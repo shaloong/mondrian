@@ -101,6 +101,10 @@ pub(crate) fn mix_color(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
+pub(crate) fn centered_text_origin_y(rect: Rect, line_height: f32) -> f32 {
+    rect.y + (rect.height - line_height).max(0.0) * 0.5
+}
+
 pub(crate) fn soft_border(color: Color) -> Color {
     color_with_alpha(color, 0.72)
 }

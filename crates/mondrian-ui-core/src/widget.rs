@@ -51,6 +51,10 @@ pub struct ImeRequest {
 pub enum CursorRequest {
     Crosshair,
     Default,
+    Grab,
+    Grabbing,
+    EwResize,
+    NsResize,
 }
 
 /// Eyedropper mode requested by a widget (for screen color sampling).

@@ -111,13 +111,14 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 if !rect_is_visible(screen_rect) {
                     continue;
                 }
+                let color = color_to_gpu_linear(*color);
 
                 let vertices = generate_rect_vertices(
                     screen_rect,
-                    color.r,
-                    color.g,
-                    color.b,
-                    color.a,
+                    color[0],
+                    color[1],
+                    color[2],
+                    color[3],
                     pixel_w,
                     pixel_h,
                     *corner_radius,
@@ -146,9 +147,10 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 }
 
                 let transformed = apply_transform(bounds, &transform_stack);
+                let color = color_from_gpu_linear(color_to_gpu_linear(*color));
                 if let Some(vertices) = generate_soft_shadow_vertices(
                     transformed,
-                    *color,
+                    color,
                     *corner_radius,
                     *blur_radius,
                     *spread,
@@ -177,10 +179,11 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 if !rect_is_visible(screen_rect) {
                     continue;
                 }
+                let colors = colors.map(|color| color_from_gpu_linear(color_to_gpu_linear(color)));
 
                 let vertices = generate_gradient_rect_vertices(
                     screen_rect,
-                    colors,
+                    &colors,
                     pixel_w,
                     pixel_h,
                     *corner_radius,
@@ -222,10 +225,7 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let v0 = uv_rect.y;
                 let u1 = uv_rect.x + uv_rect.width;
                 let v1 = uv_rect.y + uv_rect.height;
-                let r = tint.r;
-                let g = tint.g;
-                let b = tint.b;
-                let a = tint.a;
+                let [r, g, b, a] = color_to_gpu_linear(*tint);
                 // NDC Y is flipped (y0=bottom, y1=top), so swap V coords:
                 // bottom vertices → v1 (bottom of glyph), top vertices → v0 (top of glyph)
                 let bw = bounds.width.max(1.0);
@@ -272,10 +272,7 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let v0 = uv_rect.y;
                 let u1 = uv_rect.x + uv_rect.width;
                 let v1 = uv_rect.y + uv_rect.height;
-                let r = tint.r;
-                let g = tint.g;
-                let b = tint.b;
-                let a = tint.a;
+                let [r, g, b, a] = color_to_gpu_linear(*tint);
                 let bw = bounds.width.max(1.0);
                 let bh = bounds.height.max(1.0);
                 let vertices = vec![
@@ -483,6 +480,7 @@ fn line_vertices(
     } else {
         [p0, p1, p2, p2, p1, p3]
     };
+    let [r, g, b, a] = color_to_gpu_linear(*color);
 
     Some(order.map(|((x, y), tex_coord)| {
         RectVertex::new(
@@ -490,10 +488,10 @@ fn line_vertices(
             y,
             tex_coord[0],
             tex_coord[1],
-            color.r,
-            color.g,
-            color.b,
-            color.a,
+            r,
+            g,
+            b,
+            a,
             geometry_len,
             geometry_width,
             radius,
@@ -519,22 +517,10 @@ fn triangle_vertices(points: [Point; 3], color: &mondrian_core::Color) -> Option
     if area < 0.0 {
         points.swap(1, 2);
     }
+    let [r, g, b, a] = color_to_gpu_linear(*color);
 
     Some(points.map(|(x, y)| {
-        RectVertex::new(
-            x,
-            y,
-            0.0,
-            0.0,
-            color.r,
-            color.g,
-            color.b,
-            color.a,
-            1.0,
-            1.0,
-            0.0,
-            RenderMode::Shape,
-        )
+        RectVertex::new(x, y, 0.0, 0.0, r, g, b, a, 1.0, 1.0, 0.0, RenderMode::Shape)
     }))
 }
 
@@ -568,15 +554,16 @@ fn colored_triangle_vertices(
     }
 
     Some(points.map(|((x, y), color, tex_coord)| {
+        let [r, g, b, a] = color_to_gpu_linear(color);
         RectVertex::new(
             x,
             y,
             tex_coord[0],
             tex_coord[1],
-            color.r,
-            color.g,
-            color.b,
-            color.a,
+            r,
+            g,
+            b,
+            a,
             rect_size[0],
             rect_size[1],
             corner_radius,
@@ -603,6 +590,28 @@ fn point_is_finite(point: Point) -> bool {
 
 fn color_is_finite(color: mondrian_core::Color) -> bool {
     color.r.is_finite() && color.g.is_finite() && color.b.is_finite() && color.a.is_finite()
+}
+
+fn color_to_gpu_linear(color: mondrian_core::Color) -> [f32; 4] {
+    [
+        srgb_channel_to_linear(color.r),
+        srgb_channel_to_linear(color.g),
+        srgb_channel_to_linear(color.b),
+        color.a.clamp(0.0, 1.0),
+    ]
+}
+
+fn color_from_gpu_linear(color: [f32; 4]) -> mondrian_core::Color {
+    mondrian_core::Color { r: color[0], g: color[1], b: color[2], a: color[3] }
+}
+
+fn srgb_channel_to_linear(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn finish_batch_if_needed(
@@ -985,6 +994,28 @@ mod tests {
 
         assert!(build_batches(&cmds, (0, 100)).is_empty());
         assert!(build_batches(&cmds, (100, 0)).is_empty());
+    }
+
+    #[test]
+    fn build_batches_converts_srgb_ui_colors_to_linear_gpu_colors() {
+        let cmds = [DrawCommand::Rect {
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+            color: Color::from_hex(0x101319),
+            corner_radius: 0.0,
+        }];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 1);
+        let color = batches[0].vertices[0].color;
+        let expected = color_to_gpu_linear(Color::from_hex(0x101319));
+        for (actual, expected) in color.iter().zip(expected) {
+            assert!((actual - expected).abs() < 0.0001);
+        }
+        assert!(
+            color[0] < 0.01 && color[1] < 0.01 && color[2] < 0.01,
+            "theme dark colors must reach the sRGB framebuffer as linear values, got {color:?}"
+        );
     }
 
     #[test]
@@ -2073,7 +2104,10 @@ mod tests {
             assert_eq!(vertex.rect_size, [1.0, 1.0]);
             assert_eq!(vertex.corner_radius_px, 0.0);
             assert_eq!(vertex.tex_coord, [0.0, 0.0]);
-            assert_eq!(vertex.color, [0.2, 0.4, 0.6, 0.8]);
+            let expected = color_to_gpu_linear(Color::from_rgba8(51, 102, 153, 204));
+            for (actual, expected) in vertex.color.iter().zip(expected) {
+                assert!((actual - expected).abs() < 0.0001);
+            }
         }
 
         let actual = tri

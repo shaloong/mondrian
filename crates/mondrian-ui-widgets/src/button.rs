@@ -7,7 +7,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::paint::paint_focus_ring;
+use crate::paint::{centered_text_origin_y, paint_focus_ring};
 use crate::text_metrics::{centered_text_x, measure_single_line};
 use crate::vector_icon::VectorIcon;
 
@@ -280,7 +280,7 @@ fn paint_button_label(
     font_size: f32,
     color: mondrian_core::Color,
 ) {
-    let ty = clip.y + (clip.height - font_size * 1.3).max(0.0) * 0.5;
+    let ty = centered_text_origin_y(clip, ctx.theme.typography.button.line_height);
     ctx.push_clip(clip);
     ctx.encoder.draw_text(label, font_size, Point::new(text_x, ty), color);
     ctx.pop_clip();

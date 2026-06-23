@@ -76,9 +76,9 @@ pub use timeline_view::{
     TimelineClipMoveAction, TimelineClipRef, TimelineClipTrim, TimelineClipTrimAction,
     TimelineEditCommand, TimelineEditCommandAction, TimelineInOutPoint, TimelineInOutPointAction,
     TimelineSeekAction, TimelineTool, TimelineToolbarIconSlot, TimelineTrack, TimelineTrackAction,
-    TimelineTrackAddAction, TimelineTrackControl, TimelineTrackControlAction, TimelineTrackKind,
-    TimelineTrackMove, TimelineTrackMoveAction, TimelineTrackRef, TimelineTrimEdge, TimelineView,
-    TimelineViewState,
+    TimelineTrackAddAction, TimelineTrackControl, TimelineTrackControlAction,
+    TimelineTrackControlIconSlot, TimelineTrackKind, TimelineTrackMove, TimelineTrackMoveAction,
+    TimelineTrackRef, TimelineTrimEdge, TimelineView, TimelineViewState,
 };
 pub use vector_icon::{VectorIcon, VectorIconError};
 pub use viewer_surface::{

@@ -829,7 +829,7 @@ impl Widget for TextInput {
         } else if self.focused {
             tokens.popover
         } else {
-            tokens.card
+            tokens.surface
         };
         let border = if self.enabled {
             tokens.border_for_state(self.focused)
@@ -872,7 +872,7 @@ impl Widget for TextInput {
                 if self.enabled {
                     tokens.foreground
                 } else {
-                    tokens.muted_foreground
+                    tokens.text_disabled
                 },
             );
         } else if !self.focused {
@@ -880,7 +880,7 @@ impl Widget for TextInput {
                 &self.placeholder,
                 font_size,
                 Point::new(text_x, text_y),
-                tokens.muted_foreground,
+                tokens.text_tertiary,
             );
         }
 

@@ -7,6 +7,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
+use crate::paint::centered_text_origin_y;
 use crate::text_metrics::measure_single_line;
 
 const CHECKBOX_BOX_SIZE: f32 = 16.0;
@@ -180,7 +181,7 @@ impl Widget for Checkbox {
         let fill = if !self.enabled {
             tokens.muted
         } else if self.checked {
-            tokens.primary
+            tokens.foreground
         } else if self.hovered {
             tokens.accent
         } else {
@@ -191,7 +192,7 @@ impl Widget for Checkbox {
         let border_color = if !self.enabled {
             tokens.border
         } else if self.checked || self.hovered {
-            tokens.primary
+            tokens.foreground
         } else {
             tokens.border
         };
@@ -208,7 +209,7 @@ impl Widget for Checkbox {
         if self.checked {
             let vertices = checkmark_triangles(box_rect);
             let check_color = if self.enabled {
-                tokens.primary_foreground
+                tokens.background
             } else {
                 tokens.muted_foreground
             };
@@ -225,7 +226,7 @@ impl Widget for Checkbox {
                 self.bounds.height,
             );
             let tx = text_clip.x;
-            let ty = self.bounds.y + (self.bounds.height - font_size * 1.3).max(0.0) * 0.5;
+            let ty = centered_text_origin_y(text_clip, ctx.theme.typography.body.line_height);
             ctx.push_clip(text_clip);
             ctx.encoder.draw_text(
                 &self.label,

@@ -15,6 +15,10 @@ use crate::text_metrics::{measure_single_line, measure_text_box};
 pub enum LabelColor {
     /// Theme foreground text.
     Foreground,
+    /// Theme secondary text color.
+    Secondary,
+    /// Theme tertiary text color.
+    Tertiary,
     /// Theme muted foreground text.
     Muted,
     /// Theme popover foreground text.
@@ -93,6 +97,16 @@ impl Label {
         self.with_semantic_color(LabelColor::Muted)
     }
 
+    /// Shorthand for secondary supporting text.
+    pub fn secondary(self) -> Self {
+        self.with_semantic_color(LabelColor::Secondary)
+    }
+
+    /// Shorthand for tertiary supporting text.
+    pub fn tertiary(self) -> Self {
+        self.with_semantic_color(LabelColor::Tertiary)
+    }
+
     /// Shorthand for popover foreground text.
     pub fn popover_foreground(self) -> Self {
         self.with_semantic_color(LabelColor::PopoverForeground)
@@ -109,6 +123,8 @@ impl Label {
     fn resolved_color(&self, ctx: &PaintContext) -> Color {
         match self.color {
             LabelColor::Foreground => ctx.theme.colors.foreground,
+            LabelColor::Secondary => ctx.theme.colors.text_secondary,
+            LabelColor::Tertiary => ctx.theme.colors.text_tertiary,
             LabelColor::Muted => ctx.theme.colors.muted_foreground,
             LabelColor::PopoverForeground => ctx.theme.colors.popover_foreground,
             LabelColor::Primary => ctx.theme.colors.primary,

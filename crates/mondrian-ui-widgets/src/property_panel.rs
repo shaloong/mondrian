@@ -8,7 +8,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::color_with_alpha;
-use crate::{FormLayout, FormRowOptions, Label};
+use crate::{FormLayout, FormRowOptions, Label, VectorIcon};
 use mondrian_editor_state::Action;
 
 /// Layout options for [`PropertyPanel`].
@@ -154,12 +154,40 @@ impl PropertySection {
     }
 }
 
+struct PropertyPanelEmptyState {
+    title: Label,
+    description: Label,
+    icon: Option<VectorIcon>,
+    icon_bounds: Rect,
+}
+
+impl PropertyPanelEmptyState {
+    fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            title: Label::new(title.into()).secondary().with_font_size(13.0).with_padding(0.0, 0.0),
+            description: Label::new(description.into())
+                .tertiary()
+                .with_font_size(12.0)
+                .with_padding(0.0, 0.0)
+                .wrapped(),
+            icon: None,
+            icon_bounds: Rect::ZERO,
+        }
+    }
+
+    fn with_icon(mut self, icon: VectorIcon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+}
+
 /// Inspector-style property panel with labeled rows.
 pub struct PropertyPanel {
     id: WidgetId,
     title: Label,
     subtitle: Option<Label>,
     show_header_text: bool,
+    empty_state: Option<PropertyPanelEmptyState>,
     sections: Vec<PropertySection>,
     options: PropertyPanelOptions,
     bounds: Rect,
@@ -178,6 +206,7 @@ impl PropertyPanel {
             title: Label::new(title.into()).with_font_size(13.0).with_padding(0.0, 0.0),
             subtitle: None,
             show_header_text: true,
+            empty_state: None,
             sections: Vec::new(),
             options,
             bounds: Rect::ZERO,
@@ -194,6 +223,25 @@ impl PropertyPanel {
     /// Use compact embedded chrome when the host panel already supplies title text.
     pub fn with_embedded_panel_chrome(mut self) -> Self {
         self.show_header_text = false;
+        self
+    }
+
+    /// Replace row content with a compact empty state.
+    pub fn with_empty_state(
+        mut self,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        self.empty_state = Some(PropertyPanelEmptyState::new(title, description));
+        self.sections.clear();
+        self
+    }
+
+    /// Add an optional quiet icon to the empty state.
+    pub fn with_empty_state_icon(mut self, icon: VectorIcon) -> Self {
+        if let Some(empty_state) = self.empty_state.take() {
+            self.empty_state = Some(empty_state.with_icon(icon));
+        }
         self
     }
 
@@ -257,6 +305,13 @@ impl Widget for PropertyPanel {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
+        if self.empty_state.is_some() {
+            let preferred = Size::new(
+                280.0,
+                self.options.margin * 2.0 + self.header_height() + 96.0,
+            );
+            return constraint.constrain(preferred);
+        }
         let rows_height: f32 = self
             .sections
             .iter()
@@ -281,8 +336,50 @@ impl Widget for PropertyPanel {
         self.bounds = bounds;
         let content = self.content_rect();
         let form_layout = FormLayout::new(self.options.form_row_options());
+        let header_height = self.header_height();
 
-        let mut y = content.y + self.header_height();
+        if self.show_header_text {
+            self.title.layout(Rect::new(content.x, content.y + 12.0, content.width, 18.0));
+            if let Some(subtitle) = &mut self.subtitle {
+                subtitle.layout(Rect::new(content.x, content.y + 28.0, content.width, 16.0));
+            }
+        }
+
+        if let Some(empty_state) = &mut self.empty_state {
+            let inset_x = 6.0;
+            let max_width = (content.width - 36.0).min(220.0).max(1.0);
+            let available_height = (content.height - header_height).max(0.0);
+            let top = if self.show_header_text {
+                content.y + header_height + (available_height * 0.24).max(18.0)
+            } else {
+                content.y + 92.0
+            };
+            let description_size = empty_state.description.measure(LayoutConstraint {
+                min: Size::ZERO,
+                max: Size::new(max_width, f32::MAX),
+            });
+            let x = content.x + inset_x;
+            empty_state.icon_bounds = if empty_state.icon.is_some() {
+                Rect::new(x, top, 28.0, 28.0)
+            } else {
+                Rect::ZERO
+            };
+            let text_top = if empty_state.icon.is_some() {
+                top + 42.0
+            } else {
+                top
+            };
+            empty_state.title.layout(Rect::new(x, text_top, max_width, 18.0));
+            empty_state.description.layout(Rect::new(
+                x,
+                text_top + 26.0,
+                max_width,
+                description_size.height.max(16.0),
+            ));
+            return;
+        }
+
+        let mut y = content.y + header_height;
 
         for section in &mut self.sections {
             if !section.title().is_empty() {
@@ -325,12 +422,6 @@ impl Widget for PropertyPanel {
             );
             y += self.options.section_gap;
         }
-        if self.show_header_text {
-            self.title.layout(Rect::new(content.x, content.y + 12.0, content.width, 18.0));
-            if let Some(subtitle) = &mut self.subtitle {
-                subtitle.layout(Rect::new(content.x, content.y + 28.0, content.width, 16.0));
-            }
-        }
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -364,13 +455,23 @@ impl Widget for PropertyPanel {
                 subtitle.paint(ctx);
             }
         }
+        if let Some(empty_state) = &self.empty_state {
+            if let Some(icon) = &empty_state.icon {
+                let mut color = colors.text_tertiary;
+                color.a *= 0.8;
+                icon.paint(ctx, empty_state.icon_bounds, color);
+            }
+            empty_state.title.paint(ctx);
+            empty_state.description.paint(ctx);
+            return;
+        }
 
         for section in &self.sections {
             if section.header_bounds.height > 0.0 {
                 let y = section.header_bounds.y;
                 ctx.encoder.draw_rect(
                     Rect::new(section.header_bounds.x, y, section.header_bounds.width, 1.0),
-                    color_with_alpha(colors.border, 0.72),
+                    color_with_alpha(colors.border, 0.82),
                     0.0,
                 );
             }
@@ -379,10 +480,10 @@ impl Widget for PropertyPanel {
                     Rect::new(
                         section.bounds.x,
                         section.bounds.y,
-                        3.0,
+                        section.bounds.width,
                         section.bounds.height,
                     ),
-                    color_with_alpha(colors.primary, 0.72),
+                    color_with_alpha(colors.primary, 0.10),
                     spacing.radius_sm,
                 );
             }
@@ -559,6 +660,17 @@ mod tests {
             text: &str,
             _font_size: f32,
             _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.to_string());
+        }
+
+        fn draw_text_box(
+            &mut self,
+            text: &str,
+            _font_size: f32,
+            _position: Point,
+            _max_width: f32,
             _color: mondrian_core::Color,
         ) {
             self.texts.push(text.to_string());
@@ -858,6 +970,32 @@ mod tests {
         assert!(!encoder.texts.contains(&"Selected clip".to_string()));
         assert!(encoder.texts.contains(&"Clip".to_string()));
         assert!(encoder.texts.contains(&"Opacity".to_string()));
+    }
+
+    #[test]
+    fn embedded_empty_state_paints_title_and_wrapped_description_without_form_rows() {
+        let mut panel =
+            PropertyPanel::new("Inspector").with_embedded_panel_chrome().with_empty_state(
+                "未选择剪辑",
+                "选择时间线中的剪辑、图层或效果后，可在这里调整属性。",
+            );
+        panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let mut encoder = RecordingEncoder::default();
+        let theme = ThemePreset::Dark.build();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 220.0),
+        };
+
+        panel.paint(&mut ctx);
+
+        assert_eq!(panel.child_count(), 0);
+        assert!(encoder.texts.contains(&"未选择剪辑".to_string()));
+        assert!(encoder
+            .texts
+            .contains(&"选择时间线中的剪辑、图层或效果后，可在这里调整属性。".to_string()));
+        assert_eq!(encoder.clip_pops, encoder.clips.len());
     }
 
     #[test]

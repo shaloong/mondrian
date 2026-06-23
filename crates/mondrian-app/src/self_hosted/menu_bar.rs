@@ -20,7 +20,6 @@ use crate::app::ui_actions::{
 };
 use crate::app::AppState;
 use crate::self_hosted::action_availability::app_state_action_enabled;
-use crate::self_hosted::icons::AppIcon;
 use crate::self_hosted::shortcuts::{
     shortcut_label_for_action, shortcut_label_for_action_with_overrides, SelfHostedShortcutOverride,
 };
@@ -37,23 +36,23 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         (
             "文件",
             vec![
-                menu_item_with_icon(
-                    MenuItem::new("新建项目...", app_shell_new_project_dialog_action()),
-                    AppIcon::PlusFilled,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("打开项目...", app_shell_open_project_dialog_action()),
-                    AppIcon::FolderOpenFilled,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("导入媒体...", app_shell_import_media_dialog_action()),
-                    AppIcon::Import,
-                ),
-                menu_item_with_icon(MenuItem::new("保存", Action::SaveProject), AppIcon::Save),
-                menu_item_with_icon(
-                    MenuItem::new("另存为...", app_shell_save_project_as_dialog_action()),
-                    AppIcon::Save,
-                ),
+                menu_item_with_shortcut(MenuItem::new(
+                    "新建项目...",
+                    app_shell_new_project_dialog_action(),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    "打开项目...",
+                    app_shell_open_project_dialog_action(),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    "导入媒体...",
+                    app_shell_import_media_dialog_action(),
+                )),
+                menu_item_with_shortcut(MenuItem::new("保存", Action::SaveProject)),
+                menu_item_with_shortcut(MenuItem::new(
+                    "另存为...",
+                    app_shell_save_project_as_dialog_action(),
+                )),
                 MenuItem::separator(),
                 menu_item_with_shortcut(MenuItem::new("关闭项目", Action::CloseProject)),
                 menu_item_with_shortcut(MenuItem::new("退出", app_shell_quit_action())),
@@ -62,155 +61,104 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         (
             "编辑",
             vec![
-                menu_item_with_icon(MenuItem::new("撤销", Action::Undo), AppIcon::Undo),
-                menu_item_with_icon(MenuItem::new("重做", Action::Redo), AppIcon::Redo),
-                menu_item_with_icon(MenuItem::new("剪切", Action::Cut), AppIcon::Cut),
-                menu_item_with_icon(MenuItem::new("复制", Action::Copy), AppIcon::Copy),
-                menu_item_with_icon(MenuItem::new("粘贴", Action::Paste), AppIcon::ClipboardText),
-                menu_item_with_icon(MenuItem::new("创建副本", Action::Duplicate), AppIcon::Copy),
+                menu_item_with_shortcut(MenuItem::new("撤销", Action::Undo)),
+                menu_item_with_shortcut(MenuItem::new("重做", Action::Redo)),
+                menu_item_with_shortcut(MenuItem::new("剪切", Action::Cut)),
+                menu_item_with_shortcut(MenuItem::new("复制", Action::Copy)),
+                menu_item_with_shortcut(MenuItem::new("粘贴", Action::Paste)),
+                menu_item_with_shortcut(MenuItem::new("创建副本", Action::Duplicate)),
                 MenuItem::separator(),
-                menu_item_with_icon(MenuItem::new("全选", Action::SelectAll), AppIcon::Cursor),
-                menu_item_with_icon(
-                    MenuItem::new("取消选择", Action::DeselectAll),
-                    AppIcon::CursorFilled,
-                ),
+                menu_item_with_shortcut(MenuItem::new("全选", Action::SelectAll)),
+                menu_item_with_shortcut(MenuItem::new("取消选择", Action::DeselectAll)),
                 MenuItem::separator(),
-                menu_item_with_icon(
-                    MenuItem::new("删除所选", Action::DeleteSelection),
-                    AppIcon::Trash,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("波纹删除", Action::RippleDeleteSelection),
-                    AppIcon::Trash,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("在播放头处分割", Action::SplitClipAtPlayhead),
-                    AppIcon::Cut,
-                ),
+                menu_item_with_shortcut(MenuItem::new("删除所选", Action::DeleteSelection)),
+                menu_item_with_shortcut(MenuItem::new("波纹删除", Action::RippleDeleteSelection)),
+                menu_item_with_shortcut(MenuItem::new(
+                    "在播放头处分割",
+                    Action::SplitClipAtPlayhead,
+                )),
                 MenuItem::separator(),
-                menu_item_with_icon(
-                    MenuItem::new("标记入点", Action::MarkInAtPlayhead),
-                    AppIcon::BracketsLeft,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("标记出点", Action::MarkOutAtPlayhead),
-                    AppIcon::BracketsRight,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new("清除入点/出点", timeline_clear_in_out_points_action()),
-                    AppIcon::Stopwatch,
-                ),
+                menu_item_with_shortcut(MenuItem::new("标记入点", Action::MarkInAtPlayhead)),
+                menu_item_with_shortcut(MenuItem::new("标记出点", Action::MarkOutAtPlayhead)),
+                menu_item_with_shortcut(MenuItem::new(
+                    "清除入点/出点",
+                    timeline_clear_in_out_points_action(),
+                )),
                 MenuItem::separator(),
-                menu_item_with_icon(
-                    MenuItem::new("偏好设置...", app_shell_preferences_action()),
-                    AppIcon::List,
-                ),
+                menu_item_with_shortcut(MenuItem::new(
+                    "偏好设置...",
+                    app_shell_preferences_action(),
+                )),
             ],
         ),
         (
             "视图",
-            vec![menu_item_with_icon(
-                MenuItem::new("切换全屏", Action::ToggleFullscreen),
-                AppIcon::FullScreen,
-            )],
+            vec![menu_item_with_shortcut(MenuItem::new(
+                "切换全屏",
+                Action::ToggleFullscreen,
+            ))],
         ),
         (
             "窗口",
             vec![
-                menu_item_with_icon(
-                    MenuItem::new(
-                        PanelKind::Viewer.display_name(),
-                        Action::TogglePanel(PanelKind::Viewer),
-                    ),
-                    AppIcon::FullScreen,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        PanelKind::Timeline.display_name(),
-                        Action::TogglePanel(PanelKind::Timeline),
-                    ),
-                    AppIcon::Clock,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        PanelKind::Inspector.display_name(),
-                        Action::TogglePanel(PanelKind::Inspector),
-                    ),
-                    AppIcon::List,
-                ),
+                menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Viewer.display_name(),
+                    Action::TogglePanel(PanelKind::Viewer),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Timeline.display_name(),
+                    Action::TogglePanel(PanelKind::Timeline),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Inspector.display_name(),
+                    Action::TogglePanel(PanelKind::Inspector),
+                )),
                 MenuItem::separator(),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        PanelKind::Assets.display_name(),
-                        Action::TogglePanel(PanelKind::Assets),
-                    ),
-                    AppIcon::Folder,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        PanelKind::Effects.display_name(),
-                        Action::TogglePanel(PanelKind::Effects),
-                    ),
-                    AppIcon::Effect,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        PanelKind::NodeGraph.display_name(),
-                        Action::TogglePanel(PanelKind::NodeGraph),
-                    ),
-                    AppIcon::Grid,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        PanelKind::Export.display_name(),
-                        Action::TogglePanel(PanelKind::Export),
-                    ),
-                    AppIcon::Export,
-                ),
+                menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Assets.display_name(),
+                    Action::TogglePanel(PanelKind::Assets),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Effects.display_name(),
+                    Action::TogglePanel(PanelKind::Effects),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::NodeGraph.display_name(),
+                    Action::TogglePanel(PanelKind::NodeGraph),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Export.display_name(),
+                    Action::TogglePanel(PanelKind::Export),
+                )),
                 MenuItem::separator(),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        "编辑工作区",
-                        Action::SwitchWorkspace(WorkspacePreset::Editing),
-                    ),
-                    AppIcon::Cursor,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        "调色工作区",
-                        Action::SwitchWorkspace(WorkspacePreset::Color),
-                    ),
-                    AppIcon::Circle,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        "音频工作区",
-                        Action::SwitchWorkspace(WorkspacePreset::Audio),
-                    ),
-                    AppIcon::Music,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        "合成工作区",
-                        Action::SwitchWorkspace(WorkspacePreset::Compositing),
-                    ),
-                    AppIcon::Grid,
-                ),
-                menu_item_with_icon(
-                    MenuItem::new(
-                        "导出工作区",
-                        Action::SwitchWorkspace(WorkspacePreset::Export),
-                    ),
-                    AppIcon::Export,
-                ),
+                menu_item_with_shortcut(MenuItem::new(
+                    "编辑工作区",
+                    Action::SwitchWorkspace(WorkspacePreset::Editing),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    "调色工作区",
+                    Action::SwitchWorkspace(WorkspacePreset::Color),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    "音频工作区",
+                    Action::SwitchWorkspace(WorkspacePreset::Audio),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    "合成工作区",
+                    Action::SwitchWorkspace(WorkspacePreset::Compositing),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
+                    "导出工作区",
+                    Action::SwitchWorkspace(WorkspacePreset::Export),
+                )),
             ],
         ),
         (
             "帮助",
-            vec![menu_item_with_icon(
-                MenuItem::new("关于 Mondrian", app_shell_about_action()),
-                AppIcon::Info,
-            )],
+            vec![menu_item_with_shortcut(MenuItem::new(
+                "关于 Mondrian",
+                app_shell_about_action(),
+            ))],
         ),
     ]
 }
@@ -293,14 +241,6 @@ fn apply_app_state_menu_availability(item: MenuItem, state: &AppState) -> MenuIt
     }
 }
 
-fn menu_item_with_icon(item: MenuItem, icon: AppIcon) -> MenuItem {
-    let item = menu_item_with_shortcut(item);
-    match icon.vector_icon() {
-        Ok(icon) => item.with_icon(icon),
-        Err(_) => item,
-    }
-}
-
 fn menu_item_with_shortcut(item: MenuItem) -> MenuItem {
     let Some(shortcut) = shortcut_label_for_action(&item.action) else {
         return item;
@@ -334,6 +274,7 @@ pub struct MenuBar {
     id: WidgetId,
     menus: Vec<Dropdown>,
     bounds: Rect,
+    content_right: f32,
 }
 
 impl Default for MenuBar {
@@ -351,7 +292,12 @@ impl MenuBar {
                 Dropdown::new(label, items).with_trigger_style(DropdownTriggerStyle::MenuBar)
             })
             .collect();
-        Self { id: WidgetId::new(), menus, bounds: Rect::ZERO }
+        Self {
+            id: WidgetId::new(),
+            menus,
+            bounds: Rect::ZERO,
+            content_right: 0.0,
+        }
     }
 
     /// Build a menu bar whose rows reflect the current application state.
@@ -399,6 +345,11 @@ impl MenuBar {
     /// Current laid-out menu bar bounds.
     pub fn bounds(&self) -> Rect {
         self.bounds
+    }
+
+    /// Right edge of the last laid-out menu trigger.
+    pub(crate) fn content_right(&self) -> f32 {
+        self.content_right
     }
 
     /// Whether a point lands on an actual menu trigger, excluding unused menu
@@ -452,6 +403,7 @@ impl Widget for MenuBar {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
+        self.content_right = bounds.x;
         if self.menus.is_empty() {
             return;
         }
@@ -465,6 +417,9 @@ impl Widget for MenuBar {
             let remaining = (bounds.x + bounds.width - x).max(0.0);
             let width = preferred.min(remaining);
             menu.layout(Rect::new(x, bounds.y, width, MENU_BAR_HEIGHT));
+            if width > 0.0 {
+                self.content_right = x + width;
+            }
             x += width + MENU_BAR_TRIGGER_GAP;
         }
     }
@@ -507,11 +462,7 @@ impl Widget for MenuBar {
             self.bounds.width,
             MENU_BAR_HEIGHT,
         );
-        ctx.encoder.draw_rect(
-            bar_bg,
-            ctx.theme.colors.background.lerp(ctx.theme.colors.card, 0.42),
-            0.0,
-        );
+        ctx.encoder.draw_rect(bar_bg, ctx.theme.colors.titlebar, 0.0);
         for menu in &self.menus {
             menu.paint(ctx);
         }
@@ -766,7 +717,26 @@ mod tests {
     }
 
     #[test]
-    fn default_menu_items_use_semantic_vector_icons() {
+    fn default_menu_items_are_text_only_without_icons() {
+        let menu_items = default_menu_items();
+
+        for (menu_label, items) in &menu_items {
+            for item in items {
+                if item.is_separator() {
+                    continue;
+                }
+                assert!(
+                    item.icon.is_none(),
+                    "{}/{} should stay text-only in the product menu",
+                    menu_label,
+                    item.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_menu_items_keep_expected_text_rows_after_icon_removal() {
         let menu_items = default_menu_items();
 
         for (menu_label, item_label) in [
@@ -774,28 +744,14 @@ mod tests {
             ("文件", "保存"),
             ("编辑", "撤销"),
             ("编辑", "重做"),
-            ("编辑", "剪切"),
-            ("编辑", "复制"),
-            ("编辑", "粘贴"),
-            ("编辑", "创建副本"),
-            ("编辑", "全选"),
-            ("编辑", "取消选择"),
-            ("编辑", "删除所选"),
-            ("编辑", "波纹删除"),
             ("编辑", "在播放头处分割"),
-            ("编辑", "标记入点"),
-            ("编辑", "标记出点"),
-            ("编辑", "清除入点/出点"),
-            ("编辑", "偏好设置..."),
-            ("视图", "切换全屏"),
             ("窗口", "时间线"),
             ("窗口", "效果"),
-            ("窗口", "音频工作区"),
             ("帮助", "关于 Mondrian"),
         ] {
             assert!(
-                menu_item(&menu_items, menu_label, item_label).icon.is_some(),
-                "{menu_label}/{item_label} should carry a semantic icon"
+                menu_item(&menu_items, menu_label, item_label).icon.is_none(),
+                "{menu_label}/{item_label} should stay text-only"
             );
         }
     }

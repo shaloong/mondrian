@@ -11,7 +11,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::time::{Duration, Instant};
 
-use crate::paint::{color_with_alpha, mix_color};
+use crate::paint::{centered_text_origin_y, color_with_alpha, mix_color};
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 use crate::TextInput;
@@ -21,7 +21,7 @@ const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
 const DRAG_START_DISTANCE: f32 = 6.0;
 const ROW_ICON_GAP: f32 = 8.0;
 const ROW_ICON_SIZE: f32 = 16.0;
-const FILTER_INPUT_HEIGHT: f32 = 28.0;
+const FILTER_INPUT_HEIGHT: f32 = 30.0;
 const FILTER_INPUT_GAP: f32 = 10.0;
 
 /// Dynamic action factory used when a panel-list item changes state.
@@ -43,6 +43,8 @@ pub struct PanelListState {
     pub selected_index: Option<usize>,
     /// Vertical scroll offset in content pixels.
     pub scroll_y: f32,
+    /// Collapsed tree node ids for list models that opt into tree rows.
+    pub collapsed_tree_nodes: Vec<String>,
 }
 
 /// Item rendered by [`PanelList`].
@@ -53,6 +55,9 @@ pub struct PanelListItem {
     pub badge: Option<PanelListBadge>,
     pub accent: Option<Color>,
     pub icon: Option<VectorIcon>,
+    pub tree_depth: u8,
+    pub tree_id: Option<String>,
+    pub tree_expanded: Option<bool>,
     pub disabled: bool,
     pub select_action: Option<Action>,
     pub activate_action: Option<Action>,
@@ -105,6 +110,9 @@ impl PanelListItem {
             badge: None,
             accent: None,
             icon: None,
+            tree_depth: 0,
+            tree_id: None,
+            tree_expanded: None,
             disabled: false,
             select_action: None,
             activate_action: None,
@@ -139,6 +147,19 @@ impl PanelListItem {
     /// Set a left-side vector icon painted before the text lane.
     pub fn with_icon(mut self, icon: VectorIcon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Set visual tree indentation for this row.
+    pub fn with_tree_depth(mut self, depth: u8) -> Self {
+        self.tree_depth = depth.min(8);
+        self
+    }
+
+    /// Mark this row as a collapsible tree node.
+    pub fn with_tree_node(mut self, id: impl Into<String>, expanded: bool) -> Self {
+        self.tree_id = Some(id.into());
+        self.tree_expanded = Some(expanded);
         self
     }
 
@@ -197,6 +218,8 @@ pub struct PanelList {
     on_select: Option<Box<PanelListAction>>,
     on_activate: Option<Box<PanelListAction>>,
     on_drop: Option<Box<PanelListDropAction>>,
+    tree_collapsed_icon: Option<VectorIcon>,
+    tree_expanded_icon: Option<VectorIcon>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -245,6 +268,8 @@ impl PanelList {
             on_select: None,
             on_activate: None,
             on_drop: None,
+            tree_collapsed_icon: None,
+            tree_expanded_icon: None,
         }
     }
 
@@ -260,9 +285,9 @@ impl PanelList {
         self
     }
 
-    /// Set the row height. Values below 36 px are clamped for readability.
+    /// Set the row height. Values below 28 px are clamped for compact list readability.
     pub fn with_row_height(mut self, row_height: f32) -> Self {
-        self.row_height = row_height.max(36.0);
+        self.row_height = row_height.max(28.0);
         self
     }
 
@@ -305,12 +330,28 @@ impl PanelList {
                 .map(|item| item.title.clone()),
             selected_index: self.selected,
             scroll_y: self.scroll_y,
+            collapsed_tree_nodes: self
+                .items
+                .iter()
+                .filter_map(|item| {
+                    (item.tree_expanded == Some(false))
+                        .then_some(item.tree_id.as_ref())
+                        .flatten()
+                        .cloned()
+                })
+                .collect(),
         }
     }
 
     /// Restore local list interaction state after replacing the backing model.
     pub fn restore_state(&mut self, state: &PanelListState) {
         self.set_filter_query(state.filter_query.clone());
+        for item in &mut self.items {
+            if let (Some(id), Some(expanded)) = (&item.tree_id, item.tree_expanded.as_mut()) {
+                *expanded = !state.collapsed_tree_nodes.iter().any(|candidate| candidate == id);
+            }
+        }
+        self.rebuild_visible_indices();
         let selected = state
             .selected_item_title
             .as_ref()
@@ -351,6 +392,13 @@ impl PanelList {
         action: impl Fn(&DragPayload, Point) -> Option<Action> + 'static,
     ) -> Self {
         self.on_drop = Some(Box::new(action));
+        self
+    }
+
+    /// Set SVG-backed chevrons used for collapsible tree rows.
+    pub fn with_tree_icons(mut self, collapsed: VectorIcon, expanded: VectorIcon) -> Self {
+        self.tree_collapsed_icon = Some(collapsed);
+        self.tree_expanded_icon = Some(expanded);
         self
     }
 
@@ -500,16 +548,41 @@ impl PanelList {
 
     fn rebuild_visible_indices(&mut self) {
         let query = self.filter_query.trim().to_lowercase();
-        self.visible_indices = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| Self::item_matches_query(item, &query).then_some(index))
-            .collect();
+        let filtering = !query.is_empty();
+        let mut hidden_child_depth = None;
+        self.visible_indices.clear();
+        for (index, item) in self.items.iter().enumerate() {
+            if !filtering {
+                if let Some(depth) = hidden_child_depth {
+                    if item.tree_depth > depth {
+                        continue;
+                    }
+                    hidden_child_depth = None;
+                }
+            }
+
+            if Self::item_matches_query(item, &query) {
+                self.visible_indices.push(index);
+            }
+
+            if !filtering && item.tree_expanded == Some(false) {
+                hidden_child_depth = Some(item.tree_depth);
+            }
+        }
     }
 
     fn visible_position_for_index(&self, index: usize) -> Option<usize> {
         self.visible_indices.iter().position(|candidate| *candidate == index)
+    }
+
+    fn row_rect_for_visible_position(&self, visible_position: usize) -> Rect {
+        let y = self.viewport.y + visible_position as f32 * self.row_height - self.scroll_y;
+        Rect::new(
+            self.viewport.x,
+            y + 2.0,
+            self.viewport.width,
+            self.row_height - 4.0,
+        )
     }
 
     fn visible_enabled_indices(&self) -> Vec<usize> {
@@ -715,6 +788,23 @@ impl PanelList {
         EventResult::Handled
     }
 
+    fn toggle_tree_node_from_input(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
+        let Some(item) = self.items.get_mut(index) else {
+            return EventResult::Ignored;
+        };
+        let Some(expanded) = item.tree_expanded.as_mut() else {
+            return EventResult::Ignored;
+        };
+        *expanded = !*expanded;
+        self.selected = Some(index);
+        self.rebuild_visible_indices();
+        self.clamp_scroll();
+        self.ensure_selected_visible();
+        self.last_click = None;
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
     fn begin_drag_candidate_if_needed(
         &mut self,
         position: Point,
@@ -748,10 +838,13 @@ impl PanelList {
         EventResult::Handled
     }
 
-    fn activate_selected(&self, ctx: &mut EventContext) -> EventResult {
+    fn activate_selected(&mut self, ctx: &mut EventContext) -> EventResult {
         let Some(index) = self.selected.filter(|idx| self.is_enabled_index(*idx)) else {
             return EventResult::Ignored;
         };
+        if self.items.get(index).is_some_and(|item| item.tree_expanded.is_some()) {
+            return self.toggle_tree_node_from_input(index, ctx);
+        }
         self.dispatch_activate(index, ctx);
         EventResult::Handled
     }
@@ -797,33 +890,15 @@ impl PanelList {
         let hovered = self.hovered == Some(index) && !item.disabled;
 
         let fill = if selected {
-            mix_color(colors.card, colors.accent, 0.34)
+            color_with_alpha(colors.foreground, 0.085)
         } else if hovered {
-            mix_color(colors.card, colors.muted, 0.58)
+            color_with_alpha(colors.foreground, 0.05)
         } else {
-            mix_color(colors.background, colors.card, 0.54)
+            Color::TRANSPARENT
         };
-        if selected {
-            ctx.encoder.draw_rect(
-                row.inset(-1.0, -1.0),
-                color_with_alpha(colors.ring, 0.34),
-                spacing.radius_sm + 1.0,
-            );
+        if fill.a > 0.0 {
+            ctx.encoder.draw_rect(row, fill, 6.0);
         }
-        ctx.encoder.draw_rect(
-            row,
-            color_with_alpha(colors.border, 0.56),
-            spacing.radius_sm,
-        );
-        ctx.encoder.draw_rect(
-            row.inset(1.0, 1.0),
-            fill,
-            (spacing.radius_sm - 1.0).max(0.0),
-        );
-
-        let accent = item.accent.unwrap_or(colors.secondary);
-        let swatch = Rect::new(row.x + 8.0, row.y + 13.0, 6.0, row.height - 26.0);
-        ctx.encoder.draw_rect(swatch, accent, 3.0);
 
         let badge_width = item
             .badge
@@ -837,8 +912,6 @@ impl PanelList {
         };
         let title_color = if item.disabled {
             colors.muted_foreground
-        } else if selected {
-            colors.accent_foreground
         } else {
             colors.foreground
         };
@@ -847,9 +920,34 @@ impl PanelList {
         } else {
             title_color
         };
-        let mut text_x = row.x + 22.0;
+        let has_tree_gutter = item.tree_expanded.is_some() || item.tree_depth > 0;
+        let mut text_x = row.x + 10.0 + item.tree_depth as f32 * 14.0;
 
         ctx.push_clip(row.inset(4.0, 2.0));
+        if has_tree_gutter {
+            let icon_rect = Rect::new(
+                text_x,
+                row.y + (row.height - 14.0).max(0.0) * 0.5,
+                14.0,
+                14.0,
+            );
+            if let Some(expanded) = item.tree_expanded {
+                let icon = if expanded {
+                    self.tree_expanded_icon.as_ref()
+                } else {
+                    self.tree_collapsed_icon.as_ref()
+                };
+                if let Some(icon) = icon {
+                    icon.paint(ctx, icon_rect, color_with_alpha(text_color, 0.82));
+                }
+            }
+            text_x += 18.0;
+        }
+        if let Some(accent) = item.accent {
+            let swatch = Rect::new(row.x + 8.0, row.y + 9.0, 3.0, (row.height - 18.0).max(8.0));
+            ctx.encoder.draw_rect(swatch, color_with_alpha(accent, 0.72), 1.5);
+            text_x += 10.0;
+        }
         if let Some(icon) = &item.icon {
             let icon_size = ctx.theme.spacing.icon_size.clamp(1.0, ROW_ICON_SIZE);
             let icon_rect = Rect::new(
@@ -862,18 +960,26 @@ impl PanelList {
             text_x += icon_size + ROW_ICON_GAP;
         }
         let text_width = (row.x + row.width - badge_reserved - text_x).max(24.0);
+        let title_style = &ctx.theme.typography.body;
+        let subtitle_style = &ctx.theme.typography.small;
+        let title_y = if item.subtitle.is_empty() {
+            centered_text_origin_y(row, title_style.line_height)
+        } else {
+            let stack_height = title_style.line_height + subtitle_style.line_height;
+            row.y + (row.height - stack_height).max(0.0) * 0.5
+        };
         ctx.encoder.draw_text_box(
             &item.title,
-            ctx.theme.typography.body.font_size,
-            snap_point(Point::new(text_x, row.y + 7.0)),
+            title_style.font_size,
+            snap_point(Point::new(text_x, title_y)),
             text_width,
             text_color,
         );
         if !item.subtitle.is_empty() {
             ctx.encoder.draw_text_box(
                 &item.subtitle,
-                ctx.theme.typography.small.font_size,
-                snap_point(Point::new(text_x, row.y + 28.0)),
+                subtitle_style.font_size,
+                snap_point(Point::new(text_x, title_y + title_style.line_height)),
                 text_width,
                 colors.muted_foreground,
             );
@@ -881,19 +987,22 @@ impl PanelList {
         ctx.pop_clip();
 
         if let Some(badge) = &item.badge {
+            let badge_height = (row.height - 12.0).clamp(16.0, 22.0);
             let badge_rect = Rect::new(
                 row.x + row.width - badge_width - 10.0,
-                row.y + 13.0,
+                row.y + (row.height - badge_height) * 0.5,
                 badge_width,
-                22.0,
+                badge_height,
             );
             let (fill, text) = panel_list_badge_colors(ctx, badge);
             ctx.encoder.draw_rect(badge_rect, fill, spacing.radius_sm);
             ctx.push_clip(badge_rect.inset(6.0, 1.0));
+            let badge_text_y =
+                centered_text_origin_y(badge_rect, ctx.theme.typography.small.line_height);
             ctx.encoder.draw_text(
                 &badge.label,
                 ctx.theme.typography.small.font_size,
-                snap_point(Point::new(badge_rect.x + 8.0, badge_rect.y + 4.0)),
+                snap_point(Point::new(badge_rect.x + 8.0, badge_text_y)),
                 text,
             );
             ctx.pop_clip();
@@ -990,6 +1099,9 @@ impl Widget for PanelList {
                         }
                     }
                     if let Some(index) = self.index_at(*position) {
+                        if self.items.get(index).is_some_and(|item| item.tree_expanded.is_some()) {
+                            return self.toggle_tree_node_from_input(index, ctx);
+                        }
                         let result = self.select_or_activate_from_input(index, *position, ctx);
                         if let Some(payload) =
                             self.items.get(index).and_then(|item| item.drag_payload.clone())
@@ -1187,16 +1299,6 @@ impl Widget for PanelList {
             input.paint(ctx);
         }
 
-        if self.show_header_text {
-            let divider_y = self.viewport.y - 7.0;
-            ctx.encoder.draw_line(
-                Point::new(self.bounds.x, divider_y),
-                Point::new(self.bounds.x + self.bounds.width, divider_y),
-                1.0,
-                colors.border,
-            );
-        }
-
         ctx.push_clip(self.viewport);
         let visible = &self.visible_indices;
         let first = (self.scroll_y / self.row_height).floor().max(0.0) as usize;
@@ -1204,13 +1306,7 @@ impl Widget for PanelList {
         for (visible_position, index) in
             visible.iter().copied().enumerate().take(last.min(visible.len())).skip(first)
         {
-            let y = self.viewport.y + visible_position as f32 * self.row_height - self.scroll_y;
-            let row = Rect::new(
-                self.viewport.x,
-                y + 2.0,
-                self.viewport.width,
-                self.row_height - 4.0,
-            );
+            let row = self.row_rect_for_visible_position(visible_position);
             self.paint_row(ctx, index, row);
         }
         if visible.is_empty() {
@@ -2582,6 +2678,65 @@ mod tests {
     }
 
     #[test]
+    fn tree_rows_toggle_descendants_and_restore_collapsed_state() {
+        let mut list = PanelList::new(
+            "Effects",
+            vec![
+                PanelListItem::new("颜色").with_tree_node("color", true),
+                PanelListItem::new("LUT").with_tree_depth(1),
+                PanelListItem::new("模糊").with_tree_node("blur", true),
+            ],
+        )
+        .with_embedded_panel_chrome();
+        list.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        assert_eq!(list.visible_indices, vec![0, 1, 2]);
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let row = list.row_rect_for_visible_position(0);
+
+        assert_eq!(
+            list.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(row.x + 8.0, row.y + row.height * 0.5),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(list.visible_indices, vec![0, 2]);
+        assert!(requests.repaint);
+
+        let state = list.state();
+        assert_eq!(state.collapsed_tree_nodes, vec!["color".to_owned()]);
+
+        let mut restored = PanelList::new(
+            "Effects",
+            vec![
+                PanelListItem::new("颜色").with_tree_node("color", true),
+                PanelListItem::new("LUT").with_tree_depth(1),
+                PanelListItem::new("模糊").with_tree_node("blur", true),
+            ],
+        );
+        restored.restore_state(&state);
+        assert_eq!(restored.visible_indices, vec![0, 2]);
+    }
+
+    #[test]
     fn paint_draws_header_rows_and_clips_row_text() {
         let mut list = PanelList::new(
             "Assets",
@@ -2599,8 +2754,11 @@ mod tests {
         };
         list.paint(&mut ctx);
 
-        assert!(encoder.rects >= 3);
-        assert_eq!(encoder.lines, 1);
+        assert!(encoder.rects >= 2);
+        assert_eq!(
+            encoder.lines, 0,
+            "standalone panel headers should not draw a divider"
+        );
         assert!(encoder.clips >= 2);
         assert!(encoder.texts.iter().any(|text| text == "Assets"));
         assert!(encoder.texts.iter().any(|text| text == "Imported footage"));
@@ -2651,14 +2809,14 @@ mod tests {
                 .rect_colors
                 .iter()
                 .any(|color| *color == mix_color(theme.colors.background, theme.colors.card, 0.24)),
-            "panel background should sit below card rows in the dark surface ladder"
+            "panel background should use the unified dock/app surface"
         );
         assert!(
             encoder
                 .rect_colors
                 .iter()
-                .any(|color| *color == mix_color(theme.colors.background, theme.colors.card, 0.54)),
-            "unselected rows should not flatten to the raw card token"
+                .all(|color| *color != color_with_alpha(theme.colors.surface, 0.20)),
+            "unselected rows should remain transparent until hover or selection"
         );
     }
 
@@ -2744,7 +2902,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_row_paints_outer_ring_before_row_fill() {
+    fn selected_row_paints_quiet_neutral_fill_without_outer_ring() {
         let mut list =
             PanelList::new("Assets", vec![PanelListItem::new("Selected")]).with_selected(Some(0));
         list.layout(Rect::new(0.0, 0.0, 260.0, 140.0));
@@ -2758,7 +2916,14 @@ mod tests {
         };
         list.paint(&mut ctx);
 
-        assert!(encoder.rect_bounds.windows(2).any(|pair| {
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == color_with_alpha(theme.colors.foreground, 0.085)),
+            "selected rows should use a subdued neutral fill"
+        );
+        assert!(!encoder.rect_bounds.windows(2).any(|pair| {
             pair[0].width > pair[1].width
                 && pair[0].height > pair[1].height
                 && (pair[0].x - pair[1].x).abs() <= 1.1

@@ -9,7 +9,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::cell::Cell;
 
-use crate::paint::{horizontal_stroke_rect, mix_color, paint_focus_ring, paint_popover_shadow};
+use crate::paint::{horizontal_stroke_rect, paint_focus_ring, paint_popover_shadow};
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 
@@ -21,13 +21,14 @@ pub(crate) struct MenuRowPaint {
 }
 
 const MENU_MEASURE_FONT_SIZE: f32 = 13.0;
-const MENU_MIN_WIDTH: f32 = 120.0;
+const MENU_MIN_WIDTH: f32 = 160.0;
 const MENU_TRIGGER_HEIGHT: f32 = 28.0;
 const MENU_BAR_TRIGGER_HEIGHT: f32 = 22.0;
 const MENU_TRIGGER_PADDING_X: f32 = 8.0;
 const MENU_ARROW_SPACE: f32 = 24.0;
-const MENU_ROW_PADDING_X: f32 = 16.0;
-const MENU_ROW_ICON_SIZE: f32 = 16.0;
+const MENU_POPUP_PADDING: f32 = 6.0;
+const MENU_ROW_PADDING_X: f32 = 10.0;
+const MENU_ROW_ICON_SIZE: f32 = 15.0;
 const MENU_ROW_ICON_GAP: f32 = 8.0;
 const MENU_ROW_SHORTCUT_GAP: f32 = 24.0;
 const MENU_SCROLLBAR_SPACE: f32 = 8.0;
@@ -94,16 +95,20 @@ pub(crate) fn paint_menu_trigger(
     let spacing = &ctx.theme.spacing;
     match style {
         DropdownTriggerStyle::Filled => {
-            let fill = if open { tokens.primary } else { tokens.card };
+            let fill = if open {
+                tokens.surface_2
+            } else {
+                tokens.surface
+            };
             ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
             paint_menu_trigger_label(ctx, rect, label, tokens.foreground, true, style);
             paint_menu_arrow(ctx, rect);
         }
         DropdownTriggerStyle::MenuBar => {
             if open {
-                ctx.encoder.draw_rect(rect, tokens.accent, spacing.radius_sm);
+                ctx.encoder.draw_rect(rect, tokens.surface_2, spacing.radius_sm);
             }
-            paint_menu_trigger_label(ctx, rect, label, tokens.muted_foreground, false, style);
+            paint_menu_trigger_label(ctx, rect, label, tokens.text_secondary, false, style);
         }
     }
 }
@@ -161,9 +166,9 @@ fn trigger_text_y(rect: Rect, font_size: f32, style: DropdownTriggerStyle) -> f3
 pub(crate) fn paint_menu_popup_chrome(ctx: &mut PaintContext, rect: Rect) {
     let tokens = &ctx.theme.colors;
     let spacing = &ctx.theme.spacing;
-    let radius = spacing.radius_md;
+    let radius = 8.0_f32.min(spacing.radius_lg);
     paint_popover_shadow(ctx, rect, radius);
-    ctx.encoder.draw_rect(rect, tokens.border, radius);
+    ctx.encoder.draw_rect(rect, tokens.border_strong, radius);
     ctx.encoder.draw_rect(
         rect.inset(1.0, 1.0),
         tokens.popover,
@@ -182,38 +187,33 @@ pub(crate) fn paint_menu_row(
 ) {
     let tokens = &ctx.theme.colors;
     let spacing = &ctx.theme.spacing;
-    let font_size = ctx.theme.typography.body.font_size;
-    let fill = if state.active {
-        mix_color(tokens.popover, tokens.primary, 0.16)
-    } else if state.hovered && state.enabled {
-        tokens.accent
+    let font_size = MENU_MEASURE_FONT_SIZE;
+    let fill = if state.hovered && state.enabled {
+        let mut hover = tokens.surface_2;
+        hover.a *= 0.72;
+        hover
     } else {
         tokens.popover
     };
     ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
-    if state.active {
-        ctx.encoder.draw_rect(
-            Rect::new(
-                rect.x + 4.0,
-                rect.y + 7.0,
-                3.0,
-                (rect.height - 14.0).max(1.0),
-            ),
-            tokens.primary,
-            2.0,
-        );
-    }
     let text_color = if state.enabled {
-        if state.active {
+        if state.hovered {
             tokens.foreground
         } else {
             tokens.popover_foreground
         }
     } else {
-        tokens.muted_foreground
+        tokens.text_disabled
     };
     if reserve_icon_lane {
-        if let Some(icon) = icon {
+        if state.active {
+            let check_color = if state.enabled {
+                tokens.primary
+            } else {
+                tokens.text_disabled
+            };
+            paint_menu_checkmark(ctx, rect, check_color);
+        } else if let Some(icon) = icon {
             let icon_size = MENU_ROW_ICON_SIZE.min(rect.height).max(1.0);
             let icon_rect = Rect::new(
                 rect.x + MENU_ROW_PADDING_X,
@@ -247,7 +247,7 @@ pub(crate) fn paint_menu_row(
         ctx.encoder.draw_text(
             label,
             font_size,
-            Point::new(text_x, rect.y + 5.0),
+            Point::new(text_x, menu_row_text_y(rect, font_size)),
             text_color,
         );
         ctx.pop_clip();
@@ -263,9 +263,9 @@ pub(crate) fn paint_menu_row(
             ctx.push_clip(shortcut_clip);
             ctx.encoder.draw_text(
                 shortcut,
-                font_size,
-                Point::new(shortcut_clip.x, rect.y + 5.0),
-                tokens.muted_foreground,
+                12.0,
+                Point::new(shortcut_clip.x, menu_row_text_y(rect, 12.0)),
+                tokens.text_secondary,
             );
             ctx.pop_clip();
         }
@@ -276,11 +276,13 @@ pub(crate) fn paint_menu_separator(ctx: &mut PaintContext, rect: Rect) {
     let tokens = &ctx.theme.colors;
     let line = horizontal_stroke_rect(
         rect.y + rect.height * 0.5,
-        rect.x + 8.0,
-        rect.width - 16.0,
+        rect.x + 6.0,
+        rect.width - 12.0,
         1.0,
     );
-    ctx.encoder.draw_rect(line, tokens.border, 0.0);
+    let mut border = tokens.border;
+    border.a *= 0.86;
+    ctx.encoder.draw_rect(line, border, 0.0);
 }
 
 pub(crate) fn paint_menu_scrollbar(
@@ -325,6 +327,27 @@ fn paint_menu_arrow(ctx: &mut PaintContext, rect: Rect) {
             Point::new(arrow_x, arrow_y + 3.0),
         ],
         tokens.foreground,
+    );
+}
+
+fn menu_row_text_y(rect: Rect, font_size: f32) -> f32 {
+    rect.y + ((rect.height - font_size * 1.3) * 0.5).max(0.0)
+}
+
+fn paint_menu_checkmark(ctx: &mut PaintContext, rect: Rect, color: Color) {
+    let x = rect.x + MENU_ROW_PADDING_X + 1.0;
+    let y = rect.y + rect.height * 0.5;
+    ctx.encoder.draw_line(
+        Point::new(x, y + 0.5),
+        Point::new(x + 3.2, y + 3.8),
+        1.5,
+        color,
+    );
+    ctx.encoder.draw_line(
+        Point::new(x + 3.0, y + 3.8),
+        Point::new(x + 9.5, y - 4.0),
+        1.5,
+        color,
     );
 }
 
@@ -469,7 +492,7 @@ impl Dropdown {
             open: false,
             hovered_index: None,
             pressed_index: None,
-            item_height: 24.0,
+            item_height: 28.0,
             max_visible_items: 8,
             scroll_offset: 0.0,
             suppress_next_release: false,
@@ -607,7 +630,7 @@ impl Dropdown {
     }
 
     fn icon_lane_width(&self) -> f32 {
-        if self.items.iter().any(|item| item.icon.is_some()) {
+        if self.items.iter().any(|item| item.icon.is_some() || item.checked) {
             MENU_ROW_ICON_SIZE + MENU_ROW_ICON_GAP
         } else {
             0.0
@@ -642,8 +665,8 @@ impl Dropdown {
         anchored_menu_rect(
             self.trigger_rect(),
             self.menu_width(),
-            self.visible_content_height() + 4.0,
-            0.0,
+            self.visible_content_height() + MENU_POPUP_PADDING * 2.0,
+            2.0,
             self.overlay_viewport.get(),
         )
     }
@@ -651,9 +674,9 @@ impl Dropdown {
     fn item_rect(&self, index: usize) -> Rect {
         let menu = self.menu_rect();
         Rect::new(
-            menu.x + 2.0,
-            menu.y + 2.0 + index as f32 * self.item_height - self.scroll_offset,
-            (menu.width - 4.0).max(1.0),
+            menu.x + MENU_POPUP_PADDING,
+            menu.y + MENU_POPUP_PADDING + index as f32 * self.item_height - self.scroll_offset,
+            (menu.width - MENU_POPUP_PADDING * 2.0).max(1.0),
             self.item_height,
         )
     }
@@ -662,7 +685,8 @@ impl Dropdown {
         if !self.menu_rect().contains(position) {
             return None;
         }
-        let relative_y = position.y - (self.menu_rect().y + 2.0) + self.scroll_offset;
+        let relative_y =
+            position.y - (self.menu_rect().y + MENU_POPUP_PADDING) + self.scroll_offset;
         if relative_y < 0.0 {
             return None;
         }
@@ -1648,7 +1672,7 @@ mod tests {
         let open = d.measure(LayoutConstraint::LOOSE);
 
         assert_eq!(open, closed);
-        assert_eq!(open, Size::new(120.0, 28.0));
+        assert_eq!(open, Size::new(160.0, 28.0));
     }
 
     #[test]
@@ -1723,7 +1747,7 @@ mod tests {
             )],
         );
 
-        assert_eq!(d.measure(LayoutConstraint::LOOSE), Size::new(120.0, 28.0));
+        assert_eq!(d.measure(LayoutConstraint::LOOSE), Size::new(160.0, 28.0));
 
         d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
         d.open = true;
@@ -1904,7 +1928,7 @@ mod tests {
         );
         assert!(encoder.soft_shadows[0].color.a > encoder.soft_shadows[1].color.a);
         assert_eq!(encoder.rects[0], popup);
-        assert_eq!(encoder.rect_colors[0], theme.colors.border);
+        assert_eq!(encoder.rect_colors[0], theme.colors.border_strong);
     }
 
     #[test]
@@ -1950,7 +1974,7 @@ mod tests {
             encoder.texts,
             vec!["Disabled option with a very long label"]
         );
-        assert_eq!(encoder.clips, vec![Rect::new(26.0, 20.0, 32.0, 24.0)]);
+        assert_eq!(encoder.clips, vec![Rect::new(20.0, 20.0, 44.0, 24.0)]);
         assert_eq!(encoder.clip_pops, 1);
         assert_eq!(encoder.lines, 0);
     }
@@ -1976,8 +2000,34 @@ mod tests {
         assert_eq!(encoder.texts, vec!["Open"]);
         assert_eq!(encoder.triangles + encoder.raster_images, 1);
         assert!(icon.triangle_count() > 0);
-        assert_eq!(encoder.clips, vec![Rect::new(50.0, 20.0, 72.0, 24.0)]);
+        assert_eq!(encoder.clips, vec![Rect::new(43.0, 20.0, 85.0, 24.0)]);
         assert_eq!(encoder.clip_pops, 1);
+    }
+
+    #[test]
+    fn menu_row_checked_state_paints_checkmark_without_accent_selection_chrome() {
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 180.0, 80.0);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        paint_menu_row(
+            &mut ctx,
+            Rect::new(10.0, 20.0, 128.0, 28.0),
+            "Inspector",
+            Some("Ctrl+Alt+I"),
+            None,
+            true,
+            MenuRowPaint { enabled: true, active: true, hovered: false },
+        );
+
+        assert_eq!(encoder.lines, 2);
+        assert_eq!(encoder.rects[0], Rect::new(10.0, 20.0, 128.0, 28.0));
+        assert_eq!(encoder.rect_colors[0], theme.colors.popover);
+        assert!(
+            !encoder.rect_colors.iter().any(|color| *color == theme.colors.primary),
+            "checked rows should not paint blue row chrome"
+        );
     }
 
     #[test]
@@ -2025,13 +2075,11 @@ mod tests {
 
     #[test]
     fn dropdown_popup_width_reserves_shortcut_lane() {
-        let mut plain = Dropdown::new(
-            "File",
-            vec![MenuItem::new("Save Project", Action::SaveProject)],
-        );
+        let label = "Save Project With Media Cache";
+        let mut plain = Dropdown::new("File", vec![MenuItem::new(label, Action::SaveProject)]);
         let mut with_shortcut = Dropdown::new(
             "File",
-            vec![MenuItem::new("Save Project", Action::SaveProject).with_shortcut("Ctrl+S")],
+            vec![MenuItem::new(label, Action::SaveProject).with_shortcut("Ctrl+S")],
         );
         plain.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
         with_shortcut.layout(Rect::new(0.0, 0.0, 120.0, 28.0));

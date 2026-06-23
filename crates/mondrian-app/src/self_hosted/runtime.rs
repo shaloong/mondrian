@@ -542,6 +542,10 @@ fn apply_cursor_request(window: &winit::window::Window, cursor: CursorRequest) {
     let icon = match cursor {
         CursorRequest::Crosshair => winit::window::CursorIcon::Crosshair,
         CursorRequest::Default => winit::window::CursorIcon::Default,
+        CursorRequest::Grab => winit::window::CursorIcon::Grab,
+        CursorRequest::Grabbing => winit::window::CursorIcon::Grabbing,
+        CursorRequest::EwResize => winit::window::CursorIcon::EwResize,
+        CursorRequest::NsResize => winit::window::CursorIcon::NsResize,
     };
     window.set_cursor_icon(icon);
 }

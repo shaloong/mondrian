@@ -24,6 +24,16 @@ command generation instead of being reimplemented per component.
 pointer capture. Widgets record side-effect intent in `EventRequests`; the
 router or app shell applies those requests.
 
+UI theme colors are authored as design-tool sRGB hex values, while the wgpu
+fragment pipeline writes linear RGB into the presentation target. The UI
+renderer therefore converts shape colors from sRGB tokens to linear RGB when
+building GPU vertices, uses sRGB texture sampling for full-color raster atlas
+images such as thumbnails, and leaves R8 glyph/vector alpha masks in linear
+alpha space. Widgets and theme tokens should not pre-darken colors to compensate
+for display output, nor should they decode or encode the same color twice; the
+renderer boundary owns this conversion so dark surfaces such as title bars and
+timeline tracks match their authored hex values on screen.
+
 `mondrian-platform` owns OS integration. Text widgets use `PlatformService`
 for clipboard operations instead of calling platform APIs directly.
 `SystemPlatformService` currently provides desktop clipboard copy/paste through
@@ -118,6 +128,15 @@ actions. The official `mondrian` entrypoint starts from a real empty
 `AppState`, builds `SelfHostedPanelModels::from_app_state`, and refreshes from
 that same boundary after dispatched actions. Component fixtures remain in
 `ui_demo` and explicit `SelfHostedPanelModels::demo()` tests only.
+The winit runner should request redraws from explicit state transitions: widget
+or router repaint requests, surface resize/reconfigure, background preview or
+thumbnail refreshes, startup/workspace window replacement, and render follow-up
+work such as resource uploads. Plain `CursorMoved` events must not force a full
+UI redraw by themselves; widgets that change hover, drag previews, tooltips, or
+cursor-dependent overlays are responsible for emitting `ctx.request_repaint()`.
+The runner also avoids repeating native cursor-icon updates when the resolved
+icon has not changed, keeping OS-level window dragging and splitter hover
+feedback from competing with redundant shell work.
 
 The self-hosted entrypoint uses distinct native window roles for startup and
 workspace. Startup owns a fixed transparent undecorated winit window. Once
@@ -190,9 +209,17 @@ palette values in the app shell. Window controls emit app-shell custom actions o
 quit side effects after widget and `AppState` borrows end. These commands must
 not be added to the editor-state core action enum unless they mutate portable
 editor data.
+The title text is centered inside the remaining blank titlebar span between the
+menu group and platform window controls, not against a fixed window midpoint or
+hard-coded offset. It elides inside that span when the project name is too long
+so menu triggers and window controls keep their native-feeling hit targets.
 Top menu triggers use the lightweight `DropdownTriggerStyle::MenuBar` treatment
 and content-width layout: closed triggers should read like native menu text, not
 filled toolbar buttons, and should not reserve a persistent arrow affordance.
+Top-level product menu rows are text-first shell commands with optional shortcut
+hints only; they should not pass icon assets into `MenuItem`, even when the
+underlying generic dropdown component can still render icon lanes for embedded
+selectors and context menus.
 The product menu bar has exactly five stable top-level groups, displayed in the
 Chinese-first shell as 文件, 编辑, 视图, 窗口, and 帮助. Their stable product
 roles remain File, Edit, View, Window, and Help for action naming and tests. Do
@@ -699,7 +726,7 @@ start, playhead, clip edge, or in/out candidates and paint a snap guide; the
 app layer receives only the adjusted frame proposal. Future marker, linked
 clip, or ripple-aware snapping should extend candidate generation without
 moving timeline mutation rules into the widget crate. Timelines expose
-overlay horizontal and vertical scrollbars when content overflows; scrollbar
+persistent horizontal and vertical scrollbars in reserved gutters; scrollbar
 thumb drags, endpoint-handle drags, and track paging must win hit testing over
 clip selection and seeking. Horizontal scrollbar endpoint handles adjust the
 visible frame span by mutating widget-local `pixels_per_frame`; vertical
@@ -719,9 +746,12 @@ state from a previous panel model.
 
 Dropdowns, context menus, and tooltips derive event hit regions and paint
 geometry from shared rect helpers. Dropdown triggers, context-menu popup chrome,
-rows, separators, active indicators, and scrollbars are painted through shared
-menu helpers so action-backed dropdowns, context menus, and internal selectors
-keep the same visual language. Disabled menu items consume pointer input
+rows, separators, checked-row checkmarks, and scrollbars are painted through
+shared menu helpers so action-backed dropdowns, context menus, and internal
+selectors keep the same visual language. Checked rows are intentionally quiet:
+the row fill stays the normal popover fill unless hovered, and selected state is
+communicated by the checkmark only, with no full-row primary fill or decorative
+left accent rail. Disabled menu items consume pointer input
 without dispatching actions or closing the overlay; outside clicks close open
 menus. Closed dropdown measurement is based on the trigger label only so long
 popup choices do not widen compact inspector rows; the popup itself expands to
@@ -1228,6 +1258,11 @@ drag candidates and scrollbar drags are cleared immediately, and the next routed
 event releases any capture the stale interaction owned. List wheel events follow
 the same bubbling contract as `ScrollView`: scrolling consumes the event, while
 boundary or non-overflow wheel input remains ignored for parent panels.
+`PanelListItem` also owns optional tree-row metadata: depth, stable tree id, and
+expanded state. Tree rows use SVG chevrons supplied by the app layer, toggle on
+row click or Enter/Space, hide descendants when collapsed, and preserve collapsed
+ids through `PanelListState` across model refreshes. Tree indentation must come
+from this metadata, not from leading spaces in the row title.
 Searchable list panels should use `PanelList::with_filter`, which exposes its
 filter `TextInput` as a real widget tree child so focus, IME, and keyboard
 routing stay framework-owned. Filtering
@@ -1429,31 +1464,41 @@ and future browsers can share neutral, accent, success, warning, and error
 treatments without hard-coded colors or fixed-width text assumptions. Demo
 fixture colors that represent clip media content may remain fixture data,
 because they are not theme chrome.
-The dark theme maintains a deliberate surface ladder: root workspace and viewer
-canvases are the darkest surfaces, dock chrome and timeline rulers sit one step
-above them, panel bodies use a restrained card mix, and inspector sections,
-popups, and menus use elevated tokens only when they need clear containment.
-Widgets may compose semantic tokens with shared paint helpers such as
-`mix_color`, but should not flatten large editor areas into the same mid-gray
-`card`/`popover` fill. This keeps the self-hosted UI closer to professional NLE
-workspaces and prevents visual hierarchy from depending on per-panel ad-hoc
-color constants.
-The default dark preset is calibrated around an editor workbench:
-`background` is the app/window floor, `card` is the normal dock panel body,
-`secondary` and `accent` are compact control surfaces, and `primary`/`ring`
-carry the blue focus, playback, selection, and playhead language. `accent` is
-not a license for broad blue fills; large selected timeline/header regions
-should use low-alpha `primary` composition so the workspace remains dark and
-readable. Scrollbars use a white semantic thumb with per-widget alpha, producing
-modern overlay-scrollbar contrast without system-default gray rails.
+The dark theme maintains a deliberate shadcn/zinc-style neutral surface ladder:
+`background` and `card` form the normal app/dock floor in the current dark
+preset, `panel_alt` is reserved for timeline/tool chrome or other intentional
+bands rather than every dock header, `surface` / `surface_2` are compact control
+surfaces, `viewer_stage` is the darker preview workspace, `canvas` is the fitted
+sequence-frame fill, and `popover` / `border_strong` are reserved for elevated
+overlays. Widgets may compose semantic tokens with shared paint helpers such as
+`mix_color`, but should not flatten large editor areas into blue-gray
+`card`/`popover` fills or reveal darker app gaps between a dock header and its
+content. This keeps the self-hosted UI closer to professional NLE workspaces and
+prevents visual hierarchy from depending on per-panel ad-hoc color constants.
+The default dark preset is calibrated around a neutral black/zinc editor
+workbench: `background`, `card`, `panel_alt`, `surface`, and `surface_2` should
+step upward by small but visible amounts without drifting into blue slate.
+`primary`/`ring` carry only the blue focus, playback, playhead, ruler range edge,
+and transient drop-target language. Ordinary active controls, selected browser
+rows/cards, dock-tab underlines, track-selection tints, and slider/checkbox
+filled states use low-alpha foreground or neutral surface tokens instead of
+primary blue. `primary` is not a license for broad blue fills; large selected
+timeline/header regions should use neutral low-alpha composition so the
+workspace remains dark and readable. Scrollbars and timeline range navigators
+use pre-mixed opaque RGB where overlapping geometry would otherwise double-blend
+semi-transparent whites.
 Reusable browser surfaces such as `PanelList` and `AssetGrid` follow the same
-rule: their panel body is a dark workspace mix, rows/cards draw a subtle border
-with an inset fill, and selected/hovered states tint that fill instead of
-painting the entire item with raw `accent` or `muted`. Asset-grid preview wells
-should read as dark media slots even before thumbnails arrive, so placeholder
-gradients and badges do not dominate the panel. Embedded browser margins should
-align to the same compact inset so Assets and Effects do not appear to belong to
-different layout systems inside a shared dock group.
+rule: their panel body is a dark workspace mix and selected/hovered states tint
+the item fill instead of painting the entire item with raw `accent` or `muted`.
+`PanelList` rows stay lightweight: normal rows paint no persistent background,
+hover/selection are the only row fills, and there is no strong border or
+selection-side stripe. Selected rows use a subdued neutral foreground fill and
+checked state should be expressed by explicit row content, such as a checkmark,
+rather than a decorative blue block. Asset-grid preview wells should read as
+dark media slots even before thumbnails arrive, so placeholder gradients and
+badges do not dominate the panel. Embedded browser margins should align to the
+same compact inset so Assets and Effects do not appear to belong to different
+layout systems inside a shared dock group.
 Panel models must attach explicit stable actions to rows instead of deriving
 commands from titles, indices, or fixture-only prefixes. Synthetic demo rows
 use explicit `ui.demo_panel` actions so they exercise the same select/activate
@@ -1465,10 +1510,12 @@ bottom span. Project commands remain in the shell/menu layer, and export uses
 its own workspace/panel instead of sharing a status/log tab group.
 The editing preset keeps the left browser narrow, gives the center viewer the
 largest share of the upper workspace, and leaves the inspector at a compact
-right-column width. Single-tab dock headers should paint as panel titles with a
-small active underline, not as full-width raised tabs; grouped browser tabs may
-keep larger hit areas but should use hover fills and underline selection rather
-than heavy active rectangles.
+right-column width. Dock headers share the same panel-body surface as their
+content and do not draw a bottom divider between tab chrome and panel content.
+Single-tab dock headers should paint as panel titles with a small neutral active
+underline, not as full-width raised tabs; grouped browser tabs may keep larger
+hit areas but should use hover fills and underline selection rather than heavy
+active rectangles.
 Dock tab labels are content-measured from the current display text with tokenized
 padding, min/max widths, and the small tab-label typography token. Assets,
 Effects, Inspector, Timeline, and future panels must not reserve equal-width
@@ -1498,6 +1545,10 @@ panel rows are checked only when the current live layout contains the direct
 panel or grouped tab, while built-in workspace rows are checked only when that
 named preset is active. Custom layouts intentionally leave built-in workspace
 rows unchecked instead of pretending to be Editing.
+Window-menu checked state follows the generic menu rule: visibility is shown by
+the checkmark glyph only. It must not introduce blue checked backgrounds, left
+accent bars, or per-row icons, because the menu is a state report rather than a
+primary editing surface.
 Self-hosted `SwitchWorkspace` is also shell-local: it rebuilds the dock tree
 from the current `SelfHostedPanelModels` using named built-in preset factories
 while keeping panel models read-only and app/domain mutation in `AppState`.
@@ -1534,6 +1585,30 @@ The self-hosted Assets panel maps real library cards to `ui.assets.prepare_drag`
 path so later Timeline drop handling stays shared with the egui implementation.
 The same left dock hosts the Effects browser as an `Effects` tab so effect
 insertion remains visible without changing the default split layout.
+Asset cards are fixed-size browser cells. Their preview well uses a 16:9 aspect
+ratio and a black background; raster thumbnails must aspect-fit inside that well
+without overflowing, leaving black letterbox/pillarbox space as needed. Media
+kind badges are app-layer Chinese labels, such as 视频, 音频, 图片, and 序列,
+until the product has a real i18n layer. The footer is a single row with the
+asset name left-aligned and duration right-aligned; both lanes elide when space
+runs out, and the full value belongs in a tooltip rather than a taller card.
+`AssetGridState` preserves hover by stable id across model refreshes because
+tooltip timer redraws and shell model rebuilds should not make the hovered card
+blink off while the pointer is still stationary over it.
+Future browser zoom should be an explicit grid scale control or Ctrl-wheel
+gesture, not implicit responsive card resizing.
+The Effects browser should read like a professional NLE effect library: a
+compact multi-level category tree with plain category rows and effect rows.
+Its row height can be tighter than general-purpose browser lists because effect
+libraries are expected to contain hundreds of entries; the app adapter should
+use `PanelList::with_row_height(30.0)` or a similarly compact tokenized value
+instead of large card-like rows.
+Rows in this panel should not carry FX icons, GPU/3D/FX badges, or descriptive
+subtitles; those richer labels belong in documentation, search metadata, or a
+future inspector/help surface, not the dense effect list.
+Effects categories are interactive `PanelList` tree nodes, not disabled
+placeholder rows, so users can collapse and expand the library while effect rows
+remain the only rows with apply actions.
 Panel content factories must cover every `PanelKind` explicitly. Product shell
 fallbacks should be disabled `PanelList` empty states that name the unsupported
 panel, not anonymous colored boxes, so missing migrations stay visible and new
@@ -1549,17 +1624,59 @@ selection and seek callbacks into semantic `Action`s or undoable commands at
 the app layer. This keeps the renderer-facing timeline primitive testable while
 preserving a clean path for progressively replacing the old egui timeline.
 The visual baseline is compact NLE density: 42px default tracks, 28px ruler,
-104px app-supplied track header column, subtle alternating lane fills, weak row
-separators, a one-pixel playhead, 8px overlay scrollbars with circular endpoint
-handles, an explicit magnet Snap toggle in the tool strip, V/A track badges,
-and clip blocks with kind-specific borders plus trim-handle affordances on
-hover/selection. Audio clip view models may carry normalized waveform peaks;
-`TimelineView` paints them as compact vertical peak columns without decoding
-media or owning a waveform cache. Ruler ticks and snap guides should use
-low-alpha semantic foreground/ring colors rather than full panel borders, so
-time markings and edit alignment cues read without turning the timeline into a
-table. Alternating timeline lane fills are semantic timeline tokens so compact
-editor density remains theme-owned rather than embedded in the drawing code.
+132px minimum track header column, subtle alternating lane fills, weak row
+separators, a one-pixel playhead with a small five-sided ruler handle,
+persistent 8px scrollbars in reserved gutters with circular endpoint handles, an
+explicit magnet Snap toggle in the tool strip, V/A track badges, and clip blocks
+with tokenized selected borders plus trim-handle affordances on hover/selection.
+Track headers should stay terse: the V1/V2/V3/A1/A2 labels are the track
+identity and the badge width should be measured from the label with equal
+horizontal padding, while visibility, mute, and lock are icon buttons sourced
+from the app SVG icon registry. Do not add persistent explanatory text such as
+"video track", "mute", or "locked" inside the compact header row.
+Audio clip view models may
+carry normalized waveform peaks; `TimelineView` paints them as compact vertical
+peak columns without decoding media or owning a waveform cache. Ruler ticks and
+snap guides should use low-alpha semantic timeline tick tokens rather than full
+panel borders, so time markings and edit alignment cues read without turning
+the timeline into a table. Ruler labels should adapt to the visible frame
+scale: close zoom levels may show SMPTE-style `HH:MM:SS:FF`, normal edit ranges
+can collapse to `MM:SS`, and long ranges should avoid noisy frame labels.
+App adapters should pass the active sequence frame rate into `TimelineView`, so
+SMPTE labels and major-step thresholds follow real 23.976/25/29.97/60fps
+timelines instead of assuming 30fps.
+Minor and major tick cadence should also be chosen independently from the
+visible frame span: minor marks stay dense enough for scanning, while labeled
+major ticks snap to calmer second/minute multiples instead of a fixed
+`minor * 4` pattern.
+Alternating timeline lane fills, range markers, scrollbar alpha, playhead color,
+and selected clip outlines are semantic timeline tokens so compact editor
+density remains theme-owned rather than embedded in the drawing code. Timeline
+work areas are expressed first as a thin ruler bar, with only optional very weak
+track tint and one-pixel boundaries; they must not compete with selected clips.
+Range selections, rendered-cache bars, and playhead-previous areas are separate
+future semantics and should not reuse the work-area fill.
+Timeline Range Navigators are not normal scrollbar thumbs. Their center body
+pans the visible time/track range, while the leading and trailing circular
+handles resize that visible range and therefore alter timeline zoom or track
+density. Paint them as track, body, leading handle, then trailing handle. The
+body should visually extend under the full circular handles so the navigator
+reads as one continuous Premiere-style viewport block, but state changes must
+use theme-owned opaque replacement colors or a true union/mask pass rather than
+stacked translucent overlays. Body hover uses a grab cursor, body drag uses
+grabbing, and handle hover/drag uses resize cursors. During an active navigator
+drag, pointer handling must remain captured even when the cursor leaves the
+timeline bounds; the active drag path owns cursor requests until mouse-up or
+focus loss. Horizontal handle resizing should solve from the handle's
+navigator-track position, including fixed timeline content padding, so circular
+handles stay visually anchored under the pointer instead of drifting as zoom
+changes.
+Timeline tracks expose distinct visual slots for normal, targeted/selected,
+locked, muted, hidden, drag/drop-target, and future solo states. The widget can
+paint states only when the view model carries real state; do not invent a solo
+indicator until the app/domain layer exposes solo. Long clip labels are clipped
+inside the clip card and surface their full label through the shared tooltip
+manager when hover reveals truncation.
 When no timeline model is available, app panels should disable the surface so
 empty shells do not steal focus, seek, or hold pointer capture. The app panel
 model owns the empty-state reason, such as no open sequence or an empty
@@ -1567,7 +1684,13 @@ sequence, while `TimelineView` only paints the supplied message in the timeline
 body and keeps add-track command routing available for sequence-backed empty
 timelines. Disabled timeline shells must also mute toolbar chrome and suppress
 the playhead so a no-sequence workspace does not present editing affordances as
-available.
+available. Empty timeline messaging should follow the same restrained product
+language as other panels: a short title plus optional body copy, left-aligned in
+the upper third of the content area rather than centered like a splash screen.
+The timeline body should not paint persistent vertical ruler grid lines inside
+every track; time structure belongs in the ruler row, while playhead, in/out
+ranges, snap guides, and transient drag indicators provide alignment cues in
+the track body.
 
 Value widgets stay editor-state agnostic. `Button`, `Checkbox`, `Slider`,
 `TextInput`, `Dropdown`, `ColorPicker`, `ColorPickerTrigger`, and `CurveEditor`
@@ -1588,9 +1711,11 @@ workspace shortcuts, input methods, and user-level tool hotkeys remain
 centralized outside the component. Programmatically disabling a focused number
 input ends the edit session before any further key handling: the wrapper focus
 flag is cleared and pending invalid display text is normalized back to the most
-recent valid value. Slider focus loss clears keyboard focus and an active drag if
-present, but it must not release pointer capture when the slider was only
-keyboard focused.
+recent valid value. Sliders use a compact neutral visual: a thin track,
+foreground-filled progress and thumb, and neutral surface track background
+rather than primary blue. Slider focus loss clears keyboard focus and an active
+drag if present, but it must not release pointer capture when the slider was
+only keyboard focused.
 Self-hosted Inspector actions should use typed payloads for clip mutations.
 Scalar clip fields that need both coarse and precise editing, such as opacity,
 transform values, and trim frames, compose `Slider` plus `NumberInput` in the
@@ -1740,11 +1865,16 @@ Inspector/property-panel titles, section headers, and row labels follow the
 same rule through `PropertyPanel`'s internal `Label` instances. When the
 Inspector is hosted inside a dock panel, it uses embedded panel chrome so the
 dock header supplies the panel name and the property stack starts directly at
-its first meaningful section.
+its first meaningful section. Empty inspector states should use a dedicated
+panel-level empty-state layout rather than a fake one-row form section, so
+wrapped guidance copy can sit at a stable top offset without row clipping.
+That empty-state rhythm should stay close to the Assets panel: quiet left-aligned
+title/body copy anchored in the upper third of the panel instead of a centered
+placeholder card.
 Inspector sections should read as a professional parameter stack, not nested
 cards. `PropertyPanel` paints the panel body from the normal panel token, uses
 thin section dividers, and reserves stronger chrome only for the selected
-section's left accent marker. Standard property rows are 30px tall, with labels
+section's restrained selection tint. Standard property rows are 30px tall, with labels
 vertically centered in compact rows and pinned near the top of tall rows by
 `FormLayout`; oversized curve editors or color pickers can opt into explicit
 taller row heights while staying clipped to their row/control rects.
@@ -1802,12 +1932,16 @@ status-badge tones, empty-canvas messaging, metadata labels, and safe-area guide
 drawing only; frame decoding, preview scheduling, and GPU texture lifecycle
 remain app/runtime responsibilities.
 Viewer painting treats the fitted sequence frame as the only real image canvas.
-The panel body stays at `card`; areas outside the sequence frame show that
-panel body, not a fake black frame. The sequence frame itself is a straight-edged
-rectangle with a Photoshop-style checkerboard base so transparent or empty
-regions can be distinguished from genuinely black media. Preview frames, empty
-messages, and safe-area guides are clipped to that sequence rectangle and then
-to the viewport, so content outside the sequence frame is never visible.
+The panel body uses the dedicated `viewer_panel` token, while the surrounding
+preview stage uses `viewer_stage` as a future pan/zoom workspace. The fitted
+sequence frame uses `canvas` as its empty-frame fill, so the user can distinguish
+the workspace from the actual sequence rectangle. The sequence frame itself is a
+straight-edged rectangle; empty projects omit the checkerboard and show only the
+dark stage, neutral canvas fill, and safe-area guides. Transparent content or an
+explicit transparent-background toggle may enable the low-presence checkerboard.
+Preview frames, empty messages, and safe-area guides are clipped to that
+sequence rectangle and then to the viewport, so content outside the sequence
+frame is never visible.
 Transport buttons and zoom/quality chips use compact toolbar surfaces; the
 play/pause button may be slightly more prominent, but viewer controls should not
 look like generic form inputs or large rectangular tabs.
@@ -1858,7 +1992,7 @@ Preview-quality interaction emits
 preview settings through an undoable sequence snapshot without stopping
 playback, so quality switching remains a viewer operation rather than a
 sequence-settings-dialog draft mutation. The preview quality label comes from
-the active sequence preview scale (`Full` at 1.0, percentage labels below full
+the active sequence preview scale (`1/1` at 1.0, percentage labels below full
 resolution), not from whether a preview frame has already arrived. Zoom and
 preview-quality chips dispatch only when the host provides their callback;
 otherwise they keep local press/repaint feedback but must not send
@@ -2008,11 +2142,14 @@ enabling rewiring or parameter mutation in the widget.
 Curve editing starts as a domain-independent widget primitive in
 `mondrian-ui-widgets`. `CurveEditor` owns normalized `0.0..=1.0` point layout,
 hit testing, pointer capture, monotonic-x dragging, keyboard nudging, and themed
-grid/curve/handle painting. Nudging selected points handles unmodified arrows
-and Shift large-step arrows only; Ctrl/Alt/Meta arrow chords stay ignored so
-shortcut routing remains centralized. Focus loss or disabling the control may
-cancel an active point drag, but it must release pointer capture only when such
-a drag exists; keyboard focus alone does not imply capture ownership.
+grid/curve/handle painting. The curve stroke and selected point fill should use
+neutral foreground/surface tokens, not primary blue; blue remains reserved for
+focus, playhead/range edges, and explicit active states. Nudging selected points
+handles unmodified arrows and Shift large-step arrows only; Ctrl/Alt/Meta arrow
+chords stay ignored so shortcut routing remains centralized. Focus loss or
+disabling the control may cancel an active point drag, but it must release
+pointer capture only when such a drag exists; keyboard focus alone does not
+imply capture ownership.
 Programmatic disabling clears the active drag immediately and remembers that
 the next routed event must release capture, so re-enabling the widget cannot
 apply stale pointer movement from a previous panel model. Timeline keyframes,

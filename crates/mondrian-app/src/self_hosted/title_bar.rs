@@ -139,7 +139,7 @@ impl Widget for TitleBar {
         self.menu_bounds = Rect::new(menu_x, menu_y, menu_width, MENU_BAR_HEIGHT);
         self.menu_bar.layout(self.menu_bounds);
 
-        let title_x = (menu_x + menu_width + 12.0).min(content_right);
+        let title_x = (self.menu_bar.content_right() + 12.0).min(content_right);
         let title_width = (content_right - title_x - 12.0).max(0.0);
         self.title_bounds = Rect::new(title_x, self.bounds.y, title_width, TITLE_BAR_HEIGHT);
     }
@@ -196,8 +196,7 @@ impl Widget for TitleBar {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        ctx.encoder
-            .draw_rect(self.bounds, colors.background.lerp(colors.card, 0.42), 0.0);
+        ctx.encoder.draw_rect(self.bounds, colors.titlebar, 0.0);
         let border_y = self.bounds.y + self.bounds.height - 1.0;
         ctx.encoder.draw_line(
             Point::new(self.bounds.x, border_y),
@@ -221,11 +220,15 @@ impl Widget for TitleBar {
         let previous_clip = ctx.clip_rect;
         ctx.clip_rect = previous_clip.intersection(&self.title_bounds);
         ctx.push_clip(self.title_bounds);
+        let font_size = 12.0;
+        let title = elide_text_to_width(&self.title, font_size, self.title_bounds.width);
+        let title_width = estimate_text_width(&title, font_size).min(self.title_bounds.width);
+        let title_x = self.title_bounds.x + (self.title_bounds.width - title_width) * 0.5;
         ctx.encoder.draw_text(
-            &self.title,
-            12.0,
-            Point::new(self.title_bounds.x, self.title_bounds.y + 10.0),
-            colors.muted_foreground,
+            &title,
+            font_size,
+            Point::new(title_x, self.title_bounds.y + 10.0),
+            colors.text_secondary,
         );
         ctx.pop_clip();
         ctx.clip_rect = previous_clip;
@@ -256,6 +259,29 @@ impl Widget for TitleBar {
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         (index == 0).then_some(&mut self.menu_bar as &mut dyn Widget)
     }
+}
+
+fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
+    if text.is_empty() || max_width <= 0.0 {
+        return String::new();
+    }
+    if estimate_text_width(text, font_size) <= max_width {
+        return text.to_owned();
+    }
+    let suffix = "...";
+    if estimate_text_width(suffix, font_size) > max_width {
+        return String::new();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        out.push(ch);
+        let candidate = format!("{out}{suffix}");
+        if estimate_text_width(&candidate, font_size) > max_width {
+            out.pop();
+            break;
+        }
+    }
+    format!("{out}{suffix}")
 }
 
 impl TitleBar {
@@ -482,6 +508,16 @@ mod tests {
             menu_bounds.x + menu_bounds.width - 8.0,
             menu_bounds.center().y,
         )));
+    }
+
+    #[test]
+    fn title_bar_title_uses_blank_space_after_actual_menu_content() {
+        let bar = title_bar();
+        let menu_bounds = bar.menu_bar().bounds();
+        let content_right = bar.menu_bar().content_right();
+
+        assert!(content_right < menu_bounds.x + menu_bounds.width);
+        assert_eq!(bar.title_bounds.x, content_right + 12.0);
     }
 
     #[test]

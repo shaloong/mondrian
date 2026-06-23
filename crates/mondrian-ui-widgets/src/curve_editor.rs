@@ -431,18 +431,18 @@ impl Widget for CurveEditor {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let plot = self.plot_rect();
-        let grid = color_with_alpha(colors.border, 0.45);
+        let grid = color_with_alpha(colors.border, 0.38);
         let curve = if self.enabled {
-            colors.primary
+            color_with_alpha(colors.foreground, 0.82)
         } else {
             colors.muted_foreground
         };
-        let point_fill = colors.popover;
+        let point_fill = colors.surface;
 
         ctx.encoder.draw_rect(self.bounds, colors.card, spacing.radius_md);
         ctx.encoder.draw_rect(
             plot,
-            color_with_alpha(colors.muted, 0.42),
+            color_with_alpha(colors.surface, 0.34),
             spacing.radius_sm,
         );
 
@@ -491,7 +491,7 @@ impl Widget for CurveEditor {
             );
             ctx.encoder.draw_rect(
                 rect.inset(-1.0, -1.0),
-                color_with_alpha(colors.border, 0.78),
+                color_with_alpha(colors.border_strong, 0.70),
                 radius + 1.0,
             );
             ctx.encoder.draw_rect(rect, point_fill, radius);

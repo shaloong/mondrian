@@ -9,7 +9,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::rc::Rc;
 
-use crate::paint::{color_with_alpha, mix_color};
+use crate::paint::{centered_text_origin_y, color_with_alpha};
 use crate::text_metrics::{centered_text_x, measure_single_line};
 
 const DRAG_START_DISTANCE: f32 = 5.0;
@@ -308,19 +308,9 @@ impl Widget for DockTabBar {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
 
-        let bg = Rect::new(
-            self.bounds.x,
-            self.bounds.y,
-            self.bounds.width,
-            self.bar_height,
-        );
-        let bar_fill = mix_color(tokens.background, tokens.card, 0.54);
+        let bg = self.bounds;
+        let bar_fill = tokens.card;
         ctx.encoder.draw_rect(bg, bar_fill, 0.0);
-        ctx.encoder.draw_rect(
-            Rect::new(bg.x, bg.y + bg.height - 1.0, bg.width, 1.0),
-            color_with_alpha(tokens.border, 0.58),
-            0.0,
-        );
 
         let rects = self.tab_rects();
         for (i, tab) in self.tabs.iter().enumerate() {
@@ -332,45 +322,44 @@ impl Widget for DockTabBar {
             let is_hovered = self.hovered_tab == Some(i);
 
             let inset = r.inset(2.0, 3.0);
-            if is_active {
-                ctx.encoder.draw_rect(
-                    inset,
-                    mix_color(tokens.card, tokens.background, 0.18),
-                    spacing.radius_sm,
-                );
-            }
             if is_hovered {
                 ctx.encoder.draw_rect(
                     inset,
-                    color_with_alpha(tokens.accent, if is_active { 0.20 } else { 0.14 }),
+                    color_with_alpha(tokens.surface_2, if is_active { 0.40 } else { 0.28 }),
                     spacing.radius_sm,
                 );
             }
 
             if !tab.label.is_empty() {
-                let font_size = ctx.theme.typography.tab_label.font_size;
+                let style = &ctx.theme.typography.tab_label;
+                let font_size = style.font_size;
                 let tx = centered_text_x(inset.x, inset.width, &tab.label, font_size);
-                let ty = inset.y + (inset.height - font_size * 1.3).max(0.0) * 0.5;
+                let ty = centered_text_origin_y(inset, style.line_height);
                 let pos = mondrian_ui_core::types::snap_point(Point::new(tx, ty));
                 ctx.push_clip(inset);
                 let text_color = if is_active || is_hovered {
                     tokens.foreground
                 } else {
-                    tokens.muted_foreground
+                    tokens.text_tertiary
                 };
                 ctx.encoder.draw_text(&tab.label, font_size, pos, text_color);
                 ctx.pop_clip();
             }
 
             if is_active {
-                let indicator_width = (inset.width * 0.38).clamp(24.0, 48.0);
+                let label_width = if tab.label.is_empty() {
+                    16.0
+                } else {
+                    measure_single_line(&tab.label, ctx.theme.typography.tab_label.font_size).0
+                };
+                let indicator_width = (label_width + 8.0).clamp(16.0, inset.width.max(16.0));
                 let indicator = Rect::new(
                     inset.x + (inset.width - indicator_width) * 0.5,
                     bg.y + bg.height - 2.0,
                     indicator_width,
                     2.0,
                 );
-                ctx.encoder.draw_rect(indicator, tokens.primary, 1.0);
+                ctx.encoder.draw_rect(indicator, color_with_alpha(tokens.foreground, 0.86), 1.0);
             }
         }
 
@@ -378,19 +367,19 @@ impl Widget for DockTabBar {
             let x = self.insert_indicator_x(hover.insert_index);
             ctx.encoder.draw_rect(
                 Rect::new(x - 2.0, bg.y + 4.0, 4.0, (bg.height - 8.0).max(0.0)),
-                color_with_alpha(tokens.primary, 0.18),
+                color_with_alpha(tokens.foreground, 0.14),
                 2.0,
             );
             let indicator = Rect::new(x - 1.0, bg.y + 5.0, 2.0, (bg.height - 10.0).max(0.0));
-            ctx.encoder.draw_rect(indicator, color_with_alpha(tokens.primary, 0.94), 1.0);
+            ctx.encoder.draw_rect(indicator, color_with_alpha(tokens.foreground, 0.82), 1.0);
             ctx.encoder.draw_rect(
                 Rect::new(x - 4.0, bg.y + 3.0, 8.0, 2.0),
-                color_with_alpha(tokens.primary, 0.94),
+                color_with_alpha(tokens.foreground, 0.82),
                 1.0,
             );
             ctx.encoder.draw_rect(
                 Rect::new(x - 4.0, bg.y + bg.height - 5.0, 8.0, 2.0),
-                color_with_alpha(tokens.primary, 0.94),
+                color_with_alpha(tokens.foreground, 0.82),
                 1.0,
             );
         }

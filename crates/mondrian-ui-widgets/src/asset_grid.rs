@@ -13,7 +13,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::paint::{color_with_alpha, mix_color, paint_focus_ring, soft_border};
+use crate::paint::{
+    centered_text_origin_y, color_with_alpha, mix_color, paint_focus_ring, soft_border,
+};
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 use crate::ContextMenu;
@@ -29,11 +31,9 @@ const HEADER_GAP: f32 = 10.0;
 const HEADER_PADDING_X: f32 = 8.0;
 const CONTENT_PADDING: f32 = 8.0;
 const CARD_GAP: f32 = 8.0;
-const CARD_TARGET_WIDTH: f32 = 158.0;
-const CARD_MIN_WIDTH: f32 = 118.0;
-const CARD_MAX_WIDTH: f32 = 190.0;
-const CARD_HEIGHT: f32 = 118.0;
-const THUMBNAIL_HEIGHT: f32 = 66.0;
+const CARD_TARGET_WIDTH: f32 = 172.0;
+const CARD_HEIGHT: f32 = 126.0;
+const PREVIEW_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const CARD_RADIUS: f32 = 7.0;
 const ICON_SIZE: f32 = 22.0;
 const RENAME_MENU_COMMAND: &str = "asset_grid.rename";
@@ -62,6 +62,10 @@ pub struct AssetGridState {
     pub selected_item_ids: Vec<String>,
     /// Multi-selected item indices as a fallback when ids are unavailable.
     pub selected_indices: Vec<usize>,
+    /// Hovered item by stable id when available.
+    pub hovered_item_id: Option<String>,
+    /// Hovered item by model index as a fallback.
+    pub hovered_index: Option<usize>,
 }
 
 /// Non-image state for an [`AssetGridItem`] preview region.
@@ -408,6 +412,11 @@ impl AssetGrid {
                 .filter_map(|index| self.items.get(*index).map(|item| item.id.clone()))
                 .collect(),
             selected_indices: self.selected_indices.iter().copied().collect(),
+            hovered_item_id: self
+                .hovered
+                .and_then(|index| self.items.get(index))
+                .map(|item| item.id.clone()),
+            hovered_index: self.hovered,
         }
     }
 
@@ -455,6 +464,16 @@ impl AssetGrid {
         }
         self.selected_indices = selected_indices;
         self.selection_anchor = self.selected;
+        self.hovered = state
+            .hovered_item_id
+            .as_ref()
+            .and_then(|id| {
+                self.items
+                    .iter()
+                    .position(|item| item.id == *id && self.item_matches_filter(item))
+            })
+            .or(state.hovered_index)
+            .filter(|index| self.visible_indices.contains(index));
     }
 
     /// Dispatch a dynamic action when selection changes.
@@ -569,6 +588,26 @@ impl AssetGrid {
     fn content_height(&self) -> f32 {
         let rows = self.visible_indices.len().div_ceil(self.columns.max(1));
         CONTENT_PADDING * 2.0 + rows as f32 * CARD_HEIGHT + rows.saturating_sub(1) as f32 * CARD_GAP
+    }
+
+    fn preview_rect_for_card(&self, card: Rect) -> Rect {
+        let width = (card.width - 12.0).max(0.0);
+        Rect::new(
+            card.x + 6.0,
+            card.y + 6.0,
+            width,
+            width / PREVIEW_ASPECT_RATIO,
+        )
+    }
+
+    fn footer_rect_for_card(&self, card: Rect) -> Rect {
+        let preview = self.preview_rect_for_card(card);
+        Rect::new(
+            card.x + 8.0,
+            preview.y + preview.height + 7.0,
+            (card.width - 16.0).max(0.0),
+            18.0,
+        )
     }
 
     fn is_enabled_index(&self, index: usize) -> bool {
@@ -1039,12 +1078,63 @@ impl AssetGrid {
     fn title_editor_rect(&self, index: usize) -> Option<Rect> {
         let visible_position = self.visible_position_for_index(index)?;
         let card = self.card_rect_at_visible_position(visible_position);
-        Some(Rect::new(
-            card.x + 6.0,
-            card.y + 76.0,
-            (card.width - 12.0).max(0.0),
-            24.0,
-        ))
+        let footer = self.footer_rect_for_card(card);
+        Some(Rect::new(footer.x, footer.y - 3.0, footer.width, 24.0))
+    }
+
+    fn footer_text_metrics(
+        &self,
+        item: &AssetGridItem,
+        footer: Rect,
+        title_font_size: f32,
+        duration_font_size: f32,
+    ) -> (f32, f32, f32) {
+        let duration_width = if item.subtitle.is_empty() {
+            0.0
+        } else {
+            measure_single_line(&item.subtitle, duration_font_size)
+                .0
+                .min((footer.width * 0.38).max(28.0))
+        };
+        let title_width = if duration_width > 0.0 {
+            (footer.width - duration_width - 8.0).max(0.0)
+        } else {
+            footer.width
+        };
+        let title_text_width = measure_single_line(&item.title, title_font_size).0;
+        let duration_text_width = if item.subtitle.is_empty() {
+            0.0
+        } else {
+            measure_single_line(&item.subtitle, duration_font_size).0
+        };
+        (title_width, title_text_width, duration_text_width)
+    }
+
+    fn item_footer_tooltip(&self, index: usize) -> Option<String> {
+        let item = self.items.get(index)?;
+        let visible_position = self.visible_position_for_index(index)?;
+        let card = self.card_rect_at_visible_position(visible_position);
+        let footer = self.footer_rect_for_card(card);
+        let title_font_size = 12.0;
+        let duration_font_size = 11.0;
+        let (title_width, title_text_width, duration_text_width) =
+            self.footer_text_metrics(item, footer, title_font_size, duration_font_size);
+        let duration_width = if item.subtitle.is_empty() {
+            0.0
+        } else {
+            measure_single_line(&item.subtitle, duration_font_size)
+                .0
+                .min((footer.width * 0.38).max(28.0))
+        };
+        let truncated = title_text_width > title_width
+            || (!item.subtitle.is_empty() && duration_text_width > duration_width);
+        truncated.then(|| {
+            if item.subtitle.is_empty() {
+                item.title.clone()
+            } else {
+                format!("{}  {}", item.title, item.subtitle)
+            }
+        })
     }
 
     fn start_rename(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
@@ -1144,26 +1234,26 @@ impl AssetGrid {
         if item.badges.is_empty() {
             return;
         }
-        let font_size = ctx.theme.typography.small.font_size;
-        let min_x = preview.x + 6.0;
-        let mut x = preview.x + preview.width - 8.0;
-        let max_badge_width = (preview.width - 12.0).max(24.0);
+        let font_size = 10.0;
+        let min_x = preview.x + 5.0;
+        let mut x = preview.x + preview.width - 5.0;
+        let max_badge_width = (preview.width - 10.0).max(24.0);
         for badge in item.badges.iter().rev() {
             let text_width = measure_single_line(&badge.label, font_size).0;
-            let desired_width = (text_width + 12.0).clamp(24.0, max_badge_width);
+            let desired_width = (text_width + 10.0).clamp(24.0, max_badge_width);
             let available_width = x - min_x;
             if available_width < 22.0 {
                 break;
             }
             let badge_width = desired_width.min(available_width);
-            let badge_rect = Rect::new(x - badge_width, preview.y + 6.0, badge_width, 18.0);
+            let badge_rect = Rect::new(x - badge_width, preview.y + 5.0, badge_width, 18.0);
             let (fill, text) = badge_colors(ctx, badge, text_color);
-            ctx.encoder.draw_rect(badge_rect, fill, 5.0);
+            ctx.encoder.draw_rect(badge_rect, fill, 4.0);
             ctx.push_clip(badge_rect.inset(4.0, 1.0));
             ctx.encoder.draw_text(
                 &badge.label,
                 font_size,
-                snap_point(Point::new(badge_rect.x + 6.0, badge_rect.y + 3.0)),
+                snap_point(Point::new(badge_rect.x + 5.0, badge_rect.y + 4.0)),
                 text,
             );
             ctx.pop_clip();
@@ -1173,17 +1263,27 @@ impl AssetGrid {
 
     fn paint_empty_state(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        let message = if self.items.is_empty() {
-            "将媒体拖到这里，或导入文件"
+        let (title, description) = if self.items.is_empty() {
+            ("拖入媒体开始编辑", "支持视频、音频、图片与序列")
         } else {
-            "没有匹配的素材"
+            ("没有匹配的素材", "换个关键词或清空搜索条件")
         };
+        let top = self.viewport.y + (self.viewport.height * 0.30).max(24.0);
+        let title_size = ctx.theme.typography.small.font_size;
+        let body_size = ctx.theme.typography.metadata.font_size;
         ctx.encoder.draw_text_box(
-            message,
-            ctx.theme.typography.small.font_size,
-            snap_point(Point::new(self.viewport.x + 8.0, self.viewport.y + 8.0)),
-            (self.viewport.width - 16.0).max(0.0),
-            colors.muted_foreground,
+            title,
+            title_size,
+            snap_point(Point::new(self.viewport.x + 16.0, top)),
+            (self.viewport.width - 32.0).max(0.0),
+            colors.text_secondary,
+        );
+        ctx.encoder.draw_text_box(
+            description,
+            body_size,
+            snap_point(Point::new(self.viewport.x + 16.0, top + 20.0)),
+            (self.viewport.width - 32.0).max(0.0),
+            colors.text_tertiary,
         );
     }
 
@@ -1195,21 +1295,21 @@ impl AssetGrid {
         let selected = self.selected_indices.contains(&index);
         let hovered = self.hovered == Some(index) && !item.disabled;
         let base_fill = if selected {
-            mix_color(colors.card, colors.accent, 0.34)
+            color_with_alpha(colors.foreground, 0.075)
         } else if hovered {
-            mix_color(colors.card, colors.muted, 0.58)
+            color_with_alpha(colors.foreground, 0.05)
         } else {
-            mix_color(colors.background, colors.card, 0.64)
+            Color::TRANSPARENT
         };
         if primary_selected && (self.focus_visible || self.focused) {
             paint_focus_ring(ctx, rect, CARD_RADIUS);
         }
         let card_border = if selected {
-            color_with_alpha(colors.ring, 0.34)
+            color_with_alpha(colors.foreground, 0.22)
         } else if hovered {
-            color_with_alpha(colors.border, 0.82)
+            color_with_alpha(colors.foreground, 0.10)
         } else {
-            soft_border(colors.border)
+            Color::TRANSPARENT
         };
         ctx.encoder.draw_rect(rect, card_border, CARD_RADIUS);
         ctx.encoder.draw_rect(
@@ -1218,12 +1318,7 @@ impl AssetGrid {
             (CARD_RADIUS - 1.0).max(0.0),
         );
 
-        let preview = Rect::new(
-            rect.x + 6.0,
-            rect.y + 6.0,
-            (rect.width - 12.0).max(0.0),
-            THUMBNAIL_HEIGHT,
-        );
+        let preview = self.preview_rect_for_card(rect);
         let accent = if item.disabled {
             colors.muted_foreground
         } else {
@@ -1234,24 +1329,20 @@ impl AssetGrid {
             soft_border(colors.border),
             spacing.radius_sm + 1.0,
         );
-        ctx.encoder.draw_rect(
-            preview,
-            mix_color(colors.canvas, colors.card, 0.30),
-            spacing.radius_sm,
-        );
+        ctx.encoder.draw_rect(preview, Color::from_hex(0x000000), spacing.radius_sm);
 
         let text_color = if item.disabled {
             colors.muted_foreground
-        } else if selected {
-            colors.accent_foreground
         } else {
-            colors.foreground
+            color_with_alpha(colors.foreground, 0.92)
         };
         if let Some(thumbnail) = &item.thumbnail {
+            let image_rect =
+                fit_rect_into(thumbnail.width as f32, thumbnail.height as f32, preview);
             ctx.push_clip(preview);
             ctx.encoder.draw_raster_image(
                 &thumbnail.key,
-                preview,
+                image_rect,
                 thumbnail.width,
                 thumbnail.height,
                 Arc::clone(&thumbnail.rgba),
@@ -1263,23 +1354,13 @@ impl AssetGrid {
             );
             ctx.pop_clip();
         } else {
-            let preview_top = mix_color(colors.canvas, accent, 0.24);
-            let preview_bottom = mix_color(colors.background, accent, 0.16);
-            ctx.encoder.draw_gradient_rect(
-                preview,
-                [preview_top, preview_top, preview_bottom, preview_bottom],
-                spacing.radius_sm,
+            let accent_line = Rect::new(
+                preview.x,
+                preview.y + preview.height - 2.0,
+                preview.width,
+                2.0,
             );
-            ctx.encoder.draw_rect(
-                Rect::new(
-                    preview.x,
-                    preview.y + preview.height - 2.0,
-                    preview.width,
-                    2.0,
-                ),
-                color_with_alpha(accent, 0.62),
-                0.0,
-            );
+            ctx.encoder.draw_rect(accent_line, color_with_alpha(accent, 0.56), 0.0);
         }
         if item.thumbnail.is_none() {
             if let Some(icon) = &item.icon {
@@ -1303,22 +1384,45 @@ impl AssetGrid {
         }
         self.paint_badges(ctx, item, preview, text_color);
 
-        let text_clip = Rect::new(
-            rect.x + 8.0,
-            rect.y + 78.0,
-            (rect.width - 16.0).max(0.0),
-            34.0,
-        );
-        ctx.push_clip(text_clip);
+        let footer = self.footer_rect_for_card(rect);
+        ctx.push_clip(footer);
         let editing_title = self.rename_editor.as_ref().is_some_and(|editor| editor.index == index);
         if !editing_title {
-            ctx.encoder.draw_text_box(
-                &item.title,
-                ctx.theme.typography.small.font_size,
-                snap_point(Point::new(text_clip.x, text_clip.y)),
-                text_clip.width,
+            let font_size = ctx.theme.typography.small.font_size;
+            let duration_font_size = ctx.theme.typography.metadata.font_size;
+            let (title_width, _, _) =
+                self.footer_text_metrics(item, footer, font_size, duration_font_size);
+            let duration_width = if item.subtitle.is_empty() {
+                0.0
+            } else {
+                measure_single_line(&item.subtitle, duration_font_size)
+                    .0
+                    .min((footer.width * 0.38).max(28.0))
+            };
+            let title = elide_text_to_width(&item.title, font_size, title_width);
+            let title_y = centered_text_origin_y(footer, ctx.theme.typography.small.line_height);
+            ctx.encoder.draw_text(
+                &title,
+                font_size,
+                snap_point(Point::new(footer.x, title_y)),
                 text_color,
             );
+            if !item.subtitle.is_empty() && duration_width > 0.0 {
+                let duration =
+                    elide_text_to_width(&item.subtitle, duration_font_size, duration_width);
+                let duration_text_width = measure_single_line(&duration, duration_font_size).0;
+                let duration_y =
+                    centered_text_origin_y(footer, ctx.theme.typography.metadata.line_height);
+                ctx.encoder.draw_text(
+                    &duration,
+                    duration_font_size,
+                    snap_point(Point::new(
+                        footer.x + footer.width - duration_text_width,
+                        duration_y,
+                    )),
+                    colors.text_tertiary,
+                );
+            }
         }
         ctx.pop_clip();
     }
@@ -1355,9 +1459,7 @@ impl Widget for AssetGrid {
         let header = self.header_height();
         let viewport_width = (bounds.width - CONTENT_PADDING * 2.0).max(0.0);
         self.columns = grid_columns_for_width(viewport_width);
-        let total_gap = CARD_GAP * self.columns.saturating_sub(1) as f32;
-        self.card_width = ((viewport_width - total_gap) / self.columns as f32)
-            .clamp(CARD_MIN_WIDTH, CARD_MAX_WIDTH);
+        self.card_width = CARD_TARGET_WIDTH;
         self.viewport = Rect::new(
             bounds.x,
             bounds.y + header,
@@ -1468,8 +1570,24 @@ impl Widget for AssetGrid {
                 let hover = self.index_at(*position);
                 if hover != self.hovered {
                     self.hovered = hover;
+                    if let Some(index) = hover {
+                        if let Some(text) = self.item_footer_tooltip(index) {
+                            ctx.tooltip.show(text, Point::new(position.x, position.y + 18.0));
+                        } else {
+                            ctx.tooltip.hide();
+                        }
+                    } else {
+                        ctx.tooltip.hide();
+                    }
                     ctx.request_repaint();
                     return EventResult::Handled;
+                }
+                if let Some(index) = hover {
+                    if let Some(text) = self.item_footer_tooltip(index) {
+                        ctx.tooltip.show(text, Point::new(position.x, position.y + 18.0));
+                    } else {
+                        ctx.tooltip.hide();
+                    }
                 }
             }
             UiEvent::DragEnter { position, .. } | UiEvent::DragOver { position, .. }
@@ -1788,11 +1906,51 @@ impl Widget for AssetGrid {
 }
 
 fn grid_columns_for_width(width: f32) -> usize {
-    if width <= CARD_MIN_WIDTH {
+    if width <= CARD_TARGET_WIDTH {
         return 1;
     }
     let columns = ((width + CARD_GAP) / (CARD_TARGET_WIDTH + CARD_GAP)).floor() as usize;
     columns.max(1)
+}
+
+fn fit_rect_into(source_width: f32, source_height: f32, bounds: Rect) -> Rect {
+    if source_width <= 0.0 || source_height <= 0.0 || bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return bounds;
+    }
+    let scale = (bounds.width / source_width).min(bounds.height / source_height);
+    let width = source_width * scale;
+    let height = source_height * scale;
+    Rect::new(
+        bounds.x + (bounds.width - width) * 0.5,
+        bounds.y + (bounds.height - height) * 0.5,
+        width,
+        height,
+    )
+}
+
+fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
+    if text.is_empty() || max_width <= 0.0 {
+        return String::new();
+    }
+    if measure_single_line(text, font_size).0 <= max_width {
+        return text.to_owned();
+    }
+
+    let suffix = "...";
+    if measure_single_line(suffix, font_size).0 > max_width {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    for ch in text.chars() {
+        out.push(ch);
+        let candidate = format!("{out}{suffix}");
+        if measure_single_line(&candidate, font_size).0 > max_width {
+            out.pop();
+            break;
+        }
+    }
+    format!("{out}{suffix}")
 }
 
 fn paint_thumbnail_loading(ctx: &mut PaintContext, preview: Rect, color: Color) {
@@ -1843,10 +2001,17 @@ fn paint_thumbnail_failed(ctx: &mut PaintContext, preview: Rect, color: Color) {
     );
 }
 
-fn badge_colors(ctx: &PaintContext, badge: &AssetGridBadge, neutral_text: Color) -> (Color, Color) {
+fn badge_colors(
+    ctx: &PaintContext,
+    badge: &AssetGridBadge,
+    _neutral_text: Color,
+) -> (Color, Color) {
     let colors = &ctx.theme.colors;
     match badge.tone {
-        AssetGridBadgeTone::Neutral => (color_with_alpha(colors.background, 0.56), neutral_text),
+        AssetGridBadgeTone::Neutral => (
+            color_with_alpha(Color::BLACK, 0.50),
+            Color::from_hex(0xE6EAF0),
+        ),
         AssetGridBadgeTone::Accent => (color_with_alpha(colors.primary, 0.22), colors.primary),
         AssetGridBadgeTone::Success => (color_with_alpha(colors.success, 0.22), colors.success),
         AssetGridBadgeTone::Warning => (color_with_alpha(colors.warning, 0.22), colors.warning),
@@ -1990,16 +2155,16 @@ mod tests {
             vec![item("a", "A"), item("b", "B"), item("c", "C")],
         );
         let measured =
-            grid.measure(LayoutConstraint { min: Size::ZERO, max: Size::new(360.0, f32::MAX) });
+            grid.measure(LayoutConstraint { min: Size::ZERO, max: Size::new(380.0, f32::MAX) });
 
-        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.layout(Rect::new(0.0, 0.0, 380.0, 220.0));
 
-        assert_eq!(measured.width, 360.0);
+        assert_eq!(measured.width, 380.0);
         assert_eq!(grid.columns(), 2);
         let first = grid.card_rect_for_index(0).expect("first card");
         let second = grid.card_rect_for_index(1).expect("second card");
         assert!(second.x > first.x + first.width);
-        assert!(second.x + second.width <= 360.0);
+        assert!(second.x + second.width <= 380.0);
     }
 
     #[test]
@@ -2365,19 +2530,15 @@ mod tests {
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
         };
-        let card = Rect::new(20.0, 30.0, 158.0, 118.0);
-        let preview = Rect::new(
-            card.x + 6.0,
-            card.y + 6.0,
-            card.width - 12.0,
-            THUMBNAIL_HEIGHT,
-        );
+        let card = Rect::new(20.0, 30.0, CARD_TARGET_WIDTH, CARD_HEIGHT);
+        let preview = grid.preview_rect_for_card(card);
+        let image_rect = fit_rect_into(2.0, 2.0, preview);
 
         grid.paint_card(&mut ctx, 0, card);
 
         assert_eq!(
             encoder.raster_images,
-            vec![("asset-thumb:clip-a".to_owned(), preview, 2, 2)]
+            vec![("asset-thumb:clip-a".to_owned(), image_rect, 2, 2)]
         );
         assert!(
             encoder.clips.contains(&preview),
@@ -2425,18 +2586,12 @@ mod tests {
             "asset grid background should sit below card surfaces"
         );
         assert!(
-            encoder
-                .rect_colors
-                .iter()
-                .any(|color| *color == mix_color(theme.colors.background, theme.colors.card, 0.64)),
-            "asset cards should use a layered surface instead of raw card fill"
+            encoder.rect_colors.iter().any(|color| *color == Color::TRANSPARENT),
+            "normal asset cards should rest transparent until hover or selection"
         );
         assert!(
-            encoder
-                .rect_colors
-                .iter()
-                .any(|color| *color == mix_color(theme.colors.canvas, theme.colors.card, 0.30)),
-            "asset previews should read as a dark media well"
+            encoder.rect_colors.iter().any(|color| *color == Color::from_hex(0x000000)),
+            "asset previews should use a black media well for letterboxing"
         );
     }
 
@@ -2483,13 +2638,8 @@ mod tests {
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
         };
-        let card = Rect::new(20.0, 30.0, 158.0, 118.0);
-        let preview = Rect::new(
-            card.x + 6.0,
-            card.y + 6.0,
-            card.width - 12.0,
-            THUMBNAIL_HEIGHT,
-        );
+        let card = Rect::new(20.0, 30.0, CARD_TARGET_WIDTH, CARD_HEIGHT);
+        let preview = grid.preview_rect_for_card(card);
 
         grid.paint_card(&mut ctx, 0, card);
 
@@ -2519,7 +2669,7 @@ mod tests {
     fn paint_card_uses_badges_for_type_metadata_not_subtitle_text() {
         let grid = AssetGrid::new(
             "Assets",
-            vec![item("clip-a", "Clip A").with_subtitle("Video clip").with_badge("VID")],
+            vec![item("clip-a", "Clip A").with_subtitle("0:12").with_badge("VID")],
         );
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
@@ -2529,11 +2679,15 @@ mod tests {
             clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
         };
 
-        grid.paint_card(&mut ctx, 0, Rect::new(20.0, 30.0, 158.0, 118.0));
+        grid.paint_card(
+            &mut ctx,
+            0,
+            Rect::new(20.0, 30.0, CARD_TARGET_WIDTH, CARD_HEIGHT),
+        );
 
         assert!(encoder.texts.iter().any(|text| text == "Clip A"));
         assert!(encoder.texts.iter().any(|text| text == "VID"));
-        assert!(!encoder.texts.iter().any(|text| text == "Video clip"));
+        assert!(encoder.texts.iter().any(|text| text == "0:12"));
     }
 
     #[test]
@@ -2617,6 +2771,8 @@ mod tests {
             selected_index: Some(1),
             selected_item_ids: Vec::new(),
             selected_indices: vec![1],
+            hovered_item_id: None,
+            hovered_index: None,
         };
         let mut grid = AssetGrid::new(
             "Assets",
@@ -2630,6 +2786,49 @@ mod tests {
         assert_eq!(grid.filter_query(), "camera");
         assert_eq!(grid.selected_index(), None);
         assert!(grid.selected_indices().is_empty());
+    }
+
+    #[test]
+    fn restore_state_preserves_hover_by_stable_id_across_rebuilds() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A"), item("clip-b", "Clip B")],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 220.0));
+        let hover_point = grid.card_rect_for_index(1).expect("second card").center();
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseMove {
+                    position: hover_point,
+                    modifiers: Modifiers::none()
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        let state = grid.state();
+
+        let mut rebuilt = AssetGrid::new(
+            "Assets",
+            vec![item("clip-b", "Clip B"), item("clip-a", "Clip A")],
+        );
+        rebuilt.layout(Rect::new(0.0, 0.0, 520.0, 220.0));
+        rebuilt.restore_state(&state);
+
+        assert_eq!(rebuilt.hovered, Some(0));
     }
 
     #[test]

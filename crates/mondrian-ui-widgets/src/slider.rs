@@ -41,8 +41,8 @@ impl Slider {
             dragging: false,
             focused: false,
             focus_visible: false,
-            track_height: 6.0,
-            thumb_size: 14.0,
+            track_height: 4.0,
+            thumb_size: 12.0,
             step: None,
             on_change: None,
         }
@@ -295,12 +295,12 @@ impl Widget for Slider {
         // Track background
         let track = self.track_rect();
         let track_color = if self.enabled {
-            tokens.accent
+            tokens.surface_2
         } else {
             tokens.muted
         };
         let fill_color = if self.enabled {
-            tokens.primary
+            tokens.foreground
         } else {
             tokens.muted_foreground
         };
@@ -573,10 +573,11 @@ mod tests {
         let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
         let mut s = Slider::new(0.0, 0.0, 100.0).on_change(value_action);
         s.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        let track = s.track_rect();
 
         s.event(
             &UiEvent::MouseDown {
-                position: Point::new(7.0, 10.0),
+                position: Point::new(track.x, track.center().y),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -591,11 +592,12 @@ mod tests {
     fn slider_drag_uses_thumb_center_track_range() {
         let mut s = Slider::new(0.0, 0.0, 100.0);
         s.layout(Rect::new(0.0, 0.0, 200.0, 20.0));
+        let track = s.track_rect();
 
         let mut ctx = event_ctx();
         s.event(
             &UiEvent::MouseDown {
-                position: Point::new(7.0, 10.0),
+                position: Point::new(track.x, track.center().y),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -605,7 +607,7 @@ mod tests {
 
         s.event(
             &UiEvent::MouseMove {
-                position: Point::new(193.0, 10.0),
+                position: Point::new(track.x + track.width, track.center().y),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
