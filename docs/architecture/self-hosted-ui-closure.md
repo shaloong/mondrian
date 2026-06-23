@@ -83,8 +83,14 @@ workflow.
   quality dropdowns, focus-keyboard controls, focus/disabled cleanup, shell-local
   zoom persistence, AppState preview-quality updates, and panel-model preview
   source attachment/empty-state isolation.
-- P2-INSPECTOR-001: Verify selected clip, selected effect, no selection,
+- [done] P2-INSPECTOR-001: Verify selected clip, selected effect, no selection,
   locked/read-only, disabled effect, numeric rows, color rows, and curve rows.
+  Coverage now spans AppState-backed selected clip/effect panel models, empty
+  inspector panels with no form controls, locked-track read-only panel state and
+  dispatch suppression, disabled effect rows that still expose editable
+  properties for unlocked clips, typed numeric/vector/text/color effect property
+  payloads, clip tint/opacity/transform/timing actions, and opacity curve model,
+  action, and AppState keyframe mapping.
 - P2-EFFECTS-001: Verify effect list filtering/category display, add-to-clip,
   selection of newly added effects, Inspector sync, and NodeGraph sync.
 - P2-NODEGRAPH-001: Verify source/effect/output graph generation, selection,

@@ -7101,6 +7101,89 @@ mod tests {
     }
 
     #[test]
+    fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
+        let effect_id = EffectId::new();
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let property = InspectorEffectPropertyModel {
+            path: "blur.radius".to_string(),
+            label: "Radius".to_string(),
+            value: PropertyValue::Float(0.2),
+            min: Some(0.0),
+            max: Some(1.0),
+            step: Some(0.1),
+            is_animatable: true,
+        };
+        let disabled_effect = InspectorEffectModel {
+            effect_id,
+            label: "Gaussian Blur".to_string(),
+            enabled: false,
+            properties: vec![property.clone()],
+        };
+        assert!(
+            !disabled_effect.enabled,
+            "effect runtime bypass state should not imply read-only property rows"
+        );
+
+        let mut widget = effect_property_value_widget(
+            &property,
+            true,
+            Some(selection),
+            effect_id,
+            property.path.clone(),
+        );
+        widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            widget.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(80.0, 14.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let recorded = actions.borrow();
+        assert_eq!(recorded.len(), 1);
+        let Action::Custom { namespace, name, payload } = &recorded[0] else {
+            panic!("expected inspector custom action, got {:?}", recorded[0]);
+        };
+        assert_eq!(namespace, INSPECTOR_NAMESPACE);
+        assert_eq!(name, INSPECTOR_SET_EFFECT_PROPERTY);
+        let payload: InspectorSetEffectPropertyPayload =
+            serde_json::from_value(payload.clone()).expect("set effect property payload");
+        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect_id);
+        assert_eq!(payload.path, "blur.radius");
+        let PropertyValue::Float(value) = payload.value else {
+            panic!("expected Float payload");
+        };
+        assert!(
+            value > 0.2,
+            "clicking the enabled property row should update a disabled effect's property, got {value}"
+        );
+    }
+
+    #[test]
     fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() {
         let effect_id = EffectId::new();
         let selection = SelectedClipRef {
@@ -7245,6 +7328,37 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("set effect property payload");
         assert_eq!(payload.path, "levels.iterations");
         assert_eq!(payload.value, PropertyValue::Int(12));
+    }
+
+    #[test]
+    fn inspector_effect_color_property_action_uses_typed_payload() {
+        let effect_id = EffectId::new();
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        let color = Color::from_rgba8(24, 96, 180, 220);
+
+        let action = inspector_effect_property_action(
+            Some(selection),
+            effect_id,
+            "key.color",
+            PropertyValue::Color(color),
+        );
+
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected inspector set effect property action");
+        };
+        assert_eq!(namespace, INSPECTOR_NAMESPACE);
+        assert_eq!(name, INSPECTOR_SET_EFFECT_PROPERTY);
+        let payload: InspectorSetEffectPropertyPayload =
+            serde_json::from_value(payload).expect("set effect property payload");
+        assert_eq!(payload.clip.track_id, selection.track_id);
+        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect_id);
+        assert_eq!(payload.path, "key.color");
+        assert_eq!(payload.value, PropertyValue::Color(color));
     }
 
     #[test]
@@ -7648,6 +7762,15 @@ mod tests {
             Action::NoOp
         );
         assert_eq!(inspector_reorder_effect_action(None, 1, 0), Action::NoOp);
+        assert_eq!(
+            inspector_effect_property_action(
+                None,
+                EffectId::new(),
+                "color.tint",
+                PropertyValue::Color(Color::from_rgba8(1, 2, 3, 4)),
+            ),
+            Action::NoOp
+        );
         assert_eq!(
             inspector_curve_action(None, &[CurvePoint::new(0.0, 1.0)]),
             Action::NoOp
