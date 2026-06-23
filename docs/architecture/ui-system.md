@@ -208,7 +208,9 @@ palette values in the app shell. Window controls emit app-shell custom actions o
 `self_hosted::window` applies native minimize, maximize, drag, fullscreen, or
 quit side effects after widget and `AppState` borrows end. These commands must
 not be added to the editor-state core action enum unless they mutate portable
-editor data.
+editor data. Native `CloseRequested` events use the same app-shell quit action
+path as client-side close buttons, menu rows, and shortcut commands so all
+window-exit policy has a single shell boundary.
 The title text is centered inside the remaining blank titlebar span between the
 menu group and platform window controls, not against a fixed window midpoint or
 hard-coded offset. It elides inside that span when the project name is too long
@@ -1829,7 +1831,9 @@ status hints or other user-visible state before reporting the failure.
 `SelfHostedUiHost::drain_pending_actions` also returns window-host commands
 such as quit and toggle-fullscreen. Entrypoints apply those commands only after
 event routing and model refresh have completed, so native side effects stay out
-of widget code and out of `AppState`.
+of widget code and out of `AppState`. Native platform close requests must enter
+the same pending-action queue as `app.shell.quit`; entrypoints must not call the
+event-loop exit primitive directly from `WindowEvent::CloseRequested`.
 Shell chrome that presents transient project status should keep error feedback
 visible without requiring the user to scroll a compact dock panel. Dock panels
 should stay focused on editing surfaces rather than general project diagnostics.

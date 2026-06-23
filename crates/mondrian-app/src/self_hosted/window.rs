@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::host::{SelfHostedShellCommands, SelfHostedUiHost, SelfHostedUiMode};
@@ -139,7 +140,19 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
         match event {
             Event::WindowEvent { window_id, event } if window_id == session.window.id() => {
                 match event {
-                    WindowEvent::CloseRequested => elwt.exit(),
+                    WindowEvent::CloseRequested => {
+                        pending_actions.push(native_close_request_action());
+                        drain_actions_and_sync_window_session(
+                            &mut host,
+                            &pending_actions,
+                            &platform,
+                            elwt,
+                            &instance,
+                            &adapter,
+                            &device,
+                            &mut session,
+                        );
+                    }
 
                     WindowEvent::ModifiersChanged(modifiers) => {
                         session.modifiers_state = winit_modifiers_to_ui_modifiers(modifiers);
@@ -551,6 +564,10 @@ fn should_exit_on_ignored_keyboard_input(
     _key: &winit::keyboard::Key,
 ) -> bool {
     false
+}
+
+fn native_close_request_action() -> mondrian_editor_state::Action {
+    app_shell_quit_action()
 }
 
 impl SelfHostedWindowSession {
@@ -1001,6 +1018,11 @@ mod tests {
                 &winit::keyboard::Key::Character("q".into()),
             ));
         }
+    }
+
+    #[test]
+    fn native_close_request_uses_app_shell_quit_action() {
+        assert_eq!(native_close_request_action(), app_shell_quit_action());
     }
 
     #[test]
