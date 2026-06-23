@@ -49,8 +49,12 @@ workflow.
 
 ## Phase 2: Core Workflow Parity
 
-- P2-ASSETS-001: Verify project-media import, folder navigation, rename, move,
-  delete, relink, proxy mode, thumbnail loading/failure, and drag payloads.
+- [done] P2-ASSETS-001: Verify project-media import, folder navigation, rename,
+  move, delete, relink, proxy mode, thumbnail loading/failure, and drag payloads.
+  Coverage now spans self-hosted host import-dialog dispatch into target asset
+  folders, app-action relink success and proxy-mode type guards, existing
+  folder/rename/move/delete action tests, thumbnail loading/failure cache tests,
+  and `AssetGrid` drag/selection/context-menu widget tests.
 - P2-ASSETS-002: Ensure asset browser state restoration is stable across
   AppState refreshes: selected assets, folder, filter, scroll, hover, and inline
   rename cancellation.

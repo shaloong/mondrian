@@ -1190,6 +1190,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(project_runtime_root_for_test(project_file));
     }
 
+    fn write_minimal_wav(path: &Path) {
+        let sample_rate = 8_000u32;
+        let channels = 1u16;
+        let bits_per_sample = 16u16;
+        let samples = [0i16; 16];
+        let data_size = (samples.len() * std::mem::size_of::<i16>()) as u32;
+        let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+        let block_align = channels * bits_per_sample / 8;
+        let mut bytes = Vec::with_capacity(44 + data_size as usize);
+
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        std::fs::write(path, bytes).expect("write wav fixture");
+    }
+
     fn dispatch_ctx<'a>(
         focus: &'a mut DummyFocus,
         shortcut: &'a mut DummyShortcut,
@@ -2146,6 +2176,56 @@ mod tests {
         assert_eq!(commands, SelfHostedShellCommands::default());
         assert_eq!(platform.open_file_dialog_calls.load(Ordering::Relaxed), 0);
         assert!(host.app_state().status_hint.is_none());
+    }
+
+    #[test]
+    fn host_import_media_dialog_places_selected_files_in_target_asset_folder() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let library_root = temp_asset_library_dir("asset-dialog-import-library");
+        let media_root = temp_asset_library_dir("asset-dialog-import-media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let media_path = media_root.join("dialog-tone.wav");
+        write_minimal_wav(&media_path);
+        let library = AssetLibrary::open(library_root.clone()).expect("open asset library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let mut state = workspace_app_state();
+        state.asset_library = Some(library);
+        let mut host = SelfHostedUiHost::new(state);
+        let pending = PendingUiActions::default();
+        let platform = ProjectDialogPlatform {
+            open_paths: Some(vec![media_path.clone()]),
+            save_path: None,
+        };
+
+        pending.push(
+            crate::app::ui_actions::app_shell_import_media_dialog_action_with_target(
+                crate::app::ui_actions::ImportMediaDialogPayload {
+                    folder_id: Some(folder_id.clone()),
+                },
+            ),
+        );
+        let commands =
+            host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        let assets = host
+            .app_state()
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .list_assets()
+            .expect("list assets");
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].name, "dialog-tone.wav");
+        assert_eq!(assets[0].folder_id.as_deref(), Some(folder_id.as_str()));
+        assert!(host
+            .app_state()
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| !*is_error && message.contains("已导入 1")));
+
+        let _ = std::fs::remove_dir_all(library_root);
+        let _ = std::fs::remove_dir_all(media_root);
     }
 
     #[test]

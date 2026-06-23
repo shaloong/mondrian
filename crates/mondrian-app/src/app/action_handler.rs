@@ -3608,6 +3608,51 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_assets_relink_asset_updates_library_path_and_publishes_reload() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-relink-action-library");
+        let media_root = unique_temp_path("assets-relink-action-media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let original_path = media_root.join("original.wav");
+        let replacement_path = media_root.join("replacement.wav");
+        write_minimal_wav(&original_path);
+        write_minimal_wav(&replacement_path);
+
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = library.import_media_file(&original_path).expect("import original");
+        state.asset_library = Some(library);
+        let events = state.event_bus.subscribe();
+
+        state
+            .dispatch_action(assets_relink_asset_action(AssetsRelinkAssetPayload {
+                asset_id,
+                path: replacement_path.clone(),
+            }))
+            .expect("relink asset");
+
+        let asset = state
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .get_asset(asset_id)
+            .expect("get asset")
+            .expect("asset");
+        assert_eq!(
+            asset.path,
+            replacement_path.canonicalize().expect("canonical path")
+        );
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                !*is_error && message.contains("已重新链接素材") && message.contains("original.wav")
+            })
+        );
+        assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
+
+        remove_temp_path(&library_root);
+        remove_temp_path(&media_root);
+    }
+
+    #[test]
     fn dispatch_assets_rename_asset_updates_library_and_publishes_reload() {
         let mut state = AppState::new();
         let library_root = unique_temp_path("assets-rename-action-library");
@@ -3688,6 +3733,39 @@ mod tests {
                 *is_error && message.contains("设置代理模式失败")
             })
         );
+    }
+
+    #[test]
+    fn dispatch_assets_set_proxy_mode_rejects_non_video_assets_without_state_change() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-proxy-audio-library");
+        let media_root = unique_temp_path("assets-proxy-audio-media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let media_path = media_root.join("tone.wav");
+        write_minimal_wav(&media_path);
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = library.import_media_file(&media_path).expect("import audio");
+        state.asset_library = Some(library);
+
+        let err = state
+            .dispatch_action(assets_set_proxy_mode_action(AssetsSetProxyModePayload {
+                asset_id,
+                enabled: true,
+            }))
+            .expect_err("audio assets should not support proxy mode");
+
+        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert!(!state.is_asset_proxy_mode(asset_id));
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                *is_error && message.contains("只有视频素材支持代理模式")
+            }),
+            "status hint: {:?}",
+            state.status_hint
+        );
+
+        remove_temp_path(&library_root);
+        remove_temp_path(&media_root);
     }
 
     #[test]
