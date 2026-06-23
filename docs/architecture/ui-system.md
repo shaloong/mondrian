@@ -342,6 +342,12 @@ are deliberately separate from editor state: Quit is emitted as
 self-hosted host as a `SelfHostedShellCommands` value for the winit entrypoint.
 They must not be dispatched into `AppState`, where `CloseProject` keeps the
 narrow meaning of closing the current project.
+Close-project and quit requests share the same self-hosted pending-close guard:
+`AppState::has_unsaved_project_changes()` compares the current project data
+fingerprint to the saved `.mdp` archive, and failures are treated as unsaved.
+When the guard finds unsaved changes, `SelfHostedUiHost` opens a shell modal for
+Save and continue / Discard / Cancel. Save failures keep the modal open and
+surface a status error; discard performs the pending close/quit without writing.
 `self_hosted::shell::resolve_app_shell_action` is the tested boundary that
 turns those intents into concrete project creation, `OpenProject`,
 `ImportMedia`, and `SaveProjectAs` actions after a native adapter supplies

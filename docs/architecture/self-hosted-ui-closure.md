@@ -25,6 +25,8 @@ workflow.
   Completed in `17d8188 fix(ui): keep ignored keys from closing windows`.
 - P2-WINDOW-001: Native close requests route through the same app-shell quit
   action path used by titlebar controls, menus, and shortcuts.
+- P2-PROJECT-001: Self-hosted close-project and quit requests guard unsaved
+  project changes with Save and continue / Discard / Cancel.
 
 ## Phase 1: Visual System Production Pass
 
@@ -44,8 +46,6 @@ workflow.
 
 ## Phase 2: Core Workflow Parity
 
-- P2-PROJECT-001: Add self-hosted close-project and quit guarding for unsaved
-  project changes, matching or improving the egui confirmation flow.
 - P2-PROJECT-002: Verify create, open, save, save-as, close, recent project,
   recovery, and startup-to-workspace transitions through self-hosted actions.
 - P2-ASSETS-001: Verify project-media import, folder navigation, rename, move,

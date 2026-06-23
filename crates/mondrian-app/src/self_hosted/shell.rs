@@ -50,6 +50,7 @@ use crate::self_hosted::panels::{
     build_dock_tree_for_preset, build_dock_tree_from_layout, AssetThumbnailSource,
     SelfHostedPanelModels, ViewerPreviewSource,
 };
+use crate::self_hosted::pending_close_dialog::PendingCloseDialogAction;
 use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
 use crate::self_hosted::preferences_store::SelfHostedPreferences;
 use crate::self_hosted::sequence_settings_dialog::SelfHostedSequenceSettingsDraft;
@@ -757,6 +758,26 @@ impl SelfHostedAppRoot {
     /// Replace the shell-local asset-library browser folder.
     pub fn set_asset_folder_id(&mut self, folder_id: Option<String>) {
         self.asset_folder_id = folder_id;
+    }
+
+    /// Show the pending-close confirmation modal.
+    pub fn show_pending_close_dialog(&mut self, action: PendingCloseDialogAction) {
+        self.modal = Some(ShellModal::pending_close(action));
+        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+            self.layout(self.bounds);
+        }
+    }
+
+    /// Close the pending-close confirmation modal when it is active.
+    pub fn close_pending_close_dialog(&mut self) {
+        if self.modal.as_ref().and_then(ShellModal::as_pending_close).is_some() {
+            self.modal = None;
+        }
+    }
+
+    /// Whether the pending-close confirmation modal is currently active.
+    pub fn has_pending_close_dialog(&self) -> bool {
+        self.modal.as_ref().and_then(ShellModal::as_pending_close).is_some()
     }
 
     /// Access the inner dock splitter for shell-owned grab zone cursor queries.

@@ -216,6 +216,12 @@ pub const APP_SHELL_PREFERENCES_SHORTCUT_RESET: &str = "preferences_shortcut_res
 pub const APP_SHELL_PREFERENCES_SHORTCUT_REBOUND: &str = "preferences_shortcut_rebound";
 /// App-shell request to close the current shell-local modal.
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
+/// App-shell request to save before continuing a pending close/quit flow.
+pub const APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE: &str = "pending_close_save_continue";
+/// App-shell request to continue a pending close/quit flow without saving.
+pub const APP_SHELL_PENDING_CLOSE_DISCARD: &str = "pending_close_discard";
+/// App-shell request to cancel a pending close/quit flow.
+pub const APP_SHELL_PENDING_CLOSE_CANCEL: &str = "pending_close_cancel";
 /// App-shell request to quit the native application window.
 pub const APP_SHELL_QUIT: &str = "quit";
 /// App-shell request to minimize the native application window.
@@ -1335,6 +1341,21 @@ pub fn app_shell_preferences_shortcut_rebound_action(
 /// Build an app-shell request for closing the current shell-local modal.
 pub fn app_shell_close_modal_action() -> Action {
     custom_app_shell_action(APP_SHELL_CLOSE_MODAL)
+}
+
+/// Build an app-shell request to save before continuing a pending close/quit flow.
+pub fn app_shell_pending_close_save_continue_action() -> Action {
+    custom_app_shell_action(APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE)
+}
+
+/// Build an app-shell request to continue a pending close/quit flow without saving.
+pub fn app_shell_pending_close_discard_action() -> Action {
+    custom_app_shell_action(APP_SHELL_PENDING_CLOSE_DISCARD)
+}
+
+/// Build an app-shell request to cancel a pending close/quit flow.
+pub fn app_shell_pending_close_cancel_action() -> Action {
+    custom_app_shell_action(APP_SHELL_PENDING_CLOSE_CANCEL)
 }
 
 /// Build an app-shell request for quitting the native application window.

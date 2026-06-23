@@ -10,6 +10,7 @@ use mondrian_ui_core::{EventResult, Widget};
 
 use crate::self_hosted::about_dialog::AboutDialog;
 use crate::self_hosted::new_project_dialog::{NewProjectDialog, SelfHostedNewProjectDraft};
+use crate::self_hosted::pending_close_dialog::{PendingCloseDialog, PendingCloseDialogAction};
 use crate::self_hosted::preferences_dialog::{
     PreferencesDialog, PreferencesDialogTab, SelfHostedPreferencesModel,
 };
@@ -21,6 +22,7 @@ use crate::self_hosted::sequence_settings_dialog::{
 pub enum ShellModal {
     About(Box<AboutDialog>),
     NewProject(Box<NewProjectDialog>),
+    PendingClose(Box<PendingCloseDialog>),
     Preferences(Box<PreferencesDialog>),
     SequenceSettings(Box<SequenceSettingsDialog>),
 }
@@ -34,6 +36,11 @@ impl ShellModal {
     /// Build the new-project modal from an initial draft.
     pub fn new_project(draft: SelfHostedNewProjectDraft) -> Self {
         Self::NewProject(Box::new(NewProjectDialog::new(draft)))
+    }
+
+    /// Build the pending-close confirmation modal.
+    pub fn pending_close(action: PendingCloseDialogAction) -> Self {
+        Self::PendingClose(Box::new(PendingCloseDialog::new(action)))
     }
 
     /// Build the product preferences modal.
@@ -78,6 +85,14 @@ impl ShellModal {
         }
     }
 
+    /// Access the pending-close modal when it is active.
+    pub fn as_pending_close(&self) -> Option<&PendingCloseDialog> {
+        match self {
+            Self::PendingClose(dialog) => Some(dialog.as_ref()),
+            _ => None,
+        }
+    }
+
     /// Access the preferences modal when it is active.
     pub fn as_preferences(&self) -> Option<&PreferencesDialog> {
         match self {
@@ -116,6 +131,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.id(),
             Self::NewProject(dialog) => dialog.id(),
+            Self::PendingClose(dialog) => dialog.id(),
             Self::Preferences(dialog) => dialog.id(),
             Self::SequenceSettings(dialog) => dialog.id(),
         }
@@ -125,6 +141,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.measure(constraint),
             Self::NewProject(dialog) => dialog.measure(constraint),
+            Self::PendingClose(dialog) => dialog.measure(constraint),
             Self::Preferences(dialog) => dialog.measure(constraint),
             Self::SequenceSettings(dialog) => dialog.measure(constraint),
         }
@@ -134,6 +151,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.layout(bounds),
             Self::NewProject(dialog) => dialog.layout(bounds),
+            Self::PendingClose(dialog) => dialog.layout(bounds),
             Self::Preferences(dialog) => dialog.layout(bounds),
             Self::SequenceSettings(dialog) => dialog.layout(bounds),
         }
@@ -143,6 +161,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.event(event, ctx),
             Self::NewProject(dialog) => dialog.event(event, ctx),
+            Self::PendingClose(dialog) => dialog.event(event, ctx),
             Self::Preferences(dialog) => dialog.event(event, ctx),
             Self::SequenceSettings(dialog) => dialog.event(event, ctx),
         }
@@ -152,6 +171,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.paint(ctx),
             Self::NewProject(dialog) => dialog.paint(ctx),
+            Self::PendingClose(dialog) => dialog.paint(ctx),
             Self::Preferences(dialog) => dialog.paint(ctx),
             Self::SequenceSettings(dialog) => dialog.paint(ctx),
         }
@@ -161,6 +181,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.hit_test(point),
             Self::NewProject(dialog) => dialog.hit_test(point),
+            Self::PendingClose(dialog) => dialog.hit_test(point),
             Self::Preferences(dialog) => dialog.hit_test(point),
             Self::SequenceSettings(dialog) => dialog.hit_test(point),
         }
@@ -174,6 +195,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.child_count(),
             Self::NewProject(dialog) => dialog.child_count(),
+            Self::PendingClose(dialog) => dialog.child_count(),
             Self::Preferences(dialog) => dialog.child_count(),
             Self::SequenceSettings(dialog) => dialog.child_count(),
         }
@@ -183,6 +205,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.child(index),
             Self::NewProject(dialog) => dialog.child(index),
+            Self::PendingClose(dialog) => dialog.child(index),
             Self::Preferences(dialog) => dialog.child(index),
             Self::SequenceSettings(dialog) => dialog.child(index),
         }
@@ -192,6 +215,7 @@ impl Widget for ShellModal {
         match self {
             Self::About(dialog) => dialog.child_mut(index),
             Self::NewProject(dialog) => dialog.child_mut(index),
+            Self::PendingClose(dialog) => dialog.child_mut(index),
             Self::Preferences(dialog) => dialog.child_mut(index),
             Self::SequenceSettings(dialog) => dialog.child_mut(index),
         }

@@ -14,6 +14,7 @@ pub mod menu_bar;
 pub mod modal;
 pub mod new_project_dialog;
 pub mod panels;
+pub mod pending_close_dialog;
 pub mod preferences_dialog;
 pub mod preferences_store;
 pub mod preview;

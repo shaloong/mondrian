@@ -19,7 +19,8 @@ use crate::app::ui_actions::{
     PreferencesThemePayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
-    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
+    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL, APP_SHELL_PENDING_CLOSE_DISCARD,
+    APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
     APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
@@ -29,6 +30,7 @@ use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCand
 use crate::self_hosted::action_availability::app_state_action_enabled;
 use crate::self_hosted::action_queue::PendingUiActions;
 use crate::self_hosted::asset_thumbnails::AssetThumbnailCache;
+use crate::self_hosted::pending_close_dialog::PendingCloseDialogAction;
 use crate::self_hosted::preferences_store::{
     load_self_hosted_preferences, persist_self_hosted_preferences_to, self_hosted_preferences_path,
     SelfHostedPreferences,
@@ -83,6 +85,7 @@ pub struct SelfHostedUiHost {
     preview_service: SelfHostedPreviewService,
     mode: SelfHostedUiMode,
     ui_dirty: Cell<bool>,
+    pending_close_action: Option<PendingCloseAction>,
 }
 
 impl SelfHostedUiHost {
@@ -132,6 +135,7 @@ impl SelfHostedUiHost {
             preview_service,
             mode,
             ui_dirty: Cell::new(false),
+            pending_close_action: None,
         }
     }
 
@@ -232,6 +236,14 @@ impl SelfHostedUiHost {
 
         let mut needs_layout = false;
         for action in actions {
+            if self.take_pending_close_response(&mut commands, &action) {
+                needs_layout = true;
+                continue;
+            }
+            if self.take_guarded_close_or_quit(&mut commands, &action) {
+                needs_layout = true;
+                continue;
+            }
             if take_shell_window_command(&mut commands, &action) {
                 continue;
             }
@@ -592,6 +604,127 @@ impl SelfHostedUiHost {
         if valid != current {
             self.root.set_asset_folder_id(valid);
         }
+    }
+
+    fn take_guarded_close_or_quit(
+        &mut self,
+        commands: &mut SelfHostedShellCommands,
+        action: &Action,
+    ) -> bool {
+        let Some(pending) = close_request_from_action(action) else {
+            return false;
+        };
+
+        if self.app_state.borrow().has_unsaved_project_changes() {
+            self.pending_close_action = Some(pending);
+            self.root.show_pending_close_dialog(pending.dialog_action());
+            return true;
+        }
+
+        self.execute_pending_close_action(commands, pending);
+        true
+    }
+
+    fn take_pending_close_response(
+        &mut self,
+        commands: &mut SelfHostedShellCommands,
+        action: &Action,
+    ) -> bool {
+        let Action::Custom { namespace, name, .. } = action else {
+            return false;
+        };
+        if namespace != APP_SHELL_NAMESPACE {
+            return false;
+        }
+
+        match name.as_str() {
+            APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE => {
+                let Some(pending) = self.pending_close_action else {
+                    self.root.close_pending_close_dialog();
+                    return true;
+                };
+                if let Err(err) = self.app_state.borrow().save_project() {
+                    tracing::warn!("closing project after save failed: {err}");
+                    self.app_state
+                        .borrow_mut()
+                        .set_status_hint(format!("保存项目失败：{err}"), true);
+                    self.mark_dirty();
+                    return true;
+                }
+                self.pending_close_action = None;
+                self.root.close_pending_close_dialog();
+                self.execute_pending_close_action(commands, pending);
+                true
+            }
+            APP_SHELL_PENDING_CLOSE_DISCARD => {
+                let Some(pending) = self.pending_close_action.take() else {
+                    self.root.close_pending_close_dialog();
+                    return true;
+                };
+                self.root.close_pending_close_dialog();
+                self.execute_pending_close_action(commands, pending);
+                true
+            }
+            APP_SHELL_PENDING_CLOSE_CANCEL => {
+                self.pending_close_action = None;
+                self.root.close_pending_close_dialog();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn execute_pending_close_action(
+        &mut self,
+        commands: &mut SelfHostedShellCommands,
+        pending: PendingCloseAction,
+    ) {
+        match pending {
+            PendingCloseAction::CloseProject => {
+                if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
+                    tracing::warn!("close project failed: {err}");
+                }
+                self.refresh_recovery_candidates();
+                self.mark_dirty();
+            }
+            PendingCloseAction::QuitApp => {
+                if self.app_state.borrow().has_open_project() {
+                    if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
+                        tracing::warn!("close project before quit failed: {err}");
+                    }
+                    self.refresh_recovery_candidates();
+                    self.mark_dirty();
+                }
+                commands.quit = true;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingCloseAction {
+    CloseProject,
+    QuitApp,
+}
+
+impl PendingCloseAction {
+    fn dialog_action(self) -> PendingCloseDialogAction {
+        match self {
+            Self::CloseProject => PendingCloseDialogAction::CloseProject,
+            Self::QuitApp => PendingCloseDialogAction::QuitApp,
+        }
+    }
+}
+
+fn close_request_from_action(action: &Action) -> Option<PendingCloseAction> {
+    match action {
+        Action::CloseProject => Some(PendingCloseAction::CloseProject),
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_QUIT =>
+        {
+            Some(PendingCloseAction::QuitApp)
+        }
+        _ => None,
     }
 }
 
@@ -984,6 +1117,22 @@ mod tests {
         state
     }
 
+    fn saved_workspace_app_state(name: &str) -> AppState {
+        let mut state = AppState::new();
+        let project_file = temp_preferences_path(name).with_extension("mdp");
+        state
+            .create_new_project_at(
+                project_file,
+                "Edit",
+                1920,
+                1080,
+                mondrian_core::Rational::FPS_2997,
+            )
+            .expect("project should be created");
+        state.sequence.as_mut().expect("active sequence").name = "Changed".to_owned();
+        state
+    }
+
     fn dispatch_ctx<'a>(
         focus: &'a mut DummyFocus,
         shortcut: &'a mut DummyShortcut,
@@ -1303,6 +1452,132 @@ mod tests {
                 toggle_fullscreen: true,
                 ..SelfHostedShellCommands::default()
             }
+        );
+        assert!(!host.app_state().has_open_project());
+    }
+
+    #[test]
+    fn host_guards_unsaved_close_project_with_pending_modal() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::CloseProject);
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(host.app_state().has_open_project());
+        assert!(host.root.has_pending_close_dialog());
+        assert_eq!(
+            host.pending_close_action,
+            Some(PendingCloseAction::CloseProject)
+        );
+    }
+
+    #[test]
+    fn host_can_cancel_pending_close_project() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::CloseProject);
+        host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+        pending.push(crate::app::ui_actions::app_shell_pending_close_cancel_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(host.app_state().has_open_project());
+        assert!(!host.root.has_pending_close_dialog());
+        assert_eq!(host.pending_close_action, None);
+    }
+
+    #[test]
+    fn host_can_discard_pending_close_project() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::CloseProject);
+        host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+        pending.push(crate::app::ui_actions::app_shell_pending_close_discard_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(!host.app_state().has_open_project());
+        assert!(!host.root.has_pending_close_dialog());
+    }
+
+    #[test]
+    fn host_can_save_and_continue_pending_close_project() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let mut host = SelfHostedUiHost::new(saved_workspace_app_state("save-close"));
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::CloseProject);
+        host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+        assert!(host.root.has_pending_close_dialog());
+        pending.push(crate::app::ui_actions::app_shell_pending_close_save_continue_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(!host.app_state().has_open_project());
+        assert!(!host.root.has_pending_close_dialog());
+    }
+
+    #[test]
+    fn host_guards_unsaved_quit_until_discarded() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_quit_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(host.app_state().has_open_project());
+        assert!(host.root.has_pending_close_dialog());
+
+        pending.push(crate::app::ui_actions::app_shell_pending_close_discard_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(
+            commands,
+            SelfHostedShellCommands { quit: true, ..SelfHostedShellCommands::default() }
         );
         assert!(!host.app_state().has_open_project());
     }

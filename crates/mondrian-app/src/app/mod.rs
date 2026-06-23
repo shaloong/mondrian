@@ -2122,47 +2122,7 @@ impl MondrianApp {
     }
 
     fn has_unsaved_project_changes(&self) -> bool {
-        if !self.state.has_open_project() {
-            return false;
-        }
-
-        let Some(current) = self.state.current_project_data() else {
-            return false;
-        };
-
-        let current_fingerprint = match project_data_fingerprint(current) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::warn!("计算当前项目指纹失败，按未保存处理: {err}");
-                return true;
-            }
-        };
-
-        let project_file = match self.state.project_file_path() {
-            Ok(path) => path,
-            Err(err) => {
-                tracing::warn!("读取当前项目路径失败，按未保存处理: {err}");
-                return true;
-            }
-        };
-
-        let saved = match AppState::read_project_data_from_archive(project_file) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::warn!("读取磁盘项目数据失败，按未保存处理: {err}");
-                return true;
-            }
-        };
-
-        let saved_fingerprint = match project_data_fingerprint(saved) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::warn!("计算磁盘项目指纹失败，按未保存处理: {err}");
-                return true;
-            }
-        };
-
-        current_fingerprint != saved_fingerprint
+        self.state.has_unsaved_project_changes()
     }
 
     fn request_close_project(&mut self) {
