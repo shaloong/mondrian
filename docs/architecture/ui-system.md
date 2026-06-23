@@ -497,6 +497,11 @@ request because the removed widget can no longer receive `FocusLost`.
 If the focused widget still exists but no longer returns `can_focus()`, the
 router sends `FocusLost`, releases focus, and disables IME before routing the
 next event.
+Any event path that lets a widget request focus must normalize the focused
+panel from the current widget tree before returning, including pointer-move
+paths used by hover, drag, or composite controls. This keeps panel-scoped
+shortcuts deterministic even when focus is claimed outside ordinary click or
+Tab traversal.
 
 ## Focused Text Input
 

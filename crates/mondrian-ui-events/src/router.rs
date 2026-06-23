@@ -258,6 +258,7 @@ impl EventRouter {
                             };
                             self.focused = self.focus_mgr.focused_widget();
                             self.apply_event_requests(requests);
+                            normalize_focused_panel(&mut self.focus_mgr, tree);
                             match result {
                                 EventResult::Handled => {
                                     self.after_child_handled(tree, id, &event, dispatch);
@@ -1270,6 +1271,51 @@ mod tests {
         }
     }
 
+    struct FocusOnMoveWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl FocusOnMoveWidget {
+        fn new(bounds: Rect) -> Self {
+            Self { id: WidgetId::new(), bounds }
+        }
+    }
+
+    impl Widget for FocusOnMoveWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::MouseMove { .. } => {
+                    ctx.focus.request_focus(self.id);
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
+    }
+
     struct TextAcceptingWidget {
         id: WidgetId,
         bounds: Rect,
@@ -2181,6 +2227,31 @@ mod tests {
         assert_eq!(
             router.focus_manager().focused_panel(),
             Some(PanelKind::Timeline)
+        );
+    }
+
+    #[test]
+    fn router_normalizes_focused_panel_after_mouse_move_focus_request() {
+        let parent = PanelBoundaryWidget::new(Rect::new(0.0, 0.0, 200.0, 120.0), PanelKind::Assets);
+        let child = FocusOnMoveWidget::new(Rect::new(20.0, 20.0, 80.0, 30.0));
+        let child_id = child.id();
+        let mut tree = TestTree::parent_child(parent, child);
+        let mut router = EventRouter::new(tree.root_id());
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(30.0, 30.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(child_id));
+        assert_eq!(
+            router.focus_manager().focused_panel(),
+            Some(PanelKind::Assets)
         );
     }
 

@@ -158,8 +158,15 @@ workflow.
   selection-only timeline command disabling, AssetGrid card/selection/grid menu
   precedence, local Rename command handling, and replacing an open AssetGrid
   context menu with the newly right-clicked card target in one gesture.
-- P3-FOCUS-001: Make focus transfer predictable across dock rebuilds, modals,
-  dropdowns, inline editors, color picker, timeline, viewer, and node graph.
+- [done] P3-FOCUS-001: Make focus transfer predictable across dock rebuilds,
+  modals, dropdowns, inline editors, color picker, timeline, viewer, and node
+  graph. Coverage now spans stale focus cleanup after widget tree rebuilds,
+  IME disable when focused widgets disappear or become unfocusable, window
+  focus loss, Tab traversal no-op/empty cases, focused-panel derivation from
+  ancestors after click, Tab, and pointer-move focus requests, panel focus
+  fallback after workspace switches, inline asset rename commit/cancel focus
+  restoration, ColorPicker inner-field focus translation, timeline/viewer/node
+  graph focused keyboard handling, and disabled widgets opting out of focus.
 - P3-SHORTCUTS-001: Complete shortcut customization UX: conflict ownership,
   disabled bindings, labels, capture mode, reset, persistence, and immediate
   router rebuild.
