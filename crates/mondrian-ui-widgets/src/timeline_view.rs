@@ -6350,6 +6350,74 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_scrollbar_track_click_pages_backward_and_clamps() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Long", 0, 1000)],
+        )])
+        .with_playhead(12);
+        view.layout(Rect::new(0.0, 0.0, 320.0, 140.0));
+        assert!(view.set_scroll_x(view.max_scroll_x()));
+        let initial_scroll = view.scroll_x();
+        let track = view
+            .horizontal_scrollbar_track_rect()
+            .expect("wide timeline should show horizontal scrollbar");
+        let thumb = view.horizontal_scrollbar_thumb_rect().expect("thumb");
+        let click = Point::new((thumb.x - 24.0).max(track.x + 1.0), track.center().y);
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: click,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert!(view.scroll_x() < initial_scroll);
+        assert!(view.scroll_x() >= 0.0);
+        assert_eq!(view.playhead_frame(), 12);
+
+        assert!(view.set_scroll_x(view.body_rect.width));
+        let before_forward_page = view.scroll_x();
+        let thumb = view.horizontal_scrollbar_thumb_rect().expect("thumb after scroll");
+        let click = Point::new(
+            (thumb.x + thumb.width + 24.0).min(track.x + track.width - 1.0),
+            track.center().y,
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: click,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(view.scroll_x() > before_forward_page);
+        assert!(view.scroll_x() <= view.max_scroll_x());
+        assert_eq!(view.playhead_frame(), 12);
+    }
+
+    #[test]
     fn horizontal_scrollbar_handles_adjust_zoom_without_seeking() {
         let mut view = TimelineView::new(vec![TimelineTrack::video(
             "V1",
@@ -6528,6 +6596,78 @@ mod tests {
         assert!(view.scrollbar_drag.is_some());
         assert_eq!(ctx.requests.cursor, Some(CursorRequest::EwResize));
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn horizontal_scrollbar_handle_zoom_clamps_to_min_and_max() {
+        let mut max_zoom = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Long", 0, 1000)],
+        )])
+        .with_pixels_per_frame(TIMELINE_MAX_PIXELS_PER_FRAME);
+        max_zoom.layout(Rect::new(0.0, 0.0, 420.0, 160.0));
+        let max_drag = TimelineScrollbarDrag {
+            axis: TimelineScrollbarAxis::Horizontal,
+            kind: TimelineScrollbarDragKind::TrailingHandle,
+            start_pointer: 0.0,
+            start_scroll: max_zoom.scroll_x(),
+            start_pixels_per_frame: max_zoom.pixels_per_frame(),
+            start_track_height: max_zoom.track_height(),
+        };
+
+        max_zoom.zoom_x_for_handle_delta(-10_000.0, max_drag);
+        assert_eq!(max_zoom.pixels_per_frame(), TIMELINE_MAX_PIXELS_PER_FRAME);
+        assert!(max_zoom.scroll_x() <= max_zoom.max_scroll_x());
+
+        let mut min_zoom = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Long", 0, 1000)],
+        )])
+        .with_pixels_per_frame(TIMELINE_MIN_PIXELS_PER_FRAME);
+        min_zoom.layout(Rect::new(0.0, 0.0, 420.0, 160.0));
+        let min_drag = TimelineScrollbarDrag {
+            axis: TimelineScrollbarAxis::Horizontal,
+            kind: TimelineScrollbarDragKind::TrailingHandle,
+            start_pointer: 0.0,
+            start_scroll: min_zoom.scroll_x(),
+            start_pixels_per_frame: min_zoom.pixels_per_frame(),
+            start_track_height: min_zoom.track_height(),
+        };
+
+        min_zoom.zoom_x_for_handle_delta(10_000.0, min_drag);
+        assert_eq!(min_zoom.pixels_per_frame(), TIMELINE_MIN_PIXELS_PER_FRAME);
+        assert!(min_zoom.scroll_x() <= min_zoom.max_scroll_x());
+    }
+
+    #[test]
+    fn restoring_timeline_state_clamps_zoom_track_height_and_offsets() {
+        let mut view = TimelineView::new(
+            (0..12)
+                .map(|track| {
+                    TimelineTrack::video(
+                        format!("V{track}"),
+                        vec![TimelineClip::new("Long", 0, 1000)],
+                    )
+                })
+                .collect(),
+        );
+        view.layout(Rect::new(0.0, 0.0, 360.0, 180.0));
+
+        view.restore_state(&TimelineViewState {
+            active_tool: TimelineTool::Blade,
+            scroll_x: f32::MAX,
+            scroll_y: f32::MAX,
+            pixels_per_frame: f32::MAX,
+            snapping_enabled: false,
+            track_height: f32::MAX,
+        });
+
+        assert_eq!(view.active_tool(), TimelineTool::Blade);
+        assert_eq!(view.pixels_per_frame(), TIMELINE_MAX_PIXELS_PER_FRAME);
+        assert_eq!(view.track_height(), TIMELINE_MAX_TRACK_HEIGHT);
+        assert_eq!(view.scroll_x(), view.max_scroll_x());
+        assert_eq!(view.scroll_y(), view.max_scroll_y());
+        assert!(!view.snapping_enabled());
     }
 
     #[test]
@@ -8156,6 +8296,24 @@ mod tests {
         assert!(!encoder.texts.iter().any(|text| text == "视频轨道"));
         assert!(!encoder.texts.iter().any(|text| text == "音频轨道"));
         assert!(!encoder.texts.iter().any(|text| text == "静音"));
+    }
+
+    #[test]
+    fn paint_skips_playhead_when_it_is_outside_visible_range() {
+        let mut view = timeline().with_playhead(12).with_pixels_per_frame(8.0);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        assert!(view.set_scroll_x(view.max_scroll_x()));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
+        };
+        view.paint(&mut ctx);
+
+        assert!(!encoder.line_colors.contains(&theme.colors.timeline_playhead));
     }
 
     #[test]

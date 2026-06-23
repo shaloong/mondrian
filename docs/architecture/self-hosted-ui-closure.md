@@ -117,8 +117,14 @@ workflow.
 
 ## Phase 3: Advanced NLE Interaction Polish
 
-- P3-TIMELINE-001: Harden range navigator behavior: zoom handles, page clicks,
-  min/max zoom, offset clamping, playhead visibility, and high-density labels.
+- [done] P3-TIMELINE-001: Harden range navigator behavior: zoom handles,
+  page clicks, min/max zoom, offset clamping, playhead visibility, and
+  high-density labels. Coverage now spans ctrl-wheel zoom around cursor, zoom
+  limit bubbling, horizontal thumb dragging and capture release, horizontal
+  page clicks in both directions without seeking, leading/trailing handle zoom,
+  min/max zoom clamps, restored state offset/zoom/track-height clamps,
+  offscreen playhead paint suppression, and dense minor/major ruler labels
+  using the configured frame rate.
 - P3-TIMELINE-002: Improve clip visual fidelity for labels, badges, disabled
   state, waveform peaks, selection, hover, trim handles, snap guides, and narrow
   clips.
