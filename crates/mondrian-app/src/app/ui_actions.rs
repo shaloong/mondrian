@@ -136,6 +136,8 @@ pub const VIEWER_NAMESPACE: &str = "ui.viewer";
 pub const VIEWER_SET_PREVIEW_RESOLUTION_SCALE: &str = "set_preview_resolution_scale";
 /// Shell-local action name for cycling viewer canvas zoom.
 pub const VIEWER_CYCLE_ZOOM: &str = "cycle_zoom";
+/// Shell-local action name for setting viewer canvas zoom.
+pub const VIEWER_SET_ZOOM_SCALE: &str = "set_zoom_scale";
 
 /// Custom action namespace for project lifecycle operations supplied by shell UI.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
@@ -424,6 +426,13 @@ pub struct SequenceUpdateSettingsPayload {
 pub struct ViewerSetPreviewResolutionScalePayload {
     /// Preview resolution scale requested by the UI.
     pub scale: f32,
+}
+
+/// Change the shell-local viewer canvas zoom.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ViewerSetZoomScalePayload {
+    /// Fixed canvas scale. `None` means fit to available viewer space.
+    pub scale: Option<f32>,
 }
 
 /// Seek the active timeline to a frame.
@@ -1132,6 +1141,11 @@ pub fn viewer_set_preview_resolution_scale_action(
 /// Build a shell-local viewer request for cycling canvas zoom.
 pub fn viewer_cycle_zoom_action() -> Action {
     custom_viewer_action(VIEWER_CYCLE_ZOOM, ())
+}
+
+/// Build a shell-local viewer request for setting canvas zoom.
+pub fn viewer_set_zoom_scale_action(payload: ViewerSetZoomScalePayload) -> Action {
+    custom_viewer_action(VIEWER_SET_ZOOM_SCALE, payload)
 }
 
 /// Build an action that creates a project from shell UI.

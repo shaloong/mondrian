@@ -13,17 +13,20 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::sync::Arc;
 
 use crate::paint::{
-    color_with_alpha, horizontal_stroke_rect, mix_color, paint_focus_ring, soft_border,
-    vertical_stroke_rect,
+    centered_text_origin_y, color_with_alpha, horizontal_stroke_rect, mix_color, paint_focus_ring,
+    soft_border, vertical_stroke_rect,
 };
 use crate::text_metrics::measure_single_line;
 use crate::{RasterImage, VectorIcon};
 
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
-const TRANSPORT_BUTTON_SIZE: f32 = 26.0;
-const TRANSPORT_BUTTON_GAP: f32 = 7.0;
-const CHECKER_TILE_SIZE: f32 = 10.0;
+const TRANSPORT_BUTTON_SIZE: f32 = 28.0;
+const TRANSPORT_BUTTON_GAP: f32 = 6.0;
+const CHECKER_TILE_SIZE: f32 = 16.0;
+const VIEWER_DROPDOWN_ROW_HEIGHT: f32 = 24.0;
+const VIEWER_DROPDOWN_PAD_X: f32 = 5.0;
+const VIEWER_DROPDOWN_PAD_Y: f32 = 5.0;
 
 /// RGBA preview image presented by [`ViewerSurface`].
 pub type ViewerFrameImage = RasterImage;
@@ -66,10 +69,34 @@ pub enum ViewerControl {
 pub type ViewerControlAction = dyn Fn(ViewerControl) -> Action;
 
 /// Maps a viewer preview-quality chip activation to an editor action.
-pub type ViewerPreviewQualityAction = dyn Fn() -> Action;
+pub type ViewerPreviewQualityAction = dyn Fn(f32) -> Action;
 
 /// Maps a viewer zoom chip activation to an editor action.
-pub type ViewerZoomAction = dyn Fn() -> Action;
+pub type ViewerZoomAction = dyn Fn(Option<f32>) -> Action;
+
+/// One selectable viewer zoom mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewerZoomOption {
+    /// User-facing label.
+    pub label: &'static str,
+    /// Fixed canvas scale. `None` means fit to available viewer space.
+    pub scale: Option<f32>,
+}
+
+/// One selectable preview resolution mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewerPreviewQualityOption {
+    /// User-facing label.
+    pub label: &'static str,
+    /// Preview render resolution scale.
+    pub scale: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerDropdown {
+    Zoom,
+    PreviewQuality,
+}
 
 /// Preview viewer surface.
 pub struct ViewerSurface {
@@ -96,6 +123,9 @@ pub struct ViewerSurface {
     pressed_zoom: bool,
     hovered_preview_quality: bool,
     pressed_preview_quality: bool,
+    open_dropdown: Option<ViewerDropdown>,
+    hovered_dropdown_index: Option<usize>,
+    pressed_dropdown_index: Option<usize>,
     focused: bool,
     focus_visible: bool,
     on_control: Option<Box<ViewerControlAction>>,
@@ -121,7 +151,7 @@ impl ViewerSurface {
             duration_label: String::new(),
             zoom_label: "适合".into(),
             zoom_scale: None,
-            preview_quality_label: "完整".into(),
+            preview_quality_label: "1/1".into(),
             source_width: source_width.max(1),
             source_height: source_height.max(1),
             playing: false,
@@ -134,6 +164,9 @@ impl ViewerSurface {
             pressed_zoom: false,
             hovered_preview_quality: false,
             pressed_preview_quality: false,
+            open_dropdown: None,
+            hovered_dropdown_index: None,
+            pressed_dropdown_index: None,
             focused: false,
             focus_visible: false,
             on_control: None,
@@ -242,14 +275,14 @@ impl ViewerSurface {
         self
     }
 
-    /// Set a custom action for clicking the preview-quality chip.
-    pub fn on_preview_quality(mut self, action: impl Fn() -> Action + 'static) -> Self {
+    /// Set a custom action for selecting a preview-quality option.
+    pub fn on_preview_quality(mut self, action: impl Fn(f32) -> Action + 'static) -> Self {
         self.on_preview_quality = Some(Box::new(action));
         self
     }
 
-    /// Set a custom action for clicking the zoom chip.
-    pub fn on_zoom(mut self, action: impl Fn() -> Action + 'static) -> Self {
+    /// Set a custom action for selecting a viewer zoom option.
+    pub fn on_zoom(mut self, action: impl Fn(Option<f32>) -> Action + 'static) -> Self {
         self.on_zoom = Some(Box::new(action));
         self
     }
@@ -385,7 +418,7 @@ impl ViewerSurface {
             return Rect::ZERO;
         }
         let wanted =
-            (self.preview_quality_label.chars().count() as f32 * 7.0 + 18.0).clamp(48.0, 82.0);
+            (self.preview_quality_label.chars().count() as f32 * 7.0 + 28.0).clamp(50.0, 86.0);
         let width = wanted.min(available);
         Rect::new(
             right - width,
@@ -407,7 +440,7 @@ impl ViewerSurface {
         if available < 42.0 {
             return Rect::ZERO;
         }
-        let wanted = (self.zoom_label.chars().count() as f32 * 7.0 + 18.0).clamp(42.0, 74.0);
+        let wanted = (self.zoom_label.chars().count() as f32 * 7.0 + 28.0).clamp(50.0, 78.0);
         let width = wanted.min(available);
         Rect::new(right - width, quality.y, width, quality.height)
     }
@@ -422,6 +455,59 @@ impl ViewerSurface {
         rect.width > 0.0 && rect.height > 0.0 && rect.contains(point)
     }
 
+    fn dropdown_anchor_rect(&self, dropdown: ViewerDropdown) -> Rect {
+        match dropdown {
+            ViewerDropdown::Zoom => self.zoom_rect(),
+            ViewerDropdown::PreviewQuality => self.preview_quality_rect(),
+        }
+    }
+
+    fn dropdown_options_len(dropdown: ViewerDropdown) -> usize {
+        match dropdown {
+            ViewerDropdown::Zoom => VIEWER_ZOOM_OPTIONS.len(),
+            ViewerDropdown::PreviewQuality => VIEWER_PREVIEW_QUALITY_OPTIONS.len(),
+        }
+    }
+
+    fn dropdown_rect(&self, dropdown: ViewerDropdown) -> Rect {
+        let anchor = self.dropdown_anchor_rect(dropdown);
+        if anchor.width <= 0.0 || anchor.height <= 0.0 {
+            return Rect::ZERO;
+        }
+        let row_count = Self::dropdown_options_len(dropdown) as f32;
+        let width: f32 = match dropdown {
+            ViewerDropdown::Zoom => 92.0,
+            ViewerDropdown::PreviewQuality => 74.0,
+        };
+        let height = row_count * VIEWER_DROPDOWN_ROW_HEIGHT + VIEWER_DROPDOWN_PAD_Y * 2.0;
+        let min_x = self.bounds.x + 8.0;
+        let max_x = (self.bounds.x + self.bounds.width - width - 8.0).max(min_x);
+        let x = (anchor.x + anchor.width - width).clamp(min_x, max_x);
+        let y = (anchor.y - height - 6.0).max(self.bounds.y + 8.0);
+        Rect::new(x, y, width, height)
+    }
+
+    fn dropdown_row_rect(&self, dropdown: ViewerDropdown, index: usize) -> Rect {
+        let menu = self.dropdown_rect(dropdown);
+        Rect::new(
+            menu.x + VIEWER_DROPDOWN_PAD_X,
+            menu.y + VIEWER_DROPDOWN_PAD_Y + index as f32 * VIEWER_DROPDOWN_ROW_HEIGHT,
+            (menu.width - VIEWER_DROPDOWN_PAD_X * 2.0).max(0.0),
+            VIEWER_DROPDOWN_ROW_HEIGHT,
+        )
+    }
+
+    fn dropdown_item_at(&self, point: Point) -> Option<(ViewerDropdown, usize)> {
+        let dropdown = self.open_dropdown?;
+        let menu = self.dropdown_rect(dropdown);
+        if !menu.contains(point) {
+            return None;
+        }
+        (0..Self::dropdown_options_len(dropdown))
+            .find(|index| self.dropdown_row_rect(dropdown, *index).contains(point))
+            .map(|index| (dropdown, index))
+    }
+
     fn dispatch_control(&self, control: ViewerControl, ctx: &mut EventContext) {
         let action = self
             .on_control
@@ -431,15 +517,15 @@ impl ViewerSurface {
         (ctx.dispatch)(action);
     }
 
-    fn dispatch_preview_quality(&self, ctx: &mut EventContext) {
+    fn dispatch_preview_quality(&self, scale: f32, ctx: &mut EventContext) {
         if let Some(mapper) = &self.on_preview_quality {
-            (ctx.dispatch)(mapper());
+            (ctx.dispatch)(mapper(scale));
         }
     }
 
-    fn dispatch_zoom(&self, ctx: &mut EventContext) {
+    fn dispatch_zoom(&self, scale: Option<f32>, ctx: &mut EventContext) {
         if let Some(mapper) = &self.on_zoom {
-            (ctx.dispatch)(mapper());
+            (ctx.dispatch)(mapper(scale));
         }
     }
 
@@ -478,6 +564,9 @@ impl ViewerSurface {
             || self.pressed_zoom
             || self.hovered_preview_quality
             || self.pressed_preview_quality
+            || self.open_dropdown.is_some()
+            || self.hovered_dropdown_index.is_some()
+            || self.pressed_dropdown_index.is_some()
             || self.focused
             || self.focus_visible;
         self.hovered_control = None;
@@ -486,6 +575,9 @@ impl ViewerSurface {
         self.pressed_zoom = false;
         self.hovered_preview_quality = false;
         self.pressed_preview_quality = false;
+        self.open_dropdown = None;
+        self.hovered_dropdown_index = None;
+        self.pressed_dropdown_index = None;
         self.focused = false;
         self.focus_visible = false;
         changed
@@ -518,17 +610,25 @@ impl Widget for ViewerSurface {
                 let hovered = self.control_at(*position);
                 let hovered_zoom = self.zoom_at(*position);
                 let hovered_preview_quality = self.preview_quality_at(*position);
+                let hovered_dropdown_index =
+                    self.dropdown_item_at(*position).map(|(_, index)| index);
                 if hovered != self.hovered_control
                     || hovered_zoom != self.hovered_zoom
                     || hovered_preview_quality != self.hovered_preview_quality
+                    || hovered_dropdown_index != self.hovered_dropdown_index
                 {
                     self.hovered_control = hovered;
                     self.hovered_zoom = hovered_zoom;
                     self.hovered_preview_quality = hovered_preview_quality;
+                    self.hovered_dropdown_index = hovered_dropdown_index;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
-                if hovered.is_some() || hovered_zoom || hovered_preview_quality {
+                if hovered.is_some()
+                    || hovered_zoom
+                    || hovered_preview_quality
+                    || hovered_dropdown_index.is_some()
+                {
                     EventResult::Handled
                 } else {
                     EventResult::Ignored
@@ -536,10 +636,26 @@ impl Widget for ViewerSurface {
             }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
                 if !self.bounds.contains(*position) {
+                    if self.open_dropdown.is_some() {
+                        self.open_dropdown = None;
+                        self.hovered_dropdown_index = None;
+                        self.pressed_dropdown_index = None;
+                        ctx.request_repaint();
+                    }
                     return EventResult::Ignored;
                 }
                 self.focus_from_pointer(ctx);
+                if let Some((dropdown, index)) = self.dropdown_item_at(*position) {
+                    self.open_dropdown = Some(dropdown);
+                    self.hovered_dropdown_index = Some(index);
+                    self.pressed_dropdown_index = Some(index);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if let Some(control) = self.control_at(*position) {
+                    self.open_dropdown = None;
+                    self.hovered_dropdown_index = None;
+                    self.pressed_dropdown_index = None;
                     self.pressed_control = Some(control);
                     self.hovered_control = Some(control);
                     ctx.request_repaint();
@@ -548,14 +664,26 @@ impl Widget for ViewerSurface {
                 if self.zoom_at(*position) {
                     self.pressed_zoom = true;
                     self.hovered_zoom = true;
+                    self.open_dropdown = None;
+                    self.hovered_dropdown_index = None;
+                    self.pressed_dropdown_index = None;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
                 if self.preview_quality_at(*position) {
                     self.pressed_preview_quality = true;
                     self.hovered_preview_quality = true;
+                    self.open_dropdown = None;
+                    self.hovered_dropdown_index = None;
+                    self.pressed_dropdown_index = None;
                     ctx.request_repaint();
                     return EventResult::Handled;
+                }
+                if self.open_dropdown.is_some() {
+                    self.open_dropdown = None;
+                    self.hovered_dropdown_index = None;
+                    self.pressed_dropdown_index = None;
+                    ctx.request_repaint();
                 }
                 EventResult::Handled
             }
@@ -565,6 +693,27 @@ impl Widget for ViewerSurface {
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                let pressed_dropdown_index = self.pressed_dropdown_index.take();
+                if let Some((dropdown, hovered_index)) = self.dropdown_item_at(*position) {
+                    if pressed_dropdown_index == Some(hovered_index)
+                        && self.open_dropdown == Some(dropdown)
+                    {
+                        match dropdown {
+                            ViewerDropdown::Zoom => {
+                                let option = VIEWER_ZOOM_OPTIONS[hovered_index];
+                                self.dispatch_zoom(option.scale, ctx);
+                            }
+                            ViewerDropdown::PreviewQuality => {
+                                let option = VIEWER_PREVIEW_QUALITY_OPTIONS[hovered_index];
+                                self.dispatch_preview_quality(option.scale, ctx);
+                            }
+                        }
+                        self.open_dropdown = None;
+                        self.hovered_dropdown_index = None;
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                }
                 let pressed = self.pressed_control.take();
                 let hovered = self.control_at(*position);
                 self.hovered_control = hovered;
@@ -580,7 +729,8 @@ impl Widget for ViewerSurface {
                 self.hovered_zoom = self.zoom_at(*position);
                 if pressed_zoom {
                     if self.hovered_zoom {
-                        self.dispatch_zoom(ctx);
+                        self.open_dropdown = Some(ViewerDropdown::Zoom);
+                        self.hovered_dropdown_index = None;
                     }
                     ctx.request_repaint();
                     return EventResult::Handled;
@@ -590,7 +740,8 @@ impl Widget for ViewerSurface {
                 self.hovered_preview_quality = self.preview_quality_at(*position);
                 if pressed_preview_quality {
                     if self.hovered_preview_quality {
-                        self.dispatch_preview_quality(ctx);
+                        self.open_dropdown = Some(ViewerDropdown::PreviewQuality);
+                        self.hovered_dropdown_index = None;
                     }
                     ctx.request_repaint();
                     return EventResult::Handled;
@@ -622,7 +773,7 @@ impl Widget for ViewerSurface {
         let viewport = self.canvas_viewport_rect();
         let canvas = self.canvas_rect();
 
-        ctx.encoder.draw_rect(self.bounds, colors.card, 0.0);
+        ctx.encoder.draw_rect(self.bounds, colors.viewer_panel, 0.0);
         if self.focus_visible {
             paint_focus_ring(ctx, self.bounds.inset(2.0, 2.0), spacing.radius_lg);
         }
@@ -651,15 +802,17 @@ impl Widget for ViewerSurface {
         }
 
         ctx.push_clip(viewport);
+        ctx.encoder.draw_rect(viewport, colors.viewer_stage, 0.0);
         ctx.encoder.draw_rect(
             canvas.inset(-1.0, -1.0),
-            color_with_alpha(colors.border, 0.82),
+            color_with_alpha(colors.foreground, 0.08),
             0.0,
         );
         ctx.push_clip(canvas);
+        ctx.encoder.draw_rect(canvas, colors.canvas, 0.0);
         if self.enabled {
-            paint_checkerboard(ctx, canvas);
             if let Some(frame) = &self.frame_image {
+                paint_checkerboard(ctx, canvas);
                 ctx.encoder.draw_raster_image(
                     &frame.key,
                     canvas,
@@ -669,12 +822,6 @@ impl Widget for ViewerSurface {
                     Color::WHITE,
                 );
             }
-        } else {
-            ctx.encoder.draw_rect(
-                canvas,
-                mix_color(colors.background, colors.muted, 0.24),
-                0.0,
-            );
         }
         if self.frame_image.is_none() {
             if let Some(message) =
@@ -722,6 +869,7 @@ impl Widget for ViewerSurface {
             &self.zoom_label,
             self.hovered_zoom,
             self.pressed_zoom,
+            self.open_dropdown == Some(ViewerDropdown::Zoom),
         );
         self.paint_chrome_chip(
             ctx,
@@ -729,7 +877,9 @@ impl Widget for ViewerSurface {
             &self.preview_quality_label,
             self.hovered_preview_quality,
             self.pressed_preview_quality,
+            self.open_dropdown == Some(ViewerDropdown::PreviewQuality),
         );
+        self.paint_open_dropdown(ctx);
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -754,22 +904,29 @@ impl ViewerSurface {
         let rect = self.control_rect(control);
         let pressed = self.pressed_control == Some(control);
         let hovered = self.hovered_control == Some(control);
-        let bg = if !self.enabled || pressed {
-            colors.muted
-        } else if control == ViewerControl::PlayPause && hovered {
-            mix_color(colors.accent, colors.primary, 0.12)
-        } else if control == ViewerControl::PlayPause || hovered {
-            colors.accent
+        let active = control == ViewerControl::PlayPause && self.playing;
+        let bg = if !self.enabled {
+            color_with_alpha(colors.surface, 0.30)
+        } else if pressed {
+            color_with_alpha(colors.foreground, 0.11)
+        } else if active {
+            color_with_alpha(colors.primary, 0.16)
+        } else if hovered {
+            color_with_alpha(colors.foreground, 0.07)
         } else {
-            colors.secondary
+            Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
         };
         let icon = if self.enabled {
-            colors.foreground
+            if hovered || active || control == ViewerControl::PlayPause {
+                colors.foreground
+            } else {
+                colors.text_secondary
+            }
         } else {
-            colors.muted_foreground
+            colors.text_disabled
         };
 
-        ctx.encoder.draw_rect(rect, bg, radius);
+        ctx.encoder.draw_rect(rect, bg, radius.max(7.0));
         let vector_icon = if control == ViewerControl::PlayPause && self.playing {
             self.playing_pause_icon.as_ref()
         } else if control == ViewerControl::PlayPause {
@@ -843,6 +1000,7 @@ impl ViewerSurface {
         label: &str,
         hovered: bool,
         pressed: bool,
+        open: bool,
     ) {
         if rect.width <= 0.0 || rect.height <= 0.0 || label.is_empty() {
             return;
@@ -850,10 +1008,10 @@ impl ViewerSurface {
         let colors = &ctx.theme.colors;
         let fill = if pressed {
             colors.muted
-        } else if hovered {
-            colors.accent
+        } else if hovered || open {
+            colors.surface_2
         } else {
-            colors.secondary
+            colors.surface
         };
         ctx.encoder.draw_rect(
             rect,
@@ -865,19 +1023,109 @@ impl ViewerSurface {
             fill,
             ctx.theme.spacing.radius_sm - 1.0,
         );
-        ctx.push_clip(rect.inset(4.0, 0.0));
-        ctx.encoder.draw_text_box(
+        let style = &ctx.theme.typography.small;
+        let label_width = measure_single_line(label, style.font_size).0;
+        let caret_width = 6.0;
+        let caret_gap = 6.0;
+        let content_width =
+            (label_width + caret_gap + caret_width).min((rect.width - 12.0).max(1.0));
+        let content_x = rect.x + (rect.width - content_width).max(0.0) * 0.5;
+        let text_color = if hovered || open {
+            colors.foreground
+        } else {
+            colors.muted_foreground
+        };
+        ctx.push_clip(rect.inset(6.0, 0.0));
+        ctx.encoder.draw_text(
             label,
-            ctx.theme.typography.small.font_size,
-            Point::new(rect.x + 8.0, rect.y + 4.0),
-            (rect.width - 16.0).max(1.0),
+            style.font_size,
+            Point::new(content_x, centered_text_origin_y(rect, style.line_height)),
+            text_color,
+        );
+        let caret_x = content_x + label_width + caret_gap;
+        let caret_y = rect.y + rect.height * 0.5 + if open { -1.0 } else { 1.0 };
+        let caret = if open {
+            [
+                Point::new(caret_x, caret_y + 2.0),
+                Point::new(caret_x + caret_width, caret_y + 2.0),
+                Point::new(caret_x + caret_width * 0.5, caret_y - 2.0),
+            ]
+        } else {
+            [
+                Point::new(caret_x, caret_y - 2.0),
+                Point::new(caret_x + caret_width, caret_y - 2.0),
+                Point::new(caret_x + caret_width * 0.5, caret_y + 2.0),
+            ]
+        };
+        ctx.encoder.draw_triangles(&caret, color_with_alpha(text_color, 0.86));
+        ctx.pop_clip();
+    }
+
+    fn paint_open_dropdown(&self, ctx: &mut PaintContext) {
+        let Some(dropdown) = self.open_dropdown else {
+            return;
+        };
+        let menu = self.dropdown_rect(dropdown);
+        if menu.width <= 0.0 || menu.height <= 0.0 {
+            return;
+        }
+        let colors = &ctx.theme.colors;
+        let radius = ctx.theme.spacing.radius_md;
+        ctx.encoder.draw_rect(menu, soft_border(colors.border), radius);
+        ctx.encoder.draw_rect(menu.inset(1.0, 1.0), colors.popover, radius - 1.0);
+        for index in 0..Self::dropdown_options_len(dropdown) {
+            let row = self.dropdown_row_rect(dropdown, index);
+            let hovered = self.hovered_dropdown_index == Some(index);
             if hovered {
+                ctx.encoder.draw_rect(
+                    row,
+                    color_with_alpha(colors.foreground, 0.07),
+                    ctx.theme.spacing.radius_sm,
+                );
+            }
+            let (label, selected) = match dropdown {
+                ViewerDropdown::Zoom => {
+                    let option = VIEWER_ZOOM_OPTIONS[index];
+                    (
+                        option.label,
+                        viewer_zoom_option_selected(option, self.zoom_scale),
+                    )
+                }
+                ViewerDropdown::PreviewQuality => {
+                    let option = VIEWER_PREVIEW_QUALITY_OPTIONS[index];
+                    (
+                        option.label,
+                        (option.label == self.preview_quality_label)
+                            || (preview_quality_label_for_scale(option.scale)
+                                == self.preview_quality_label),
+                    )
+                }
+            };
+            let style = &ctx.theme.typography.small;
+            let text_color = if hovered {
                 colors.foreground
             } else {
-                colors.muted_foreground
-            },
-        );
-        ctx.pop_clip();
+                colors.popover_foreground
+            };
+            let check_lane = 16.0;
+            if selected {
+                ctx.encoder.draw_text(
+                    "✓",
+                    style.font_size,
+                    Point::new(row.x + 5.0, centered_text_origin_y(row, style.line_height)),
+                    text_color,
+                );
+            }
+            ctx.encoder.draw_text(
+                label,
+                style.font_size,
+                Point::new(
+                    row.x + check_lane,
+                    centered_text_origin_y(row, style.line_height),
+                ),
+                text_color,
+            );
+        }
     }
 }
 
@@ -904,6 +1152,45 @@ const BASIC_VIEWER_CONTROLS: [ViewerControl; 3] = [
 ];
 
 const MINIMAL_VIEWER_CONTROLS: [ViewerControl; 1] = [ViewerControl::PlayPause];
+
+const VIEWER_ZOOM_OPTIONS: [ViewerZoomOption; 9] = [
+    ViewerZoomOption { label: "适合", scale: None },
+    ViewerZoomOption { label: "10%", scale: Some(0.10) },
+    ViewerZoomOption { label: "25%", scale: Some(0.25) },
+    ViewerZoomOption { label: "50%", scale: Some(0.50) },
+    ViewerZoomOption { label: "75%", scale: Some(0.75) },
+    ViewerZoomOption { label: "100%", scale: Some(1.0) },
+    ViewerZoomOption { label: "150%", scale: Some(1.5) },
+    ViewerZoomOption { label: "200%", scale: Some(2.0) },
+    ViewerZoomOption { label: "400%", scale: Some(4.0) },
+];
+
+const VIEWER_PREVIEW_QUALITY_OPTIONS: [ViewerPreviewQualityOption; 4] = [
+    ViewerPreviewQualityOption { label: "1/1", scale: 1.0 },
+    ViewerPreviewQualityOption { label: "1/2", scale: 0.5 },
+    ViewerPreviewQualityOption { label: "1/4", scale: 0.25 },
+    ViewerPreviewQualityOption { label: "1/8", scale: 0.125 },
+];
+
+fn viewer_zoom_option_selected(option: ViewerZoomOption, current: Option<f32>) -> bool {
+    match (option.scale, current) {
+        (None, None) => true,
+        (Some(a), Some(b)) => (a - b).abs() <= 0.001,
+        _ => false,
+    }
+}
+
+fn preview_quality_label_for_scale(scale: f32) -> &'static str {
+    if (scale - 1.0).abs() <= 0.001 {
+        "1/1"
+    } else if (scale - 0.5).abs() <= 0.001 {
+        "1/2"
+    } else if (scale - 0.25).abs() <= 0.001 {
+        "1/4"
+    } else {
+        "1/8"
+    }
+}
 
 fn default_viewer_control_action(control: ViewerControl) -> Action {
     match control {
@@ -944,8 +1231,10 @@ fn paint_checkerboard(ctx: &mut PaintContext, canvas: Rect) {
         return;
     }
     let colors = &ctx.theme.colors;
-    let dark = mix_color(colors.background, colors.canvas, 0.38);
-    let light = mix_color(colors.canvas, colors.card, 0.28);
+    let mut dark = colors.checkerboard_dark;
+    let mut light = colors.checkerboard_light;
+    dark.a *= 0.28;
+    light.a *= 0.28;
     ctx.encoder.draw_rect(canvas, dark, 0.0);
 
     let columns = (canvas.width / CHECKER_TILE_SIZE).ceil().max(1.0) as usize;
@@ -1050,11 +1339,16 @@ fn paint_safe_guides(ctx: &mut PaintContext, canvas: Rect, enabled: bool) {
         return;
     }
     let colors = &ctx.theme.colors;
-    let guide = color_with_alpha(colors.foreground, if enabled { 0.18 } else { 0.10 });
+    let mut guide = colors.safe_guide;
+    let mut inner_guide = colors.safe_guide_inner;
+    if !enabled {
+        guide.a *= 0.56;
+        inner_guide.a *= 0.56;
+    }
     let action = canvas.inset(canvas.width * 0.05, canvas.height * 0.05);
     let title = canvas.inset(canvas.width * 0.10, canvas.height * 0.10);
     draw_rect_outline(ctx, action, guide);
-    draw_rect_outline(ctx, title, color_with_alpha(guide, 0.72));
+    draw_rect_outline(ctx, title, inner_guide);
 }
 
 fn draw_rect_outline(ctx: &mut PaintContext, rect: Rect, color: Color) {
@@ -1182,7 +1476,7 @@ mod tests {
             .with_frame_label("F42")
             .with_duration_label("240 frames")
             .with_zoom_label("适合")
-            .with_preview_quality_label("完整")
+            .with_preview_quality_label("1/1")
             .playing(true);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let theme = ThemePreset::Dark.build();
@@ -1202,7 +1496,7 @@ mod tests {
         assert!(!encoder.texts.iter().any(|text| text.contains("F42")));
         assert!(!encoder.texts.iter().any(|text| text.contains("240 frames")));
         assert!(encoder.texts.iter().any(|text| text.contains("适合")));
-        assert!(encoder.texts.iter().any(|text| text.contains("完整")));
+        assert!(encoder.texts.iter().any(|text| text.contains("1/1")));
         assert!(!encoder
             .rect_colors
             .iter()
@@ -1358,10 +1652,16 @@ mod tests {
     }
 
     #[test]
-    fn preview_quality_chip_dispatches_custom_action() {
+    fn preview_quality_chip_opens_dropdown_and_option_dispatches_custom_action() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
-            .with_preview_quality_label("50%")
-            .on_preview_quality(|| Action::SaveProject);
+            .with_preview_quality_label("1/2")
+            .on_preview_quality(|scale| {
+                if (scale - 0.25).abs() <= f32::EPSILON {
+                    Action::SaveProject
+                } else {
+                    Action::DeselectAll
+                }
+            });
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let position = viewer.preview_quality_rect().center();
         let actions = RefCell::new(Vec::<Action>::new());
@@ -1394,14 +1694,46 @@ mod tests {
             EventResult::Handled
         );
 
+        assert_eq!(actions.borrow().as_slice(), &[]);
+        assert_eq!(viewer.open_dropdown, Some(ViewerDropdown::PreviewQuality));
+        let option = viewer.dropdown_row_rect(ViewerDropdown::PreviewQuality, 2).center();
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position: option,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position: option,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
         assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
     }
 
     #[test]
-    fn zoom_chip_dispatches_custom_action() {
+    fn zoom_chip_opens_dropdown_and_option_dispatches_custom_action() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
             .with_zoom_label("适合")
-            .on_zoom(|| Action::SaveProject);
+            .on_zoom(|scale| {
+                if scale == Some(1.0) {
+                    Action::SaveProject
+                } else {
+                    Action::DeselectAll
+                }
+            });
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let position = viewer.zoom_rect().center();
         let actions = RefCell::new(Vec::<Action>::new());
@@ -1434,6 +1766,32 @@ mod tests {
             EventResult::Handled
         );
 
+        assert_eq!(actions.borrow().as_slice(), &[]);
+        assert_eq!(viewer.open_dropdown, Some(ViewerDropdown::Zoom));
+        let option = viewer.dropdown_row_rect(ViewerDropdown::Zoom, 5).center();
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position: option,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position: option,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
         assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
     }
 
@@ -1441,7 +1799,7 @@ mod tests {
     fn optional_viewer_chips_without_actions_do_not_dispatch_noop() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
             .with_zoom_label("适合")
-            .with_preview_quality_label("50%");
+            .with_preview_quality_label("1/2");
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -1479,6 +1837,7 @@ mod tests {
         }
 
         assert!(actions.borrow().is_empty());
+        assert!(viewer.open_dropdown.is_some());
     }
 
     #[test]
@@ -1799,8 +2158,8 @@ mod tests {
 
         viewer.paint(&mut ctx);
 
-        assert_eq!(
-            encoder.triangles, 12,
+        assert!(
+            encoder.triangles >= 12,
             "jump and step buttons should paint geometric triangles"
         );
         assert!(
@@ -1854,14 +2213,15 @@ mod tests {
             encoder.raster_images,
             vec![("preview:42".to_owned(), canvas, 2, 2)]
         );
+        let mut checker_dark = theme.colors.checkerboard_dark;
+        checker_dark.a *= 0.28;
+        assert!(encoder.rect_colors.iter().any(|color| *color == theme.colors.viewer_stage));
+        assert!(encoder.rect_colors.iter().any(|color| *color == checker_dark));
         assert!(encoder
             .rect_colors
             .iter()
-            .any(|color| *color == mix_color(theme.colors.background, theme.colors.canvas, 0.38)));
-        assert!(encoder
-            .rect_colors
-            .iter()
-            .any(|color| *color == mix_color(theme.colors.canvas, theme.colors.card, 0.28)));
+            .any(|color| *color == color_with_alpha(theme.colors.foreground, 0.08)));
+        assert!(encoder.rect_colors.iter().any(|color| *color == theme.colors.canvas));
         assert!(
             encoder.clips.contains(&viewport),
             "preview image must be clipped to the viewer viewport"

@@ -28,16 +28,17 @@ use crate::app::ui_actions::{
     DockDropAreaPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
     ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
     ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
-    SequenceSettingsTabPayload, APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
-    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
-    APP_SHELL_CONFIRM_SEQUENCE_SETTINGS, APP_SHELL_EXPORT_OUTPUT_DIALOG,
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
-    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES, APP_SHELL_PREFERENCES_TAB_CHANGED,
-    APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL,
-    APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    SequenceSettingsTabPayload, ViewerSetZoomScalePayload, APP_SHELL_ABOUT,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
+    APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
+    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG,
+    APP_SHELL_RELOCATE_PANEL, APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
     APP_SHELL_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
     APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED, VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
+    VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::AppState;
 use crate::self_hosted::menu_bar::MenuBar;
@@ -484,13 +485,13 @@ fn window_title_for_app_state(state: &AppState) -> String {
         .and_then(|path| path.file_stem())
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or("未命名");
+        .unwrap_or("Untitled");
     let sequence = state.sequence.as_ref().map(|sequence| sequence.name.as_str());
     match sequence {
         Some(sequence) if !sequence.trim().is_empty() => {
-            format!("{project} - {sequence} - Mondrian")
+            format!("{project} · {sequence} — Mondrian")
         }
-        _ => format!("{project} - Mondrian"),
+        _ => format!("{project} — Mondrian"),
     }
 }
 
@@ -523,6 +524,13 @@ impl ViewerZoomMode {
             Self::Fit => None,
             Self::Fixed(percent) => Some(percent as f32 / 100.0),
         }
+    }
+
+    fn from_scale(scale: Option<f32>) -> Self {
+        let Some(scale) = scale.filter(|scale| scale.is_finite() && *scale > 0.0) else {
+            return Self::Fit;
+        };
+        Self::Fixed((scale * 100.0).round().clamp(1.0, 3200.0) as u16)
     }
 }
 
@@ -1072,6 +1080,17 @@ impl SelfHostedAppRoot {
                 let mut models = self.models.clone();
                 apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
                 self.set_models(models);
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == VIEWER_NAMESPACE && name == VIEWER_SET_ZOOM_SCALE =>
+            {
+                if let Ok(payload) = serde_json::from_value::<ViewerSetZoomScalePayload>(payload) {
+                    self.viewer_zoom_mode = ViewerZoomMode::from_scale(payload.scale);
+                    let mut models = self.models.clone();
+                    apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
+                    self.set_models(models);
+                }
                 Ok(None)
             }
             Action::Custom { namespace, name, .. }
@@ -1664,15 +1683,17 @@ mod tests {
         app_shell_save_project_as_dialog_action, app_shell_sequence_settings_action,
         app_shell_sequence_settings_draft_changed_action,
         app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
-        AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
-        AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
-        AssetsRelinkAssetPayload, DockDropAreaPayload, ExportDraftUpdatePayload,
-        ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
-        PreferencesTabPayload, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+        viewer_set_zoom_scale_action, AppShellOpenRecentProjectPayload,
+        AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
+        AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
+        DockDropAreaPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
+        ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
         SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
-        SequenceUpdateSettingsPayload, ASSETS_IMPORT_FILES, ASSETS_NAMESPACE, ASSETS_RELINK_ASSET,
-        EXPORT_NAMESPACE, EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-        PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
+        SequenceUpdateSettingsPayload, ViewerSetZoomScalePayload, ASSETS_IMPORT_FILES,
+        ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
+        SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
     };
     use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
@@ -3691,5 +3712,41 @@ mod tests {
 
         assert_eq!(root.models.viewer.zoom_label, "50%");
         assert_eq!(root.models.viewer.zoom_scale, Some(0.5));
+    }
+
+    #[test]
+    fn viewer_zoom_set_action_applies_explicit_dropdown_selection() {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let platform = FakePlatform::default();
+        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+
+        let resolved = root
+            .try_handle_shell_action(
+                viewer_set_zoom_scale_action(ViewerSetZoomScalePayload { scale: Some(1.0) }),
+                &platform,
+                None,
+            )
+            .expect("set zoom");
+
+        assert!(resolved.is_none());
+        assert_eq!(root.models.viewer.zoom_label, "100%");
+        assert_eq!(root.models.viewer.zoom_scale, Some(1.0));
+
+        root.refresh_from_app_state(&state);
+
+        assert_eq!(root.models.viewer.zoom_label, "100%");
+        assert_eq!(root.models.viewer.zoom_scale, Some(1.0));
+
+        root.try_handle_shell_action(
+            viewer_set_zoom_scale_action(ViewerSetZoomScalePayload { scale: None }),
+            &platform,
+            None,
+        )
+        .expect("fit zoom");
+
+        assert_eq!(root.models.viewer.zoom_label, "适合");
+        assert_eq!(root.models.viewer.zoom_scale, None);
     }
 }

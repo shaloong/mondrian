@@ -13,7 +13,9 @@ use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TimeCode, TrackId};
+use mondrian_core::types::{
+    AssetId, ClipId, EffectId, JobId, Rational, SequenceId, TimeCode, TrackId,
+};
 use mondrian_core::Color;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
@@ -34,12 +36,12 @@ use mondrian_ui_widgets::{
     AssetGrid, AssetGridBadgeTone, AssetGridItem, Button, Checkbox, ColorPickerAreaMode,
     ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, DockPanelDropArea, Dropdown, FlexChild,
     FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList,
-    PanelListBadgeTone, PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow,
-    PropertySection, RasterImage, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
-    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
-    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackMove,
-    TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl, ViewerFrameImage,
-    ViewerStatusTone, ViewerSurface,
+    PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage,
+    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove,
+    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
+    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
+    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl,
+    ViewerFrameImage, ViewerStatusTone, ViewerSurface,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -64,7 +66,7 @@ use crate::app::ui_actions::{
     timeline_select_clip_action, timeline_set_in_out_point_action,
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-    viewer_cycle_zoom_action, viewer_set_preview_resolution_scale_action,
+    viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
     AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
     AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
     AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
@@ -83,14 +85,12 @@ use crate::app::ui_actions::{
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
     TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-    ViewerSetPreviewResolutionScalePayload,
+    ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
 };
 use crate::app::{AppState, SelectedClipRef};
 use crate::self_hosted::action_availability::app_state_action_enabled;
 use crate::self_hosted::icons::AppIcon;
-use crate::self_hosted::preview_scale::{
-    normalize_preview_resolution_scale, preview_scale_percent_label,
-};
+use crate::self_hosted::preview_scale::normalize_preview_resolution_scale;
 use crate::self_hosted::shortcuts::shortcut_label_for_action;
 use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
@@ -451,43 +451,48 @@ impl PanelListModel {
 
     fn effect_registry_model(
         effect_target: Option<SelectedClipRef>,
-        apply_blocker: Option<&'static str>,
+        _apply_blocker: Option<&'static str>,
     ) -> Self {
         let effects = effect_library_types();
         let items = if effects.is_empty() {
-            vec![with_app_icon(
-                PanelListItem::new("没有可用效果")
-                    .with_subtitle("效果注册表为空")
-                    .disabled(true),
-                AppIcon::Effect,
-            )]
+            vec![PanelListItem::new("没有可用效果").disabled(true)]
         } else {
-            effects
-                .into_iter()
-                .map(|effect_type| {
-                    let name = effect_display_name(&effect_type);
-                    let category = effect_type.category_path().join(" / ");
-                    let mut item =
-                        PanelListItem::new(name).with_subtitle(category).with_badge_tone(
-                            effect_badge(&effect_type),
-                            effect_badge_tone(&effect_type),
-                        );
-                    if let Some(selection) = effect_target {
-                        item = item.with_activate_action(effects_add_to_clip_action(
-                            EffectsAddToClipPayload {
-                                clip: inspector_clip_payload(selection),
-                                effect_type,
-                            },
-                        ));
+            let mut items = Vec::new();
+            let mut emitted_categories = std::collections::BTreeSet::<String>::new();
+            for effect_type in effects {
+                let categories = effect_type.category_path();
+                let mut prefix = String::new();
+                for (depth, category) in categories.iter().enumerate() {
+                    if !prefix.is_empty() {
+                        prefix.push('/');
                     }
-                    with_app_icon(item, AppIcon::Effect)
-                })
-                .collect()
+                    prefix.push_str(category);
+                    if emitted_categories.insert(prefix.clone()) {
+                        items.push(
+                            PanelListItem::new((*category).to_owned())
+                                .with_tree_depth(depth as u8)
+                                .with_tree_node(prefix.clone(), true),
+                        );
+                    }
+                }
+
+                let name = effect_display_name(&effect_type);
+                let depth = categories.len();
+                let mut item = PanelListItem::new(name).with_tree_depth(depth as u8);
+                if let Some(selection) = effect_target {
+                    item = item.with_activate_action(effects_add_to_clip_action(
+                        EffectsAddToClipPayload {
+                            clip: inspector_clip_payload(selection),
+                            effect_type,
+                        },
+                    ));
+                }
+                items.push(item);
+            }
+            items
         };
 
-        PanelListModel::new("Effects", items)
-            .with_subtitle(apply_blocker.unwrap_or("效果浏览器"))
-            .with_filter_placeholder("搜索效果")
+        PanelListModel::new("Effects", items).with_filter_placeholder("搜索效果")
     }
 }
 
@@ -584,7 +589,7 @@ impl ViewerPanelModel {
             duration_label: String::new(),
             zoom_label: "适合".into(),
             zoom_scale: None,
-            preview_quality_label: "完整".into(),
+            preview_quality_label: "1/1".into(),
             preview_resolution_scale: 1.0,
             width: 16,
             height: 9,
@@ -599,38 +604,48 @@ impl ViewerPanelModel {
 fn viewer_preview_quality_label(scale: f32) -> String {
     let scale = normalize_preview_resolution_scale(scale);
     if (scale - 1.0).abs() <= f32::EPSILON {
-        "完整".into()
+        "1/1".into()
+    } else if (scale - 0.5).abs() <= f32::EPSILON {
+        "1/2".into()
+    } else if (scale - 0.25).abs() <= f32::EPSILON {
+        "1/4".into()
     } else {
-        preview_scale_percent_label(scale)
-    }
-}
-
-fn next_viewer_preview_resolution_scale(scale: f32) -> f32 {
-    let scale = normalize_preview_resolution_scale(scale);
-    if scale >= 1.0 {
-        0.5
-    } else if scale >= 0.5 {
-        0.25
-    } else if scale >= 0.25 {
-        0.125
-    } else {
-        1.0
+        "1/8".into()
     }
 }
 
 /// Timeline panel data in frame space.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TimelinePanelModel {
     pub tracks: Vec<TimelineTrack>,
     pub playhead_frame: i64,
     pub in_point_frame: i64,
     pub out_point_frame: Option<i64>,
+    pub frame_rate: Rational,
     pub enabled: bool,
     pub empty_message: Option<String>,
     edit_availability: Option<TimelineEditAvailability>,
     track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
     nested_sequence_refs: Vec<Vec<Option<SequenceId>>>,
+}
+
+impl Default for TimelinePanelModel {
+    fn default() -> Self {
+        Self {
+            tracks: Vec::new(),
+            playhead_frame: 0,
+            in_point_frame: 0,
+            out_point_frame: None,
+            frame_rate: Rational::FPS_30,
+            enabled: false,
+            empty_message: None,
+            edit_availability: None,
+            track_refs: Vec::new(),
+            clip_refs: Vec::new(),
+            nested_sequence_refs: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -721,20 +736,27 @@ impl TimelinePanelModel {
         selected_clips: &[SelectedClipRef],
         selected_tracks: &[TrackId],
     ) -> Self {
-        let video_tracks = sequence.video_tracks.iter().map(|track| {
+        let video_tracks = sequence.video_tracks.iter().enumerate().rev().map(|(index, track)| {
+            let label = format!("V{}", index + 1);
+            let mut view_track =
+                timeline_track_from_sequence_track(track, true, selected_clips, selected_tracks);
+            view_track.label = label;
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: true },
                 track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
                 track.clips.iter().map(|clip| clip.nested_sequence_id).collect::<Vec<_>>(),
-                timeline_track_from_sequence_track(track, true, selected_clips, selected_tracks),
+                view_track,
             )
         });
-        let audio_tracks = sequence.audio_tracks.iter().map(|track| {
+        let audio_tracks = sequence.audio_tracks.iter().enumerate().map(|(index, track)| {
+            let mut view_track =
+                timeline_track_from_sequence_track(track, false, selected_clips, selected_tracks);
+            view_track.label = format!("A{}", index + 1);
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: false },
                 track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
                 track.clips.iter().map(|clip| clip.nested_sequence_id).collect::<Vec<_>>(),
-                timeline_track_from_sequence_track(track, false, selected_clips, selected_tracks),
+                view_track,
             )
         });
 
@@ -748,12 +770,15 @@ impl TimelinePanelModel {
             nested_sequence_refs.push(nested_ids);
             tracks.push(track);
         }
-        let empty_message = tracks.is_empty().then(|| "当前序列没有轨道".to_owned());
+        let empty_message = tracks
+            .is_empty()
+            .then(|| "当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑".to_owned());
         Self {
             tracks,
             playhead_frame: sequence.playhead.frame.max(0),
             in_point_frame: sequence.in_point_frame(),
             out_point_frame: sequence.out_point_frame(),
+            frame_rate: sequence.settings.frame_rate,
             enabled: true,
             empty_message,
             edit_availability: None,
@@ -770,8 +795,9 @@ impl TimelinePanelModel {
             playhead_frame: 0,
             in_point_frame: 0,
             out_point_frame: None,
+            frame_rate: Rational::FPS_30,
             enabled: false,
-            empty_message: Some("未载入序列".into()),
+            empty_message: Some("未载入序列\n打开项目或创建序列以开始编辑".into()),
             edit_availability: Some(TimelineEditAvailability::from_app_state(&AppState::new())),
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
@@ -850,12 +876,22 @@ impl TimelinePanelModel {
         if source.is_video_track != target.is_video_track {
             return None;
         }
-        let target_index = self
+        let display_target_index = self
             .track_refs
             .iter()
             .take(movement.new_track_index)
             .filter(|track| track.is_video_track == source.is_video_track)
             .count();
+        let target_kind_count = self
+            .track_refs
+            .iter()
+            .filter(|track| track.is_video_track == source.is_video_track)
+            .count();
+        let target_index = if source.is_video_track {
+            target_kind_count.saturating_sub(1).saturating_sub(display_target_index)
+        } else {
+            display_target_index
+        };
         Some(TimelineMoveTrackPayload {
             track_id: source.track_id,
             is_video_track: source.is_video_track,
@@ -1048,7 +1084,7 @@ impl InspectorPanelModel {
     pub fn empty() -> Self {
         Self {
             selected_clip: None,
-            empty_message: Some("选择剪辑以检查属性".into()),
+            empty_message: Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。".into()),
             selected_effect_id: None,
             is_editable: false,
             edit_disabled_reason: None,
@@ -1626,7 +1662,6 @@ fn panel_content_for_slot(kind: PanelKind, models: &SelfHostedPanelModels) -> Bo
 }
 
 fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
-    let next_preview_scale = next_viewer_preview_resolution_scale(model.preview_resolution_scale);
     let surface = ViewerSurface::new(model.title.clone(), model.width, model.height)
         .with_status(model.status.clone())
         .with_status_tone(model.status_tone)
@@ -1640,10 +1675,10 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .playing(model.playing)
         .enabled(model.enabled)
         .on_control(viewer_control_action)
-        .on_zoom(viewer_cycle_zoom_action)
-        .on_preview_quality(move || {
+        .on_zoom(|scale| viewer_set_zoom_scale_action(ViewerSetZoomScalePayload { scale }))
+        .on_preview_quality(|scale| {
             viewer_set_preview_resolution_scale_action(ViewerSetPreviewResolutionScalePayload {
-                scale: next_preview_scale,
+                scale,
             })
         });
     let surface = with_viewer_transport_icons(surface);
@@ -1694,6 +1729,24 @@ fn with_timeline_toolbar_icons(mut timeline: TimelineView) -> TimelineView {
     ] {
         if let Ok(vector_icon) = icon.vector_icon() {
             timeline = timeline.with_toolbar_icon(slot, vector_icon);
+        }
+    }
+    for (slot, icon) in [
+        (
+            TimelineTrackControlIconSlot::VisibilityOn,
+            AppIcon::EyeVisible,
+        ),
+        (
+            TimelineTrackControlIconSlot::VisibilityOff,
+            AppIcon::EyeHidden,
+        ),
+        (TimelineTrackControlIconSlot::MuteOff, AppIcon::Speaker),
+        (TimelineTrackControlIconSlot::MuteOn, AppIcon::SpeakerMuted),
+        (TimelineTrackControlIconSlot::LockOff, AppIcon::Unlock),
+        (TimelineTrackControlIconSlot::LockOn, AppIcon::Lock),
+    ] {
+        if let Ok(vector_icon) = icon.vector_icon() {
+            timeline = timeline.with_track_control_icon(slot, vector_icon);
         }
     }
     timeline
@@ -1847,7 +1900,9 @@ fn asset_grid_item_from_asset(
     let context_menu_items = asset_grid_asset_context_menu_items(&asset, proxy_mode);
     let offline = asset_is_offline(&asset);
     let proxied = proxy_mode && matches!(asset.kind, AssetKind::Video);
+    let duration_label = asset_duration_label(asset.media_info.duration);
     let mut item = AssetGridItem::new(asset.id.to_string(), asset.name, accent)
+        .with_subtitle(duration_label)
         .with_badge(badge)
         .with_drag_payload(DragPayload::Asset(asset.id))
         .with_activate_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
@@ -1856,9 +1911,9 @@ fn asset_grid_item_from_asset(
         .with_context_menu(context_menu_items)
         .renamable(true);
     if offline {
-        item = item.with_badge_tone("OFFLINE", AssetGridBadgeTone::Warning);
+        item = item.with_badge_tone("离线", AssetGridBadgeTone::Warning);
     } else if proxied {
-        item = item.with_badge_tone("PROXY", AssetGridBadgeTone::Success);
+        item = item.with_badge_tone("代理", AssetGridBadgeTone::Success);
     }
     if let Some(state) = thumbnail_state {
         item = match state {
@@ -1978,9 +2033,9 @@ fn asset_folder_direct_item_count(
 
 fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
     let (title, badge) = if parent_id.is_some() {
-        ("Back", "UP")
+        ("返回", "上级")
     } else {
-        ("All assets", "ALL")
+        ("全部素材", "全部")
     };
     with_asset_icon(
         AssetGridItem::new("asset-folder-up", title, current_theme().colors.secondary)
@@ -1993,11 +2048,7 @@ fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
 }
 
 fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> AssetGridItem {
-    let badge = if item_count == 1 {
-        "1 ITEM".to_owned()
-    } else {
-        format!("{item_count} ITEMS")
-    };
+    let badge = format!("{item_count} 项");
     let folder_id = folder.id.clone();
     with_asset_icon(
         AssetGridItem::new(
@@ -2039,13 +2090,6 @@ fn with_asset_icon(item: AssetGridItem, icon: AppIcon) -> AssetGridItem {
     }
 }
 
-fn with_app_icon(item: PanelListItem, icon: AppIcon) -> PanelListItem {
-    match icon.vector_icon() {
-        Ok(icon) => item.with_icon(icon),
-        Err(_) => item,
-    }
-}
-
 fn effect_icon_button(
     icon: AppIcon,
     fallback_label: &'static str,
@@ -2069,10 +2113,25 @@ fn color_picker_trigger(color: Color) -> ColorPickerTrigger {
 
 fn asset_kind_badge(kind: &AssetKind) -> &'static str {
     match kind {
-        AssetKind::Video => "VID",
-        AssetKind::Audio => "AUD",
-        AssetKind::AdjustmentLayer => "ADJ",
-        AssetKind::SolidColor => "CLR",
+        AssetKind::Video => "视频",
+        AssetKind::Audio => "音频",
+        AssetKind::AdjustmentLayer => "序列",
+        AssetKind::SolidColor => "图片",
+    }
+}
+
+fn asset_duration_label(duration: std::time::Duration) -> String {
+    let total_secs = duration.as_secs();
+    if total_secs == 0 {
+        return String::new();
+    }
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -2092,26 +2151,6 @@ fn asset_kind_icon(kind: &AssetKind) -> AppIcon {
         AssetKind::Audio => AppIcon::Music,
         AssetKind::AdjustmentLayer => AppIcon::Grid,
         AssetKind::SolidColor => AppIcon::Rectangle,
-    }
-}
-
-fn effect_badge(effect_type: &EffectType) -> &'static str {
-    match effect_type {
-        EffectType::Plugin(_) => "PLG",
-        EffectType::GaussianBlur | EffectType::Sharpen => "GPU",
-        EffectType::Lut3D => "3D",
-        EffectType::ChromaKey | EffectType::LumaKey => "KEY",
-        _ => "FX",
-    }
-}
-
-fn effect_badge_tone(effect_type: &EffectType) -> PanelListBadgeTone {
-    match effect_type {
-        EffectType::Plugin(_) => PanelListBadgeTone::Accent,
-        EffectType::Lut3D => PanelListBadgeTone::Success,
-        EffectType::ChromaKey | EffectType::LumaKey => PanelListBadgeTone::Warning,
-        EffectType::GaussianBlur | EffectType::Sharpen => PanelListBadgeTone::Neutral,
-        _ => PanelListBadgeTone::Neutral,
     }
 }
 
@@ -2221,6 +2260,15 @@ fn panel_list(model: &PanelListModel) -> PanelList {
     if let Some(placeholder) = &model.filter_placeholder {
         list = list.with_filter(placeholder.clone());
     }
+    if model.title == "Effects" {
+        list = list.with_row_height(30.0);
+        if let (Ok(collapsed), Ok(expanded)) = (
+            AppIcon::CaretRight.vector_icon(),
+            AppIcon::CaretDown.vector_icon(),
+        ) {
+            list = list.with_tree_icons(collapsed, expanded);
+        }
+    }
     list
 }
 
@@ -2307,6 +2355,16 @@ fn asset_grid_rename_action(_index: usize, item: &AssetGridItem, name: &str) -> 
             })
         }
         _ => Action::NoOp,
+    }
+}
+
+fn effect_badge(effect_type: &EffectType) -> &'static str {
+    match effect_type {
+        EffectType::Plugin(_) => "PLG",
+        EffectType::GaussianBlur | EffectType::Sharpen => "GPU",
+        EffectType::Lut3D => "3D",
+        EffectType::ChromaKey | EffectType::LumaKey => "KEY",
+        _ => "FX",
     }
 }
 
@@ -2465,9 +2523,9 @@ fn demo_sequence() -> Sequence {
     while sequence.audio_tracks.len() < 2 {
         sequence.add_audio_track();
     }
-    sequence.video_tracks[0].name = "V3".to_string();
+    sequence.video_tracks[0].name = "V1".to_string();
     sequence.video_tracks[1].name = "V2".to_string();
-    sequence.video_tracks[2].name = "V1".to_string();
+    sequence.video_tracks[2].name = "V3".to_string();
     sequence.audio_tracks[0].name = "A1".to_string();
     sequence.audio_tracks[1].name = "A2".to_string();
 
@@ -2477,7 +2535,7 @@ fn demo_sequence() -> Sequence {
     let mut adjustment =
         Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(36, tb), TimeCode::new(84, tb));
     adjustment.label = Some("Adjustment".to_string());
-    sequence.video_tracks[0].add_clip(adjustment).expect("add adjustment");
+    sequence.video_tracks[2].add_clip(adjustment).expect("add adjustment");
 
     let mut title = Clip::new_nested_sequence(
         nested_id,
@@ -2486,7 +2544,7 @@ fn demo_sequence() -> Sequence {
         Some("Title".to_string()),
     );
     title.solid_color = Some(Color::from_hex(0x4B7BE5));
-    sequence.video_tracks[0].add_clip(title).expect("add title");
+    sequence.video_tracks[2].add_clip(title).expect("add title");
 
     let mut b_roll = Clip::new(AssetId::new(), TimeCode::new(18, tb), TimeCode::new(72, tb));
     b_roll.label = Some("B-roll".to_string());
@@ -2504,7 +2562,7 @@ fn demo_sequence() -> Sequence {
 
     let mut interview = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(96, tb));
     interview.label = Some("Interview".to_string());
-    sequence.video_tracks[2].add_clip(interview).expect("add interview");
+    sequence.video_tracks[0].add_clip(interview).expect("add interview");
 
     let mut cutaway = Clip::new(
         AssetId::new(),
@@ -2513,7 +2571,7 @@ fn demo_sequence() -> Sequence {
     );
     cutaway.label = Some("Cutaway".to_string());
     cutaway.solid_color = Some(Color::from_hex(0x2F855A));
-    sequence.video_tracks[2].add_clip(cutaway).expect("add cutaway");
+    sequence.video_tracks[0].add_clip(cutaway).expect("add cutaway");
 
     let mut outro = Clip::new(
         AssetId::new(),
@@ -2522,7 +2580,7 @@ fn demo_sequence() -> Sequence {
     );
     outro.label = Some("Outro".to_string());
     outro.solid_color = Some(Color::from_hex(0x744210));
-    sequence.video_tracks[2].add_clip(outro).expect("add outro");
+    sequence.video_tracks[0].add_clip(outro).expect("add outro");
 
     let mut dialogue = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(176, tb));
     dialogue.label = Some("Dialogue".to_string());
@@ -2555,7 +2613,8 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
     let action_model = model.clone();
     let timeline = TimelineView::new(model.tracks.clone())
         .enabled(model.enabled)
-        .with_header_width(104.0)
+        .with_header_width(144.0)
+        .with_frame_rate(model.frame_rate)
         .with_playhead(model.playhead_frame)
         .with_in_out_points(model.in_point_frame, model.out_point_frame)
         .on_clip_select({
@@ -3034,7 +3093,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         "No clip selected"
     });
     if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
-        return PropertyPanel::with_options(
+        let (title, description) = message
+            .split_once('\n')
+            .map_or((message, ""), |(title, description)| (title, description));
+        let mut panel = PropertyPanel::with_options(
             "检查器",
             PropertyPanelOptions {
                 label_width: 0.0,
@@ -3045,10 +3107,11 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             },
         )
         .with_embedded_panel_chrome()
-        .with_section(PropertySection::new("").with_row(PropertyRow::new(
-            "",
-            Box::new(Label::new(message).muted().wrapped()),
-        )));
+        .with_empty_state(title, description);
+        if let Ok(icon) = AppIcon::Info.vector_icon() {
+            panel = panel.with_empty_state_icon(icon);
+        }
+        return panel;
     }
     let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
     tint.picker_mut().set_area_mode(model.tint_area_mode);
@@ -3860,7 +3923,16 @@ mod tests {
     use std::path::PathBuf;
 
     fn timeline_content_point(x: f32, y: f32) -> Point {
-        Point::new(x, y + 30.0)
+        const LEGACY_APP_TIMELINE_HEADER_WIDTH: f32 = 104.0;
+        const CURRENT_TIMELINE_HEADER_WIDTH: f32 = 144.0;
+        Point::new(
+            x + CURRENT_TIMELINE_HEADER_WIDTH - LEGACY_APP_TIMELINE_HEADER_WIDTH,
+            y + 30.0,
+        )
+    }
+
+    fn video_display_index(sequence: &Sequence, domain_index: usize) -> usize {
+        sequence.video_tracks.len() - 1 - domain_index
     }
 
     fn badge_labels(item: &AssetGridItem) -> Vec<&str> {
@@ -3943,7 +4015,7 @@ mod tests {
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
         assert_eq!(models.viewer.empty_message, None);
         assert_eq!(models.viewer.zoom_label, "适合");
-        assert_eq!(models.viewer.preview_quality_label, "50%");
+        assert_eq!(models.viewer.preview_quality_label, "1/2");
         assert_eq!(models.viewer.preview_resolution_scale, 0.5);
         assert!(!models.timeline.tracks.is_empty());
         assert!(!models.inspector.curve_points.is_empty());
@@ -4110,7 +4182,10 @@ mod tests {
         assert!(models.timeline.tracks.is_empty());
         assert_eq!(models.timeline.playhead_frame, 0);
         assert!(!models.timeline.enabled);
-        assert_eq!(models.timeline.empty_message.as_deref(), Some("未载入序列"));
+        assert_eq!(
+            models.timeline.empty_message.as_deref(),
+            Some("未载入序列\n打开项目或创建序列以开始编辑")
+        );
         assert!(!timeline_panel(&models.timeline).can_focus());
         assert_eq!(models.assets.items[0].title, "没有项目素材库");
         assert!(models.assets.items[0].icon.is_some());
@@ -4123,11 +4198,11 @@ mod tests {
         assert_eq!(models.viewer.resolution_label, "无信号");
         assert_eq!(models.viewer.timecode_label, "00:00:00:00");
         assert_eq!(models.viewer.zoom_label, "适合");
-        assert_eq!(models.viewer.preview_quality_label, "完整");
+        assert_eq!(models.viewer.preview_quality_label, "1/1");
         assert_eq!(models.inspector.selected_clip, None);
         assert_eq!(
             models.inspector.empty_message.as_deref(),
-            Some("选择剪辑以检查属性")
+            Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。")
         );
         assert!(!models.inspector.is_editable);
         assert_eq!(models.inspector.edit_disabled_reason, None);
@@ -4153,7 +4228,10 @@ mod tests {
 
         assert!(model.enabled);
         assert!(model.tracks.is_empty());
-        assert_eq!(model.empty_message.as_deref(), Some("当前序列没有轨道"));
+        assert_eq!(
+            model.empty_message.as_deref(),
+            Some("当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑")
+        );
         assert!(timeline_panel(&model).can_focus());
     }
 
@@ -4163,8 +4241,11 @@ mod tests {
         let mut panel = inspector_panel(&model);
         panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
 
-        assert_eq!(model.empty_message.as_deref(), Some("选择剪辑以检查属性"));
-        assert_eq!(panel.section_count(), 1);
+        assert_eq!(
+            model.empty_message.as_deref(),
+            Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。")
+        );
+        assert_eq!(panel.section_count(), 0);
 
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -4980,7 +5061,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(badge_labels(&item), ["VID", "OFFLINE"]);
+        assert_eq!(badge_labels(&item), ["视频", "离线"]);
         assert_eq!(item.badges[1].tone, AssetGridBadgeTone::Warning);
         assert_eq!(item.context_menu_items.len(), 4);
         assert_eq!(item.context_menu_items[0].label, "在文件管理器中显示");
@@ -5007,7 +5088,7 @@ mod tests {
         let item =
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path.clone()), None, false);
 
-        assert_eq!(badge_labels(&item), ["VID"]);
+        assert_eq!(badge_labels(&item), ["视频"]);
         assert_eq!(item.context_menu_items.len(), 4);
         assert_eq!(item.context_menu_items[0].label, "在文件管理器中显示");
         assert_eq!(item.context_menu_items[1].label, "启用代理模式");
@@ -5024,7 +5105,7 @@ mod tests {
 
         let proxied =
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true);
-        assert_eq!(badge_labels(&proxied), ["VID", "PROXY"]);
+        assert_eq!(badge_labels(&proxied), ["视频", "代理"]);
         assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
         assert_eq!(proxied.context_menu_items[1].label, "关闭代理模式");
         let Action::Custom { payload, .. } = &proxied.context_menu_items[1].action else {
@@ -5344,17 +5425,19 @@ mod tests {
             model.tracks.len(),
             sequence.video_tracks.len() + sequence.audio_tracks.len()
         );
-        assert_eq!(model.tracks[0].label, "V1");
+        assert_eq!(model.tracks[0].label, "V3");
+        let selected_video = sequence.video_tracks.len() - 1;
+        assert_eq!(model.tracks[selected_video].label, "V1");
         assert_eq!(
-            model.tracks[0].kind,
+            model.tracks[selected_video].kind,
             mondrian_ui_widgets::TimelineTrackKind::Video
         );
-        assert_eq!(model.tracks[0].clips[0].label, "Interview");
-        assert_eq!(model.tracks[0].clips[0].start_frame, 10);
-        assert_eq!(model.tracks[0].clips[0].duration_frames, 20);
-        assert!(model.tracks[0].clips[0].selected);
-        assert!(model.tracks[0].clips[0].select_action.is_none());
-        assert!(!model.tracks[0].selected);
+        assert_eq!(model.tracks[selected_video].clips[0].label, "Interview");
+        assert_eq!(model.tracks[selected_video].clips[0].start_frame, 10);
+        assert_eq!(model.tracks[selected_video].clips[0].duration_frames, 20);
+        assert!(model.tracks[selected_video].clips[0].selected);
+        assert!(model.tracks[selected_video].clips[0].select_action.is_none());
+        assert!(!model.tracks[selected_video].selected);
         let first_audio = sequence.video_tracks.len();
         assert_eq!(
             model.track_identity(TimelineTrackRef { track_index: first_audio }),
@@ -5378,7 +5461,7 @@ mod tests {
         sequence.audio_tracks[0].is_muted = true;
 
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
-        let video_ref = TimelineTrackRef { track_index: 0 };
+        let video_ref = TimelineTrackRef { track_index: sequence.video_tracks.len() - 1 };
         let first_audio_ref = TimelineTrackRef { track_index: sequence.video_tracks.len() };
 
         let visibility = model
@@ -5414,21 +5497,23 @@ mod tests {
         let mut sequence = Sequence::new("edit");
         sequence.add_video_track();
         sequence.add_audio_track();
+        let video_count = sequence.video_tracks.len();
         let moved_track_id = sequence.video_tracks[1].id;
         let first_audio_ref = TimelineTrackRef { track_index: sequence.video_tracks.len() };
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+        let moved_display_index = video_count - 1 - 1;
 
         let payload = model
             .track_move_payload(TimelineTrackMove {
-                track_ref: TimelineTrackRef { track_index: 1 },
-                old_track_index: 1,
+                track_ref: TimelineTrackRef { track_index: moved_display_index },
+                old_track_index: moved_display_index,
                 new_track_index: 0,
             })
             .expect("same-kind video move payload");
 
         assert_eq!(payload.track_id, moved_track_id);
         assert!(payload.is_video_track);
-        assert_eq!(payload.target_index, 0);
+        assert_eq!(payload.target_index, video_count - 1);
         assert!(model
             .track_move_payload(TimelineTrackMove {
                 track_ref: TimelineTrackRef { track_index: 0 },
@@ -5583,7 +5668,7 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("move track payload");
         assert_eq!(payload.track_id, moved.track_id);
         assert!(payload.is_video_track);
-        assert_eq!(payload.target_index, 0);
+        assert_eq!(payload.target_index, 2);
     }
 
     #[test]
@@ -5595,8 +5680,9 @@ mod tests {
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        let display_track_index = video_display_index(&sequence, 0);
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
-        assert!(model.tracks[0].clips[0].disabled);
+        assert!(model.tracks[display_track_index].clips[0].disabled);
 
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -5618,7 +5704,10 @@ mod tests {
         assert_eq!(
             panel.event(
                 &UiEvent::MouseDown {
-                    position: timeline_content_point(140.0, 42.0),
+                    position: timeline_content_point(
+                        140.0,
+                        42.0 + display_track_index as f32 * 42.0,
+                    ),
                     button: MouseButton::Left,
                     modifiers: Modifiers::none(),
                 },
@@ -6135,12 +6224,13 @@ mod tests {
                 Some("Nested".to_owned()),
             ))
             .expect("add nested clip");
+        let display_track_index = video_display_index(&sequence, 0);
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
 
         let action = timeline_edit_command_action(
             &model,
             TimelineEditCommand::OpenNestedSequence(TimelineClipRef {
-                track_index: 0,
+                track_index: display_track_index,
                 clip_index: 0,
             }),
         );
@@ -6166,6 +6256,7 @@ mod tests {
         let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(24, tb));
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        let display_track_index = video_display_index(&sequence, 0);
         state.sequence = Some(sequence);
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: stale_track_id,
@@ -6175,7 +6266,7 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
-        assert!(models.timeline.tracks[0].clips[0].selected);
+        assert!(models.timeline.tracks[display_track_index].clips[0].selected);
         assert_eq!(
             models.inspector.selected_clip,
             Some(SelectedClipRef {
@@ -6218,6 +6309,7 @@ mod tests {
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add solid clip");
+        let display_track_index = video_display_index(&sequence, 0);
         state.sequence = Some(sequence);
         assert!(
             state.select_effect_by_id(clip_id, effect_id).is_some(),
@@ -6235,10 +6327,10 @@ mod tests {
         assert_eq!(models.viewer.empty_message, None);
         assert!(models.viewer.resolution_label.contains("1920x1080"));
         assert_eq!(models.viewer.zoom_label, "适合");
-        assert_eq!(models.viewer.preview_quality_label, "50%");
+        assert_eq!(models.viewer.preview_quality_label, "1/2");
         assert_eq!(models.timeline.playhead_frame, 7);
-        assert!(models.timeline.tracks[0].clips[0].selected);
-        assert!(models.timeline.tracks[0].clips[0].disabled);
+        assert!(models.timeline.tracks[display_track_index].clips[0].selected);
+        assert!(models.timeline.tracks[display_track_index].clips[0].disabled);
         assert!(models.inspector.is_editable);
         assert_eq!(models.inspector.edit_disabled_reason, None);
         assert!(!models.inspector.enabled);
@@ -6344,7 +6436,7 @@ mod tests {
         assert_eq!(frame.key, "test-preview");
         assert_eq!(frame.width, 320);
         assert_eq!(frame.height, 180);
-        assert_eq!(models.viewer.preview_quality_label, "50%");
+        assert_eq!(models.viewer.preview_quality_label, "1/2");
         assert_eq!(models.viewer.preview_resolution_scale, 0.5);
     }
 
@@ -6357,7 +6449,7 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
-        assert_eq!(models.viewer.preview_quality_label, "完整");
+        assert_eq!(models.viewer.preview_quality_label, "1/1");
         assert_eq!(models.viewer.preview_resolution_scale, 1.0);
     }
 
@@ -6370,7 +6462,7 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
-        assert_eq!(models.viewer.preview_quality_label, "12.5%");
+        assert_eq!(models.viewer.preview_quality_label, "1/8");
         assert_eq!(models.viewer.preview_resolution_scale, 0.125);
     }
 
@@ -6485,7 +6577,7 @@ mod tests {
         );
         let item = &models.assets.items[0];
         assert_eq!(item.title, "Brand Purple");
-        assert_eq!(badge_labels(item), ["CLR"]);
+        assert_eq!(badge_labels(item), ["图片"]);
         assert!(item.icon.is_some());
         assert!(item.select_action.is_none());
         assert_eq!(item.drag_payload, Some(DragPayload::Asset(asset_id)));
@@ -6619,7 +6711,7 @@ mod tests {
         assert_eq!(folder.id, format!("folder:{folder_id}"));
         assert_eq!(folder.title, "Rushes");
         assert!(folder.subtitle.is_empty());
-        assert_eq!(badge_labels(folder), ["2 ITEMS"]);
+        assert_eq!(badge_labels(folder), ["2 项"]);
         assert!(folder.icon.is_some());
         assert_eq!(
             folder.drag_payload,
@@ -6649,7 +6741,7 @@ mod tests {
 
         let asset = &models.assets.items[1];
         assert_eq!(asset.title, "Root Adjustment");
-        assert_eq!(badge_labels(asset), ["ADJ"]);
+        assert_eq!(badge_labels(asset), ["序列"]);
         assert_eq!(asset.drag_payload, Some(DragPayload::Asset(root_asset_id)));
         assert!(
             !models.assets.items.iter().any(|item| item.title == "Nested"),
@@ -6701,9 +6793,9 @@ mod tests {
 
         let parent = &models.assets.items[0];
         assert_eq!(parent.id, "asset-folder-up");
-        assert_eq!(parent.title, "All assets");
+        assert_eq!(parent.title, "全部素材");
         assert!(parent.subtitle.is_empty());
-        assert_eq!(badge_labels(parent), ["ALL"]);
+        assert_eq!(badge_labels(parent), ["全部"]);
         let Action::Custom { namespace, name, payload } =
             parent.activate_action.as_ref().expect("parent activate action")
         else {
@@ -6720,7 +6812,7 @@ mod tests {
         assert_eq!(nested.id, format!("folder:{nested_id}"));
         assert_eq!(nested.title, "Selects");
         assert!(nested.subtitle.is_empty());
-        assert_eq!(badge_labels(nested), ["1 ITEM"]);
+        assert_eq!(badge_labels(nested), ["1 项"]);
         assert_eq!(
             nested.drag_payload,
             Some(DragPayload::AssetFolder(nested_id.clone()))
@@ -6770,14 +6862,20 @@ mod tests {
     fn effect_panel_model_keeps_catalog_browsable_without_apply_target() {
         let model = PanelListModel::from_effect_registry(None);
 
-        assert_eq!(model.subtitle, "选择视频剪辑后应用效果");
+        assert!(model.subtitle.is_empty());
         assert_eq!(model.filter_placeholder.as_deref(), Some("搜索效果"));
         assert!(model.items.iter().all(|item| item.select_action.is_none()));
         assert!(model.items.iter().all(|item| item.activate_action.is_none()));
-        assert!(model.items.iter().all(|item| item.icon.is_some()));
-        assert!(model.items.iter().all(|item| !item.disabled));
-        assert!(model.items.iter().all(|item| item.badge.is_some()));
-        assert!(model.items.iter().all(|item| !item.subtitle.is_empty()));
+        assert!(model.items.iter().all(|item| item.icon.is_none()));
+        assert!(model.items.iter().all(|item| item.badge.is_none()));
+        assert!(model.items.iter().all(|item| item.subtitle.is_empty()));
+        assert!(model.items.iter().any(|item| {
+            item.title == "颜色" && item.tree_depth == 0 && item.tree_expanded == Some(true)
+        }));
+        assert!(model
+            .items
+            .iter()
+            .any(|item| { item.tree_depth > 0 && item.tree_expanded.is_none() && !item.disabled }));
     }
 
     #[test]
@@ -6792,10 +6890,11 @@ mod tests {
 
         let model = PanelListModel::from_effect_registry(Some(selection));
 
-        assert_eq!(model.subtitle, "效果浏览器");
-        assert!(model.items.iter().all(|item| item.icon.is_some()));
-        assert!(model.items.iter().all(|item| !item.disabled));
-        assert!(model.items.iter().all(|item| item.badge.is_some()));
+        assert!(model.subtitle.is_empty());
+        assert!(model.items.iter().all(|item| item.icon.is_none()));
+        assert!(model.items.iter().all(|item| item.badge.is_none()));
+        assert!(model.items.iter().all(|item| item.subtitle.is_empty()));
+        assert!(model.items.iter().any(|item| item.tree_expanded.is_some()));
         let action = model
             .items
             .iter()
@@ -6811,30 +6910,6 @@ mod tests {
         assert_eq!(payload.clip.clip_id, clip_id);
         assert_eq!(payload.clip.track_id, track_id);
         assert!(payload.clip.is_video_track);
-    }
-
-    #[test]
-    fn effect_badges_use_semantic_panel_list_tones() {
-        assert_eq!(
-            effect_badge_tone(&EffectType::Plugin("demo".to_owned())),
-            PanelListBadgeTone::Accent
-        );
-        assert_eq!(
-            effect_badge_tone(&EffectType::Lut3D),
-            PanelListBadgeTone::Success
-        );
-        assert_eq!(
-            effect_badge_tone(&EffectType::ChromaKey),
-            PanelListBadgeTone::Warning
-        );
-        assert_eq!(
-            effect_badge_tone(&EffectType::LumaKey),
-            PanelListBadgeTone::Warning
-        );
-        assert_eq!(
-            effect_badge_tone(&EffectType::GaussianBlur),
-            PanelListBadgeTone::Neutral
-        );
     }
 
     #[test]
@@ -7280,14 +7355,13 @@ mod tests {
 
         let models = SelfHostedPanelModels::from_app_state(&state);
 
-        assert_eq!(models.effects.subtitle, "所选剪辑所在轨道已锁定");
-        assert!(models.effects.items.iter().all(|item| !item.disabled));
+        assert!(models.effects.subtitle.is_empty());
         assert!(models.effects.items.iter().all(|item| item.activate_action.is_none()));
         assert!(models
             .effects
             .items
             .iter()
-            .all(|item| !item.subtitle.is_empty() && item.subtitle != "所选剪辑所在轨道已锁定"));
+            .all(|item| item.icon.is_none() && item.badge.is_none() && item.subtitle.is_empty()));
     }
 
     #[test]
@@ -7392,12 +7466,13 @@ mod tests {
             TimeCode::new(30, tb),
         );
         sequence.video_tracks[0].add_clip(solid).expect("add solid clip");
+        let display_track_index = video_display_index(&sequence, 0);
 
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
 
-        assert_eq!(model.tracks[0].clips[0].label, "纯色层");
+        assert_eq!(model.tracks[display_track_index].clips[0].label, "纯色层");
         assert_eq!(
-            model.tracks[0].clips[0].color.map(|c| c.to_rgba8()),
+            model.tracks[display_track_index].clips[0].color.map(|c| c.to_rgba8()),
             Some(color.to_rgba8())
         );
     }
@@ -7432,14 +7507,15 @@ mod tests {
 
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
         let colors = current_theme().colors.clone();
+        let video_track = video_display_index(&sequence, 0);
         let first_audio_track = sequence.video_tracks.len();
 
         assert_eq!(
-            model.tracks[0].clips[0].color,
+            model.tracks[video_track].clips[0].color,
             Some(colors.timeline_clip_video)
         );
         assert_eq!(
-            model.tracks[0].clips[1].color,
+            model.tracks[video_track].clips[1].color,
             Some(colors.media_adjustment)
         );
         assert_eq!(

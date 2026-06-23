@@ -75,6 +75,7 @@ struct SelfHostedWindowSession {
     router: EventRouter,
     ui_runtime: WinitUiRuntime,
     last_cursor: Point,
+    last_window_cursor_icon: Option<winit::window::CursorIcon>,
     current_bounds: std::cell::Cell<Rect>,
     modifiers_state: Modifiers,
     pending_initial_redraw: bool,
@@ -199,7 +200,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                         if pressed && is_escape && result == EventResult::Ignored {
                             elwt.exit();
                         }
-                        update_window_cursor_icon(&host, &session);
+                        update_window_cursor_icon(&host, &mut session);
                         session.window.request_redraw();
                     }
 
@@ -237,7 +238,9 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                         let mut encoder = DrawEncoder::new();
                         let theme = mondrian_ui_theme::current_theme();
                         let b = session.current_bounds.get();
-                        encoder.draw_rect(b, theme.colors.background, 0.0);
+                        if session.role == SelfHostedWindowRole::Workspace {
+                            encoder.draw_rect(b, theme.colors.background, 0.0);
+                        }
                         TreeWalker::paint_clipped(host.active_root(), &mut encoder, &theme, b);
                         session.ui_runtime.paint_shell_overlays(
                             &mut encoder,
@@ -366,8 +369,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
-                        update_window_cursor_icon(&host, &session);
-                        session.window.request_redraw();
+                        update_window_cursor_icon(&host, &mut session);
                     }
 
                     WindowEvent::MouseInput { state, button, .. } => {
@@ -417,7 +419,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                         if sync_workspace_layout {
                             host.sync_workspace_layout_from_root();
                         }
-                        update_window_cursor_icon(&host, &session);
+                        update_window_cursor_icon(&host, &mut session);
                         session.window.request_redraw();
                     }
 
@@ -520,6 +522,26 @@ fn build_self_hosted_background_runtime() -> std::io::Result<tokio::runtime::Run
         .build()
 }
 
+fn preferred_self_hosted_surface_format(
+    surface: &wgpu::Surface<'static>,
+    adapter: &wgpu::Adapter,
+    fallback: wgpu::TextureFormat,
+) -> wgpu::TextureFormat {
+    surface
+        .get_capabilities(adapter)
+        .formats
+        .into_iter()
+        .find(|format| is_srgb_surface_format(*format))
+        .unwrap_or(fallback)
+}
+
+fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
+    matches!(
+        format,
+        wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
+    )
+}
+
 fn should_route_focus_lost_to_ui(eyedropper_active: bool) -> bool {
     !eyedropper_active
 }
@@ -536,9 +558,10 @@ impl SelfHostedWindowSession {
         apply_window_corner_preference(&window, window_corner_preference_for_role(role));
 
         let size = window.inner_size();
-        let config = surface
+        let mut config = surface
             .get_default_config(adapter, size.width, size.height)
             .ok_or("Failed surface config")?;
+        config.format = preferred_self_hosted_surface_format(&surface, adapter, config.format);
         surface.configure(device, &config);
 
         let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
@@ -556,6 +579,7 @@ impl SelfHostedWindowSession {
             ),
             ui_runtime: WinitUiRuntime::new(),
             last_cursor: Point::new(0.0, 0.0),
+            last_window_cursor_icon: None,
             current_bounds: std::cell::Cell::new(bounds),
             modifiers_state: Modifiers::none(),
             pending_initial_redraw: true,
@@ -653,7 +677,7 @@ fn window_chrome_for_role(role: SelfHostedWindowRole) -> WindowChrome {
             height: STARTUP_WINDOW_HEIGHT,
             transparent: true,
             decorations: false,
-            rounded_corners: false,
+            rounded_corners: true,
             resizable: false,
             min_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
             max_size: Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)),
@@ -709,8 +733,12 @@ fn apply_window_corner_preference(
     platform_window_chrome::apply_window_corner_preference(window, preference);
 }
 
-fn update_window_cursor_icon(host: &SelfHostedUiHost, session: &SelfHostedWindowSession) {
-    session.window.set_cursor_icon(window_cursor_icon(host, session));
+fn update_window_cursor_icon(host: &SelfHostedUiHost, session: &mut SelfHostedWindowSession) {
+    let next = window_cursor_icon(host, session);
+    if session.last_window_cursor_icon != Some(next) {
+        session.window.set_cursor_icon(next);
+        session.last_window_cursor_icon = Some(next);
+    }
 }
 
 fn window_cursor_icon(
@@ -866,6 +894,14 @@ mod tests {
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
 
+    #[test]
+    fn srgb_surface_format_detection_matches_presentation_formats() {
+        assert!(is_srgb_surface_format(wgpu::TextureFormat::Bgra8UnormSrgb));
+        assert!(is_srgb_surface_format(wgpu::TextureFormat::Rgba8UnormSrgb));
+        assert!(!is_srgb_surface_format(wgpu::TextureFormat::Bgra8Unorm));
+        assert!(!is_srgb_surface_format(wgpu::TextureFormat::Rgba8Unorm));
+    }
+
     struct CursorFocusWidget {
         id: WidgetId,
         accepts_text: bool,
@@ -972,7 +1008,7 @@ mod tests {
         assert_eq!(chrome.height, STARTUP_WINDOW_HEIGHT);
         assert!(chrome.transparent);
         assert!(!chrome.decorations);
-        assert!(!chrome.rounded_corners);
+        assert!(chrome.rounded_corners);
         assert!(!chrome.resizable);
         assert_eq!(
             chrome.min_size,
@@ -1034,7 +1070,7 @@ mod tests {
     fn workspace_window_requests_platform_rounded_corners() {
         assert_eq!(
             window_corner_preference_for_role(SelfHostedWindowRole::Startup),
-            WindowCornerPreference::Default
+            WindowCornerPreference::Round
         );
         assert_eq!(
             window_corner_preference_for_role(SelfHostedWindowRole::Workspace),

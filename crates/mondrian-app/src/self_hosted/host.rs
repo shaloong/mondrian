@@ -702,11 +702,54 @@ fn recovery_age_label(saved_at_unix_ms: u64) -> String {
 }
 
 fn recent_project_subtitle(project_file: &Path) -> String {
-    project_file
-        .parent()
-        .map(|parent| parent.display().to_string())
-        .filter(|parent| !parent.trim().is_empty())
-        .unwrap_or_else(|| project_file.display().to_string())
+    let metadata = std::fs::metadata(project_file).ok();
+    let modified = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(recent_project_modified_label)
+        .unwrap_or_else(|| "未知时间".to_owned());
+    let size = metadata
+        .as_ref()
+        .map(|metadata| format_file_size(metadata.len()))
+        .unwrap_or_else(|| "--".to_owned());
+    format!("{modified} • {size}")
+}
+
+fn recent_project_modified_label(modified: SystemTime) -> String {
+    let age_secs = SystemTime::now()
+        .duration_since(modified)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    if age_secs < 60 {
+        "刚刚".to_owned()
+    } else if age_secs < 3600 {
+        format!("{} 分钟前", age_secs / 60)
+    } else if age_secs < 86_400 {
+        format!("{} 小时前", age_secs / 3600)
+    } else if age_secs < 172_800 {
+        "昨天".to_owned()
+    } else if age_secs < 604_800 {
+        format!("{} 天前", age_secs / 86_400)
+    } else {
+        format!("{} 周前", age_secs / 604_800)
+    }
+}
+
+fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else if size >= 10.0 {
+        format!("{size:.0} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Action) -> bool {

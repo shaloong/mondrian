@@ -10,7 +10,7 @@ use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_widgets::RasterImage;
+use mondrian_ui_widgets::{RasterImage, VectorIcon};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -23,6 +23,7 @@ use crate::app::ui_actions::{
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
 };
+use crate::self_hosted::icons::AppIcon;
 use crate::self_hosted::modal::ShellModal;
 use crate::self_hosted::new_project_dialog::{
     default_project_file_name, SelfHostedNewProjectDraft,
@@ -30,20 +31,21 @@ use crate::self_hosted::new_project_dialog::{
 use crate::self_hosted::shell::project_file_filters;
 
 /// Startup window logical size used by the self-hosted product entrypoint.
-pub const STARTUP_WINDOW_WIDTH: f32 = 820.0;
+pub const STARTUP_WINDOW_WIDTH: f32 = 784.0;
 /// Startup window logical size used by the self-hosted product entrypoint.
-pub const STARTUP_WINDOW_HEIGHT: f32 = 500.0;
+pub const STARTUP_WINDOW_HEIGHT: f32 = 464.0;
 
-const OUTER_MARGIN: f32 = 18.0;
 const LEFT_WIDTH: f32 = 300.0;
 const CONTENT_PAD_X: f32 = 28.0;
 const CONTENT_PAD_Y: f32 = 46.0;
 const CLOSE_SIZE: f32 = 28.0;
 const CLOSE_MARGIN: f32 = 10.0;
-const ACTION_BUTTON_HEIGHT: f32 = 34.0;
+const ACTION_BUTTON_HEIGHT: f32 = 32.0;
+const ACTION_BUTTON_WIDTH: f32 = 118.0;
 const ACTION_BUTTON_GAP: f32 = 10.0;
-const RECENT_ROW_HEIGHT: f32 = 44.0;
-const RECENT_ROW_GAP: f32 = 8.0;
+const RECENT_ROW_HEIGHT: f32 = 52.0;
+const RECENT_ROW_GAP: f32 = 10.0;
+const SECTION_LABEL_TO_ROW_GAP: f32 = 30.0;
 const MAX_VISIBLE_RECENT_PROJECTS: usize = 5;
 const MAX_VISIBLE_RECENT_PROJECTS_WITH_RECOVERY: usize = 2;
 const MAX_VISIBLE_RECOVERY_PROJECTS: usize = 2;
@@ -277,9 +279,9 @@ impl SelfHostedStartupScreen {
         }
         if primary {
             if self.hover == Some(hit) {
-                colors.primary.lerp(colors.foreground, 0.10)
+                colors.foreground
             } else {
-                colors.primary
+                startup_alpha(colors.foreground, 0.88)
             }
         } else if self.hover == Some(hit) {
             colors.muted
@@ -306,14 +308,7 @@ impl Widget for SelfHostedStartupScreen {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        let panel_width = (bounds.width - OUTER_MARGIN * 2.0).max(320.0);
-        let panel_height = (bounds.height - OUTER_MARGIN * 2.0).max(260.0);
-        self.panel_rect = Rect::new(
-            bounds.x + (bounds.width - panel_width) * 0.5,
-            bounds.y + (bounds.height - panel_height) * 0.5,
-            panel_width,
-            panel_height,
-        );
+        self.panel_rect = bounds;
 
         let left_width = LEFT_WIDTH.min(self.panel_rect.width * 0.45);
         self.left_rect = Rect::new(
@@ -338,21 +333,25 @@ impl Widget for SelfHostedStartupScreen {
 
         let content_x = self.right_rect.x + CONTENT_PAD_X;
         let content_width = (self.right_rect.width - CONTENT_PAD_X * 2.0).max(0.0);
-        let action_y = self.right_rect.y + CONTENT_PAD_Y + 56.0;
-        let button_width = ((content_width - ACTION_BUTTON_GAP) * 0.5).max(92.0);
+        let action_y = self.right_rect.y + CONTENT_PAD_Y - 3.0;
+        let available_button_width = ((content_width - ACTION_BUTTON_GAP) * 0.5).max(0.0);
+        let button_width = ACTION_BUTTON_WIDTH.min(available_button_width);
+        let button_group_width = button_width * 2.0 + ACTION_BUTTON_GAP;
+        let button_x = content_x + (content_width - button_group_width).max(0.0);
         self.new_project_rect = Rect::new(content_x, action_y, button_width, ACTION_BUTTON_HEIGHT);
+        self.new_project_rect.x = button_x;
         self.open_project_rect = Rect::new(
-            content_x + button_width + ACTION_BUTTON_GAP,
+            button_x + button_width + ACTION_BUTTON_GAP,
             action_y,
             button_width,
             ACTION_BUTTON_HEIGHT,
         );
 
-        let mut section_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 34.0;
+        let mut section_y = self.right_rect.y + CONTENT_PAD_Y + 72.0;
         self.recovery_rects.clear();
         let recovery_count = self.recovery_projects.len().min(MAX_VISIBLE_RECOVERY_PROJECTS);
         if recovery_count > 0 {
-            let first_row_y = section_y + 24.0;
+            let first_row_y = section_y + SECTION_LABEL_TO_ROW_GAP;
             for index in 0..recovery_count {
                 self.recovery_rects.push(Rect::new(
                     content_x,
@@ -371,7 +370,7 @@ impl Widget for SelfHostedStartupScreen {
         } else {
             MAX_VISIBLE_RECENT_PROJECTS
         };
-        let first_row_y = section_y + 24.0;
+        let first_row_y = section_y + SECTION_LABEL_TO_ROW_GAP;
         let row_count = self.recent_projects.len().min(max_recent);
         for index in 0..row_count {
             self.recent_rects.push(Rect::new(
@@ -464,6 +463,7 @@ impl Widget for SelfHostedStartupScreen {
             self.new_project_rect,
             "新建项目",
             true,
+            Some(AppIcon::PlusFilled),
             StartupHit::NewProject,
         );
         self.paint_button(
@@ -471,10 +471,11 @@ impl Widget for SelfHostedStartupScreen {
             self.open_project_rect,
             "打开项目",
             false,
+            Some(AppIcon::FolderOpenFilled),
             StartupHit::OpenProject,
         );
 
-        let mut section_y = self.new_project_rect.y + ACTION_BUTTON_HEIGHT + 36.0;
+        let mut section_y = self.right_rect.y + CONTENT_PAD_Y + 72.0;
         if !self.recovery_projects.is_empty() {
             ctx.encoder.draw_text(
                 "可恢复项目",
@@ -524,13 +525,17 @@ impl Widget for SelfHostedStartupScreen {
             colors.popover_foreground,
         );
         if self.recent_projects.is_empty() {
-            let recent_rect =
-                Rect::new(content_x, recent_y + 24.0, content_width, RECENT_ROW_HEIGHT);
+            let recent_rect = Rect::new(
+                content_x,
+                recent_y + SECTION_LABEL_TO_ROW_GAP,
+                content_width,
+                RECENT_ROW_HEIGHT,
+            );
             ctx.encoder.draw_rect(recent_rect, colors.card, spacing.radius_md);
             ctx.encoder.draw_text(
                 "暂无最近项目",
                 typography.body.font_size,
-                Point::new(recent_rect.x + 14.0, recent_rect.y + 17.0),
+                Point::new(recent_rect.x + 14.0, recent_rect.y + 20.0),
                 colors.muted_foreground,
             );
         } else {
@@ -545,18 +550,32 @@ impl Widget for SelfHostedStartupScreen {
                 };
                 ctx.encoder.draw_rect(*rect, fill, spacing.radius_md);
                 if let Some(project) = self.recent_projects.get(index) {
-                    ctx.encoder.draw_text_box(
-                        &project.title,
+                    let title_font = typography.body.font_size;
+                    let detail_font = typography.small.font_size;
+                    let text_x = rect.x + 14.0;
+                    let text_right = rect.x + rect.width - 14.0;
+                    let title = startup_ellipsize(&project.title, title_font, text_right - text_x);
+                    ctx.encoder.draw_text(
+                        &title,
                         typography.body.font_size,
-                        Point::new(rect.x + 14.0, rect.y + 15.0),
-                        rect.width - 28.0,
+                        Point::new(text_x, rect.y + 12.0),
                         colors.card_foreground,
                     );
-                    ctx.encoder.draw_text_box(
-                        &project.subtitle,
-                        typography.small.font_size,
-                        Point::new(rect.x + 14.0, rect.y + 32.0),
-                        rect.width - 28.0,
+                    let icon_size = 12.0;
+                    let icon_rect = Rect::new(text_x, rect.y + 31.0, icon_size, icon_size);
+                    paint_startup_icon(
+                        ctx,
+                        AppIcon::Clock,
+                        icon_rect,
+                        startup_alpha(colors.muted_foreground, 0.92),
+                    );
+                    let detail_x = icon_rect.x + icon_rect.width + 6.0;
+                    let detail =
+                        startup_ellipsize(&project.subtitle, detail_font, text_right - detail_x);
+                    ctx.encoder.draw_text(
+                        &detail,
+                        detail_font,
+                        Point::new(detail_x, rect.y + 29.0),
                         colors.muted_foreground,
                     );
                 }
@@ -620,28 +639,52 @@ impl SelfHostedStartupScreen {
         rect: Rect,
         label: &str,
         primary: bool,
+        icon: Option<AppIcon>,
         hit: StartupHit,
     ) {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let fill = self.button_color(hit, primary, ctx);
         let text = if primary {
-            colors.primary_foreground
+            colors.background
         } else {
             colors.card_foreground
         };
         ctx.encoder.draw_rect(rect, fill, spacing.radius_md);
-        let text_width = label.chars().count() as f32 * 14.0;
+        let font_size = ctx.theme.typography.button.font_size;
+        let icon_size = if icon.is_some() { 13.0 } else { 0.0 };
+        let icon_gap = if icon.is_some() { 6.0 } else { 0.0 };
+        let text_width = startup_text_width(label, font_size);
+        let content_width = icon_size + icon_gap + text_width;
+        let content_x = rect.x + (rect.width - content_width).max(0.0) * 0.5;
+        let text_y =
+            rect.y + (rect.height - ctx.theme.typography.button.line_height).max(0.0) * 0.5;
+        if let Some(icon) = icon {
+            let icon_rect = Rect::new(
+                content_x,
+                rect.y + (rect.height - icon_size).max(0.0) * 0.5,
+                icon_size,
+                icon_size,
+            );
+            paint_startup_icon(ctx, icon, icon_rect, text);
+        }
         ctx.encoder.draw_text(
             label,
-            ctx.theme.typography.button.font_size,
-            Point::new(
-                rect.x + (rect.width - text_width).max(0.0) * 0.5,
-                rect.y + 21.0,
-            ),
+            font_size,
+            Point::new(content_x + icon_size + icon_gap, text_y),
             text,
         );
     }
+}
+
+fn paint_startup_icon(ctx: &mut PaintContext, icon: AppIcon, rect: Rect, color: Color) {
+    if let Some(icon) = startup_vector_icon(icon) {
+        icon.paint(ctx, rect, color);
+    }
+}
+
+fn startup_vector_icon(icon: AppIcon) -> Option<VectorIcon> {
+    icon.vector_icon().ok()
 }
 
 fn paint_startup_banner(ctx: &mut PaintContext, rect: Rect) {
@@ -662,14 +705,49 @@ fn paint_startup_banner(ctx: &mut PaintContext, rect: Rect) {
         ctx.encoder.draw_gradient_rect(
             rect,
             [
-                colors.primary.lerp(colors.background, 0.15),
-                colors.accent.lerp(colors.primary, 0.30),
-                colors.background.lerp(colors.primary, 0.22),
-                colors.card.lerp(colors.primary, 0.18),
+                colors.surface.lerp(colors.background, 0.18),
+                colors.card.lerp(colors.surface_2, 0.24),
+                colors.background.lerp(colors.surface, 0.18),
+                colors.card.lerp(colors.foreground, 0.06),
             ],
             0.0,
         );
     }
+}
+
+fn startup_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars()
+        .map(|ch| {
+            if ch.is_ascii_whitespace() {
+                font_size * 0.32
+            } else if ch.is_ascii() {
+                font_size * 0.56
+            } else {
+                font_size
+            }
+        })
+        .sum()
+}
+
+fn startup_ellipsize(text: &str, font_size: f32, max_width: f32) -> String {
+    if max_width <= 0.0 || startup_text_width(text, font_size) <= max_width {
+        return text.to_owned();
+    }
+    let ellipsis = "...";
+    let ellipsis_width = startup_text_width(ellipsis, font_size);
+    if ellipsis_width >= max_width {
+        return ellipsis.to_owned();
+    }
+    let mut output = String::new();
+    for ch in text.chars() {
+        output.push(ch);
+        if startup_text_width(&output, font_size) + ellipsis_width > max_width {
+            output.pop();
+            break;
+        }
+    }
+    output.push_str(ellipsis);
+    output
 }
 
 fn cover_image_rect(bounds: Rect, image_width: u32, image_height: u32) -> Rect {
@@ -873,6 +951,25 @@ mod tests {
             screen.measure(LayoutConstraint::LOOSE),
             Size::new(STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT)
         );
+    }
+
+    #[test]
+    fn startup_panel_fills_native_window_without_transparent_outer_margin() {
+        let mut screen = SelfHostedStartupScreen::new();
+        let bounds = Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT);
+
+        screen.layout(bounds);
+
+        assert_eq!(screen.panel_rect, bounds);
+        assert_eq!(screen.left_rect.x, bounds.x);
+        assert_eq!(screen.left_rect.y, bounds.y);
+        assert_eq!(screen.right_rect.y, bounds.y);
+        assert_eq!(
+            screen.right_rect.x + screen.right_rect.width,
+            bounds.x + bounds.width
+        );
+        assert_eq!(screen.left_rect.height, bounds.height);
+        assert_eq!(screen.right_rect.height, bounds.height);
     }
 
     #[test]
