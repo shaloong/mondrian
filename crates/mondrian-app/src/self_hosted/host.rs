@@ -1006,7 +1006,7 @@ fn parse_asset_browser_navigation(
 mod tests {
     use super::*;
     use mondrian_assets::AssetLibrary;
-    use mondrian_core::types::AssetId;
+    use mondrian_core::types::{AssetId, ClipId, TrackId};
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
     use mondrian_platform::{FileFilter, NoopPlatformService};
@@ -2151,6 +2151,31 @@ mod tests {
 
         pending.push(Action::ImportMedia(vec![PathBuf::from("E:/media/a.mov")]));
         pending.push(Action::Undo);
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(host.app_state().status_hint.is_none());
+        assert!(!host.app_state().can_undo_action());
+    }
+
+    #[test]
+    fn host_ignores_unavailable_typed_timeline_actions_before_dispatch() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::timeline_move_clip_action(
+            crate::app::ui_actions::TimelineMoveClipPayload {
+                target_track_id: TrackId::new(),
+                is_video_track: true,
+                clip_id: ClipId::new(),
+                frame: 12,
+            },
+        ));
         let commands = host.drain_pending_actions(
             &pending,
             Rect::new(0.0, 0.0, 1280.0, 720.0),

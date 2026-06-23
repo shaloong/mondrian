@@ -61,9 +61,13 @@ workflow.
   selection/filter/hover, Assets panel scroll preservation, host refresh
   normalization for valid/deleted folders, and forced rebuild cancellation of
   stale inline rename editors without dispatching rename actions.
-- P2-TIMELINE-001: Verify select, seek, move, trim, split, delete, ripple
-  delete, duplicate, copy/paste, enable/disable, mark in/out, and track controls
-  through shared app actions and host availability gates.
+- [done] P2-TIMELINE-001: Verify select, seek, move, trim, split, delete,
+  ripple delete, duplicate, copy/paste, enable/disable, mark in/out, and track
+  controls through shared app actions and host availability gates. Coverage
+  includes Timeline panel adapters for keyboard/context/range actions,
+  AppState dispatch tests for typed timeline and shared edit actions, and
+  self-hosted availability gates for valid, stale, locked, and host-dispatched
+  typed timeline targets.
 - P2-TIMELINE-002: Ensure timeline drag proposals validate clip media type,
   target track type, locked tracks, disabled timelines, and stale ids before any
   AppState mutation.

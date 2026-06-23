@@ -1076,7 +1076,14 @@ view facts such as selection and playhead intersection, while the self-hosted
 adapter injects app-state availability derived from the same locked-track,
 clipboard, in/out, and sequence gates used by the top menus. Timeline context
 menu rows and focused timeline shortcuts must consult that host availability
-before dispatching.
+before dispatching. Typed timeline actions also pass through this gate before
+they reach `AppState`: select, move, trim, selected enable/disable, explicit
+range edits, seek, add/move track, and track controls must reject malformed
+payloads, stale clip or track ids, missing sequences, and locked clip-edit
+targets at the shell boundary. This gate prevents dead UI commands and stale
+panel snapshots from producing editor status errors; deeper timeline mutation
+rules such as overlap resolution and media-type compatibility remain
+authoritative in the app/timeline command layer.
 Disabled toolbar controls consume their click without dispatching so they
 cannot accidentally seek or select timeline content underneath. Display zoom
 mutates widget-local `pixels_per_frame` through Ctrl/Meta wheel or the
