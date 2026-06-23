@@ -1480,7 +1480,18 @@ impl Widget for AssetGrid {
             return result;
         }
 
-        if let Some(menu) = &mut self.context_menu {
+        let replace_with_new_menu = matches!(
+            event,
+            UiEvent::MouseDown {
+                position,
+                button: MouseButton::Right,
+                ..
+            } if self.bounds.contains(*position)
+        );
+        if replace_with_new_menu {
+            self.context_menu = None;
+            self.context_menu_target = None;
+        } else if let Some(menu) = &mut self.context_menu {
             if menu.is_visible() {
                 let result = menu.event(event, ctx);
                 let local_command = menu.take_local_command();
@@ -3567,6 +3578,70 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[card_action]);
+    }
+
+    #[test]
+    fn right_click_replaces_open_context_menu_with_new_card_target() {
+        let first_action = Action::ImportMedia(vec![PathBuf::from("E:/media/first.mov")]);
+        let second_action = Action::ImportMedia(vec![PathBuf::from("E:/media/second.mov")]);
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_context_menu(vec![MenuItem::new("Delete first", first_action)]),
+                item("asset-b", "Asset B")
+                    .with_context_menu(vec![MenuItem::new("Delete second", second_action.clone())]),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first card");
+        let second = grid.card_rect_for_index(1).expect("second card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: first.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[second_action]);
     }
 
     #[test]

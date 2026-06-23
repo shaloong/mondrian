@@ -149,9 +149,15 @@ workflow.
   id resolution, incompatible media rejection without mutation, dock tab
   reordering, dock edge/center targets, and the future effect-row drag boundary
   through the existing undoable `Action::ReorderEffects` path.
-- P3-CONTEXT-001: Ensure all context menus use shared shortcut hints, disabled
-  reason semantics where useful, overlay z-order, keyboard navigation, and
-  stable close behavior.
+- [done] P3-CONTEXT-001: Ensure all context menus use shared shortcut hints,
+  disabled reason semantics where useful, overlay z-order, keyboard navigation,
+  and stable close behavior. Coverage now spans shared `ContextMenu` shortcut
+  hint painting, disabled-row consumption without dispatch or close, separator
+  geometry, long-menu viewport clamping and scrolling, overlay paint/hit-test,
+  Escape and keyboard navigation, timeline host-provided shortcut labels,
+  selection-only timeline command disabling, AssetGrid card/selection/grid menu
+  precedence, local Rename command handling, and replacing an open AssetGrid
+  context menu with the newly right-clicked card target in one gesture.
 - P3-FOCUS-001: Make focus transfer predictable across dock rebuilds, modals,
   dropdowns, inline editors, color picker, timeline, viewer, and node graph.
 - P3-SHORTCUTS-001: Complete shortcut customization UX: conflict ownership,

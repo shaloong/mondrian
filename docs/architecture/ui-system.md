@@ -851,6 +851,12 @@ Enter/Space activates the highlighted row, and Escape closes the popup. Modified
 navigation and activation chords stay ignored so application shortcuts remain
 centralized. Internal selectors such as the ColorPicker mode menu follow the
 same keys but commit local widget state instead of dispatching editor actions.
+Context-menu owners should treat a second right-click inside the same surface
+as a replacement request, not as a simple close of the old menu. The old menu
+is discarded and the event continues through the owner's normal target
+resolution so asset cards, timeline clips, and empty canvas areas can open the
+correct new menu and clear stale local targets in one gesture. Outside clicks
+still close through the shared `ContextMenu` overlay hit-test path.
 Menu bars coordinate sibling dropdowns: when one menu is open, clicking or
 hovering another menu trigger closes the old popup and opens the new one.
 Trigger-click opens suppress the matching release; parent-coordinated hover
