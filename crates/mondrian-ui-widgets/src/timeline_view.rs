@@ -3497,7 +3497,7 @@ impl TimelineView {
             );
         }
         ctx.encoder.draw_rect(rect, fill, 5.0);
-        let accent_height = rect.height.min(4.0).max(2.0);
+        let accent_height = rect.height.clamp(2.0, 4.0);
         ctx.encoder.draw_rect(
             Rect::new(
                 rect.x + 1.0,

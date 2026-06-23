@@ -2215,13 +2215,13 @@ mod tests {
         );
         let mut checker_dark = theme.colors.checkerboard_dark;
         checker_dark.a *= 0.28;
-        assert!(encoder.rect_colors.iter().any(|color| *color == theme.colors.viewer_stage));
-        assert!(encoder.rect_colors.iter().any(|color| *color == checker_dark));
+        assert!(encoder.rect_colors.contains(&theme.colors.viewer_stage));
+        assert!(encoder.rect_colors.contains(&checker_dark));
         assert!(encoder
             .rect_colors
             .iter()
             .any(|color| *color == color_with_alpha(theme.colors.foreground, 0.08)));
-        assert!(encoder.rect_colors.iter().any(|color| *color == theme.colors.canvas));
+        assert!(encoder.rect_colors.contains(&theme.colors.canvas));
         assert!(
             encoder.clips.contains(&viewport),
             "preview image must be clipped to the viewer viewport"

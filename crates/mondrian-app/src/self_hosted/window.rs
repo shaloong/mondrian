@@ -174,11 +174,6 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::KeyboardInput { event: key_event, .. } => {
-                        let is_escape = matches!(
-                            key_event.logical_key,
-                            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                        );
-                        let pressed = key_event.state == ElementState::Pressed;
                         let result = session.ui_runtime.route_keyboard_input(
                             &session.window,
                             &mut session.router,
@@ -197,7 +192,12 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
-                        if pressed && is_escape && result == EventResult::Ignored {
+                        if result == EventResult::Ignored
+                            && should_exit_on_ignored_keyboard_input(
+                                session.role,
+                                &key_event.logical_key,
+                            )
+                        {
                             elwt.exit();
                         }
                         update_window_cursor_icon(&host, &mut session);
@@ -544,6 +544,13 @@ fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
 
 fn should_route_focus_lost_to_ui(eyedropper_active: bool) -> bool {
     !eyedropper_active
+}
+
+fn should_exit_on_ignored_keyboard_input(
+    _role: SelfHostedWindowRole,
+    _key: &winit::keyboard::Key,
+) -> bool {
+    false
 }
 
 impl SelfHostedWindowSession {
@@ -977,6 +984,23 @@ mod tests {
     fn focus_loss_is_deferred_while_desktop_eyedropper_is_active() {
         assert!(!should_route_focus_lost_to_ui(true));
         assert!(should_route_focus_lost_to_ui(false));
+    }
+
+    #[test]
+    fn ignored_keyboard_input_never_exits_native_windows() {
+        for role in [
+            SelfHostedWindowRole::Startup,
+            SelfHostedWindowRole::Workspace,
+        ] {
+            assert!(!should_exit_on_ignored_keyboard_input(
+                role,
+                &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            ));
+            assert!(!should_exit_on_ignored_keyboard_input(
+                role,
+                &winit::keyboard::Key::Character("q".into()),
+            ));
+        }
     }
 
     #[test]

@@ -2586,7 +2586,7 @@ mod tests {
             "asset grid background should sit below card surfaces"
         );
         assert!(
-            encoder.rect_colors.iter().any(|color| *color == Color::TRANSPARENT),
+            encoder.rect_colors.contains(&Color::TRANSPARENT),
             "normal asset cards should rest transparent until hover or selection"
         );
         assert!(

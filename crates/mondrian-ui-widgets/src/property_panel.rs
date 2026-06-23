@@ -347,7 +347,7 @@ impl Widget for PropertyPanel {
 
         if let Some(empty_state) = &mut self.empty_state {
             let inset_x = 6.0;
-            let max_width = (content.width - 36.0).min(220.0).max(1.0);
+            let max_width = (content.width - 36.0).clamp(1.0, 220.0);
             let available_height = (content.height - header_height).max(0.0);
             let top = if self.show_header_text {
                 content.y + header_height + (available_height * 0.24).max(18.0)

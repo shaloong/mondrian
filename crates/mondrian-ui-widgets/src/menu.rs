@@ -2025,7 +2025,7 @@ mod tests {
         assert_eq!(encoder.rects[0], Rect::new(10.0, 20.0, 128.0, 28.0));
         assert_eq!(encoder.rect_colors[0], theme.colors.popover);
         assert!(
-            !encoder.rect_colors.iter().any(|color| *color == theme.colors.primary),
+            !encoder.rect_colors.contains(&theme.colors.primary),
             "checked rows should not paint blue row chrome"
         );
     }
