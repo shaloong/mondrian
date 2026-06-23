@@ -421,7 +421,10 @@ actually changes. Self-hosted Inspector reorder controls emit this typed action
 directly rather than adding an inspector-specific custom action. Effect-stack
 toolbars use compact icon-only buttons with tooltips for reorder and removal so
 the inspector stays dense without relying on text labels inside destructive
-controls.
+controls. Future effect-row drag/drop must reuse this same action boundary:
+`DragPayload::Effect` is only a stable instance identity, while the host adapter
+resolves the selected clip, source slot, target slot, locked-track policy, and
+undo behavior through `AppState::reorder_effects_for_clip`.
 Effects browser activation uses the same protocol family: when a video clip is
 selected, effect rows carry a `ui.effects` add-to-clip payload with the selected
 clip id and serialized `EffectType`, and `AppState` routes it through
@@ -1810,6 +1813,13 @@ route `UiEvent::FocusLost` and reset the tracked modifiers to
 `Modifiers::none()`. The router treats that as a window-level blur: active
 drags are cancelled, capture and hover are released, focused widgets receive
 `FocusLost`, IME is disabled, and tooltip state is hidden.
+Internal drag/drop has the same router-owned lifecycle. Once a widget requests
+`DragRequest::Begin`, the router owns the active payload, routes movement as
+overlay-first `DragEnter` / `DragOver` / `DragLeave`, converts left-button
+release into a single `Drop`, and ends the drag session even when the target
+ignores that drop. Widgets may paint hover affordances and dispatch
+domain-light drop proposals, but they must not rely on a second cleanup event
+after `Drop` to terminate the drag.
 Pointer and wheel events, including runtime-synthesized pointer events such as
 eyedropper polling, must carry the current modifier state tracked by the
 entrypoint so timeline zoom, alternate drag modes, and shifted scrolling do not

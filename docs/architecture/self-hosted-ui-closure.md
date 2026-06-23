@@ -141,8 +141,14 @@ workflow.
   edge-specific trim-to-playhead enablement at clip boundaries, locked-track
   suppression, AppState trim/roll/ripple command handling, and timeline undo
   semantics through the shared editing command path.
-- P3-DND-001: Finish cross-panel drag/drop semantics for assets to timeline,
-  panel tabs, dock targets, and future effect reordering.
+- [done] P3-DND-001: Finish cross-panel drag/drop semantics for assets to
+  timeline, panel tabs, dock targets, and future effect reordering. Coverage
+  now spans router-owned active-drag lifecycle, overlay-first drop routing,
+  ignored-drop termination, native file-drop mapping, asset-browser file and
+  selection drops, asset-to-timeline typed drop proposals, stable app-side track
+  id resolution, incompatible media rejection without mutation, dock tab
+  reordering, dock edge/center targets, and the future effect-row drag boundary
+  through the existing undoable `Action::ReorderEffects` path.
 - P3-CONTEXT-001: Ensure all context menus use shared shortcut hints, disabled
   reason semantics where useful, overlay z-order, keyboard navigation, and
   stable close behavior.

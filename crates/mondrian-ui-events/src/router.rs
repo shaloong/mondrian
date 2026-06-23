@@ -1070,6 +1070,64 @@ mod tests {
         }
     }
 
+    struct DropIgnoringWidget {
+        id: WidgetId,
+        bounds: Rect,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl DropIgnoringWidget {
+        fn new(bounds: Rect, log: Rc<RefCell<Vec<String>>>) -> Self {
+            Self { id: WidgetId::new(), bounds, log }
+        }
+    }
+
+    impl Widget for DropIgnoringWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::MouseMove { .. } => {
+                    self.log.borrow_mut().push("mouse-move".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragEnter { .. } => {
+                    self.log.borrow_mut().push("drag-enter".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragOver { .. } => {
+                    self.log.borrow_mut().push("drag-over".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragLeave => {
+                    self.log.borrow_mut().push("drag-leave".into());
+                    EventResult::Handled
+                }
+                UiEvent::Drop { .. } => {
+                    self.log.borrow_mut().push("drop-ignored".into());
+                    EventResult::Ignored
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+    }
+
     struct TestTree {
         root: WidgetId,
         nodes: HashMap<WidgetId, Box<dyn Widget>>,
@@ -1078,7 +1136,7 @@ mod tests {
     }
 
     impl TestTree {
-        fn single(widget: RecordingWidget) -> Self {
+        fn single(widget: impl Widget + 'static) -> Self {
             let root = widget.id();
             let mut nodes = HashMap::new();
             nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
@@ -1828,6 +1886,66 @@ mod tests {
         assert_eq!(log.borrow().as_slice(), ["drag-enter", "drag-over", "drop"]);
         assert!(router.active_drag_payload().is_none());
         assert_eq!(router.captured(), None);
+    }
+
+    #[test]
+    fn router_ends_active_drag_even_when_drop_target_ignores_drop() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = DropIgnoringWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        router.active_drag = Some(ActiveDrag {
+            payload: DragPayload::Asset(AssetId::new()),
+            target: None,
+        });
+        router.set_capture(Some(WidgetId::new()));
+
+        assert_eq!(
+            router.route(
+                UiEvent::MouseMove {
+                    position: Point::new(10.0, 10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &|_| {},
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-enter"]);
+
+        assert_eq!(
+            router.route(
+                UiEvent::MouseUp {
+                    position: Point::new(10.0, 10.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &|_| {},
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(log.borrow().as_slice(), ["drag-enter", "drop-ignored"]);
+        assert!(router.active_drag_payload().is_none());
+        assert_eq!(router.captured(), None);
+
+        assert_eq!(
+            router.route(
+                UiEvent::MouseMove {
+                    position: Point::new(20.0, 10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &|_| {},
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            log.borrow().as_slice(),
+            ["drag-enter", "drop-ignored", "mouse-move"]
+        );
     }
 
     #[test]
