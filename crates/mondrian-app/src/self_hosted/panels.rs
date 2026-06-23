@@ -7022,6 +7022,116 @@ mod tests {
     }
 
     #[test]
+    fn node_graph_model_falls_back_to_source_after_selected_effect_removal() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let remove_effect = mondrian_effects::EffectNode::with_defaults(EffectType::GaussianBlur);
+        let keep_effect = mondrian_effects::EffectNode::with_defaults(EffectType::Sharpen);
+        let remove_id = remove_effect.id;
+        let keep_id = keep_effect.id;
+        clip.add_effect_node(remove_effect);
+        clip.add_effect_node(keep_effect);
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+        state.sequence = Some(sequence);
+        let selection = state
+            .select_effect_by_id(clip_id, remove_id)
+            .expect("seed selected effect")
+            .clip;
+
+        state
+            .dispatch_action(inspector_remove_effect_action(
+                InspectorRemoveEffectPayload {
+                    clip: inspector_clip_payload(selection),
+                    effect_id: remove_id,
+                },
+            ))
+            .expect("dispatch remove selected effect");
+
+        assert!(state.primary_selected_effect().is_none());
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(models.node_graph.selected_clip, Some(selection));
+        assert_eq!(
+            models.node_graph.selected_node_id,
+            Some("source".to_owned())
+        );
+        assert_eq!(
+            models.node_graph.nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>(),
+            vec![
+                "source".to_owned(),
+                format!("effect:{keep_id}"),
+                "output".to_owned(),
+            ]
+        );
+        assert!(!models
+            .node_graph
+            .node_targets
+            .iter()
+            .any(|target| target.target == NodeGraphTarget::Effect(remove_id)));
+    }
+
+    #[test]
+    fn node_graph_model_preserves_selected_effect_after_reorder() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let first = mondrian_effects::EffectNode::with_defaults(EffectType::GaussianBlur);
+        let second = mondrian_effects::EffectNode::with_defaults(EffectType::Sharpen);
+        let third = mondrian_effects::EffectNode::with_defaults(EffectType::BasicCorrection);
+        let first_id = first.id;
+        let second_id = second.id;
+        let third_id = third.id;
+        clip.add_effect_node(first);
+        clip.add_effect_node(second);
+        clip.add_effect_node(third);
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+        state.sequence = Some(sequence);
+        state.select_effect_by_id(clip_id, second_id).expect("seed selected effect");
+
+        state
+            .dispatch_action(Action::ReorderEffects { clip_id, from: 1, to: 0 })
+            .expect("dispatch reorder selected effect");
+
+        let models = SelfHostedPanelModels::from_app_state(&state);
+        let selected = state.primary_selected_effect().expect("selected effect survives reorder");
+
+        assert_eq!(selected.effect_id, second_id);
+        assert_eq!(models.node_graph.selected_clip, Some(selected.clip));
+        assert_eq!(
+            models.node_graph.selected_node_id,
+            Some(format!("effect:{second_id}"))
+        );
+        assert_eq!(
+            models.node_graph.nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>(),
+            vec![
+                "source".to_owned(),
+                format!("effect:{second_id}"),
+                format!("effect:{first_id}"),
+                format!("effect:{third_id}"),
+                "output".to_owned(),
+            ]
+        );
+        assert_eq!(
+            models.node_graph.edges,
+            vec![
+                NodeGraphEdge::new("source", format!("effect:{second_id}")),
+                NodeGraphEdge::new(format!("effect:{second_id}"), format!("effect:{first_id}")),
+                NodeGraphEdge::new(format!("effect:{first_id}"), format!("effect:{third_id}")),
+                NodeGraphEdge::new(format!("effect:{third_id}"), "output"),
+            ]
+        );
+        assert!(models.node_graph.node_targets.iter().any(|target| {
+            target.node_id == format!("effect:{second_id}")
+                && target.target == NodeGraphTarget::Effect(second_id)
+        }));
+    }
+
+    #[test]
     fn inspector_effect_vector_property_rows_get_multi_component_height() {
         assert_eq!(
             effect_property_row_height(&PropertyValue::Vec2(glam::Vec2::ZERO)),

@@ -98,8 +98,14 @@ workflow.
   suppression, selected-video add payloads, AppState add-to-clip undo behavior,
   automatic selection of newly added effects, and refreshed Inspector/NodeGraph
   models targeting the new effect.
-- P2-NODEGRAPH-001: Verify source/effect/output graph generation, selection,
-  keyboard navigation, empty states, and sync after effect add/remove/reorder.
+- [done] P2-NODEGRAPH-001: Verify source/effect/output graph generation,
+  selection, keyboard navigation, empty states, and sync after effect
+  add/remove/reorder. Coverage now spans AppState-backed source/effect/output
+  graph generation, domain-light node targets, selected-effect graph chrome,
+  empty disabled graph state, keyboard/pointer/Home/End selection dispatch,
+  automatic selection after effect add, fallback to source after selected-effect
+  removal, and node/edge retargeting while preserving selected effect identity
+  after effect reorder.
 - P2-EXPORT-001: Verify draft settings, output selection, enqueue, cancel,
   clear completed, status snapshots, and disabled/error states.
 
