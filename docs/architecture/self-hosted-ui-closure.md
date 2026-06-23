@@ -91,8 +91,13 @@ workflow.
   properties for unlocked clips, typed numeric/vector/text/color effect property
   payloads, clip tint/opacity/transform/timing actions, and opacity curve model,
   action, and AppState keyframe mapping.
-- P2-EFFECTS-001: Verify effect list filtering/category display, add-to-clip,
-  selection of newly added effects, Inspector sync, and NodeGraph sync.
+- [done] P2-EFFECTS-001: Verify effect list filtering/category display,
+  add-to-clip, selection of newly added effects, Inspector sync, and NodeGraph
+  sync. Coverage now spans Effects model category/effect-row separation,
+  searchable effect titles and filter wiring, no-target and locked-track apply
+  suppression, selected-video add payloads, AppState add-to-clip undo behavior,
+  automatic selection of newly added effects, and refreshed Inspector/NodeGraph
+  models targeting the new effect.
 - P2-NODEGRAPH-001: Verify source/effect/output graph generation, selection,
   keyboard navigation, empty states, and sync after effect add/remove/reorder.
 - P2-EXPORT-001: Verify draft settings, output selection, enqueue, cancel,

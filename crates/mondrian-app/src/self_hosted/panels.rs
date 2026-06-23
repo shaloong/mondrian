@@ -6937,6 +6937,91 @@ mod tests {
     }
 
     #[test]
+    fn effect_panel_model_keeps_category_rows_separate_from_effect_apply_rows() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+
+        let model = PanelListModel::from_effect_registry(Some(selection));
+
+        let color_category = model
+            .items
+            .iter()
+            .find(|item| item.title == "颜色" && item.tree_depth == 0)
+            .expect("top-level color category");
+        assert_eq!(color_category.tree_id.as_deref(), Some("颜色"));
+        assert_eq!(color_category.tree_expanded, Some(true));
+        assert!(color_category.activate_action.is_none());
+
+        let blur_effect = model
+            .items
+            .iter()
+            .find(|item| item.title == effect_display_name(&EffectType::GaussianBlur))
+            .expect("Gaussian blur effect row");
+        assert_eq!(
+            blur_effect.tree_depth,
+            EffectType::GaussianBlur.category_path().len() as u8
+        );
+        assert!(blur_effect.tree_id.is_none());
+        assert!(blur_effect.tree_expanded.is_none());
+        assert!(blur_effect.activate_action.is_some());
+        assert_eq!(model.filter_placeholder.as_deref(), Some("搜索效果"));
+        assert_eq!(
+            blur_effect.title,
+            effect_display_name(&EffectType::GaussianBlur)
+        );
+    }
+
+    #[test]
+    fn effects_add_refreshes_inspector_and_node_graph_selection_models() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips.push(SelectedClipRef {
+            track_id,
+            is_video_track: true,
+            clip_id,
+        });
+
+        state
+            .dispatch_action(effects_add_to_clip_action(EffectsAddToClipPayload {
+                clip: inspector_clip_payload(SelectedClipRef {
+                    track_id,
+                    is_video_track: true,
+                    clip_id,
+                }),
+                effect_type: EffectType::GaussianBlur,
+            }))
+            .expect("dispatch add effect");
+
+        let selected = state.primary_selected_effect().expect("new effect selected");
+        assert_eq!(selected.clip.clip_id, clip_id);
+        let models = SelfHostedPanelModels::from_app_state(&state);
+
+        assert_eq!(
+            models.inspector.selected_effect_id,
+            Some(selected.effect_id)
+        );
+        assert_eq!(models.inspector.effects.len(), 1);
+        assert_eq!(models.inspector.effects[0].effect_id, selected.effect_id);
+        assert_eq!(
+            models.node_graph.selected_node_id,
+            Some(format!("effect:{}", selected.effect_id))
+        );
+        assert!(models.node_graph.node_targets.iter().any(|target| {
+            target.target == NodeGraphTarget::Effect(selected.effect_id)
+                && target.node_id == format!("effect:{}", selected.effect_id)
+        }));
+    }
+
+    #[test]
     fn inspector_effect_vector_property_rows_get_multi_component_height() {
         assert_eq!(
             effect_property_row_height(&PropertyValue::Vec2(glam::Vec2::ZERO)),
