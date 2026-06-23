@@ -2268,6 +2268,36 @@ mod tests {
     }
 
     #[test]
+    fn host_refresh_preserves_valid_asset_folder_and_normalizes_deleted_folder() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let root = temp_asset_library_dir("asset-folder-refresh-normalize");
+        let library = AssetLibrary::open(root.clone()).expect("open asset library");
+        let folder_id = library.create_folder("Rushes", None).expect("create folder");
+        let mut state = workspace_app_state();
+        state.asset_library = Some(library);
+        let mut host = SelfHostedUiHost::new(state);
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+
+        host.root_mut().set_asset_folder_id(Some(folder_id.clone()));
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+        assert_eq!(host.root().asset_folder_id(), Some(folder_id.as_str()));
+
+        host.app_state()
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .delete_folder(&folder_id)
+            .expect("delete folder");
+        host.mark_dirty();
+        host.refresh_if_dirty(bounds);
+
+        assert_eq!(host.root().asset_folder_id(), None);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn host_clears_deleted_asset_folder_selection_after_dispatch() {
         let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
         let root = temp_asset_library_dir("asset-folder-delete-normalize");

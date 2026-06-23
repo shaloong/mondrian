@@ -55,9 +55,12 @@ workflow.
   folders, app-action relink success and proxy-mode type guards, existing
   folder/rename/move/delete action tests, thumbnail loading/failure cache tests,
   and `AssetGrid` drag/selection/context-menu widget tests.
-- P2-ASSETS-002: Ensure asset browser state restoration is stable across
+- [done] P2-ASSETS-002: Ensure asset browser state restoration is stable across
   AppState refreshes: selected assets, folder, filter, scroll, hover, and inline
-  rename cancellation.
+  rename cancellation. Coverage includes shell-level stable-id restoration for
+  selection/filter/hover, Assets panel scroll preservation, host refresh
+  normalization for valid/deleted folders, and forced rebuild cancellation of
+  stale inline rename editors without dispatching rename actions.
 - P2-TIMELINE-001: Verify select, seek, move, trim, split, delete, ripple
   delete, duplicate, copy/paste, enable/disable, mark in/out, and track controls
   through shared app actions and host availability gates.

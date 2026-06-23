@@ -1956,6 +1956,12 @@ mod tests {
         None
     }
 
+    fn widget_tree_accepts_text_input(widget: &dyn Widget) -> bool {
+        widget.accepts_text_input()
+            || (0..widget.child_count())
+                .any(|index| widget.child(index).is_some_and(widget_tree_accepts_text_input))
+    }
+
     fn timeline_view_state(widget: &dyn Widget) -> Option<TimelineViewState> {
         if let Some(timeline) = widget.as_any().and_then(|any| any.downcast_ref::<TimelineView>()) {
             return Some(timeline.state());
@@ -3553,6 +3559,102 @@ mod tests {
     }
 
     #[test]
+    fn set_models_preserves_asset_grid_hover_by_stable_id() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        assert!(with_asset_grid_mut_for_title(
+            root.dock_mut(),
+            "Assets",
+            &mut |grid| {
+                let point = grid.card_rect_for_index(1).expect("second asset").center();
+                assert_eq!(
+                    grid.event(
+                        &UiEvent::MouseMove { position: point, modifiers: Modifiers::none() },
+                        &mut ctx,
+                    ),
+                    EventResult::Handled
+                );
+            },
+        ));
+        let before = asset_grid_state_for_title(&root, "Assets").expect("assets state");
+        assert_eq!(before.hovered_item_id.as_deref(), Some("demo-audio"));
+
+        root.set_models(SelfHostedPanelModels::demo());
+
+        let after = asset_grid_state_for_title(&root, "Assets").expect("assets state");
+        assert_eq!(after.hovered_item_id.as_deref(), Some("demo-audio"));
+    }
+
+    #[test]
+    fn set_models_cancels_asset_grid_inline_rename_without_dispatching() {
+        let mut models = SelfHostedPanelModels::demo();
+        models.assets.items[0] = models.assets.items[0].clone().renamable(true);
+        let mut root = SelfHostedAppRoot::from_models(models);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let actions = std::cell::RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        assert!(with_asset_grid_mut_for_title(
+            root.dock_mut(),
+            "Assets",
+            &mut |grid| {
+                grid.event(&UiEvent::FocusGained, &mut ctx);
+                grid.event(
+                    &UiEvent::MouseDown {
+                        position: grid.card_rect_for_index(0).expect("first asset").center(),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                );
+                assert_eq!(
+                    grid.event(
+                        &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+                        &mut ctx,
+                    ),
+                    EventResult::Handled
+                );
+                assert!(grid.accepts_text_input());
+            },
+        ));
+        assert!(widget_tree_accepts_text_input(&root));
+        actions.borrow_mut().clear();
+
+        root.set_models(SelfHostedPanelModels::demo());
+
+        assert!(
+            !widget_tree_accepts_text_input(&root),
+            "forced model rebuild must discard transient inline editors"
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "discarding a stale inline editor must not commit a rename action"
+        );
+    }
+
+    #[test]
     fn set_models_preserves_asset_grid_state_when_title_changes() {
         let mut root = SelfHostedAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -3646,6 +3748,31 @@ mod tests {
 
         let after = scroll_state_for_panel(root.dock(), PanelKind::Inspector)
             .expect("inspector should keep a scroll view");
+        assert_eq!(after.scroll_offset, before.scroll_offset);
+    }
+
+    #[test]
+    fn set_models_preserves_assets_panel_scroll_position() {
+        let mut root = SelfHostedAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 360.0));
+        assert!(with_scroll_view_mut_for_panel(
+            root.dock_mut(),
+            PanelKind::Assets,
+            &mut |scroll| {
+                scroll.set_scroll_offset(Vec2::new(0.0, 80.0));
+            },
+        ));
+        let before =
+            scroll_state_for_panel(root.dock(), PanelKind::Assets).expect("assets scroll view");
+        assert!(
+            before.scroll_offset.y > 0.0,
+            "test fixture must overflow vertically"
+        );
+
+        root.set_models(SelfHostedPanelModels::demo());
+
+        let after =
+            scroll_state_for_panel(root.dock(), PanelKind::Assets).expect("assets scroll view");
         assert_eq!(after.scroll_offset, before.scroll_offset);
     }
 
