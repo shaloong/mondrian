@@ -1035,6 +1035,12 @@ mod tests {
         project_file: PathBuf,
     }
 
+    #[derive(Default)]
+    struct ProjectDialogPlatform {
+        open_paths: Option<Vec<PathBuf>>,
+        save_path: Option<PathBuf>,
+    }
+
     impl PlatformService for CountingPlatform {
         fn clipboard_copy(&self, _text: &str) {}
 
@@ -1098,6 +1104,37 @@ mod tests {
         fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
+    impl PlatformService for ProjectDialogPlatform {
+        fn clipboard_copy(&self, _text: &str) {}
+
+        fn clipboard_paste(&self) -> Option<String> {
+            None
+        }
+
+        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
+            self.open_paths.clone()
+        }
+
+        fn save_file_dialog(
+            &self,
+            _title: &str,
+            _default_name: &str,
+            _filters: &[FileFilter],
+        ) -> Option<PathBuf> {
+            self.save_path.clone()
+        }
+
+        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn open_url(&self, _url: &str) {}
+
+        fn reveal_in_file_manager(&self, _path: &Path) {}
+
+        fn send_notification(&self, _title: &str, _body: &str) {}
+    }
+
     fn temp_preferences_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1131,6 +1168,26 @@ mod tests {
             .expect("project should be created");
         state.sequence.as_mut().expect("active sequence").name = "Changed".to_owned();
         state
+    }
+
+    fn create_project_file(name: &str) -> PathBuf {
+        let project_file = temp_preferences_path(name).with_extension("mdp");
+        let mut state = AppState::new();
+        state
+            .create_new_project_at(
+                project_file.clone(),
+                name,
+                1920,
+                1080,
+                mondrian_core::Rational::FPS_2997,
+            )
+            .expect("project should be created");
+        project_file
+    }
+
+    fn cleanup_project_file(project_file: &Path) {
+        let _ = std::fs::remove_file(project_file);
+        let _ = std::fs::remove_dir_all(project_runtime_root_for_test(project_file));
     }
 
     fn dispatch_ctx<'a>(
@@ -1289,6 +1346,199 @@ mod tests {
         let _ = std::fs::remove_file(project_file);
         let _ = std::fs::remove_file(preferences_path);
         let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
+    fn host_open_project_dialog_switches_to_workspace_and_records_recent_project() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let project_file = create_project_file("open-dialog");
+        let preferences_path = temp_preferences_path("open-dialog-preferences");
+        let platform = ProjectDialogPlatform {
+            open_paths: Some(vec![project_file.clone()]),
+            save_path: None,
+        };
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            SelfHostedPreferences::default(),
+            preferences_path.clone(),
+        );
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_open_project_dialog_action());
+        let commands =
+            host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(
+            host.app_state().current_project_path.as_deref(),
+            Some(project_file.as_path())
+        );
+        assert_eq!(
+            host.preferences().recent_projects,
+            vec![project_file.clone()]
+        );
+        assert_eq!(
+            load_self_hosted_preferences_from(&preferences_path).recent_projects,
+            vec![project_file.clone()]
+        );
+
+        cleanup_project_file(&project_file);
+        let _ = std::fs::remove_file(preferences_path);
+    }
+
+    #[test]
+    fn host_open_recent_project_uses_startup_shell_action_boundary() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let project_file = create_project_file("open-recent");
+        let mut preferences = SelfHostedPreferences::default();
+        preferences.record_recent_project(project_file.clone());
+        let preferences_path = temp_preferences_path("open-recent-preferences");
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            preferences,
+            preferences_path.clone(),
+        );
+        let pending = PendingUiActions::default();
+
+        pending.push(
+            crate::app::ui_actions::app_shell_open_recent_project_action(
+                crate::app::ui_actions::AppShellOpenRecentProjectPayload {
+                    project_file: project_file.clone(),
+                },
+            ),
+        );
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(
+            host.app_state().current_project_path.as_deref(),
+            Some(project_file.as_path())
+        );
+        assert_eq!(
+            host.preferences().recent_projects,
+            vec![project_file.clone()]
+        );
+
+        cleanup_project_file(&project_file);
+        let _ = std::fs::remove_file(preferences_path);
+    }
+
+    #[test]
+    fn host_save_project_action_clears_unsaved_fingerprint_delta() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let mut host = SelfHostedUiHost::new(saved_workspace_app_state("save-project-action"));
+        let project_file = host.app_state().current_project_path.clone().expect("project path");
+        assert!(host.app_state().has_unsaved_project_changes());
+        let pending = PendingUiActions::default();
+
+        pending.push(Action::SaveProject);
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert!(host.app_state().has_open_project());
+        assert!(!host.app_state().has_unsaved_project_changes());
+
+        cleanup_project_file(&project_file);
+    }
+
+    #[test]
+    fn host_save_as_dialog_updates_project_path_and_recent_project() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let preferences_path = temp_preferences_path("save-as-preferences");
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            saved_workspace_app_state("save-as-source"),
+            SelfHostedPreferences::default(),
+            preferences_path.clone(),
+        );
+        let source_file =
+            host.app_state().current_project_path.clone().expect("source project path");
+        let target_file = temp_preferences_path("save-as-target").with_extension("mdp");
+        let platform = ProjectDialogPlatform {
+            open_paths: None,
+            save_path: Some(target_file.clone()),
+        };
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_save_project_as_dialog_action());
+        let commands =
+            host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(
+            host.app_state().current_project_path.as_deref(),
+            Some(target_file.as_path())
+        );
+        assert!(target_file.exists());
+        assert_eq!(
+            host.preferences().recent_projects,
+            vec![target_file.clone()]
+        );
+
+        cleanup_project_file(&source_file);
+        cleanup_project_file(&target_file);
+        let _ = std::fs::remove_file(preferences_path);
+    }
+
+    #[test]
+    fn host_recovers_autosave_candidate_and_records_recent_project() {
+        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let project_file = create_project_file("recover-host");
+        let mut autosave_state = AppState::new();
+        autosave_state
+            .open_project_file(project_file.clone())
+            .expect("project should open for autosave");
+        autosave_state.sequence.as_mut().expect("active sequence").name =
+            "Recovered Edit".to_owned();
+        let autosave_file = autosave_state
+            .write_autosave_snapshot(2, 7)
+            .expect("autosave snapshot should write");
+        let preferences_path = temp_preferences_path("recover-host-preferences");
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            SelfHostedPreferences::default(),
+            preferences_path.clone(),
+        );
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_recover_project_action(
+            crate::app::ui_actions::ProjectRecoverFromAutosavePayload {
+                project_file: project_file.clone(),
+                autosave_file,
+            },
+        ));
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(
+            host.app_state().current_project_path.as_deref(),
+            Some(project_file.as_path())
+        );
+        assert_eq!(
+            host.app_state().sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            Some("Recovered Edit")
+        );
+        assert_eq!(
+            host.preferences().recent_projects,
+            vec![project_file.clone()]
+        );
+
+        cleanup_project_file(&project_file);
+        let _ = std::fs::remove_file(preferences_path);
     }
 
     #[test]

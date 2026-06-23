@@ -27,6 +27,9 @@ workflow.
   action path used by titlebar controls, menus, and shortcuts.
 - P2-PROJECT-001: Self-hosted close-project and quit requests guard unsaved
   project changes with Save and continue / Discard / Cancel.
+- P2-PROJECT-002: Host-level self-hosted project lifecycle tests cover create,
+  open, save, save-as, close, recent project, recovery, and startup-to-workspace
+  transitions through self-hosted actions.
 
 ## Phase 1: Visual System Production Pass
 
@@ -46,8 +49,6 @@ workflow.
 
 ## Phase 2: Core Workflow Parity
 
-- P2-PROJECT-002: Verify create, open, save, save-as, close, recent project,
-  recovery, and startup-to-workspace transitions through self-hosted actions.
 - P2-ASSETS-001: Verify project-media import, folder navigation, rename, move,
   delete, relink, proxy mode, thumbnail loading/failure, and drag payloads.
 - P2-ASSETS-002: Ensure asset browser state restoration is stable across
