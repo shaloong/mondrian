@@ -158,11 +158,13 @@ impl DockSplitter {
                     self.dragging = true;
                     self.handle_hovered = true;
                     ctx.request_pointer_capture(self.id);
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
             }
             UiEvent::MouseMove { position, .. } => {
                 if self.dragging {
+                    let old_ratio = self.ratio;
                     match self.direction {
                         SplitDirection::Horizontal => {
                             let rel = (position.x - self.bounds.x - self.handle_size * 0.5)
@@ -177,9 +179,16 @@ impl DockSplitter {
                     }
                     let bounds = self.bounds;
                     self.layout(bounds);
+                    if (self.ratio - old_ratio).abs() > f32::EPSILON {
+                        ctx.request_repaint();
+                    }
                     return EventResult::Handled;
                 }
+                let old_hovered = self.handle_hovered;
                 self.handle_hovered = self.grab_rect.contains(*position);
+                if self.handle_hovered != old_hovered {
+                    ctx.request_repaint();
+                }
                 if self.handle_hovered {
                     return EventResult::Handled;
                 }
@@ -188,6 +197,7 @@ impl DockSplitter {
                 if self.dragging {
                     self.dragging = false;
                     ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
             }
@@ -195,6 +205,7 @@ impl DockSplitter {
                 self.dragging = false;
                 self.handle_hovered = false;
                 ctx.release_pointer_capture(self.id);
+                ctx.request_repaint();
                 return EventResult::Handled;
             }
             _ => {}
@@ -532,6 +543,41 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert!(splitter.dragging);
         assert!(ctx.requests.pointer_capture.is_some());
+    }
+
+    #[test]
+    fn drag_move_requests_repaint_after_cursor_move_redraw_is_not_global() {
+        let mut splitter = splitter(SplitDirection::Horizontal);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = event_ctx(&mut focus, &mut shortcut, &mut tooltip);
+
+        assert_eq!(
+            splitter.before_child_event(
+                &UiEvent::MouseDown {
+                    position: splitter.grab_rect.center(),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        ctx.requests.repaint = false;
+
+        assert_eq!(
+            splitter.before_child_event(
+                &UiEvent::MouseMove {
+                    position: Point::new(splitter.grab_rect.center().x + 24.0, 40.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert!(ctx.requests.repaint);
     }
 
     #[test]
