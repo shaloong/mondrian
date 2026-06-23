@@ -125,9 +125,14 @@ workflow.
   min/max zoom clamps, restored state offset/zoom/track-height clamps,
   offscreen playhead paint suppression, and dense minor/major ruler labels
   using the configured frame rate.
-- P3-TIMELINE-002: Improve clip visual fidelity for labels, badges, disabled
-  state, waveform peaks, selection, hover, trim handles, snap guides, and narrow
-  clips.
+- [done] P3-TIMELINE-002: Improve clip visual fidelity for labels, badges,
+  disabled state, waveform peaks, selection, hover, trim handles, snap guides,
+  and narrow clips. Coverage now spans measured V/A track badges, selected
+  clip tokenized borders, hover/selected trim-handle chrome, disabled clip
+  muted fill and label color, clipped label paint bounds, truncated-label
+  tooltips, narrow clips that skip overflowing labels, waveform peak clamping
+  inside clip bounds, waveform paint command density, snap-guide paint tokens,
+  and disabled clips remaining selectable for inspection.
 - P3-TIMELINE-003: Complete roll/trim/ripple UX parity, including keyboard
   shortcuts, context menus, host availability, and undo semantics.
 - P3-DND-001: Finish cross-panel drag/drop semantics for assets to timeline,

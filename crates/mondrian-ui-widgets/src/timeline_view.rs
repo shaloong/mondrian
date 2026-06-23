@@ -4466,26 +4466,33 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: usize,
+        rect_commands: Vec<(Rect, Color, f32)>,
         lines: usize,
+        line_commands: Vec<(Point, Point, f32, Color)>,
         line_colors: Vec<Color>,
         triangles: usize,
         texts: Vec<String>,
+        text_boxes: Vec<(String, Point, f32, Color)>,
         clips: usize,
+        clip_bounds: Vec<Rect>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {
+        fn push_clip(&mut self, bounds: Rect) {
             self.clips += 1;
+            self.clip_bounds.push(bounds);
         }
 
         fn pop_clip(&mut self) {}
 
-        fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
             self.rects += 1;
+            self.rect_commands.push((bounds, color, corner_radius));
         }
 
-        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, color: Color) {
+        fn draw_line(&mut self, start: Point, end: Point, width: f32, color: Color) {
             self.lines += 1;
+            self.line_commands.push((start, end, width, color));
             self.line_colors.push(color);
         }
 
@@ -4501,15 +4508,23 @@ mod tests {
             &mut self,
             text: &str,
             _font_size: f32,
-            _position: Point,
-            _max_width: f32,
-            _color: Color,
+            position: Point,
+            max_width: f32,
+            color: Color,
         ) {
             self.texts.push(text.into());
+            self.text_boxes.push((text.into(), position, max_width, color));
         }
 
         fn push_translate(&mut self, _offset: glam::Vec2) {}
         fn pop_transform(&mut self) {}
+    }
+
+    fn color_close(actual: Color, expected: Color) -> bool {
+        (actual.r - expected.r).abs() <= 0.001
+            && (actual.g - expected.g).abs() <= 0.001
+            && (actual.b - expected.b).abs() <= 0.001
+            && (actual.a - expected.a).abs() <= 0.001
     }
 
     #[test]
@@ -8271,6 +8286,213 @@ mod tests {
             assert_eq!(view.playhead_frame(), 12);
         }
         assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn track_kind_badge_measures_label_with_equal_padding() {
+        let view = TimelineView::new(vec![TimelineTrack::video("V12", Vec::new())]);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 220.0, 80.0),
+        };
+        let header = Rect::new(0.0, 0.0, 132.0, 42.0);
+        let rect = view.paint_track_kind_badge(&mut ctx, header, &view.tracks[0], false);
+        let text_width = measure_single_line("V12", theme.typography.metadata.font_size).0;
+
+        assert_eq!(rect.height, 18.0);
+        assert_eq!(rect.width, (text_width + 12.0).max(22.0));
+        assert!(encoder.texts.iter().any(|text| text == "V12"));
+    }
+
+    #[test]
+    fn selected_clip_paints_tokenized_border_and_trim_handles() {
+        let view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Selected", 0, 20).selected(true)],
+        )]);
+        let rect = Rect::new(24.0, 36.0, 96.0, 34.0);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 180.0, 100.0),
+        };
+
+        view.paint_clip(
+            &mut ctx,
+            TimelineClipRef { track_index: 0, clip_index: 0 },
+            &view.tracks[0].clips[0],
+            rect,
+            false,
+        );
+
+        let mut selected_border = theme.colors.timeline_clip_selected_border;
+        selected_border.a = 0.62;
+        assert!(encoder
+            .rect_commands
+            .iter()
+            .any(|(bounds, color, _)| *bounds == rect.inset(-1.0, -1.0)
+                && color_close(*color, selected_border)));
+
+        let handle = color_with_alpha(theme.colors.foreground, 0.22);
+        assert_eq!(
+            encoder
+                .rect_commands
+                .iter()
+                .filter(|(bounds, color, _)| bounds.width == 2.0
+                    && bounds.height >= 4.0
+                    && color_close(*color, handle))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn hovered_clip_paints_hover_fill_and_stronger_trim_handles() {
+        let mut view = TimelineView::new(vec![TimelineTrack::audio(
+            "A1",
+            vec![TimelineClip::new("Hover", 0, 20)],
+        )]);
+        view.hovered_clip = Some(TimelineClipRef { track_index: 0, clip_index: 0 });
+        let rect = Rect::new(24.0, 36.0, 96.0, 34.0);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 180.0, 100.0),
+        };
+
+        view.paint_clip(
+            &mut ctx,
+            TimelineClipRef { track_index: 0, clip_index: 0 },
+            &view.tracks[0].clips[0],
+            rect,
+            false,
+        );
+
+        assert!(
+            encoder.rect_commands.iter().any(|(bounds, color, _)| *bounds == rect
+                && color_close(*color, theme.colors.timeline_clip_audio_hover))
+        );
+
+        let handle = color_with_alpha(theme.colors.foreground, 0.35);
+        assert_eq!(
+            encoder
+                .rect_commands
+                .iter()
+                .filter(|(bounds, color, _)| bounds.width == 2.0
+                    && bounds.height >= 4.0
+                    && color_close(*color, handle))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn disabled_clip_uses_muted_fill_and_clipped_label_color() {
+        let view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Disabled", 0, 20).disabled(true)],
+        )]);
+        let rect = Rect::new(24.0, 36.0, 96.0, 34.0);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 180.0, 100.0),
+        };
+
+        view.paint_clip(
+            &mut ctx,
+            TimelineClipRef { track_index: 0, clip_index: 0 },
+            &view.tracks[0].clips[0],
+            rect,
+            false,
+        );
+
+        let mut disabled_fill = theme.colors.timeline_clip_video;
+        disabled_fill.a *= 0.45;
+        assert!(encoder
+            .rect_commands
+            .iter()
+            .any(|(bounds, color, _)| *bounds == rect && color_close(*color, disabled_fill)));
+        assert!(encoder.clip_bounds.contains(&rect.inset(6.0, 2.0)));
+
+        let text = encoder
+            .text_boxes
+            .iter()
+            .find(|(text, _, _, _)| text == "Disabled")
+            .expect("disabled label text box");
+        assert!(color_close(
+            text.3,
+            color_with_alpha(theme.colors.foreground, 0.74)
+        ));
+    }
+
+    #[test]
+    fn narrow_clip_skips_label_text_box_without_overflowing() {
+        let view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Tiny", 0, 1)],
+        )]);
+        let rect = Rect::new(24.0, 36.0, 8.0, 24.0);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 80.0, 80.0),
+        };
+
+        view.paint_clip(
+            &mut ctx,
+            TimelineClipRef { track_index: 0, clip_index: 0 },
+            &view.tracks[0].clips[0],
+            rect,
+            false,
+        );
+
+        assert!(encoder.text_boxes.iter().all(|(text, _, _, _)| text != "Tiny"));
+        assert!(encoder
+            .rect_commands
+            .iter()
+            .all(|(bounds, _, _)| bounds.width.is_finite() && bounds.height.is_finite()));
+    }
+
+    #[test]
+    fn waveform_peaks_are_clamped_and_painted_inside_clip() {
+        let view = TimelineView::new(vec![TimelineTrack::audio("A1", Vec::new())]);
+        let clip = TimelineClip::new("Wave", 0, 20).with_waveform_peaks(vec![-1.0, 0.5, 2.0]);
+        let rect = Rect::new(20.0, 30.0, 26.0, 32.0);
+        let inner = rect.inset(6.0, (rect.height * 0.24).min(10.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 80.0, 80.0),
+        };
+
+        view.paint_audio_waveform(&mut ctx, rect, &clip, false);
+
+        assert_eq!(encoder.line_commands.len(), inner.width.floor() as usize);
+        assert!(
+            encoder.line_commands.iter().all(|(start, end, width, color)| {
+                *width == 1.0
+                    && color_close(*color, color_with_alpha(theme.colors.foreground, 0.30))
+                    && start.x >= inner.x
+                    && start.x <= inner.x + inner.width
+                    && end.x == start.x
+                    && start.y >= inner.y
+                    && end.y <= inner.y + inner.height
+            })
+        );
     }
 
     #[test]
