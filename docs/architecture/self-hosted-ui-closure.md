@@ -75,8 +75,14 @@ workflow.
   payload rejection for stale clip refs and cross-media moves; host availability
   gates for typed stale/locked timeline targets; and command-layer media/track
   validation before undoable AppState mutation.
-- P2-VIEWER-001: Verify preview frame delivery, zoom, fit/full controls, preview
-  quality, transport controls, safe guides, and focus keyboard controls.
+- [done] P2-VIEWER-001: Verify preview frame delivery, zoom, fit/full controls,
+  preview quality, transport controls, safe guides, and focus keyboard controls.
+  Coverage now spans `ViewerSurface` aspect-fit and fixed zoom geometry,
+  preview-frame clipping, disabled empty states, safe-guide geometry,
+  transport icon/action dispatch, narrow-control collapse, zoom and preview
+  quality dropdowns, focus-keyboard controls, focus/disabled cleanup, shell-local
+  zoom persistence, AppState preview-quality updates, and panel-model preview
+  source attachment/empty-state isolation.
 - P2-INSPECTOR-001: Verify selected clip, selected effect, no selection,
   locked/read-only, disabled effect, numeric rows, color rows, and curve rows.
 - P2-EFFECTS-001: Verify effect list filtering/category display, add-to-clip,

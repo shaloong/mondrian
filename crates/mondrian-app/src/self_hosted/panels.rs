@@ -6441,6 +6441,30 @@ mod tests {
     }
 
     #[test]
+    fn app_state_models_do_not_request_viewer_preview_without_sequence() {
+        struct UnexpectedPreview;
+
+        impl ViewerPreviewSource for UnexpectedPreview {
+            fn viewer_frame_for_state(&self, _state: &AppState) -> Option<ViewerFrameImage> {
+                ViewerFrameImage::new("unexpected-preview", 320, 180, vec![128; 320 * 180 * 4])
+            }
+        }
+
+        let state = AppState::new();
+
+        let models = SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&UnexpectedPreview),
+        );
+
+        assert!(!models.viewer.enabled);
+        assert!(models.viewer.frame_image.is_none());
+        assert_eq!(models.viewer.empty_message.as_deref(), Some("未载入序列"));
+    }
+
+    #[test]
     fn app_state_models_label_full_resolution_viewer_preview_scale() {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");

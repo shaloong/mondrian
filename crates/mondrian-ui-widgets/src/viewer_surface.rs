@@ -1441,6 +1441,17 @@ mod tests {
         fn pop_transform(&mut self) {}
     }
 
+    fn rect_approx_eq(left: Rect, right: Rect) -> bool {
+        (left.x - right.x).abs() < 0.001
+            && (left.y - right.y).abs() < 0.001
+            && (left.width - right.width).abs() < 0.001
+            && (left.height - right.height).abs() < 0.001
+    }
+
+    fn has_rect(rects: &[Rect], wanted: Rect) -> bool {
+        rects.iter().copied().any(|candidate| rect_approx_eq(candidate, wanted))
+    }
+
     #[test]
     fn canvas_preserves_source_aspect_ratio() {
         let mut viewer = ViewerSurface::new("Demo", 1920, 1080);
@@ -1545,6 +1556,47 @@ mod tests {
         assert!(!encoder.texts.iter().any(|text| text == "No sequence"));
         assert!(encoder.texts.iter().any(|text| text == "未载入序列"));
         assert_eq!(encoder.clip_pops, encoder.clips.len());
+    }
+
+    #[test]
+    fn safe_guides_are_drawn_inside_the_fitted_canvas() {
+        let mut viewer = ViewerSurface::new("Viewer", 1920, 1080);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let canvas = viewer.canvas_rect();
+        let action = canvas.inset(canvas.width * 0.05, canvas.height * 0.05);
+        let title = canvas.inset(canvas.width * 0.10, canvas.height * 0.10);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+
+        for guide in [action, title] {
+            assert!(guide.x > canvas.x);
+            assert!(guide.y > canvas.y);
+            assert!(guide.x + guide.width < canvas.x + canvas.width);
+            assert!(guide.y + guide.height < canvas.y + canvas.height);
+            assert!(has_rect(
+                &encoder.rects,
+                horizontal_stroke_rect(guide.y, guide.x, guide.width, 1.0)
+            ));
+            assert!(has_rect(
+                &encoder.rects,
+                horizontal_stroke_rect(guide.y + guide.height, guide.x, guide.width, 1.0)
+            ));
+            assert!(has_rect(
+                &encoder.rects,
+                vertical_stroke_rect(guide.x, guide.y, guide.height, 1.0)
+            ));
+            assert!(has_rect(
+                &encoder.rects,
+                vertical_stroke_rect(guide.x + guide.width, guide.y, guide.height, 1.0)
+            ));
+        }
     }
 
     #[test]
@@ -1793,6 +1845,60 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn focus_lost_closes_open_viewer_dropdown_without_dispatching() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_zoom_label("适合")
+            .on_zoom(|_| Action::SaveProject);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let position = viewer.zoom_rect().center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(viewer.open_dropdown, Some(ViewerDropdown::Zoom));
+        assert!(viewer.hovered_zoom);
+        ctx.requests.repaint = false;
+
+        assert_eq!(
+            viewer.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(ctx.requests.repaint);
+        assert_eq!(viewer.open_dropdown, None);
+        assert_eq!(viewer.hovered_dropdown_index, None);
+        assert_eq!(viewer.pressed_dropdown_index, None);
+        assert!(!viewer.hovered_zoom);
+        assert!(!viewer.focused);
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
