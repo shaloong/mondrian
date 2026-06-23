@@ -648,4 +648,23 @@ mod tests {
             &state
         ));
     }
+
+    #[test]
+    fn app_state_action_gate_uses_edge_specific_trim_to_playhead_validity() {
+        let mut state = state_with_selected_clip();
+        let trim_in = timeline_trim_selected_clips_to_playhead_action(
+            TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
+        );
+        let trim_out = timeline_trim_selected_clips_to_playhead_action(
+            TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
+        );
+
+        state.seek(10);
+        assert!(!app_state_action_enabled(&trim_in, &state));
+        assert!(app_state_action_enabled(&trim_out, &state));
+
+        state.seek(29);
+        assert!(app_state_action_enabled(&trim_in, &state));
+        assert!(!app_state_action_enabled(&trim_out, &state));
+    }
 }

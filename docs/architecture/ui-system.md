@@ -1162,7 +1162,9 @@ maps them to `ui.timeline.trim_selected_clips_to_playhead`, and `AppState`
 resolves the current selection and playhead at dispatch time. This matters for
 right-click workflows because the widget first dispatches clip selection before
 the menu command is activated; menu items must not freeze stale clip ids when
-the menu opens.
+the menu opens. Host availability for these rows must use the same shared
+`app_state_action_enabled` gate as menu shortcuts, including edge-specific
+playhead validity; Trim In and Trim Out may differ at clip boundaries.
 Roll edit follows the same selected-state boundary through
 `TimelineEditCommand::RollSelectedCutToPlayhead` and
 `ui.timeline.roll_selected_cut_to_playhead`: the context menu exposes the NLE

@@ -133,8 +133,14 @@ workflow.
   tooltips, narrow clips that skip overflowing labels, waveform peak clamping
   inside clip bounds, waveform paint command density, snap-guide paint tokens,
   and disabled clips remaining selectable for inspection.
-- P3-TIMELINE-003: Complete roll/trim/ripple UX parity, including keyboard
-  shortcuts, context menus, host availability, and undo semantics.
+- [done] P3-TIMELINE-003: Complete roll/trim/ripple UX parity, including
+  keyboard shortcuts, context menus, host availability, and undo semantics.
+  Coverage now spans widget-level focused keyboard commands, context-menu
+  command rows and shortcut hints, Shift+Delete ripple delete dispatch,
+  self-hosted command-to-action mapping, shared AppState availability gates,
+  edge-specific trim-to-playhead enablement at clip boundaries, locked-track
+  suppression, AppState trim/roll/ripple command handling, and timeline undo
+  semantics through the shared editing command path.
 - P3-DND-001: Finish cross-panel drag/drop semantics for assets to timeline,
   panel tabs, dock targets, and future effect reordering.
 - P3-CONTEXT-001: Ensure all context menus use shared shortcut hints, disabled

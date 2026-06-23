@@ -657,7 +657,8 @@ struct TimelineEditAvailability {
     delete: bool,
     ripple_delete: bool,
     split: bool,
-    trim_to_playhead: bool,
+    trim_in_to_playhead: bool,
+    trim_out_to_playhead: bool,
     roll_cut_to_playhead: bool,
     set_selected_enabled: bool,
     mark_in: bool,
@@ -676,8 +677,26 @@ impl TimelineEditAvailability {
             delete: app_state_action_enabled(&Action::DeleteSelection, state),
             ripple_delete: app_state_action_enabled(&Action::RippleDeleteSelection, state),
             split: app_state_action_enabled(&Action::SplitClipAtPlayhead, state),
-            trim_to_playhead: selected_clip_tracks_are_editable(state),
-            roll_cut_to_playhead: single_selected_clip_track_is_editable(state),
+            trim_in_to_playhead: app_state_action_enabled(
+                &timeline_trim_selected_clips_to_playhead_action(
+                    TimelineTrimSelectedClipsToPlayheadPayload {
+                        edge: TimelineTrimPayloadEdge::In,
+                    },
+                ),
+                state,
+            ),
+            trim_out_to_playhead: app_state_action_enabled(
+                &timeline_trim_selected_clips_to_playhead_action(
+                    TimelineTrimSelectedClipsToPlayheadPayload {
+                        edge: TimelineTrimPayloadEdge::Out,
+                    },
+                ),
+                state,
+            ),
+            roll_cut_to_playhead: app_state_action_enabled(
+                &timeline_roll_selected_cut_to_playhead_action(),
+                state,
+            ),
             set_selected_enabled: selected_clip_tracks_are_editable(state),
             mark_in: app_state_action_enabled(&Action::MarkInAtPlayhead, state),
             mark_out: app_state_action_enabled(&Action::MarkOutAtPlayhead, state),
@@ -695,8 +714,8 @@ impl TimelineEditAvailability {
             TimelineEditCommand::DeleteSelection => self.delete,
             TimelineEditCommand::RippleDeleteSelection => self.ripple_delete,
             TimelineEditCommand::SplitAtPlayhead => self.split,
-            TimelineEditCommand::TrimSelectionInToPlayhead
-            | TimelineEditCommand::TrimSelectionOutToPlayhead => self.trim_to_playhead,
+            TimelineEditCommand::TrimSelectionInToPlayhead => self.trim_in_to_playhead,
+            TimelineEditCommand::TrimSelectionOutToPlayhead => self.trim_out_to_playhead,
             TimelineEditCommand::RollSelectedCutToPlayhead => self.roll_cut_to_playhead,
             TimelineEditCommand::EnableSelection | TimelineEditCommand::DisableSelection => {
                 self.set_selected_enabled
@@ -2253,10 +2272,6 @@ fn selected_clip_tracks_are_editable(state: &AppState) -> bool {
             .find(|track| track.clips.iter().any(|clip| clip.id == selection.clip_id))
             .is_some_and(|track| !track.is_locked)
     })
-}
-
-fn single_selected_clip_track_is_editable(state: &AppState) -> bool {
-    state.selected_clips().len() == 1 && selected_clip_tracks_are_editable(state)
 }
 
 fn panel_list(model: &PanelListModel) -> PanelList {
@@ -7765,6 +7780,39 @@ mod tests {
         ] {
             assert!(!model.edit_command_available(command), "{command:?}");
         }
+    }
+
+    #[test]
+    fn app_state_timeline_model_uses_edge_specific_trim_availability() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("edit");
+        let tb = sequence.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip_id = clip.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+        state.sequence = Some(sequence);
+        state.selection.selected_clips.push(SelectedClipRef {
+            track_id,
+            is_video_track: true,
+            clip_id,
+        });
+
+        state.seek(10);
+        let at_clip_start = TimelinePanelModel::from_app_state(&state);
+        assert!(
+            !at_clip_start.edit_command_available(TimelineEditCommand::TrimSelectionInToPlayhead)
+        );
+        assert!(
+            at_clip_start.edit_command_available(TimelineEditCommand::TrimSelectionOutToPlayhead)
+        );
+
+        state.seek(29);
+        let at_clip_end = TimelinePanelModel::from_app_state(&state);
+        assert!(at_clip_end.edit_command_available(TimelineEditCommand::TrimSelectionInToPlayhead));
+        assert!(
+            !at_clip_end.edit_command_available(TimelineEditCommand::TrimSelectionOutToPlayhead)
+        );
     }
 
     #[test]
