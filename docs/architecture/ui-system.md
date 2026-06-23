@@ -725,7 +725,16 @@ scrolling, zooming, local drag previews, and edge-trim previews. On mouse
 release they emit domain-light move/trim proposals (`TimelineClipMove`,
 `TimelineClipTrim`) instead of resolving clip overlaps, ripple behavior, linked
 media, source in/out offsets, or undo snapshots. Those semantics stay in
-`mondrian-app` / `mondrian-timeline` command handling. Timelines expose
+`mondrian-app` / `mondrian-timeline` command handling.
+Presentation-level drag guards run before any proposal leaves the widget: source
+locked tracks cannot start clip moves or trims, incompatible or locked target
+tracks fold back to the source track, stale local clip references cancel the
+active preview, and disabled timelines clear pending drag state at the event
+boundary. The app adapter still resolves those proposals through stable
+`TrackId` / `ClipId` identities and rejects stale ids or media-kind mismatches
+before dispatching typed actions, with command handlers as the final mutation
+authority.
+Timelines expose
 snapping as another widget-local preview layer: the explicit Snap toolbar
 toggle is stored in `TimelineViewState`, defaults on, and focused `S` toggles
 it without dispatching editor actions. When enabled, clip moves, edge trims,

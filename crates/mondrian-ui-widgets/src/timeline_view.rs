@@ -5097,6 +5097,89 @@ mod tests {
     }
 
     #[test]
+    fn disabled_timeline_ignores_clip_drag_and_trim_proposals() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![TimelineClip::new("Intro", 40, 30)],
+        )])
+        .on_clip_move(|_, _| Action::DeleteSelection)
+        .on_clip_trim(|_, _| Action::SaveProject)
+        .disabled();
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: timeline_content_point(312.0, 42.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: timeline_content_point(352.0, 42.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseUp {
+                position: timeline_content_point(352.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: timeline_content_point(258.0, 42.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: timeline_content_point(278.0, 42.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseUp {
+                position: timeline_content_point(278.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(view.clip_drag.is_none());
+        assert!(view.trim_drag.is_none());
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.pointer_capture.is_none());
+    }
+
+    #[test]
     fn disabling_while_dragging_playhead_releases_capture_on_next_event() {
         let mut view = timeline();
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -5526,6 +5609,77 @@ mod tests {
             },
             &mut ctx,
         );
+        view.event(
+            &UiEvent::MouseUp {
+                position: timeline_content_point(148.0, 92.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            moves.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.move".into(),
+                name: "0->0:0->10".into(),
+                payload: Default::default(),
+            }]
+        );
+    }
+
+    #[test]
+    fn dragging_clip_to_locked_target_track_keeps_source_track() {
+        let moves = RefCell::new(Vec::new());
+        let dispatch = |action| moves.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![
+            TimelineTrack::video("V1", vec![TimelineClip::new("Intro", 0, 24)]),
+            TimelineTrack::video("V2", vec![]).locked(true),
+        ])
+        .on_clip_move(|movement, _clip| Action::Custom {
+            namespace: "timeline.move".into(),
+            name: format!(
+                "{}->{}:{}->{}",
+                movement.clip_ref.track_index,
+                movement.new_track_index,
+                movement.old_start_frame,
+                movement.new_start_frame
+            ),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        view.event(
+            &UiEvent::MouseDown {
+                position: timeline_content_point(108.0, 42.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        view.event(
+            &UiEvent::MouseMove {
+                position: timeline_content_point(148.0, 92.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(view
+            .clip_drag
+            .is_some_and(|drag| drag.current_start_frame == 10 && drag.current_track_index == 0));
+
         view.event(
             &UiEvent::MouseUp {
                 position: timeline_content_point(148.0, 92.0),

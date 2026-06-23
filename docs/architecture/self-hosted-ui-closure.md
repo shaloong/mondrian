@@ -68,9 +68,13 @@ workflow.
   AppState dispatch tests for typed timeline and shared edit actions, and
   self-hosted availability gates for valid, stale, locked, and host-dispatched
   typed timeline targets.
-- P2-TIMELINE-002: Ensure timeline drag proposals validate clip media type,
-  target track type, locked tracks, disabled timelines, and stale ids before any
-  AppState mutation.
+- [done] P2-TIMELINE-002: Ensure timeline drag proposals validate clip media
+  type, target track type, locked tracks, disabled timelines, and stale ids
+  before any AppState mutation. Coverage now spans widget-level disabled,
+  locked-source, locked-target, and incompatible-track proposal guards; panel
+  payload rejection for stale clip refs and cross-media moves; host availability
+  gates for typed stale/locked timeline targets; and command-layer media/track
+  validation before undoable AppState mutation.
 - P2-VIEWER-001: Verify preview frame delivery, zoom, fit/full controls, preview
   quality, transport controls, safe guides, and focus keyboard controls.
 - P2-INSPECTOR-001: Verify selected clip, selected effect, no selection,
