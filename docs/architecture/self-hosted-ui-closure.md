@@ -106,8 +106,14 @@ workflow.
   automatic selection after effect add, fallback to source after selected-effect
   removal, and node/edge retargeting while preserving selected effect identity
   after effect reorder.
-- P2-EXPORT-001: Verify draft settings, output selection, enqueue, cancel,
-  clear completed, status snapshots, and disabled/error states.
+- [done] P2-EXPORT-001: Verify draft settings, output selection, enqueue,
+  cancel, clear completed, status snapshots, and disabled/error states.
+  Coverage now spans AppState-backed export draft preset/sequence/range/output
+  persistence, output-dialog shell resolution into draft updates, disabled
+  enqueue payload guards for missing sequences or blank paths, enqueue error
+  status for invalid requests, queue cancel/clear typed actions, bounded recent
+  job snapshots, cancelable active jobs, failed/completed terminal job states,
+  and clear-completed cleanup for Completed/Failed/Cancelled jobs.
 
 ## Phase 3: Advanced NLE Interaction Polish
 

@@ -2527,6 +2527,17 @@ mod tests {
     fn dispatch_export_ui_routes_queue_management_actions() {
         let mut state = AppState::new();
         let job_id = mondrian_core::types::JobId::new();
+        let render_job = |output_path: &str| {
+            mondrian_export::queue::RenderJob::new(mondrian_export::preset::ExportConfig {
+                preset: mondrian_export::preset::ExportPreset::youtube_1080p(),
+                input: mondrian_export::preset::ExportInput::File {
+                    input_path: "missing-source.mov".into(),
+                    in_point: None,
+                    out_point: None,
+                },
+                output_path: output_path.into(),
+            })
+        };
 
         state
             .dispatch_action(export_cancel_job_action(ExportJobTargetPayload { job_id }))
@@ -2536,6 +2547,30 @@ mod tests {
             .expect("clear completed should be a queue no-op when empty");
 
         assert!(state.render_queue.list_jobs().is_empty());
+
+        let mut encoding = render_job("E:/renders/encoding.mp4");
+        encoding.status = mondrian_export::queue::JobStatus::Encoding;
+        let encoding_id = state.render_queue.enqueue(encoding);
+        let mut failed = render_job("E:/renders/failed.mp4");
+        failed.status = mondrian_export::queue::JobStatus::Failed("disk full".to_owned());
+        state.render_queue.enqueue(failed);
+        let mut completed = render_job("E:/renders/completed.mp4");
+        completed.status = mondrian_export::queue::JobStatus::Completed;
+        state.render_queue.enqueue(completed);
+
+        state
+            .dispatch_action(export_cancel_job_action(ExportJobTargetPayload {
+                job_id: encoding_id,
+            }))
+            .expect("cancel active export job should route");
+        state
+            .dispatch_action(export_clear_completed_action())
+            .expect("clear terminal jobs");
+
+        let jobs = state.render_queue.list_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, encoding_id);
+        assert_eq!(jobs[0].status, mondrian_export::queue::JobStatus::Encoding);
     }
 
     #[test]

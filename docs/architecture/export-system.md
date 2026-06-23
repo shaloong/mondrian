@@ -147,6 +147,12 @@ impl RenderQueue {
 }
 ```
 
+`clear_completed` clears every terminal queue entry, not only successful exports:
+`Completed`, `Failed(_)`, and `Cancelled` jobs are removable, while `Pending`,
+`Rendering`, and `Encoding` jobs remain visible and cancelable. Self-hosted UI
+queue snapshots must use the same terminal definition for clear-button
+availability and row state.
+
 ---
 
 ## 4. 硬件加速编码

@@ -1332,7 +1332,7 @@ impl RenderQueue {
 
     pub fn clear_completed(&self) {
         let mut queue = self.jobs.lock();
-        queue.retain(|j| !matches!(j.status, JobStatus::Completed | JobStatus::Cancelled));
+        queue.retain(|job| !helpers::is_terminal(&job.status));
     }
 }
 
@@ -1522,6 +1522,31 @@ mod tests {
 
         assert!(done, "first should complete and second should cancel");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn clear_completed_removes_all_terminal_jobs() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let queue = RenderQueue::new_with_executor(Arc::new(FakeExecutor {
+            calls: Arc::clone(&calls),
+            delay_ms: 100,
+        }));
+        let mut completed = RenderJob::new(dummy_config("completed.mp4"));
+        completed.status = JobStatus::Completed;
+        completed.progress = 1.0;
+        let mut failed = RenderJob::new(dummy_config("failed.mp4"));
+        failed.status = JobStatus::Failed("disk full".to_owned());
+        let mut cancelled = RenderJob::new(dummy_config("cancelled.mp4"));
+        cancelled.status = JobStatus::Cancelled;
+
+        queue.enqueue(completed);
+        queue.enqueue(failed);
+        queue.enqueue(cancelled);
+
+        queue.clear_completed();
+
+        assert!(queue.list_jobs().is_empty());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
