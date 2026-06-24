@@ -87,8 +87,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [ ] Split large widgets into state/model, layout/geometry, events, paint, and tests.
 - [ ] Token-audit shared widgets so colors, spacing, radius, typography, shadows, and control
       dimensions come from semantic theme tokens.
-- [ ] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
-      Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and Popup.
+- [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
+      Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
+      controls.
 - [ ] Add composition stress tests for nested clipping, nested scroll views, overlays, focus
       handoff, and disabled/read-only states.
 - [x] Add a nested ScrollView overlay stress test proving child overlays remain hit-testable and

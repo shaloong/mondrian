@@ -496,4 +496,71 @@ mod tests {
         assert_eq!(overlay_encoder.rects.len(), 2);
         assert_eq!(overlay_encoder.text_boxes.len(), 1);
     }
+
+    #[test]
+    fn component_visual_regression_scenario_keeps_tooltip_as_clipped_top_layer_popover() {
+        let mut widget = TooltipWidget::new();
+        widget.update_state(TooltipState {
+            text: "Tooltip visual regression text wraps near the viewport edge".into(),
+            position: Point::new(156.0, 84.0),
+            visible: true,
+        });
+        let theme = ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 220.0, 140.0);
+
+        let mut normal_encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut normal_encoder,
+                theme: &theme,
+                clip_rect,
+            };
+            widget.paint(&mut ctx);
+        }
+        assert!(
+            normal_encoder.rects.is_empty() && normal_encoder.text_boxes.is_empty(),
+            "tooltip visual chrome should be emitted only from the overlay pass"
+        );
+
+        let mut overlay_encoder = RecordingEncoder::default();
+        {
+            let mut ctx = PaintContext {
+                encoder: &mut overlay_encoder,
+                theme: &theme,
+                clip_rect,
+            };
+            widget.paint_overlay(&mut ctx);
+        }
+
+        assert_eq!(
+            overlay_encoder.rects.len(),
+            2,
+            "tooltip should paint border and fill as stable popover chrome"
+        );
+        let fill = overlay_encoder.rects[1];
+        assert!(fill.x >= clip_rect.x);
+        assert!(fill.y >= clip_rect.y);
+        assert!(fill.x + fill.width <= clip_rect.x + clip_rect.width + 0.1);
+        assert!(fill.y + fill.height <= clip_rect.y + clip_rect.height + 0.1);
+        let text_clip = overlay_encoder
+            .clips
+            .first()
+            .copied()
+            .expect("tooltip text should be clipped to the visible popover fill");
+        assert!((text_clip.x - fill.x).abs() <= 0.01);
+        assert!((text_clip.y - fill.y).abs() <= 0.01);
+        assert!((text_clip.width - fill.width).abs() <= 0.01);
+        assert!((text_clip.height - fill.height).abs() <= 0.01);
+        let (text, position, max_width) = overlay_encoder
+            .text_boxes
+            .first()
+            .expect("visible tooltip should emit wrapped text");
+        assert!(text.contains("Tooltip visual regression"));
+        assert!(position.x >= fill.x + HORIZONTAL_PADDING - 0.1);
+        assert!(position.y >= fill.y + VERTICAL_PADDING - 0.1);
+        assert!(
+            position.x + max_width <= fill.x + fill.width - HORIZONTAL_PADDING + 0.1,
+            "tooltip wrapped text width should remain inside the clamped popover"
+        );
+    }
 }

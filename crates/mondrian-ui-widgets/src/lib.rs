@@ -36,6 +36,8 @@ pub mod viewer_surface;
 #[cfg(test)]
 mod component_extreme_tests;
 #[cfg(test)]
+mod component_visual_tests;
+#[cfg(test)]
 mod test_utils;
 
 pub use asset_grid::{

@@ -1,41 +1,19 @@
 use std::cell::RefCell;
 
-use glam::Vec2;
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{
-    DrawCommandEncoder, EventContext, PaintContext, PointerCaptureRequest,
-};
+use mondrian_ui_core::widget::{EventContext, PaintContext, PointerCaptureRequest};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_theme::{Theme, ThemePreset};
 
-use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+use crate::test_utils::{
+    custom_action, make_event_ctx, paint_widget, test_icon, DummyFocus, DummyShortcut, DummyTooltip,
+};
 use crate::{
     Checkbox, ColorPickerTrigger, ColorPickerTriggerOptions, ContextMenu, CurveEditor, CurvePoint,
     Dropdown, Label, MenuItem, PanelList, PanelListItem, ScrollView, Slider, TextInput,
-    TimelineClip, TimelineTrack, TimelineView, VectorIcon, ViewerSurface,
+    TimelineClip, TimelineTrack, TimelineView, ViewerSurface,
 };
-
-#[derive(Debug, Clone)]
-struct TextCommand {
-    text: String,
-    position: Point,
-    max_width: Option<f32>,
-}
-
-#[derive(Default)]
-struct RecordingEncoder {
-    rects: Vec<Rect>,
-    clips: Vec<Rect>,
-    lines: Vec<(Point, Point, f32)>,
-    triangle_batches: Vec<Vec<Point>>,
-    raster_images: Vec<Rect>,
-    colored_triangle_batches: Vec<Vec<(Point, Color)>>,
-    texts: Vec<TextCommand>,
-    clip_depth: i32,
-    transform_depth: i32,
-}
 
 struct NestedOverlayWidget {
     id: WidgetId,
@@ -118,179 +96,6 @@ impl Widget for NestedOverlayWidget {
     fn hit_test(&self, point: Point) -> bool {
         self.trigger_rect().contains(point)
     }
-}
-
-impl RecordingEncoder {
-    fn assert_balanced_and_finite(&self) {
-        assert_eq!(self.clip_depth, 0, "paint leaked clip stack entries");
-        assert_eq!(
-            self.transform_depth, 0,
-            "paint leaked transform stack entries"
-        );
-        for rect in &self.rects {
-            assert_rect_finite(*rect);
-        }
-        for clip in &self.clips {
-            assert_rect_finite(*clip);
-        }
-        for (start, end, width) in &self.lines {
-            assert_point_finite(*start);
-            assert_point_finite(*end);
-            assert!(width.is_finite());
-        }
-        for batch in &self.triangle_batches {
-            for point in batch {
-                assert_point_finite(*point);
-            }
-        }
-        for rect in &self.raster_images {
-            assert_rect_finite(*rect);
-        }
-        for batch in &self.colored_triangle_batches {
-            for (point, _) in batch {
-                assert_point_finite(*point);
-            }
-        }
-        for text in &self.texts {
-            assert_point_finite(text.position);
-            if let Some(max_width) = text.max_width {
-                assert!(max_width.is_finite());
-                assert!(max_width > 0.0);
-            }
-        }
-    }
-}
-
-impl DrawCommandEncoder for RecordingEncoder {
-    fn push_clip(&mut self, bounds: Rect) {
-        assert_rect_finite(bounds);
-        self.clips.push(bounds);
-        self.clip_depth += 1;
-    }
-
-    fn pop_clip(&mut self) {
-        self.clip_depth -= 1;
-        assert!(self.clip_depth >= 0, "paint popped an empty clip stack");
-    }
-
-    fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
-        self.rects.push(bounds);
-    }
-
-    fn draw_gradient_rect(&mut self, bounds: Rect, _colors: [Color; 4], _corner_radius: f32) {
-        self.rects.push(bounds);
-    }
-
-    fn draw_line(&mut self, start: Point, end: Point, width: f32, _color: Color) {
-        self.lines.push((start, end, width));
-    }
-
-    fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
-        self.triangle_batches.push(vertices.to_vec());
-    }
-
-    fn draw_raster_image(
-        &mut self,
-        _key: &str,
-        bounds: Rect,
-        _width: u32,
-        _height: u32,
-        _rgba: std::sync::Arc<[u8]>,
-        _tint: Color,
-    ) {
-        self.raster_images.push(bounds);
-    }
-
-    fn draw_colored_triangles(&mut self, vertices: &[(Point, Color)]) {
-        self.colored_triangle_batches.push(vertices.to_vec());
-    }
-
-    fn draw_colored_triangles_in_rect(
-        &mut self,
-        vertices: &[(Point, Color)],
-        mask_bounds: Rect,
-        _corner_radius: f32,
-    ) {
-        assert_rect_finite(mask_bounds);
-        self.colored_triangle_batches.push(vertices.to_vec());
-    }
-
-    fn draw_text(&mut self, text: &str, _font_size: f32, position: Point, _color: Color) {
-        self.texts
-            .push(TextCommand { text: text.to_string(), position, max_width: None });
-    }
-
-    fn draw_text_box(
-        &mut self,
-        text: &str,
-        _font_size: f32,
-        position: Point,
-        max_width: f32,
-        _color: Color,
-    ) {
-        self.texts.push(TextCommand {
-            text: text.to_string(),
-            position,
-            max_width: Some(max_width),
-        });
-    }
-
-    fn push_translate(&mut self, offset: Vec2) {
-        assert!(offset.x.is_finite());
-        assert!(offset.y.is_finite());
-        self.transform_depth += 1;
-    }
-
-    fn pop_transform(&mut self) {
-        self.transform_depth -= 1;
-        assert!(
-            self.transform_depth >= 0,
-            "paint popped an empty transform stack"
-        );
-    }
-}
-
-fn theme() -> Theme {
-    ThemePreset::Dark.build()
-}
-
-fn paint_widget(widget: &dyn Widget, clip_rect: Rect) -> RecordingEncoder {
-    let theme = theme();
-    let mut encoder = RecordingEncoder::default();
-    {
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
-        widget.paint(&mut ctx);
-        widget.paint_overlay(&mut ctx);
-    }
-    encoder.assert_balanced_and_finite();
-    encoder
-}
-
-fn assert_rect_finite(rect: Rect) {
-    assert!(rect.x.is_finite());
-    assert!(rect.y.is_finite());
-    assert!(rect.width.is_finite());
-    assert!(rect.height.is_finite());
-    assert!(rect.width >= 0.0);
-    assert!(rect.height >= 0.0);
-}
-
-fn assert_point_finite(point: Point) {
-    assert!(point.x.is_finite());
-    assert!(point.y.is_finite());
-}
-
-fn custom_action(_name: &str) -> Action {
-    Action::ToggleFullscreen
-}
-
-fn test_icon() -> VectorIcon {
-    VectorIcon::from_svg_str(
-        r#"<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="2" width="12" height="12" fill="black"/>
-        </svg>"#,
-    )
-    .expect("test icon should parse")
 }
 
 #[test]
