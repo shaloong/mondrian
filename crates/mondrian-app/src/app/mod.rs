@@ -38,6 +38,7 @@ use mondrian_timeline::sequence::{
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
+use crate::app::media_cache::MediaCacheCleanupStats;
 use crate::egui_ui::{
     effect_controls_panel::EffectControlsPanel,
     effect_library_panel::EffectLibraryPanel,
@@ -45,7 +46,7 @@ use crate::egui_ui::{
     library_panel::LibraryPanel,
     startup::{BootstrapAction, BootstrapRecentProjectItem, BootstrapRecoveryItem},
     timeline_panel::TimelinePanel,
-    viewer_panel::{MediaCacheCleanupStats, ViewerPanel, ViewerPreferences},
+    viewer_panel::{ViewerPanel, ViewerPreferences},
 };
 use crate::shortcuts::{ShortcutAction, ShortcutBinding, ShortcutKey, ShortcutPreferences};
 
@@ -62,6 +63,7 @@ mod bootstrap;
 mod chrome;
 mod clip_clipboard;
 pub(crate) mod exporting;
+pub(crate) mod media_cache;
 #[allow(dead_code)]
 mod new_project;
 mod playback;

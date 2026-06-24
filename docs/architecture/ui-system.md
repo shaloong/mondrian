@@ -67,6 +67,11 @@ The legacy egui shortcut preference module at `mondrian-app/src/shortcuts.rs`
 is also crate-private; new shortcut routing, labels, persistence, and
 Preferences UI must use `self_hosted::shortcuts` and
 `SelfHostedPreferences.shortcut_overrides`.
+Media-cache filesystem policy is not a UI concern: `mondrian-app::app::media_cache`
+owns cache usage statistics, size/age cleanup, and clear-directory behavior.
+Legacy viewer panels may call it before clearing their GPU textures, decoder
+pools, and prefetch state, but app preferences and future self-hosted
+preferences must not depend on `egui_ui::viewer_panel` for cache maintenance.
 The Phase 5 parity audit lives in
 `docs/architecture/self-hosted-ui-parity.md`. It is the source of truth for
 which legacy egui workflows are product-covered by self-hosted UI, which panels

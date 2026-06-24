@@ -39,47 +39,6 @@ pub(crate) fn prefetch_budget(active_layer_count: usize, is_playing: bool) -> Pr
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct CacheFileEntry {
-    pub(crate) path: PathBuf,
-    pub(crate) size: u64,
-    pub(crate) modified: std::time::SystemTime,
-}
-
-pub(crate) fn list_cache_files(root: &Path) -> anyhow::Result<Vec<CacheFileEntry>> {
-    let mut stack = vec![root.to_path_buf()];
-    let mut files = Vec::new();
-
-    while let Some(dir) = stack.pop() {
-        let read_dir = std::fs::read_dir(&dir)?;
-        for entry in read_dir {
-            let entry = entry?;
-            let path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-
-            if !metadata.is_file() {
-                continue;
-            }
-
-            files.push(CacheFileEntry {
-                path,
-                size: metadata.len(),
-                modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            });
-        }
-    }
-
-    Ok(files)
-}
-
 pub(crate) fn prefetch_offsets(
     frames_ahead: i64,
     direction: i64,

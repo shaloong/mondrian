@@ -170,7 +170,7 @@ pub(super) fn run_cache_maintenance_if_needed(app: &mut MondrianApp) {
         }
     }
 
-    let policy = crate::egui_ui::viewer_panel::MediaCachePolicy {
+    let policy = crate::app::media_cache::MediaCachePolicy {
         max_size_bytes: (app.media_cache_max_size_gb.max(1) as u64)
             .saturating_mul(1024)
             .saturating_mul(1024)
@@ -182,7 +182,7 @@ pub(super) fn run_cache_maintenance_if_needed(app: &mut MondrianApp) {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let result =
-            crate::egui_ui::viewer_panel::run_media_cache_maintenance_for_dir(cache_dir, policy);
+            crate::app::media_cache::run_media_cache_maintenance_for_dir(&cache_dir, policy);
         let _ = tx.send(result);
     });
     app.cache_maintenance_in_flight = true;
@@ -991,7 +991,7 @@ fn draw_media_preferences(app: &mut MondrianApp, ui: &mut egui::Ui) {
             }
 
             if ui.button("立即执行自动清理").clicked() {
-                let policy = crate::egui_ui::viewer_panel::MediaCachePolicy {
+                let policy = crate::app::media_cache::MediaCachePolicy {
                     max_size_bytes: (app.media_cache_max_size_gb.max(1) as u64)
                         .saturating_mul(1024)
                         .saturating_mul(1024)

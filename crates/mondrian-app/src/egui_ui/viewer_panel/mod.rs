@@ -1,6 +1,12 @@
 mod draw;
 use crate::{
-    app::{AppState, SelectedClipRef},
+    app::{
+        media_cache::{
+            clear_media_cache_dir, media_cache_usage_stats, run_media_cache_maintenance_for_dir,
+            MediaCacheCleanupStats, MediaCachePolicy, MediaCacheUsageStats,
+        },
+        AppState, SelectedClipRef,
+    },
     egui_ui::theme::{self, palette, tokens, typography},
 };
 pub(crate) use draw::*;
@@ -283,24 +289,6 @@ const fn default_prefetch_enabled() -> bool {
 
 const fn default_layer_cache_enabled() -> bool {
     true
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct MediaCachePolicy {
-    pub max_size_bytes: u64,
-    pub max_age_days: u64,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MediaCacheCleanupStats {
-    pub deleted_files: usize,
-    pub deleted_bytes: u64,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MediaCacheUsageStats {
-    pub file_count: usize,
-    pub total_bytes: u64,
 }
 
 impl Default for ViewerPreferences {
@@ -3472,21 +3460,12 @@ impl ViewerPanel {
         &mut self,
         policy: MediaCachePolicy,
     ) -> anyhow::Result<MediaCacheCleanupStats> {
-        run_media_cache_maintenance_for_dir(self.proxy_config.cache_dir.clone(), policy)
+        run_media_cache_maintenance_for_dir(&self.proxy_config.cache_dir, policy)
     }
 
     pub fn clear_all_media_cache(&mut self) -> anyhow::Result<MediaCacheCleanupStats> {
         let cache_dir = self.proxy_config.cache_dir.clone();
-        let mut stats = MediaCacheCleanupStats::default();
-
-        if cache_dir.exists() {
-            let entries = list_cache_files(&cache_dir)?;
-            stats.deleted_files = entries.len();
-            stats.deleted_bytes = entries.iter().map(|e| e.size).sum();
-            std::fs::remove_dir_all(&cache_dir)?;
-        }
-
-        std::fs::create_dir_all(&cache_dir)?;
+        let stats = clear_media_cache_dir(&cache_dir)?;
 
         self.texture_cache.clear();
         layer_cache_clear(&self.layer_frame_cache);
@@ -3500,60 +3479,8 @@ impl ViewerPanel {
     }
 
     pub fn media_cache_usage_stats(&self) -> anyhow::Result<MediaCacheUsageStats> {
-        let cache_dir = self.proxy_config.cache_dir.clone();
-        if !cache_dir.exists() {
-            return Ok(MediaCacheUsageStats::default());
-        }
-
-        let entries = list_cache_files(&cache_dir)?;
-        Ok(MediaCacheUsageStats {
-            file_count: entries.len(),
-            total_bytes: entries.iter().map(|entry| entry.size).sum(),
-        })
+        media_cache_usage_stats(&self.proxy_config.cache_dir)
     }
-}
-
-pub fn run_media_cache_maintenance_for_dir(
-    cache_dir: PathBuf,
-    policy: MediaCachePolicy,
-) -> anyhow::Result<MediaCacheCleanupStats> {
-    if !cache_dir.exists() {
-        return Ok(MediaCacheCleanupStats::default());
-    }
-
-    let mut entries = list_cache_files(&cache_dir)?;
-    let mut stats = MediaCacheCleanupStats::default();
-
-    if policy.max_age_days > 0 {
-        let max_age = Duration::from_secs(policy.max_age_days.saturating_mul(24 * 60 * 60));
-        let now = std::time::SystemTime::now();
-        for entry in &entries {
-            if let Ok(age) = now.duration_since(entry.modified) {
-                if age > max_age && std::fs::remove_file(&entry.path).is_ok() {
-                    stats.deleted_files += 1;
-                    stats.deleted_bytes = stats.deleted_bytes.saturating_add(entry.size);
-                }
-            }
-        }
-        entries = list_cache_files(&cache_dir)?;
-    }
-
-    let mut total_size: u64 = entries.iter().map(|e| e.size).sum();
-    if policy.max_size_bytes > 0 && total_size > policy.max_size_bytes {
-        entries.sort_by_key(|e| e.modified);
-        for entry in entries {
-            if total_size <= policy.max_size_bytes {
-                break;
-            }
-            if std::fs::remove_file(&entry.path).is_ok() {
-                stats.deleted_files += 1;
-                stats.deleted_bytes = stats.deleted_bytes.saturating_add(entry.size);
-                total_size = total_size.saturating_sub(entry.size);
-            }
-        }
-    }
-
-    Ok(stats)
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -272,7 +272,10 @@ workflow.
   longer advertise `mondrian_app::egui_ui`, and an integration route contract
   test now guards the manifest, `main.rs`, and legacy API visibility.
 - P5-CODE-001: Delete legacy egui code that is no longer needed as reference, or
-  move it behind an explicit reference-only boundary.
+  move it behind an explicit reference-only boundary. Progress: legacy egui
+  shortcut preferences are crate-private, and media-cache filesystem cleanup /
+  usage policy has moved from `egui_ui::viewer_panel` into the neutral
+  `app::media_cache` module with focused coverage.
 - P5-DOCS-001: Update architecture docs to describe the final self-hosted UI
   stack, ownership model, test strategy, and removed compatibility paths.
 - P5-CI-001: Make self-hosted UI tests, clippy, and any screenshot/draw-command
