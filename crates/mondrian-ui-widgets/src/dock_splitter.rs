@@ -8,6 +8,8 @@ use mondrian_ui_core::widget::{
     PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
+use std::cell::Cell;
 
 use crate::paint::{horizontal_stroke_rect, vertical_stroke_rect};
 
@@ -32,6 +34,43 @@ pub struct DockSplitter {
     handle_size: f32,
     /// 交互热区宽度（鼠标检测范围，默认 8px）
     grab_zone: f32,
+    visual: Cell<DockSplitterVisualTokens>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DockSplitterVisualTokens {
+    handle_size: f32,
+    grab_zone: f32,
+    min_grab_zone: f32,
+    base_alpha: f32,
+    hover_lane_alpha: f32,
+    drag_lane_alpha: f32,
+    base_width: f32,
+    hover_width: f32,
+    drag_width: f32,
+}
+
+impl DockSplitterVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            handle_size: spacing.border_standard,
+            grab_zone: spacing.sm,
+            min_grab_zone: spacing.border_emphasis,
+            base_alpha: 0.62,
+            hover_lane_alpha: 0.08,
+            drag_lane_alpha: 0.14,
+            base_width: spacing.border_standard,
+            hover_width: spacing.border_emphasis,
+            drag_width: spacing.border_emphasis + spacing.border_standard,
+        }
+    }
+}
+
+impl Default for DockSplitterVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
 }
 
 /// Serializable-enough splitter layout snapshot used while rebuilding docks.
@@ -51,6 +90,7 @@ impl DockSplitter {
         child_a: Box<dyn Widget>,
         child_b: Box<dyn Widget>,
     ) -> Self {
+        let visual = DockSplitterVisualTokens::default();
         Self {
             id: WidgetId::new(),
             direction,
@@ -60,8 +100,9 @@ impl DockSplitter {
             grab_rect: Rect::ZERO,
             dragging: false,
             handle_hovered: false,
-            handle_size: 1.0,
-            grab_zone: 6.0,
+            handle_size: visual.handle_size,
+            grab_zone: visual.grab_zone,
+            visual: Cell::new(visual),
         }
     }
 
@@ -81,7 +122,7 @@ impl DockSplitter {
 
     /// 设置交互热区宽度（默认 6.0）
     pub fn with_grab_zone(mut self, width: f32) -> Self {
-        self.grab_zone = width.max(2.0);
+        self.grab_zone = width.max(self.visual.get().min_grab_zone);
         self
     }
 
@@ -314,9 +355,11 @@ impl Widget for DockSplitter {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        self.visual.set(DockSplitterVisualTokens::from_theme(ctx.theme));
+        let visual = self.visual.get();
         let tokens = &ctx.theme.colors;
 
-        let base_color = crate::paint::color_with_alpha(tokens.border, 0.62);
+        let base_color = crate::paint::color_with_alpha(tokens.border, visual.base_alpha);
         let active_color = if self.dragging {
             tokens.primary
         } else if self.handle_hovered {
@@ -325,17 +368,17 @@ impl Widget for DockSplitter {
             tokens.border
         };
         let lane_color = if self.dragging {
-            crate::paint::color_with_alpha(tokens.primary, 0.14)
+            crate::paint::color_with_alpha(tokens.primary, visual.drag_lane_alpha)
         } else if self.handle_hovered {
-            crate::paint::color_with_alpha(tokens.accent, 0.08)
+            crate::paint::color_with_alpha(tokens.accent, visual.hover_lane_alpha)
         } else {
             mondrian_core::Color::TRANSPARENT
         };
-        let base_width = 1.0;
+        let base_width = visual.base_width;
         let active_width = if self.dragging {
-            3.0
+            visual.drag_width
         } else if self.handle_hovered {
-            2.0
+            visual.hover_width
         } else {
             0.0
         };
@@ -482,6 +525,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
+        colors: Vec<mondrian_core::Color>,
+        radii: Vec<f32>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -489,8 +534,10 @@ mod tests {
 
         fn pop_clip(&mut self) {}
 
-        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32) {
             self.rects.push(bounds);
+            self.colors.push(color);
+            self.radii.push(corner_radius);
         }
 
         fn draw_line(
@@ -539,7 +586,28 @@ mod tests {
     #[test]
     fn default_grab_zone_is_six_pixels() {
         let splitter = splitter(SplitDirection::Horizontal);
-        assert_eq!(splitter.grab_rect.width, 6.0);
+        let visual = DockSplitterVisualTokens::default();
+
+        assert_eq!(splitter.handle_size, visual.handle_size);
+        assert_eq!(splitter.grab_rect.width, visual.grab_zone);
+    }
+
+    #[test]
+    fn grab_zone_builder_clamps_to_token_minimum() {
+        let mut splitter = DockSplitter::new(
+            SplitDirection::Horizontal,
+            0.5,
+            Box::new(EmptyWidget::new()),
+            Box::new(EmptyWidget::new()),
+        )
+        .with_grab_zone(0.25);
+
+        splitter.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+
+        assert_eq!(
+            splitter.grab_rect.width,
+            DockSplitterVisualTokens::default().min_grab_zone
+        );
     }
 
     #[test]
@@ -670,6 +738,7 @@ mod tests {
     fn handle_geometry_grows_on_hover_and_drag() {
         let mut splitter = splitter(SplitDirection::Vertical);
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let visual = DockSplitterVisualTokens::from_theme(&theme);
 
         let mut encoder = RecordingEncoder::default();
         {
@@ -680,7 +749,10 @@ mod tests {
             };
             splitter.paint(&mut ctx);
         }
-        assert_eq!(encoder.rects.last().map(|r| r.height), Some(1.0));
+        assert_eq!(
+            encoder.rects.last().map(|r| r.height),
+            Some(visual.base_width)
+        );
 
         splitter.handle_hovered = true;
         let mut encoder = RecordingEncoder::default();
@@ -692,7 +764,10 @@ mod tests {
             };
             splitter.paint(&mut ctx);
         }
-        assert_eq!(encoder.rects.last().map(|r| r.height), Some(2.0));
+        assert_eq!(
+            encoder.rects.last().map(|r| r.height),
+            Some(visual.hover_width)
+        );
 
         splitter.dragging = true;
         let mut encoder = RecordingEncoder::default();
@@ -704,7 +779,44 @@ mod tests {
             };
             splitter.paint(&mut ctx);
         }
-        assert_eq!(encoder.rects.last().map(|r| r.height), Some(3.0));
+        assert_eq!(
+            encoder.rects.last().map(|r| r.height),
+            Some(visual.drag_width)
+        );
+    }
+
+    #[test]
+    fn handle_visuals_follow_theme_tokens() {
+        let mut splitter = splitter(SplitDirection::Horizontal);
+        splitter.handle_hovered = true;
+        let mut theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        theme.spacing.border_standard = 2.0;
+        theme.spacing.border_emphasis = 4.0;
+        let visual = DockSplitterVisualTokens::from_theme(&theme);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+        splitter.paint(&mut ctx);
+
+        assert_eq!(encoder.rects.len(), 3);
+        assert_eq!(encoder.rects[0].width, splitter.grab_zone);
+        assert_eq!(encoder.radii[0], splitter.grab_zone * 0.5);
+        assert_eq!(
+            encoder.colors[0],
+            crate::paint::color_with_alpha(theme.colors.accent, visual.hover_lane_alpha)
+        );
+        assert_eq!(encoder.rects[1].width, visual.base_width);
+        assert_eq!(encoder.radii[1], 0.0);
+        assert_eq!(
+            encoder.colors[1],
+            crate::paint::color_with_alpha(theme.colors.border, visual.base_alpha)
+        );
+        assert_eq!(encoder.rects[2].width, visual.hover_width);
+        assert_eq!(encoder.radii[2], visual.hover_width * 0.5);
     }
 
     #[test]
