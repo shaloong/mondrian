@@ -103,6 +103,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       color application into directly tested model contracts.
 - [x] Extract ColorPicker swatch, mode menu, eyedropper, color area, wheel, and field-row
       geometry into directly tested layout contracts.
+- [x] Extract ColorPicker drag and keyboard color interaction math into directly tested
+      interaction contracts while keeping focus/capture/dispatch in the widget layer.
 
 ## Phase 5 - Performance And Observability
 

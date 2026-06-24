@@ -3,12 +3,17 @@
 //! Provides a compact model-based color editor for the custom UI stack.
 
 mod geometry;
+mod interaction;
 mod model;
 
 use std::cell::Cell;
 use std::f32::consts::TAU;
 
 use geometry::ColorPickerGeometry;
+use interaction::{
+    apply_drag, nudge_keyboard_target, ColorDragGeometry, ColorDragTarget, ColorInteractionState,
+    ColorInteractionUpdate,
+};
 use model::{apply_field_texts, field_text, hue_for_color, ColorField};
 use mondrian_core::{Color, HsvColor};
 use mondrian_editor_state::Action;
@@ -137,13 +142,6 @@ pub struct ColorPicker {
     pending_eyedropper_cleanup: bool,
     enabled: bool,
     on_change: Option<Box<ColorChangeAction>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ColorDragTarget {
-    ColorArea,
-    Hue,
-    Alpha,
 }
 
 impl ColorPicker {
@@ -559,55 +557,50 @@ impl ColorPicker {
         true
     }
 
+    fn interaction_state(&self) -> ColorInteractionState {
+        ColorInteractionState { color: self.color, hue: self.hue }
+    }
+
+    fn drag_geometry(&self) -> ColorDragGeometry {
+        ColorDragGeometry {
+            color_area: self.color_area_rect(),
+            hue_bar: self.hue_bar_rect(),
+            alpha_bar: self.alpha_bar_rect(),
+            color_wheel: self.color_wheel_rect(),
+        }
+    }
+
+    fn apply_interaction_update(
+        &mut self,
+        update: ColorInteractionUpdate,
+        ctx: &mut EventContext,
+    ) -> bool {
+        self.color = update.color;
+        self.hue = update.hue;
+        self.sync_fields_from_color();
+        if update.color_changed {
+            self.dispatch_change(ctx);
+            ctx.request_repaint();
+        } else if update.hue_changed {
+            ctx.request_repaint();
+        }
+        update.changed()
+    }
+
     fn update_from_drag(
         &mut self,
         target: ColorDragTarget,
         point: Point,
         ctx: &mut EventContext,
     ) -> bool {
-        let old_color = self.color;
-        let old_hue = self.hue;
-        match target {
-            ColorDragTarget::ColorArea => match self.area_mode {
-                ColorPickerAreaMode::Square => {
-                    let area = self.color_area_rect();
-                    let s = ((point.x - area.x) / area.width).clamp(0.0, 1.0);
-                    let v = (1.0 - (point.y - area.y) / area.height).clamp(0.0, 1.0);
-                    let a = self.color.a;
-                    self.color = Color::from_hsv(HsvColor { h: self.hue, s, v, a });
-                }
-                ColorPickerAreaMode::Wheel => {
-                    let wheel = self.color_wheel_rect();
-                    let center = wheel.center();
-                    let radius = wheel.width.min(wheel.height).max(1.0) * 0.5;
-                    let dx = point.x - center.x;
-                    let dy = point.y - center.y;
-                    let distance = (dx * dx + dy * dy).sqrt().min(radius);
-                    let mut hsv = self.color.to_hsv();
-                    self.hue = dy.atan2(dx).rem_euclid(TAU).to_degrees();
-                    hsv.h = self.hue;
-                    hsv.s = (distance / radius).clamp(0.0, 1.0);
-                    self.color = Color::from_hsv(hsv);
-                }
-            },
-            ColorDragTarget::Hue => {
-                let bar = self.hue_bar_rect();
-                self.hue = (((point.x - bar.x) / bar.width).clamp(0.0, 1.0) * 360.0).min(359.999);
-                let hsv = self.color.to_hsv();
-                self.color =
-                    Color::from_hsv(HsvColor { h: self.hue, s: hsv.s, v: hsv.v, a: hsv.a });
-            }
-            ColorDragTarget::Alpha => {
-                let bar = self.alpha_bar_rect();
-                self.color.a = ((point.x - bar.x) / bar.width).clamp(0.0, 1.0);
-            }
-        }
-        self.sync_fields_from_color();
-        let color_changed = self.color_changed_from_input(old_color, ctx);
-        if !color_changed && (self.hue - old_hue).abs() > f32::EPSILON {
-            ctx.request_repaint();
-        }
-        color_changed || (self.hue - old_hue).abs() > f32::EPSILON
+        let update = apply_drag(
+            self.interaction_state(),
+            self.area_mode,
+            target,
+            point,
+            self.drag_geometry(),
+        );
+        self.apply_interaction_update(update, ctx)
     }
 
     fn nudge_keyboard_target(
@@ -616,53 +609,15 @@ impl ColorPicker {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
-        if modifiers.ctrl || modifiers.alt || modifiers.meta {
+        let Some(update) = nudge_keyboard_target(
+            self.interaction_state(),
+            self.keyboard_target,
+            key,
+            modifiers,
+        ) else {
             return false;
-        }
-        let old_color = self.color;
-        let old_hue = self.hue;
-        let step = if modifiers.shift { 0.05 } else { 0.01 };
-        let mut hsv = self.color.to_hsv();
-        match self.keyboard_target {
-            ColorDragTarget::ColorArea => match key {
-                KeyCode::Left => hsv.s = (hsv.s - step).clamp(0.0, 1.0),
-                KeyCode::Right => hsv.s = (hsv.s + step).clamp(0.0, 1.0),
-                KeyCode::Up => hsv.v = (hsv.v + step).clamp(0.0, 1.0),
-                KeyCode::Down => hsv.v = (hsv.v - step).clamp(0.0, 1.0),
-                _ => return false,
-            },
-            ColorDragTarget::Hue => match key {
-                KeyCode::Left | KeyCode::Down => {
-                    self.hue = (self.hue - step * 360.0).rem_euclid(360.0)
-                }
-                KeyCode::Right | KeyCode::Up => {
-                    self.hue = (self.hue + step * 360.0).rem_euclid(360.0)
-                }
-                _ => return false,
-            },
-            ColorDragTarget::Alpha => match key {
-                KeyCode::Left | KeyCode::Down => {
-                    self.color.a = (self.color.a - step).clamp(0.0, 1.0);
-                    self.sync_fields_from_color();
-                }
-                KeyCode::Right | KeyCode::Up => {
-                    self.color.a = (self.color.a + step).clamp(0.0, 1.0);
-                    self.sync_fields_from_color();
-                }
-                _ => return false,
-            },
-        }
-
-        if !matches!(self.keyboard_target, ColorDragTarget::Alpha) {
-            self.color = Color::from_hsv(HsvColor { h: self.hue, s: hsv.s, v: hsv.v, a: hsv.a });
-            self.sync_fields_from_color();
-        }
-
-        let color_changed = self.color_changed_from_input(old_color, ctx);
-        if !color_changed && (self.hue - old_hue).abs() > f32::EPSILON {
-            ctx.request_repaint();
-        }
-        color_changed || (self.hue - old_hue).abs() > f32::EPSILON
+        };
+        self.apply_interaction_update(update, ctx)
     }
 
     fn paint_panel_chrome(&self, ctx: &mut PaintContext) {
