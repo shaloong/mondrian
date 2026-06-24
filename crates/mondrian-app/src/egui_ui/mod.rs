@@ -1,3 +1,10 @@
+#![allow(dead_code)]
+//! Legacy egui UI reference modules.
+//!
+//! This module is crate-private during self-hosted UI retirement. Unused egui
+//! helpers are expected until P5-CODE deletes or extracts the remaining shared
+//! reference code.
+
 pub mod animation_groups;
 pub mod color_picker;
 pub mod effect_controls;

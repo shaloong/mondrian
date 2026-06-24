@@ -264,8 +264,13 @@ workflow.
   `docs/architecture/self-hosted-ui-parity.md` and classifies product entry,
   project/sequence/preferences flows, editor panels, shared infrastructure,
   retired panels, and remaining legacy egui reference boundaries.
-- P5-ROUTE-001: Remove or quarantine product entrypoints that can still launch
-  legacy egui unintentionally.
+- [done] P5-ROUTE-001: Remove or quarantine product entrypoints that can still
+  launch legacy egui unintentionally. The product `mondrian` binary remains the
+  only default run target and launches `self_hosted::window::run_self_hosted_app`;
+  developer binaries are explicitly self-hosted diagnostics. Legacy egui modules
+  and `MondrianApp` are crate-private reference code, stale plugin docs no
+  longer advertise `mondrian_app::egui_ui`, and an integration route contract
+  test now guards the manifest, `main.rs`, and legacy API visibility.
 - P5-CODE-001: Delete legacy egui code that is no longer needed as reference, or
   move it behind an explicit reference-only boundary.
 - P5-DOCS-001: Update architecture docs to describe the final self-hosted UI

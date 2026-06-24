@@ -61,7 +61,8 @@ The legacy egui UI lives under `mondrian-app/src/egui_ui` and remains migration
 reference code only. That module contains egui panels, egui theme tokens,
 viewer helpers, and the old timeline implementation. New self-hosted UI code
 must not be added there unless it is deliberately deleting or extracting legacy
-behavior.
+behavior. It is crate-private and must not be exposed as public API, product
+binary code, or plugin-extension guidance while it remains reference code.
 The Phase 5 parity audit lives in
 `docs/architecture/self-hosted-ui-parity.md`. It is the source of truth for
 which legacy egui workflows are product-covered by self-hosted UI, which panels

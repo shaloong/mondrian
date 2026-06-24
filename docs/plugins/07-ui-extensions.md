@@ -1,7 +1,7 @@
 # UI 扩展
 
-> **状态：规划中** —— 以下描述的是旧 egui UI 的目标形态，具体 API 尚未开放。
-> self-hosted UI 的插件扩展应基于未来的 widget / panel adapter 接口另行设计。
+> **状态：规划中** —— self-hosted UI 的插件扩展尚未开放。旧 egui UI
+> 现在只是迁移参考，不再作为插件或产品扩展 API 暴露。
 
 本文介绍插件如何扩展 Mondrian 的用户界面：注册面板、菜单项和工具栏按钮。
 
@@ -39,8 +39,8 @@ UI 扩展遵循以下原则：
 
 ```rust
 // 规划中的 API 示意 —— 尚未可用
-use mondrian_app::egui_ui::{
-    PanelDefinition, PanelLocation, PanelContext,
+use mondrian_editor_ui::{
+    PanelBuildContext, PanelDefinition, PanelLocation,
 };
 
 struct MyPluginPanel {
@@ -50,9 +50,9 @@ struct MyPluginPanel {
 impl PanelDefinition for MyPluginPanel {
     fn title(&self) -> &str { "My Tool" }
     fn location(&self) -> PanelLocation { PanelLocation::RightSidebar }
-    fn show(&mut self, ctx: &PanelContext, ui: &mut egui::Ui) {
-        // 使用 egui 绘制面板内容
-        ui.label("Hello from plugin!");
+    fn build(&mut self, ctx: &PanelBuildContext) -> Box<dyn mondrian_ui_core::Widget> {
+        // 使用 self-hosted widget 构建面板内容
+        todo!("future plugin widget construction")
     }
 }
 ```
@@ -74,7 +74,7 @@ impl PanelDefinition for MyPluginPanel {
 
 ```rust
 // 规划中的 API 示意 —— 尚未可用
-use mondrian_app::egui_ui::MenuExtension;
+use mondrian_editor_ui::MenuExtension;
 
 fn register_menu_items() -> Vec<MenuExtension> {
     vec![
@@ -89,7 +89,7 @@ fn register_menu_items() -> Vec<MenuExtension> {
 
 ```rust
 // 规划中的 API 示意 —— 尚未可用
-use mondrian_app::egui_ui::ToolbarButton;
+use mondrian_editor_ui::ToolbarButton;
 
 fn register_toolbar_buttons() -> Vec<ToolbarButton> {
     vec![

@@ -56,12 +56,16 @@ const MAX_STATUS_LOG_ENTRIES: usize = 64;
 mod action_handler;
 mod animation_state;
 mod audio_rendering;
+#[allow(dead_code)]
 mod bootstrap;
+#[allow(dead_code)]
 mod chrome;
 mod clip_clipboard;
 pub(crate) mod exporting;
+#[allow(dead_code)]
 mod new_project;
 mod playback;
+#[allow(dead_code)]
 mod preferences;
 mod project_lifecycle;
 mod selection;
@@ -870,7 +874,8 @@ mod status_log_tests {
     }
 }
 
-pub struct MondrianApp {
+#[allow(dead_code)]
+pub(crate) struct MondrianApp {
     state: AppState,
 
     // UI 面板
@@ -936,11 +941,12 @@ pub struct MondrianApp {
     gpu_available: bool,
 }
 
+#[allow(dead_code)]
 impl MondrianApp {
     const MENU_POPUP_MIN_WIDTH: f32 = 176.0;
     const MENU_POPUP_WIDTH: f32 = 196.0;
 
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::egui_ui::fonts::configure_fonts(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
@@ -1559,6 +1565,7 @@ fn audio_render_max_in_flight_buffering() -> usize {
 //  MondrianApp — 私有 UI helpers
 // ─────────────────────────────────────────────
 
+#[allow(dead_code)]
 impl MondrianApp {
     /// Try to initialize GPU using eframe's shared wgpu device.
     /// Falls back to standalone device creation if eframe device is unavailable.
@@ -2346,6 +2353,7 @@ impl MondrianApp {
     }
 }
 
+#[allow(dead_code)]
 fn app_preferences_path() -> PathBuf {
     app_data_dir().join("app_preferences.json")
 }

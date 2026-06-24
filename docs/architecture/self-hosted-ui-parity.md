@@ -20,9 +20,9 @@ which follow-up Phase 5 item should own any remaining cleanup.
 
 | Workflow | Self-hosted status | Evidence | Follow-up |
 | --- | --- | --- | --- |
-| Default product launch | Covered | `mondrian` is the package default-run and `src/main.rs` calls `self_hosted::window::run_self_hosted_app`. | P5-ROUTE-001 should keep legacy egui out of accidental product launch paths. |
+| Default product launch | Covered | `mondrian` is the package default-run and `src/main.rs` calls `self_hosted::window::run_self_hosted_app`. The route contract test locks this manifest/main boundary. | None. |
 | Startup window, create/open/recent/recovery | Covered | `SelfHostedUiHost` owns startup/workspace mode, recent-project preferences, recovery candidates, and startup action dispatch. Host tests cover new project, open project, recent project, autosave recovery, and startup-to-workspace transitions. | Keep startup as the only pre-project surface; no legacy egui bootstrap fallback. |
-| Native window lifecycle | Covered | `self_hosted::window` owns startup/workspace native window roles, surface resize/DPI lifecycle, shortcut registration, drag/drop, and close routing. Surface lifecycle tests cover zero-size, same-size, resize, and DPI changes. | P5-ROUTE-001 should audit any developer-only binary that can look like a product entrypoint. |
+| Native window lifecycle | Covered | `self_hosted::window` owns startup/workspace native window roles, surface resize/DPI lifecycle, shortcut registration, drag/drop, and close routing. Surface lifecycle tests cover zero-size, same-size, resize, and DPI changes. | None for route parity; developer binaries are classified as self-hosted diagnostics. |
 | Title bar, menu bar, app shell commands | Covered | `TitleBar`, `MenuBar`, and `SelfHostedShellCommands` route minimize, maximize, drag, quit, workspace, and modal commands through app-shell actions. | None for parity; future visual polish belongs to scoped P1 follow-ups. |
 | Pending close/quit guard | Covered | `SelfHostedUiHost` routes close-project and quit through the same pending-close modal with save, discard, and cancel actions. Host tests cover unsaved close-project and quit flows. | None. |
 | Status and action errors | Covered | Self-hosted host surfaces failed editor actions in `AppState` status hints and preserves specific app-layer error hints. | None. |
@@ -65,11 +65,11 @@ which follow-up Phase 5 item should own any remaining cleanup.
 
 | Legacy area | Current classification | Reason | Follow-up |
 | --- | --- | --- | --- |
-| `mondrian-app/src/egui_ui` module | Reference | Still contains migration reference implementations and helper code for theme, viewer/canvas, timeline, startup, color picker, effects, and export panels. | P5-CODE-001 should move required non-UI helpers to app/self-hosted/shared crates or put the module behind an explicit reference-only boundary. |
-| `mondrian-app/src/app::MondrianApp` eframe app | Reference | Still compiles and uses egui/eframe types, but the product binary no longer launches it. | P5-ROUTE-001 should prevent accidental launch; P5-CODE-001 should retire it once remaining helper dependencies are lifted. |
+| `mondrian-app/src/egui_ui` module | Reference | Still contains migration reference implementations and helper code for theme, viewer/canvas, timeline, startup, color picker, effects, and export panels. It is crate-private and is guarded from becoming public API. | P5-CODE-001 should move required non-UI helpers to app/self-hosted/shared crates or delete them. |
+| `mondrian-app/src/app::MondrianApp` eframe app | Reference | Still compiles and uses egui/eframe types, but the product binary no longer launches it. The type and constructor are crate-private. | P5-CODE-001 should retire it once remaining helper dependencies are lifted. |
 | egui/eframe/egui-wgpu dependencies | Reference | Kept for legacy migration reference and tests while transitional app-layer references remain. | P5-CODE-001 should remove them when no non-reference code imports egui types. |
 | `app` layer references to egui theme/viewer helpers | Partial | Some app modules still import legacy egui theme, viewer cache, node graph, and preference helper types. These are not self-hosted product entrypoints but block clean deletion. | P5-CODE-001 owns extracting shared domain helpers and deleting compatibility paths. |
-| Developer gallery/test binaries | Covered | `ui_demo`, `ui_color_test`, `ui_widget_test`, and `ui_pipeline_test` are explicitly self-hosted developer surfaces, not legacy egui routes. | P5-ROUTE-001 should keep names and docs clearly developer-only. |
+| Developer gallery/test binaries | Covered | `ui_demo`, `ui_color_test`, `ui_widget_test`, and `ui_pipeline_test` are explicitly self-hosted developer surfaces, not legacy egui routes. | None. |
 
 ## Phase 5 Exit Criteria From This Audit
 
