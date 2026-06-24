@@ -27,6 +27,7 @@ mod commands;
 mod composition;
 mod edit;
 mod geometry;
+mod ime;
 mod paint;
 
 use commands::{classify_key_command, TextInputKeyCommand};
@@ -36,6 +37,7 @@ use geometry::{
     compute_text_geometry, scroll_offset_after_cursor,
     text_x_from_pointer as pointer_text_x_from_geometry, TextInputGeometry,
 };
+use ime::{classify_ime_key, request_disabled_ime, request_enabled_ime, ImeKeyDisposition};
 use paint::{paint_text_input, TextInputPaintSnapshot};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
@@ -277,9 +279,11 @@ impl TextInput {
     }
 
     fn refresh_ime_area(&self, ctx: &mut EventContext) {
-        if self.focused {
-            ctx.set_ime_enabled(true, Some(self.cursor_area(DEFAULT_FONT_SIZE)));
-        }
+        request_enabled_ime(
+            ctx.requests,
+            self.focused,
+            self.cursor_area(DEFAULT_FONT_SIZE),
+        );
     }
 
     fn text_x_from_pointer(&self, position: Point) -> f32 {
@@ -465,7 +469,7 @@ impl Widget for TextInput {
                 || self.composition.is_active()
             {
                 ctx.release_pointer_capture(self.id);
-                ctx.set_ime_enabled(false, None);
+                request_disabled_ime(ctx.requests);
                 ctx.request_repaint();
             }
             self.focused = false;
@@ -504,7 +508,7 @@ impl Widget for TextInput {
                     self.mouse_down = false;
                     self.composition.clear();
                     ctx.release_pointer_capture(self.id);
-                    ctx.set_ime_enabled(false, None);
+                    request_disabled_ime(ctx.requests);
                     self.refresh_ime_area(ctx);
                     if changed {
                         ctx.request_repaint();
@@ -559,28 +563,29 @@ impl Widget for TextInput {
                 self.clear_selection();
                 self.composition.clear();
                 ctx.release_pointer_capture(self.id);
-                ctx.set_ime_enabled(false, None);
+                request_disabled_ime(ctx.requests);
                 if changed {
                     ctx.request_repaint();
                 }
                 EventResult::Handled
             }
             // ── Keyboard ───────────────────────────────────────────────
-            UiEvent::KeyDown { key: KeyCode::Escape, modifiers }
-                if self.focused
-                    && self.composition.is_active()
-                    && *modifiers == Modifiers::none() =>
-            {
-                self.composition.clear();
-                self.refresh_ime_area(ctx);
-                ctx.request_repaint();
-                EventResult::Handled
-            }
-            UiEvent::KeyDown { .. } if self.focused && self.composition.is_active() => {
-                self.refresh_ime_area(ctx);
-                EventResult::Handled
-            }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
+                match classify_ime_key(self.focused, self.composition.is_active(), *key, *modifiers)
+                {
+                    ImeKeyDisposition::ClearComposition => {
+                        self.composition.clear();
+                        self.refresh_ime_area(ctx);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                    ImeKeyDisposition::ConsumeDuringComposition => {
+                        self.refresh_ime_area(ctx);
+                        return EventResult::Handled;
+                    }
+                    ImeKeyDisposition::RouteNormally => {}
+                }
+
                 let before_text = self.edit.text.clone();
                 let result = classify_key_command(*key, *modifiers)
                     .map_or(EventResult::Ignored, |command| {

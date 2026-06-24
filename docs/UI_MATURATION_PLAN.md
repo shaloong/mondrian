@@ -40,6 +40,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       module with direct modifier-routing coverage.
 - [x] Move TextInput paint into a dedicated `text_input::paint` module with direct coverage for
       placeholder, preedit underline, cursor, disabled, and clip-stack behavior.
+- [x] Move TextInput IME request and composition-key routing policy into a dedicated
+      `text_input::ime` module with direct enable/disable and active-composition coverage.
 - [x] Extract TextInput committed text, cursor, and selection into a `TextEditState` model with
       direct unit coverage for selection collapse and grapheme-safe deletion.
 - [x] Centralize TextInput committed text edits behind one command path with explicit empty
