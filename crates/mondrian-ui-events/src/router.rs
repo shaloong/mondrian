@@ -297,7 +297,7 @@ impl EventRouter {
                                 let mut ctx = self.make_event_context(dispatch, &mut requests);
                                 widget.event(&event, &mut ctx)
                             };
-                            self.focused = self.focus_mgr.focused_widget();
+                            self.sync_focus_from_manager();
                             self.apply_event_requests(requests);
                             normalize_focused_panel(&mut self.focus_mgr, tree);
                             match result {
@@ -328,26 +328,16 @@ impl EventRouter {
                             TreeWalker::focus_next(tree, traversal_origin)
                         };
                         if next.is_none() {
-                            self.focused = self.focus_mgr.focused_widget();
+                            self.sync_focus_from_manager();
                             return EventResult::Ignored;
                         }
                         if next == current {
-                            self.focused = self.focus_mgr.focused_widget();
+                            self.sync_focus_from_manager();
                             return EventResult::Handled;
                         }
-                        // Blur current
-                        if let Some(current_id) = current {
-                            self.send_focus_lost(tree, current_id, dispatch);
-                        }
-                        // Focus next
                         if let Some(next_id) = next {
-                            self.send_focus_gained(tree, next_id, dispatch);
+                            self.move_focus_to(tree, next_id, dispatch);
                         }
-                        let panel = next
-                            .and_then(|id| panel_kind_for_widget(tree, id))
-                            .or_else(|| self.focus_mgr.focused_panel());
-                        self.focus_mgr.set_focused_widget(next, panel);
-                        self.focused = self.focus_mgr.focused_widget();
                         return EventResult::Handled;
                     }
                 }
@@ -390,27 +380,17 @@ impl EventRouter {
                                 // delivering MouseDown so widgets can set their
                                 // internal focused state while MouseDown can
                                 // still suppress keyboard-only focus rings.
-                                if let Some(old) = current_focused {
-                                    self.send_focus_lost(tree, old, dispatch);
-                                }
-                                let panel = panel_kind_for_widget(tree, clicked_id)
-                                    .or_else(|| self.focus_mgr.focused_panel());
-                                self.send_focus_gained(tree, clicked_id, dispatch);
-                                self.focus_mgr.set_focused_widget(Some(clicked_id), panel);
+                                self.move_focus_to(tree, clicked_id, dispatch);
                             } else if let Some(old) = current_focused {
                                 let clicked_inside_focus =
                                     self.is_ancestor_or_self(tree, old, clicked_id);
                                 if !clicked_inside_focus {
-                                    self.send_focus_lost(tree, old, dispatch);
-                                    self.focus_mgr.release_focus(old);
+                                    self.blur_focus(tree, old, dispatch);
                                 }
                             }
-                            self.focused = self.focus_mgr.focused_widget();
                         }
                     } else if let Some(old) = current_focused {
-                        self.send_focus_lost(tree, old, dispatch);
-                        self.focus_mgr.release_focus(old);
-                        self.focused = self.focus_mgr.focused_widget();
+                        self.blur_focus(tree, old, dispatch);
                     }
                 }
 
@@ -429,7 +409,7 @@ impl EventRouter {
                                 let mut ctx = self.make_event_context(dispatch, &mut requests);
                                 widget.event(&event, &mut ctx)
                             };
-                            self.focused = self.focus_mgr.focused_widget();
+                            self.sync_focus_from_manager();
                             self.apply_event_requests(requests);
                             normalize_focused_panel(&mut self.focus_mgr, tree);
                             match result {
@@ -513,20 +493,12 @@ impl EventRouter {
         tree: &mut dyn WidgetTree,
         dispatch: &dyn Fn(Action),
     ) -> EventResult {
-        let focused = self.focus_mgr.focused_widget();
-
         self.cancel_active_drag(tree, dispatch);
         self.hovered = None;
         self.tooltip.hide();
 
-        if let Some(focused) = focused {
-            self.send_focus_lost(tree, focused, dispatch);
-        }
-
-        self.focus_mgr.clear_focus();
-        self.focused = None;
+        self.clear_focus_for_window_loss(tree, dispatch);
         self.capture.clear();
-        self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
         self.repaint_requested = true;
 
         EventResult::Handled
@@ -580,7 +552,7 @@ impl EventRouter {
             let mut ctx = self.make_event_context(dispatch, &mut requests);
             widget.event(event, &mut ctx)
         };
-        self.focused = self.focus_mgr.focused_widget();
+        self.sync_focus_from_manager();
         self.apply_event_requests(requests);
         result
     }
@@ -666,21 +638,76 @@ impl EventRouter {
             match tree.get(focused) {
                 Some(widget) if widget.can_focus() => {}
                 Some(_) => {
-                    self.send_focus_lost(tree, focused, dispatch);
-                    self.focus_mgr.release_focus(focused);
-                    self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+                    self.blur_focus(tree, focused, dispatch);
+                    self.disable_ime_for_cleared_focus();
                     self.diagnostics.unfocusable_focused_widgets =
                         self.diagnostics.unfocusable_focused_widgets.saturating_add(1);
                 }
                 None => {
-                    self.focus_mgr.release_focus(focused);
-                    self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+                    self.drop_stale_focus(focused);
                     self.diagnostics.stale_focused_widgets =
                         self.diagnostics.stale_focused_widgets.saturating_add(1);
                 }
             }
         }
         normalize_focused_panel(&mut self.focus_mgr, tree);
+        self.sync_focus_from_manager();
+    }
+
+    fn move_focus_to(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        next: WidgetId,
+        dispatch: &dyn Fn(Action),
+    ) {
+        if self.focus_mgr.focused_widget() == Some(next) {
+            self.sync_focus_from_manager();
+            return;
+        }
+        if let Some(current) = self.focus_mgr.focused_widget() {
+            self.send_focus_lost(tree, current, dispatch);
+        }
+        self.send_focus_gained(tree, next, dispatch);
+        let panel = panel_kind_for_widget(tree, next).or_else(|| self.focus_mgr.focused_panel());
+        self.focus_mgr.set_focused_widget(Some(next), panel);
+        self.sync_focus_from_manager();
+    }
+
+    fn blur_focus(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        focused: WidgetId,
+        dispatch: &dyn Fn(Action),
+    ) {
+        self.send_focus_lost(tree, focused, dispatch);
+        self.focus_mgr.release_focus(focused);
+        self.sync_focus_from_manager();
+    }
+
+    fn clear_focus_for_window_loss(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) {
+        if let Some(focused) = self.focus_mgr.focused_widget() {
+            self.send_focus_lost(tree, focused, dispatch);
+        }
+        self.focus_mgr.clear_focus();
+        self.sync_focus_from_manager();
+        self.disable_ime_for_cleared_focus();
+    }
+
+    fn drop_stale_focus(&mut self, focused: WidgetId) {
+        self.focus_mgr.release_focus(focused);
+        self.sync_focus_from_manager();
+        self.disable_ime_for_cleared_focus();
+    }
+
+    fn disable_ime_for_cleared_focus(&mut self) {
+        self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+    }
+
+    fn sync_focus_from_manager(&mut self) {
         self.focused = self.focus_mgr.focused_widget();
     }
 
@@ -784,7 +811,7 @@ impl EventRouter {
                     let mut ctx = self.make_event_context(dispatch, &mut requests);
                     let _ = widget.after_child_event(event, &mut ctx);
                 }
-                self.focused = self.focus_mgr.focused_widget();
+                self.sync_focus_from_manager();
                 self.apply_event_requests(requests);
             }
             current = parent_id;
@@ -807,7 +834,7 @@ impl EventRouter {
                     let mut ctx = self.make_event_context(dispatch, &mut requests);
                     widget.before_child_event(event, &mut ctx)
                 };
-                self.focused = self.focus_mgr.focused_widget();
+                self.sync_focus_from_manager();
                 self.apply_event_requests(requests);
                 if result == EventResult::Handled {
                     return true;
@@ -2595,8 +2622,10 @@ mod tests {
         }
 
         fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
-            if matches!(event, UiEvent::FocusGained) {
-                self.log.borrow_mut().push("focus-gained".into());
+            match event {
+                UiEvent::FocusGained => self.log.borrow_mut().push("focus-gained".into()),
+                UiEvent::FocusLost => self.log.borrow_mut().push("focus-lost".into()),
+                _ => {}
             }
             EventResult::Ignored
         }
@@ -2675,6 +2704,36 @@ mod tests {
 
         assert_eq!(router.focused(), Some(root));
         assert_eq!(log.borrow().as_slice(), ["focus-gained"]);
+    }
+
+    #[test]
+    fn router_tab_focus_blurs_old_widget_before_focusing_next() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let first = FocusEventWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            log: Rc::clone(&log),
+        };
+        let first_id = first.id;
+        let second = FocusEventWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 40.0, 100.0, 30.0),
+            log: Rc::clone(&log),
+        };
+        let second_id = second.id;
+        let mut tree = TestTree::parent_child(first, second);
+        let mut router = EventRouter::new(first_id);
+        router.focus_manager_mut().set_focused_widget(Some(first_id), None);
+
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(second_id));
+        assert_eq!(log.borrow().as_slice(), ["focus-lost", "focus-gained"]);
     }
 
     struct ParentPostWidget {

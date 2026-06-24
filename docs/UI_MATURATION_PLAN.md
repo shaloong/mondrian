@@ -78,6 +78,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Remove inert `FocusManager::focus_next` / `focus_prev` methods so focus traversal remains
       an explicit event-router contract backed by `WidgetTree` traversal instead of no-op manager
       methods.
+- [x] Centralize event-router focus transitions so Tab traversal, click-to-focus, blur, window
+      focus loss, stale-focus pruning, panel normalization, and IME disable paths share explicit
+      helper contracts with ordering coverage.
 
 ## Phase 4 - Widget Productionization
 
