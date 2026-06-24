@@ -126,6 +126,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       vertical track-resize math into directly tested interaction contracts.
 - [x] Extract TimelineView edit-command target availability, keyboard edit-command routing,
       and keyboard seek routing into directly tested model contracts.
+- [x] Extract TimelineView ruler step/label selection and in/out marker/range geometry into
+      directly tested model contracts.
 
 ## Phase 5 - Performance And Observability
 

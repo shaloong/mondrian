@@ -7,7 +7,7 @@
 
 mod model;
 
-use mondrian_core::types::{AssetId, Rational, TimeCode};
+use mondrian_core::types::{AssetId, Rational};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -36,6 +36,7 @@ const TIMELINE_TOOL_BUTTON_GAP: f32 = 4.0;
 const TIMELINE_TOOLBAR_HEIGHT: f32 = 34.0;
 const TIMELINE_TOOLBAR_GROUP_GAP: f32 = 10.0;
 const TIMELINE_SNAP_THRESHOLD_PX: f32 = 8.0;
+const TIMELINE_IN_OUT_MARKER_HIT_RADIUS: f32 = 5.0;
 const TIMELINE_MIN_PIXELS_PER_FRAME: f32 = 0.25;
 const TIMELINE_MAX_PIXELS_PER_FRAME: f32 = 64.0;
 const TIMELINE_CONTENT_TRAILING_PADDING: f32 = 160.0;
@@ -1373,18 +1374,15 @@ impl TimelineView {
     }
 
     fn in_out_marker_at(&self, point: Point) -> Option<TimelineInOutPoint> {
-        if !self.ruler_rect.contains(point) {
-            return None;
-        }
-        let hit_radius = 5.0;
-        if (point.x - self.frame_to_x(self.in_point_frame)).abs() <= hit_radius {
-            return Some(TimelineInOutPoint::In);
-        }
-        let out = self.out_point_frame?;
-        if (point.x - self.frame_to_x(out.saturating_add(1))).abs() <= hit_radius {
-            return Some(TimelineInOutPoint::Out);
-        }
-        None
+        timeline_model::in_out_marker_at(
+            self.ruler_rect,
+            self.body_rect,
+            self.pixels_per_frame,
+            self.scroll_x,
+            self.in_point_frame,
+            self.out_point_frame,
+            point,
+        )
     }
 
     fn timeline_corner_rect(&self) -> Rect {
@@ -2364,76 +2362,16 @@ impl TimelineView {
         false
     }
 
-    fn pick_ruler_step_frames(&self, target_px: f32, min_step: i64) -> i64 {
-        let raw = (target_px / self.pixels_per_frame).max(min_step.max(1) as f32);
-        let fps = self.ruler_fps().max(1);
-        for step in [
-            1,
-            2,
-            5,
-            10,
-            15,
-            fps,
-            fps * 2,
-            fps * 5,
-            fps * 10,
-            fps * 15,
-            fps * 30,
-            fps * 60,
-            fps * 120,
-            fps * 240,
-            fps * 300,
-            fps * 600,
-            fps * 900,
-            fps * 1800,
-            fps * 3600,
-        ] {
-            if step < min_step || step % min_step != 0 {
-                continue;
-            }
-            if raw <= step as f32 {
-                return step;
-            }
-        }
-        let fallback = fps * 3600;
-        if fallback >= min_step && fallback % min_step == 0 {
-            fallback
-        } else {
-            min_step.max(1)
-        }
-    }
-
     fn tick_step_frames(&self) -> i64 {
-        self.pick_ruler_step_frames(20.0, 1)
+        timeline_model::tick_step_frames(self.pixels_per_frame, self.frame_rate)
     }
 
     fn major_tick_step_frames(&self, minor_step: i64) -> i64 {
-        self.pick_ruler_step_frames(96.0, minor_step.max(1))
+        timeline_model::major_tick_step_frames(self.pixels_per_frame, self.frame_rate, minor_step)
     }
 
     fn ruler_label_for_frame(&self, frame: i64, major_step: i64) -> String {
-        let frame = frame.max(0);
-        let fps = self.ruler_fps().max(1);
-        let smpte = TimeCode::new(frame, self.frame_time_base()).to_smpte();
-        let total_seconds = (frame as f64 / self.frame_rate.to_f64()).floor().max(0.0) as i64;
-        let hours = total_seconds / 3600;
-        let parts = smpte.split(':').collect::<Vec<_>>();
-
-        if major_step < fps * 2 {
-            smpte
-        } else if hours > 0 || major_step >= fps * 60 * 10 {
-            format!("{}:{}:{}", parts[0], parts[1], parts[2])
-        } else {
-            format!("{}:{}", parts[1], parts[2])
-        }
-    }
-
-    fn ruler_fps(&self) -> i64 {
-        self.frame_rate.to_f64().round().max(1.0) as i64
-    }
-
-    fn frame_time_base(&self) -> Rational {
-        Rational::new(self.frame_rate.den, self.frame_rate.num)
+        timeline_model::ruler_label_for_frame(frame, major_step, self.frame_rate)
     }
 
     fn paint_ruler(&self, ctx: &mut PaintContext) {
@@ -3048,15 +2986,13 @@ impl TimelineView {
     }
 
     fn in_out_visible_range(&self) -> Option<(f32, f32)> {
-        let out = self.out_point_frame?;
-        if out < self.in_point_frame {
-            return None;
-        }
-        let start = self.frame_to_x(self.in_point_frame);
-        let end = self.frame_to_x(out.saturating_add(1));
-        let x0 = start.max(self.body_rect.x);
-        let x1 = end.min(self.body_rect.x + self.body_rect.width);
-        (x1 > x0).then_some((x0, x1))
+        timeline_model::in_out_visible_range(
+            self.body_rect,
+            self.pixels_per_frame,
+            self.scroll_x,
+            self.in_point_frame,
+            self.out_point_frame,
+        )
     }
 
     fn paint_in_out_ruler_region(&self, ctx: &mut PaintContext) {
@@ -3087,8 +3023,16 @@ impl TimelineView {
     fn paint_in_out_marker_lines(&self, ctx: &mut PaintContext, rect: Rect) {
         let colors = &ctx.theme.colors;
         let color = colors.timeline_range_edge;
-        let in_x = self.frame_to_x(self.in_point_frame);
-        if in_x >= rect.x && in_x <= rect.x + rect.width {
+        if let Some(in_x) = timeline_model::in_out_marker_x(
+            self.body_rect,
+            self.pixels_per_frame,
+            self.scroll_x,
+            TimelineInOutPoint::In,
+            self.in_point_frame,
+            self.out_point_frame,
+        )
+        .filter(|in_x| *in_x >= rect.x && *in_x <= rect.x + rect.width)
+        {
             ctx.encoder.draw_line(
                 Point::new(in_x, rect.y),
                 Point::new(in_x, rect.y + rect.height),
@@ -3096,16 +3040,22 @@ impl TimelineView {
                 color,
             );
         }
-        if let Some(out) = self.out_point_frame {
-            let out_x = self.frame_to_x(out.saturating_add(1));
-            if out_x >= rect.x && out_x <= rect.x + rect.width {
-                ctx.encoder.draw_line(
-                    Point::new(out_x, rect.y),
-                    Point::new(out_x, rect.y + rect.height),
-                    1.0,
-                    color,
-                );
-            }
+        if let Some(out_x) = timeline_model::in_out_marker_x(
+            self.body_rect,
+            self.pixels_per_frame,
+            self.scroll_x,
+            TimelineInOutPoint::Out,
+            self.in_point_frame,
+            self.out_point_frame,
+        )
+        .filter(|out_x| *out_x >= rect.x && *out_x <= rect.x + rect.width)
+        {
+            ctx.encoder.draw_line(
+                Point::new(out_x, rect.y),
+                Point::new(out_x, rect.y + rect.height),
+                1.0,
+                color,
+            );
         }
     }
 

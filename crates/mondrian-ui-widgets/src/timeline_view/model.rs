@@ -1,11 +1,13 @@
+use mondrian_core::types::{Rational, TimeCode};
 use mondrian_ui_core::types::{KeyCode, Modifiers, Point, Rect};
 
 use super::{
-    TimelineClipRef, TimelineEditCommand, TimelineScrollbarDragKind, TimelineTrackControl,
-    TimelineTrackRef, TimelineTrimEdge, SCROLLBAR_HANDLE_SIZE, SCROLLBAR_MIN_THUMB,
-    SCROLLBAR_THICKNESS, TIMELINE_CONTENT_TRAILING_PADDING, TIMELINE_MAX_PIXELS_PER_FRAME,
-    TIMELINE_MAX_TRACK_HEIGHT, TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MIN_TRACK_HEIGHT,
-    TIMELINE_SCROLLBAR_GUTTER, TIMELINE_TOOLBAR_HEIGHT,
+    TimelineClipRef, TimelineEditCommand, TimelineInOutPoint, TimelineScrollbarDragKind,
+    TimelineTrackControl, TimelineTrackRef, TimelineTrimEdge, SCROLLBAR_HANDLE_SIZE,
+    SCROLLBAR_MIN_THUMB, SCROLLBAR_THICKNESS, TIMELINE_CONTENT_TRAILING_PADDING,
+    TIMELINE_IN_OUT_MARKER_HIT_RADIUS, TIMELINE_MAX_PIXELS_PER_FRAME, TIMELINE_MAX_TRACK_HEIGHT,
+    TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_SCROLLBAR_GUTTER,
+    TIMELINE_TOOLBAR_HEIGHT,
 };
 
 const CLIP_VERTICAL_INSET: f32 = 4.0;
@@ -255,6 +257,32 @@ pub(super) fn track_control_at(
     .map(|control| (track_ref, control))
 }
 
+pub(super) fn in_out_marker_at(
+    ruler: Rect,
+    body: Rect,
+    pixels_per_frame: f32,
+    scroll_x: f32,
+    in_point_frame: i64,
+    out_point_frame: Option<i64>,
+    point: Point,
+) -> Option<TimelineInOutPoint> {
+    if !ruler.contains(point) {
+        return None;
+    }
+    if (point.x - frame_to_x(body, pixels_per_frame, scroll_x, in_point_frame)).abs()
+        <= TIMELINE_IN_OUT_MARKER_HIT_RADIUS
+    {
+        return Some(TimelineInOutPoint::In);
+    }
+    let out = out_point_frame?;
+    if (point.x - frame_to_x(body, pixels_per_frame, scroll_x, out.saturating_add(1))).abs()
+        <= TIMELINE_IN_OUT_MARKER_HIT_RADIUS
+    {
+        return Some(TimelineInOutPoint::Out);
+    }
+    None
+}
+
 pub(super) fn clip_rect(
     body: Rect,
     pixels_per_frame: f32,
@@ -293,6 +321,39 @@ pub(super) fn hit_clip_edge(rect: Rect, point: Point) -> Option<TimelineTrimEdge
     } else {
         None
     }
+}
+
+pub(super) fn in_out_visible_range(
+    body: Rect,
+    pixels_per_frame: f32,
+    scroll_x: f32,
+    in_point_frame: i64,
+    out_point_frame: Option<i64>,
+) -> Option<(f32, f32)> {
+    let out = out_point_frame?;
+    if out < in_point_frame {
+        return None;
+    }
+    let start = frame_to_x(body, pixels_per_frame, scroll_x, in_point_frame);
+    let end = frame_to_x(body, pixels_per_frame, scroll_x, out.saturating_add(1));
+    let x0 = start.max(body.x);
+    let x1 = end.min(body.x + body.width);
+    (x1 > x0).then_some((x0, x1))
+}
+
+pub(super) fn in_out_marker_x(
+    body: Rect,
+    pixels_per_frame: f32,
+    scroll_x: f32,
+    point: TimelineInOutPoint,
+    in_point_frame: i64,
+    out_point_frame: Option<i64>,
+) -> Option<f32> {
+    let frame = match point {
+        TimelineInOutPoint::In => in_point_frame,
+        TimelineInOutPoint::Out => out_point_frame?.saturating_add(1),
+    };
+    Some(frame_to_x(body, pixels_per_frame, scroll_x, frame))
 }
 
 pub(super) fn clip_drag_proposed_start_frame(
@@ -470,6 +531,91 @@ pub(super) fn track_resize_for_handle_delta(
         track_height,
         scroll_y: top_row.max(0.0) * track_height,
     })
+}
+
+pub(super) fn ruler_fps(frame_rate: Rational) -> i64 {
+    frame_rate.to_f64().round().max(1.0) as i64
+}
+
+pub(super) fn frame_time_base(frame_rate: Rational) -> Rational {
+    Rational::new(frame_rate.den, frame_rate.num)
+}
+
+pub(super) fn pick_ruler_step_frames(
+    pixels_per_frame: f32,
+    frame_rate: Rational,
+    target_px: f32,
+    min_step: i64,
+) -> i64 {
+    let pixels_per_frame = finite_or(pixels_per_frame, TIMELINE_MIN_PIXELS_PER_FRAME)
+        .max(TIMELINE_MIN_PIXELS_PER_FRAME);
+    let target_px = finite_or(target_px, 0.0).max(0.0);
+    let min_step = min_step.max(1);
+    let raw = (target_px / pixels_per_frame).max(min_step as f32);
+    let fps = ruler_fps(frame_rate).max(1);
+    for step in [
+        1,
+        2,
+        5,
+        10,
+        15,
+        fps,
+        fps * 2,
+        fps * 5,
+        fps * 10,
+        fps * 15,
+        fps * 30,
+        fps * 60,
+        fps * 120,
+        fps * 240,
+        fps * 300,
+        fps * 600,
+        fps * 900,
+        fps * 1800,
+        fps * 3600,
+    ] {
+        if step < min_step || step % min_step != 0 {
+            continue;
+        }
+        if raw <= step as f32 {
+            return step;
+        }
+    }
+    let fallback = fps * 3600;
+    if fallback >= min_step && fallback % min_step == 0 {
+        fallback
+    } else {
+        min_step
+    }
+}
+
+pub(super) fn tick_step_frames(pixels_per_frame: f32, frame_rate: Rational) -> i64 {
+    pick_ruler_step_frames(pixels_per_frame, frame_rate, 20.0, 1)
+}
+
+pub(super) fn major_tick_step_frames(
+    pixels_per_frame: f32,
+    frame_rate: Rational,
+    minor_step: i64,
+) -> i64 {
+    pick_ruler_step_frames(pixels_per_frame, frame_rate, 96.0, minor_step.max(1))
+}
+
+pub(super) fn ruler_label_for_frame(frame: i64, major_step: i64, frame_rate: Rational) -> String {
+    let frame = frame.max(0);
+    let fps = ruler_fps(frame_rate).max(1);
+    let smpte = TimeCode::new(frame, frame_time_base(frame_rate)).to_smpte();
+    let total_seconds = (frame as f64 / frame_rate.to_f64()).floor().max(0.0) as i64;
+    let hours = total_seconds / 3600;
+    let parts = smpte.split(':').collect::<Vec<_>>();
+
+    if major_step < fps * 2 {
+        smpte
+    } else if hours > 0 || major_step >= fps * 60 * 10 {
+        format!("{}:{}:{}", parts[0], parts[1], parts[2])
+    } else {
+        format!("{}:{}", parts[1], parts[2])
+    }
 }
 
 pub(super) fn edit_command_has_local_target(
@@ -669,6 +815,29 @@ mod tests {
                 TimelineTrackRef { track_index: 1 },
                 TimelineTrackControl::Lock
             ))
+        );
+    }
+
+    #[test]
+    fn in_out_marker_hit_testing_uses_ruler_bounds_and_out_end_frame() {
+        let body = Rect::new(100.0, 50.0, 300.0, 100.0);
+        let ruler = Rect::new(100.0, 20.0, 300.0, 28.0);
+
+        assert_eq!(
+            in_out_marker_at(ruler, body, 2.0, 0.0, 10, Some(20), Point::new(120.0, 24.0)),
+            Some(TimelineInOutPoint::In)
+        );
+        assert_eq!(
+            in_out_marker_at(ruler, body, 2.0, 0.0, 10, Some(20), Point::new(142.0, 24.0)),
+            Some(TimelineInOutPoint::Out)
+        );
+        assert_eq!(
+            in_out_marker_at(ruler, body, 2.0, 0.0, 10, Some(20), Point::new(142.0, 60.0)),
+            None
+        );
+        assert_eq!(
+            in_out_marker_at(ruler, body, 2.0, 0.0, 10, None, Point::new(142.0, 24.0)),
+            None
         );
     }
 
@@ -889,6 +1058,72 @@ mod tests {
         .unwrap();
         assert!(recovered.track_height.is_finite());
         assert!(recovered.scroll_y.is_finite());
+    }
+
+    #[test]
+    fn in_out_visible_range_clips_to_body_viewport() {
+        let body = Rect::new(100.0, 50.0, 120.0, 100.0);
+
+        assert_eq!(in_out_visible_range(body, 2.0, 0.0, 10, None), None);
+        assert_eq!(in_out_visible_range(body, 2.0, 0.0, 30, Some(20)), None);
+        assert_eq!(
+            in_out_visible_range(body, 2.0, 0.0, 10, Some(20)),
+            Some((120.0, 142.0))
+        );
+        assert_eq!(
+            in_out_visible_range(body, 2.0, 30.0, 10, Some(90)),
+            Some((100.0, 220.0))
+        );
+        assert_eq!(in_out_visible_range(body, 2.0, 400.0, 10, Some(20)), None);
+    }
+
+    #[test]
+    fn in_out_marker_x_maps_out_to_exclusive_end_frame() {
+        let body = Rect::new(100.0, 50.0, 120.0, 100.0);
+
+        assert_eq!(
+            in_out_marker_x(body, 2.0, 0.0, TimelineInOutPoint::In, 10, Some(20)),
+            Some(120.0)
+        );
+        assert_eq!(
+            in_out_marker_x(body, 2.0, 0.0, TimelineInOutPoint::Out, 10, Some(20)),
+            Some(142.0)
+        );
+        assert_eq!(
+            in_out_marker_x(body, 2.0, 0.0, TimelineInOutPoint::Out, 10, None),
+            None
+        );
+    }
+
+    #[test]
+    fn ruler_step_selection_uses_frame_rate_and_zoom_density() {
+        assert_eq!(tick_step_frames(0.5, Rational::FPS_25), 50);
+        assert_eq!(major_tick_step_frames(0.5, Rational::FPS_25, 50), 250);
+        assert_eq!(pick_ruler_step_frames(100.0, Rational::FPS_25, 20.0, 1), 1);
+        assert_eq!(
+            pick_ruler_step_frames(f32::NAN, Rational::FPS_25, 20.0, 1),
+            125
+        );
+        assert_eq!(pick_ruler_step_frames(0.5, Rational::FPS_25, 96.0, 7), 7);
+    }
+
+    #[test]
+    fn ruler_labels_use_configured_frame_rate_and_density() {
+        assert_eq!(ruler_fps(Rational::FPS_25), 25);
+        assert_eq!(frame_time_base(Rational::FPS_25), Rational::new(1, 25));
+        assert_eq!(
+            ruler_label_for_frame(250, 25, Rational::FPS_25),
+            "00:00:10:00"
+        );
+        assert_eq!(ruler_label_for_frame(250, 125, Rational::FPS_25), "00:10");
+        assert_eq!(
+            ruler_label_for_frame(25 * 60 * 60 + 250, 25 * 60 * 10, Rational::FPS_25),
+            "01:00:10"
+        );
+        assert_eq!(
+            ruler_label_for_frame(-10, 25, Rational::FPS_25),
+            "00:00:00:00"
+        );
     }
 
     #[test]
