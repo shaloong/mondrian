@@ -16,3 +16,6 @@ mondrian-ui-renderer = { workspace = true }
 cosmic-text = "0.19"
 fontdb = { version = "0.23", default-features = false, features = ["fontconfig"] }
 wgpu        = { workspace = true }
+
+[dev-dependencies]
+pollster = "0.4"

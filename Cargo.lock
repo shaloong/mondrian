@@ -2918,6 +2918,7 @@ dependencies = [
  "mondrian-ui-core",
  "mondrian-ui-renderer",
  "mondrian-ui-theme",
+ "pollster",
  "wgpu",
 ]
 

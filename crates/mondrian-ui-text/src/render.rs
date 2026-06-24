@@ -180,6 +180,7 @@ impl Default for TextRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_ui_renderer::{GlyphUpload as RendererGlyphUpload, UiRenderer};
 
     // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -207,6 +208,19 @@ mod tests {
         })
     }
 
+    fn renderer_glyph_uploads(uploads: Vec<crate::atlas::GlyphUpload>) -> Vec<RendererGlyphUpload> {
+        uploads
+            .into_iter()
+            .map(|upload| RendererGlyphUpload {
+                x: upload.x,
+                y: upload.y,
+                width: upload.width,
+                height: upload.height,
+                data: upload.data,
+            })
+            .collect()
+    }
+
     // ── Basic Tests ─────────────────────────────────────────────────────
 
     #[test]
@@ -217,6 +231,49 @@ mod tests {
     #[test]
     fn text_renderer_default_creates() {
         let _r = TextRenderer::default();
+    }
+
+    #[test]
+    fn offscreen_text_renderer_uploads_glyphs_and_draws_visible_pixels() {
+        let Some(mut harness) = OffscreenHarness::new(128, 48) else {
+            return;
+        };
+        let mut text_renderer = TextRenderer::new();
+        let commands = vec![DrawCommand::Text {
+            text: "UI".to_string(),
+            style: mondrian_ui_theme::typography::TextStyle {
+                font_size: 28.0,
+                line_height: 34.0,
+                font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+                letter_spacing: 0.0,
+            },
+            position: Point::new(12.0, 34.0),
+            max_width: None,
+            color: Color::WHITE,
+        }];
+
+        let resolved = resolve_text_commands(commands, &mut text_renderer);
+        assert_eq!(resolved.stats.text_commands, 1);
+        assert!(resolved.stats.glyphs_resolved > 0);
+        assert_eq!(resolved.stats.missing_glyphs, 0);
+
+        let uploads = renderer_glyph_uploads(text_renderer.take_pending_uploads());
+        assert!(
+            !uploads.is_empty(),
+            "first text render should upload glyphs"
+        );
+        harness.renderer.upload_glyphs(&harness.queue, &uploads);
+
+        let pixels = harness.render(resolved.commands);
+        let visible_alpha = pixels.chunks_exact(4).filter(|px| px[3] >= 24).count();
+        assert!(
+            visible_alpha > 24,
+            "text glyph rendering should produce visible alpha pixels, got {visible_alpha}"
+        );
+
+        let stats = harness.last_stats.expect("render should record stats");
+        assert_eq!(stats.unresolved_text_commands, 0);
+        assert_eq!(stats.failed_raster_images, 0);
     }
 
     #[test]
@@ -857,5 +914,127 @@ mod tests {
         );
         assert_eq!(result.stats.text_commands, 0);
         assert_eq!(result.stats.glyphs_requested, 0);
+    }
+
+    struct OffscreenHarness {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        renderer: UiRenderer,
+        texture: wgpu::Texture,
+        size: (u32, u32),
+        last_stats: Option<mondrian_ui_renderer::UiRenderFrameStats>,
+    }
+
+    impl OffscreenHarness {
+        fn new(width: u32, height: u32) -> Option<Self> {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    compatible_surface: None,
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                }))
+                .ok()?;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                    .ok()?;
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ui_text_offscreen_test_target"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let renderer = UiRenderer::new(&device, format);
+
+            Some(Self {
+                device,
+                queue,
+                renderer,
+                texture,
+                size: (width, height),
+                last_stats: None,
+            })
+        }
+
+        fn render(&mut self, commands: Vec<DrawCommand>) -> Vec<u8> {
+            let view = self.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let stats = self.renderer.render_resolved_commands(
+                &self.device,
+                &self.queue,
+                &view,
+                &commands,
+                self.size,
+            );
+            self.last_stats = Some(stats);
+            self.readback()
+        }
+
+        fn readback(&self) -> Vec<u8> {
+            let (width, height) = self.size;
+            let bytes_per_pixel = 4u32;
+            let unpadded_bytes_per_row = width * bytes_per_pixel;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+            let buffer_size = padded_bytes_per_row as u64 * height as u64;
+
+            let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ui_text_offscreen_test_readback"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ui_text_offscreen_test_readback_encoder"),
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            self.queue.submit([encoder.finish()]);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let slice = readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            let _ =
+                self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            rx.recv()
+                .expect("readback map callback should run")
+                .expect("readback map should succeed");
+
+            let mapped = slice.get_mapped_range();
+            let mut out = vec![0u8; width as usize * height as usize * 4];
+            for row in 0..height as usize {
+                let src_start = row * padded_bytes_per_row as usize;
+                let src_end = src_start + unpadded_bytes_per_row as usize;
+                let dst_start = row * unpadded_bytes_per_row as usize;
+                let dst_end = dst_start + unpadded_bytes_per_row as usize;
+                out[dst_start..dst_end].copy_from_slice(&mapped[src_start..src_end]);
+            }
+            drop(mapped);
+            readback.unmap();
+            out
+        }
     }
 }

@@ -842,12 +842,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn offscreen_renderer_uploads_and_samples_raster_images() {
+        let Some(mut harness) = OffscreenHarness::new(32, 32) else {
+            return;
+        };
+        let mut rgba = vec![0u8; 4 * 4 * 4];
+        for y in 0..4 {
+            for x in 0..4 {
+                let index = (y * 4 + x) * 4;
+                rgba[index] = if x < 2 { 255 } else { 0 };
+                rgba[index + 1] = if x >= 2 { 255 } else { 0 };
+                rgba[index + 2] = if y >= 2 { 255 } else { 0 };
+                rgba[index + 3] = 255;
+            }
+        }
+
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_raster_image(
+            "test.raster.quadrants",
+            Rect::new(8.0, 8.0, 16.0, 16.0),
+            4,
+            4,
+            std::sync::Arc::from(rgba),
+            Color::WHITE,
+        );
+
+        let pixels = harness.render(encoder.finish());
+        let top_left = pixel(&pixels, 32, 10, 10);
+        let top_right = pixel(&pixels, 32, 21, 10);
+        let bottom_left = pixel(&pixels, 32, 10, 21);
+        let bottom_right = pixel(&pixels, 32, 21, 21);
+
+        assert!(
+            top_left[0] > top_left[1].saturating_add(80) && top_left[3] >= 240,
+            "top-left raster sample should be red, got {top_left:?}"
+        );
+        assert!(
+            top_right[1] > top_right[0].saturating_add(80) && top_right[3] >= 240,
+            "top-right raster sample should be green, got {top_right:?}"
+        );
+        assert!(
+            bottom_left[0] >= 180 && bottom_left[2] >= 180 && bottom_left[3] >= 240,
+            "bottom-left raster sample should be magenta-ish, got {bottom_left:?}"
+        );
+        assert!(
+            bottom_right[1] >= 180 && bottom_right[2] >= 180 && bottom_right[3] >= 240,
+            "bottom-right raster sample should be cyan-ish, got {bottom_right:?}"
+        );
+
+        let stats = harness.last_stats.expect("render should record stats");
+        assert!(stats.uploaded_raster_images);
+        assert_eq!(stats.failed_raster_images, 0);
+        assert!(stats.image_atlas_entries >= 1);
+    }
+
     struct OffscreenHarness {
         device: wgpu::Device,
         queue: wgpu::Queue,
         renderer: UiRenderer,
         texture: wgpu::Texture,
         size: (u32, u32),
+        last_stats: Option<UiRenderFrameStats>,
     }
 
     impl OffscreenHarness {
@@ -884,18 +940,20 @@ mod tests {
                 renderer,
                 texture,
                 size: (width, height),
+                last_stats: None,
             })
         }
 
         fn render(&mut self, commands: Vec<DrawCommand>) -> Vec<u8> {
             let view = self.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.renderer.render_resolved_commands(
+            let stats = self.renderer.render_resolved_commands(
                 &self.device,
                 &self.queue,
                 &view,
                 &commands,
                 self.size,
             );
+            self.last_stats = Some(stats);
             self.readback()
         }
 
