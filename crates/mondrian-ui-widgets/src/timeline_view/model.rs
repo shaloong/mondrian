@@ -1,8 +1,11 @@
 use mondrian_ui_core::types::{Point, Rect};
 
 use super::{
-    TimelineTrackControl, TimelineTrackRef, TimelineTrimEdge, SCROLLBAR_HANDLE_SIZE,
-    SCROLLBAR_MIN_THUMB, SCROLLBAR_THICKNESS, TIMELINE_SCROLLBAR_GUTTER, TIMELINE_TOOLBAR_HEIGHT,
+    TimelineScrollbarDragKind, TimelineTrackControl, TimelineTrackRef, TimelineTrimEdge,
+    SCROLLBAR_HANDLE_SIZE, SCROLLBAR_MIN_THUMB, SCROLLBAR_THICKNESS,
+    TIMELINE_CONTENT_TRAILING_PADDING, TIMELINE_MAX_PIXELS_PER_FRAME, TIMELINE_MAX_TRACK_HEIGHT,
+    TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_SCROLLBAR_GUTTER,
+    TIMELINE_TOOLBAR_HEIGHT,
 };
 
 const CLIP_VERTICAL_INSET: f32 = 4.0;
@@ -20,6 +23,32 @@ pub(super) struct TimelineLayoutRects {
     pub header: Rect,
     pub ruler: Rect,
     pub body: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TimelineClipDragPosition {
+    pub start_frame: i64,
+    pub track_index: usize,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TimelineTrimDragPosition {
+    pub start_frame: i64,
+    pub duration_frames: i64,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TimelineHorizontalZoomUpdate {
+    pub pixels_per_frame: f32,
+    pub scroll_x: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TimelineTrackResizeUpdate {
+    pub track_height: f32,
+    pub scroll_y: f32,
 }
 
 pub(super) fn layout_rects(
@@ -256,6 +285,195 @@ pub(super) fn hit_clip_edge(rect: Rect, point: Point) -> Option<TimelineTrimEdge
     }
 }
 
+pub(super) fn clip_drag_proposed_start_frame(
+    pointer_frame: i64,
+    pointer_offset_frames: i64,
+) -> i64 {
+    pointer_frame.saturating_sub(pointer_offset_frames).max(0)
+}
+
+pub(super) fn clip_drag_position(
+    pointer_frame: i64,
+    pointer_offset_frames: i64,
+    current_start_frame: i64,
+    current_track_index: usize,
+    target_track_index: usize,
+    snap_frame: Option<i64>,
+) -> TimelineClipDragPosition {
+    let proposed_start_frame = clip_drag_proposed_start_frame(pointer_frame, pointer_offset_frames);
+    let start_frame = snap_frame.map_or(proposed_start_frame, |frame| frame.max(0));
+    TimelineClipDragPosition {
+        start_frame,
+        track_index: target_track_index,
+        changed: current_start_frame != start_frame || current_track_index != target_track_index,
+    }
+}
+
+pub(super) fn trim_drag_position(
+    edge: TimelineTrimEdge,
+    pointer_frame: i64,
+    snap_frame: Option<i64>,
+    old_start_frame: i64,
+    old_duration_frames: i64,
+    current_start_frame: i64,
+    current_duration_frames: i64,
+) -> TimelineTrimDragPosition {
+    let pointer_frame = snap_frame.unwrap_or(pointer_frame);
+    let old_duration_frames = old_duration_frames.max(1);
+    let old_end = old_start_frame.saturating_add(old_duration_frames);
+    let (start_frame, duration_frames) = match edge {
+        TimelineTrimEdge::In => {
+            let start_frame = pointer_frame.clamp(0, old_end.saturating_sub(1).max(0));
+            (start_frame, old_end.saturating_sub(start_frame).max(1))
+        }
+        TimelineTrimEdge::Out => {
+            let end_frame = pointer_frame.max(old_start_frame.saturating_add(1));
+            (
+                old_start_frame,
+                end_frame.saturating_sub(old_start_frame).max(1),
+            )
+        }
+    };
+    TimelineTrimDragPosition {
+        start_frame,
+        duration_frames,
+        changed: current_start_frame != start_frame || current_duration_frames != duration_frames,
+    }
+}
+
+pub(super) fn scrollbar_scroll_for_thumb_delta(
+    track_extent: f32,
+    thumb_extent: f32,
+    max_scroll: f32,
+    start_scroll: f32,
+    delta: f32,
+) -> f32 {
+    if !track_extent.is_finite()
+        || !thumb_extent.is_finite()
+        || !max_scroll.is_finite()
+        || !start_scroll.is_finite()
+        || !delta.is_finite()
+    {
+        return finite_or(start_scroll, 0.0).max(0.0);
+    }
+    let travel = (track_extent - thumb_extent).max(1.0);
+    start_scroll + (delta / travel) * max_scroll.max(0.0)
+}
+
+pub(super) fn horizontal_zoom_for_handle_delta(
+    body_width: f32,
+    track_width: f32,
+    content_frames: f32,
+    delta_x: f32,
+    kind: TimelineScrollbarDragKind,
+    start_scroll: f32,
+    start_pixels_per_frame: f32,
+) -> Option<TimelineHorizontalZoomUpdate> {
+    if body_width <= 1.0 || !body_width.is_finite() {
+        return None;
+    }
+    let start_pixels = finite_or(start_pixels_per_frame, TIMELINE_MIN_PIXELS_PER_FRAME)
+        .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
+    let content_frames = finite_or(content_frames, 0.0);
+    let delta_x = finite_or(delta_x, 0.0);
+    let start_scroll = finite_or(start_scroll, 0.0);
+    let track_width = finite_or(track_width, 1.0);
+    let total_frames =
+        (content_frames.max(0.0) + TIMELINE_CONTENT_TRAILING_PADDING / start_pixels).max(1.0);
+    let start_left = (start_scroll.max(0.0) / start_pixels).clamp(0.0, total_frames);
+    let start_visible = (body_width / start_pixels).max(1.0);
+    let start_right = (start_left + start_visible).clamp(start_left, total_frames);
+    let delta_frames = delta_x / track_width.max(1.0) * total_frames;
+    let min_visible_frames = (body_width / TIMELINE_MAX_PIXELS_PER_FRAME).max(1.0);
+    let max_visible_frames = (body_width / TIMELINE_MIN_PIXELS_PER_FRAME).max(1.0);
+    let (left_frame, proposed_visible_frames) = match kind {
+        TimelineScrollbarDragKind::LeadingHandle => {
+            let left = clamp_unordered(
+                start_left + delta_frames,
+                0.0,
+                start_right - min_visible_frames,
+            );
+            (left, start_right - left)
+        }
+        TimelineScrollbarDragKind::TrailingHandle => {
+            let right = clamp_unordered(
+                start_right + delta_frames,
+                start_left + min_visible_frames,
+                total_frames,
+            );
+            (start_left, right - start_left)
+        }
+        TimelineScrollbarDragKind::Thumb => return None,
+    };
+    let visible_frames = proposed_visible_frames.clamp(min_visible_frames, max_visible_frames);
+    let pixels_per_frame = (body_width / visible_frames)
+        .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
+    Some(TimelineHorizontalZoomUpdate {
+        pixels_per_frame,
+        scroll_x: left_frame.max(0.0) * pixels_per_frame,
+    })
+}
+
+pub(super) fn track_resize_for_handle_delta(
+    body_height: f32,
+    track_height_extent: f32,
+    track_count: usize,
+    delta_y: f32,
+    kind: TimelineScrollbarDragKind,
+    start_scroll: f32,
+    start_track_height: f32,
+) -> Option<TimelineTrackResizeUpdate> {
+    if body_height <= 1.0 || !body_height.is_finite() {
+        return None;
+    }
+    let start_height = finite_or(start_track_height, TIMELINE_MIN_TRACK_HEIGHT)
+        .clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
+    let start_scroll = finite_or(start_scroll, 0.0);
+    let track_height_extent = finite_or(track_height_extent, 1.0);
+    let delta_y = finite_or(delta_y, 0.0);
+    let total_rows = (track_count as f32).max(1.0);
+    let start_top = (start_scroll.max(0.0) / start_height).clamp(0.0, total_rows);
+    let start_visible = (body_height / start_height).max(1.0);
+    let start_bottom = (start_top + start_visible).clamp(start_top, total_rows);
+    let delta_rows = delta_y / track_height_extent.max(1.0) * total_rows;
+    let min_visible_rows = (body_height / TIMELINE_MAX_TRACK_HEIGHT).max(1.0);
+    let max_visible_rows = (body_height / TIMELINE_MIN_TRACK_HEIGHT).max(1.0);
+    let (top_row, proposed_visible_rows) = match kind {
+        TimelineScrollbarDragKind::LeadingHandle => {
+            let top = clamp_unordered(start_top + delta_rows, 0.0, start_bottom - min_visible_rows);
+            (top, start_bottom - top)
+        }
+        TimelineScrollbarDragKind::TrailingHandle => {
+            let bottom = clamp_unordered(
+                start_bottom + delta_rows,
+                start_top + min_visible_rows,
+                total_rows,
+            );
+            (start_top, bottom - start_top)
+        }
+        TimelineScrollbarDragKind::Thumb => return None,
+    };
+    let visible_rows = proposed_visible_rows.clamp(min_visible_rows, max_visible_rows);
+    let track_height =
+        (body_height / visible_rows).clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
+    Some(TimelineTrackResizeUpdate {
+        track_height,
+        scroll_y: top_row.max(0.0) * track_height,
+    })
+}
+
+fn clamp_unordered(value: f32, min: f32, max: f32) -> f32 {
+    value.clamp(min.min(max), min.max(max))
+}
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +596,197 @@ mod tests {
         );
         assert_eq!(hit_clip_edge(rect, Point::new(50.0, 20.0)), None);
         assert_eq!(hit_clip_edge(rect, Point::new(12.0, 40.0)), None);
+    }
+
+    #[test]
+    fn clip_drag_position_clamps_start_and_reports_changes() {
+        assert_eq!(clip_drag_proposed_start_frame(12, 20), 0);
+
+        assert_eq!(
+            clip_drag_position(50, 8, 40, 1, 2, None),
+            TimelineClipDragPosition { start_frame: 42, track_index: 2, changed: true }
+        );
+        assert_eq!(
+            clip_drag_position(50, 8, 12, 0, 0, Some(-10)),
+            TimelineClipDragPosition { start_frame: 0, track_index: 0, changed: true }
+        );
+        assert_eq!(
+            clip_drag_position(50, 8, 42, 2, 2, None),
+            TimelineClipDragPosition { start_frame: 42, track_index: 2, changed: false }
+        );
+    }
+
+    #[test]
+    fn trim_drag_position_keeps_valid_one_frame_minimums() {
+        assert_eq!(
+            trim_drag_position(TimelineTrimEdge::In, 80, None, 30, 40, 30, 40),
+            TimelineTrimDragPosition { start_frame: 69, duration_frames: 1, changed: true }
+        );
+        assert_eq!(
+            trim_drag_position(TimelineTrimEdge::In, -10, None, 30, 40, 30, 40),
+            TimelineTrimDragPosition { start_frame: 0, duration_frames: 70, changed: true }
+        );
+        assert_eq!(
+            trim_drag_position(TimelineTrimEdge::Out, 20, None, 30, 40, 30, 40),
+            TimelineTrimDragPosition { start_frame: 30, duration_frames: 1, changed: true }
+        );
+        assert_eq!(
+            trim_drag_position(TimelineTrimEdge::Out, 44, Some(70), 30, 40, 30, 40),
+            TimelineTrimDragPosition {
+                start_frame: 30,
+                duration_frames: 40,
+                changed: false
+            }
+        );
+        assert_eq!(
+            trim_drag_position(TimelineTrimEdge::In, 0, None, -10, 1, -10, 1),
+            TimelineTrimDragPosition { start_frame: 0, duration_frames: 1, changed: true }
+        );
+    }
+
+    #[test]
+    fn scrollbar_thumb_delta_maps_track_travel_to_scroll_range() {
+        assert_eq!(
+            scrollbar_scroll_for_thumb_delta(100.0, 40.0, 300.0, 20.0, 30.0),
+            170.0
+        );
+        assert_eq!(
+            scrollbar_scroll_for_thumb_delta(40.0, 40.0, 300.0, 20.0, 30.0),
+            9020.0
+        );
+        assert_eq!(
+            scrollbar_scroll_for_thumb_delta(100.0, 40.0, -300.0, 20.0, 30.0),
+            20.0
+        );
+        assert_eq!(
+            scrollbar_scroll_for_thumb_delta(f32::NAN, 40.0, 300.0, 20.0, 30.0),
+            20.0
+        );
+        assert_eq!(
+            scrollbar_scroll_for_thumb_delta(100.0, 40.0, 300.0, f32::NAN, 30.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn horizontal_zoom_for_handle_delta_updates_zoom_and_scroll_without_panicking_on_tight_ranges()
+    {
+        let trailing = horizontal_zoom_for_handle_delta(
+            300.0,
+            288.0,
+            240.0,
+            50.0,
+            TimelineScrollbarDragKind::TrailingHandle,
+            0.0,
+            2.0,
+        )
+        .unwrap();
+        assert!(trailing.pixels_per_frame < 2.0);
+        assert_eq!(trailing.scroll_x, 0.0);
+
+        let leading = horizontal_zoom_for_handle_delta(
+            300.0,
+            288.0,
+            240.0,
+            50.0,
+            TimelineScrollbarDragKind::LeadingHandle,
+            100.0,
+            2.0,
+        )
+        .unwrap();
+        assert!(leading.pixels_per_frame > 2.0);
+        assert!(leading.scroll_x > 100.0);
+
+        assert_eq!(
+            horizontal_zoom_for_handle_delta(
+                300.0,
+                288.0,
+                240.0,
+                50.0,
+                TimelineScrollbarDragKind::Thumb,
+                0.0,
+                2.0,
+            ),
+            None
+        );
+        assert!(horizontal_zoom_for_handle_delta(
+            0.5,
+            0.0,
+            0.0,
+            10_000.0,
+            TimelineScrollbarDragKind::LeadingHandle,
+            0.0,
+            2.0,
+        )
+        .is_none());
+
+        let recovered = horizontal_zoom_for_handle_delta(
+            300.0,
+            f32::NAN,
+            f32::NAN,
+            f32::NAN,
+            TimelineScrollbarDragKind::TrailingHandle,
+            f32::NAN,
+            f32::NAN,
+        )
+        .unwrap();
+        assert!(recovered.pixels_per_frame.is_finite());
+        assert!(recovered.scroll_x.is_finite());
+    }
+
+    #[test]
+    fn track_resize_for_handle_delta_updates_height_and_scroll() {
+        let trailing = track_resize_for_handle_delta(
+            170.0,
+            158.0,
+            8,
+            50.0,
+            TimelineScrollbarDragKind::TrailingHandle,
+            0.0,
+            40.0,
+        )
+        .unwrap();
+        assert_eq!(trailing.track_height, 30.0);
+        assert_eq!(trailing.scroll_y, 0.0);
+
+        let leading = track_resize_for_handle_delta(
+            170.0,
+            158.0,
+            8,
+            30.0,
+            TimelineScrollbarDragKind::LeadingHandle,
+            80.0,
+            40.0,
+        )
+        .unwrap();
+        assert!(leading.track_height > 40.0);
+        assert!(leading.scroll_y > 80.0);
+
+        assert_eq!(
+            track_resize_for_handle_delta(
+                170.0,
+                158.0,
+                8,
+                50.0,
+                TimelineScrollbarDragKind::Thumb,
+                0.0,
+                40.0,
+            ),
+            None
+        );
+
+        let recovered = track_resize_for_handle_delta(
+            170.0,
+            f32::NAN,
+            8,
+            f32::NAN,
+            TimelineScrollbarDragKind::TrailingHandle,
+            f32::NAN,
+            f32::NAN,
+        )
+        .unwrap();
+        assert!(recovered.track_height.is_finite());
+        assert!(recovered.scroll_y.is_finite());
     }
 
     #[test]

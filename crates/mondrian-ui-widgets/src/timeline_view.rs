@@ -38,6 +38,7 @@ const TIMELINE_TOOLBAR_GROUP_GAP: f32 = 10.0;
 const TIMELINE_SNAP_THRESHOLD_PX: f32 = 8.0;
 const TIMELINE_MIN_PIXELS_PER_FRAME: f32 = 0.25;
 const TIMELINE_MAX_PIXELS_PER_FRAME: f32 = 64.0;
+const TIMELINE_CONTENT_TRAILING_PADDING: f32 = 160.0;
 const TIMELINE_MIN_TRACK_HEIGHT: f32 = 30.0;
 const TIMELINE_MAX_TRACK_HEIGHT: f32 = 96.0;
 const TIMELINE_TRACK_HEADER_MIN_WIDTH: f32 = 132.0;
@@ -939,7 +940,7 @@ impl TimelineView {
     }
 
     fn content_width(&self) -> f32 {
-        self.max_content_frame() as f32 * self.pixels_per_frame + 160.0
+        self.max_content_frame() as f32 * self.pixels_per_frame + TIMELINE_CONTENT_TRAILING_PADDING
     }
 
     fn max_content_frame(&self) -> i64 {
@@ -1091,8 +1092,13 @@ impl TimelineView {
         let Some(thumb) = self.horizontal_scrollbar_thumb_rect() else {
             return self.scroll_x;
         };
-        let travel = (track.width - thumb.width).max(1.0);
-        drag.start_scroll + (delta_x / travel) * self.max_scroll_x()
+        timeline_model::scrollbar_scroll_for_thumb_delta(
+            track.width,
+            thumb.width,
+            self.max_scroll_x(),
+            drag.start_scroll,
+            delta_x,
+        )
     }
 
     fn scroll_y_for_thumb_delta(&self, delta_y: f32, drag: TimelineScrollbarDrag) -> f32 {
@@ -1102,49 +1108,34 @@ impl TimelineView {
         let Some(thumb) = self.vertical_scrollbar_thumb_rect() else {
             return self.scroll_y;
         };
-        let travel = (track.height - thumb.height).max(1.0);
-        drag.start_scroll + (delta_y / travel) * self.max_scroll_y()
+        timeline_model::scrollbar_scroll_for_thumb_delta(
+            track.height,
+            thumb.height,
+            self.max_scroll_y(),
+            drag.start_scroll,
+            delta_y,
+        )
     }
 
     fn zoom_x_for_handle_delta(&mut self, delta_x: f32, drag: TimelineScrollbarDrag) -> bool {
-        if self.body_rect.width <= 1.0 {
-            return false;
-        }
         let Some(track) = self.horizontal_scrollbar_track_rect() else {
             return false;
         };
-        let start_pixels = drag
-            .start_pixels_per_frame
-            .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
-        let content_frames = self.max_content_frame() as f32;
-        let content_padding = 160.0;
-        let total_frames = (content_frames + content_padding / start_pixels).max(1.0);
-        let start_left = (drag.start_scroll / start_pixels).clamp(0.0, total_frames);
-        let start_visible = (self.body_rect.width / start_pixels).max(1.0);
-        let start_right = (start_left + start_visible).clamp(start_left, total_frames);
-        let delta_frames = delta_x / track.width.max(1.0) * total_frames;
-        let min_visible_frames = self.body_rect.width / TIMELINE_MAX_PIXELS_PER_FRAME;
-        let max_visible_frames = self.body_rect.width / TIMELINE_MIN_PIXELS_PER_FRAME;
-        let (left_frame, proposed_visible_frames) = match drag.kind {
-            TimelineScrollbarDragKind::LeadingHandle => {
-                let left = (start_left + delta_frames)
-                    .clamp(0.0, start_right - min_visible_frames.max(1.0));
-                (left, start_right - left)
-            }
-            TimelineScrollbarDragKind::TrailingHandle => {
-                let right = (start_right + delta_frames)
-                    .clamp(start_left + min_visible_frames.max(1.0), total_frames);
-                (start_left, right - start_left)
-            }
-            TimelineScrollbarDragKind::Thumb => return false,
+        let Some(update) = timeline_model::horizontal_zoom_for_handle_delta(
+            self.body_rect.width,
+            track.width,
+            self.max_content_frame() as f32,
+            delta_x,
+            drag.kind,
+            drag.start_scroll,
+            drag.start_pixels_per_frame,
+        ) else {
+            return false;
         };
-        let visible_frames =
-            proposed_visible_frames.clamp(min_visible_frames.max(1.0), max_visible_frames.max(1.0));
         let old_pixels = self.pixels_per_frame;
         let old_scroll = self.scroll_x;
-        self.pixels_per_frame = (self.body_rect.width / visible_frames)
-            .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
-        self.scroll_x = left_frame.max(0.0) * self.pixels_per_frame;
+        self.pixels_per_frame = update.pixels_per_frame;
+        self.scroll_x = update.scroll_x;
         self.clamp_scroll();
         (self.pixels_per_frame - old_pixels).abs() > 0.001
             || (self.scroll_x - old_scroll).abs() > 0.01
@@ -1155,42 +1146,24 @@ impl TimelineView {
         delta_y: f32,
         drag: TimelineScrollbarDrag,
     ) -> bool {
-        if self.body_rect.height <= 1.0 {
-            return false;
-        }
         let Some(track) = self.vertical_scrollbar_track_rect() else {
             return false;
         };
-        let start_height = drag
-            .start_track_height
-            .clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
-        let total_rows = (self.tracks.len() as f32).max(1.0);
-        let start_top = (drag.start_scroll / start_height).clamp(0.0, total_rows);
-        let start_visible = (self.body_rect.height / start_height).max(1.0);
-        let start_bottom = (start_top + start_visible).clamp(start_top, total_rows);
-        let delta_rows = delta_y / track.height.max(1.0) * total_rows;
-        let min_visible_rows = self.body_rect.height / TIMELINE_MAX_TRACK_HEIGHT;
-        let max_visible_rows = self.body_rect.height / TIMELINE_MIN_TRACK_HEIGHT;
-        let (top_row, proposed_visible_rows) = match drag.kind {
-            TimelineScrollbarDragKind::LeadingHandle => {
-                let top =
-                    (start_top + delta_rows).clamp(0.0, start_bottom - min_visible_rows.max(1.0));
-                (top, start_bottom - top)
-            }
-            TimelineScrollbarDragKind::TrailingHandle => {
-                let bottom = (start_bottom + delta_rows)
-                    .clamp(start_top + min_visible_rows.max(1.0), total_rows);
-                (start_top, bottom - start_top)
-            }
-            TimelineScrollbarDragKind::Thumb => return false,
+        let Some(update) = timeline_model::track_resize_for_handle_delta(
+            self.body_rect.height,
+            track.height,
+            self.tracks.len(),
+            delta_y,
+            drag.kind,
+            drag.start_scroll,
+            drag.start_track_height,
+        ) else {
+            return false;
         };
-        let visible_rows =
-            proposed_visible_rows.clamp(min_visible_rows.max(1.0), max_visible_rows.max(1.0));
         let old_height = self.track_height;
         let old_scroll = self.scroll_y;
-        self.track_height = (self.body_rect.height / visible_rows)
-            .clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
-        self.scroll_y = top_row.max(0.0) * self.track_height;
+        self.track_height = update.track_height;
+        self.scroll_y = update.scroll_y;
         self.clamp_scroll();
         (self.track_height - old_height).abs() > 0.01 || (self.scroll_y - old_scroll).abs() > 0.01
     }
@@ -1833,22 +1806,30 @@ impl TimelineView {
         };
         let clip_duration =
             self.clip(drag.clip_ref).map(|clip| clip.duration_frames.max(1)).unwrap_or(1);
-        let proposed_start_frame =
-            (self.x_to_frame(position.x) - drag.pointer_offset_frames).max(0);
+        let pointer_frame = self.x_to_frame(position.x);
+        let proposed_start_frame = timeline_model::clip_drag_proposed_start_frame(
+            pointer_frame,
+            drag.pointer_offset_frames,
+        );
         let snap = self.snap_clip_start(drag.clip_ref, proposed_start_frame, clip_duration);
-        let new_start_frame = snap.map_or(proposed_start_frame, |snap| snap.frame.max(0));
         let target_track_index = self
             .track_index_at(position)
             .map(|index| self.compatible_drag_track(drag.clip_ref.track_index, index))
             .unwrap_or(drag.current_track_index);
+        let drag_position = timeline_model::clip_drag_position(
+            pointer_frame,
+            drag.pointer_offset_frames,
+            drag.current_start_frame,
+            drag.current_track_index,
+            target_track_index,
+            snap.map(|snap| snap.frame),
+        );
         self.set_active_snap(snap, ctx);
-        if drag.current_start_frame == new_start_frame
-            && drag.current_track_index == target_track_index
-        {
+        if !drag_position.changed {
             return true;
         }
-        drag.current_start_frame = new_start_frame;
-        drag.current_track_index = target_track_index;
+        drag.current_start_frame = drag_position.start_frame;
+        drag.current_track_index = drag_position.track_index;
         drag.moved = true;
         self.clip_drag = Some(drag);
         ctx.request_repaint();
@@ -1866,24 +1847,21 @@ impl TimelineView {
         };
         let pointer_frame = self.x_to_frame(position.x);
         let snap = self.snap_frame(pointer_frame, Some(drag.clip_ref), true);
-        let pointer_frame = snap.map_or(pointer_frame, |snap| snap.frame);
-        let old_end = drag.old_start_frame + drag.old_duration_frames.max(1);
-        let (new_start, new_duration) = match drag.edge {
-            TimelineTrimEdge::In => {
-                let new_start = pointer_frame.clamp(0, old_end - 1);
-                (new_start, old_end - new_start)
-            }
-            TimelineTrimEdge::Out => {
-                let new_end = pointer_frame.max(drag.old_start_frame + 1);
-                (drag.old_start_frame, new_end - drag.old_start_frame)
-            }
-        };
+        let trim_position = timeline_model::trim_drag_position(
+            drag.edge,
+            pointer_frame,
+            snap.map(|snap| snap.frame),
+            drag.old_start_frame,
+            drag.old_duration_frames,
+            drag.current_start_frame,
+            drag.current_duration_frames,
+        );
         self.set_active_snap(snap, ctx);
-        if drag.current_start_frame == new_start && drag.current_duration_frames == new_duration {
+        if !trim_position.changed {
             return true;
         }
-        drag.current_start_frame = new_start;
-        drag.current_duration_frames = new_duration;
+        drag.current_start_frame = trim_position.start_frame;
+        drag.current_duration_frames = trim_position.duration_frames;
         drag.moved = true;
         self.trim_drag = Some(drag);
         ctx.request_repaint();

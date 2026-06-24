@@ -122,6 +122,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Extract TimelineView viewport layout, frame/track coordinate mapping, track-control hit
       testing, clip rectangles, trim-edge hit testing, and scrollbar track geometry into
       directly tested model/layout contracts.
+- [x] Extract TimelineView clip drag, trim drag, scrollbar thumb scroll, horizontal zoom, and
+      vertical track-resize math into directly tested interaction contracts.
 
 ## Phase 5 - Performance And Observability
 
