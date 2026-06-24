@@ -8,15 +8,12 @@ use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
+use std::cell::Cell;
 
 use crate::paint::{centered_text_origin_y, paint_focus_ring};
 use crate::text_metrics::{centered_text_x, measure_single_line};
 use crate::vector_icon::VectorIcon;
-
-const BUTTON_PADDING_X: f32 = 12.0;
-const BUTTON_HEIGHT: f32 = 28.0;
-const BUTTON_ICON_GAP: f32 = 6.0;
-const BUTTON_ICON_SIZE: f32 = 14.0;
 
 /// 按钮状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +33,37 @@ pub struct Button {
     enabled: bool,
     pub on_click: Option<Action>,
     focus_visible: bool,
+    visual: Cell<ButtonVisualTokens>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ButtonVisualTokens {
+    padding_x: f32,
+    height: f32,
+    icon_gap: f32,
+    icon_size: f32,
+    font_size: f32,
+    radius: f32,
+}
+
+impl ButtonVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            padding_x: spacing.md + spacing.border_emphasis,
+            height: spacing.interact_height,
+            icon_gap: spacing.sm,
+            icon_size: spacing.icon_size,
+            font_size: theme.typography.button.font_size,
+            radius: spacing.radius_md,
+        }
+    }
+}
+
+impl Default for ButtonVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
 }
 
 impl Button {
@@ -49,6 +77,7 @@ impl Button {
             enabled: true,
             on_click: None,
             focus_visible: false,
+            visual: Cell::new(ButtonVisualTokens::default()),
         }
     }
 
@@ -107,16 +136,17 @@ impl Widget for Button {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        let (label_width, _) = measure_single_line(&self.label, 14.0);
-        let icon_width = self.leading_icon.as_ref().map_or(0.0, |_| BUTTON_ICON_SIZE);
+        let visual = self.visual.get();
+        let (label_width, _) = measure_single_line(&self.label, visual.font_size);
+        let icon_width = self.leading_icon.as_ref().map_or(0.0, |_| visual.icon_size);
         let icon_gap = if self.leading_icon.is_some() && !self.label.is_empty() {
-            BUTTON_ICON_GAP
+            visual.icon_gap
         } else {
             0.0
         };
         let preferred = Size::new(
-            icon_width + icon_gap + label_width + BUTTON_PADDING_X * 2.0,
-            BUTTON_HEIGHT,
+            icon_width + icon_gap + label_width + visual.padding_x * 2.0,
+            visual.height,
         );
         constraint.constrain(preferred)
     }
@@ -197,9 +227,10 @@ impl Widget for Button {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        self.visual.set(ButtonVisualTokens::from_theme(ctx.theme));
+        let visual = self.visual.get();
         let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
-        let font_size = ctx.theme.typography.button.font_size;
+        let font_size = visual.font_size;
 
         let bg = if !self.enabled {
             tokens.muted
@@ -211,13 +242,13 @@ impl Widget for Button {
             }
         };
 
-        ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);
+        ctx.encoder.draw_rect(self.bounds, bg, visual.radius);
         if self.focus_visible {
-            paint_focus_ring(ctx, self.bounds, spacing.radius_md);
+            paint_focus_ring(ctx, self.bounds, visual.radius);
         }
 
-        let content = self.bounds.inset(BUTTON_PADDING_X, 0.0);
-        let icon_size = spacing.icon_size.min(content.height).clamp(1.0, BUTTON_ICON_SIZE);
+        let content = self.bounds.inset(visual.padding_x, 0.0);
+        let icon_size = visual.icon_size.min(content.height).max(1.0);
         let icon_color = if self.enabled {
             tokens.foreground
         } else {
@@ -229,7 +260,7 @@ impl Widget for Button {
             let gap = if self.label.is_empty() {
                 0.0
             } else {
-                BUTTON_ICON_GAP
+                visual.icon_gap
             };
             let desired_width = icon_size + gap + label_width;
             let content_x = content.x + (content.width - desired_width).max(0.0) * 0.5;
@@ -312,11 +343,14 @@ mod tests {
 
     #[derive(Default)]
     struct PaintRecorder {
+        rects: Vec<Rect>,
+        rect_radii: Vec<f32>,
         clips: Vec<Rect>,
         clip_pops: usize,
         triangles: usize,
         raster_images: usize,
         texts: Vec<String>,
+        text_font_sizes: Vec<f32>,
     }
 
     impl DrawCommandEncoder for PaintRecorder {
@@ -328,7 +362,10 @@ mod tests {
             self.clip_pops += 1;
         }
 
-        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, corner_radius: f32) {
+            self.rects.push(bounds);
+            self.rect_radii.push(corner_radius);
+        }
 
         fn draw_line(
             &mut self,
@@ -342,11 +379,12 @@ mod tests {
         fn draw_text(
             &mut self,
             text: &str,
-            _font_size: f32,
+            font_size: f32,
             _position: Point,
             _color: mondrian_core::Color,
         ) {
             self.texts.push(text.into());
+            self.text_font_sizes.push(font_size);
         }
 
         fn draw_triangles(&mut self, vertices: &[Point], _color: mondrian_core::Color) {
@@ -402,12 +440,14 @@ mod tests {
 
     #[test]
     fn button_measure_includes_leading_icon_and_gap() {
+        let theme = ThemePreset::Dark.build();
+        let visual = ButtonVisualTokens::from_theme(&theme);
         let plain = Button::new("Hello").measure(LayoutConstraint::LOOSE);
         let icon = Button::new("Hello")
             .with_leading_icon(test_icon())
             .measure(LayoutConstraint::LOOSE);
 
-        assert!(icon.width > plain.width + BUTTON_ICON_SIZE);
+        assert!(icon.width > plain.width + visual.icon_size);
         assert_eq!(icon.height, plain.height);
     }
 
@@ -428,6 +468,44 @@ mod tests {
         assert_eq!(encoder.texts, vec!["A very long button label"]);
         assert_eq!(encoder.clips, vec![Rect::new(22.0, 20.0, 56.0, 28.0)]);
         assert_eq!(encoder.clip_pops, 1);
+    }
+
+    #[test]
+    fn button_visual_metrics_follow_theme_tokens() {
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.md = 14.0;
+        theme.spacing.sm = 7.0;
+        theme.spacing.border_emphasis = 3.0;
+        theme.spacing.interact_height = 34.0;
+        theme.spacing.icon_size = 18.0;
+        theme.spacing.radius_md = 9.0;
+        theme.typography.button.font_size = 13.5;
+        let visual = ButtonVisualTokens::from_theme(&theme);
+        let mut b = Button::new("Tokenized").with_leading_icon(test_icon());
+        b.layout(Rect::new(10.0, 20.0, 160.0, visual.height));
+        let mut encoder = PaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 240.0, 120.0),
+        };
+
+        b.paint(&mut ctx);
+
+        let measured = b.measure(LayoutConstraint::LOOSE);
+        assert_eq!(measured.height, visual.height);
+        assert!(measured.width > visual.padding_x * 2.0 + visual.icon_size + visual.icon_gap);
+        assert_eq!(
+            encoder.rects[0],
+            Rect::new(10.0, 20.0, 160.0, visual.height)
+        );
+        assert_eq!(encoder.rect_radii[0], visual.radius);
+        assert_eq!(encoder.texts, vec!["Tokenized"]);
+        assert_eq!(encoder.text_font_sizes, vec![visual.font_size]);
+        assert_eq!(
+            encoder.clips[0].height, visual.height,
+            "label clip should use the tokenized control height"
+        );
     }
 
     #[test]
