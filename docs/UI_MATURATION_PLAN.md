@@ -29,6 +29,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [ ] Decide whether subpixel glyph atlas bins are needed for rich text/code-style editors.
 - [ ] Add text visual regression tests for small sizes, CJK, mixed scripts, emoji fallback,
       caret placement, selection paint, and IME preedit.
+- [x] Extract TextInput committed text, cursor, and selection into a `TextEditState` model with
+      direct unit coverage for selection collapse and grapheme-safe deletion.
 - [x] Centralize TextInput committed text edits behind one command path with explicit empty
       paste versus empty IME commit semantics.
 - [x] Centralize TextInput keyboard navigation selection semantics so plain, Shift, word,
