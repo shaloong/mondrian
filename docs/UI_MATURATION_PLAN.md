@@ -20,7 +20,7 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Extend offscreen visual regression coverage to triangles, clips, and gradients.
 - [x] Extend offscreen visual regression coverage to text glyphs and renderer raster images.
 - [x] Extend offscreen visual regression coverage to SVG icon rasterization.
-- [ ] Capture golden images at representative DPI scales: 1.0, 1.25, 1.5, and 2.0.
+- [x] Capture golden images at representative DPI scales: 1.0, 1.25, 1.5, and 2.0.
 
 ## Phase 2 - Text And Input Maturity
 

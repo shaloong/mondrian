@@ -1042,6 +1042,105 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_renderer_covers_primitives_at_representative_dpi_scales() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let physical_size = scaled_u32(96.0, scale);
+            let Some(mut harness) = OffscreenHarness::new(physical_size, physical_size) else {
+                return;
+            };
+            let mut encoder = DrawEncoder::new();
+
+            encoder.draw_line(
+                scaled_point(8.0, 8.0, scale),
+                scaled_point(40.0, 40.0, scale),
+                scale,
+                Color::WHITE,
+            );
+            encoder.draw_rect(
+                scaled_rect(52.0, 12.0, 28.0, 28.0, scale),
+                Color::WHITE,
+                14.0 * scale,
+            );
+            encoder.draw_triangles(
+                &[
+                    scaled_point(10.0, 86.0, scale),
+                    scaled_point(48.0, 86.0, scale),
+                    scaled_point(10.0, 48.0, scale),
+                ],
+                Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 },
+            );
+
+            let pixels = harness.render(encoder.finish());
+            let sample_radius = scale.ceil() as u32;
+
+            for logical in [10.0_f32, 16.0, 22.0, 28.0, 34.0, 38.0] {
+                let x = scaled_u32(logical, scale);
+                let y = scaled_u32(logical, scale);
+                let alpha = max_alpha_in_square(&pixels, physical_size, x, y, sample_radius);
+                assert!(
+                    alpha >= 32,
+                    "scale {scale} diagonal hairline lost coverage near logical {logical}: alpha={alpha}"
+                );
+            }
+
+            let circle_center = pixel(
+                &pixels,
+                physical_size,
+                scaled_u32(66.0, scale),
+                scaled_u32(26.0, scale),
+            );
+            assert!(
+                circle_center[3] >= 220,
+                "scale {scale} circle center should be opaque, got {circle_center:?}"
+            );
+            for (x, y) in [(52.0, 12.0), (79.0, 12.0), (52.0, 39.0), (79.0, 39.0)] {
+                let alpha = pixel(
+                    &pixels,
+                    physical_size,
+                    scaled_u32(x, scale),
+                    scaled_u32(y, scale),
+                )[3];
+                assert!(
+                    alpha <= 48,
+                    "scale {scale} circle corner ({x},{y}) should stay transparent, got {alpha}"
+                );
+            }
+            let circle_edge_alpha = max_alpha_in_square(
+                &pixels,
+                physical_size,
+                scaled_u32(66.0, scale),
+                scaled_u32(12.0, scale),
+                sample_radius,
+            );
+            assert!(
+                circle_edge_alpha >= 64,
+                "scale {scale} circle top edge should have AA coverage, got {circle_edge_alpha}"
+            );
+
+            let triangle_inside = pixel(
+                &pixels,
+                physical_size,
+                scaled_u32(20.0, scale),
+                scaled_u32(76.0, scale),
+            );
+            assert!(
+                triangle_inside[1] >= 180 && triangle_inside[3] >= 220,
+                "scale {scale} triangle interior should be green and opaque, got {triangle_inside:?}"
+            );
+            let triangle_outside = pixel(
+                &pixels,
+                physical_size,
+                scaled_u32(54.0, scale),
+                scaled_u32(54.0, scale),
+            );
+            assert_eq!(
+                triangle_outside[3], 0,
+                "scale {scale} triangle outside should stay transparent, got {triangle_outside:?}"
+            );
+        }
+    }
+
+    #[test]
     fn offscreen_renderer_uploads_and_samples_raster_images() {
         let Some(mut harness) = OffscreenHarness::new(32, 32) else {
             return;
@@ -1312,6 +1411,18 @@ mod tests {
             }
         }
         max_alpha
+    }
+
+    fn scaled_u32(logical: f32, scale: f32) -> u32 {
+        (logical * scale).round().max(0.0) as u32
+    }
+
+    fn scaled_point(x: f32, y: f32, scale: f32) -> Point {
+        Point::new(x * scale, y * scale)
+    }
+
+    fn scaled_rect(x: f32, y: f32, width: f32, height: f32, scale: f32) -> Rect {
+        Rect::new(x * scale, y * scale, width * scale, height * scale)
     }
 
     fn assert_dominant_channel(pixel: [u8; 4], channel: usize, label: &str) {
