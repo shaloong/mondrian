@@ -105,6 +105,7 @@ fn product_main_calls_only_the_self_hosted_window_runner() {
 fn legacy_egui_reference_is_not_public_crate_api() {
     let lib_rs = include_str!("../src/lib.rs");
     let app_rs = include_str!("../src/app/mod.rs");
+    let legacy_app_rs = include_str!("../src/app/legacy_egui/app.rs");
     let legacy_boundary_rs = include_str!("../src/app/legacy_egui/mod.rs");
     let legacy_preferences_rs = include_str!("../src/app/legacy_egui/preferences_model.rs");
 
@@ -125,8 +126,22 @@ fn legacy_egui_reference_is_not_public_crate_api() {
         "legacy egui shortcut preference module must not expose egui key types as public API"
     );
     assert!(
-        app_rs.contains("pub(crate) struct MondrianApp"),
-        "legacy eframe app type should not be public crate API"
+        !app_rs.contains("struct MondrianApp"),
+        "legacy eframe app type must not live in app/mod.rs"
+    );
+    assert!(
+        legacy_app_rs.contains("pub(in crate::app) struct MondrianApp"),
+        "legacy eframe app type should stay restricted to the app legacy boundary"
+    );
+    assert!(
+        !legacy_app_rs.contains("pub(crate) struct MondrianApp")
+            && !legacy_app_rs.contains("pub struct MondrianApp")
+            && !app_rs.contains("pub struct MondrianApp"),
+        "legacy eframe app type must not be exported as a product route or crate API"
+    );
+    assert!(
+        legacy_boundary_rs.contains("pub(in crate::app) mod app;"),
+        "legacy eframe app implementation should stay behind the legacy boundary"
     );
     assert!(
         !app_rs.contains("pub struct MondrianApp"),

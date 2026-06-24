@@ -279,10 +279,12 @@ workflow.
   persistence/defaults have also moved from the legacy viewer panel into the
   neutral `app::viewer_preferences` module, leaving the old viewer as a
   snapshot/apply consumer while it remains reference code. Legacy egui
-  eframe UI extension modules are now isolated under `app::legacy_egui`, and
-  the legacy preference/new-project draft schema lives in
-  `legacy_egui::preferences_model`, with route-contract coverage preventing it
-  from drifting back into `app/mod.rs`.
+  eframe UI modules, including the old `MondrianApp` implementation, are now
+  isolated under `app::legacy_egui`, and the legacy preference/new-project
+  draft schema lives in `legacy_egui::preferences_model`, with route-contract
+  coverage preventing them from drifting back into `app/mod.rs`. This boundary
+  is a deletion boundary, not a compatibility layer: new product UI work must
+  land on the self-hosted stack.
 - P5-DOCS-001: Update architecture docs to describe the final self-hosted UI
   stack, ownership model, test strategy, and removed compatibility paths.
   Progress: overview, renderer, export, and design-guideline docs now describe

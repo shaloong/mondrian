@@ -66,8 +66,8 @@ which follow-up Phase 5 item should own any remaining cleanup.
 | Legacy area | Current classification | Reason | Follow-up |
 | --- | --- | --- | --- |
 | `mondrian-app/src/egui_ui` module | Reference | Still contains migration reference implementations and helper code for theme, viewer/canvas, timeline, startup, color picker, effects, and export panels. It is crate-private and is guarded from becoming public API. | P5-CODE-001 should move required non-UI helpers to app/self-hosted/shared crates or delete them. |
-| `mondrian-app/src/app::MondrianApp` eframe app | Reference | Still compiles and uses egui/eframe types, but the product binary no longer launches it. The type and constructor are crate-private. | P5-CODE-001 should retire it once remaining helper dependencies are lifted. |
-| `mondrian-app/src/app/legacy_egui/` | Reference quarantine | Legacy eframe UI extension modules now live behind an explicit `app::legacy_egui` boundary. Legacy preference and new-project draft schema has been moved out of `app/mod.rs` into restricted `legacy_egui::preferences_model`; self-hosted product preferences live in `self_hosted::preferences_store`. | Delete with the legacy eframe app; do not add new product preference fields here. |
+| `mondrian-app/src/app/legacy_egui/app.rs` | Reference quarantine | The old `MondrianApp` eframe app has moved out of `app/mod.rs` and is restricted to the `app::legacy_egui` boundary. The product binary never launches it. | Delete once remaining helper dependencies are lifted; do not add new product UI behavior here. |
+| `mondrian-app/src/app/legacy_egui/` | Reference quarantine | Legacy eframe UI extension modules now live behind an explicit `app::legacy_egui` deletion boundary. Legacy preference and new-project draft schema has been moved out of `app/mod.rs` into restricted `legacy_egui::preferences_model`; self-hosted product preferences live in `self_hosted::preferences_store`. | Delete with the legacy eframe app; do not add new product preference fields here. |
 | `mondrian-app/src/shortcuts.rs` | Reference | This is the legacy egui shortcut preference model and still maps to `egui::InputState` / `egui::Key` for the old eframe app. It is crate-private; self-hosted shortcut routing lives in `self_hosted::shortcuts`. | P5-CODE-001 should delete it with the old eframe app after any still-useful preference migration logic is extracted. |
 | `mondrian-app/src/app/media_cache.rs` | Covered extraction | Media-cache filesystem policy has been extracted out of `egui_ui::viewer_panel`; app preferences and legacy viewer calls share one neutral cleanup/statistics module with focused tests. | P5-CODE-001 should continue extracting or deleting the remaining viewer preference/helper dependencies. |
 | `mondrian-app/src/app/viewer_preferences.rs` | Covered extraction | Viewer preference persistence and defaults now live in a toolkit-neutral app module; the legacy viewer only snapshots/applies the model while it remains reference code. Tests cover defaults, missing persisted fields, scale labels/factors, and serialization roundtrips. | P5-CODE-001 should continue extracting remaining viewer/canvas helpers before deleting the legacy viewer module. |
@@ -81,8 +81,9 @@ which follow-up Phase 5 item should own any remaining cleanup.
    default-run, documented run path, or product binary can launch legacy egui
    unintentionally.
 2. P5-CODE-001 can be closed when every dependency listed under "Legacy egui
-   Boundary" is either deleted, moved to a neutral shared module, or gated as an
-   explicit reference-only target.
+   Boundary" is either deleted or moved to a neutral shared/self-hosted module.
+   Temporary `app::legacy_egui` quarantine is acceptable only as a deletion
+   staging area and must not become a product compatibility layer.
 3. P5-DOCS-001 can be closed when `ui-system.md`, crate/module docs, and run
    instructions describe self-hosted UI as the final product stack and document
    removed compatibility paths.
