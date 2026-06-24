@@ -98,6 +98,165 @@ impl Widget for NestedOverlayWidget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusStressTarget {
+    Input,
+    Slider,
+}
+
+struct FocusHandoffStressWidget {
+    id: WidgetId,
+    bounds: Rect,
+    input: TextInput,
+    disabled_checkbox: Checkbox,
+    slider: Slider,
+    focused: Option<FocusStressTarget>,
+}
+
+impl FocusHandoffStressWidget {
+    fn new() -> Self {
+        Self {
+            id: WidgetId::new(),
+            bounds: Rect::ZERO,
+            input: TextInput::new("Focus field"),
+            disabled_checkbox: Checkbox::new("Disabled option", false)
+                .on_change(|_| custom_action("disabled-toggle"))
+                .disabled(),
+            slider: Slider::new(25.0, 0.0, 100.0)
+                .with_step(5.0)
+                .on_change(|_| custom_action("slider-change")),
+            focused: None,
+        }
+    }
+
+    fn input_rect(&self) -> Rect {
+        Rect::new(self.bounds.x + 8.0, self.bounds.y + 8.0, 180.0, 28.0)
+    }
+
+    fn checkbox_rect(&self) -> Rect {
+        Rect::new(self.bounds.x + 8.0, self.bounds.y + 46.0, 180.0, 24.0)
+    }
+
+    fn slider_rect(&self) -> Rect {
+        Rect::new(self.bounds.x + 8.0, self.bounds.y + 84.0, 180.0, 24.0)
+    }
+
+    fn hit_focus_target(&self, position: Point) -> Option<FocusStressTarget> {
+        if self.input.hit_test(position) && self.input.can_focus() {
+            Some(FocusStressTarget::Input)
+        } else if self.slider.hit_test(position) && self.slider.can_focus() {
+            Some(FocusStressTarget::Slider)
+        } else {
+            None
+        }
+    }
+
+    fn event_for_target(
+        &mut self,
+        target: FocusStressTarget,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        match target {
+            FocusStressTarget::Input => self.input.event(event, ctx),
+            FocusStressTarget::Slider => self.slider.event(event, ctx),
+        }
+    }
+
+    fn set_focused(
+        &mut self,
+        target: Option<FocusStressTarget>,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if self.focused == target {
+            return EventResult::Ignored;
+        }
+        let mut result = EventResult::Ignored;
+        if let Some(previous) = self.focused {
+            result = self.event_for_target(previous, &UiEvent::FocusLost, ctx);
+        }
+        self.focused = target;
+        if let Some(next) = target {
+            self.event_for_target(next, &UiEvent::FocusGained, ctx)
+        } else {
+            result
+        }
+    }
+
+    fn input_accepts_text_input(&self) -> bool {
+        self.input.accepts_text_input()
+    }
+
+    fn disabled_checkbox_checked(&self) -> bool {
+        self.disabled_checkbox.is_checked()
+    }
+
+    fn slider_value(&self) -> f32 {
+        self.slider.value()
+    }
+}
+
+impl Widget for FocusHandoffStressWidget {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(220.0, 132.0))
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+        self.input.layout(self.input_rect());
+        self.disabled_checkbox.layout(self.checkbox_rect());
+        self.slider.layout(self.slider_rect());
+    }
+
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                if let Some(target) = self.hit_focus_target(*position) {
+                    let _ = self.set_focused(Some(target), ctx);
+                    return self.event_for_target(target, event, ctx);
+                }
+                if self.disabled_checkbox.hit_test(*position) {
+                    return self.disabled_checkbox.event(event, ctx);
+                }
+                EventResult::Ignored
+            }
+            UiEvent::MouseMove { position, .. } | UiEvent::MouseUp { position, .. } => {
+                if let Some(target) = self.focused {
+                    return self.event_for_target(target, event, ctx);
+                }
+                if self.disabled_checkbox.hit_test(*position) {
+                    return self.disabled_checkbox.event(event, ctx);
+                }
+                EventResult::Ignored
+            }
+            UiEvent::FocusLost => self.set_focused(None, ctx),
+            UiEvent::KeyDown { .. }
+            | UiEvent::KeyUp { .. }
+            | UiEvent::TextInput(_)
+            | UiEvent::ImePreedit(_)
+            | UiEvent::ImeCommit(_)
+            | UiEvent::ImeCancel => self.focused.map_or(EventResult::Ignored, |target| {
+                self.event_for_target(target, event, ctx)
+            }),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        self.input.paint(ctx);
+        self.disabled_checkbox.paint(ctx);
+        self.slider.paint(ctx);
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.bounds.contains(point)
+    }
+}
+
 #[test]
 fn extreme_sized_controls_paint_without_leaking_clip_or_nan_geometry() {
     let clip_rect = Rect::new(0.0, 0.0, 96.0, 64.0);
@@ -510,6 +669,112 @@ fn nested_scroll_views_do_not_clip_child_overlays() {
     assert!(
         paint.clips.iter().any(|clip| clip.height <= 32.0),
         "outer scroll viewport should still establish a bounded content clip"
+    );
+}
+
+#[test]
+fn focus_handoff_disabled_controls_and_scroll_clip_remain_stable() {
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut composite = FocusHandoffStressWidget::new();
+    composite.layout(Rect::new(0.0, 0.0, 220.0, 132.0));
+    let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+    assert_eq!(
+        composite.event(
+            &UiEvent::MouseDown {
+                position: Point::new(16.0, 18.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert!(composite.input_accepts_text_input());
+    assert!(
+        ctx.requests.ime.as_ref().is_some_and(|request| request.enabled),
+        "focused text input should request IME while inside the composite"
+    );
+    assert_eq!(
+        composite.event(&UiEvent::TextInput("x".to_string()), &mut ctx),
+        EventResult::Handled
+    );
+
+    assert_eq!(
+        composite.event(
+            &UiEvent::MouseDown {
+                position: Point::new(16.0, 56.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Ignored
+    );
+    assert!(composite.input_accepts_text_input());
+    assert!(!composite.disabled_checkbox_checked());
+    assert!(
+        actions.borrow().is_empty(),
+        "disabled controls should not dispatch while participating in a composite"
+    );
+
+    assert_eq!(
+        composite.event(
+            &UiEvent::MouseDown {
+                position: Point::new(76.0, 96.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert!(!composite.input_accepts_text_input());
+    let slider_after_pointer = composite.slider_value();
+    assert_eq!(
+        composite.event(
+            &UiEvent::MouseUp {
+                position: Point::new(76.0, 96.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert_eq!(
+        composite.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert!(
+        composite.slider_value() > slider_after_pointer,
+        "keyboard input should route only to the newly focused slider after handoff"
+    );
+
+    assert_eq!(
+        composite.event(&UiEvent::FocusLost, &mut ctx),
+        EventResult::Handled
+    );
+    assert!(!composite.input_accepts_text_input());
+
+    let mut scroll = ScrollView::new(Some(Box::new(composite)));
+    scroll.layout(Rect::new(0.0, 0.0, 112.0, 72.0));
+    let paint = paint_widget(&scroll, Rect::new(0.0, 0.0, 112.0, 72.0));
+    assert_eq!(
+        paint.clips.first().copied(),
+        Some(Rect::new(0.0, 0.0, 104.0, 72.0)),
+        "scroll container should keep a bounded child clip around the composite"
+    );
+    assert!(
+        paint.texts.iter().any(|text| text.text == "Focus field" || text.text == "x"),
+        "focused composite children should still paint bounded text after moving into a scroll view"
     );
 }
 

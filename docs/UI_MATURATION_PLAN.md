@@ -92,10 +92,12 @@ shared renderer, text, event, theme, or widget infrastructure.
       controls.
 - [x] Tokenize AssetGrid preview wells, badge typography/chrome, footer typography, and
       thumbnail warning marks against theme-derived visual tokens.
-- [ ] Add composition stress tests for nested clipping, nested scroll views, overlays, focus
+- [x] Add composition stress tests for nested clipping, nested scroll views, overlays, focus
       handoff, and disabled/read-only states.
 - [x] Add a nested ScrollView overlay stress test proving child overlays remain hit-testable and
       paint outside ancestor viewport clips while clip stacks stay balanced.
+- [x] Add a focus-handoff stress test for composite widgets covering TextInput IME ownership,
+      disabled controls, Slider keyboard routing, and ScrollView child clipping.
 - [x] Extract NumberInput numeric range, parsing, quantization, display formatting, committed
       value, and keyboard step semantics into a directly tested model module.
 - [x] Extract Slider numeric range, step quantization, keyboard increments, and track/thumb
