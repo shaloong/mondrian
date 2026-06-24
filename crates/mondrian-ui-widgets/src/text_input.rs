@@ -27,6 +27,7 @@ mod commands;
 mod composition;
 mod edit;
 mod geometry;
+mod paint;
 
 use commands::{classify_key_command, TextInputKeyCommand};
 use composition::TextCompositionState;
@@ -35,6 +36,7 @@ use geometry::{
     compute_text_geometry, scroll_offset_after_cursor,
     text_x_from_pointer as pointer_text_x_from_geometry, TextInputGeometry,
 };
+use paint::{paint_text_input, TextInputPaintSnapshot};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
@@ -633,108 +635,35 @@ impl Widget for TextInput {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
         let font_size = ctx.theme.typography.body.font_size;
-
-        let bg = if !self.enabled {
-            tokens.muted
-        } else if self.focused {
-            tokens.popover
-        } else {
-            tokens.surface
-        };
-        let border = if self.enabled {
-            tokens.border_for_state(self.focused)
-        } else {
-            tokens.border
-        };
-        let border_inset = 1.0;
-        ctx.encoder.draw_rect(
-            self.bounds.inset(-border_inset, -border_inset),
-            border,
-            spacing.radius_sm + border_inset,
-        );
-        ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
-
-        // Clip text content to padded area.
         let geometry = self.text_geometry(font_size);
-        ctx.push_clip(geometry.clip);
-
-        let text = self.edit.text();
-        let text_x = geometry.text_origin.x;
-        let text_y = geometry.text_origin.y;
-
-        // Selection highlight
-        if self.enabled {
-            if let Some((byte_start, byte_end)) = self.selection_byte_range() {
-                let sel_x = text_x + measure_text_width(&text[..byte_start], font_size);
-                let sel_w = measure_text_width(&text[byte_start..byte_end], font_size);
-                let sel_h = font_size * 1.3;
-                let sel_y = self.bounds.y + (self.bounds.height - sel_h).max(0.0) * 0.5;
-                ctx.encoder
-                    .draw_rect(Rect::new(sel_x, sel_y, sel_w, sel_h), tokens.primary, 0.0);
-            }
-        }
-
-        if !text.is_empty() {
-            ctx.encoder.draw_text(
-                text,
-                font_size,
-                Point::new(text_x, text_y),
-                if self.enabled {
-                    tokens.foreground
-                } else {
-                    tokens.text_disabled
-                },
-            );
-        } else if !self.focused {
-            ctx.encoder.draw_text(
-                &self.placeholder,
-                font_size,
-                Point::new(text_x, text_y),
-                tokens.text_tertiary,
-            );
-        }
-
-        if self.enabled && self.focused && self.composition.is_active() {
-            let prefix_byte = self.grapheme_byte_idx(self.edit.cursor);
-            let preedit_x = text_x + measure_text_width(&text[..prefix_byte], font_size);
-            ctx.encoder.draw_text(
-                self.composition.preedit(),
-                font_size,
-                Point::new(preedit_x, text_y),
-                tokens.foreground,
-            );
-            let underline_y = text_y + font_size * 1.25;
-            let underline_w = measure_text_width(self.composition.preedit(), font_size).max(4.0);
-            ctx.encoder.draw_line(
-                Point::new(preedit_x, underline_y),
-                Point::new(preedit_x + underline_w, underline_y),
-                1.0,
-                tokens.primary,
-            );
-        }
-
-        // Blinking cursor. Draw last so it remains visible over text/preedit.
+        let mut cursor_visible = self.cursor_visible.get();
         if self.enabled && self.focused {
             let now = Instant::now();
             let elapsed = now.duration_since(self.last_blink.get());
             if elapsed.as_millis() >= 500 {
-                self.cursor_visible.set(!self.cursor_visible.get());
+                cursor_visible = !cursor_visible;
+                self.cursor_visible.set(cursor_visible);
                 self.last_blink.set(now);
-            }
-            if self.cursor_visible.get() {
-                let cursor_color = if self.has_selection() {
-                    tokens.primary
-                } else {
-                    tokens.foreground
-                };
-                ctx.encoder.draw_rect(geometry.caret, cursor_color, 0.0);
             }
         }
 
-        ctx.pop_clip();
+        paint_text_input(
+            ctx,
+            TextInputPaintSnapshot {
+                bounds: self.bounds,
+                geometry,
+                enabled: self.enabled,
+                focused: self.focused,
+                cursor_visible,
+                has_selection: self.has_selection(),
+                text: self.edit.text(),
+                placeholder: &self.placeholder,
+                selection_byte_range: self.selection_byte_range(),
+                cursor_prefix_byte: self.grapheme_byte_idx(self.edit.cursor),
+                preedit: self.composition.is_active().then(|| self.composition.preedit()),
+            },
+        );
     }
 
     fn hit_test(&self, point: Point) -> bool {
