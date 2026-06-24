@@ -101,15 +101,30 @@ impl SliderModel {
 pub(super) struct SliderGeometry {
     track_height: f32,
     thumb_size: f32,
+    min_width: f32,
+    measure_padding_y: f32,
+    thumb_fit_inset: f32,
 }
 
 impl SliderGeometry {
-    pub(super) fn new(track_height: f32, thumb_size: f32) -> Self {
-        Self { track_height, thumb_size }
+    pub(super) fn new(
+        track_height: f32,
+        thumb_size: f32,
+        min_width: f32,
+        measure_padding_y: f32,
+        thumb_fit_inset: f32,
+    ) -> Self {
+        Self {
+            track_height: track_height.max(1.0),
+            thumb_size: thumb_size.max(1.0),
+            min_width: min_width.max(1.0),
+            measure_padding_y: measure_padding_y.max(0.0),
+            thumb_fit_inset: thumb_fit_inset.max(0.0),
+        }
     }
 
     pub(super) fn measure_size(&self) -> Size {
-        Size::new(100.0, self.thumb_size + 4.0)
+        Size::new(self.min_width, self.thumb_size + self.measure_padding_y)
     }
 
     pub(super) fn track_rect(&self, bounds: Rect) -> Rect {
@@ -145,7 +160,7 @@ impl SliderGeometry {
     }
 
     fn effective_thumb_size(&self, bounds: Rect) -> f32 {
-        self.thumb_size.min((bounds.height - 2.0).max(1.0))
+        self.thumb_size.min((bounds.height - self.thumb_fit_inset).max(1.0))
     }
 }
 
@@ -216,7 +231,7 @@ mod tests {
 
     #[test]
     fn geometry_maps_thumb_center_to_track_ratio() {
-        let geometry = SliderGeometry::new(4.0, 12.0);
+        let geometry = SliderGeometry::new(4.0, 12.0, 100.0, 4.0, 2.0);
         let bounds = Rect::new(10.0, 20.0, 200.0, 20.0);
         let track = geometry.track_rect(bounds);
 
@@ -232,7 +247,7 @@ mod tests {
 
     #[test]
     fn geometry_shrinks_thumb_to_fit_short_bounds() {
-        let geometry = SliderGeometry::new(4.0, 12.0);
+        let geometry = SliderGeometry::new(4.0, 12.0, 100.0, 4.0, 2.0);
         let bounds = Rect::new(0.0, 0.0, 100.0, 10.0);
         let thumb = geometry.thumb_rect(bounds, 0.5);
 

@@ -12,6 +12,8 @@ use mondrian_ui_core::widget::{
     PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
+use std::cell::Cell;
 
 /// Adapter that maps the current slider value to an editor [`Action`].
 pub type SliderChangeAction = dyn Fn(f32) -> Action;
@@ -25,8 +27,51 @@ pub struct Slider {
     dragging: bool,
     focused: bool,
     focus_visible: bool,
-    geometry: SliderGeometry,
+    geometry: Cell<SliderGeometry>,
     on_change: Option<Box<SliderChangeAction>>,
+    visual: Cell<SliderVisualTokens>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SliderVisualTokens {
+    track_height: f32,
+    thumb_size: f32,
+    min_width: f32,
+    measure_padding_y: f32,
+    thumb_fit_inset: f32,
+    focus_halo_inset: f32,
+    focus_halo_alpha: f32,
+}
+
+impl SliderVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            track_height: spacing.xs,
+            thumb_size: (spacing.icon_size - spacing.border_emphasis).max(1.0),
+            min_width: spacing.interact_height * 3.5 + spacing.border_emphasis,
+            measure_padding_y: spacing.xs,
+            thumb_fit_inset: spacing.border_emphasis,
+            focus_halo_inset: (spacing.xs - spacing.border_standard).max(0.0),
+            focus_halo_alpha: 0.38,
+        }
+    }
+
+    fn geometry(self) -> SliderGeometry {
+        SliderGeometry::new(
+            self.track_height,
+            self.thumb_size,
+            self.min_width,
+            self.measure_padding_y,
+            self.thumb_fit_inset,
+        )
+    }
+}
+
+impl Default for SliderVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
 }
 
 impl Slider {
@@ -40,8 +85,9 @@ impl Slider {
             dragging: false,
             focused: false,
             focus_visible: false,
-            geometry: SliderGeometry::new(4.0, 12.0),
+            geometry: Cell::new(SliderVisualTokens::default().geometry()),
             on_change: None,
+            visual: Cell::new(SliderVisualTokens::default()),
         }
     }
 
@@ -96,11 +142,11 @@ impl Slider {
     }
 
     fn track_rect(&self) -> Rect {
-        self.geometry.track_rect(self.bounds)
+        self.geometry.get().track_rect(self.bounds)
     }
 
     fn thumb_rect(&self) -> Rect {
-        self.geometry.thumb_rect(self.bounds, self.ratio())
+        self.geometry.get().thumb_rect(self.bounds, self.ratio())
     }
 
     fn set_value(&mut self, value: f32) -> bool {
@@ -148,7 +194,7 @@ impl Widget for Slider {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        constraint.constrain(self.geometry.measure_size())
+        constraint.constrain(self.geometry.get().measure_size())
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -232,8 +278,11 @@ impl Widget for Slider {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        self.visual.set(SliderVisualTokens::from_theme(ctx.theme));
+        self.geometry.set(self.visual.get().geometry());
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
+        let visual = self.visual.get();
 
         // Track background
         let track = self.track_rect();
@@ -260,12 +309,12 @@ impl Widget for Slider {
         let thumb_rect = self.thumb_rect();
         if self.focus_visible {
             let mut ring = tokens.ring;
-            ring.a = 0.38;
+            ring.a = visual.focus_halo_alpha;
             let halo = Rect::new(
-                thumb_rect.x - 3.0,
-                thumb_rect.y - 3.0,
-                thumb_rect.width + 6.0,
-                thumb_rect.height + 6.0,
+                thumb_rect.x - visual.focus_halo_inset,
+                thumb_rect.y - visual.focus_halo_inset,
+                thumb_rect.width + visual.focus_halo_inset * 2.0,
+                thumb_rect.height + visual.focus_halo_inset * 2.0,
             );
             ctx.encoder.draw_rect(halo, ring, halo.height * 0.5);
         }
@@ -305,7 +354,7 @@ impl Slider {
         if range <= 0.0 {
             return;
         }
-        let ratio = self.geometry.ratio_at_position(self.bounds, *position);
+        let ratio = self.geometry.get().ratio_at_position(self.bounds, *position);
         self.set_value_from_input(self.model.value_at_ratio(ratio), ctx);
     }
 }
@@ -321,6 +370,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingEncoder {
         rects: Vec<Rect>,
+        rect_radii: Vec<f32>,
+        rect_colors: Vec<mondrian_core::Color>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -328,8 +379,10 @@ mod tests {
 
         fn pop_clip(&mut self) {}
 
-        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32) {
             self.rects.push(bounds);
+            self.rect_colors.push(color);
+            self.rect_radii.push(corner_radius);
         }
 
         fn draw_line(
@@ -907,5 +960,60 @@ mod tests {
         let thumb = encoder.rects.last().expect("paint should draw a thumb");
         assert!(thumb.y >= s.bounds.y);
         assert!(thumb.y + thumb.height <= s.bounds.y + s.bounds.height);
+    }
+
+    #[test]
+    fn slider_visual_metrics_follow_theme_tokens() {
+        let mut slider = Slider::new(50.0, 0.0, 100.0);
+        slider.focus_visible = true;
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.xs = 5.0;
+        theme.spacing.icon_size = 18.0;
+        theme.spacing.border_emphasis = 3.0;
+        theme.spacing.border_standard = 2.0;
+        theme.spacing.interact_height = 34.0;
+        let visual = SliderVisualTokens::from_theme(&theme);
+        slider.layout(Rect::new(
+            10.0,
+            20.0,
+            200.0,
+            visual.thumb_size + visual.measure_padding_y,
+        ));
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 100.0),
+        };
+
+        slider.paint(&mut ctx);
+
+        assert_eq!(
+            slider.measure(LayoutConstraint::LOOSE),
+            Size::new(
+                visual.min_width,
+                visual.thumb_size + visual.measure_padding_y
+            )
+        );
+        let track = encoder.rects[0];
+        assert_eq!(track.height, visual.track_height);
+        assert_eq!(track.x, slider.bounds.x + visual.thumb_size * 0.5);
+        assert_eq!(track.width, slider.bounds.width - visual.thumb_size);
+        assert_eq!(encoder.rect_radii[0], theme.spacing.radius_full);
+        assert_eq!(encoder.rects[1].width, track.width * 0.5);
+        let thumb = encoder.rects.last().copied().expect("slider should paint thumb");
+        assert_eq!(thumb.width, visual.thumb_size);
+        assert_eq!(thumb.height, visual.thumb_size);
+        let halo = encoder.rects[2];
+        assert_eq!(
+            halo,
+            Rect::new(
+                thumb.x - visual.focus_halo_inset,
+                thumb.y - visual.focus_halo_inset,
+                thumb.width + visual.focus_halo_inset * 2.0,
+                thumb.height + visual.focus_halo_inset * 2.0,
+            )
+        );
+        assert_eq!(encoder.rect_colors[2].a, visual.focus_halo_alpha);
     }
 }

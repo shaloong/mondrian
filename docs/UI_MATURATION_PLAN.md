@@ -160,6 +160,8 @@ custom UI line can be considered production-grade.
       theme-derived visual tokens while keeping icon/label clips bounded.
 - [x] Tokenize IconButton size, radius, icon inset, and icon alpha against theme-derived visual
       tokens while keeping tooltip and keyboard behavior unchanged.
+- [x] Tokenize Slider track height, thumb size, minimum width, fit inset, and focus halo against
+      theme-derived visual tokens while keeping numeric model and geometry contracts pure.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.
