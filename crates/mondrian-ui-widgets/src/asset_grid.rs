@@ -7,7 +7,10 @@
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
+    PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1914,6 +1917,24 @@ impl Widget for AssetGrid {
                 .as_ref()
                 .is_some_and(|editor| editor.input.accepts_text_input())
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Grid)
+                .with_name(self.title.clone())
+                .with_state(AccessibilityState {
+                    focusable: true,
+                    focused: self.focused,
+                    selected: Some(!self.selected_indices.is_empty()),
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Collection {
+                    total_count: self.items.len(),
+                    visible_count: self.visible_indices.len(),
+                    selected_count: self.selected_indices.len(),
+                }),
+        )
+    }
 }
 
 fn grid_columns_for_width(width: f32) -> usize {
@@ -2107,6 +2128,38 @@ mod tests {
 
     fn item(id: &str, title: &str) -> AssetGridItem {
         AssetGridItem::new(id, title, Color::from_hex(0x6688CC))
+    }
+
+    #[test]
+    fn asset_grid_accessibility_exposes_collection_counts_and_focus() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("camera", "Camera"),
+                item("music", "Music"),
+                item("camera-b", "Camera B"),
+            ],
+        )
+        .with_filter("Search");
+        grid.set_filter_query("camera");
+        grid.set_selected(Some(0));
+        grid.focused = true;
+
+        let node = grid.accessibility().expect("asset grid should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::Grid);
+        assert_eq!(node.name.as_deref(), Some("Assets"));
+        assert!(node.state.focusable);
+        assert!(node.state.focused);
+        assert_eq!(node.state.selected, Some(true));
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Collection {
+                total_count: 3,
+                visible_count: 2,
+                selected_count: 1,
+            })
+        );
     }
 
     #[derive(Default)]

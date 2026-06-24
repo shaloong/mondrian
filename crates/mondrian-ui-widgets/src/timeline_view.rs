@@ -9,7 +9,10 @@ use mondrian_core::types::{AssetId, Rational, TimeCode};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{CursorRequest, EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, CursorRequest,
+    EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::colors::ColorTokens;
 
@@ -4374,6 +4377,56 @@ impl Widget for TimelineView {
         self.enabled
     }
 
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        let track_count = self.tracks.len();
+        let clip_count = self.tracks.iter().map(|track| track.clips.len()).sum();
+        let selected_track_count = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(track_index, track)| {
+                track.selected
+                    || self.selected_track == Some(TimelineTrackRef { track_index: *track_index })
+            })
+            .count();
+        let selected_clip_count = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(track_index, track)| {
+                track
+                    .clips
+                    .iter()
+                    .enumerate()
+                    .filter(|(clip_index, clip)| {
+                        clip.selected
+                            || self.selected_clip
+                                == Some(TimelineClipRef { track_index, clip_index: *clip_index })
+                    })
+                    .count()
+            })
+            .sum();
+
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Timeline)
+                .with_name("Timeline")
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused,
+                    disabled: !self.enabled,
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Timeline {
+                    playhead_frame: self.playhead_frame,
+                    max_frame: self.max_content_frame(),
+                    track_count,
+                    clip_count,
+                    selected_track_count,
+                    selected_clip_count,
+                }),
+        )
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
@@ -4421,6 +4474,43 @@ mod tests {
             x + TIMELINE_TRACK_HEADER_MIN_WIDTH - LEGACY_TIMELINE_HEADER_WIDTH,
             y,
         )
+    }
+
+    #[test]
+    fn timeline_accessibility_exposes_playhead_counts_selection_and_state() {
+        let mut view = timeline().with_playhead(12);
+        view.focused = true;
+        view.selected_clip = Some(TimelineClipRef { track_index: 0, clip_index: 1 });
+
+        let node = view.accessibility().expect("timeline should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::Timeline);
+        assert_eq!(node.name.as_deref(), Some("Timeline"));
+        assert!(node.state.focusable);
+        assert!(node.state.focused);
+        assert!(!node.state.disabled);
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Timeline {
+                playhead_frame: 12,
+                max_frame: view.max_content_frame(),
+                track_count: 2,
+                clip_count: 3,
+                selected_track_count: 0,
+                selected_clip_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn disabled_timeline_accessibility_is_not_focusable() {
+        let view = timeline().disabled();
+        let node = view.accessibility().expect("timeline should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::Timeline);
+        assert!(!node.state.focusable);
+        assert!(!node.state.focused);
+        assert!(node.state.disabled);
     }
 
     fn dispatching_ctx<'a>(

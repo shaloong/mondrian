@@ -40,7 +40,7 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Extend accessibility metadata to foundational composite widgets: Dropdown, ContextMenu,
       ScrollView, and DockSplitter.
 - [x] Extend accessibility metadata to ColorPicker and ColorPickerTrigger.
-- [ ] Extend accessibility metadata to editor-scale composite widgets: TimelineView, AssetGrid,
+- [x] Extend accessibility metadata to editor-scale composite widgets: TimelineView, AssetGrid,
       and ViewerSurface.
 - [x] Define keyboard routing policy for unmatched shortcuts, system shortcut pass-through, and
       IME switching chords.

@@ -8,7 +8,10 @@
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
+    PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::sync::Arc;
 
@@ -102,6 +105,7 @@ enum ViewerDropdown {
 pub struct ViewerSurface {
     id: WidgetId,
     bounds: Rect,
+    title: String,
     status: String,
     status_tone: ViewerStatusTone,
     resolution_label: String,
@@ -139,10 +143,10 @@ pub struct ViewerSurface {
 impl ViewerSurface {
     /// Create a viewer surface with a title and source dimensions.
     pub fn new(title: impl Into<String>, source_width: u32, source_height: u32) -> Self {
-        let _ = title.into();
         Self {
             id: WidgetId::new(),
             bounds: Rect::ZERO,
+            title: title.into(),
             status: "无信号".into(),
             status_tone: ViewerStatusTone::Neutral,
             resolution_label: String::new(),
@@ -889,6 +893,32 @@ impl Widget for ViewerSurface {
     fn can_focus(&self) -> bool {
         self.enabled
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Canvas)
+                .with_name(self.title.clone())
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused,
+                    disabled: !self.enabled,
+                    pressed: Some(
+                        self.pressed_control.is_some()
+                            || self.pressed_zoom
+                            || self.pressed_preview_quality
+                            || self.pressed_dropdown_index.is_some(),
+                    ),
+                    expanded: Some(self.open_dropdown.is_some()),
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Viewer {
+                    source_width: self.source_width,
+                    source_height: self.source_height,
+                    has_frame: self.frame_image.is_some(),
+                    zoom_scale: self.zoom_scale,
+                }),
+        )
+    }
 }
 
 impl ViewerSurface {
@@ -1604,6 +1634,56 @@ mod tests {
         let viewer = ViewerSurface::new("Offline", 1920, 1080).disabled();
 
         assert!(!viewer.is_enabled());
+    }
+
+    #[test]
+    fn viewer_accessibility_exposes_canvas_state_and_source_metadata() {
+        let image =
+            ViewerFrameImage::new("frame:a11y", 1, 1, vec![255, 0, 0, 255]).expect("valid frame");
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_frame_image(image)
+            .with_zoom_scale(Some(0.5));
+        viewer.focused = true;
+        viewer.open_dropdown = Some(ViewerDropdown::Zoom);
+
+        let node = viewer.accessibility().expect("viewer should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::Canvas);
+        assert_eq!(node.name.as_deref(), Some("Scene 01"));
+        assert!(node.state.focusable);
+        assert!(node.state.focused);
+        assert!(!node.state.disabled);
+        assert_eq!(node.state.pressed, Some(false));
+        assert_eq!(node.state.expanded, Some(true));
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Viewer {
+                source_width: 1920,
+                source_height: 1080,
+                has_frame: true,
+                zoom_scale: Some(0.5),
+            })
+        );
+    }
+
+    #[test]
+    fn disabled_viewer_accessibility_is_not_focusable() {
+        let viewer = ViewerSurface::new("Offline", 1920, 1080).disabled();
+        let node = viewer.accessibility().expect("viewer should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::Canvas);
+        assert!(!node.state.focusable);
+        assert!(!node.state.focused);
+        assert!(node.state.disabled);
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Viewer {
+                source_width: 1920,
+                source_height: 1080,
+                has_frame: false,
+                zoom_scale: None,
+            })
+        );
     }
 
     #[test]

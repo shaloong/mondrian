@@ -84,6 +84,12 @@ pub enum AccessibilityRole {
     ScrollView,
     /// Draggable splitter between panes.
     Splitter,
+    /// Time-based editor surface with tracks, clips, and a playhead.
+    Timeline,
+    /// Selectable item grid or collection browser.
+    Grid,
+    /// Interactive canvas or preview surface.
+    Canvas,
     /// Color well or full color picker control.
     ColorPicker,
     /// Generic focusable or structural group.
@@ -125,6 +131,28 @@ pub enum AccessibilityValue {
     },
     /// Normalized RGBA color channels in the 0..1 range.
     Color { r: f32, g: f32, b: f32, a: f32 },
+    /// Time-based editor surface state.
+    Timeline {
+        playhead_frame: i64,
+        max_frame: i64,
+        track_count: usize,
+        clip_count: usize,
+        selected_track_count: usize,
+        selected_clip_count: usize,
+    },
+    /// Selectable collection state.
+    Collection {
+        total_count: usize,
+        visible_count: usize,
+        selected_count: usize,
+    },
+    /// Preview/canvas state.
+    Viewer {
+        source_width: u32,
+        source_height: u32,
+        has_frame: bool,
+        zoom_scale: Option<f32>,
+    },
 }
 
 /// Platform-neutral accessibility metadata for a widget.
