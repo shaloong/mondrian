@@ -2904,6 +2904,7 @@ dependencies = [
  "mondrian-ui-theme",
  "naga",
  "parking_lot",
+ "pollster",
  "wgpu",
 ]
 

@@ -563,6 +563,7 @@ impl UiRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::DrawEncoder;
     use mondrian_ui_core::types::Rect;
 
     #[test]
@@ -656,5 +657,241 @@ mod tests {
             }
             other => panic!("expected rect fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn offscreen_renderer_draws_opaque_rect_with_readback() {
+        let Some(mut harness) = OffscreenHarness::new(64, 64) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_rect(
+            Rect::new(16.0, 16.0, 32.0, 32.0),
+            Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            0.0,
+        );
+
+        let pixels = harness.render(encoder.finish());
+        let center = pixel(&pixels, 64, 32, 32);
+
+        assert!(
+            center[0] >= 240,
+            "red channel should be saturated, got {center:?}"
+        );
+        assert!(
+            center[1] <= 8,
+            "green channel should remain near zero, got {center:?}"
+        );
+        assert!(
+            center[2] <= 8,
+            "blue channel should remain near zero, got {center:?}"
+        );
+        assert!(center[3] >= 240, "alpha should be opaque, got {center:?}");
+    }
+
+    #[test]
+    fn offscreen_renderer_keeps_45_degree_hairline_visible() {
+        let Some(mut harness) = OffscreenHarness::new(64, 64) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_line(
+            mondrian_ui_core::types::Point::new(8.0, 8.0),
+            mondrian_ui_core::types::Point::new(56.0, 56.0),
+            1.0,
+            Color::WHITE,
+        );
+
+        let pixels = harness.render(encoder.finish());
+        for i in 10..=54 {
+            let alpha = max_alpha_in_square(&pixels, 64, i, i, 1);
+            assert!(
+                alpha >= 32,
+                "45-degree hairline lost visible coverage around ({i},{i}); max alpha={alpha}"
+            );
+        }
+    }
+
+    #[test]
+    fn offscreen_renderer_draws_square_rounded_rect_as_circle() {
+        let Some(mut harness) = OffscreenHarness::new(64, 64) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_rect(Rect::new(16.0, 16.0, 32.0, 32.0), Color::WHITE, 16.0);
+
+        let pixels = harness.render(encoder.finish());
+
+        assert!(
+            pixel(&pixels, 64, 32, 32)[3] >= 240,
+            "circle center should be opaque"
+        );
+        for (x, y) in [(16, 16), (47, 16), (16, 47), (47, 47)] {
+            let alpha = pixel(&pixels, 64, x, y)[3];
+            assert!(
+                alpha <= 24,
+                "circle corner ({x},{y}) should stay transparent, got {alpha}"
+            );
+        }
+
+        let top = max_alpha_in_square(&pixels, 64, 32, 16, 1);
+        let right = max_alpha_in_square(&pixels, 64, 47, 32, 1);
+        let bottom = max_alpha_in_square(&pixels, 64, 32, 47, 1);
+        let left = max_alpha_in_square(&pixels, 64, 16, 32, 1);
+        for (label, alpha) in [
+            ("top", top),
+            ("right", right),
+            ("bottom", bottom),
+            ("left", left),
+        ] {
+            assert!(
+                alpha >= 80,
+                "circle {label} edge should have visible AA coverage, got {alpha}"
+            );
+        }
+    }
+
+    struct OffscreenHarness {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        renderer: UiRenderer,
+        texture: wgpu::Texture,
+        size: (u32, u32),
+    }
+
+    impl OffscreenHarness {
+        fn new(width: u32, height: u32) -> Option<Self> {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    compatible_surface: None,
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                }))
+                .ok()?;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                    .ok()?;
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ui_offscreen_test_target"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let renderer = UiRenderer::new(&device, format);
+
+            Some(Self {
+                device,
+                queue,
+                renderer,
+                texture,
+                size: (width, height),
+            })
+        }
+
+        fn render(&mut self, commands: Vec<DrawCommand>) -> Vec<u8> {
+            let view = self.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.renderer.render_resolved_commands(
+                &self.device,
+                &self.queue,
+                &view,
+                &commands,
+                self.size,
+            );
+            self.readback()
+        }
+
+        fn readback(&self) -> Vec<u8> {
+            let (width, height) = self.size;
+            let bytes_per_pixel = 4u32;
+            let unpadded_bytes_per_row = width * bytes_per_pixel;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+            let buffer_size = padded_bytes_per_row as u64 * height as u64;
+
+            let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ui_offscreen_test_readback"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ui_offscreen_test_readback_encoder"),
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            self.queue.submit([encoder.finish()]);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let slice = readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            let _ =
+                self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            rx.recv()
+                .expect("readback map callback should run")
+                .expect("readback map should succeed");
+
+            let mapped = slice.get_mapped_range();
+            let mut out = vec![0u8; width as usize * height as usize * 4];
+            for row in 0..height as usize {
+                let src_start = row * padded_bytes_per_row as usize;
+                let src_end = src_start + unpadded_bytes_per_row as usize;
+                let dst_start = row * unpadded_bytes_per_row as usize;
+                let dst_end = dst_start + unpadded_bytes_per_row as usize;
+                out[dst_start..dst_end].copy_from_slice(&mapped[src_start..src_end]);
+            }
+            drop(mapped);
+            readback.unmap();
+            out
+        }
+    }
+
+    fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+        let index = ((y * width + x) * 4) as usize;
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
+    }
+
+    fn max_alpha_in_square(pixels: &[u8], width: u32, x: u32, y: u32, radius: u32) -> u8 {
+        let height = pixels.len() as u32 / (width * 4);
+        let left = x.saturating_sub(radius);
+        let right = (x + radius).min(width - 1);
+        let top = y.saturating_sub(radius);
+        let bottom = (y + radius).min(height - 1);
+        let mut max_alpha = 0u8;
+        for sample_y in top..=bottom {
+            for sample_x in left..=right {
+                max_alpha = max_alpha.max(pixel(pixels, width, sample_x, sample_y)[3]);
+            }
+        }
+        max_alpha
     }
 }

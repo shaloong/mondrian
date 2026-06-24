@@ -19,3 +19,4 @@ parking_lot = { workspace = true }
 
 [dev-dependencies]
 naga = { version = "29.0.3", features = ["wgsl-in"] }
+pollster = "0.4"

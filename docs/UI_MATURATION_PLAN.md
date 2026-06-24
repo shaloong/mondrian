@@ -14,8 +14,11 @@ shared renderer, text, event, theme, or widget infrastructure.
       invalid clip bounds, and invalid translate offsets.
 - [ ] Add explicit debug diagnostics for backend fallbacks that would otherwise be silently
       tolerated.
-- [ ] Build an offscreen visual regression harness for primitives: lines, rounded rects,
-      circles, triangles, clips, gradients, text glyphs, and SVG/raster icons.
+- [x] Build an offscreen visual regression harness for renderer primitives.
+- [x] Add GPU readback coverage for filled rects, 45-degree hairlines, and circle-shaped
+      rounded rectangles.
+- [ ] Extend offscreen visual regression coverage to triangles, clips, gradients, text glyphs,
+      and SVG/raster icons.
 - [ ] Capture golden images at representative DPI scales: 1.0, 1.25, 1.5, and 2.0.
 
 ## Phase 2 - Text And Input Maturity
