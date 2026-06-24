@@ -25,9 +25,14 @@ use mondrian_ui_text::TextRenderer;
 
 mod composition;
 mod edit;
+mod geometry;
 
 use composition::TextCompositionState;
 use edit::TextEditState;
+use geometry::{
+    compute_text_geometry, scroll_offset_after_cursor,
+    text_x_from_pointer as pointer_text_x_from_geometry, TextInputGeometry,
+};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
@@ -91,16 +96,6 @@ fn normalize_single_line_input(input: &str) -> Cow<'_, str> {
 
 /// Adapter that maps the current input value to an editor [`Action`].
 pub type TextInputChangeAction = dyn Fn(&str) -> Action;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct TextInputGeometry {
-    clip: Rect,
-    text_origin: Point,
-    content_left: f32,
-    content_right: f32,
-    visible_width: f32,
-    caret: Rect,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EmptyTextCommitPolicy {
@@ -247,46 +242,14 @@ impl TextInput {
         self.update_scroll(font_size);
     }
 
-    fn line_height(font_size: f32) -> f32 {
-        font_size * 1.3
-    }
-
     fn text_geometry(&self, font_size: f32) -> TextInputGeometry {
-        let content_left = self.bounds.x + HORIZONTAL_PADDING;
-        let content_right =
-            (self.bounds.x + self.bounds.width - HORIZONTAL_PADDING).max(content_left);
-        let visible_width = (self.bounds.width - HORIZONTAL_PADDING * 2.0).max(1.0);
-        let text_x = content_left - self.scroll_x.get();
-        let text_y =
-            self.bounds.y + (self.bounds.height - Self::line_height(font_size)).max(0.0) * 0.5;
-        let preedit_w = if !self.composition.is_active() {
-            0.0
-        } else {
-            measure_text_width(self.composition.preedit(), font_size)
-        };
-        let caret_width = 2.0;
-        let max_caret_x = (content_right - caret_width).max(content_left);
-        let caret_x =
-            (text_x + self.cursor_text_x(font_size) + preedit_w).clamp(content_left, max_caret_x);
-
-        TextInputGeometry {
-            clip: Rect::new(
-                content_left,
-                self.bounds.y,
-                visible_width,
-                self.bounds.height,
-            ),
-            text_origin: Point::new(text_x, text_y),
-            content_left,
-            content_right,
-            visible_width,
-            caret: Rect::new(
-                caret_x,
-                self.bounds.y + VERTICAL_PADDING,
-                caret_width,
-                (self.bounds.height - VERTICAL_PADDING * 2.0).max(1.0),
-            ),
-        }
+        compute_text_geometry(
+            self.bounds,
+            self.scroll_x.get(),
+            self.cursor_text_x(font_size),
+            self.composition.is_active().then(|| self.composition.preedit()),
+            font_size,
+        )
     }
 
     fn visible_width(&self) -> f32 {
@@ -316,13 +279,13 @@ impl TextInput {
     }
 
     fn text_x_from_pointer(&self, position: Point) -> f32 {
-        if position.x < self.content_left() {
-            0.0
-        } else if position.x > self.content_right() {
-            measure_text_width(self.edit.text(), DEFAULT_FONT_SIZE)
-        } else {
-            (position.x - self.content_left() + self.scroll_x.get()).max(0.0)
-        }
+        pointer_text_x_from_geometry(
+            position,
+            self.content_left(),
+            self.content_right(),
+            self.scroll_x.get(),
+            measure_text_width(self.edit.text(), DEFAULT_FONT_SIZE),
+        )
     }
 
     fn update_scroll(&self, font_size: f32) {
@@ -333,20 +296,12 @@ impl TextInput {
         };
         let visible_w = self.visible_width();
         let cursor_x = self.cursor_text_x(font_size);
-        let sx = self.scroll_x.get();
-        // Cursor to the right of visible area → scroll left
-        if cursor_x - sx > visible_w - 4.0 {
-            self.scroll_x.set((cursor_x - visible_w + 4.0).min(text_w - visible_w).max(0.0));
-        }
-        // Cursor to the left of visible area → scroll right
-        else if cursor_x - sx < 0.0 {
-            self.scroll_x.set(cursor_x.max(0.0));
-        }
-        // Clamp: don't scroll past the text end
-        let max_scroll = (text_w - visible_w).max(0.0);
-        if self.scroll_x.get() > max_scroll {
-            self.scroll_x.set(max_scroll);
-        }
+        self.scroll_x.set(scroll_offset_after_cursor(
+            self.scroll_x.get(),
+            text_w,
+            visible_w,
+            cursor_x,
+        ));
     }
 
     /// Delete one grapheme before the cursor (for Backspace).

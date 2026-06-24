@@ -34,6 +34,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Move TextInput committed edit state and IME composition state into dedicated
       `text_input` submodules so event and paint extraction can proceed without expanding the
       root widget file.
+- [x] Move TextInput geometry and horizontal scroll math into a dedicated `text_input::geometry`
+      module with direct edge-case coverage.
 - [x] Extract TextInput committed text, cursor, and selection into a `TextEditState` model with
       direct unit coverage for selection collapse and grapheme-safe deletion.
 - [x] Centralize TextInput committed text edits behind one command path with explicit empty
