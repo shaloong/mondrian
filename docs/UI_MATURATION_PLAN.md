@@ -55,7 +55,7 @@ shared renderer, text, event, theme, or widget infrastructure.
       command resolution, and large timeline-style command streams.
 - [x] Add frame diagnostics for batch count, vertex count, atlas occupancy, fallback counts,
       and clip/scissor skips.
-- [ ] Add frame diagnostics for upload bytes and persistent frame cost reporting.
+- [x] Add frame diagnostics for upload bytes and persistent frame cost reporting.
 - [ ] Evaluate retained/cached paint geometry for expensive mostly-static widgets.
 - [ ] Add debug overlays or structured logs for UI frame cost and resource pressure.
 

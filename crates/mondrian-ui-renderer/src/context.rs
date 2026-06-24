@@ -5,6 +5,7 @@
 use bytemuck::Pod;
 use mondrian_core::Color;
 use std::collections::HashMap;
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 use crate::atlas::{TextureAtlas, TextureAtlasStats};
@@ -43,6 +44,17 @@ pub struct GlyphUpload {
     pub data: Vec<u8>,
 }
 
+/// Diagnostics produced while uploading glyph atlas data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GlyphUploadStats {
+    /// Glyph uploads submitted to the GPU queue.
+    pub submitted_glyphs: u32,
+    /// Glyph uploads skipped because dimensions or payload length were invalid.
+    pub skipped_glyphs: u32,
+    /// Bytes written to the GPU glyph atlas after alpha-to-RGBA expansion.
+    pub upload_bytes: u64,
+}
+
 /// Diagnostics produced while submitting one resolved UI frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UiRenderFrameStats {
@@ -78,6 +90,19 @@ pub struct UiRenderFrameStats {
     pub skipped_empty_batches: usize,
     /// Batches skipped because their clip/scissor rectangle was empty or invalid.
     pub skipped_scissor_batches: usize,
+    /// Bytes written to the renderer-owned raster image atlas this frame.
+    pub raster_image_upload_bytes: u64,
+    /// Bytes written to per-frame uniform buffers.
+    pub uniform_upload_bytes: u64,
+    /// Bytes written to per-batch vertex buffers.
+    pub vertex_buffer_upload_bytes: u64,
+    /// Total bytes uploaded by this renderer entry point.
+    ///
+    /// This excludes glyph uploads, because glyphs are uploaded through
+    /// [`UiRenderer::upload_glyphs`] before rendering and have their own stats.
+    pub gpu_upload_bytes: u64,
+    /// CPU time spent inside `render_resolved_commands`, in microseconds.
+    pub frame_cpu_time_micros: u64,
     /// The frame uploaded new raster images into the renderer-owned image atlas.
     pub uploaded_raster_images: bool,
     /// Raster images that could not be uploaded or allocated in the image atlas.
@@ -321,13 +346,16 @@ impl UiRenderer {
     }
 
     /// 上传字形 bitmap 到 GPU 图集纹理（alpha→Rgba8 格式转换）
-    pub fn upload_glyphs(&self, queue: &wgpu::Queue, uploads: &[GlyphUpload]) {
+    pub fn upload_glyphs(&self, queue: &wgpu::Queue, uploads: &[GlyphUpload]) -> GlyphUploadStats {
+        let mut stats = GlyphUploadStats::default();
         for upload in uploads {
             if upload.width == 0 || upload.height == 0 {
+                stats.skipped_glyphs = stats.skipped_glyphs.saturating_add(1);
                 continue;
             }
             let pixel_count = (upload.width * upload.height) as usize;
             if upload.data.len() != pixel_count {
+                stats.skipped_glyphs = stats.skipped_glyphs.saturating_add(1);
                 continue;
             }
             // Convert alpha-only to RGBA: each pixel becomes [255, 255, 255, alpha].
@@ -354,7 +382,10 @@ impl UiRenderer {
                     depth_or_array_layers: 1,
                 },
             );
+            stats.submitted_glyphs = stats.submitted_glyphs.saturating_add(1);
+            stats.upload_bytes = stats.upload_bytes.saturating_add(rgba.len() as u64);
         }
+        stats
     }
 
     /// Return diagnostics for the renderer-owned raster image atlas.
@@ -373,10 +404,12 @@ impl UiRenderer {
         for command in commands {
             match command {
                 DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => {
-                    if let Some((uv_rect, uploaded)) =
+                    if let Some((uv_rect, uploaded, upload_bytes)) =
                         self.resolve_raster_image(queue, key, *width, *height, rgba)
                     {
                         stats.uploaded_raster_images |= uploaded;
+                        stats.raster_image_upload_bytes =
+                            stats.raster_image_upload_bytes.saturating_add(upload_bytes);
                         resolved.push(DrawCommand::RasterAtlasImage {
                             bounds: *bounds,
                             uv_rect,
@@ -401,7 +434,7 @@ impl UiRenderer {
         width: u32,
         height: u32,
         rgba: &[u8],
-    ) -> Option<(mondrian_ui_core::types::Rect, bool)> {
+    ) -> Option<(mondrian_ui_core::types::Rect, bool, u64)> {
         let expected_len = raster_image_payload_len(width, height)?;
         if width == 0 || height == 0 || rgba.len() != expected_len {
             return None;
@@ -409,7 +442,7 @@ impl UiRenderer {
 
         let cache_key = format!("{key}@{width}x{height}");
         if let Some(entry) = self.image_cache.get(&cache_key) {
-            return Some((entry.uv_rect, false));
+            return Some((entry.uv_rect, false, 0));
         }
 
         let pad_twice = IMAGE_ATLAS_PAD.checked_mul(2)?;
@@ -448,7 +481,7 @@ impl UiRenderer {
         );
 
         self.image_cache.insert(cache_key, ImageCacheEntry { uv_rect });
-        Some((uv_rect, true))
+        Some((uv_rect, true, padded_rgba.len() as u64))
     }
 
     /// Render draw commands that have already had text commands resolved to
@@ -465,6 +498,7 @@ impl UiRenderer {
         commands: &[DrawCommand],
         screen_size: (u32, u32),
     ) -> UiRenderFrameStats {
+        let frame_started = Instant::now();
         let command_diagnostics = diagnose_draw_commands(commands);
         debug_assert_eq!(
             command_diagnostics.unresolved_text_commands, 0,
@@ -497,6 +531,7 @@ impl UiRenderer {
             screen_size: [screen_size.0 as f32, screen_size.1 as f32],
             _pad: [0.0; 2],
         };
+        stats.uniform_upload_bytes = std::mem::size_of::<Uniforms>() as u64;
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ui_uniform"),
             contents: bytemuck::bytes_of(&uniform_data),
@@ -561,6 +596,7 @@ impl UiRenderer {
                 rpass.set_bind_group(1, texture_bind_group, &[]);
 
                 let vertex_data: &[RectVertex] = &batch.vertices;
+                let vertex_bytes = std::mem::size_of_val(vertex_data) as u64;
                 let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("ui_vb"),
                     contents: bytemuck::cast_slice(vertex_data),
@@ -571,12 +607,23 @@ impl UiRenderer {
                 stats.submitted_batches = stats.submitted_batches.saturating_add(1);
                 stats.submitted_vertices =
                     stats.submitted_vertices.saturating_add(vertex_data.len());
+                stats.vertex_buffer_upload_bytes =
+                    stats.vertex_buffer_upload_bytes.saturating_add(vertex_bytes);
             }
         }
 
         queue.submit(std::iter::once(encoder.finish()));
+        stats.gpu_upload_bytes = stats
+            .raster_image_upload_bytes
+            .saturating_add(stats.uniform_upload_bytes)
+            .saturating_add(stats.vertex_buffer_upload_bytes);
+        stats.frame_cpu_time_micros = elapsed_micros(frame_started);
         stats
     }
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
@@ -714,6 +761,19 @@ mod tests {
         assert_eq!(stats.submitted_vertices, 6);
         assert_eq!(stats.skipped_empty_batches, 0);
         assert_eq!(stats.skipped_scissor_batches, 0);
+        assert_eq!(
+            stats.uniform_upload_bytes,
+            std::mem::size_of::<Uniforms>() as u64
+        );
+        assert_eq!(
+            stats.vertex_buffer_upload_bytes,
+            (6 * std::mem::size_of::<RectVertex>()) as u64
+        );
+        assert_eq!(
+            stats.gpu_upload_bytes,
+            stats.uniform_upload_bytes + stats.vertex_buffer_upload_bytes
+        );
+        assert!(stats.frame_cpu_time_micros > 0);
     }
 
     #[test]
@@ -946,6 +1006,33 @@ mod tests {
         assert!(stats.uploaded_raster_images);
         assert_eq!(stats.failed_raster_images, 0);
         assert!(stats.image_atlas_entries >= 1);
+        assert_eq!(stats.raster_image_upload_bytes, 6 * 6 * 4);
+        assert!(stats.gpu_upload_bytes >= stats.raster_image_upload_bytes);
+    }
+
+    #[test]
+    fn upload_glyphs_reports_submitted_skipped_and_bytes() {
+        let Some(harness) = OffscreenHarness::new(16, 16) else {
+            return;
+        };
+        let stats = harness.renderer.upload_glyphs(
+            &harness.queue,
+            &[
+                GlyphUpload {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 2,
+                    data: vec![64, 255],
+                },
+                GlyphUpload { x: 2, y: 0, width: 2, height: 2, data: vec![255] },
+                GlyphUpload { x: 4, y: 0, width: 0, height: 1, data: Vec::new() },
+            ],
+        );
+
+        assert_eq!(stats.submitted_glyphs, 1);
+        assert_eq!(stats.skipped_glyphs, 2);
+        assert_eq!(stats.upload_bytes, 8);
     }
 
     struct OffscreenHarness {
