@@ -53,8 +53,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 - [ ] Add repeatable renderer benchmarks for batching, atlas churn, raster uploads, text
       command resolution, and large timeline-style command streams.
-- [ ] Add frame diagnostics for batch count, vertex count, upload bytes, atlas occupancy,
-      fallback counts, and clip/scissor skips.
+- [x] Add frame diagnostics for batch count, vertex count, atlas occupancy, fallback counts,
+      and clip/scissor skips.
+- [ ] Add frame diagnostics for upload bytes and persistent frame cost reporting.
 - [ ] Evaluate retained/cached paint geometry for expensive mostly-static widgets.
 - [ ] Add debug overlays or structured logs for UI frame cost and resource pressure.
 

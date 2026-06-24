@@ -66,6 +66,18 @@ pub struct UiRenderFrameStats {
     pub invalid_clip_bounds: u32,
     /// Translate commands with non-finite offsets.
     pub invalid_translate_offsets: u32,
+    /// Draw batches produced by command batching before render-pass filtering.
+    pub batch_count: usize,
+    /// Vertices produced by command batching before render-pass filtering.
+    pub vertex_count: usize,
+    /// Batches submitted to the GPU render pass.
+    pub submitted_batches: usize,
+    /// Vertices submitted to the GPU render pass.
+    pub submitted_vertices: usize,
+    /// Batches skipped because they contained no vertices.
+    pub skipped_empty_batches: usize,
+    /// Batches skipped because their clip/scissor rectangle was empty or invalid.
+    pub skipped_scissor_batches: usize,
     /// The frame uploaded new raster images into the renderer-owned image atlas.
     pub uploaded_raster_images: bool,
     /// Raster images that could not be uploaded or allocated in the image atlas.
@@ -476,6 +488,8 @@ impl UiRenderer {
         stats.image_atlas_largest_free_rect_pixels = image_atlas_stats.largest_free_rect_pixels;
         stats.image_atlas_failed_allocations = image_atlas_stats.failed_allocations;
         let batches = build_batches(&commands, screen_size);
+        stats.batch_count = batches.len();
+        stats.vertex_count = batches.iter().map(|batch| batch.vertices.len()).sum();
         self.ensure_msaa_target(device, screen_size);
         let msaa_view = self.msaa_target.as_ref().map(|target| &target.view);
 
@@ -529,11 +543,13 @@ impl UiRenderer {
 
             for batch in &batches {
                 if batch.vertices.is_empty() {
+                    stats.skipped_empty_batches = stats.skipped_empty_batches.saturating_add(1);
                     continue;
                 }
                 let Some((x, y, width, height)) =
                     scissor_rect_for_clip(batch.clip_rect, screen_size)
                 else {
+                    stats.skipped_scissor_batches = stats.skipped_scissor_batches.saturating_add(1);
                     continue;
                 };
                 rpass.set_scissor_rect(x, y, width, height);
@@ -552,6 +568,9 @@ impl UiRenderer {
                 });
                 rpass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 rpass.draw(0..vertex_data.len() as u32, 0..1);
+                stats.submitted_batches = stats.submitted_batches.saturating_add(1);
+                stats.submitted_vertices =
+                    stats.submitted_vertices.saturating_add(vertex_data.len());
             }
         }
 
@@ -687,6 +706,14 @@ mod tests {
             "blue channel should remain near zero, got {center:?}"
         );
         assert!(center[3] >= 240, "alpha should be opaque, got {center:?}");
+
+        let stats = harness.last_stats.expect("render should record stats");
+        assert_eq!(stats.batch_count, 1);
+        assert_eq!(stats.vertex_count, 6);
+        assert_eq!(stats.submitted_batches, 1);
+        assert_eq!(stats.submitted_vertices, 6);
+        assert_eq!(stats.skipped_empty_batches, 0);
+        assert_eq!(stats.skipped_scissor_batches, 0);
     }
 
     #[test]
@@ -778,6 +805,30 @@ mod tests {
                 "clip should reject ({x},{y}), got {outside:?}"
             );
         }
+    }
+
+    #[test]
+    fn offscreen_renderer_reports_scissor_skipped_batches() {
+        let Some(mut harness) = OffscreenHarness::new(64, 64) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.push_clip(Rect::new(96.0, 96.0, 16.0, 16.0));
+        encoder.draw_rect(Rect::new(0.0, 0.0, 64.0, 64.0), Color::WHITE, 0.0);
+        encoder.pop_clip();
+
+        let pixels = harness.render(encoder.finish());
+
+        assert!(
+            pixels.chunks_exact(4).all(|pixel| pixel[3] == 0),
+            "fully clipped frame should remain transparent"
+        );
+        let stats = harness.last_stats.expect("render should record stats");
+        assert_eq!(stats.batch_count, 1);
+        assert_eq!(stats.vertex_count, 6);
+        assert_eq!(stats.submitted_batches, 0);
+        assert_eq!(stats.submitted_vertices, 0);
+        assert_eq!(stats.skipped_scissor_batches, 1);
     }
 
     #[test]
