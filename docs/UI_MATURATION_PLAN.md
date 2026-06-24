@@ -24,7 +24,7 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 ## Phase 2 - Text And Input Maturity
 
-- [ ] Separate text input state, editing commands, geometry, IME integration, and paint.
+- [x] Separate text input state, editing commands, geometry, IME integration, and paint.
 - [ ] Add multiline text editing with selection, clipboard, IME, scroll, and undo semantics.
 - [ ] Decide whether subpixel glyph atlas bins are needed for rich text/code-style editors.
 - [ ] Add text visual regression tests for small sizes, CJK, mixed scripts, emoji fallback,
@@ -72,6 +72,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Define cursor request priority and transient clearing across runtime/window shells.
 - [x] Define clipboard failure behavior in `PlatformService` and TextInput clipboard commands.
 - [x] Define native file drag-and-drop fallback behavior and diagnostics.
+- [x] Extract pointer capture ownership into a dedicated event-router state module with direct
+      coverage for capture, owner-only release, clear, stale-owner pruning, overlay preemption,
+      drag cancellation, and window focus loss.
 
 ## Phase 4 - Widget Productionization
 

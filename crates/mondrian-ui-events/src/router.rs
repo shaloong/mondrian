@@ -14,10 +14,10 @@ use mondrian_ui_core::types::{
 };
 use mondrian_ui_core::widget::{
     CursorRequest, DragRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
-    PointerCaptureRequest,
 };
 use mondrian_ui_core::{TreeWalker, Widget, WidgetTree};
 
+use crate::capture::PointerCaptureState;
 use crate::focus_manager::FocusManagerImpl;
 use crate::hit_test::{hit_test_deepest, overlay_hit_test_deepest};
 use crate::shortcut_manager::ShortcutManagerImpl;
@@ -62,7 +62,7 @@ pub struct EventRouter {
     root_widget_id: WidgetId,
     hovered: Option<WidgetId>,
     focused: Option<WidgetId>,
-    captured: Option<WidgetId>,
+    capture: PointerCaptureState,
     active_drag: Option<ActiveDrag>,
 
     focus_mgr: FocusManagerImpl,
@@ -98,7 +98,7 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
-            captured: None,
+            capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
@@ -117,7 +117,7 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
-            captured: None,
+            capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
@@ -144,7 +144,7 @@ impl EventRouter {
             root_widget_id,
             hovered: None,
             focused: None,
-            captured: None,
+            capture: PointerCaptureState::default(),
             active_drag: None,
             focus_mgr: FocusManagerImpl::new(),
             shortcut_mgr: ShortcutManagerImpl::new(),
@@ -165,7 +165,7 @@ impl EventRouter {
         self.focused
     }
     pub fn captured(&self) -> Option<WidgetId> {
-        self.captured
+        self.capture.owner()
     }
 
     pub fn active_drag_payload(&self) -> Option<&DragPayload> {
@@ -209,7 +209,7 @@ impl EventRouter {
     }
 
     pub fn set_capture(&mut self, widget: Option<WidgetId>) {
-        self.captured = widget;
+        self.capture.set_owner(widget);
     }
 
     pub fn focus_manager(&self) -> &FocusManagerImpl {
@@ -284,7 +284,7 @@ impl EventRouter {
                     self.hovered = target;
                 }
                 if let Some(target_id) = target {
-                    if self.captured.is_none()
+                    if self.capture.is_idle()
                         && self.before_child_event(tree, target_id, &event, dispatch)
                     {
                         return EventResult::Handled;
@@ -415,7 +415,7 @@ impl EventRouter {
                 }
 
                 if let Some(target_id) = target {
-                    if self.captured.is_none()
+                    if self.capture.is_idle()
                         && !is_keyboard
                         && self.before_child_event(tree, target_id, &event, dispatch)
                     {
@@ -525,7 +525,7 @@ impl EventRouter {
 
         self.focus_mgr.clear_focus();
         self.focused = None;
-        self.captured = None;
+        self.capture.clear();
         self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
         self.repaint_requested = true;
 
@@ -541,7 +541,7 @@ impl EventRouter {
         let Some(active_drag) = self.active_drag.take() else {
             return EventResult::Ignored;
         };
-        self.captured = None;
+        self.capture.clear();
         let target = overlay_hit_test_deepest(tree, position)
             .or_else(|| hit_test_deepest(tree, position))
             .or(active_drag.target);
@@ -562,7 +562,7 @@ impl EventRouter {
                 self.dispatch_direct_event(tree, target, &UiEvent::DragLeave, dispatch);
             }
         }
-        self.captured = None;
+        self.capture.clear();
     }
 
     fn dispatch_direct_event(
@@ -623,7 +623,7 @@ impl EventRouter {
 
     fn pointer_target(&mut self, tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
         let overlay_target = overlay_hit_test_deepest(tree, position);
-        let Some(captured) = self.captured else {
+        let Some(captured) = self.capture.owner() else {
             return overlay_target.or_else(|| hit_test_deepest(tree, position));
         };
 
@@ -631,7 +631,7 @@ impl EventRouter {
             Some(overlay)
                 if overlay != captured && !self.is_ancestor_or_self(tree, overlay, captured) =>
             {
-                self.captured = None;
+                self.capture.clear();
                 self.diagnostics.overlay_capture_preemptions =
                     self.diagnostics.overlay_capture_preemptions.saturating_add(1);
                 Some(overlay)
@@ -641,8 +641,7 @@ impl EventRouter {
     }
 
     fn prune_stale_widget_state(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
-        if self.captured.is_some_and(|id| tree.get(id).is_none()) {
-            self.captured = None;
+        if self.capture.clear_if_stale(|id| tree.get(id).is_some()) {
             self.diagnostics.stale_captured_widgets =
                 self.diagnostics.stale_captured_widgets.saturating_add(1);
         }
@@ -751,23 +750,18 @@ impl EventRouter {
         if requests.repaint {
             self.repaint_requested = true;
         }
-        match requests.pointer_capture {
-            Some(PointerCaptureRequest::Capture(id)) => self.captured = Some(id),
-            Some(PointerCaptureRequest::Release(id)) if self.captured == Some(id) => {
-                self.captured = None;
-            }
-            Some(PointerCaptureRequest::Clear) => self.captured = None,
-            _ => {}
+        if let Some(request) = requests.pointer_capture {
+            self.capture.apply_request(request);
         }
         match requests.drag {
             Some(DragRequest::Begin(payload)) => {
                 self.active_drag = Some(ActiveDrag { payload, target: None });
-                self.captured = None;
+                self.capture.clear();
                 self.repaint_requested = true;
             }
             Some(DragRequest::Cancel) => {
                 self.active_drag = None;
-                self.captured = None;
+                self.capture.clear();
                 self.repaint_requested = true;
             }
             None => {}
