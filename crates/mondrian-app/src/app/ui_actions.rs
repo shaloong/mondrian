@@ -92,7 +92,7 @@ pub const ASSETS_CREATE_ADJUSTMENT_LAYER: &str = "create_adjustment_layer";
 pub const ASSETS_CREATE_SOLID_COLOR: &str = "create_solid_color";
 /// Action name for creating a folder in the library.
 pub const ASSETS_CREATE_FOLDER: &str = "create_folder";
-/// Action name for opening an asset-browser folder in the self-hosted shell.
+/// Action name for opening an asset-browser folder in the app UI shell.
 pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
 /// Action name for importing files into an asset-browser folder.
 pub const ASSETS_IMPORT_FILES: &str = "import_files";
@@ -122,7 +122,7 @@ pub const EXPORT_NAMESPACE: &str = "ui.export";
 
 /// Action name for enqueueing a timeline export job.
 pub const EXPORT_ENQUEUE: &str = "enqueue";
-/// Action name for updating the self-hosted export draft.
+/// Action name for updating the app UI export draft.
 pub const EXPORT_SET_DRAFT: &str = "set_draft";
 /// Action name for cancelling one export queue job.
 pub const EXPORT_CANCEL_JOB: &str = "cancel_job";
@@ -162,7 +162,7 @@ pub const SEQUENCE_SWITCH_ACTIVE: &str = "switch_active";
 pub const SEQUENCE_DUPLICATE: &str = "duplicate";
 /// Action name for deleting a sequence.
 pub const SEQUENCE_DELETE: &str = "delete";
-/// Action name for updating sequence identity/settings from self-hosted UI.
+/// Action name for updating sequence identity/settings from app UI.
 pub const SEQUENCE_UPDATE_SETTINGS: &str = "update_settings";
 
 /// Custom action namespace for app-shell operations resolved by native adapters.
@@ -170,15 +170,15 @@ pub const APP_SHELL_NAMESPACE: &str = "app.shell";
 
 /// App-shell request to create a new project through a platform save dialog.
 pub const APP_SHELL_NEW_PROJECT_DIALOG: &str = "new_project_dialog";
-/// App-shell request to update one self-hosted new-project draft setting.
+/// App-shell request to update one app UI new-project draft setting.
 pub const APP_SHELL_NEW_PROJECT_DRAFT_CHANGED: &str = "new_project_draft_changed";
-/// App-shell request to confirm the self-hosted new-project dialog.
+/// App-shell request to confirm the app UI new-project dialog.
 pub const APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG: &str = "confirm_new_project_dialog";
-/// App-shell request to cancel the self-hosted new-project dialog.
+/// App-shell request to cancel the app UI new-project dialog.
 pub const APP_SHELL_CANCEL_NEW_PROJECT_DIALOG: &str = "cancel_new_project_dialog";
 /// App-shell request to open a platform project file dialog.
 pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
-/// App-shell request to open one project from the self-hosted recent list.
+/// App-shell request to open one project from the app UI recent list.
 pub const APP_SHELL_OPEN_RECENT_PROJECT: &str = "open_recent_project";
 /// App-shell request to recover a project from a startup autosave candidate.
 pub const APP_SHELL_RECOVER_PROJECT: &str = "recover_project";
@@ -194,25 +194,25 @@ pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
 /// App-shell request to show product about information.
 pub const APP_SHELL_ABOUT: &str = "about";
-/// App-shell request to show self-hosted preferences.
+/// App-shell request to show app UI preferences.
 pub const APP_SHELL_PREFERENCES: &str = "preferences";
 /// App-shell request to show the active sequence settings dialog.
 pub const APP_SHELL_SEQUENCE_SETTINGS: &str = "sequence_settings";
-/// App-shell request to update one self-hosted sequence-settings draft field.
+/// App-shell request to update one app UI sequence-settings draft field.
 pub const APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED: &str = "sequence_settings_draft_changed";
 /// App-shell request to apply the active sequence settings dialog.
 pub const APP_SHELL_CONFIRM_SEQUENCE_SETTINGS: &str = "confirm_sequence_settings";
 /// App-shell request to switch the active sequence-settings tab.
 pub const APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED: &str = "sequence_settings_tab_changed";
-/// App-shell request to switch the active self-hosted preferences tab.
+/// App-shell request to switch the active app UI preferences tab.
 pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
-/// App-shell request to switch the active self-hosted theme preset.
+/// App-shell request to switch the active app UI theme preset.
 pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed";
-/// App-shell request to disable one self-hosted shortcut descriptor.
+/// App-shell request to disable one app UI shortcut descriptor.
 pub const APP_SHELL_PREFERENCES_SHORTCUT_DISABLED: &str = "preferences_shortcut_disabled";
-/// App-shell request to restore one self-hosted shortcut descriptor to default.
+/// App-shell request to restore one app UI shortcut descriptor to default.
 pub const APP_SHELL_PREFERENCES_SHORTCUT_RESET: &str = "preferences_shortcut_reset";
-/// App-shell request to bind one self-hosted shortcut descriptor to a new key chord.
+/// App-shell request to bind one app UI shortcut descriptor to a new key chord.
 pub const APP_SHELL_PREFERENCES_SHORTCUT_REBOUND: &str = "preferences_shortcut_rebound";
 /// App-shell request to close the current shell-local modal.
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
@@ -233,7 +233,7 @@ pub const APP_SHELL_WINDOW_DRAG: &str = "window_drag";
 /// App-shell request to relocate one dock panel tab in the workspace layout.
 pub const APP_SHELL_RELOCATE_PANEL: &str = "relocate_panel";
 
-/// Self-hosted preferences section selected by the shell-local preferences UI.
+/// App UI preferences section selected by the shell-local preferences UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PreferencesTabPayload {
     General,
@@ -242,26 +242,26 @@ pub enum PreferencesTabPayload {
     Developer,
 }
 
-/// Theme preset selected by the self-hosted preferences UI.
+/// Theme preset selected by the app UI preferences UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferencesThemePayload {
     /// Theme preset to apply and persist.
     pub preset: ThemePreset,
 }
 
-/// Stable shortcut descriptor selected in the self-hosted preferences UI.
+/// Stable shortcut descriptor selected in the app UI preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferencesShortcutPayload {
     /// Stable shortcut descriptor id.
     pub id: String,
 }
 
-/// New key chord captured by the self-hosted shortcut preferences UI.
+/// New key chord captured by the app UI shortcut preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferencesShortcutReboundPayload {
     /// Stable shortcut descriptor id.
     pub id: String,
-    /// Stable key name matching `SelfHostedShortcutKey` serialization.
+    /// Stable key name matching `AppUiShortcutKey` serialization.
     pub key: String,
     pub ctrl: bool,
     pub alt: bool,
@@ -269,14 +269,14 @@ pub struct PreferencesShortcutReboundPayload {
     pub meta: bool,
 }
 
-/// Project path selected from the self-hosted recent-project startup list.
+/// Project path selected from the app UI recent-project startup list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppShellOpenRecentProjectPayload {
     /// Mondrian project file to open.
     pub project_file: PathBuf,
 }
 
-/// Project autosave candidate selected from the self-hosted startup surface.
+/// Project autosave candidate selected from the app UI startup surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRecoverFromAutosavePayload {
     /// Original Mondrian project file represented by the autosave snapshot.
@@ -299,7 +299,7 @@ pub struct AppShellRelinkAssetDialogPayload {
     pub asset_id: AssetId,
 }
 
-/// Dock drop region selected by the self-hosted workspace shell.
+/// Dock drop region selected by the app UI workspace shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockDropAreaPayload {
     /// Add as a tab in the target panel group.
@@ -409,7 +409,7 @@ pub struct TimelineOpenNestedSequencePayload {
     pub sequence_id: SequenceId,
 }
 
-/// Target one project sequence from a self-hosted sequence menu.
+/// Target one project sequence from an app UI sequence menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequenceTargetPayload {
     /// Sequence to operate on.
@@ -550,7 +550,7 @@ pub struct InspectorSetClipTintPayload {
     pub color: mondrian_core::Color,
 }
 
-/// Transform field exposed by the self-hosted inspector.
+/// Transform field exposed by the app UI inspector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InspectorClipTransformField {
     /// Horizontal position in sequence pixels.
@@ -574,7 +574,7 @@ pub struct InspectorSetClipTransformFieldPayload {
     pub value: f32,
 }
 
-/// One normalized point from the self-hosted curve editor.
+/// One normalized point from the app UI curve editor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct InspectorCurvePointPayload {
     /// Normalized x coordinate in the curve editor.
@@ -646,7 +646,7 @@ pub struct EffectsAddToClipPayload {
 /// Prepare one asset for the existing timeline drag/drop path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsPrepareDragPayload {
-    /// Asset selected from the self-hosted asset browser.
+    /// Asset selected from the app UI asset browser.
     pub asset_id: AssetId,
 }
 
@@ -709,7 +709,7 @@ pub struct AssetsCreateAssetPayload {
     pub folder_id: Option<String>,
 }
 
-/// Open one folder in the self-hosted asset browser, or the root view.
+/// Open one folder in the app UI asset browser, or the root view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsOpenFolderPayload {
     /// Folder to show. `None` returns to the root/unfiled asset view.
@@ -795,7 +795,7 @@ pub struct ExportJobTargetPayload {
     pub job_id: JobId,
 }
 
-/// Update one field of the self-hosted export draft.
+/// Update one field of the app UI export draft.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExportDraftUpdatePayload {
     /// Select a built-in preset by index.
@@ -902,7 +902,7 @@ pub enum SequenceSettingsDraftUpdatePayload {
     PreviewCacheEnabled(bool),
 }
 
-/// Section selected in the self-hosted sequence settings dialog.
+/// Section selected in the app UI sequence settings dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SequenceSettingsTabPayload {
     /// Format, frame timing, and audio settings.
@@ -1307,7 +1307,7 @@ pub fn app_shell_preferences_tab_changed_action(payload: PreferencesTabPayload) 
     custom_app_shell_action_with_payload(APP_SHELL_PREFERENCES_TAB_CHANGED, payload)
 }
 
-/// Build an app-shell request for switching the self-hosted theme preset.
+/// Build an app-shell request for switching the app UI theme preset.
 pub fn app_shell_preferences_theme_changed_action(preset: ThemePreset) -> Action {
     custom_app_shell_action_with_payload(
         APP_SHELL_PREFERENCES_THEME_CHANGED,

@@ -26,15 +26,15 @@ RenderQueue（异步后台任务）
 ```
 
 导出 compositor 与产品预览应共享同一套 timeline render-plan、effect graph 和 GPU
-compositing 语义。产品预览通过 self-hosted `SelfHostedPreviewService` /
+compositing 语义。产品预览通过 app UI `AppUiPreviewService` /
 `ViewerSurface` 边界接入，不能复制导出侧的素材递归、离线检查或 effect 解释规则。
 
-`mondrian-app::app::exporting` 是 UI 无关的导出编排边界。self-hosted UI
+`mondrian-app::app::exporting` 是 UI 无关的导出编排边界。app UI
 提交 `ui.export.enqueue` action，最终由
 `AppState` 负责解析目标序列、递归收集嵌套序列素材、过滤 synthetic adjustment
 asset、检查离线素材、构造 `TimelineExportInput`，最后将 `RenderJob` 放入
 `RenderQueue`。面板代码不应复制这些业务规则。
-同一模块也提供共享内置预设列表和 `TimelineExportDraft`，避免 self-hosted
+同一模块也提供共享内置预设列表和 `TimelineExportDraft`，避免 app UI
 产品 UI 在预设命名、默认选择、草稿状态持久化上分叉。
 
 ---
@@ -151,7 +151,7 @@ impl RenderQueue {
 
 `clear_completed` clears every terminal queue entry, not only successful exports:
 `Completed`, `Failed(_)`, and `Cancelled` jobs are removable, while `Pending`,
-`Rendering`, and `Encoding` jobs remain visible and cancelable. Self-hosted UI
+`Rendering`, and `Encoding` jobs remain visible and cancelable. App UI
 queue snapshots must use the same terminal definition for clear-button
 availability and row state.
 

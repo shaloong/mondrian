@@ -1,8 +1,8 @@
-//! Self-hosted startup surface.
+//! App UI startup surface.
 //!
 //! The startup surface is separate from the editor workspace. It owns only
 //! launch-time presentation and emits shell actions; project lifecycle work
-//! stays in `SelfHostedUiHost` / `AppState`.
+//! stays in `AppUiHost` / `AppState`.
 
 use mondrian_core::{Color, MondrianError, Result};
 use mondrian_editor_state::Action;
@@ -23,16 +23,14 @@ use crate::app::ui_actions::{
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
 };
-use crate::self_hosted::icons::AppIcon;
-use crate::self_hosted::modal::ShellModal;
-use crate::self_hosted::new_project_dialog::{
-    default_project_file_name, SelfHostedNewProjectDraft,
-};
-use crate::self_hosted::shell::project_file_filters;
+use crate::app_ui::icons::AppIcon;
+use crate::app_ui::modal::ShellModal;
+use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
+use crate::app_ui::shell::project_file_filters;
 
-/// Startup window logical size used by the self-hosted product entrypoint.
+/// Startup window logical size used by the app UI product entrypoint.
 pub const STARTUP_WINDOW_WIDTH: f32 = 784.0;
-/// Startup window logical size used by the self-hosted product entrypoint.
+/// Startup window logical size used by the app UI product entrypoint.
 pub const STARTUP_WINDOW_HEIGHT: f32 = 464.0;
 
 const LEFT_WIDTH: f32 = 300.0;
@@ -60,7 +58,7 @@ enum StartupHit {
     DragSurface,
 }
 
-/// One project row shown on the self-hosted startup surface.
+/// One project row shown on the app UI startup surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupRecentProject {
     /// Project file opened when the row is activated.
@@ -71,7 +69,7 @@ pub struct StartupRecentProject {
     pub subtitle: String,
 }
 
-/// One autosave recovery row shown on the self-hosted startup surface.
+/// One autosave recovery row shown on the app UI startup surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupRecoveryProject {
     /// Original project file represented by the autosave snapshot.
@@ -85,7 +83,7 @@ pub struct StartupRecoveryProject {
 }
 
 /// Startup screen shown before a project is opened.
-pub struct SelfHostedStartupScreen {
+pub struct AppUiStartupScreen {
     id: WidgetId,
     bounds: Rect,
     panel_rect: Rect,
@@ -103,7 +101,7 @@ pub struct SelfHostedStartupScreen {
     pressed: Option<StartupHit>,
 }
 
-impl SelfHostedStartupScreen {
+impl AppUiStartupScreen {
     /// Build the default startup surface.
     pub fn new() -> Self {
         Self {
@@ -154,7 +152,7 @@ impl SelfHostedStartupScreen {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.modal = Some(ShellModal::new_project(SelfHostedNewProjectDraft::default()));
+                self.modal = Some(ShellModal::new_project(AppUiNewProjectDraft::default()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -291,13 +289,13 @@ impl SelfHostedStartupScreen {
     }
 }
 
-impl Default for SelfHostedStartupScreen {
+impl Default for AppUiStartupScreen {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Widget for SelfHostedStartupScreen {
+impl Widget for AppUiStartupScreen {
     fn id(&self) -> WidgetId {
         self.id
     }
@@ -632,7 +630,7 @@ impl Widget for SelfHostedStartupScreen {
     }
 }
 
-impl SelfHostedStartupScreen {
+impl AppUiStartupScreen {
     fn paint_button(
         &self,
         ctx: &mut PaintContext,
@@ -798,7 +796,7 @@ mod tests {
         APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
         APP_SHELL_WINDOW_DRAG,
     };
-    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
     use mondrian_platform::{FileFilter, PlatformService};
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
@@ -848,7 +846,7 @@ mod tests {
         }
     }
 
-    fn dispatch_click(screen: &mut SelfHostedStartupScreen, point: Point) -> Vec<Action> {
+    fn dispatch_click(screen: &mut AppUiStartupScreen, point: Point) -> Vec<Action> {
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut focus = DummyFocus;
@@ -945,7 +943,7 @@ mod tests {
 
     #[test]
     fn startup_screen_measures_to_product_startup_window_size() {
-        let screen = SelfHostedStartupScreen::new();
+        let screen = AppUiStartupScreen::new();
 
         assert_eq!(
             screen.measure(LayoutConstraint::LOOSE),
@@ -955,7 +953,7 @@ mod tests {
 
     #[test]
     fn startup_panel_fills_native_window_without_transparent_outer_margin() {
-        let mut screen = SelfHostedStartupScreen::new();
+        let mut screen = AppUiStartupScreen::new();
         let bounds = Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT);
 
         screen.layout(bounds);
@@ -974,7 +972,7 @@ mod tests {
 
     #[test]
     fn startup_screen_uses_embedded_banner_without_text_overlay() {
-        let mut screen = SelfHostedStartupScreen::new();
+        let mut screen = AppUiStartupScreen::new();
         screen.layout(Rect::new(
             0.0,
             0.0,
@@ -1006,7 +1004,7 @@ mod tests {
 
     #[test]
     fn startup_screen_dispatches_project_actions() {
-        let mut screen = SelfHostedStartupScreen::new();
+        let mut screen = AppUiStartupScreen::new();
         screen.layout(Rect::new(
             0.0,
             0.0,
@@ -1033,7 +1031,7 @@ mod tests {
 
     #[test]
     fn startup_screen_dispatches_window_commands() {
-        let mut screen = SelfHostedStartupScreen::new();
+        let mut screen = AppUiStartupScreen::new();
         screen.layout(Rect::new(
             0.0,
             0.0,
@@ -1060,7 +1058,7 @@ mod tests {
 
     #[test]
     fn startup_screen_dispatches_recent_project_action() {
-        let mut screen = SelfHostedStartupScreen::new();
+        let mut screen = AppUiStartupScreen::new();
         let project_file = PathBuf::from("E:/projects/recent.mdp");
         screen.set_recent_projects(vec![StartupRecentProject {
             project_file: project_file.clone(),
@@ -1090,7 +1088,7 @@ mod tests {
 
     #[test]
     fn startup_screen_dispatches_recovery_project_action() {
-        let mut screen = SelfHostedStartupScreen::new();
+        let mut screen = AppUiStartupScreen::new();
         let project_file = PathBuf::from("E:/projects/recover.mdp");
         let autosave_file = PathBuf::from("E:/runtime/autosave/project.autosave.mdp");
         screen.set_recovery_projects(vec![StartupRecoveryProject {
@@ -1123,7 +1121,7 @@ mod tests {
 
     #[test]
     fn startup_screen_handles_new_project_modal_shell_actions() {
-        let mut screen = SelfHostedStartupScreen::new();
+        let mut screen = AppUiStartupScreen::new();
         let platform = SaveProjectPlatform {
             project_file: PathBuf::from("E:/projects/modal-create.mdp"),
         };

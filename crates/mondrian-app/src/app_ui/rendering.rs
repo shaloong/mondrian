@@ -1,4 +1,4 @@
-//! Shared frame rendering helpers for self-hosted winit windows.
+//! Shared frame rendering helpers for app UI winit windows.
 //!
 //! Product shells and developer galleries should share the same text-atlas
 //! upload and surface-present path so renderer behavior does not drift between
@@ -7,32 +7,32 @@
 use mondrian_ui_renderer::{DrawCommand, GlyphUpload, UiRenderer};
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 
-/// Resource diagnostics observed while rendering a self-hosted UI frame.
+/// Resource diagnostics observed while rendering an app UI frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SelfHostedFrameDiagnostics {
+pub struct AppUiFrameDiagnostics {
     /// Text glyphs that failed rasterization or atlas allocation.
     pub text_missing_glyphs: u32,
     /// Raster images that failed upload or image-atlas allocation.
     pub raster_image_failures: u32,
 }
 
-impl SelfHostedFrameDiagnostics {
+impl AppUiFrameDiagnostics {
     /// Whether the frame rendered with any missing UI resource.
     pub fn has_failures(self) -> bool {
         self.text_missing_glyphs > 0 || self.raster_image_failures > 0
     }
 }
 
-/// Result of submitting one self-hosted UI frame.
+/// Result of submitting one app UI frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelfHostedFrameResult {
+pub enum AppUiFrameResult {
     /// The frame rendered and was presented to the surface.
     Presented {
         /// The frame uploaded atlas resources that should be visible on a
         /// deterministic follow-up frame across all backends.
         uploaded_resources: bool,
         /// Resource diagnostics for this frame.
-        diagnostics: SelfHostedFrameDiagnostics,
+        diagnostics: AppUiFrameDiagnostics,
     },
     /// The surface was temporarily unavailable and the frame was skipped.
     Skipped,
@@ -40,22 +40,22 @@ pub enum SelfHostedFrameResult {
     Reconfigured,
 }
 
-impl SelfHostedFrameResult {
+impl AppUiFrameResult {
     /// Whether the window should request another redraw immediately.
     pub fn needs_follow_up_redraw(self) -> bool {
         match self {
-            SelfHostedFrameResult::Presented { uploaded_resources, .. } => uploaded_resources,
-            SelfHostedFrameResult::Reconfigured => true,
-            SelfHostedFrameResult::Skipped => false,
+            AppUiFrameResult::Presented { uploaded_resources, .. } => uploaded_resources,
+            AppUiFrameResult::Reconfigured => true,
+            AppUiFrameResult::Skipped => false,
         }
     }
 
     /// Resource diagnostics for presented frames.
-    pub fn diagnostics(self) -> SelfHostedFrameDiagnostics {
+    pub fn diagnostics(self) -> AppUiFrameDiagnostics {
         match self {
-            SelfHostedFrameResult::Presented { diagnostics, .. } => diagnostics,
-            SelfHostedFrameResult::Skipped | SelfHostedFrameResult::Reconfigured => {
-                SelfHostedFrameDiagnostics::default()
+            AppUiFrameResult::Presented { diagnostics, .. } => diagnostics,
+            AppUiFrameResult::Skipped | AppUiFrameResult::Reconfigured => {
+                AppUiFrameDiagnostics::default()
             }
         }
     }
@@ -63,16 +63,13 @@ impl SelfHostedFrameResult {
 
 /// Emits render resource diagnostics once per changed failure count.
 #[derive(Debug, Default)]
-pub struct SelfHostedRenderDiagnosticReporter {
-    last_reported: Option<SelfHostedFrameDiagnostics>,
+pub struct AppUiRenderDiagnosticReporter {
+    last_reported: Option<AppUiFrameDiagnostics>,
 }
 
-impl SelfHostedRenderDiagnosticReporter {
+impl AppUiRenderDiagnosticReporter {
     /// Return diagnostics that should be logged for this frame, if any.
-    pub fn changed_failure(
-        &mut self,
-        result: SelfHostedFrameResult,
-    ) -> Option<SelfHostedFrameDiagnostics> {
+    pub fn changed_failure(&mut self, result: AppUiFrameResult) -> Option<AppUiFrameDiagnostics> {
         let diagnostics = result.diagnostics();
         if !diagnostics.has_failures() {
             self.last_reported = None;
@@ -86,13 +83,13 @@ impl SelfHostedRenderDiagnosticReporter {
     }
 }
 
-/// GPU frame renderer shared by self-hosted app and demo windows.
-pub struct SelfHostedFrameRenderer {
+/// GPU frame renderer shared by app UI and demo windows.
+pub struct AppUiFrameRenderer {
     ui_renderer: UiRenderer,
     text_renderer: TextRenderer,
 }
 
-impl SelfHostedFrameRenderer {
+impl AppUiFrameRenderer {
     /// Create a renderer for a configured wgpu surface format.
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         Self {
@@ -110,7 +107,7 @@ impl SelfHostedFrameRenderer {
         config: &wgpu::SurfaceConfiguration,
         screen_size: (u32, u32),
         commands: Vec<DrawCommand>,
-    ) -> SelfHostedFrameResult {
+    ) -> AppUiFrameResult {
         let resolved_text = resolve_text_commands(commands, &mut self.text_renderer);
         let text_stats = resolved_text.stats;
         let commands = resolved_text.commands;
@@ -132,22 +129,22 @@ impl SelfHostedFrameRenderer {
                     screen_size,
                 );
                 output.present();
-                SelfHostedFrameResult::Presented {
+                AppUiFrameResult::Presented {
                     uploaded_resources: uploaded_glyphs || render_stats.uploaded_raster_images,
-                    diagnostics: SelfHostedFrameDiagnostics {
+                    diagnostics: AppUiFrameDiagnostics {
                         text_missing_glyphs: text_stats.missing_glyphs,
                         raster_image_failures: render_stats.failed_raster_images,
                     },
                 }
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                SelfHostedFrameResult::Skipped
+                AppUiFrameResult::Skipped
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface.configure(device, config);
-                SelfHostedFrameResult::Reconfigured
+                AppUiFrameResult::Reconfigured
             }
-            _ => SelfHostedFrameResult::Skipped,
+            _ => AppUiFrameResult::Skipped,
         }
     }
 }
@@ -171,58 +168,49 @@ mod tests {
 
     #[test]
     fn frame_result_requests_follow_up_after_resource_upload_or_reconfigure() {
-        assert!(!SelfHostedFrameResult::Presented {
+        assert!(!AppUiFrameResult::Presented {
             uploaded_resources: false,
-            diagnostics: SelfHostedFrameDiagnostics {
-                text_missing_glyphs: 2,
-                raster_image_failures: 1,
-            },
+            diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
         }
         .needs_follow_up_redraw());
-        assert!(SelfHostedFrameResult::Presented {
+        assert!(AppUiFrameResult::Presented {
             uploaded_resources: true,
-            diagnostics: SelfHostedFrameDiagnostics::default(),
+            diagnostics: AppUiFrameDiagnostics::default(),
         }
         .needs_follow_up_redraw());
-        assert!(SelfHostedFrameResult::Reconfigured.needs_follow_up_redraw());
-        assert!(!SelfHostedFrameResult::Skipped.needs_follow_up_redraw());
+        assert!(AppUiFrameResult::Reconfigured.needs_follow_up_redraw());
+        assert!(!AppUiFrameResult::Skipped.needs_follow_up_redraw());
     }
 
     #[test]
     fn render_diagnostic_reporter_only_reports_changed_failures() {
-        let mut reporter = SelfHostedRenderDiagnosticReporter::default();
-        let failed = SelfHostedFrameResult::Presented {
+        let mut reporter = AppUiRenderDiagnosticReporter::default();
+        let failed = AppUiFrameResult::Presented {
             uploaded_resources: false,
-            diagnostics: SelfHostedFrameDiagnostics {
-                text_missing_glyphs: 2,
-                raster_image_failures: 1,
-            },
+            diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
         };
-        let changed = SelfHostedFrameResult::Presented {
+        let changed = AppUiFrameResult::Presented {
             uploaded_resources: false,
-            diagnostics: SelfHostedFrameDiagnostics {
-                text_missing_glyphs: 3,
-                raster_image_failures: 1,
-            },
+            diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 },
         };
-        let healthy = SelfHostedFrameResult::Presented {
+        let healthy = AppUiFrameResult::Presented {
             uploaded_resources: false,
-            diagnostics: SelfHostedFrameDiagnostics::default(),
+            diagnostics: AppUiFrameDiagnostics::default(),
         };
 
         assert_eq!(
             reporter.changed_failure(failed),
-            Some(SelfHostedFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
+            Some(AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
         );
         assert_eq!(reporter.changed_failure(failed), None);
         assert_eq!(
             reporter.changed_failure(changed),
-            Some(SelfHostedFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 })
+            Some(AppUiFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 })
         );
         assert_eq!(reporter.changed_failure(healthy), None);
         assert_eq!(
             reporter.changed_failure(failed),
-            Some(SelfHostedFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
+            Some(AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
         );
     }
 

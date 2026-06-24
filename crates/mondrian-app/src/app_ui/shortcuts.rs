@@ -1,4 +1,4 @@
-//! Default keyboard shortcuts for the self-hosted shell.
+//! Default keyboard shortcuts for the app UI shell.
 //!
 //! The router resolves these only after the focused widget ignores a `KeyDown`,
 //! so text inputs and panel-specific key handling keep priority.
@@ -16,9 +16,9 @@ use crate::app::ui_actions::{
     app_shell_save_project_as_dialog_action,
 };
 
-/// A self-hosted shell shortcut together with its menu-facing display label.
+/// A app UI shell shortcut together with its menu-facing display label.
 #[derive(Debug, Clone)]
-pub struct SelfHostedShortcut {
+pub struct AppUiShortcut {
     /// Stable preference id for this command binding.
     pub id: &'static str,
     /// Key/modifier binding registered with the shortcut router.
@@ -29,34 +29,34 @@ pub struct SelfHostedShortcut {
     pub label: String,
 }
 
-/// User override for one self-hosted shortcut descriptor.
+/// User override for one app UI shortcut descriptor.
 ///
 /// `binding: None` disables the descriptor. Unknown ids are ignored when the
 /// active shortcut table is built, which keeps alpha preference files safe to
 /// load across descriptor reshuffles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SelfHostedShortcutOverride {
-    /// Stable id from [`SelfHostedShortcut::id`].
+pub struct AppUiShortcutOverride {
+    /// Stable id from [`AppUiShortcut::id`].
     pub id: String,
     /// Replacement binding, or `None` to disable the shortcut.
-    pub binding: Option<SelfHostedShortcutBinding>,
+    pub binding: Option<AppUiShortcutBinding>,
 }
 
-/// Serializable key binding stored in self-hosted preferences.
+/// Serializable key binding stored in app UI preferences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SelfHostedShortcutBinding {
-    pub key: SelfHostedShortcutKey,
+pub struct AppUiShortcutBinding {
+    pub key: AppUiShortcutKey,
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
     pub meta: bool,
 }
 
-impl SelfHostedShortcutBinding {
+impl AppUiShortcutBinding {
     /// Build a stored binding from the router binding type.
     pub fn from_core(binding: &ShortcutBinding) -> Option<Self> {
         Some(Self {
-            key: SelfHostedShortcutKey::from_key_code(binding.key)?,
+            key: AppUiShortcutKey::from_key_code(binding.key)?,
             ctrl: binding.modifiers.ctrl,
             alt: binding.modifiers.alt,
             shift: binding.modifiers.shift,
@@ -97,9 +97,9 @@ impl SelfHostedShortcutBinding {
     }
 }
 
-/// Serializable subset of keys supported by self-hosted shortcut preferences.
+/// Serializable subset of keys supported by app UI shortcut preferences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SelfHostedShortcutKey {
+pub enum AppUiShortcutKey {
     A,
     B,
     C,
@@ -165,7 +165,7 @@ pub enum SelfHostedShortcutKey {
     Down,
 }
 
-impl SelfHostedShortcutKey {
+impl AppUiShortcutKey {
     /// Convert a runtime UI key code into a serializable shortcut key.
     pub fn from_key_code(key: KeyCode) -> Option<Self> {
         Some(match key {
@@ -455,7 +455,7 @@ impl SelfHostedShortcutKey {
 }
 
 /// Default shortcut descriptors used by both the router and menu hints.
-pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
+pub fn default_shortcuts() -> Vec<AppUiShortcut> {
     vec![
         shortcut(
             "file.new_project",
@@ -634,8 +634,8 @@ pub fn default_shortcuts() -> Vec<SelfHostedShortcut> {
 }
 
 /// Resolve the active shortcut table after applying user overrides.
-pub fn active_shortcuts(overrides: &[SelfHostedShortcutOverride]) -> Vec<SelfHostedShortcut> {
-    let mut active: Vec<(SelfHostedShortcut, bool)> = Vec::new();
+pub fn active_shortcuts(overrides: &[AppUiShortcutOverride]) -> Vec<AppUiShortcut> {
+    let mut active: Vec<(AppUiShortcut, bool)> = Vec::new();
 
     for mut shortcut in default_shortcuts() {
         let mut overridden = false;
@@ -663,7 +663,7 @@ pub fn active_shortcuts(overrides: &[SelfHostedShortcutOverride]) -> Vec<SelfHos
     active.into_iter().map(|(shortcut, _)| shortcut).collect()
 }
 
-/// Shortcut hint shown for an action in self-hosted menus.
+/// Shortcut hint shown for an action in app UI menus.
 pub fn shortcut_label_for_action(action: &Action) -> Option<String> {
     shortcut_label_for_action_with_overrides(action, &[])
 }
@@ -671,7 +671,7 @@ pub fn shortcut_label_for_action(action: &Action) -> Option<String> {
 /// Shortcut hint shown for an action after applying user overrides.
 pub fn shortcut_label_for_action_with_overrides(
     action: &Action,
-    overrides: &[SelfHostedShortcutOverride],
+    overrides: &[AppUiShortcutOverride],
 ) -> Option<String> {
     let lookup_action = shortcut_hint_action(action);
     active_shortcuts(overrides)
@@ -687,20 +687,20 @@ fn shortcut_hint_action(action: &Action) -> Action {
     }
 }
 
-fn shortcut(id: &'static str, binding: ShortcutBinding, action: Action) -> SelfHostedShortcut {
-    let label = SelfHostedShortcutBinding::from_core(&binding)
-        .map(SelfHostedShortcutBinding::label)
+fn shortcut(id: &'static str, binding: ShortcutBinding, action: Action) -> AppUiShortcut {
+    let label = AppUiShortcutBinding::from_core(&binding)
+        .map(AppUiShortcutBinding::label)
         .unwrap_or_default();
-    SelfHostedShortcut { id, binding, action, label }
+    AppUiShortcut { id, binding, action, label }
 }
 
-/// Register the default global shortcuts for a self-hosted editor window.
+/// Register the default global shortcuts for an app UI editor window.
 pub fn register_default_shortcuts(router: &mut EventRouter) {
     register_shortcuts(router, &[]);
 }
 
-/// Register the active global shortcuts for a self-hosted editor window.
-pub fn register_shortcuts(router: &mut EventRouter, overrides: &[SelfHostedShortcutOverride]) {
+/// Register the active global shortcuts for an app UI editor window.
+pub fn register_shortcuts(router: &mut EventRouter, overrides: &[AppUiShortcutOverride]) {
     for shortcut in active_shortcuts(overrides) {
         register(router, shortcut.binding, shortcut.action);
     }
@@ -908,7 +908,7 @@ mod tests {
     fn shortcut_overrides_can_disable_conflicting_global_bindings() {
         let mut router = EventRouter::new(mondrian_ui_core::types::WidgetId::new());
         let overrides =
-            vec![SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None }];
+            vec![AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None }];
 
         register_shortcuts(&mut router, &overrides);
 
@@ -930,14 +930,14 @@ mod tests {
     #[test]
     fn shortcut_overrides_rebind_registered_key_and_label() {
         let mut router = EventRouter::new(mondrian_ui_core::types::WidgetId::new());
-        let replacement = SelfHostedShortcutBinding {
-            key: SelfHostedShortcutKey::S,
+        let replacement = AppUiShortcutBinding {
+            key: AppUiShortcutKey::S,
             ctrl: true,
             alt: true,
             shift: false,
             meta: false,
         };
-        let overrides = vec![SelfHostedShortcutOverride {
+        let overrides = vec![AppUiShortcutOverride {
             id: "file.save_project".to_owned(),
             binding: Some(replacement),
         }];
@@ -969,14 +969,14 @@ mod tests {
     #[test]
     fn shortcut_overrides_take_ownership_of_conflicting_default_bindings() {
         let mut router = EventRouter::new(mondrian_ui_core::types::WidgetId::new());
-        let replacement = SelfHostedShortcutBinding {
-            key: SelfHostedShortcutKey::O,
+        let replacement = AppUiShortcutBinding {
+            key: AppUiShortcutKey::O,
             ctrl: true,
             alt: false,
             shift: false,
             meta: false,
         };
-        let overrides = vec![SelfHostedShortcutOverride {
+        let overrides = vec![AppUiShortcutOverride {
             id: "file.save_project".to_owned(),
             binding: Some(replacement),
         }];

@@ -1,4 +1,4 @@
-//! Self-hosted new-project dialog and draft state.
+//! App UI new-project dialog and draft state.
 //!
 //! The dialog owns shell-local form state. It edits the same project and
 //! sequence settings structs consumed by `AppState`, then emits a concrete
@@ -19,22 +19,22 @@ use crate::app::ui_actions::{
     app_shell_new_project_draft_changed_action, NewProjectDraftUpdatePayload,
     ProjectCreateWithSettingsPayload,
 };
-use crate::self_hosted::icons::AppIcon;
-use crate::self_hosted::shell::PROJECT_FILE_EXTENSION;
+use crate::app_ui::icons::AppIcon;
+use crate::app_ui::shell::PROJECT_FILE_EXTENSION;
 
-/// Self-hosted new-project form state.
+/// App UI new-project form state.
 ///
 /// The draft deliberately carries the same settings structs consumed by
 /// `AppState` so form widgets edit the eventual creation payload instead of a
 /// parallel DTO that can drift from project lifecycle semantics.
 #[derive(Debug, Clone)]
-pub struct SelfHostedNewProjectDraft {
+pub struct AppUiNewProjectDraft {
     pub name: String,
     pub sequence_settings: SequenceSettings,
     pub project_settings: ProjectSettings,
 }
 
-impl Default for SelfHostedNewProjectDraft {
+impl Default for AppUiNewProjectDraft {
     fn default() -> Self {
         Self {
             name: "未命名".into(),
@@ -44,7 +44,7 @@ impl Default for SelfHostedNewProjectDraft {
     }
 }
 
-impl SelfHostedNewProjectDraft {
+impl AppUiNewProjectDraft {
     /// Build a draft using the file stem as the initial project name.
     pub fn from_project_path(path: &Path) -> Self {
         Self {
@@ -220,7 +220,7 @@ fn new_project_audio_sample_rate_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn resolution_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown {
+fn resolution_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
     Dropdown::new(
         resolution_label(draft.sequence_settings.resolution),
         new_project_resolution_items(),
@@ -228,7 +228,7 @@ fn resolution_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown {
     .with_max_visible_items(4)
 }
 
-fn frame_rate_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown {
+fn frame_rate_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
     Dropdown::new(
         frame_rate_label(draft.sequence_settings.frame_rate),
         new_project_frame_rate_items(),
@@ -236,7 +236,7 @@ fn frame_rate_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown {
     .with_max_visible_items(7)
 }
 
-fn audio_sample_rate_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown {
+fn audio_sample_rate_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
     Dropdown::new(
         audio_sample_rate_label(draft.sequence_settings.audio_sample_rate),
         new_project_audio_sample_rate_items(),
@@ -244,7 +244,7 @@ fn audio_sample_rate_dropdown_for(draft: &SelfHostedNewProjectDraft) -> Dropdown
     .with_max_visible_items(3)
 }
 
-fn proxy_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
+fn proxy_checkbox_for(draft: &AppUiNewProjectDraft) -> Checkbox {
     Checkbox::new("创建代理", draft.project_settings.proxy_enabled).on_change(|enabled| {
         app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ProxyEnabled(
             enabled,
@@ -252,7 +252,7 @@ fn proxy_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
     })
 }
 
-fn preview_cache_checkbox_for(draft: &SelfHostedNewProjectDraft) -> Checkbox {
+fn preview_cache_checkbox_for(draft: &AppUiNewProjectDraft) -> Checkbox {
     Checkbox::new("预览缓存", draft.sequence_settings.preview.cache_enabled).on_change(|enabled| {
         app_shell_new_project_draft_changed_action(
             NewProjectDraftUpdatePayload::PreviewCacheEnabled(enabled),
@@ -286,7 +286,7 @@ const AUDIO_LABEL_BASELINE_Y: f32 = 196.0;
 
 pub struct NewProjectDialog {
     id: WidgetId,
-    draft: SelfHostedNewProjectDraft,
+    draft: AppUiNewProjectDraft,
     surface: DialogSurface,
     bounds: Rect,
     card: Rect,
@@ -307,7 +307,7 @@ pub struct NewProjectDialog {
 }
 
 impl NewProjectDialog {
-    pub fn new(draft: SelfHostedNewProjectDraft) -> Self {
+    pub fn new(draft: AppUiNewProjectDraft) -> Self {
         let title_label = Label::new("新建项目")
             .popover_foreground()
             .with_font_size(TITLE_FONT_SIZE)
@@ -388,7 +388,7 @@ impl NewProjectDialog {
         }
     }
 
-    pub fn draft(&self) -> &SelfHostedNewProjectDraft {
+    pub fn draft(&self) -> &AppUiNewProjectDraft {
         &self.draft
     }
 }

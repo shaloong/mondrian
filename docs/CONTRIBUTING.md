@@ -76,7 +76,7 @@ cargo fmt
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace
 cargo test -p mondrian-app --test product_entrypoint_contract
-cargo test -p mondrian-app self_hosted
+cargo test -p mondrian-app app_ui
 cargo test -p mondrian-ui-renderer
 cargo test -p mondrian-ui-widgets component_extreme_tests
 ```
@@ -104,7 +104,7 @@ git push origin v0.1.1
 - 核心算法（关键帧插值、色彩转换）必须有 property-based 测试
 - 性能敏感路径必须有 benchmark（criterion）
 - 运行测试：`cargo nextest run --workspace`
-- 自研 UI 相关变更还必须跑 self-hosted 产品入口、`mondrian-app self_hosted`
+- 自研 UI 相关变更还必须跑 app UI 产品入口、`mondrian-app app_ui`
   过滤测试、`mondrian-ui-renderer` primitive/draw-command 测试，以及
   `mondrian-ui-widgets component_extreme_tests`。
 

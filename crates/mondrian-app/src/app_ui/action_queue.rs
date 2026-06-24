@@ -1,7 +1,7 @@
-//! Action queue shared by self-hosted application entrypoints.
+//! Action queue shared by app UI application entrypoints.
 //!
 //! Widget dispatch callbacks run while the root widget tree is mutably borrowed.
-//! Entry loops enqueue actions first, then let `SelfHostedUiHost` drain the queue
+//! Entry loops enqueue actions first, then let `AppUiHost` drain the queue
 //! after event routing so shell-local modal state and `AppState` mutations can be
 //! applied without re-entrant root borrows.
 

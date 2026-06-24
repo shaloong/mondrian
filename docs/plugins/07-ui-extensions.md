@@ -1,6 +1,6 @@
 # UI 扩展
 
-> **状态：规划中** —— self-hosted UI 的插件扩展尚未开放。旧 egui UI
+> **状态：规划中** —— app UI 的插件扩展尚未开放。旧 egui UI
 > 已删除，不再作为插件或产品扩展 API 暴露。
 
 本文介绍插件如何扩展 Mondrian 的用户界面：注册面板、菜单项和工具栏按钮。
@@ -51,7 +51,7 @@ impl PanelDefinition for MyPluginPanel {
     fn title(&self) -> &str { "My Tool" }
     fn location(&self) -> PanelLocation { PanelLocation::RightSidebar }
     fn build(&mut self, ctx: &PanelBuildContext) -> Box<dyn mondrian_ui_core::Widget> {
-        // 使用 self-hosted widget 构建面板内容
+        // 使用 app UI widget 构建面板内容
         todo!("future plugin widget construction")
     }
 }

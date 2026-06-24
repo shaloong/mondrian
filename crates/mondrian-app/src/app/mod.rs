@@ -280,7 +280,7 @@ pub struct AppState {
 
     // 渲染导出队列
     pub render_queue: Arc<RenderQueue>,
-    /// UI-stable timeline export draft shared by self-hosted export panels.
+    /// UI-stable timeline export draft shared by app UI export panels.
     pub export_draft: TimelineExportDraft,
 
     // 底部状态栏提示（message, is_error）

@@ -1,6 +1,6 @@
-# Self-Hosted UI Closure Plan
+# App UI Closure Plan
 
-This document tracks the remaining work required before the self-hosted UI can
+This document tracks the remaining work required before the app UI can
 replace the legacy egui editor path. It is intentionally action-oriented:
 finish one item, verify it, update this document, and commit before moving to
 the next item. Phase 0 visual baselining is intentionally omitted; visual
@@ -25,15 +25,15 @@ workflow.
   Completed in `17d8188 fix(ui): keep ignored keys from closing windows`.
 - P2-WINDOW-001: Native close requests route through the same app-shell quit
   action path used by titlebar controls, menus, and shortcuts.
-- P2-PROJECT-001: Self-hosted close-project and quit requests guard unsaved
+- P2-PROJECT-001: App UI close-project and quit requests guard unsaved
   project changes with Save and continue / Discard / Cancel.
-- P2-PROJECT-002: Host-level self-hosted project lifecycle tests cover create,
+- P2-PROJECT-002: Host-level app UI project lifecycle tests cover create,
   open, save, save-as, close, recent project, recovery, and startup-to-workspace
-  transitions through self-hosted actions.
+  transitions through app UI actions.
 
 ## Phase 1: Visual System Production Pass
 
-- P1-THEME-001: Audit self-hosted widgets for hardcoded production colors,
+- P1-THEME-001: Audit app UI widgets for hardcoded production colors,
   spacing, radius, shadows, and typography values. Move reusable values to
   `mondrian-ui-theme` tokens; keep geometry constants only when they describe a
   domain surface such as timeline track height or transport hit target.
@@ -51,7 +51,7 @@ workflow.
 
 - [done] P2-ASSETS-001: Verify project-media import, folder navigation, rename,
   move, delete, relink, proxy mode, thumbnail loading/failure, and drag payloads.
-  Coverage now spans self-hosted host import-dialog dispatch into target asset
+  Coverage now spans app UI host import-dialog dispatch into target asset
   folders, app-action relink success and proxy-mode type guards, existing
   folder/rename/move/delete action tests, thumbnail loading/failure cache tests,
   and `AssetGrid` drag/selection/context-menu widget tests.
@@ -66,7 +66,7 @@ workflow.
   controls through shared app actions and host availability gates. Coverage
   includes Timeline panel adapters for keyboard/context/range actions,
   AppState dispatch tests for typed timeline and shared edit actions, and
-  self-hosted availability gates for valid, stale, locked, and host-dispatched
+  app UI availability gates for valid, stale, locked, and host-dispatched
   typed timeline targets.
 - [done] P2-TIMELINE-002: Ensure timeline drag proposals validate clip media
   type, target track type, locked tracks, disabled timelines, and stale ids
@@ -137,7 +137,7 @@ workflow.
   keyboard shortcuts, context menus, host availability, and undo semantics.
   Coverage now spans widget-level focused keyboard commands, context-menu
   command rows and shortcut hints, Shift+Delete ripple delete dispatch,
-  self-hosted command-to-action mapping, shared AppState availability gates,
+  app UI command-to-action mapping, shared AppState availability gates,
   edge-specific trim-to-playhead enablement at clip boundaries, locked-track
   suppression, AppState trim/roll/ripple command handling, and timeline undo
   semantics through the shared editing command path.
@@ -230,7 +230,7 @@ workflow.
   scissor rejection, and shader validation.
 - [done] P4-PERF-001: Add performance smoke coverage for large asset
   libraries, long timelines, many clips, many effects, resize loops, and
-  sustained playback. `self_hosted_ui_scale_smoke` now builds a synthetic
+  sustained playback. `app_ui_scale_smoke` now builds a synthetic
   SQLite-backed project library, a 14-track long timeline, hundreds of clips
   and effect nodes, then measures cold root build, repeated model refresh,
   resize loops, draw-command emission, and sustained playback refresh. The
@@ -244,8 +244,8 @@ workflow.
   same-size resize no-ops; real resize reconfigure/relayout/redraw; and
   same-size or size-changing DPI relayout behavior. Startup-to-workspace mode
   mapping and replacement remain owned by the window-session boundary.
-- [done] P4-ERROR-001: Surface app/action errors in self-hosted shell status
-  without requiring Console/Project panel iteration. `SelfHostedUiHost`
+- [done] P4-ERROR-001: Surface app/action errors in app UI shell status
+  without requiring Console/Project panel iteration. `AppUiHost`
   preserves action-specific `AppState::status_hint` errors and writes a generic
   error status when an editor action returns an error without reporting one, so
   shell-dispatched failures cannot disappear into tracing-only diagnostics.
@@ -259,37 +259,37 @@ workflow.
 
 ## Phase 5: egui Retirement
 
-- [done] P5-PARITY-001: Produce a final self-hosted parity checklist for every
+- [done] P5-PARITY-001: Produce a final app UI parity checklist for every
   legacy egui workflow that remains product-relevant. The audit now lives in
-  `docs/architecture/self-hosted-ui-parity.md` and classifies product entry,
+  `docs/architecture/app-ui-parity.md` and classifies product entry,
   project/sequence/preferences flows, editor panels, shared infrastructure,
   retired panels, and remaining legacy egui reference boundaries.
 - [done] P5-ROUTE-001: Remove or quarantine product entrypoints that can still
   launch legacy egui unintentionally. The product `mondrian` binary remains the
-  only default run target and launches `self_hosted::window::run_self_hosted_app`;
-  developer binaries are explicitly self-hosted diagnostics. The legacy egui
+  only default run target and launches `app_ui::window::run_app_ui`;
+  developer binaries are explicitly app UI diagnostics. The legacy egui
   modules and `MondrianApp` implementation have been deleted, stale plugin docs
   no longer advertise `mondrian_app::egui_ui`, and an integration route contract
   test now guards the manifest, `main.rs`, dependency graph, and removed source
   paths.
 - P5-CODE-001: Delete legacy egui code that is no longer needed as reference, or
-  move useful helpers into neutral self-hosted/app modules. Progress: the old
+  move useful helpers into neutral app or app UI modules. Progress: the old
   `egui_ui`, `app::legacy_egui`, crate-level legacy `shortcuts`, and temporary
   egui-extraction helper modules have been deleted from `mondrian-app`;
   route-contract coverage now keeps them from returning. New product UI work
-  must land on the self-hosted stack, and future cache/viewer preference logic
-  must be introduced from real self-hosted call sites rather than compatibility
+  must land on the app UI stack, and future cache/viewer preference logic
+  must be introduced from real app UI call sites rather than compatibility
   leftovers.
-- P5-DOCS-001: Update architecture docs to describe the final self-hosted UI
+- P5-DOCS-001: Update architecture docs to describe the final app UI
   stack, ownership model, test strategy, and removed compatibility paths.
   Progress: overview, renderer, export, and design-guideline docs now describe
-  self-hosted winit/wgpu as the product UI path and classify egui preview/theme
+  app UI winit/wgpu as the product UI path and classify egui preview/theme
   references as legacy migration/reference boundaries rather than current
   product architecture.
-- [done] P5-CI-001: Make self-hosted UI tests, clippy, and any screenshot/draw-command
+- [done] P5-CI-001: Make app UI tests, clippy, and any screenshot/draw-command
   regressions part of the required CI gate. CI now has a dedicated
-  `self-hosted-ui` job that runs the product entrypoint contract,
-  `cargo test -p mondrian-app self_hosted`,
+  `app-ui` job that runs the product entrypoint contract,
+  `cargo test -p mondrian-app app_ui`,
   `cargo test -p mondrian-ui-renderer`, and
   `cargo test -p mondrian-ui-widgets component_extreme_tests`; clippy remains a
   required workspace job with `--all-targets --all-features -D warnings`.

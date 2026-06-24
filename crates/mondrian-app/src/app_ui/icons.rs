@@ -1,4 +1,4 @@
-//! Product icon assets for the self-hosted UI shell.
+//! Product icon assets for the app UI shell.
 //!
 //! This module is the app-layer registry for bundled designer-authored SVG
 //! assets. Reusable widgets stay asset-agnostic; panels ask this registry for
@@ -6,7 +6,7 @@
 
 use mondrian_ui_widgets::{Button, IconButton, VectorIcon, VectorIconError};
 
-/// Built-in product icons available to the self-hosted UI.
+/// Built-in product icons available to the app UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppIcon {
     /// Add item outline icon.
@@ -320,7 +320,7 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn all_self_hosted_icon_assets_parse_as_vector_icons() {
+    fn all_app_ui_icon_assets_parse_as_vector_icons() {
         for icon in AppIcon::ALL {
             let vector = icon
                 .vector_icon()
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn self_hosted_icon_ids_are_unique() {
+    fn app_ui_icon_ids_are_unique() {
         let mut ids = HashSet::new();
 
         for icon in AppIcon::ALL {
@@ -361,14 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn self_hosted_icons_build_text_buttons() {
+    fn app_ui_icons_build_text_buttons() {
         let button = AppIcon::Trash.text_button("Remove").expect("trash text button");
 
         assert!(button.measure(mondrian_ui_core::types::LayoutConstraint::LOOSE).width > 0.0);
     }
 
     #[test]
-    fn self_hosted_icons_build_lossy_text_buttons() {
+    fn app_ui_icons_build_lossy_text_buttons() {
         let button = AppIcon::Trash.text_button_or_label("Remove");
 
         assert!(button.measure(mondrian_ui_core::types::LayoutConstraint::LOOSE).width > 0.0);

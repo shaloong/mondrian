@@ -1,4 +1,4 @@
-//! Reusable widget shell for self-hosted Mondrian windows.
+//! Reusable widget shell for app UI Mondrian windows.
 //!
 //! Developer binaries own native window setup and event-loop plumbing. This
 //! module owns the reusable root widget composition above the dock/panel layer.
@@ -41,21 +41,19 @@ use crate::app::ui_actions::{
     VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::AppState;
-use crate::self_hosted::menu_bar::MenuBar;
-use crate::self_hosted::modal::ShellModal;
-use crate::self_hosted::new_project_dialog::{
-    default_project_file_name, SelfHostedNewProjectDraft,
+use crate::app_ui::menu_bar::MenuBar;
+use crate::app_ui::modal::ShellModal;
+use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
+use crate::app_ui::panels::{
+    build_dock_tree_for_preset, build_dock_tree_from_layout, AppUiPanelModels,
+    AssetThumbnailSource, ViewerPreviewSource,
 };
-use crate::self_hosted::panels::{
-    build_dock_tree_for_preset, build_dock_tree_from_layout, AssetThumbnailSource,
-    SelfHostedPanelModels, ViewerPreviewSource,
-};
-use crate::self_hosted::pending_close_dialog::PendingCloseDialogAction;
-use crate::self_hosted::preferences_dialog::{PreferencesDialogTab, SelfHostedPreferencesModel};
-use crate::self_hosted::preferences_store::SelfHostedPreferences;
-use crate::self_hosted::sequence_settings_dialog::SelfHostedSequenceSettingsDraft;
-use crate::self_hosted::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
-use crate::self_hosted::workspace_layout::{DockDropArea, SelfHostedWorkspaceLayout};
+use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
+use crate::app_ui::preferences_dialog::{AppUiPreferencesModel, PreferencesDialogTab};
+use crate::app_ui::preferences_store::AppUiPreferences;
+use crate::app_ui::sequence_settings_dialog::AppUiSequenceSettingsDraft;
+use crate::app_ui::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
+use crate::app_ui::workspace_layout::{AppUiWorkspaceLayout, DockDropArea};
 use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
@@ -300,7 +298,7 @@ fn normalized_export_extension(extension: &str) -> String {
     extension.trim().trim_start_matches('.').trim().to_ascii_lowercase()
 }
 
-/// Resolve a self-hosted app-shell action into a concrete editor action.
+/// Resolve an app-shell action into a concrete editor action.
 ///
 /// Native file dialogs stay behind [`PlatformService`]. Widgets and menus emit
 /// stable app-shell requests, while the window entrypoint injects platform
@@ -313,13 +311,13 @@ pub fn resolve_app_shell_action(
     match try_resolve_app_shell_action(action, platform, current_project_path) {
         Ok(action) => action,
         Err(err) => {
-            tracing::warn!("self-hosted app-shell action failed: {err}");
+            tracing::warn!("app-shell action failed: {err}");
             None
         }
     }
 }
 
-/// Resolve a self-hosted app-shell action and report protocol errors.
+/// Resolve an app-shell action and report protocol errors.
 pub fn try_resolve_app_shell_action(
     action: Action,
     platform: &dyn PlatformService,
@@ -337,7 +335,7 @@ pub fn try_resolve_app_shell_action(
             let Some(path) = path else {
                 return Ok(None);
             };
-            let draft = SelfHostedNewProjectDraft::from_project_path(&path);
+            let draft = AppUiNewProjectDraft::from_project_path(&path);
             Ok(Some(project_create_with_settings_action(
                 draft.into_payload(path),
             )))
@@ -462,7 +460,7 @@ fn app_shell_action_error(name: &str, err: serde_json::Error) -> MondrianError {
 fn unknown_app_shell_action_error(name: &str) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: format!("app_shell_action.{name}"),
-        reason: format!("unknown self-hosted app-shell action: {name}"),
+        reason: format!("unknown app-shell action: {name}"),
     }
 }
 
@@ -535,39 +533,39 @@ impl ViewerZoomMode {
     }
 }
 
-fn apply_viewer_zoom_mode(models: &mut SelfHostedPanelModels, mode: ViewerZoomMode) {
+fn apply_viewer_zoom_mode(models: &mut AppUiPanelModels, mode: ViewerZoomMode) {
     models.viewer.zoom_label = mode.label();
     models.viewer.zoom_scale = mode.scale();
 }
 
-/// Root widget for the self-hosted editor window.
-pub struct SelfHostedAppRoot {
+/// Root widget for the app UI editor window.
+pub struct AppUiAppRoot {
     id: WidgetId,
     title_bar: TitleBar,
     dock: DockSplitter,
     status_bar: StatusBar,
-    models: SelfHostedPanelModels,
+    models: AppUiPanelModels,
     asset_folder_id: Option<String>,
-    preferences_model: SelfHostedPreferencesModel,
+    preferences_model: AppUiPreferencesModel,
     workspace_preset: WorkspacePreset,
-    custom_workspace_layout: Option<SelfHostedWorkspaceLayout>,
+    custom_workspace_layout: Option<AppUiWorkspaceLayout>,
     viewer_zoom_mode: ViewerZoomMode,
     active_sequence: Option<Sequence>,
     modal: Option<ShellModal>,
     bounds: Rect,
 }
 
-impl SelfHostedAppRoot {
+impl AppUiAppRoot {
     /// Build a root widget from the current application state snapshot.
     pub fn from_app_state(state: &AppState) -> Self {
-        Self::from_app_state_with_preferences(state, &SelfHostedPreferences::default())
+        Self::from_app_state_with_preferences(state, &AppUiPreferences::default())
     }
 
-    /// Build a root widget from the current app state and self-hosted shell
+    /// Build a root widget from the current app state and app UI shell
     /// preferences.
     pub fn from_app_state_with_preferences(
         state: &AppState,
-        preferences: &SelfHostedPreferences,
+        preferences: &AppUiPreferences,
     ) -> Self {
         Self::from_app_state_with_preferences_and_thumbnails(state, preferences, None)
     }
@@ -576,7 +574,7 @@ impl SelfHostedAppRoot {
     /// thumbnail source.
     pub fn from_app_state_with_preferences_and_thumbnails(
         state: &AppState,
-        preferences: &SelfHostedPreferences,
+        preferences: &AppUiPreferences,
         thumbnails: Option<&dyn AssetThumbnailSource>,
     ) -> Self {
         Self::from_app_state_with_preferences_thumbnails_and_preview(
@@ -591,15 +589,14 @@ impl SelfHostedAppRoot {
     /// and an optional viewer preview source.
     pub fn from_app_state_with_preferences_thumbnails_and_preview(
         state: &AppState,
-        preferences: &SelfHostedPreferences,
+        preferences: &AppUiPreferences,
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
-        let mut models =
-            SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
-                state, None, thumbnails, preview,
-            );
+        let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            state, None, thumbnails, preview,
+        );
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
         let mut root = Self::new_with_preferences(
             TitleBar::new(
@@ -610,7 +607,7 @@ impl SelfHostedAppRoot {
                 ),
             ),
             models,
-            SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
+            AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
                 state,
                 preferences.workspace_preset,
                 preferences.theme_preset,
@@ -625,7 +622,7 @@ impl SelfHostedAppRoot {
     }
 
     /// Build a root widget from app-facing panel models.
-    pub fn from_models(models: SelfHostedPanelModels) -> Self {
+    pub fn from_models(models: AppUiPanelModels) -> Self {
         Self::new(
             TitleBar::new("Mondrian", MenuBar::default()),
             models,
@@ -638,7 +635,7 @@ impl SelfHostedAppRoot {
     pub fn demo() -> Self {
         Self::new(
             TitleBar::new("Mondrian", MenuBar::default()),
-            SelfHostedPanelModels::demo(),
+            AppUiPanelModels::demo(),
             WorkspacePreset::Editing,
         )
     }
@@ -646,13 +643,13 @@ impl SelfHostedAppRoot {
     /// Build a root widget from explicit shell parts.
     pub fn new(
         title_bar: TitleBar,
-        models: SelfHostedPanelModels,
+        models: AppUiPanelModels,
         workspace_preset: WorkspacePreset,
     ) -> Self {
         Self::new_with_preferences(
             title_bar,
             models,
-            SelfHostedPreferencesModel::default(),
+            AppUiPreferencesModel::default(),
             workspace_preset,
             None,
             status_bar_model(&AppState::new()),
@@ -661,10 +658,10 @@ impl SelfHostedAppRoot {
 
     fn new_with_preferences(
         title_bar: TitleBar,
-        mut models: SelfHostedPanelModels,
-        preferences_model: SelfHostedPreferencesModel,
+        mut models: AppUiPanelModels,
+        preferences_model: AppUiPreferencesModel,
         workspace_preset: WorkspacePreset,
-        custom_workspace_layout: Option<SelfHostedWorkspaceLayout>,
+        custom_workspace_layout: Option<AppUiWorkspaceLayout>,
         status_bar_model: StatusBarModel,
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
@@ -703,13 +700,13 @@ impl SelfHostedAppRoot {
     }
 
     /// Persistable custom layout currently associated with the root.
-    pub fn custom_workspace_layout(&self) -> Option<&SelfHostedWorkspaceLayout> {
+    pub fn custom_workspace_layout(&self) -> Option<&AppUiWorkspaceLayout> {
         self.custom_workspace_layout.as_ref()
     }
 
     /// Capture the live dock tree as a persistable workspace layout.
-    pub fn workspace_layout(&self) -> Option<SelfHostedWorkspaceLayout> {
-        let layout = SelfHostedWorkspaceLayout::from_dock(&self.dock)?;
+    pub fn workspace_layout(&self) -> Option<AppUiWorkspaceLayout> {
+        let layout = AppUiWorkspaceLayout::from_dock(&self.dock)?;
         if self.workspace_preset == WorkspacePreset::Custom {
             if let Some(previous) = self.custom_workspace_layout.as_ref() {
                 return Some(layout.with_panel_metadata_from(previous));
@@ -798,7 +795,7 @@ impl SelfHostedAppRoot {
 
     /// Replace panel contents from a fresh model snapshot while preserving the
     /// root widget id and menu state.
-    pub fn set_models(&mut self, models: SelfHostedPanelModels) {
+    pub fn set_models(&mut self, models: AppUiPanelModels) {
         let layout = self.dock.layout_snapshot();
         let dock_panel_state = collect_dock_panel_state(&self.dock);
         let asset_grid_state = collect_asset_grid_state(&self.dock);
@@ -830,7 +827,7 @@ impl SelfHostedAppRoot {
 
     /// Refresh panel contents from the current application state snapshot.
     pub fn refresh_from_app_state(&mut self, state: &AppState) {
-        let preferences = SelfHostedPreferences {
+        let preferences = AppUiPreferences {
             version: 1,
             theme_preset: self.preferences_model.theme_preset,
             workspace_preset: self.workspace_preset,
@@ -841,12 +838,12 @@ impl SelfHostedAppRoot {
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
 
-    /// Refresh panel contents and preferences from a full self-hosted state
+    /// Refresh panel contents and preferences from a full app UI state
     /// snapshot.
     pub fn refresh_from_app_state_with_preferences(
         &mut self,
         state: &AppState,
-        preferences: &SelfHostedPreferences,
+        preferences: &AppUiPreferences,
     ) {
         self.refresh_from_app_state_with_preferences_and_thumbnails(state, preferences, None);
     }
@@ -856,7 +853,7 @@ impl SelfHostedAppRoot {
     pub fn refresh_from_app_state_with_preferences_and_thumbnails(
         &mut self,
         state: &AppState,
-        preferences: &SelfHostedPreferences,
+        preferences: &AppUiPreferences,
         thumbnails: Option<&dyn AssetThumbnailSource>,
     ) {
         self.refresh_from_app_state_with_preferences_thumbnails_and_preview(
@@ -872,7 +869,7 @@ impl SelfHostedAppRoot {
     pub fn refresh_from_app_state_with_preferences_thumbnails_and_preview(
         &mut self,
         state: &AppState,
-        preferences: &SelfHostedPreferences,
+        preferences: &AppUiPreferences,
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
     ) {
@@ -882,16 +879,15 @@ impl SelfHostedAppRoot {
         );
         self.status_bar.set_model(status_bar_model(state));
         self.active_sequence = state.sequence.clone();
-        let mut models =
-            SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
-                state,
-                self.asset_folder_id.as_deref(),
-                thumbnails,
-                preview,
-            );
+        let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            state,
+            self.asset_folder_id.as_deref(),
+            thumbnails,
+            preview,
+        );
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
-        let preferences_model = SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
+        let preferences_model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
             state,
             self.workspace_preset,
             preferences.theme_preset,
@@ -904,7 +900,7 @@ impl SelfHostedAppRoot {
         self.refresh_shell_menu_checked_state();
     }
 
-    /// Activate a dock panel or grouped tab in the default self-hosted layout.
+    /// Activate a dock panel or grouped tab in the default app UI layout.
     pub fn activate_panel(&mut self, panel: PanelKind) -> bool {
         let activated = dock_panel_locations(panel).into_iter().any(|(owner, active_index)| {
             activate_panel_in_widget(&mut self.dock, owner, active_index)
@@ -1051,7 +1047,7 @@ impl SelfHostedAppRoot {
         match self.try_handle_shell_action(action, platform, current_project_path) {
             Ok(action) => action,
             Err(err) => {
-                tracing::warn!("self-hosted shell action failed: {err}");
+                tracing::warn!("app UI shell action failed: {err}");
                 None
             }
         }
@@ -1117,7 +1113,7 @@ impl SelfHostedAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.modal = Some(ShellModal::new_project(SelfHostedNewProjectDraft::default()));
+                self.modal = Some(ShellModal::new_project(AppUiNewProjectDraft::default()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -1189,10 +1185,8 @@ impl SelfHostedAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
             {
-                let draft = self
-                    .active_sequence
-                    .as_ref()
-                    .map(SelfHostedSequenceSettingsDraft::from_sequence);
+                let draft =
+                    self.active_sequence.as_ref().map(AppUiSequenceSettingsDraft::from_sequence);
                 if let Some(draft) = draft {
                     self.modal = Some(ShellModal::sequence_settings(draft));
                     if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -1277,7 +1271,7 @@ impl SelfHostedAppRoot {
         }
     }
 
-    fn preferences_model(&self) -> SelfHostedPreferencesModel {
+    fn preferences_model(&self) -> AppUiPreferencesModel {
         self.preferences_model.clone()
     }
 
@@ -1291,9 +1285,9 @@ impl SelfHostedAppRoot {
 }
 
 fn build_dock_tree_for_workspace(
-    models: SelfHostedPanelModels,
+    models: AppUiPanelModels,
     preset: WorkspacePreset,
-    custom_layout: Option<&SelfHostedWorkspaceLayout>,
+    custom_layout: Option<&AppUiWorkspaceLayout>,
 ) -> DockSplitter {
     if preset == WorkspacePreset::Custom {
         if let Some(layout) = custom_layout {
@@ -1603,7 +1597,7 @@ fn restore_panel_scroll_state_into(
     }
 }
 
-impl Widget for SelfHostedAppRoot {
+impl Widget for AppUiAppRoot {
     fn id(&self) -> WidgetId {
         self.id
     }
@@ -1716,7 +1710,7 @@ mod tests {
         PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
         SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
     };
-    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
     use mondrian_core::types::AssetId;
     use mondrian_core::{ColorSpace, Rational, Resolution};
@@ -1820,7 +1814,7 @@ mod tests {
         fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
-    fn drag_root_splitter_to(root: &mut SelfHostedAppRoot, x: f32) {
+    fn drag_root_splitter_to(root: &mut AppUiAppRoot, x: f32) {
         let grab = root.dock().collect_grab_zones()[0].0.center();
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
@@ -1936,7 +1930,7 @@ mod tests {
         None
     }
 
-    fn menu_checked_for_action(root: &SelfHostedAppRoot, action: &Action) -> Option<bool> {
+    fn menu_checked_for_action(root: &AppUiAppRoot, action: &Action) -> Option<bool> {
         root.title_bar.menu_bar().checked_for_action(action)
     }
 
@@ -2093,7 +2087,7 @@ mod tests {
     #[test]
     fn app_root_focus_panel_switches_to_workspace_when_panel_is_absent() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let action =
@@ -2110,7 +2104,7 @@ mod tests {
     #[test]
     fn app_root_focus_panel_returns_to_editing_for_timeline_when_absent() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         root.handle_shell_action(
             Action::SwitchWorkspace(WorkspacePreset::Export),
@@ -2132,7 +2126,7 @@ mod tests {
     #[test]
     fn app_root_toggle_panel_hides_direct_leaf_as_custom_layout() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         assert!(root.workspace_layout().expect("layout").contains_panel(PanelKind::Inspector));
 
@@ -2154,7 +2148,7 @@ mod tests {
     #[test]
     fn app_root_toggle_hidden_panel_restores_preferred_workspace() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         root.handle_shell_action(Action::TogglePanel(PanelKind::Inspector), &platform, None);
         assert_eq!(
@@ -2176,7 +2170,7 @@ mod tests {
     #[test]
     fn app_root_toggle_panel_hides_grouped_effects_tab_as_custom_layout() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         assert!(root.workspace_layout().expect("layout").contains_panel(PanelKind::Effects));
 
@@ -2209,7 +2203,7 @@ mod tests {
     #[test]
     fn app_root_relocate_panel_action_groups_panel_as_active_tab() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let action = root.handle_shell_action(
@@ -2241,7 +2235,7 @@ mod tests {
     #[test]
     fn app_root_relocate_panel_action_honors_tab_bar_insert_index() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let action = root.handle_shell_action(
@@ -2260,26 +2254,26 @@ mod tests {
         let layout = root.custom_workspace_layout().expect("custom layout");
         assert_eq!(
             layout,
-            &SelfHostedWorkspaceLayout::Split {
+            &AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Vertical,
                 ratio: 0.66,
-                first: Box::new(SelfHostedWorkspaceLayout::Split {
+                first: Box::new(AppUiWorkspaceLayout::Split {
                     direction: SplitDirection::Horizontal,
                     ratio: 0.22,
-                    first: Box::new(SelfHostedWorkspaceLayout::Panel {
+                    first: Box::new(AppUiWorkspaceLayout::Panel {
                         kind: PanelKind::Inspector,
                         active_index: 0,
                         hidden_tabs: Vec::new(),
                         tabs: vec![PanelKind::Inspector, PanelKind::Assets, PanelKind::Effects,],
                     }),
-                    second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                    second: Box::new(AppUiWorkspaceLayout::Panel {
                         kind: PanelKind::Viewer,
                         active_index: 0,
                         hidden_tabs: Vec::new(),
                         tabs: vec![PanelKind::Viewer],
                     }),
                 }),
-                second: Box::new(SelfHostedWorkspaceLayout::Panel {
+                second: Box::new(AppUiWorkspaceLayout::Panel {
                     kind: PanelKind::Timeline,
                     active_index: 0,
                     hidden_tabs: Vec::new(),
@@ -2296,7 +2290,7 @@ mod tests {
     #[test]
     fn app_root_toggle_hidden_grouped_effects_tab_restores_preferred_workspace() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         root.handle_shell_action(Action::TogglePanel(PanelKind::Effects), &platform, None);
         assert_eq!(root.workspace_preset(), WorkspacePreset::Custom);
@@ -2327,7 +2321,7 @@ mod tests {
     #[test]
     fn app_root_switch_workspace_rebuilds_dock_without_editor_action() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let action = root.handle_shell_action(
@@ -2364,7 +2358,7 @@ mod tests {
     #[test]
     fn app_root_focus_panel_handles_direct_panels_after_workspace_switch() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         root.handle_shell_action(
             Action::SwitchWorkspace(WorkspacePreset::Color),
@@ -2386,7 +2380,7 @@ mod tests {
     fn every_panel_has_a_workspace_focus_fallback() {
         for panel in PanelKind::ALL {
             let preset = preferred_workspace_for_panel(panel);
-            let mut dock = build_dock_tree_for_preset(SelfHostedPanelModels::demo(), preset);
+            let mut dock = build_dock_tree_for_preset(AppUiPanelModels::demo(), preset);
 
             assert!(
                 dock_panel_locations(panel).into_iter().any(|(owner, active_index)| {
@@ -2443,7 +2437,7 @@ mod tests {
     #[test]
     fn new_project_draft_uses_path_stem_and_preserves_settings_payload() {
         let path = PathBuf::from("E:/projects/Trailer Cut.mdp");
-        let mut draft = SelfHostedNewProjectDraft::from_project_path(&path);
+        let mut draft = AppUiNewProjectDraft::from_project_path(&path);
         draft.sequence_settings.resolution = Resolution { width: 4096, height: 2160 };
         draft.sequence_settings.frame_rate = Rational::FPS_24;
         draft.sequence_settings.preview.format = PreviewRenderFormat::DnxHrLb;
@@ -2464,7 +2458,7 @@ mod tests {
 
     #[test]
     fn new_project_draft_validates_sequence_settings() {
-        let mut draft = SelfHostedNewProjectDraft::default();
+        let mut draft = AppUiNewProjectDraft::default();
 
         assert!(draft.validate().is_ok());
 
@@ -2565,7 +2559,7 @@ mod tests {
             save_path: Some(PathBuf::from("E:/projects/Rough Cut.mdp")),
             ..FakePlatform::default()
         };
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(
@@ -2616,7 +2610,7 @@ mod tests {
             save_path: Some(PathBuf::from("E:/projects/UHD.mdp")),
             ..FakePlatform::default()
         };
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
 
         root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None);
         root.handle_shell_action(
@@ -2684,7 +2678,7 @@ mod tests {
         state.active_sequence_id = Some(sequence_id);
         state.sequence = Some(sequence.clone());
         state.sequences.push(sequence);
-        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(
@@ -2976,7 +2970,7 @@ mod tests {
     #[test]
     fn app_root_ignores_sequence_settings_without_active_sequence() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::from_app_state(&AppState::new());
+        let mut root = AppUiAppRoot::from_app_state(&AppState::new());
 
         let action =
             root.handle_shell_action(app_shell_sequence_settings_action(), &platform, None);
@@ -2988,7 +2982,7 @@ mod tests {
     #[test]
     fn app_root_cancels_new_project_dialog_without_editor_action() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
 
         root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None);
 
@@ -3006,7 +3000,7 @@ mod tests {
     #[test]
     fn app_root_handles_about_action_as_shell_modal() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let action = root.handle_shell_action(app_shell_about_action(), &platform, None);
@@ -3019,7 +3013,7 @@ mod tests {
     #[test]
     fn app_root_handles_preferences_action_as_shell_modal() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let action = root.handle_shell_action(app_shell_preferences_action(), &platform, None);
@@ -3032,7 +3026,7 @@ mod tests {
     #[test]
     fn app_root_switches_preferences_tab_without_editor_action() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
 
         root.handle_shell_action(app_shell_preferences_action(), &platform, None);
         let action = root.handle_shell_action(
@@ -3053,7 +3047,7 @@ mod tests {
     #[test]
     fn app_root_refresh_updates_open_preferences_model() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.handle_shell_action(app_shell_preferences_action(), &platform, None);
 
         let mut state = AppState::new();
@@ -3115,7 +3109,7 @@ mod tests {
 
     #[test]
     fn app_root_refresh_updates_status_bar_paint_model() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         let mut state = AppState::new();
         state.current_project_path = Some(PathBuf::from("E:/projects/rough-cut.mdp"));
         state.set_status_hint("Import failed", true);
@@ -3139,7 +3133,7 @@ mod tests {
     #[test]
     fn app_root_closes_shell_modal_without_editor_action() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
 
         root.handle_shell_action(app_shell_about_action(), &platform, None);
 
@@ -3152,7 +3146,7 @@ mod tests {
     #[test]
     fn app_root_modal_blocks_unhandled_keyboard_events() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.handle_shell_action(app_shell_about_action(), &platform, None);
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
@@ -3360,7 +3354,7 @@ mod tests {
         match err {
             MondrianError::WorkflowStepFailed { step_id, reason } => {
                 assert_eq!(step_id, "app_shell_action.missing_command");
-                assert!(reason.contains("unknown self-hosted app-shell action"));
+                assert!(reason.contains("unknown app-shell action"));
             }
             other => panic!("expected app-shell workflow error, got {other:?}"),
         }
@@ -3368,7 +3362,7 @@ mod tests {
 
     #[test]
     fn app_root_layout_reserves_title_bar_height_for_dock() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
 
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
@@ -3394,7 +3388,7 @@ mod tests {
 
     #[test]
     fn app_root_child_order_matches_bottom_to_top_z_order() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(root.child(0).map(Widget::id), Some(root.dock.id()));
@@ -3414,7 +3408,7 @@ mod tests {
 
     #[test]
     fn app_root_paints_in_bottom_to_top_z_order() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = PaintOrderRecorder::default();
@@ -3474,7 +3468,7 @@ mod tests {
 
     #[test]
     fn app_root_modal_overlay_wins_over_open_menu_overlay() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
@@ -3508,7 +3502,7 @@ mod tests {
     #[test]
     fn app_root_builds_from_app_state_snapshot() {
         let state = AppState::new();
-        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        let mut root = AppUiAppRoot::from_app_state(&state);
 
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
@@ -3518,28 +3512,28 @@ mod tests {
         );
         assert_eq!(
             root.title_bar.menu_bar().bounds().height,
-            crate::self_hosted::menu_bar::MENU_BAR_HEIGHT
+            crate::app_ui::menu_bar::MENU_BAR_HEIGHT
         );
         assert!(!root.dock().collect_grab_zones().is_empty());
     }
 
     #[test]
     fn set_models_preserves_user_splitter_ratio() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         drag_root_splitter_to(&mut root, 620.0);
 
         let dragged_ratio = root.dock().ratio();
         assert!(dragged_ratio > 0.4);
 
-        root.set_models(SelfHostedPanelModels::demo());
+        root.set_models(AppUiPanelModels::demo());
 
         assert!((root.dock().ratio() - dragged_ratio).abs() < f32::EPSILON);
     }
 
     #[test]
     fn set_models_preserves_asset_grid_filter_and_selection() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         assert!(with_asset_grid_mut_for_title(
             root.dock_mut(),
@@ -3550,7 +3544,7 @@ mod tests {
             },
         ));
 
-        root.set_models(SelfHostedPanelModels::demo());
+        root.set_models(AppUiPanelModels::demo());
 
         let state = asset_grid_state_for_title(&root, "Assets").expect("assets state");
         assert_eq!(state.filter_query, "audio");
@@ -3560,7 +3554,7 @@ mod tests {
 
     #[test]
     fn set_models_preserves_asset_grid_hover_by_stable_id() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         let dispatch = |_| {};
         let mut focus = DummyFocus;
@@ -3591,7 +3585,7 @@ mod tests {
         let before = asset_grid_state_for_title(&root, "Assets").expect("assets state");
         assert_eq!(before.hovered_item_id.as_deref(), Some("demo-audio"));
 
-        root.set_models(SelfHostedPanelModels::demo());
+        root.set_models(AppUiPanelModels::demo());
 
         let after = asset_grid_state_for_title(&root, "Assets").expect("assets state");
         assert_eq!(after.hovered_item_id.as_deref(), Some("demo-audio"));
@@ -3599,9 +3593,9 @@ mod tests {
 
     #[test]
     fn set_models_cancels_asset_grid_inline_rename_without_dispatching() {
-        let mut models = SelfHostedPanelModels::demo();
+        let mut models = AppUiPanelModels::demo();
         models.assets.items[0] = models.assets.items[0].clone().renamable(true);
-        let mut root = SelfHostedAppRoot::from_models(models);
+        let mut root = AppUiAppRoot::from_models(models);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         let actions = std::cell::RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -3642,7 +3636,7 @@ mod tests {
         assert!(widget_tree_accepts_text_input(&root));
         actions.borrow_mut().clear();
 
-        root.set_models(SelfHostedPanelModels::demo());
+        root.set_models(AppUiPanelModels::demo());
 
         assert!(
             !widget_tree_accepts_text_input(&root),
@@ -3656,7 +3650,7 @@ mod tests {
 
     #[test]
     fn set_models_preserves_asset_grid_state_when_title_changes() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         assert!(with_asset_grid_mut_for_title(
             root.dock_mut(),
@@ -3666,7 +3660,7 @@ mod tests {
                 grid.set_selected(Some(1));
             },
         ));
-        let mut models = SelfHostedPanelModels::demo();
+        let mut models = AppUiPanelModels::demo();
         models.assets.title = "Media".to_owned();
 
         root.set_models(models);
@@ -3679,7 +3673,7 @@ mod tests {
     #[test]
     fn set_models_preserves_grouped_panel_active_tab_and_visible_list_state() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         root.handle_shell_action(Action::FocusPanel(PanelKind::Effects), &platform, None);
         assert_eq!(
@@ -3694,7 +3688,7 @@ mod tests {
             },
         ));
 
-        root.set_models(SelfHostedPanelModels::demo());
+        root.set_models(AppUiPanelModels::demo());
 
         assert_eq!(
             active_index_for_dock_panel(&root, PanelKind::Assets),
@@ -3707,7 +3701,7 @@ mod tests {
     #[test]
     fn set_models_preserves_panel_list_state_when_title_changes() {
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         root.handle_shell_action(Action::FocusPanel(PanelKind::Effects), &platform, None);
         assert!(with_panel_list_mut_for_title(
@@ -3717,7 +3711,7 @@ mod tests {
                 list.set_filter_query("blur");
             },
         ));
-        let mut models = SelfHostedPanelModels::demo();
+        let mut models = AppUiPanelModels::demo();
         models.effects.title = "FX".to_owned();
 
         root.set_models(models);
@@ -3728,7 +3722,7 @@ mod tests {
 
     #[test]
     fn set_models_preserves_panel_scroll_position() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 480.0));
         assert!(with_scroll_view_mut_for_panel(
             root.dock_mut(),
@@ -3744,7 +3738,7 @@ mod tests {
             "test fixture must overflow vertically"
         );
 
-        root.set_models(SelfHostedPanelModels::demo());
+        root.set_models(AppUiPanelModels::demo());
 
         let after = scroll_state_for_panel(root.dock(), PanelKind::Inspector)
             .expect("inspector should keep a scroll view");
@@ -3753,7 +3747,7 @@ mod tests {
 
     #[test]
     fn set_models_preserves_assets_panel_scroll_position() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 360.0));
         assert!(with_scroll_view_mut_for_panel(
             root.dock_mut(),
@@ -3769,7 +3763,7 @@ mod tests {
             "test fixture must overflow vertically"
         );
 
-        root.set_models(SelfHostedPanelModels::demo());
+        root.set_models(AppUiPanelModels::demo());
 
         let after =
             scroll_state_for_panel(root.dock(), PanelKind::Assets).expect("assets scroll view");
@@ -3778,7 +3772,7 @@ mod tests {
 
     #[test]
     fn set_models_preserves_timeline_tool_zoom_and_scroll_state() {
-        let mut root = SelfHostedAppRoot::demo();
+        let mut root = AppUiAppRoot::demo();
         root.layout(Rect::new(0.0, 0.0, 1280.0, 480.0));
         assert!(with_timeline_view_mut(root.dock_mut(), &mut |timeline| {
             timeline.restore_state(&TimelineViewState {
@@ -3793,7 +3787,7 @@ mod tests {
         root.layout(Rect::new(0.0, 0.0, 1280.0, 480.0));
         let before = timeline_view_state(root.dock()).expect("before timeline state");
 
-        root.set_models(SelfHostedPanelModels::demo());
+        root.set_models(AppUiPanelModels::demo());
 
         let after = timeline_view_state(root.dock()).expect("after timeline state");
         assert_eq!(after.active_tool, before.active_tool);
@@ -3807,7 +3801,7 @@ mod tests {
     #[test]
     fn refresh_from_app_state_preserves_user_splitter_ratio() {
         let state = AppState::new();
-        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         drag_root_splitter_to(&mut root, 620.0);
         let dragged_ratio = root.dock().ratio();
@@ -3821,7 +3815,7 @@ mod tests {
     fn refresh_from_app_state_preserves_workspace_preset() {
         let state = AppState::new();
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         root.handle_shell_action(
             Action::SwitchWorkspace(WorkspacePreset::Compositing),
@@ -3844,7 +3838,7 @@ mod tests {
         let mut state = AppState::new();
         state.sequence = Some(Sequence::new("edit"));
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(root.models.viewer.zoom_label, "适合");
@@ -3867,7 +3861,7 @@ mod tests {
         let mut state = AppState::new();
         state.sequence = Some(Sequence::new("edit"));
         let platform = FakePlatform::default();
-        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let resolved = root

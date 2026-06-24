@@ -1,4 +1,4 @@
-//! Self-hosted UI host state.
+//! App UI host state.
 //!
 //! Window entrypoints own native event loops and rendering surfaces. This host
 //! owns the reusable application/UI state bridge: root widget, `AppState`, and
@@ -27,31 +27,29 @@ use crate::app::ui_actions::{
     ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
-use crate::self_hosted::action_availability::app_state_action_enabled;
-use crate::self_hosted::action_queue::PendingUiActions;
-use crate::self_hosted::asset_thumbnails::AssetThumbnailCache;
-use crate::self_hosted::pending_close_dialog::PendingCloseDialogAction;
-use crate::self_hosted::preferences_store::{
-    load_self_hosted_preferences, persist_self_hosted_preferences_to, self_hosted_preferences_path,
-    SelfHostedPreferences,
+use crate::app_ui::action_availability::app_state_action_enabled;
+use crate::app_ui::action_queue::PendingUiActions;
+use crate::app_ui::asset_thumbnails::AssetThumbnailCache;
+use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
+use crate::app_ui::preferences_store::{
+    app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
+    AppUiPreferences,
 };
-use crate::self_hosted::preview::SelfHostedPreviewService;
-use crate::self_hosted::shell::{try_resolve_app_shell_action, SelfHostedAppRoot};
-use crate::self_hosted::shortcuts::{
-    default_shortcuts, is_known_shortcut_id, SelfHostedShortcutBinding, SelfHostedShortcutKey,
-    SelfHostedShortcutOverride,
+use crate::app_ui::preview::AppUiPreviewService;
+use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
+use crate::app_ui::shortcuts::{
+    default_shortcuts, is_known_shortcut_id, AppUiShortcutBinding, AppUiShortcutKey,
+    AppUiShortcutOverride,
 };
-use crate::self_hosted::startup::{
-    SelfHostedStartupScreen, StartupRecentProject, StartupRecoveryProject,
-};
+use crate::app_ui::startup::{AppUiStartupScreen, StartupRecentProject, StartupRecoveryProject};
 use mondrian_editor_state::Action;
 
-/// Window-host commands produced while draining self-hosted UI actions.
+/// Window-host commands produced while draining app UI actions.
 ///
 /// These are native shell side effects, not editor-state mutations. Entrypoints
 /// apply them after the widget tree and `AppState` borrows have ended.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct SelfHostedShellCommands {
+pub struct AppUiShellCommands {
     /// The native window should request application exit.
     pub quit: bool,
     /// The native window should toggle fullscreen mode.
@@ -64,62 +62,62 @@ pub struct SelfHostedShellCommands {
     pub begin_window_drag: bool,
 }
 
-/// Product shell mode owned by the self-hosted host.
+/// Product shell mode owned by the app UI host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelfHostedUiMode {
+pub enum AppUiMode {
     /// Startup surface shown before a project is opened.
     Startup,
     /// Main editing workspace.
     Workspace,
 }
 
-/// Product-facing self-hosted UI session state.
-pub struct SelfHostedUiHost {
-    startup: SelfHostedStartupScreen,
-    root: SelfHostedAppRoot,
+/// Product-facing app UI session state.
+pub struct AppUiHost {
+    startup: AppUiStartupScreen,
+    root: AppUiAppRoot,
     app_state: RefCell<AppState>,
-    preferences: SelfHostedPreferences,
+    preferences: AppUiPreferences,
     preferences_path: PathBuf,
     recovery_candidates: Vec<CrashRecoveryCandidate>,
     asset_thumbnails: AssetThumbnailCache,
-    preview_service: SelfHostedPreviewService,
-    mode: SelfHostedUiMode,
+    preview_service: AppUiPreviewService,
+    mode: AppUiMode,
     ui_dirty: Cell<bool>,
     pending_close_action: Option<PendingCloseAction>,
 }
 
-impl SelfHostedUiHost {
+impl AppUiHost {
     /// Create a host from an initial application state snapshot.
     pub fn new(app_state: AppState) -> Self {
         Self::new_with_preferences_path(
             app_state,
-            load_self_hosted_preferences(),
-            self_hosted_preferences_path(),
+            load_app_ui_preferences(),
+            app_ui_preferences_path(),
         )
     }
 
     /// Create a host from explicit preferences and path.
     pub(crate) fn new_with_preferences_path(
         app_state: AppState,
-        preferences: SelfHostedPreferences,
+        preferences: AppUiPreferences,
         preferences_path: PathBuf,
     ) -> Self {
         set_theme_preset(preferences.theme_preset);
         let asset_thumbnails = AssetThumbnailCache::new();
-        let preview_service = SelfHostedPreviewService::new();
-        let root = SelfHostedAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
+        let preview_service = AppUiPreviewService::new();
+        let root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
             &preferences,
             Some(&asset_thumbnails),
             Some(&preview_service),
         );
         let mode = if app_state.has_open_project() {
-            SelfHostedUiMode::Workspace
+            AppUiMode::Workspace
         } else {
-            SelfHostedUiMode::Startup
+            AppUiMode::Startup
         };
         let recovery_candidates = discover_crash_recovery_candidates();
-        let mut startup = SelfHostedStartupScreen::new();
+        let mut startup = AppUiStartupScreen::new();
         startup.set_recent_projects(startup_recent_projects_from_preferences(&preferences));
         startup.set_recovery_projects(startup_recovery_projects_from_candidates(
             &recovery_candidates,
@@ -140,33 +138,33 @@ impl SelfHostedUiHost {
     }
 
     /// Immutable access to the root widget.
-    pub fn root(&self) -> &SelfHostedAppRoot {
+    pub fn root(&self) -> &AppUiAppRoot {
         &self.root
     }
 
     /// Mutable access to the root widget for event routing and layout.
-    pub fn root_mut(&mut self) -> &mut SelfHostedAppRoot {
+    pub fn root_mut(&mut self) -> &mut AppUiAppRoot {
         &mut self.root
     }
 
     /// Current visible product mode.
-    pub fn mode(&self) -> SelfHostedUiMode {
+    pub fn mode(&self) -> AppUiMode {
         self.mode
     }
 
     /// Immutable access to the widget currently visible in the native window.
     pub fn active_root(&self) -> &dyn Widget {
         match self.mode {
-            SelfHostedUiMode::Startup => &self.startup,
-            SelfHostedUiMode::Workspace => &self.root,
+            AppUiMode::Startup => &self.startup,
+            AppUiMode::Workspace => &self.root,
         }
     }
 
     /// Mutable access to the widget currently visible in the native window.
     pub fn active_root_mut(&mut self) -> &mut dyn Widget {
         match self.mode {
-            SelfHostedUiMode::Startup => &mut self.startup,
-            SelfHostedUiMode::Workspace => &mut self.root,
+            AppUiMode::Startup => &mut self.startup,
+            AppUiMode::Workspace => &mut self.root,
         }
     }
 
@@ -175,8 +173,8 @@ impl SelfHostedUiHost {
         self.app_state.borrow()
     }
 
-    /// Current persisted self-hosted preferences snapshot.
-    pub fn preferences(&self) -> &SelfHostedPreferences {
+    /// Current persisted app UI preferences snapshot.
+    pub fn preferences(&self) -> &AppUiPreferences {
         &self.preferences
     }
 
@@ -226,8 +224,8 @@ impl SelfHostedUiHost {
         pending_actions: &PendingUiActions,
         bounds: Rect,
         platform: &dyn PlatformService,
-    ) -> SelfHostedShellCommands {
-        let mut commands = SelfHostedShellCommands::default();
+    ) -> AppUiShellCommands {
+        let mut commands = AppUiShellCommands::default();
         let actions = pending_actions.take_all();
         if actions.is_empty() {
             self.refresh_if_dirty(bounds);
@@ -329,7 +327,7 @@ impl SelfHostedUiHost {
     }
 
     pub fn sync_workspace_layout_from_root(&mut self) {
-        if self.mode != SelfHostedUiMode::Workspace {
+        if self.mode != AppUiMode::Workspace {
             return;
         }
         if self.root.sync_custom_workspace_layout_from_dock() {
@@ -357,10 +355,8 @@ impl SelfHostedUiHost {
         }
         self.preferences.workspace_preset = preset;
         self.preferences.custom_workspace_layout = custom_workspace_layout;
-        if let Err(err) =
-            persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
-        {
-            tracing::warn!("failed to persist self-hosted workspace preference: {err}");
+        if let Err(err) = persist_app_ui_preferences_to(&self.preferences_path, &self.preferences) {
+            tracing::warn!("failed to persist app UI workspace preference: {err}");
             self.app_state.borrow_mut().set_status_hint(
                 format!("Workspace preference could not be saved: {err}"),
                 true,
@@ -375,7 +371,7 @@ impl SelfHostedUiHost {
         bounds: Rect,
         platform: &dyn PlatformService,
     ) -> bool {
-        if self.mode != SelfHostedUiMode::Startup {
+        if self.mode != AppUiMode::Startup {
             return false;
         }
 
@@ -461,10 +457,8 @@ impl SelfHostedUiHost {
     fn record_recent_project(&mut self, project_file: PathBuf) {
         self.preferences.record_recent_project(project_file);
         self.sync_startup_recent_projects();
-        if let Err(err) =
-            persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
-        {
-            tracing::warn!("failed to persist self-hosted recent projects: {err}");
+        if let Err(err) = persist_app_ui_preferences_to(&self.preferences_path, &self.preferences) {
+            tracing::warn!("failed to persist app UI recent projects: {err}");
             self.app_state
                 .borrow_mut()
                 .set_status_hint(format!("Recent projects could not be saved: {err}"), true);
@@ -506,7 +500,7 @@ impl SelfHostedUiHost {
                         self.preferences.shortcut_overrides.retain(|entry| entry.id != payload.id);
                         self.preferences
                             .shortcut_overrides
-                            .push(SelfHostedShortcutOverride { id: payload.id, binding: None });
+                            .push(AppUiShortcutOverride { id: payload.id, binding: None });
                     }
                     PreferencesUpdate::ShortcutReset(payload) => {
                         self.preferences.shortcut_overrides.retain(|entry| entry.id != payload.id);
@@ -519,8 +513,7 @@ impl SelfHostedUiHost {
                             self.mark_dirty();
                             return true;
                         }
-                        let Some(key) = SelfHostedShortcutKey::from_preference_name(&payload.key)
-                        else {
+                        let Some(key) = AppUiShortcutKey::from_preference_name(&payload.key) else {
                             self.app_state
                                 .borrow_mut()
                                 .set_status_hint("Shortcut key is no longer valid", true);
@@ -530,7 +523,7 @@ impl SelfHostedUiHost {
                         apply_shortcut_rebind(
                             &mut self.preferences.shortcut_overrides,
                             payload.id,
-                            SelfHostedShortcutBinding {
+                            AppUiShortcutBinding {
                                 key,
                                 ctrl: payload.ctrl,
                                 alt: payload.alt,
@@ -541,9 +534,9 @@ impl SelfHostedUiHost {
                     }
                 }
                 if let Err(err) =
-                    persist_self_hosted_preferences_to(&self.preferences_path, &self.preferences)
+                    persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
                 {
-                    tracing::warn!("failed to persist self-hosted preferences: {err}");
+                    tracing::warn!("failed to persist app UI preferences: {err}");
                     self.app_state
                         .borrow_mut()
                         .set_status_hint(format!("Preferences could not be saved: {err}"), true);
@@ -558,7 +551,7 @@ impl SelfHostedUiHost {
                 true
             }
             Err(err) => {
-                tracing::warn!("invalid self-hosted preferences action: {err}");
+                tracing::warn!("invalid app UI preferences action: {err}");
                 self.app_state
                     .borrow_mut()
                     .set_status_hint(format!("Preferences action failed: {err}"), true);
@@ -586,7 +579,7 @@ impl SelfHostedUiHost {
                 true
             }
             Err(err) => {
-                tracing::warn!("invalid self-hosted asset browser action: {err}");
+                tracing::warn!("invalid app UI asset browser action: {err}");
                 self.app_state
                     .borrow_mut()
                     .set_status_hint(format!("Asset browser action failed: {err}"), true);
@@ -625,7 +618,7 @@ impl SelfHostedUiHost {
 
     fn take_guarded_close_or_quit(
         &mut self,
-        commands: &mut SelfHostedShellCommands,
+        commands: &mut AppUiShellCommands,
         action: &Action,
     ) -> bool {
         let Some(pending) = close_request_from_action(action) else {
@@ -644,7 +637,7 @@ impl SelfHostedUiHost {
 
     fn take_pending_close_response(
         &mut self,
-        commands: &mut SelfHostedShellCommands,
+        commands: &mut AppUiShellCommands,
         action: &Action,
     ) -> bool {
         let Action::Custom { namespace, name, .. } = action else {
@@ -693,7 +686,7 @@ impl SelfHostedUiHost {
 
     fn execute_pending_close_action(
         &mut self,
-        commands: &mut SelfHostedShellCommands,
+        commands: &mut AppUiShellCommands,
         pending: PendingCloseAction,
     ) {
         match pending {
@@ -745,11 +738,11 @@ fn close_request_from_action(action: &Action) -> Option<PendingCloseAction> {
     }
 }
 
-fn mode_for_app_state(state: &AppState) -> SelfHostedUiMode {
+fn mode_for_app_state(state: &AppState) -> AppUiMode {
     if state.has_open_project() {
-        SelfHostedUiMode::Workspace
+        AppUiMode::Workspace
     } else {
-        SelfHostedUiMode::Startup
+        AppUiMode::Startup
     }
 }
 
@@ -785,7 +778,7 @@ fn is_startup_local_shell_action(action: &Action) -> bool {
 }
 
 fn startup_recent_projects_from_preferences(
-    preferences: &SelfHostedPreferences,
+    preferences: &AppUiPreferences,
 ) -> Vec<StartupRecentProject> {
     preferences
         .recent_projects
@@ -902,7 +895,7 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Action) -> bool {
+fn take_shell_window_command(commands: &mut AppUiShellCommands, action: &Action) -> bool {
     match action {
         Action::ToggleFullscreen => {
             commands.toggle_fullscreen = true;
@@ -937,9 +930,9 @@ fn take_shell_window_command(commands: &mut SelfHostedShellCommands, action: &Ac
 }
 
 fn apply_shortcut_rebind(
-    overrides: &mut Vec<SelfHostedShortcutOverride>,
+    overrides: &mut Vec<AppUiShortcutOverride>,
     id: String,
-    binding: SelfHostedShortcutBinding,
+    binding: AppUiShortcutBinding,
 ) {
     let core_binding = binding.to_core();
     overrides.retain(|entry| {
@@ -953,8 +946,7 @@ fn apply_shortcut_rebind(
             continue;
         }
         if !overrides.iter().any(|entry| entry.id == shortcut.id) {
-            overrides
-                .push(SelfHostedShortcutOverride { id: shortcut.id.to_owned(), binding: None });
+            overrides.push(AppUiShortcutOverride { id: shortcut.id.to_owned(), binding: None });
         }
     }
 
@@ -966,7 +958,7 @@ fn apply_shortcut_rebind(
         return;
     }
 
-    overrides.push(SelfHostedShortcutOverride { id, binding: Some(binding) });
+    overrides.push(AppUiShortcutOverride { id, binding: Some(binding) });
 }
 
 enum PreferencesUpdate {
@@ -1037,11 +1029,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::self_hosted::preferences_store::{
-        load_self_hosted_preferences_from, SelfHostedPreferences,
-    };
-    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-    use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
+    use crate::app_ui::preferences_store::{load_app_ui_preferences_from, AppUiPreferences};
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
     #[derive(Default)]
     struct CountingPlatform {
@@ -1173,9 +1163,9 @@ mod tests {
 
     #[test]
     fn editor_action_error_without_status_hint_surfaces_in_status_bar_state() {
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             temp_preferences_path("action-error-status"),
         );
 
@@ -1191,17 +1181,17 @@ mod tests {
         let (message, is_error) = state.status_hint.as_ref().expect("status hint");
         assert!(*is_error);
         assert!(message.contains("操作失败"));
-        assert!(message.contains("unknown self-hosted UI action"));
-        assert!(err.to_string().contains("unknown self-hosted UI action"));
+        assert!(message.contains("unknown app UI action"));
+        assert!(err.to_string().contains("unknown app UI action"));
     }
 
     #[test]
     fn editor_action_error_keeps_specific_status_hint_from_app_state() {
         let mut state = AppState::new();
         state.set_status_hint("Previous failure", true);
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             state,
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             temp_preferences_path("action-specific-error-status"),
         );
 
@@ -1291,7 +1281,7 @@ mod tests {
         event_ctx(focus, shortcut, tooltip, requests, &|_| {})
     }
 
-    fn drag_first_splitter_to(root: &mut SelfHostedAppRoot, ratio: f32) {
+    fn drag_first_splitter_to(root: &mut AppUiAppRoot, ratio: f32) {
         let (zone, direction) = root.dock().collect_grab_zones()[0];
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
         let target = match direction {
@@ -1335,7 +1325,7 @@ mod tests {
         );
     }
 
-    fn click_root(root: &mut SelfHostedAppRoot, position: Point) {
+    fn click_root(root: &mut AppUiAppRoot, position: Point) {
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
         let mut tooltip = DummyTooltip;
@@ -1380,26 +1370,26 @@ mod tests {
 
     #[test]
     fn host_builds_root_from_initial_app_state() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(AppState::new());
 
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
 
-        assert_eq!(host.mode(), SelfHostedUiMode::Startup);
+        assert_eq!(host.mode(), AppUiMode::Startup);
         assert!(!host.root().dock().collect_grab_zones().is_empty());
         assert!(!host.app_state().has_open_project());
     }
 
     #[test]
     fn startup_new_project_action_switches_to_workspace_mode() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let project_file = temp_preferences_path("startup-project").with_extension("mdp");
         let preferences_path = temp_preferences_path("startup-project-preferences");
         let runtime_root = project_runtime_root_for_test(&project_file);
         let platform = StartupProjectPlatform { project_file: project_file.clone() };
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             preferences_path.clone(),
         );
         let pending = PendingUiActions::default();
@@ -1408,8 +1398,8 @@ mod tests {
         let commands =
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
-        assert_eq!(host.mode(), SelfHostedUiMode::Startup);
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Startup);
         assert!(host.startup.has_modal());
         assert!(!host.app_state().has_open_project());
 
@@ -1417,8 +1407,8 @@ mod tests {
         let commands =
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
-        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Workspace);
         assert!(!host.startup.has_modal());
         assert!(host.app_state().has_open_project());
         assert_eq!(
@@ -1431,7 +1421,7 @@ mod tests {
         );
         assert_eq!(host.startup.recent_project_count(), 1);
         assert_eq!(
-            load_self_hosted_preferences_from(&preferences_path).recent_projects,
+            load_app_ui_preferences_from(&preferences_path).recent_projects,
             vec![project_file.clone()]
         );
 
@@ -1442,16 +1432,16 @@ mod tests {
 
     #[test]
     fn host_open_project_dialog_switches_to_workspace_and_records_recent_project() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let project_file = create_project_file("open-dialog");
         let preferences_path = temp_preferences_path("open-dialog-preferences");
         let platform = ProjectDialogPlatform {
             open_paths: Some(vec![project_file.clone()]),
             save_path: None,
         };
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             preferences_path.clone(),
         );
         let pending = PendingUiActions::default();
@@ -1460,8 +1450,8 @@ mod tests {
         let commands =
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
-        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Workspace);
         assert_eq!(
             host.app_state().current_project_path.as_deref(),
             Some(project_file.as_path())
@@ -1471,7 +1461,7 @@ mod tests {
             vec![project_file.clone()]
         );
         assert_eq!(
-            load_self_hosted_preferences_from(&preferences_path).recent_projects,
+            load_app_ui_preferences_from(&preferences_path).recent_projects,
             vec![project_file.clone()]
         );
 
@@ -1481,12 +1471,12 @@ mod tests {
 
     #[test]
     fn host_open_recent_project_uses_startup_shell_action_boundary() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let project_file = create_project_file("open-recent");
-        let mut preferences = SelfHostedPreferences::default();
+        let mut preferences = AppUiPreferences::default();
         preferences.record_recent_project(project_file.clone());
         let preferences_path = temp_preferences_path("open-recent-preferences");
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             preferences,
             preferences_path.clone(),
@@ -1506,8 +1496,8 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
-        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Workspace);
         assert_eq!(
             host.app_state().current_project_path.as_deref(),
             Some(project_file.as_path())
@@ -1523,8 +1513,8 @@ mod tests {
 
     #[test]
     fn host_save_project_action_clears_unsaved_fingerprint_delta() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(saved_workspace_app_state("save-project-action"));
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(saved_workspace_app_state("save-project-action"));
         let project_file = host.app_state().current_project_path.clone().expect("project path");
         assert!(host.app_state().has_unsaved_project_changes());
         let pending = PendingUiActions::default();
@@ -1536,7 +1526,7 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.app_state().has_open_project());
         assert!(!host.app_state().has_unsaved_project_changes());
 
@@ -1545,11 +1535,11 @@ mod tests {
 
     #[test]
     fn host_save_as_dialog_updates_project_path_and_recent_project() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let preferences_path = temp_preferences_path("save-as-preferences");
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             saved_workspace_app_state("save-as-source"),
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             preferences_path.clone(),
         );
         let source_file =
@@ -1565,7 +1555,7 @@ mod tests {
         let commands =
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(
             host.app_state().current_project_path.as_deref(),
             Some(target_file.as_path())
@@ -1583,7 +1573,7 @@ mod tests {
 
     #[test]
     fn host_recovers_autosave_candidate_and_records_recent_project() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let project_file = create_project_file("recover-host");
         let mut autosave_state = AppState::new();
         autosave_state
@@ -1595,9 +1585,9 @@ mod tests {
             .write_autosave_snapshot(2, 7)
             .expect("autosave snapshot should write");
         let preferences_path = temp_preferences_path("recover-host-preferences");
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             preferences_path.clone(),
         );
         let pending = PendingUiActions::default();
@@ -1614,8 +1604,8 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
-        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Workspace);
         assert_eq!(
             host.app_state().current_project_path.as_deref(),
             Some(project_file.as_path())
@@ -1635,18 +1625,18 @@ mod tests {
 
     #[test]
     fn host_loads_startup_recent_projects_from_preferences() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let project_file = temp_preferences_path("startup-recent").with_extension("mdp");
-        let mut preferences = SelfHostedPreferences::default();
+        let mut preferences = AppUiPreferences::default();
         preferences.record_recent_project(project_file.clone());
 
-        let host = SelfHostedUiHost::new_with_preferences_path(
+        let host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             preferences,
             temp_preferences_path("startup-recent-preferences"),
         );
 
-        assert_eq!(host.mode(), SelfHostedUiMode::Startup);
+        assert_eq!(host.mode(), AppUiMode::Startup);
         assert_eq!(host.startup.recent_project_count(), 1);
     }
 
@@ -1672,10 +1662,10 @@ mod tests {
 
     #[test]
     fn host_builds_root_from_persisted_workspace_preference() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
-            SelfHostedPreferences {
+            AppUiPreferences {
                 version: 1,
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Compositing,
@@ -1694,26 +1684,26 @@ mod tests {
 
     #[test]
     fn host_builds_root_from_persisted_custom_workspace_layout() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.37,
-            first: Box::new(SelfHostedWorkspaceLayout::Panel {
+            first: Box::new(AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Assets,
                 active_index: 1,
                 hidden_tabs: Vec::new(),
                 tabs: vec![PanelKind::Assets, PanelKind::Effects],
             }),
-            second: Box::new(SelfHostedWorkspaceLayout::Panel {
+            second: Box::new(AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
                 tabs: vec![PanelKind::Viewer],
             }),
         };
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             workspace_app_state(),
-            SelfHostedPreferences {
+            AppUiPreferences {
                 version: 1,
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Custom,
@@ -1726,7 +1716,7 @@ mod tests {
 
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
 
-        assert_eq!(host.mode(), SelfHostedUiMode::Workspace);
+        assert_eq!(host.mode(), AppUiMode::Workspace);
         assert_eq!(host.root().workspace_preset(), WorkspacePreset::Custom);
         assert!((host.root().dock().ratio() - 0.37).abs() < f32::EPSILON);
         assert_eq!(host.root().workspace_layout(), Some(layout));
@@ -1734,8 +1724,8 @@ mod tests {
 
     #[test]
     fn host_drains_actions_and_refreshes_root() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
         pending.push(Action::NoOp);
@@ -1745,15 +1735,15 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.root().dock().ratio() > 0.0);
     }
 
     #[test]
     fn host_defers_dirty_refresh_while_shell_overlay_is_open() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
-        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let mut host = AppUiHost::new(workspace_app_state());
         TreeWalker::layout(host.root_mut(), bounds);
 
         let menu_bounds = host.root().menu_bar_bounds_for_test();
@@ -1775,8 +1765,8 @@ mod tests {
 
     #[test]
     fn host_returns_window_commands_without_dispatching_to_app_state() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
         pending.push(Action::ToggleFullscreen);
@@ -1789,10 +1779,10 @@ mod tests {
 
         assert_eq!(
             commands,
-            SelfHostedShellCommands {
+            AppUiShellCommands {
                 quit: true,
                 toggle_fullscreen: true,
-                ..SelfHostedShellCommands::default()
+                ..AppUiShellCommands::default()
             }
         );
         assert!(!host.app_state().has_open_project());
@@ -1800,8 +1790,8 @@ mod tests {
 
     #[test]
     fn host_guards_unsaved_close_project_with_pending_modal() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(workspace_app_state());
         let pending = PendingUiActions::default();
 
         pending.push(Action::CloseProject);
@@ -1811,7 +1801,7 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.app_state().has_open_project());
         assert!(host.root.has_pending_close_dialog());
         assert_eq!(
@@ -1822,8 +1812,8 @@ mod tests {
 
     #[test]
     fn host_can_cancel_pending_close_project() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(workspace_app_state());
         let pending = PendingUiActions::default();
 
         pending.push(Action::CloseProject);
@@ -1839,7 +1829,7 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.app_state().has_open_project());
         assert!(!host.root.has_pending_close_dialog());
         assert_eq!(host.pending_close_action, None);
@@ -1847,8 +1837,8 @@ mod tests {
 
     #[test]
     fn host_can_discard_pending_close_project() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(workspace_app_state());
         let pending = PendingUiActions::default();
 
         pending.push(Action::CloseProject);
@@ -1864,15 +1854,15 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(!host.app_state().has_open_project());
         assert!(!host.root.has_pending_close_dialog());
     }
 
     #[test]
     fn host_can_save_and_continue_pending_close_project() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(saved_workspace_app_state("save-close"));
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(saved_workspace_app_state("save-close"));
         let pending = PendingUiActions::default();
 
         pending.push(Action::CloseProject);
@@ -1889,15 +1879,15 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(!host.app_state().has_open_project());
         assert!(!host.root.has_pending_close_dialog());
     }
 
     #[test]
     fn host_guards_unsaved_quit_until_discarded() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(workspace_app_state());
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::app_shell_quit_action());
@@ -1906,7 +1896,7 @@ mod tests {
             Rect::new(0.0, 0.0, 1280.0, 720.0),
             &NoopPlatformService,
         );
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.app_state().has_open_project());
         assert!(host.root.has_pending_close_dialog());
 
@@ -1919,15 +1909,15 @@ mod tests {
 
         assert_eq!(
             commands,
-            SelfHostedShellCommands { quit: true, ..SelfHostedShellCommands::default() }
+            AppUiShellCommands { quit: true, ..AppUiShellCommands::default() }
         );
         assert!(!host.app_state().has_open_project());
     }
 
     #[test]
     fn host_returns_custom_chrome_window_commands() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::app_shell_window_minimize_action());
@@ -1941,11 +1931,11 @@ mod tests {
 
         assert_eq!(
             commands,
-            SelfHostedShellCommands {
+            AppUiShellCommands {
                 minimize: true,
                 toggle_maximize: true,
                 begin_window_drag: true,
-                ..SelfHostedShellCommands::default()
+                ..AppUiShellCommands::default()
             }
         );
         assert!(!host.app_state().has_open_project());
@@ -1953,11 +1943,11 @@ mod tests {
 
     #[test]
     fn host_applies_and_persists_theme_preference_updates() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let path = temp_preferences_path("theme-preferences");
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             path.clone(),
         );
         let pending = PendingUiActions::default();
@@ -1971,11 +1961,11 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.preferences().theme_preset, ThemePreset::Light);
         assert_eq!(current_theme().name, "Light");
         assert_eq!(
-            load_self_hosted_preferences_from(&path).theme_preset,
+            load_app_ui_preferences_from(&path).theme_preset,
             ThemePreset::Light
         );
 
@@ -1984,14 +1974,14 @@ mod tests {
 
     #[test]
     fn host_applies_and_persists_shortcut_preference_updates() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let path = temp_preferences_path("shortcut-preferences");
-        let mut preferences = SelfHostedPreferences::default();
+        let mut preferences = AppUiPreferences::default();
         preferences
             .shortcut_overrides
-            .push(SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None });
+            .push(AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None });
         let mut host =
-            SelfHostedUiHost::new_with_preferences_path(AppState::new(), preferences, path.clone());
+            AppUiHost::new_with_preferences_path(AppState::new(), preferences, path.clone());
         let pending = PendingUiActions::default();
 
         pending.push(
@@ -2020,15 +2010,15 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(
             host.preferences().shortcut_overrides,
             vec![
-                SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
-                SelfHostedShortcutOverride {
+                AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
+                AppUiShortcutOverride {
                     id: "file.save_project".to_owned(),
-                    binding: Some(SelfHostedShortcutBinding {
-                        key: SelfHostedShortcutKey::I,
+                    binding: Some(AppUiShortcutBinding {
+                        key: AppUiShortcutKey::I,
                         ctrl: true,
                         alt: true,
                         shift: false,
@@ -2038,7 +2028,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            load_self_hosted_preferences_from(&path).shortcut_overrides,
+            load_app_ui_preferences_from(&path).shortcut_overrides,
             host.preferences().shortcut_overrides
         );
 
@@ -2047,11 +2037,11 @@ mod tests {
 
     #[test]
     fn host_persists_workspace_preference_updates() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let path = temp_preferences_path("workspace-preferences");
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
-            SelfHostedPreferences {
+            AppUiPreferences {
                 version: 1,
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Editing,
@@ -2070,10 +2060,10 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.root().workspace_preset(), WorkspacePreset::Export);
         assert_eq!(host.preferences().workspace_preset, WorkspacePreset::Export);
-        let loaded = load_self_hosted_preferences_from(&path);
+        let loaded = load_app_ui_preferences_from(&path);
         assert_eq!(loaded.workspace_preset, WorkspacePreset::Export);
         assert_eq!(loaded.theme_preset, ThemePreset::Dark);
 
@@ -2082,11 +2072,11 @@ mod tests {
 
     #[test]
     fn host_promotes_dragged_builtin_workspace_to_persisted_custom_layout() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let path = temp_preferences_path("workspace-custom-layout");
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             workspace_app_state(),
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             path.clone(),
         );
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -2100,7 +2090,7 @@ mod tests {
         assert_eq!(host.preferences().workspace_preset, WorkspacePreset::Custom);
         assert!(host.preferences().custom_workspace_layout.is_some());
         assert!((host.root().dock().ratio() - dragged_ratio).abs() < f32::EPSILON);
-        let loaded = load_self_hosted_preferences_from(&path);
+        let loaded = load_app_ui_preferences_from(&path);
         assert_eq!(loaded.workspace_preset, WorkspacePreset::Custom);
         assert_eq!(
             loaded.custom_workspace_layout,
@@ -2112,11 +2102,11 @@ mod tests {
 
     #[test]
     fn host_persists_toggle_panel_hidden_custom_layout() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let path = temp_preferences_path("workspace-toggle-layout");
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             workspace_app_state(),
-            SelfHostedPreferences::default(),
+            AppUiPreferences::default(),
             path.clone(),
         );
         TreeWalker::layout(host.root_mut(), Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -2129,12 +2119,12 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.root().workspace_preset(), WorkspacePreset::Custom);
         let layout = host.preferences().custom_workspace_layout.as_ref().expect("layout");
         assert!(!layout.contains_panel(PanelKind::Inspector));
         assert!(layout.contains_panel(PanelKind::Viewer));
-        let loaded = load_self_hosted_preferences_from(&path);
+        let loaded = load_app_ui_preferences_from(&path);
         assert_eq!(loaded.workspace_preset, WorkspacePreset::Custom);
         assert_eq!(
             loaded.custom_workspace_layout,
@@ -2146,11 +2136,11 @@ mod tests {
 
     #[test]
     fn host_persists_workspace_changes_from_panel_focus_fallback() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let path = temp_preferences_path("workspace-focus-preferences");
-        let mut host = SelfHostedUiHost::new_with_preferences_path(
+        let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
-            SelfHostedPreferences {
+            AppUiPreferences {
                 version: 1,
                 theme_preset: ThemePreset::Dark,
                 workspace_preset: WorkspacePreset::Editing,
@@ -2169,11 +2159,11 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.root().workspace_preset(), WorkspacePreset::Export);
         assert_eq!(host.preferences().workspace_preset, WorkspacePreset::Export);
         assert_eq!(
-            load_self_hosted_preferences_from(&path).workspace_preset,
+            load_app_ui_preferences_from(&path).workspace_preset,
             WorkspacePreset::Export
         );
 
@@ -2182,8 +2172,8 @@ mod tests {
 
     #[test]
     fn host_reports_unknown_app_shell_actions_as_status_errors() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
         pending.push(Action::Custom {
@@ -2197,7 +2187,7 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(
             host.app_state().status_hint.as_ref().is_some_and(|(message, is_error)| {
                 *is_error && message.contains("missing_command")
@@ -2207,8 +2197,8 @@ mod tests {
 
     #[test]
     fn host_ignores_unavailable_editor_actions_before_dispatch() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
         pending.push(Action::ImportMedia(vec![PathBuf::from("E:/media/a.mov")]));
@@ -2219,15 +2209,15 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.app_state().status_hint.is_none());
         assert!(!host.app_state().can_undo_action());
     }
 
     #[test]
     fn host_ignores_unavailable_typed_timeline_actions_before_dispatch() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(workspace_app_state());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(workspace_app_state());
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::timeline_move_clip_action(
@@ -2244,15 +2234,15 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.app_state().status_hint.is_none());
         assert!(!host.app_state().can_undo_action());
     }
 
     #[test]
     fn host_ignores_unavailable_app_shell_dialogs_before_platform_access() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
         let platform = CountingPlatform::default();
 
@@ -2260,14 +2250,14 @@ mod tests {
         let commands =
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(platform.open_file_dialog_calls.load(Ordering::Relaxed), 0);
         assert!(host.app_state().status_hint.is_none());
     }
 
     #[test]
     fn host_import_media_dialog_places_selected_files_in_target_asset_folder() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let library_root = temp_asset_library_dir("asset-dialog-import-library");
         let media_root = temp_asset_library_dir("asset-dialog-import-media");
         std::fs::create_dir_all(&media_root).expect("media root");
@@ -2277,7 +2267,7 @@ mod tests {
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = workspace_app_state();
         state.asset_library = Some(library);
-        let mut host = SelfHostedUiHost::new(state);
+        let mut host = AppUiHost::new(state);
         let pending = PendingUiActions::default();
         let platform = ProjectDialogPlatform {
             open_paths: Some(vec![media_path.clone()]),
@@ -2294,7 +2284,7 @@ mod tests {
         let commands =
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         let assets = host
             .app_state()
             .asset_library
@@ -2317,13 +2307,13 @@ mod tests {
 
     #[test]
     fn host_handles_asset_folder_navigation_as_shell_local_state() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let root = temp_asset_library_dir("asset-folder-navigation");
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = AppState::new();
         state.asset_library = Some(library);
-        let mut host = SelfHostedUiHost::new(state);
+        let mut host = AppUiHost::new(state);
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::assets_open_folder_action(
@@ -2335,7 +2325,7 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.root().asset_folder_id(), Some(folder_id.as_str()));
         assert!(host.app_state().status_hint.is_none());
 
@@ -2356,13 +2346,13 @@ mod tests {
 
     #[test]
     fn host_refresh_preserves_valid_asset_folder_and_normalizes_deleted_folder() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let root = temp_asset_library_dir("asset-folder-refresh-normalize");
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = workspace_app_state();
         state.asset_library = Some(library);
-        let mut host = SelfHostedUiHost::new(state);
+        let mut host = AppUiHost::new(state);
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
 
         host.root_mut().set_asset_folder_id(Some(folder_id.clone()));
@@ -2386,13 +2376,13 @@ mod tests {
 
     #[test]
     fn host_clears_deleted_asset_folder_selection_after_dispatch() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let root = temp_asset_library_dir("asset-folder-delete-normalize");
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = AppState::new();
         state.asset_library = Some(library);
-        let mut host = SelfHostedUiHost::new(state);
+        let mut host = AppUiHost::new(state);
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::assets_open_folder_action(
@@ -2414,7 +2404,7 @@ mod tests {
             &NoopPlatformService,
         );
 
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.root().asset_folder_id(), None);
         assert!(host
             .app_state()
@@ -2427,8 +2417,8 @@ mod tests {
 
     #[test]
     fn host_refreshes_root_after_failed_editor_action() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
-        let mut host = SelfHostedUiHost::new(AppState::new());
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::assets_prepare_drag_action(
@@ -2439,7 +2429,7 @@ mod tests {
             Rect::new(0.0, 0.0, 1280.0, 720.0),
             &NoopPlatformService,
         );
-        assert_eq!(commands, SelfHostedShellCommands::default());
+        assert_eq!(commands, AppUiShellCommands::default());
         assert!(
             host.app_state().status_hint.as_ref().is_some_and(|(message, is_error)| {
                 *is_error && message.contains("素材准备失败")

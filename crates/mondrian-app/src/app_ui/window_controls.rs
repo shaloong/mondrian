@@ -1,4 +1,4 @@
-//! Platform-aware custom window controls for the self-hosted product chrome.
+//! Platform-aware custom window controls for the app UI product chrome.
 //!
 //! Real OS titlebar buttons cannot be embedded portably while keeping a fully
 //! custom title/menu row. This module keeps the self-drawn controls behind a

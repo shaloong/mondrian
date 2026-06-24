@@ -1,5 +1,5 @@
 use super::*;
-use crate::self_hosted::shell::SelfHostedAppRoot;
+use crate::app_ui::shell::AppUiAppRoot;
 use serde::Serialize;
 use std::cmp;
 use std::fs::OpenOptions;
@@ -26,7 +26,7 @@ struct PerfCaseReport {
 }
 
 #[derive(Debug, Serialize)]
-struct SelfHostedUiScaleReport {
+struct AppUiScaleReport {
     scenario: &'static str,
     assets: usize,
     clips: usize,
@@ -178,8 +178,8 @@ fn perf_project_lifecycle_smoke() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "development self-hosted UI scale smoke test; run manually"]
-fn self_hosted_ui_scale_smoke() -> anyhow::Result<()> {
+#[ignore = "development app UI scale smoke test; run manually"]
+fn app_ui_scale_smoke() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
 
     let asset_count = env_usize_clamped("MONDRIAN_UI_PERF_ASSETS", 360, 32, 5_000);
@@ -199,28 +199,27 @@ fn self_hosted_ui_scale_smoke() -> anyhow::Result<()> {
     let root_dir = std::env::temp_dir().join(format!("mondrian_ui_perf_smoke_{uniq}"));
     fs::create_dir_all(&root_dir)?;
 
-    let result = (|| -> anyhow::Result<SelfHostedUiScaleReport> {
-        let mut state =
-            build_self_hosted_ui_perf_state(&root_dir, asset_count, clip_count, effect_count)?;
+    let result = (|| -> anyhow::Result<AppUiScaleReport> {
+        let mut state = build_app_ui_perf_state(&root_dir, asset_count, clip_count, effect_count)?;
         let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
         let theme = ThemePreset::Dark.build();
 
         let build_case = run_case(
-            "self_hosted.root_build_large_project",
+            "app_ui.root_build_large_project",
             1,
             build_threshold_ms,
             || {
-                let mut root = SelfHostedAppRoot::from_app_state(&state);
+                let mut root = AppUiAppRoot::from_app_state(&state);
                 TreeWalker::layout(&mut root, bounds);
                 Ok(())
             },
         )?;
 
-        let mut root = SelfHostedAppRoot::from_app_state(&state);
+        let mut root = AppUiAppRoot::from_app_state(&state);
         TreeWalker::layout(&mut root, bounds);
 
         let refresh_case = run_case(
-            "self_hosted.refresh_large_project",
+            "app_ui.refresh_large_project",
             refresh_iterations,
             refresh_threshold_ms,
             || {
@@ -230,7 +229,7 @@ fn self_hosted_ui_scale_smoke() -> anyhow::Result<()> {
             },
         )?;
 
-        let resize_case = run_case("self_hosted.resize_loop", 1, resize_threshold_ms, || {
+        let resize_case = run_case("app_ui.resize_loop", 1, resize_threshold_ms, || {
             for index in 0..resize_iterations {
                 let width = 1280.0 + (index % 9) as f32 * 83.0;
                 let height = 720.0 + (index % 7) as f32 * 47.0;
@@ -241,24 +240,19 @@ fn self_hosted_ui_scale_smoke() -> anyhow::Result<()> {
         })?;
 
         let mut initial_paint_commands = 0usize;
-        let paint_case = run_case(
-            "self_hosted.paint_large_project",
-            1,
-            paint_threshold_ms,
-            || {
-                initial_paint_commands = paint_command_count(&root, &theme, bounds);
-                anyhow::ensure!(
-                    initial_paint_commands > 0,
-                    "self-hosted root emitted no paint commands"
-                );
-                Ok(())
-            },
-        )?;
+        let paint_case = run_case("app_ui.paint_large_project", 1, paint_threshold_ms, || {
+            initial_paint_commands = paint_command_count(&root, &theme, bounds);
+            anyhow::ensure!(
+                initial_paint_commands > 0,
+                "app UI root emitted no paint commands"
+            );
+            Ok(())
+        })?;
 
         state.play();
         let mut playback_paint_commands_max = 0usize;
         let playback_case = run_case(
-            "self_hosted.sustained_playback_refresh",
+            "app_ui.sustained_playback_refresh",
             1,
             playback_threshold_ms,
             || {
@@ -276,8 +270,8 @@ fn self_hosted_ui_scale_smoke() -> anyhow::Result<()> {
         )?;
         state.pause();
 
-        Ok(SelfHostedUiScaleReport {
-            scenario: "self_hosted_ui_scale",
+        Ok(AppUiScaleReport {
+            scenario: "app_ui_scale",
             assets: asset_count,
             clips: clip_count,
             effects: effect_count,
@@ -306,7 +300,7 @@ fn self_hosted_ui_scale_smoke() -> anyhow::Result<()> {
         report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();
     if !failed_cases.is_empty() {
         anyhow::bail!(
-            "self-hosted UI scale smoke test failed: {:?}; report: {}",
+            "app UI scale smoke test failed: {:?}; report: {}",
             failed_cases,
             report_json
         );
@@ -315,7 +309,7 @@ fn self_hosted_ui_scale_smoke() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_self_hosted_ui_perf_state(
+fn build_app_ui_perf_state(
     root_dir: &Path,
     asset_count: usize,
     clip_count: usize,
@@ -332,7 +326,7 @@ fn build_self_hosted_ui_perf_state(
         asset_ids.push(id);
     }
 
-    let mut sequence = Sequence::new("Self-hosted UI perf");
+    let mut sequence = Sequence::new("App UI perf");
     sequence.video_tracks.clear();
     sequence.audio_tracks.clear();
 
@@ -420,7 +414,7 @@ fn build_self_hosted_ui_perf_state(
 }
 
 fn paint_command_count(
-    root: &SelfHostedAppRoot,
+    root: &AppUiAppRoot,
     theme: &mondrian_ui_theme::Theme,
     bounds: Rect,
 ) -> usize {

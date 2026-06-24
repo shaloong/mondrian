@@ -1,4 +1,4 @@
-//! Shared preview-resolution scale helpers for self-hosted UI adapters.
+//! Shared preview-resolution scale helpers for app UI adapters.
 
 pub(crate) fn normalize_preview_resolution_scale(scale: f32) -> f32 {
     if scale.is_finite() {

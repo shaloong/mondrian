@@ -379,7 +379,7 @@ fn shell_overlay_layers(eyedropper_active: bool, tooltip_visible: bool) -> Vec<S
 
 /// Convert a winit IME event into Mondrian's platform-neutral UI event.
 ///
-/// Winit reports composition cancellation as `Ime::Disabled`; the self-hosted
+/// Winit reports composition cancellation as `Ime::Disabled`; the app UI
 /// model keeps that distinct from an empty preedit update so widgets can clear
 /// local composition state without treating a sentinel string as protocol.
 pub fn winit_ime_to_ui_event(event: Ime) -> Option<UiEvent> {

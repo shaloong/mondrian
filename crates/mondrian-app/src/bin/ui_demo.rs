@@ -12,11 +12,9 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use mondrian_app::self_hosted::icons::AppIcon;
-use mondrian_app::self_hosted::rendering::{
-    SelfHostedFrameRenderer, SelfHostedRenderDiagnosticReporter,
-};
-use mondrian_app::self_hosted::runtime::{
+use mondrian_app::app_ui::icons::AppIcon;
+use mondrian_app::app_ui::rendering::{AppUiFrameRenderer, AppUiRenderDiagnosticReporter};
+use mondrian_app::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
 };
@@ -1489,8 +1487,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Failed surface config")?;
     surface.configure(&device, &config);
 
-    let mut frame_renderer = SelfHostedFrameRenderer::new(&device, config.format);
-    let mut render_diagnostic_reporter = SelfHostedRenderDiagnosticReporter::default();
+    let mut frame_renderer = AppUiFrameRenderer::new(&device, config.format);
+    let mut render_diagnostic_reporter = AppUiRenderDiagnosticReporter::default();
 
     let mut root = build_dock_tree();
     let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);

@@ -1,11 +1,11 @@
-//! Host-owned thumbnail cache for self-hosted asset cards.
+//! Host-owned thumbnail cache for app UI asset cards.
 //!
 //! This module keeps media decoding and cache invalidation out of reusable
 //! widgets. Panels ask for already-renderable thumbnails through
 //! `AssetThumbnailSource`; missing video thumbnails are decoded on a background
 //! worker and picked up by the host on the next event-loop wake.
 
-use crate::self_hosted::panels::{AssetThumbnailSource, AssetThumbnailState};
+use crate::app_ui::panels::{AssetThumbnailSource, AssetThumbnailState};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::AssetId;
 use mondrian_ui_widgets::RasterImage;
@@ -65,7 +65,7 @@ impl AssetThumbnailCache {
             .name("mondrian-ui-asset-thumbnails".to_owned())
             .spawn(move || thumbnail_worker(job_rx, result_tx))
         {
-            tracing::warn!("failed to start self-hosted asset thumbnail worker: {err}");
+            tracing::warn!("failed to start app UI asset thumbnail worker: {err}");
         }
 
         Self {

@@ -1,4 +1,4 @@
-//! Pending close confirmation dialog for the self-hosted shell.
+//! Pending close confirmation dialog for the app UI shell.
 
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};

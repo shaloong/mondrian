@@ -15,7 +15,7 @@ FrameRequest(timecode)
 │  4. GPU compute：YUV→RGB 颜色转换 + 效果链       │
 │  5. Pass Fusion：单次 render pass 合成最多 4 层  │
 │  6. 输出最终帧 (CompositedFrame / preview frame) │
-│     → self-hosted ViewerSurface / legacy callback│
+│     → app UI ViewerSurface / export consumer│
 └───────────────────────┬─────────────────────────┘
                         │
                         ▼
@@ -207,8 +207,8 @@ MONDRIAN_RENDER_PROFILE=1 cargo run -p mondrian-app
 
 ## 7. 预览集成边界
 
-BatchedCompositor 的核心职责是输出可由预览或导出消费的合成结果。self-hosted
-产品路径由 `SelfHostedPreviewService` / `ViewerSurface` 负责把 app-state 预览结果映射为
+BatchedCompositor 的核心职责是输出可由预览或导出消费的合成结果。app UI
+产品路径由 `AppUiPreviewService` / `ViewerSurface` 负责把 app-state 预览结果映射为
 自研 UI 可绘制的 frame，不应复制 renderer/export 的 timeline 解释规则。
 
 ```rust

@@ -106,7 +106,7 @@ DecoderPool::get_frame(clip_id, local_time)
 FrameCompositor::composite(clips, effects, keyframes)
   → GPU compositing (BatchedCompositor, up to 4 layers/pass)
   → GPU color conversion (Rec709/sRGB)
-  → Preview adapter (self-hosted ViewerSurface or export)
+  → Preview adapter (app UI ViewerSurface or export)
       │
       ▼
 预览窗口显示
@@ -188,8 +188,8 @@ pub struct AssetId(Uuid);
 ### 4.4 应用级主题系统（Dark / Light）
 
 `mondrian-app` 的主题是应用级配置，不进入项目文件。当前产品路径是
-self-hosted winit/wgpu UI：主题预设持久化在
-`self_hosted::preferences_store::SelfHostedPreferences.theme_preset`，并通过
+app UI winit/wgpu UI：主题预设持久化在
+`app_ui::preferences_store::AppUiPreferences.theme_preset`，并通过
 `mondrian-ui-theme::ThemePreset` 构建运行时 token。
 
 - `Dark`：强制深色。
@@ -197,8 +197,8 @@ self-hosted winit/wgpu UI：主题预设持久化在
 
 实现约定：
 
-- 主题模式持久化在 self-hosted shell preferences，不写入 `.mdp` 项目文件。
-- `SelfHostedUiHost` 在应用偏好变更时调用 `mondrian-ui-theme::set_theme_preset`
+- 主题模式持久化在 app UI shell preferences，不写入 `.mdp` 项目文件。
+- `AppUiHost` 在应用偏好变更时调用 `mondrian-ui-theme::set_theme_preset`
   更新全局 token；可复用 widgets 只消费传入的 theme/token，不读写偏好文件。
 - 通过统一 token 表（色板 + 度量）驱动颜色、字体、间距、圆角等样式，禁止业务面板散落硬编码主题值。
 - 支持插件覆写入口：插件可注册 token override，在不改业务面板代码的前提下覆写颜色与样式度量。
@@ -213,12 +213,12 @@ self-hosted winit/wgpu UI：主题预设持久化在
 
 ### 4.5 启动引导窗口（透明圆角）
 
-self-hosted 产品入口使用 `self_hosted::window` 创建启动窗口，并由
-`SelfHostedUiHost` 在新建/打开项目后切换到工作区窗口。启动阶段使用透明、
+app UI 产品入口使用 `app_ui::window` 创建启动窗口，并由
+`AppUiHost` 在新建/打开项目后切换到工作区窗口。启动阶段使用透明、
 无系统装饰、固定尺寸窗口显示项目引导界面，确保圆角卡片外侧为真实透明而非黑底：
 
 - winit window 初始即启用 transparent/undecorated/fixed-size 启动角色。
-- 启动窗口尺寸由 self-hosted startup/layout token 控制，避免首屏尺寸跳变。
+- 启动窗口尺寸由 app UI startup/layout token 控制，避免首屏尺寸跳变。
 - 渲染器启动帧使用透明清屏；进入工作区后窗口 session 会重建为可调整尺寸的 workspace 角色。
 - 启动 UI 外层不再绘制兜底背景，圆角仅由启动卡片自身负责。
 - 避免在启动页最外层绘制“整窗不透明底板”。若在透明窗口上绘制接近全屏的不透明矩形，即使窗口透明链路正确，也会产生“黑底仍在”的视觉结果。

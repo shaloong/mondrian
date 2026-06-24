@@ -1,4 +1,4 @@
-//! Test helpers for self-hosted shell widgets.
+//! Test helpers for app UI shell widgets.
 
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;

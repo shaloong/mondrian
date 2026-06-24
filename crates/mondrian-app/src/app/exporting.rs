@@ -51,7 +51,7 @@ pub struct ExportPresetOption {
     pub preset: ExportPreset,
 }
 
-/// Built-in export presets shared by legacy egui and self-hosted UI panels.
+/// Built-in export presets shared by app UI panels.
 pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
     vec![
         ExportPresetOption {

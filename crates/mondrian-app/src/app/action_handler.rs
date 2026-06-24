@@ -2240,7 +2240,7 @@ fn parse_ui_payload<T: serde::de::DeserializeOwned>(
 fn unknown_ui_action_error(step_prefix: &'static str, name: &str) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: format!("{step_prefix}.{name}"),
-        reason: format!("unknown self-hosted UI action: {name}"),
+        reason: format!("unknown app UI action: {name}"),
     }
 }
 
@@ -2462,7 +2462,7 @@ mod tests {
             match err {
                 MondrianError::WorkflowStepFailed { step_id, reason } => {
                     assert_eq!(step_id, expected_step);
-                    assert!(reason.contains("unknown self-hosted UI action"));
+                    assert!(reason.contains("unknown app UI action"));
                 }
                 other => panic!("expected unknown UI action workflow error, got {other:?}"),
             }

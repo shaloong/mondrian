@@ -1,4 +1,4 @@
-//! Shared self-hosted action availability gates.
+//! Shared app UI action availability gates.
 //!
 //! Menus, focused shortcuts, and panel adapters use this module to keep their
 //! disabled states aligned before actions reach `AppState`.

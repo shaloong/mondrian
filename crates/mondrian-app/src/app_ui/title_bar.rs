@@ -1,4 +1,4 @@
-//! Self-hosted top chrome combining product menus, title, and window controls.
+//! App UI top chrome combining product menus, title, and window controls.
 //!
 //! Native window effects stay behind app-shell actions. This widget only owns
 //! layout, hit testing, and drawing for the custom title/menu row.
@@ -12,13 +12,13 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_widgets::RasterImage;
 
 use crate::app::ui_actions::app_shell_window_drag_action;
-use crate::self_hosted::menu_bar::{MenuBar, MENU_BAR_HEIGHT};
+use crate::app_ui::menu_bar::{MenuBar, MENU_BAR_HEIGHT};
 #[cfg(test)]
-use crate::self_hosted::window_controls::PlatformWindowControlStyle;
-use crate::self_hosted::window_controls::{WindowControl, WindowControlEdge, WindowControls};
-use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
+use crate::app_ui::window_controls::PlatformWindowControlStyle;
+use crate::app_ui::window_controls::{WindowControl, WindowControlEdge, WindowControls};
+use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
-/// Height reserved for the self-hosted menu/title chrome.
+/// Height reserved for the app UI menu/title chrome.
 pub const TITLE_BAR_HEIGHT: f32 = 34.0;
 
 const BRAND_ICON_SIZE: f32 = 16.0;
@@ -83,7 +83,7 @@ impl TitleBar {
     pub(crate) fn refresh_shell_menu_checked_state(
         &mut self,
         workspace_preset: WorkspacePreset,
-        workspace_layout: Option<&SelfHostedWorkspaceLayout>,
+        workspace_layout: Option<&AppUiWorkspaceLayout>,
     ) {
         self.menu_bar.refresh_shell_checked_state(workspace_preset, workspace_layout);
     }
@@ -322,7 +322,7 @@ fn title_bar_favicon_image() -> Option<&'static RasterImage> {
 mod tests {
     use super::*;
     use crate::app::ui_actions::app_shell_quit_action;
-    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;

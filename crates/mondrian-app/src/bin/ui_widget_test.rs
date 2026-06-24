@@ -5,7 +5,7 @@
 //! Builds a simple widget tree and renders it. Uses BRIGHT colors to make visual
 //! inspection easy.
 
-use mondrian_app::self_hosted::rendering::SelfHostedFrameRenderer;
+use mondrian_app::app_ui::rendering::AppUiFrameRenderer;
 use mondrian_core::Color;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sz = w.inner_size();
     let mut cfg = surf.get_default_config(&adap, sz.width, sz.height).unwrap();
     surf.configure(&dev, &cfg);
-    let mut frame_renderer = SelfHostedFrameRenderer::new(&dev, cfg.format);
+    let mut frame_renderer = AppUiFrameRenderer::new(&dev, cfg.format);
 
     // Build widget tree: RootFill containing 2 ColoredBox children
     // Red box at (50,50) 300x400, Blue box at (450,50) 300x400

@@ -1,4 +1,4 @@
-//! Route-level guards for keeping the product on the self-hosted UI path.
+//! Route-level guards for keeping the product on the app UI path.
 
 use std::path::Path;
 
@@ -52,7 +52,7 @@ fn manifest_bins(manifest: &str) -> Vec<BinEntry> {
 }
 
 #[test]
-fn product_default_run_targets_self_hosted_main_binary() {
+fn product_default_run_targets_app_ui_main_binary() {
     let manifest = include_str!("../Cargo.toml");
     let default_run = manifest
         .lines()
@@ -88,12 +88,12 @@ fn product_default_run_targets_self_hosted_main_binary() {
 }
 
 #[test]
-fn product_main_calls_only_the_self_hosted_window_runner() {
+fn product_main_calls_only_the_app_ui_window_runner() {
     let main_rs = include_str!("../src/main.rs");
 
     assert!(
-        main_rs.contains("mondrian_app::self_hosted::window::run_self_hosted_app()"),
-        "product main must launch the self-hosted winit/wgpu shell"
+        main_rs.contains("mondrian_app::app_ui::window::run_app_ui()"),
+        "product main must launch the app UI winit/wgpu shell"
     );
     for forbidden in ["run_native", "eframe", "egui_ui", "MondrianApp"] {
         assert!(

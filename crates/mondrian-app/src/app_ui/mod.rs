@@ -1,4 +1,4 @@
-//! Self-hosted UI application shell and panel adapters.
+//! App UI application shell and panel adapters.
 //!
 //! This module is the bridge between the reusable `mondrian-ui-*` crates and
 //! the Mondrian application layer. Binaries should stay thin and call into this

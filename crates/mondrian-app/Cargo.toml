@@ -6,12 +6,12 @@ authors.workspace    = true
 license.workspace    = true
 default-run = "mondrian"
 
-# Product self-hosted editor shell.
+# Product app UI editor shell.
 [[bin]]
 name = "mondrian"
 path = "src/main.rs"
 
-# Developer gallery for reusable self-hosted widgets.
+# Developer gallery for reusable app UI widgets.
 [[bin]]
 name = "ui_demo"
 path = "src/bin/ui_demo.rs"

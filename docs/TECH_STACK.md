@@ -70,27 +70,27 @@ Linux   → Vulkan
 WebGPU  → 浏览器版（未来）
 ```
 
-当前使用 wgpu 29.0。产品 UI 是 self-hosted winit/wgpu shell；preview 与
+当前使用 wgpu 29.0。产品 UI 是 app UI winit/wgpu shell；preview 与
 export compositor 均通过同一 device/queue 语义提交工作，不再保留 egui/eframe
 产品路径。
 
 ---
 
-## 四、UI 框架：self-hosted winit/wgpu
+## 四、UI 框架：app UI winit/wgpu
 
-Mondrian 的产品 UI 走自研 self-hosted 栈：
+Mondrian 的产品 UI 走自研 app UI 栈：
 
 ```text
 winit / mondrian-platform
 wgpu / mondrian-ui-renderer
 cosmic-text / mondrian-ui-text
 mondrian-ui-core / layout / events / widgets / tooltip / theme
-mondrian-editor-ui / mondrian-app::self_hosted
+mondrian-editor-ui / mondrian-app::app_ui
 ```
 
 - Rust 负责窗口、事件、布局、渲染、组件、文本、主题和编辑器状态接入。
 - UI token、dock/panel、overlay、shortcut、IME、tooltip、drag/drop、viewer 和
-  timeline 行为在 self-hosted 栈内收敛。
+  timeline 行为在 app UI 栈内收敛。
 - 旧 egui/eframe 原型代码已从 `mondrian-app` crate 删除；后续 UI 工作不得新增
   egui 兼容路径。
 

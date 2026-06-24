@@ -1,4 +1,4 @@
-//! Self-hosted sequence settings dialog.
+//! App UI sequence settings dialog.
 //!
 //! The dialog owns shell-local draft state. It emits a typed sequence update
 //! only on Apply, keeping editor mutations in `AppState`.
@@ -24,12 +24,12 @@ use crate::app::ui_actions::{
     app_shell_sequence_settings_tab_changed_action, SequenceSettingsDraftUpdatePayload,
     SequenceSettingsTabPayload, SequenceUpdateSettingsPayload,
 };
-use crate::self_hosted::icons::AppIcon;
-use crate::self_hosted::preview_scale::preview_scale_percent_label;
+use crate::app_ui::icons::AppIcon;
+use crate::app_ui::preview_scale::preview_scale_percent_label;
 
 /// Shell-local sequence settings form state.
 #[derive(Debug, Clone)]
-pub struct SelfHostedSequenceSettingsDraft {
+pub struct AppUiSequenceSettingsDraft {
     /// Sequence targeted by this modal.
     pub sequence_id: mondrian_core::types::SequenceId,
     /// Editable user-facing sequence name.
@@ -38,7 +38,7 @@ pub struct SelfHostedSequenceSettingsDraft {
     pub settings: SequenceSettings,
 }
 
-impl SelfHostedSequenceSettingsDraft {
+impl AppUiSequenceSettingsDraft {
     /// Build a draft from the active sequence snapshot.
     pub fn from_sequence(sequence: &Sequence) -> Self {
         Self {
@@ -654,7 +654,7 @@ fn export_bit_depth_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn editing_mode_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn editing_mode_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         editing_mode_label(draft.settings.editing_mode),
         editing_mode_items(),
@@ -662,7 +662,7 @@ fn editing_mode_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdow
     .with_max_visible_items(6)
 }
 
-fn resolution_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn resolution_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         resolution_label(draft.settings.resolution),
         resolution_items(),
@@ -670,7 +670,7 @@ fn resolution_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown 
     .with_max_visible_items(4)
 }
 
-fn resolution_width_input_for(draft: &SelfHostedSequenceSettingsDraft) -> NumberInput {
+fn resolution_width_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput {
     NumberInput::new(
         draft.settings.resolution.width as f64,
         SequenceSettings::MIN_WIDTH as f64,
@@ -685,7 +685,7 @@ fn resolution_width_input_for(draft: &SelfHostedSequenceSettingsDraft) -> Number
     })
 }
 
-fn resolution_height_input_for(draft: &SelfHostedSequenceSettingsDraft) -> NumberInput {
+fn resolution_height_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput {
     NumberInput::new(
         draft.settings.resolution.height as f64,
         SequenceSettings::MIN_HEIGHT as f64,
@@ -700,7 +700,7 @@ fn resolution_height_input_for(draft: &SelfHostedSequenceSettingsDraft) -> Numbe
     })
 }
 
-fn frame_rate_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn frame_rate_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         frame_rate_label(draft.settings.frame_rate),
         frame_rate_items(),
@@ -708,7 +708,7 @@ fn frame_rate_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown 
     .with_max_visible_items(7)
 }
 
-fn start_timecode_input_for(draft: &SelfHostedSequenceSettingsDraft) -> NumberInput {
+fn start_timecode_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput {
     NumberInput::new(
         draft.settings.start_timecode_frame as f64,
         0.0,
@@ -723,7 +723,7 @@ fn start_timecode_input_for(draft: &SelfHostedSequenceSettingsDraft) -> NumberIn
     })
 }
 
-fn pixel_aspect_ratio_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn pixel_aspect_ratio_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         pixel_aspect_ratio_label(draft.settings.pixel_aspect_ratio),
         pixel_aspect_ratio_items(),
@@ -731,7 +731,7 @@ fn pixel_aspect_ratio_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> D
     .with_max_visible_items(6)
 }
 
-fn field_order_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn field_order_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         field_order_label(draft.settings.field_order),
         field_order_items(),
@@ -739,7 +739,7 @@ fn field_order_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown
     .with_max_visible_items(3)
 }
 
-fn video_display_format_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn video_display_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         video_display_format_label(draft.settings.video_display_format),
         video_display_format_items(),
@@ -747,7 +747,7 @@ fn video_display_format_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) ->
     .with_max_visible_items(5)
 }
 
-fn color_space_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn color_space_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         color_space_label(draft.settings.color_space),
         color_space_items(SequenceSettingsDraftUpdatePayload::ColorSpace),
@@ -755,7 +755,7 @@ fn color_space_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown
     .with_max_visible_items(6)
 }
 
-fn output_color_space_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn output_color_space_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         color_space_label(draft.settings.color_management.output_color_space),
         color_space_items(SequenceSettingsDraftUpdatePayload::OutputColorSpace),
@@ -763,7 +763,7 @@ fn output_color_space_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> D
     .with_max_visible_items(6)
 }
 
-fn color_workflow_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn color_workflow_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         color_workflow_label(draft.settings.color_management.workflow),
         color_workflow_items(),
@@ -771,7 +771,7 @@ fn color_workflow_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropd
     .with_max_visible_items(3)
 }
 
-fn missing_color_metadata_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn missing_color_metadata_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         missing_color_metadata_policy_label(
             draft.settings.color_management.missing_metadata_policy,
@@ -781,7 +781,7 @@ fn missing_color_metadata_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) 
     .with_max_visible_items(3)
 }
 
-fn nested_color_processing_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn nested_color_processing_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         nested_color_processing_label(draft.settings.color_management.nested_processing),
         nested_color_processing_items(),
@@ -789,7 +789,7 @@ fn nested_color_processing_dropdown_for(draft: &SelfHostedSequenceSettingsDraft)
     .with_max_visible_items(3)
 }
 
-fn video_range_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn video_range_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         video_range_label(draft.settings.color_management.video_range),
         video_range_items(),
@@ -797,7 +797,7 @@ fn video_range_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown
     .with_max_visible_items(2)
 }
 
-fn export_bit_depth_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn export_bit_depth_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         export_bit_depth_label(draft.settings.color_management.export_bit_depth),
         export_bit_depth_items(),
@@ -805,7 +805,7 @@ fn export_bit_depth_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dro
     .with_max_visible_items(3)
 }
 
-fn audio_sample_rate_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn audio_sample_rate_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         audio_sample_rate_label(draft.settings.audio_sample_rate),
         audio_sample_rate_items(),
@@ -813,7 +813,7 @@ fn audio_sample_rate_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dr
     .with_max_visible_items(5)
 }
 
-fn audio_channel_layout_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn audio_channel_layout_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         audio_channel_layout_label(draft.settings.audio_channel_layout),
         audio_channel_layout_items(),
@@ -821,7 +821,7 @@ fn audio_channel_layout_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) ->
     .with_max_visible_items(3)
 }
 
-fn audio_display_format_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn audio_display_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         audio_display_format_label(draft.settings.audio_display_format),
         audio_display_format_items(),
@@ -829,7 +829,7 @@ fn audio_display_format_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) ->
     .with_max_visible_items(2)
 }
 
-fn preview_render_format_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -> Dropdown {
+fn preview_render_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         preview_render_format_label(draft.settings.preview.format),
         preview_render_format_items(),
@@ -837,7 +837,7 @@ fn preview_render_format_dropdown_for(draft: &SelfHostedSequenceSettingsDraft) -
     .with_max_visible_items(4)
 }
 
-fn preview_scale_slider_for(draft: &SelfHostedSequenceSettingsDraft) -> Slider {
+fn preview_scale_slider_for(draft: &AppUiSequenceSettingsDraft) -> Slider {
     Slider::new(draft.settings.preview.resolution_scale, 0.125, 1.0)
         .with_step(0.125)
         .on_change(|scale| {
@@ -847,7 +847,7 @@ fn preview_scale_slider_for(draft: &SelfHostedSequenceSettingsDraft) -> Slider {
         })
 }
 
-fn preview_cache_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkbox {
+fn preview_cache_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
     Checkbox::new("预览缓存", draft.settings.preview.cache_enabled).on_change(|enabled| {
         app_shell_sequence_settings_draft_changed_action(
             SequenceSettingsDraftUpdatePayload::PreviewCacheEnabled(enabled),
@@ -855,7 +855,7 @@ fn preview_cache_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkb
     })
 }
 
-fn auto_tone_map_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkbox {
+fn auto_tone_map_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
     Checkbox::new("自动色调映射媒体", draft.settings.auto_tone_map_media).on_change(|enabled| {
         app_shell_sequence_settings_draft_changed_action(
             SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled),
@@ -863,7 +863,7 @@ fn auto_tone_map_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkb
     })
 }
 
-fn preserve_hdr_metadata_checkbox_for(draft: &SelfHostedSequenceSettingsDraft) -> Checkbox {
+fn preserve_hdr_metadata_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
     Checkbox::new(
         "保留 HDR 元数据",
         draft.settings.color_management.preserve_hdr_metadata,
@@ -909,10 +909,10 @@ const TITLE_BASELINE_Y: f32 = 22.0;
 const DESCRIPTION_BASELINE_Y: f32 = 46.0;
 const NAME_LABEL_BASELINE_Y: f32 = 132.0;
 
-/// Sequence settings modal for the self-hosted product shell.
+/// Sequence settings modal for the app UI product shell.
 pub struct SequenceSettingsDialog {
     id: WidgetId,
-    draft: SelfHostedSequenceSettingsDraft,
+    draft: AppUiSequenceSettingsDraft,
     active_tab: SequenceSettingsTabPayload,
     surface: DialogSurface,
     bounds: Rect,
@@ -959,7 +959,7 @@ pub struct SequenceSettingsDialog {
 
 impl SequenceSettingsDialog {
     /// Build the sequence settings dialog from an explicit draft.
-    pub fn new(draft: SelfHostedSequenceSettingsDraft) -> Self {
+    pub fn new(draft: AppUiSequenceSettingsDraft) -> Self {
         let title_label = Label::new("序列设置")
             .popover_foreground()
             .with_font_size(TITLE_FONT_SIZE)
@@ -1146,7 +1146,7 @@ impl SequenceSettingsDialog {
     }
 
     /// Current shell-local draft.
-    pub fn draft(&self) -> &SelfHostedSequenceSettingsDraft {
+    pub fn draft(&self) -> &AppUiSequenceSettingsDraft {
         &self.draft
     }
 }

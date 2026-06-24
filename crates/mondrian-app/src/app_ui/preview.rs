@@ -1,4 +1,4 @@
-//! Viewer preview service for the self-hosted UI host.
+//! Viewer preview service for the app UI host.
 //!
 //! The service owns render-plan interpretation and preview-frame cache keys.
 //! Panels stay read-only and only consume `ViewerFrameImage` payloads.
@@ -23,17 +23,17 @@ use mondrian_timeline::sequence::Sequence;
 use mondrian_ui_widgets::ViewerFrameImage;
 
 use crate::app::AppState;
-use crate::self_hosted::panels::ViewerPreviewSource;
-use crate::self_hosted::preview_scale::normalize_preview_resolution_scale;
+use crate::app_ui::panels::ViewerPreviewSource;
+use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
 const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
 
-/// Host-owned preview renderer used by the self-hosted viewer panel.
+/// Host-owned preview renderer used by the app UI viewer panel.
 ///
 /// This first path renders solid-color render-plan elements through the shared
 /// renderer compositor. Media and nested-sequence decode can attach here without
 /// changing panel models or widget APIs.
-pub struct SelfHostedPreviewService {
+pub struct AppUiPreviewService {
     jobs: mpsc::Sender<MediaPreviewJob>,
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     media_cache: RefCell<HashMap<MediaPreviewKey, MediaPreviewFrame>>,
@@ -42,7 +42,7 @@ pub struct SelfHostedPreviewService {
     scratch: RefCell<TimelineCompositeScratch>,
 }
 
-impl SelfHostedPreviewService {
+impl AppUiPreviewService {
     /// Create an empty preview service.
     pub fn new() -> Self {
         let (job_tx, job_rx) = mpsc::channel::<MediaPreviewJob>();
@@ -51,7 +51,7 @@ impl SelfHostedPreviewService {
             .name("mondrian-ui-viewer-preview".to_owned())
             .spawn(move || media_preview_worker(job_rx, result_tx))
         {
-            tracing::warn!("failed to start self-hosted viewer preview worker: {err}");
+            tracing::warn!("failed to start app UI viewer preview worker: {err}");
         }
 
         Self {
@@ -213,13 +213,13 @@ enum ResolvedPreviewElement {
     },
 }
 
-impl ViewerPreviewSource for SelfHostedPreviewService {
+impl ViewerPreviewSource for AppUiPreviewService {
     fn viewer_frame_for_state(&self, state: &AppState) -> Option<ViewerFrameImage> {
         self.render_preview(state)
     }
 }
 
-impl Default for SelfHostedPreviewService {
+impl Default for AppUiPreviewService {
     fn default() -> Self {
         Self::new()
     }
@@ -262,7 +262,7 @@ struct MediaPreviewResult {
     error: Option<String>,
 }
 
-impl SelfHostedPreviewService {
+impl AppUiPreviewService {
     fn media_frame_for_plan(
         &self,
         state: &AppState,
@@ -376,7 +376,7 @@ fn preview_cache_key(frame: i64, width: u32, height: u32, rgba: &[u8]) -> String
     let mut hasher = DefaultHasher::new();
     rgba.hash(&mut hasher);
     format!(
-        "self-hosted-viewer:{width}x{height}:f{frame}:p{:016x}",
+        "app UI-viewer:{width}x{height}:f{frame}:p{:016x}",
         hasher.finish()
     )
 }
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn solid_color_sequence_returns_preview_frame_at_preview_scale() {
-        let service = SelfHostedPreviewService::new();
+        let service = AppUiPreviewService::new();
         let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
 
         let frame = service
@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(frame.width, 960);
         assert_eq!(frame.height, 540);
         assert_eq!(frame.rgba.len(), 960 * 540 * 4);
-        assert!(frame.key.contains("self-hosted-viewer:960x540:f4:"));
+        assert!(frame.key.contains("app UI-viewer:960x540:f4:"));
     }
 
     #[test]
@@ -518,7 +518,7 @@ mod tests {
         state.sequence = Some(parent);
         state.seek(3);
 
-        let service = SelfHostedPreviewService::new();
+        let service = AppUiPreviewService::new();
         let frame = service
             .viewer_frame_for_state(&state)
             .expect("nested solid sequence should preview");
@@ -542,14 +542,14 @@ mod tests {
             .expect("media clip should be insertable");
         state.sequence = Some(sequence);
 
-        let service = SelfHostedPreviewService::new();
+        let service = AppUiPreviewService::new();
 
         assert!(service.viewer_frame_for_state(&state).is_none());
     }
 
     #[test]
     fn preview_cache_key_changes_when_pixels_change() {
-        let service = SelfHostedPreviewService::new();
+        let service = AppUiPreviewService::new();
         let first = service
             .viewer_frame_for_state(&state_with_solid_color_clip(Color::from_rgba8(
                 255, 0, 0, 255,

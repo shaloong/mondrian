@@ -1,4 +1,4 @@
-//! Persistable workspace layout model for the self-hosted shell.
+//! Persistable workspace layout model for the app UI shell.
 //!
 //! Widgets own live event handling and paint state. This module owns the
 //! app-shell schema used to save and restore dock structure across sessions.
@@ -28,15 +28,15 @@ pub enum DockDropArea {
     Bottom,
 }
 
-/// Persistable self-hosted workspace dock tree.
+/// Persistable app UI workspace dock tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SelfHostedWorkspaceLayout {
+pub enum AppUiWorkspaceLayout {
     /// A binary dock split.
     Split {
         direction: SplitDirection,
         ratio: f32,
-        first: Box<SelfHostedWorkspaceLayout>,
-        second: Box<SelfHostedWorkspaceLayout>,
+        first: Box<AppUiWorkspaceLayout>,
+        second: Box<AppUiWorkspaceLayout>,
     },
     /// A dock panel slot and its active tab.
     Panel {
@@ -49,7 +49,7 @@ pub enum SelfHostedWorkspaceLayout {
     },
 }
 
-impl SelfHostedWorkspaceLayout {
+impl AppUiWorkspaceLayout {
     /// Capture the current dock tree as a persistable layout model.
     pub fn from_dock(dock: &DockSplitter) -> Option<Self> {
         Self::from_widget(dock)
@@ -487,10 +487,10 @@ fn reorder_panel_tabs(
 }
 
 fn split_for_drop_area(
-    moving: SelfHostedWorkspaceLayout,
-    target: SelfHostedWorkspaceLayout,
+    moving: AppUiWorkspaceLayout,
+    target: AppUiWorkspaceLayout,
     area: DockDropArea,
-) -> SelfHostedWorkspaceLayout {
+) -> AppUiWorkspaceLayout {
     let direction = match area {
         DockDropArea::Left | DockDropArea::Right => SplitDirection::Horizontal,
         DockDropArea::Top | DockDropArea::Bottom => SplitDirection::Vertical,
@@ -501,7 +501,7 @@ fn split_for_drop_area(
         DockDropArea::Right | DockDropArea::Bottom => (target, moving),
         DockDropArea::Center => unreachable!("center handled above"),
     };
-    SelfHostedWorkspaceLayout::Split {
+    AppUiWorkspaceLayout::Split {
         direction,
         ratio: 0.5,
         first: Box::new(first),
@@ -546,12 +546,12 @@ mod tests {
         ))
     }
 
-    fn layout_panel(kind: PanelKind, active_index: usize) -> SelfHostedWorkspaceLayout {
+    fn layout_panel(kind: PanelKind, active_index: usize) -> AppUiWorkspaceLayout {
         layout_tabs(vec![kind], active_index)
     }
 
-    fn layout_tabs(tabs: Vec<PanelKind>, active_index: usize) -> SelfHostedWorkspaceLayout {
-        SelfHostedWorkspaceLayout::Panel {
+    fn layout_tabs(tabs: Vec<PanelKind>, active_index: usize) -> AppUiWorkspaceLayout {
+        AppUiWorkspaceLayout::Panel {
             kind: tabs.first().copied().unwrap_or(PanelKind::Viewer),
             active_index,
             hidden_tabs: Vec::new(),
@@ -598,11 +598,11 @@ mod tests {
             empty_panel(PanelKind::Viewer),
         );
 
-        let layout = SelfHostedWorkspaceLayout::from_dock(&dock).expect("layout");
+        let layout = AppUiWorkspaceLayout::from_dock(&dock).expect("layout");
 
         assert_eq!(
             layout,
-            SelfHostedWorkspaceLayout::Split {
+            AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.42,
                 first: Box::new(layout_panel(PanelKind::Assets, 0)),
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn sanitizes_ratios_and_panel_tab_indices() {
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Vertical,
             ratio: f32::NAN,
             first: Box::new(layout_panel(PanelKind::Assets, 12)),
@@ -624,7 +624,7 @@ mod tests {
 
         assert_eq!(
             layout,
-            SelfHostedWorkspaceLayout::Split {
+            AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Vertical,
                 ratio: 0.5,
                 first: Box::new(layout_panel(PanelKind::Assets, 0)),
@@ -635,10 +635,10 @@ mod tests {
 
     #[test]
     fn removing_panel_collapses_empty_split_branches() {
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Vertical,
             ratio: 0.66,
-            first: Box::new(SelfHostedWorkspaceLayout::Split {
+            first: Box::new(AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.3,
                 first: Box::new(layout_panel(PanelKind::Assets, 0)),
@@ -665,7 +665,7 @@ mod tests {
         assert!(!without_effects.contains_panel(PanelKind::Effects));
         assert_eq!(
             without_effects,
-            SelfHostedWorkspaceLayout::Panel {
+            AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Assets,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
@@ -677,7 +677,7 @@ mod tests {
     #[test]
     fn preserves_hidden_grouped_tabs_when_merging_live_panel_metadata() {
         let live = layout_panel(PanelKind::Assets, 1);
-        let previous = SelfHostedWorkspaceLayout::Panel {
+        let previous = AppUiWorkspaceLayout::Panel {
             kind: PanelKind::Assets,
             active_index: 0,
             hidden_tabs: vec![PanelKind::Effects],
@@ -688,7 +688,7 @@ mod tests {
 
         assert_eq!(
             merged,
-            SelfHostedWorkspaceLayout::Panel {
+            AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Assets,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn relocate_panel_to_center_creates_active_tab_group() {
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.5,
             first: Box::new(layout_panel(PanelKind::Assets, 0)),
@@ -716,7 +716,7 @@ mod tests {
 
         assert_eq!(
             moved,
-            SelfHostedWorkspaceLayout::Panel {
+            AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Assets,
                 active_index: 1,
                 hidden_tabs: Vec::new(),
@@ -738,7 +738,7 @@ mod tests {
 
         assert_eq!(
             moved,
-            SelfHostedWorkspaceLayout::Panel {
+            AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Inspector,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn relocate_panel_to_tab_index_inserts_into_target_group_and_collapses_source() {
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.5,
             first: Box::new(layout_panel(PanelKind::Assets, 0)),
@@ -765,7 +765,7 @@ mod tests {
 
         assert_eq!(
             moved,
-            SelfHostedWorkspaceLayout::Panel {
+            AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 1,
                 hidden_tabs: Vec::new(),
@@ -776,7 +776,7 @@ mod tests {
 
     #[test]
     fn relocate_panel_to_edge_creates_split_around_target_group() {
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.5,
             first: Box::new(layout_tabs(vec![PanelKind::Assets, PanelKind::Effects], 0)),
@@ -789,7 +789,7 @@ mod tests {
 
         assert_eq!(
             moved,
-            SelfHostedWorkspaceLayout::Split {
+            AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.5,
                 first: Box::new(layout_tabs(vec![PanelKind::Assets, PanelKind::Effects], 0)),
@@ -808,7 +808,7 @@ mod tests {
 
         assert_eq!(
             moved,
-            SelfHostedWorkspaceLayout::Split {
+            AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.5,
                 first: Box::new(layout_panel(PanelKind::Effects, 0)),

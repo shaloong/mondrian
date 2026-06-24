@@ -226,10 +226,10 @@ jobs:
         run: cargo test --workspace --exclude mondrian-app
 
   # ───────────────────────────────────────────────────────────────────────────
-  # 自研 UI 产品门禁（Linux；覆盖 self-hosted shell、基础图形和组件极端场景）
+  # 自研 UI 产品门禁（Linux；覆盖 app UI shell、基础图形和组件极端场景）
   # ───────────────────────────────────────────────────────────────────────────
-  self-hosted-ui:
-    name: Self-hosted UI Gate
+  app-ui:
+    name: App UI Gate
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -252,16 +252,16 @@ jobs:
             libavdevice-dev libswscale-dev libswresample-dev \
             libasound2-dev pkg-config
 
-      - name: 验证产品入口只启动 self-hosted UI
+      - name: 验证产品入口只启动 app UI
         run: cargo test -p mondrian-app --test product_entrypoint_contract
 
-      - name: 运行 self-hosted UI 核心测试
-        run: cargo test -p mondrian-app self_hosted
+      - name: 运行 app UI 核心测试
+        run: cargo test -p mondrian-app app_ui
 
-      - name: 运行 self-hosted primitive/draw-command renderer 测试
+      - name: 运行 app UI primitive/draw-command renderer 测试
         run: cargo test -p mondrian-ui-renderer
 
-      - name: 运行 self-hosted widget 极端场景测试
+      - name: 运行 app UI widget 极端场景测试
         run: cargo test -p mondrian-ui-widgets component_extreme_tests
 
   # ───────────────────────────────────────────────────────────────────────────

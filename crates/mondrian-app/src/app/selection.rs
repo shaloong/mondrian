@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 /// UI-agnostic reference to a selected clip in the active sequence.
 ///
 /// This lives in the application state layer so legacy egui panels and
-/// self-hosted UI adapters can share selection semantics without depending on
+/// app UI adapters can share selection semantics without depending on
 /// each other's widget modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SelectedClipRef {
@@ -184,7 +184,7 @@ impl AppState {
     /// Timeline structure edits such as track removal can invalidate selected
     /// tracks, selected clips, masks, and animation keyframes. This method keeps
     /// selection state aligned with the authoritative sequence after those
-    /// mutations, regardless of whether they came from legacy egui, self-hosted
+    /// mutations, regardless of whether they came from legacy egui, app UI
     /// widgets, shortcuts, or scripts.
     pub fn prune_selection_to_active_sequence(&mut self) {
         let Some(sequence) = self.sequence.as_ref() else {

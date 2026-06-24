@@ -1,6 +1,4 @@
-# Mondrian Self-Hosted UI System
-
-> Status: Input and event kernel in progress.
+# Mondrian App UI System
 
 ## Layers
 
@@ -39,7 +37,7 @@ for clipboard operations instead of calling platform APIs directly.
 `SystemPlatformService` currently provides desktop clipboard copy/paste through
 `arboard`. `DesktopEyedropper` owns desktop-coordinate screen sampling and
 best-effort global pointer polling for color picking. `mondrian-app` centralizes
-the winit adapter in `self_hosted::runtime`: it drains router side-effect requests,
+the winit adapter in `app_ui::runtime`: it drains router side-effect requests,
 translates between window-local and desktop coordinates, paints the shell-owned
 eyedropper overlay, resolves shell cursor priority, and feeds sampled colors
 back into the widget tree.
@@ -47,7 +45,7 @@ back into the widget tree.
 ## Application Entrypoints and App Modules
 
 `mondrian-app/src/main.rs` is the product entrypoint and launches the
-self-hosted winit/wgpu editor shell through `self_hosted::window`.
+app UI winit/wgpu editor shell through `app_ui::window`.
 The window runner is responsible for process-level UI bootstrap only: it
 installs tracing, honors `RUST_LOG`
 through `EnvFilter`, enters the shared Tokio background runtime used by app
@@ -60,42 +58,42 @@ modules. The product shell should not be mirrored by a second launcher binary.
 The legacy egui UI has been removed from `mondrian-app`: there is no
 `src/egui_ui`, `src/app/legacy_egui`, or old crate-level `shortcuts.rs` module.
 New UI work, product preferences, shortcut routing, and dialog-local draft
-models must use the self-hosted stack (`self_hosted::*`, including
-`self_hosted::shortcuts` and `self_hosted::preferences_store`). Reintroducing an
+models must use the app UI stack (`app_ui::*`, including
+`app_ui::shortcuts` and `app_ui::preferences_store`). Reintroducing an
 egui/eframe product path is a route-contract violation.
 The temporary media-cache and viewer-preference extractions that existed only to
 separate legacy egui code have also been removed. Future cache policy, preview
 scale, proxy/decode, prefetch, display-profile, or viewer-canvas preferences
-must be introduced from an actual self-hosted product call site as app-layer
-services or `self_hosted::preferences_store` schema, not as compatibility
+must be introduced from an actual app UI product call site as app-layer
+services or `app_ui::preferences_store` schema, not as compatibility
 adapters for removed egui behavior. Widget code must not own filesystem cleanup
 or schema migration rules.
 The Phase 5 parity audit lives in
-`docs/architecture/self-hosted-ui-parity.md`. It is the source of truth for
-which legacy egui workflows are product-covered by self-hosted UI, which panels
+`docs/architecture/app-ui-parity.md`. It is the source of truth for
+which legacy egui workflows are product-covered by app UI, which panels
 are intentionally retired, and which remaining egui references must be removed
 or quarantined before the compatibility path can disappear.
 
-The self-hosted UI application adapter lives under
-`mondrian-app/src/self_hosted`. `self_hosted::runtime` owns winit-side request
-application for reusable widgets. `self_hosted::rendering` owns the shared
-wgpu frame submission path for self-hosted windows, including cosmic-text glyph
+The app UI application adapter lives under
+`mondrian-app/src/app_ui`. `app_ui::runtime` owns winit-side request
+application for reusable widgets. `app_ui::rendering` owns the shared
+wgpu frame submission path for app UI windows, including cosmic-text glyph
 uploads, surface texture acquisition, present, and surface reconfigure on
-loss/outdating. `self_hosted::menu_bar` owns the product menu model, shortcut
-hints, and top menu widget. `self_hosted::action_availability` owns the shared
+loss/outdating. `app_ui::menu_bar` owns the product menu model, shortcut
+hints, and top menu widget. `app_ui::action_availability` owns the shared
 app-state gate used by menus, focused shortcuts, host dispatch, and panel
-adapters. `self_hosted::shell` owns reusable root-widget composition such as the
+adapters. `app_ui::shell` owns reusable root-widget composition such as the
 menu bar, dock tree, and modal layer; developer binaries should use
-`SelfHostedAppRoot` rather than defining shell widgets inline.
-`self_hosted::workspace_layout` owns the persistable dock-tree schema for the
+`AppUiAppRoot` rather than defining shell widgets inline.
+`app_ui::workspace_layout` owns the persistable dock-tree schema for the
 Custom workspace and converts live dock widgets into a sanitized shell layout
 snapshot; reusable widgets expose state but do not serialize user preferences.
 Dock panel tab dragging is split across the same boundary: `mondrian-ui-core`
 uses `DragPayload::PanelTab` for platform-neutral drag routing,
 `mondrian-ui-widgets::DockTabBar` gives tab-strip insertion/reordering priority
 and emits exact tab insertion indices, `mondrian-ui-widgets::DockPanel`
-handles only content-area dock-guide hover/drop, and `self_hosted::shell`
-resolves `app.shell/relocate_panel` into `SelfHostedWorkspaceLayout`
+handles only content-area dock-guide hover/drop, and `app_ui::shell`
+resolves `app.shell/relocate_panel` into `AppUiWorkspaceLayout`
 operations. Tab-bar drops use `relocate_panel_to_tab_index`; content guide
 center/edge drops use `relocate_panel`. Dropping on a tab bar creates browser-like
 tab insertion without showing the dock guide; dropping on the content guide
@@ -108,39 +106,39 @@ tab to anchor the remaining leaf. `DockTabBar`, `DockPanel`, and
 `DockSplitter` should keep one shared interaction language: low-noise resting
 chrome, explicit active/hover emphasis, and no duplicate drag feedback layers
 that would make dense editing layouts feel visually busy. The app shell owns persistence by promoting the workspace to Custom and
-saving the resulting layout through `SelfHostedUiHost`, so reusable widget
+saving the resulting layout through `AppUiHost`, so reusable widget
 crates remain free of preference I/O.
-`self_hosted::startup` owns the launch-time root surface
+`app_ui::startup` owns the launch-time root surface
 shown before any project is open; it emits only app-shell lifecycle actions and
 does not own project creation, loading, recent-file persistence, or editor
-state. `self_hosted::icons` owns the app-layer registry for bundled designer SVG
+state. `app_ui::icons` owns the app-layer registry for bundled designer SVG
 icon assets and converts them into
 `mondrian-ui-widgets::VectorIcon` / `IconButton` values without depending on
-legacy egui theme types. `self_hosted::panels` owns panel adapters that map
+legacy egui theme types. `app_ui::panels` owns panel adapters that map
 application-facing concepts into generic widget view models.
-Common editor operations should not be keyboard-only. When a self-hosted global
+Common editor operations should not be keyboard-only. When an app UI global
 shortcut is added for a visible NLE operation such as duplicate, delete, ripple
 delete, split, mark in/out, transport stepping, select all, or deselect all, the
 corresponding menu row should use the same action, shortcut descriptor table, and
-`self_hosted::action_availability::app_state_action_enabled` gate.
-`self_hosted::host::SelfHostedUiHost` owns the reusable product
+`app_ui::action_availability::app_state_action_enabled` gate.
+`app_ui::host::AppUiHost` owns the reusable product
 state bridge: it keeps the startup root, workspace root, current `AppState`,
 dirty refresh flag, visible shell mode, and queued-action draining together so
 window entrypoints do not duplicate root/AppState refresh plumbing.
-`self_hosted::window` owns the reusable winit/wgpu product-window runner used
-by the `mondrian` binary. The boundary type is `SelfHostedPanelModels`: real
+`app_ui::window` owns the reusable winit/wgpu product-window runner used
+by the `mondrian` binary. The boundary type is `AppUiPanelModels`: real
 `AppState` / `EditorState` adapters should produce this model, while
-`SelfHostedPanelModels::demo()` is test-only fixture code and must not be part
+`AppUiPanelModels::demo()` is test-only fixture code and must not be part
 of product entrypoints.
-`SelfHostedPanelModels::from_app_state` is the app-side snapshot boundary: it
+`AppUiPanelModels::from_app_state` is the app-side snapshot boundary: it
 reads the current `AppState`, asset library, effect registry, selection state,
 and timeline sequence into generic widget models. Timeline adapters start at
 `TimelinePanelModel::from_sequence`, which maps `mondrian-timeline::Sequence`
 plus app-layer selection DTOs into widget view models and stable-id-backed
 actions. The official `mondrian` entrypoint starts from a real empty
-`AppState`, builds `SelfHostedPanelModels::from_app_state`, and refreshes from
+`AppState`, builds `AppUiPanelModels::from_app_state`, and refreshes from
 that same boundary after dispatched actions. Component fixtures remain in
-`ui_demo` and explicit `SelfHostedPanelModels::demo()` tests only.
+`ui_demo` and explicit `AppUiPanelModels::demo()` tests only.
 The winit runner should request redraws from explicit state transitions: widget
 or router repaint requests, surface resize/reconfigure, background preview or
 thumbnail refreshes, startup/workspace window replacement, and render follow-up
@@ -151,7 +149,7 @@ The runner also avoids repeating native cursor-icon updates when the resolved
 icon has not changed, keeping OS-level window dragging and splitter hover
 feedback from competing with redundant shell work.
 
-The self-hosted entrypoint uses distinct native window roles for startup and
+The app UI entrypoint uses distinct native window roles for startup and
 workspace. Startup owns a fixed transparent undecorated winit window. Once
 create/open resolves to a concrete editor action and `AppState` owns an open
 project, the host switches the active root to the workspace and the winit
@@ -159,7 +157,7 @@ adapter replaces the native session: it hides/drops the startup window, creates
 a resizable undecorated workspace window, builds a fresh surface/router/runtime
 for that root, updates the UI bounds, and relayouts before the first workspace
 frame. The workspace keeps one product chrome row owned by `TitleBar`; it must
-not combine native OS decorations with the self-hosted title/menu bar. Closing
+not combine native OS decorations with the app UI title/menu bar. Closing
 the project follows the same boundary in reverse rather than mutating
 creation-time window attributes in place. Workspace windows request platform
 rounded corners where the operating system exposes a native top-level window
@@ -170,7 +168,7 @@ Recent-project recovery, crash recovery, and future onboarding belong in the
 startup model and should be surfaced through app-layer actions rather than
 reintroducing a separate project browser or console panel.
 The startup surface may use app-owned embedded raster resources, such as the
-bootstrap banner, decoded once inside `self_hosted::startup` and sent through
+bootstrap banner, decoded once inside `app_ui::startup` and sent through
 the renderer raster-image path. The left launch half is intentionally pure
 raster: do not layer app icons, product names, marketing copy, badges, or
 translucent overlays over it. If that side needs text, it belongs in the bitmap
@@ -179,46 +177,46 @@ dependencies; generic widgets should continue receiving already-decoded image
 view models when they need raster content.
 The workspace panel set follows NLE product surfaces only: Viewer, Timeline,
 Assets, Inspector, Effects, Node Graph, and Export. Project media browsing lives
-inside Assets as the project library; self-hosted menus and dock factories must
+inside Assets as the project library; app UI menus and dock factories must
 not grow separate Project-browser or Console panels.
-The self-hosted recent-project list is persisted in
-`self_hosted::preferences_store::SelfHostedPreferences`: it records only shell
+The app UI recent-project list is persisted in
+`app_ui::preferences_store::AppUiPreferences`: it records only shell
 launch history, is filtered to existing files when loaded, and is rendered by
-`self_hosted::startup` through explicit view models. Startup rows emit
+`app_ui::startup` through explicit view models. Startup rows emit
 `app.shell/open_recent_project`, which the shell resolves to `Action::OpenProject`;
 widgets must not read the filesystem or mutate editor state directly.
-Autosave recovery follows the same boundary. `SelfHostedUiHost` discovers
+Autosave recovery follows the same boundary. `AppUiHost` discovers
 crate-local `CrashRecoveryCandidate` values, maps them into startup view models,
 and the startup surface emits `app.shell/recover_project`. The shell resolves
 that request into `ui.project/recover_from_autosave`; only `AppState` opens the
 autosave snapshot, writes the recovered project, and clears recovery files.
 Startup also hosts shell-local modals when no project is open. Its New Project
-entry opens the shared `NewProjectDialog` through `self_hosted::modal`, applies
-draft updates to `SelfHostedNewProjectDraft`, and produces a concrete
+entry opens the shared `NewProjectDialog` through `app_ui::modal`, applies
+draft updates to `AppUiNewProjectDraft`, and produces a concrete
 `ui.project/create_with_settings` action only after the user confirms and the
 platform save dialog returns a path. Startup must not use a hidden direct-create
 shortcut with default project settings.
 
-Product top chrome is `self_hosted::title_bar::TitleBar`: it combines the
+Product top chrome is `app_ui::title_bar::TitleBar`: it combines the
 product favicon, product menu bar, a read-only project/sequence title,
 draggable titlebar space, and platform-aware custom window controls in one row.
 The left brand affordance is icon-only; do not duplicate the product name as
-text in the titlebar. The favicon is a product-shell asset: the self-hosted
+text in the titlebar. The favicon is a product-shell asset: the app UI
 titlebar rasterizes `mondrian-app/assets/favicon.svg` through the app-layer
 raster asset helper, while Windows executable metadata embeds
 `mondrian-app/assets/favicon.ico` directly from the app build script. Do not
 reintroduce PNG-to-ICO generation in the build pipeline or move branded assets
 into reusable widget crates. Native OS
 titlebar buttons are not embedded directly: winit does not expose a portable way
-to keep the self-hosted title/menu row while borrowing only the operating
-system's minimize, maximize, and close buttons. `self_hosted::window_controls`
+to keep the app UI title/menu row while borrowing only the operating
+system's minimize, maximize, and close buttons. `app_ui::window_controls`
 owns the client-side control order, edge, hit targets, hover treatment, and
 glyphs for Windows, macOS, and Linux styles; `TitleBar` only consumes its layout
 and event surface. Windows close hover/press colors are semantic theme tokens so
 the self-drawn chrome can follow native red affordances without hardcoding
 palette values in the app shell. Window controls emit app-shell custom actions only;
-`SelfHostedUiHost` converts them into `SelfHostedShellCommands` and
-`self_hosted::window` applies native minimize, maximize, drag, fullscreen, or
+`AppUiHost` converts them into `AppUiShellCommands` and
+`app_ui::window` applies native minimize, maximize, drag, fullscreen, or
 quit side effects after widget and `AppState` borrows end. These commands must
 not be added to the editor-state core action enum unless they mutate portable
 editor data. Native `CloseRequested` events use the same app-shell quit action
@@ -251,18 +249,18 @@ exclude only actual menu trigger hit rects and window-control rects from native
 drag initiation.
 
 Shell-local modals, such as New Project, Preferences, and About, live in their
-own `self_hosted::*_dialog` modules and are hosted by `self_hosted::modal`.
+own `app_ui::*_dialog` modules and are hosted by `app_ui::modal`.
 They emit stable `app.shell` custom actions defined in `app::ui_actions`.
-Preferences reads a `SelfHostedPreferencesModel` snapshot produced from the
-`AppState`, current workspace preset, and typed `SelfHostedPreferences` store.
-`self_hosted::host::SelfHostedUiHost` owns loading, applying, and persisting
+Preferences reads an `AppUiPreferencesModel` snapshot produced from the
+`AppState`, current workspace preset, and typed `AppUiPreferences` store.
+`app_ui::host::AppUiHost` owns loading, applying, and persisting
 that store; dialogs only render models and emit `app.shell` actions. The theme
 preset is the first migrated persisted preference and is applied through
 `mondrian-ui-theme` before root painting. Editable or persisted preferences
 must migrate through typed app preference DTOs as those settings are exposed to
-the self-hosted shell; the preferences surface must not read or duplicate
+the app UI shell; the preferences surface must not read or duplicate
 legacy egui-only dialog state, perform disk I/O, or show static placeholder
-values for state the self-hosted shell does not actually own.
+values for state the app UI shell does not actually own.
 
 `mondrian-editor-ui` owns the long-lived editor panel contract. Panel instances
 are created with `PanelInitContext`, which is limited to stable services such as
@@ -275,11 +273,11 @@ stays `EditorState` + `Action`.
 
 Selection DTOs that describe editor state, such as `SelectedClipRef`, live in
 `mondrian-app::app` rather than legacy UI modules. Legacy egui panels and
-self-hosted adapters may both depend on these app-layer DTOs, but app/domain
+app UI adapters may both depend on these app-layer DTOs, but app/domain
 state must not depend on widget modules.
 
 UI actions that need stable application ids use `mondrian-app::app::ui_actions`.
-Self-hosted panel adapters translate domain-light widget events, such as
+App UI panel adapters translate domain-light widget events, such as
 timeline clip indices or inspector value changes, into `Action::Custom` payloads
 carrying track and clip ids. `AppState::dispatch_action` consumes that app-layer
 protocol and calls existing undoable command/property-mutation paths. Timeline
@@ -297,18 +295,18 @@ through the AppState selection module. `Action::RippleDeleteSelection` is a
 separate timeline-editing action that uses the same clip deletion path with
 ripple enabled; track deletion remains a normal bulk track mutation. Clip
 deletes use `remove_clips_bulk`; track deletes use one prevalidated bulk track
-mutation, so shortcuts, menus, scripts, and self-hosted widgets all share one
+mutation, so shortcuts, menus, scripts, and app UI widgets all share one
 action boundary. Clip deletion keeps the existing locked-track checks and
 linked-clip cleanup; both clip and track deletion produce undo snapshots and
 timeline modified events.
 `Action::ImportMedia` is the shared boundary for platform file pickers, menus,
-scripts, and future self-hosted asset browser commands. The app layer batches
+scripts, and future app UI asset browser commands. The app layer batches
 the supplied paths through `AssetLibrary::import_media_file`, publishes
 `AssetImported`, updates proxy-mode state when auto proxy is enabled, saves the
 project opportunistically, and reports partial or complete failures through the
 status hint instead of letting widget code own import side effects.
 Native file dialogs belong to `mondrian-platform::PlatformService`; the
-self-hosted File menu emits an app-shell custom action, resolves that dialog at
+app UI File menu emits an app-shell custom action, resolves that dialog at
 the window entrypoint, then dispatches `Action::ImportMedia` with concrete
 paths.
 Project create/open/save dialogs use the same boundary: menu widgets emit
@@ -325,22 +323,22 @@ offline-asset checks, and `RenderJob` creation through
 if that id no longer resolves to an exportable sequence, enqueue fails with a
 status error instead of silently falling back to the active sequence. Only an
 absent sequence id may use the active sequence fallback.
-Self-hosted export panel model payload builders must mirror their enabled-state
+App UI export panel model payload builders must mirror their enabled-state
 validation and return no payload for missing sequences or blank output paths;
 disabled buttons are not the only guardrail against invalid enqueue actions.
 Sequence-scoped controls, such as range selection and output path picking, must
 also derive their enabled state from the same model readiness checks, and the
 status row should explain the first blocking reason instead of showing a generic
 ready state when no sequence or output path is available.
-Self-hosted export forms persist their editable draft in `AppState::export_draft`
+App UI export forms persist their editable draft in `AppState::export_draft`
 through `ui.export.set_draft`, so widget-tree refreshes and dock layout changes
 do not reset selected preset, selected sequence, range, or output path.
 Choosing an export output path is also an app-shell intent: panels emit
 `app.shell.export_output_dialog` with a suggested name/container extension, and
-`self_hosted::shell::resolve_app_shell_action` converts the native save-dialog
+`app_ui::shell::resolve_app_shell_action` converts the native save-dialog
 result into `ui.export.set_draft(OutputPath(...))`. Widgets must not call
 platform file dialogs directly.
-Export queue visibility follows the same adapter boundary. The self-hosted
+Export queue visibility follows the same adapter boundary. The app UI
 Export panel may show a bounded snapshot of recent `RenderJob` ids, output file
 names, statuses, progress, and cancel affordances, but queue mutation still goes
 through typed `ui.export.cancel_job` / `ui.export.clear_completed` actions.
@@ -348,38 +346,38 @@ through typed `ui.export.cancel_job` / `ui.export.clear_completed` actions.
 `Completed`, `Failed(_)`, and `Cancelled` are all terminal for clear-completed
 semantics. Generic widgets only render labels and buttons from the panel model.
 Those app-shell dialog intents are built through `app::ui_actions` helpers so
-menus and self-hosted panels share the same stable custom-action ids. Shell
+menus and app UI panels share the same stable custom-action ids. Shell
 local actions, such as About and close-modal, use the same helper boundary
 even when they do not resolve to editor-state actions. Native window commands
 are deliberately separate from editor state: Quit is emitted as
 `app.shell.quit`, and `Action::ToggleFullscreen` is consumed by the
-self-hosted host as a `SelfHostedShellCommands` value for the winit entrypoint.
+app UI host as a `AppUiShellCommands` value for the winit entrypoint.
 They must not be dispatched into `AppState`, where `CloseProject` keeps the
 narrow meaning of closing the current project.
-Close-project and quit requests share the same self-hosted pending-close guard:
+Close-project and quit requests share the same app UI pending-close guard:
 `AppState::has_unsaved_project_changes()` compares the current project data
 fingerprint to the saved `.mdp` archive, and failures are treated as unsaved.
-When the guard finds unsaved changes, `SelfHostedUiHost` opens a shell modal for
+When the guard finds unsaved changes, `AppUiHost` opens a shell modal for
 Save and continue / Discard / Cancel. Save failures keep the modal open and
 surface a status error; discard performs the pending close/quit without writing.
-`self_hosted::shell::resolve_app_shell_action` is the tested boundary that
+`app_ui::shell::resolve_app_shell_action` is the tested boundary that
 turns those intents into concrete project creation, `OpenProject`,
 `ImportMedia`, and `SaveProjectAs` actions after a native adapter supplies
 platform dialog results. Project creation actions carry full
 `SequenceSettings` and `ProjectSettings` payloads before reaching `AppState`.
-The self-hosted new-project flow stages editable form state in
-`SelfHostedNewProjectDraft`, which owns the same settings structs used by
+The app UI new-project flow stages editable form state in
+`AppUiNewProjectDraft`, which owns the same settings structs used by
 project creation so the eventual custom form cannot drift from lifecycle
 semantics.
 Sequence settings follow the same split: `app.shell.sequence_settings` opens a
-shell-local `SelfHostedSequenceSettingsDraft`, draft widgets emit
+shell-local `AppUiSequenceSettingsDraft`, draft widgets emit
 `app.shell.sequence_settings_draft_changed`, and Apply resolves to
 `ui.sequence.update_settings`. `AppState::update_sequence_identity_and_settings`
 is the only layer that mutates the sequence name/settings, validates the full
 `SequenceSettings`, syncs the sequence collection, and records one undoable
 snapshot. Shell dialogs must not call `rename_sequence` plus
 `update_active_sequence_settings` as separate operations.
-The self-hosted sequence settings surface uses shell-local tabs for
+The app UI sequence settings surface uses shell-local tabs for
 format/audio, color management, and preview. All editable fields use typed draft
 updates: editing mode, frame size, frame rate, pixel aspect ratio, field order,
 video display format, custom width/height, start timecode frame, working/output
@@ -430,7 +428,7 @@ behavior.
 `Action::ReorderEffects` follows the same boundary and calls
 `AppState::reorder_effects_for_clip`, which clamps the target slot, rejects an
 invalid source index, and records one undoable sequence snapshot only when order
-actually changes. Self-hosted Inspector reorder controls emit this typed action
+actually changes. App UI Inspector reorder controls emit this typed action
 directly rather than adding an inspector-specific custom action. Effect-stack
 toolbars use compact icon-only buttons with tooltips for reorder and removal so
 the inspector stays dense without relying on text labels inside destructive
@@ -465,13 +463,13 @@ Widgets can request side effects while handling an event:
   the request and the app shell delegates desktop sampling to
   `mondrian-platform`.
 - tooltip state: widgets call the injected `TooltipManager` through
-  `EventContext`; winit shells inject the real manager and `self_hosted::runtime` paints
+  `EventContext`; winit shells inject the real manager and `app_ui::runtime` paints
   the resulting tooltip in the top overlay pass.
 - repaint: request another frame for composition previews, cursor blink, or
   delayed UI. The app shell consumes this through `EventRouter` and schedules a
   native window redraw.
 - timer wakeups: delayed UI state, such as tooltip reveal timing, reports its
-  next required update through the manager layer. `self_hosted::runtime` advances timers
+  next required update through the manager layer. `app_ui::runtime` advances timers
   in `AboutToWait` and uses native `WaitUntil` scheduling instead of idle
   repaint loops.
 
@@ -551,7 +549,7 @@ predictably.
 Text content is clipped to the padded content rect, not the outer widget
 bounds. App shells should show an I-beam cursor for text inputs only after the
 input owns focus; hover alone should not switch the pointer shape. The
-self-hosted product window derives this from the focused widget's
+app UI product window derives this from the focused widget's
 `accepts_text_input()` state when choosing the native cursor, while eyedropper
 and splitter cursors keep higher priority. Native cursor refresh must run after
 focus-changing keyboard and pointer events as well as pointer movement, so
@@ -612,7 +610,7 @@ release and emits a capture release request.
 focused widget has had a chance to handle a `KeyDown`. This keeps text editing,
 IME composition, and panel-local keyboard commands ahead of global shell
 bindings while still giving menus and workspace commands a keyboard path when
-no widget consumes the key. The self-hosted product window registers default
+no widget consumes the key. The app UI product window registers default
 global shortcuts at the router boundary, not inside widgets: file commands use
 Ctrl/Ctrl+Shift combinations, workspace switching uses Ctrl+Alt+number, and
 panel focus uses Ctrl+Alt+mnemonics. Plain Space is intentionally not registered
@@ -639,10 +637,10 @@ Common NLE editing keys such as Delete, Shift+Delete, Ctrl+K, I/O, Home/End,
 arrow frame stepping, Ctrl+A, and Escape are registered as global fallback
 bindings only; focused `TextInput`s, IME composition, dropdowns, sliders, and
 timeline-local handlers still receive the key first.
-Self-hosted menu shortcut hints read from the same default shortcut descriptor
+App UI menu shortcut hints read from the same default shortcut descriptor
 table that registers router bindings, so displayed accelerators cannot drift
 from actual keyboard behavior.
-Shortcut-dispatched actions still pass through the self-hosted host's
+Shortcut-dispatched actions still pass through the app UI host's
 `AppState` availability gate before shell dialogs or editor dispatch run. This
 keeps keyboard shortcuts and disabled menu rows semantically aligned: an
 unavailable Import, Save, Undo, or Redo command is ignored before native dialogs
@@ -656,7 +654,7 @@ Shortcut resolution receives a `ShortcutContext` from the router focus state and
 must search scopes in a fixed order: focused widget, focused panel, workspace,
 then global. Same-scope duplicate registrations replace the older binding so
 the active command is deterministic.
-Self-hosted shortcut overrides must be resolved into a conflict-free active
+App UI shortcut overrides must be resolved into a conflict-free active
 descriptor table before router registration, menu hint lookup, and Preferences
 row construction. A user override owns its chosen chord: any default descriptor
 that would collide is omitted from the active table and shown as disabled in
@@ -677,8 +675,8 @@ platform before the app receives them. The winit shell adapter must preserve
 the router result: ignored shortcut chords are not promoted to shell actions,
 so external tools, OS-level input switching, and user-remapped shortcuts remain
 available outside Mondrian's registered command table.
-Self-hosted default shortcuts are descriptors with stable ids. The shell loads
-`SelfHostedPreferences.shortcut_overrides` before registering router bindings:
+App UI default shortcuts are descriptors with stable ids. The shell loads
+`AppUiPreferences.shortcut_overrides` before registering router bindings:
 an override can replace the binding or set it to `None` to disable a default
 shortcut. Menus and the Preferences shortcut list read the same active
 descriptor table, so disabling a conflicting `Ctrl+Alt` panel/workspace chord
@@ -686,7 +684,7 @@ also removes the visible shortcut hint. The Preferences Shortcuts tab dispatches
 shell-local Disable, Default, and Rebind actions keyed by descriptor id. Rebind
 captures the next supported `KeyDown` inside the Preferences modal, consumes
 Escape as cancel, and serializes only the shortcut key plus modifier booleans in
-the shell action payload. `SelfHostedUiHost` persists those updates, makes the
+the shell action payload. `AppUiHost` persists those updates, makes the
 new binding win through the conflict-free active descriptor table, and the
 native window session immediately rebuilds the router's global shortcut scope
 from that table by clearing `ShortcutScope::Global` and re-registering active
@@ -836,7 +834,7 @@ whole menu while still keeping designer assets mapped at the app layer.
 Menu items may also carry a right-aligned shortcut hint; the shared menu row
 helper owns the shortcut lane and label clipping so shell menus, context menus,
 and internal selectors do not hand-place accelerator text differently.
-Self-hosted menu availability is applied in the `mondrian-app` shell adapter
+App UI menu availability is applied in the `mondrian-app` shell adapter
 from the current `AppState` snapshot. The widgets crate owns disabled-row
 behavior and painting only; project availability, undo/redo availability, and
 native-dialog prerequisites stay at the app boundary so generic dropdowns do
@@ -955,7 +953,7 @@ as the root viewport for flipping and edge clamping; using the unbounded
 `TreeWalker::paint()` helper in production shells makes dropdowns, color-picker
 mode menus, and tooltips think the screen is infinite and can push popups off
 the visible window.
-After the widget tree overlay pass, the self-hosted runtime paints shell-owned
+After the widget tree overlay pass, the app UI runtime paints shell-owned
 overlays in deterministic bottom-to-top order: active desktop eyedropper chrome
 first, then tooltip chrome. This keeps textual hover help readable above
 sampling affordances while still leaving widget popups below shell affordances.
@@ -1063,8 +1061,8 @@ Timeline. Inspector-style controls should be assembled with the reusable
 panel/app layer. Docked panel chrome belongs to `DockPanel`, which owns the
 `DockTabBar`, active-tab content rebuilding, `PanelSlot`, and overlay
 forwarding. App entrypoints should call panel adapters in
-`mondrian-app::self_hosted::panels` instead of reimplementing tab/content
-synchronization. The self-hosted product Inspector slot uses this path with
+`mondrian-app::app_ui::panels` instead of reimplementing tab/content
+synchronization. The app UI product Inspector slot uses this path with
 real widgets (checkbox, slider, and color trigger) instead of a colored
 placeholder. Its panel snapshot carries the selected clip identity, and user
 edits emit stable inspector actions that mutate the selected clip through
@@ -1090,7 +1088,7 @@ selection is the broadest timeline target; selecting tracks clears clip, mask,
 and keyframe scopes, while selecting clips clears selected tracks. Clipboard,
 duplicate, paste, and timeline mutation paths should also replace or clear clip
 selection through that module so nested selection scopes stay consistent.
-Self-hosted Timeline track headers dispatch the generic
+App UI Timeline track headers dispatch the generic
 `Action::Select(SelectionTarget::Track(_))`; the widget exposes only
 index-based `TimelineTrackRef`s, and the app adapter maps those refs to stable
 `TrackId`s.
@@ -1114,7 +1112,7 @@ to the clicked frame and dispatching `TimelineEditCommand::SplitAtPlayhead`.
 Shortcut keys `V` and `B` switch these widget-local tools; undoable timeline
 mutation still starts only at the app command boundary. `TimelineViewState`
 captures the active tool, zoom, scroll offsets, snapping flag, and track height
-so `SelfHostedAppRoot` preserves timeline working context across panel model
+so `AppUiAppRoot` preserves timeline working context across panel model
 rebuilds without storing that UI session data in `AppState`. The toolbar above
 the ruler is reserved for compact mode and mark controls: Select, Blade,
 Snapping, Mark In, and Mark Out.
@@ -1124,7 +1122,7 @@ and focused keyboard shortcuts rather than compact icon buttons. Context menu
 rows use the same `TimelineTrackKind` or `TimelineEditCommand` adapters,
 availability checks, and action factories as focused keyboard input.
 Timeline command availability has two layers: the widget checks only local
-view facts such as selection and playhead intersection, while the self-hosted
+view facts such as selection and playhead intersection, while the app UI
 adapter injects app-state availability derived from the same locked-track,
 clipboard, in/out, and sequence gates used by the top menus. Timeline context
 menu rows and focused timeline shortcuts must consult that host availability
@@ -1156,7 +1154,7 @@ testing, availability, tooltip, and icon contracts aligned around the same
 button model.
 Asset drops follow the same boundary. `TimelineView` accepts
 `DragPayload::Asset` only as a domain-light drop proposal with a view track ref
-and frame. The self-hosted adapter resolves that view ref to a stable
+and frame. The app UI adapter resolves that view ref to a stable
 `TrackId`, dispatches `ui.timeline.drop_asset`, and `AppState` prepares the
 asset when necessary before calling the existing video/audio drop commands.
 Clip construction, media-kind validation, linked audio creation, conflict
@@ -1222,12 +1220,12 @@ Mark In / Mark Out shortcuts use `TimelineEditCommand::MarkInAtPlayhead` and
 `TimelineEditCommand::MarkOutAtPlayhead`, then route through shared app actions
 so timeline and viewer shortcuts can converge on the same command boundary.
 Focused Timeline Space uses `TimelineEditCommand::TogglePlayback`, which the
-self-hosted adapter maps to `Action::TogglePlay`; Space remains panel-local
+app UI adapter maps to `Action::TogglePlay`; Space remains panel-local
 rather than a global shortcut so text editing cannot accidentally toggle
 playback.
 Ruler marker dragging is the explicit-frame counterpart: `TimelineView` owns
 only hit testing, pointer capture, and local preview for the in/out marker, then
-emits `ui.timeline.set_in_out_point` on mouse release. The self-hosted adapter
+emits `ui.timeline.set_in_out_point` on mouse release. The app UI adapter
 does no sequence mutation; `AppState` consumes the typed payload and calls the
 active sequence's `mark_in(frame)` / `mark_out(frame)` methods so normalization,
 project synchronization, and autosave remain centralized.
@@ -1253,17 +1251,17 @@ plain delete.
 Timeline structure mutations that can invalidate ids, such as removing tracks,
 must call the app selection pruning helper after the sequence mutation succeeds.
 That pruning removes stale selected tracks, clips, masks, and animation
-keyframes regardless of whether the mutation came from self-hosted UI,
+keyframes regardless of whether the mutation came from app UI,
 shortcuts, scripts, or another app command caller.
 Panel model adapters should read primary and multi-clip selection through the
 same AppState selection queries instead of depending on `SelectionState` fields.
 Timeline mutations that move clips should refresh selected clip track metadata
-through the selection module; clip id remains the durable identity. Self-hosted
+through the selection module; clip id remains the durable identity. App UI
 Timeline move actions must call the same semantic AppState command path as
 keyboard/menu moves, rather than invoking low-level sequence mutation helpers
 directly, so linked selections, undo snapshots, overlap policy, and locked-track
 checks stay identical across UI surfaces.
-The self-hosted timeline adapter must reject cross-media clip move proposals
+The app UI timeline adapter must reject cross-media clip move proposals
 before emitting an app action: video clips cannot be mapped onto audio target
 tracks, and audio clips cannot be mapped onto video target tracks.
 `AppState` must validate the same media-type invariant when handling
@@ -1285,10 +1283,10 @@ This lets focus routing, overlay popups, repaint requests, shell runtime
 behavior, and editor-state dispatch be validated in the same dock tree that
 future panels will use. Timeline migration should reuse this path after
 scrollbars, overlays, and property controls are stable.
-When a self-hosted shell refreshes panel models from `AppState`, it may rebuild
+When an app UI shell refreshes panel models from `AppState`, it may rebuild
 panel content widgets, but it must preserve dock chrome state. `DockSplitter`
 therefore exposes a layout snapshot containing splitter direction/ratio data
-only, and `SelfHostedAppRoot::set_models` restores that snapshot before
+only, and `AppUiAppRoot::set_models` restores that snapshot before
 relayout so app data changes do not reset user-resized panels.
 Panel-local state that is not editor data should expose a small typed widget
 snapshot and be restored at this same shell boundary. `PanelListState` keeps
@@ -1336,7 +1334,7 @@ filter `TextInput` as a real widget tree child so focus, IME, and keyboard
 routing stay framework-owned. Filtering
 changes only visible row order; original item indices, row actions, drag
 payloads, badges, icons, and disabled state remain the item identity used for
-dispatch. The self-hosted Effects panel builds rows from the shared effect
+dispatch. The app UI Effects panel builds rows from the shared effect
 registry and, when a video clip is selected, activates rows through undoable
 `AppState::add_effect_to_clip` commands. The app action selects the newly
 created effect instance after the mutation so Inspector and Node Graph
@@ -1352,7 +1350,7 @@ workspaces do not expose a separate project-status panel beside creative panels.
 The lighter `List` widget remains available for demos and simple generic
 surfaces; it follows the same unmodified-key navigation and activation contract
 so Ctrl/Shift/Alt/Meta chords can continue through the central shortcut path.
-The self-hosted Assets panel uses the dedicated `AssetGrid` card browser
+The app UI Assets panel uses the dedicated `AssetGrid` card browser
 instead of the row-list surface. `AssetGrid` keeps the same framework-owned
 interaction contract as `PanelList`: filter input is a real `TextInput`, local
 selection is preserved through `AssetGridState`, cards can activate typed
@@ -1383,7 +1381,7 @@ the widget reports the target card view model, while panel adapters decide
 whether a given payload means move, import, or no-op. For drop callbacks,
 `None` means "not handled; allow fallback", while `Action::NoOp` means "handled
 without an editor action" so self-drops can consume the event without polluting
-the app action stream. The self-hosted app
+the app action stream. The app UI shell
 adapter maps the grid menu to
 `app_shell` import requests and `ui.assets` create actions for adjustment
 layers, solid-color assets, folders, and folder-aware imports. File drops
@@ -1436,10 +1434,10 @@ preview geometry rather than text or font glyphs, so users can distinguish
 queued decodes and offline/bad media without platform font dependencies. Asset
 discovery, video-frame decoding, cache invalidation, and filesystem metadata
 remain in app/media layers so the project media library does not become a
-filesystem browser or media decoder. The self-hosted panel adapter accepts
+filesystem browser or media decoder. The app UI panel adapter accepts
 thumbnail lifecycle data through `AssetThumbnailSource`, which lets a host-owned
 cache or future background thumbnail queue feed cards without adding media
-dependencies to `mondrian-ui-widgets`. `SelfHostedUiHost` owns the current
+dependencies to `mondrian-ui-widgets`. `AppUiHost` owns the current
 `AssetThumbnailCache`: model refreshes request missing video thumbnails without
 blocking, a background worker decodes bounded RGBA frames through
 `mondrian-media`, and the window event loop polls completions before repainting.
@@ -1455,7 +1453,7 @@ menu. `AppState` owns the actual deletion, including timeline cleanup for clips
 that referenced the asset, event publication, status hints, and project save.
 File-backed video/audio cards also expose `app.shell.reveal_in_file_manager`.
 That command is intentionally a shell/platform side effect: the card emits a
-stable app-shell payload containing the real filesystem path, the self-hosted
+stable app-shell payload containing the real filesystem path, the app UI
 shell resolves it through `PlatformService::reveal_in_file_manager`, and no
 editor action enters `AppState` or undo/redo. Synthetic assets such as solid
 colors and adjustment layers do not receive this menu item because they have no
@@ -1473,7 +1471,7 @@ requested, keeping media-task side effects outside reusable widgets.
 Asset and folder cards support inline rename through `AssetGrid`'s domain-light
 editing session. The widget owns F2/title double-click editing, TextInput
 focus/IME routing, commit/cancel behavior, and dispatching a rename callback
-with the new title. The self-hosted Assets adapter maps that callback to
+with the new title. The app UI Assets adapter maps that callback to
 `ui.assets.rename_asset` or `ui.assets.rename_folder`; `AppState` performs the
 library mutation, project save, reload event, and status hint. Card context
 menus expose the same rename flow through `MenuItem::local`, so choosing Rename
@@ -1488,11 +1486,11 @@ cleanup.
 Folder cards expose `ui.assets.delete_folder` through the same card-level menu
 surface. Folder deletion is an app/library mutation: `AssetLibrary` removes the
 selected folder subtree, unlinks assets assigned to any deleted folder, and
-publishes an asset-library reload through `AppState`. The self-hosted host then
+publishes an asset-library reload through `AppState`. The app UI host then
 revalidates its shell-local browser folder id during refresh and returns to the
 root asset view if the current bin no longer exists.
 When multiple asset/folder cards are selected, `AssetGrid` asks the app adapter
-for a selection context menu. The self-hosted Assets adapter maps that menu to
+for a selection context menu. The app UI Assets adapter maps that menu to
 `ui.assets.delete_selection`, so bulk deletion keeps timeline cleanup, asset
 events, one library reload, project save, and status reporting in `AppState`
 rather than dispatching a burst of widget-owned single-item commands.
@@ -1508,10 +1506,10 @@ folder, or to the root view when browsing all assets. `AssetLibrary` validates
 missing targets and rejects folder cycles, so the widget layer never owns
 library graph integrity.
 Assets already assigned to a folder are counted on that folder card and appear
-only when the self-hosted shell is browsing that folder. Folder navigation is
+only when the app UI shell is browsing that folder. Folder navigation is
 shell-local UI session state: folder cards emit `ui.assets.open_folder`, the
 host validates the target folder against the current `AssetLibrary`, updates
-`SelfHostedAppRoot::asset_folder_id`, and rebuilds panel models with that view
+`AppUiAppRoot::asset_folder_id`, and rebuilds panel models with that view
 filter. The folder browser path is intentionally not stored in `AppState` and
 does not participate in undo/redo.
 `AppState::status_log` remains a bounded internal history fed by
@@ -1541,7 +1539,7 @@ sequence-frame fill, and `popover` / `border_strong` are reserved for elevated
 overlays. Widgets may compose semantic tokens with shared paint helpers such as
 `mix_color`, but should not flatten large editor areas into blue-gray
 `card`/`popover` fills or reveal darker app gaps between a dock header and its
-content. This keeps the self-hosted UI closer to professional NLE workspaces and
+content. This keeps the app UI closer to professional NLE workspaces and
 prevents visual hierarchy from depending on per-panel ad-hoc color constants.
 The default dark preset is calibrated around a neutral black/zinc editor
 workbench: `background`, `card`, `panel_alt`, `surface`, and `surface_2` should
@@ -1591,7 +1589,7 @@ tabs just because they share a dock group; tab width follows the label while
 hit targets stay large enough for normal pointer use. Panel chrome text is
 secondary editor chrome and should stay visually quieter than panel content,
 viewer controls, or timeline editing affordances.
-Self-hosted `FocusPanel` actions activate the matching dock panel or grouped tab
+App UI `FocusPanel` actions activate the matching dock panel or grouped tab
 through shell-local dock traversal and do not continue into `AppState`. The
 traversal first understands grouped tabs in the default layout, then falls back
 to direct panels used by built-in workspace presets. If the active dock tree
@@ -1600,7 +1598,7 @@ preferred built-in workspace and activates it there, so focus shortcuts never
 silently no-op.
 Window-menu panel rows use `TogglePanel`. Direct dock-panel leaves, such as Viewer,
 Timeline, Inspector, Assets, Node Graph, and Export, hide by removing the panel
-leaf from `SelfHostedWorkspaceLayout`, collapsing now-empty split branches, and
+leaf from `AppUiWorkspaceLayout`, collapsing now-empty split branches, and
 promoting the root to `WorkspacePreset::Custom`. If toggled again while absent,
 the shell restores the panel by switching to its preferred built-in workspace.
 Grouped tabs that are not independent layout leaves, currently Effects inside
@@ -1617,8 +1615,8 @@ Window-menu checked state follows the generic menu rule: visibility is shown by
 the checkmark glyph only. It must not introduce blue checked backgrounds, left
 accent bars, or per-row icons, because the menu is a state report rather than a
 primary editing surface.
-Self-hosted `SwitchWorkspace` is also shell-local: it rebuilds the dock tree
-from the current `SelfHostedPanelModels` using named built-in preset factories
+App UI `SwitchWorkspace` is also shell-local: it rebuilds the dock tree
+from the current `AppUiPanelModels` using named built-in preset factories
 while keeping panel models read-only and app/domain mutation in `AppState`.
 Editing prioritizes full-width timeline work, Color keeps Viewer/Timeline on
 the left with Inspector/Effects on the right, Audio gives Timeline the lower
@@ -1627,12 +1625,12 @@ Export pairs export settings with the Viewer. Refreshing panel models must
 preserve the selected workspace preset so live app snapshots do not silently
 reset the user's shell layout.
 `WorkspacePreset::Custom` is a real persisted workspace, not an alias for
-Editing. Its layout is stored as `SelfHostedWorkspaceLayout`: a binary tree of
+Editing. Its layout is stored as `AppUiWorkspaceLayout`: a binary tree of
 split direction/ratio nodes and dock panel leaves with explicit `tabs:
 Vec<PanelKind>`, active tab indices, and legacy grouped-tab visibility metadata
 that live widgets cannot infer on their own.
-`self_hosted::panels` is the only layer that materializes that schema back into
-`DockSplitter` / `DockPanel` widgets from current `SelfHostedPanelModels`.
+`app_ui::panels` is the only layer that materializes that schema back into
+`DockSplitter` / `DockPanel` widgets from current `AppUiPanelModels`.
 Loading preferences sanitizes custom ratios and active tabs before a root is
 built, including clamping active tabs after hidden grouped tabs are applied.
 The layout schema already models Premiere-style panel relocation through
@@ -1643,14 +1641,14 @@ boundary; panel contents must remain ordinary `PanelKind`-addressed widgets
 instead of inventing per-panel docking APIs.
 Dragging a built-in workspace splitter promotes the root to Custom when
 the split layout diverges from the built-in preset snapshot; the winit window
-runner asks `SelfHostedUiHost` to persist that layout on left-button release or
+runner asks `AppUiHost` to persist that layout on left-button release or
 focus loss, not during every mouse-move frame. TogglePanel-driven leaf removal
 uses the same persistence path after the queued shell action drains. Built-in
 presets remain template factories and can always be selected again to reset the
 visible dock tree without deleting the saved Custom layout.
-The self-hosted Assets panel maps real library cards to `ui.assets.prepare_drag`;
+The app UI Assets panel maps real library cards to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
-path so later Timeline drop handling stays shared across self-hosted panels.
+path so later Timeline drop handling stays shared across app UI panels.
 The same left dock hosts the Effects browser as an `Effects` tab so effect
 insertion remains visible without changing the default split layout.
 Asset cards are fixed-size browser cells. Their preview well uses a 16:9 aspect
@@ -1785,7 +1783,7 @@ foreground-filled progress and thumb, and neutral surface track background
 rather than primary blue. Slider focus loss clears keyboard focus and an active
 drag if present, but it must not release pointer capture when the slider was
 only keyboard focused.
-Self-hosted Inspector actions should use typed payloads for clip mutations.
+App UI Inspector actions should use typed payloads for clip mutations.
 Scalar clip fields that need both coarse and precise editing, such as opacity,
 transform values, and trim frames, compose `Slider` plus `NumberInput` in the
 panel adapter. Both controls emit the same typed inspector action, so the app
@@ -1794,7 +1792,7 @@ The curve editor currently emits `ui.inspector.set_clip_curve` with normalized
 points; AppState maps them to opacity keyframes over the selected clip's
 timeline span so curve edits participate in undo/redo and render evaluation.
 Effect property rows are adapter-owned: bools, scalar numbers, colors, text,
-and Vec2/Vec3/Vec4 values render as typed controls in the self-hosted Inspector,
+and Vec2/Vec3/Vec4 values render as typed controls in the app UI Inspector,
 then dispatch `ui.inspector.set_effect_property` with the full `PropertyValue`.
 Numeric scalar rows and stacked vector components use the same
 `Slider` + `NumberInput` composition as clip properties, preserving untouched
@@ -1809,12 +1807,12 @@ Inspector clip mutations are validated at the AppState boundary, including
 locked-track protection; widgets stay domain-light and do not decide whether a
 clip can be edited.
 Inspector panel models still expose edit availability from the current
-`AppState` snapshot. When the selected clip's track is locked, the self-hosted
+`AppState` snapshot. When the selected clip's track is locked, the app UI
 Inspector remains readable but disables clip style, transform, timing, effect,
 property, and curve controls before they can dispatch actions. This is UI
 affordance only; `AppState` keeps the authoritative locked-track validation.
 When no clip is selected or no sequence is open, the app model must expose an
-empty-state message and the self-hosted Inspector should render only a compact
+empty-state message and the app UI Inspector should render only a compact
 status section rather than default clip-style, transform, timing, or animation
 controls. Empty inspectors must not imply a real editable target through
 placeholder parameter values.
@@ -1827,7 +1825,7 @@ keyframes at their normalized positions.
 as typed text, paste/cut/delete edits, or IME commit. Cursor movement,
 selection changes, and IME preedit updates remain local so form bindings do not
 receive noisy non-mutating actions.
-Winit keyboard and IME conversion lives in the self-hosted shell runtime so
+Winit keyboard and IME conversion lives in the app UI shell runtime so
 `ui_demo` and product windows share the same `KeyDown` / `TextInput` /
 `ImePreedit` / `ImeCommit` / `ImeCancel` semantics. Runtime conversion maps
 winit `Ime::Disabled` to explicit `ImeCancel` rather than an empty preedit
@@ -1875,10 +1873,10 @@ opaque `Other(u16)`. Unknown buttons must not be downgraded to left click,
 otherwise side buttons can accidentally activate destructive controls.
 OS file drag/drop enters the same UI event model as internal drags via
 `DragPayload::File`. Product windows route hovered/dropped files through the
-widget tree first; if no widget handles the final drop, the self-hosted app
+widget tree first; if no widget handles the final drop, the app UI shell
 falls back to `Action::ImportMedia` so dropping media into the window remains a
 useful default workflow. `PanelList` and `AssetGrid` expose domain-light
-`on_drop` adapters; the self-hosted Assets panel maps file drops to
+`on_drop` adapters; the app UI Assets panel maps file drops to
 `ui.assets.import_files` through `AssetGrid`, including the current asset-folder
 target. Other panels can opt into their own drop semantics without teaching
 generic widgets about application state.
@@ -1891,9 +1889,9 @@ Shell cursor selection is also centralized in the runtime. Entrypoints provide
 the current eyedropper, splitter, and focused-text state; the runtime resolves
 priority as eyedropper sampling, splitter resize affordance, focused text
 editing, then default cursor.
-Self-hosted entry binaries should collect widget-dispatched actions during
+App UI entry binaries should collect widget-dispatched actions during
 event routing, then drain them after the root borrow ends. Shell-local actions
-such as the new-project dialog mutate `SelfHostedAppRoot`; only confirmed
+such as the new-project dialog mutate `AppUiAppRoot`; only confirmed
 project creation emits the editor-facing `ui.project.create_with_settings`
 action consumed by `AppState`.
 Diagnostic/demo containers that manually route child events must still follow
@@ -1902,28 +1900,28 @@ ordinary pointer events go only to hit-test targets, captured widgets receive
 their drag/move/up stream, and keyboard/text input follows focused widgets.
 They must not broadcast pointer events to every child, because that couples
 independent component state and hides real scroll/dropdown regressions.
-The pending queue lives in `self_hosted::action_queue`; `SelfHostedUiHost`
+The pending queue lives in `app_ui::action_queue`; `AppUiHost`
 drains it after routing and applies shell/AppState refresh policy. Entry
 binaries should use these types rather than open-coding shell/AppState
 dispatch. The host refreshes panel models after every dispatched editor action,
 including actions that return an error, because action handlers may still update
 status hints or other user-visible state before reporting the failure.
-`SelfHostedUiHost::drain_pending_actions` also returns window-host commands
+`AppUiHost::drain_pending_actions` also returns window-host commands
 such as quit and toggle-fullscreen. Entrypoints apply those commands only after
 event routing and model refresh have completed, so native side effects stay out
 of widget code and out of `AppState`. Native platform close requests must enter
 the same pending-action queue as `app.shell.quit`; entrypoints must not call the
 event-loop exit primitive directly from `WindowEvent::CloseRequested`.
-Editor actions dispatched from the self-hosted host must surface failures in
+Editor actions dispatched from the app UI host must surface failures in
 the status bar. `AppState` action handlers should set specific localized
 `status_hint` errors when they can explain the failing workflow. If an action
-returns an error without setting a new error hint, `SelfHostedUiHost` writes a
+returns an error without setting a new error hint, `AppUiHost` writes a
 generic `操作失败：...` fallback so failures are visible without opening a
 diagnostics panel. The fallback must not overwrite a newer action-specific
 error produced by `AppState`.
-Self-hosted UI scale coverage lives in the ignored
-`self_hosted_ui_scale_smoke` test:
-`cargo test -p mondrian-app self_hosted_ui_scale_smoke -- --ignored --nocapture`.
+App UI scale coverage lives in the ignored
+`app_ui_scale_smoke` test:
+`cargo test -p mondrian-app app_ui_scale_smoke -- --ignored --nocapture`.
 It constructs a real SQLite-backed asset library and a long synthetic
 `AppState`, then exercises panel-model snapshotting, cold root build, repeated
 refresh, resize loops, draw-command emission, and sustained playback refresh
@@ -1934,13 +1932,13 @@ hundreds of assets, clips, and effect nodes; `MONDRIAN_UI_PERF_ASSETS`,
 `MONDRIAN_UI_PERF_REFRESH_ITERS`, and the matching `*_MS` threshold variables
 can scale the smoke for baseline/current comparisons. Successful runs print
 `MONDRIAN_PERF_JSON` and append it to `MONDRIAN_PERF_OUTPUT` when configured.
-The native window surface lifecycle is centralized in the self-hosted window
+The native window surface lifecycle is centralized in the app UI window
 session. Zero-sized resize events, such as minimize transitions, must not
 reconfigure the surface or relayout the root. Real size changes reconfigure the
 surface, update root bounds, relayout, and request a redraw. Same-size resize
 events are no-ops, while `ScaleFactorChanged` always relayouts and redraws so
 DPI-dependent geometry can settle even when the physical surface size is
-unchanged. `SelfHostedFrameRenderer` treats lost/outdated surfaces as
+unchanged. `AppUiFrameRenderer` treats lost/outdated surfaces as
 `Reconfigured`, schedules a follow-up redraw, skips timeout/occluded frames, and
 requests a deterministic follow-up frame after text or raster atlas uploads.
 Shell chrome that presents transient project status should keep error feedback
@@ -1948,17 +1946,17 @@ visible without requiring the user to scroll a compact dock panel. Dock panels
 should stay focused on editing surfaces rather than general project diagnostics.
 The workspace root reserves title-bar and status-bar height before laying out
 the dock tree; panels must not assume they own full-window coordinates.
-Registered self-hosted UI action namespaces are strict protocols: known
+Registered app UI action namespaces are strict protocols: known
 namespaces with unknown action names return workflow errors instead of being
 silently ignored, so widget/app wiring mistakes fail during development.
-The new-project dialog edits the real `SelfHostedNewProjectDraft` settings via
+The new-project dialog edits the real `AppUiNewProjectDraft` settings via
 typed draft-update payloads and presents validated production presets for frame
 size, frame rate, audio sample rate, proxy generation, and preview caching.
-Shell modals are routed through `self_hosted::modal::ShellModal` and should use
+Shell modals are routed through `app_ui::modal::ShellModal` and should use
 theme modal tokens such as `colors.modal_scrim`, `colors.popover`, and spacing
 radii instead of per-dialog hard-coded chrome. Each concrete modal lives in its
 own module, such as `new_project_dialog` or `about_dialog`, while
-`SelfHostedAppRoot` only opens, closes, lays out, and routes the active modal.
+`AppUiAppRoot` only opens, closes, lays out, and routes the active modal.
 When a modal is active, the root must treat it as a top-layer input boundary:
 events ignored by the modal are still handled by the root and must not fall
 through to menu, dock, panel, or shortcut behavior behind the scrim.
@@ -2031,12 +2029,12 @@ the layout crate while panels get normal widget-tree behavior: event routing,
 overlay forwarding, hit testing, and child traversal.
 List-style panel rows use `PanelListItem` with optional `VectorIcon` geometry
 for command and asset affordances. App panels must source those icons from
-`self_hosted::icons::AppIcon` and pass only parsed vector geometry into the
+`app_ui::icons::AppIcon` and pass only parsed vector geometry into the
 generic widget layer.
 
 ## Viewer Surface
 
-The self-hosted Viewer panel uses the domain-light `ViewerSurface` widget
+The app UI Viewer panel uses the domain-light `ViewerSurface` widget
 instead of a colored placeholder. App code maps `AppState` / `Sequence` into a
 small `ViewerPanelModel` containing title, playback status, current frame,
 duration, source resolution, and an optional `ViewerFrameImage` alias over the
@@ -2065,13 +2063,13 @@ the dock tab and transport/timecode chrome already provide enough context.
 Warning/error statuses may surface as a compact badge so exceptional preview
 problems remain visible without making every frame look like a status card.
 The product host supplies viewer frames through `ViewerPreviewSource`.
-`SelfHostedPreviewService` is the app-layer boundary that interprets timeline
+`AppUiPreviewService` is the app-layer boundary that interprets timeline
 render plans, owns compositor scratch state and preview cache keys, and injects
 render-ready `ViewerFrameImage` values into `ViewerPanelModel`. The initial
-self-hosted path renders solid-color timeline elements directly via the shared
+app UI path renders solid-color timeline elements directly via the shared
 `mondrian-renderer` CPU compositor and requests media frames through a
 host-owned background preview worker. Model refresh never blocks on media
-decode: missing media frames are queued, `SelfHostedUiHost::poll_background_tasks`
+decode: missing media frames are queued, `AppUiHost::poll_background_tasks`
 collects completions, and a later refresh composites only when all required
 media RGBA inputs are available. Adjustment-layer plans are forwarded to the
 same compositor pass once preceding visual layers exist. Nested-sequence plans
@@ -2083,12 +2081,12 @@ Viewer transport controls are part of this chrome but stay domain-light: the
 visible transport strip contains jump start/end, step back/forward, and
 play/pause only. Mark In/Out remains a focused keyboard workflow, not a viewer
 button, so the preview panel does not duplicate timeline editing controls. The
-self-hosted app must source those visible transport icons from
-`self_hosted::icons::AppIcon` / bundled SVG assets rather than recreating
+app UI shell must source those visible transport icons from
+`app_ui::icons::AppIcon` / bundled SVG assets rather than recreating
 product icons in widget drawing code. By default these controls emit shared
 editor actions (`GoToStart`, `StepBack`, `TogglePlay`, `StepForward`,
 `GoToEnd`), and embedders may override the mapping with a control callback when
-a host needs a custom command boundary. The self-hosted app panel must bind that
+a host needs a custom command boundary. The app UI panel must bind that
 callback explicitly so the app adapter, not the generic widget, owns the command
 boundary for transport controls. Playback state changes, mark semantics, frame
 stepping semantics, preview scheduling, and audio/video sync remain in the
@@ -2096,7 +2094,7 @@ app/runtime layers. Zoom and preview-quality
 labels are explicit model fields. The Viewer bottom-left metadata lane is kept
 to the current timecode; resolution, frame-rate, absolute frame, and duration
 remain model data but should not crowd the default transport strip. Viewer zoom is shell-local display state owned
-by `SelfHostedAppRoot`; `ui.viewer.cycle_zoom` is consumed before AppState
+by `AppUiAppRoot`; `ui.viewer.cycle_zoom` is consumed before AppState
 dispatch, survives model refreshes, and is not undoable because it does not
 change the project. The shell injects both zoom label and fixed zoom scale into
 `ViewerPanelModel`, and `ViewerSurface` uses that scale as a real display
@@ -2173,7 +2171,7 @@ still use `ColorPicker` directly. Color model fields use mode-specific compact
 columns: HEX gets one full-width field, RGB/HSL/HSV fit four channels on one
 row, and CMYKA fits five compact numeric fields on one row. The picker exposes
 a visible eyedropper button that enters sampling mode. The widget accepts an
-optional `VectorIcon` for that button but stays asset-agnostic; the self-hosted
+optional `VectorIcon` for that button but stays asset-agnostic; the app UI
 app shell supplies the bundled `AppIcon::Eyedropper` SVG from its product icon
 registry. The bundled source is the canonical `assets/icons/eyedropper.svg`
 asset, with no style suffix variants such as `eyedropper-bold.svg`, so the
@@ -2182,7 +2180,7 @@ stays platform-neutral: it emits
 `EventRequests::eyedropper`, handles `UiEvent::EyedropperSample` /
 `UiEvent::EyedropperCancel`, and never calls screen-capture or OS pointer APIs
 directly. Winit shells complete sampling via
-`mondrian_app::self_hosted::runtime::WinitUiRuntime`, which delegates platform
+`mondrian_app::app_ui::runtime::WinitUiRuntime`, which delegates platform
 work to `mondrian-platform::DesktopEyedropper` and routes the sampled color
 back as `UiEvent::EyedropperSample`. Shell-owned eyedropper overlay chrome uses
 theme tokens for its magnifier shell and contrast dot; the sampled preview color
@@ -2239,7 +2237,7 @@ keys; Ctrl/Shift/Alt/Meta chords are ignored by the widget so panel and
 workspace shortcut routing can handle them centrally. It does not own effect
 semantics, undo history, or graph mutation rules.
 
-The self-hosted `PanelKind::NodeGraph` panel maps the currently selected clip to
+The app UI `PanelKind::NodeGraph` panel maps the currently selected clip to
 a read-only render chain: Source -> each clip effect -> Output. The app adapter
 derives node titles, disabled state, and semantic accents from the same clip
 and effect data used by the Inspector, so the graph is another view of the same
@@ -2313,7 +2311,7 @@ stable icon id so parsing, lyon tessellation, and target-size raster cache reuse
 stay deterministic; repeated widget-tree construction must clone cached geometry
 rather than reparsing XML.
 Product-level bundled icons should enter the custom UI through
-`self_hosted::icons::AppIcon` so panel migration code does not duplicate
+`app_ui::icons::AppIcon` so panel migration code does not duplicate
 `include_str!()` paths or depend on legacy egui icon enums. Development tests
 must still parse every bundled `AppIcon`, but production panel and menu
 construction should not `panic!` if one SVG fails to parse: menu/list rows keep
@@ -2412,16 +2410,16 @@ the app can inspect `TextResolveStats`. Missing glyphs caused by rasterization
 or atlas allocation failures must be counted instead of silently disappearing;
 the shell may surface the counter, but missing glyphs should not trigger an
 unbounded redraw loop.
-`SelfHostedFrameRenderer` combines text and raster image diagnostics into
-`SelfHostedFrameDiagnostics`. Product and demo windows pass presented frame
-results through `SelfHostedRenderDiagnosticReporter`, which logs only changed
+`AppUiFrameRenderer` combines text and raster image diagnostics into
+`AppUiFrameDiagnostics`. Product and demo windows pass presented frame
+results through `AppUiRenderDiagnosticReporter`, which logs only changed
 failure counts and resets after a healthy frame. Render diagnostics should go to
 the tracing/log path by default; the status bar is reserved for actionable
 project or editor-state messages. Status bar text is top-positioned from the
 bar height and metadata font size, not a fixed baseline, so the bottom chrome
 cannot clip half of the glyphs on compact window sizes.
 
-Tests that mutate the process-global theme must take the self-hosted
+Tests that mutate the process-global theme must take the app UI
 `theme_test_guard()` before calling `set_theme_preset()`. Most widget tests
 should avoid the global theme entirely and pass an explicit
 `ThemePreset::build()` snapshot to `PaintContext`; global theme tests without
@@ -2440,13 +2438,13 @@ one batch.
 The text resolver preserves surrounding draw-state commands. A `Text` command
 inside `PushClip`/`PopClip` resolves into glyph `Image` commands at the same
 sequence position, still enclosed by the original clip scope.
-Self-hosted windows share `SelfHostedFrameRenderer` for the text-atlas upload
+App UI windows share `AppUiFrameRenderer` for the text-atlas upload
 and surface-present path. `mondrian-ui-text` resolves text into glyph image
 commands and exposes pending glyph uploads before the frame is submitted, so the
 renderer can upload first-use glyphs before drawing. The shared renderer still
 requests one deterministic follow-up redraw after first-use glyph or raster
 image uploads, because some backends make freshly written atlas texels visible
-one frame later. Window loops should depend on `SelfHostedFrameResult` for this
+one frame later. Window loops should depend on `AppUiFrameResult` for this
 warm-up redraw instead of adding entrypoint-specific repaint hacks.
 
 Line commands are expanded to coverage quads with deterministic triangle winding
@@ -2503,18 +2501,18 @@ and pruned with stale clips/effects. Selecting an effect is navigation state and
 must not enter timeline undo history; mutating, reordering, or removing effects
 continues to use undoable editor actions.
 
-The self-hosted product shell persists user-facing shell preferences through
-`SelfHostedUiHost`, not reusable widgets or `SelfHostedAppRoot`. Theme preset
+The app UI product shell persists user-facing shell preferences through
+`AppUiHost`, not reusable widgets or `AppUiAppRoot`. Theme preset
 workspace preset, and the optional Custom workspace layout are restored before
 the first root widget is built, so the initial dock tree matches the last
 product workspace. Shell-only actions such as `Action::SwitchWorkspace` or
-`FocusPanel` fallback update the root immediately; `SelfHostedUiHost` then
+`FocusPanel` fallback update the root immediately; `AppUiHost` then
 compares the root workspace before/after handled shell actions and writes any
-changed workspace preset/layout back through `self_hosted::preferences_store`.
+changed workspace preset/layout back through `app_ui::preferences_store`.
 Widget-local layout changes that do not dispatch an action, such as splitter
 drags, are synchronized explicitly by the window runner after the interaction
 settles. Editor-state actions and widget models remain disk-I/O free.
-Preference loading is intentionally strict while the self-hosted UI is alpha:
+Preference loading is intentionally strict while the app UI is alpha:
 files with an incompatible schema version, malformed JSON, or missing required
 fields fall back to clean defaults. Loaded recent projects are filtered to
 existing, de-duplicated paths; shortcut overrides must reference known
@@ -2526,9 +2524,9 @@ stale custom layout instead of opening a broken workspace.
 Panel model refreshes must not erase local panel interaction state. Reusable
 widgets expose small explicit state snapshots for UI-local affordances such as
 `PanelList` filters, selection, and scroll offsets. Dock containers expose their
-active tab through widget APIs, and `SelfHostedAppRoot` captures that shell-local
+active tab through widget APIs, and `AppUiAppRoot` captures that shell-local
 navigation state before rebuilding dock content from fresh `AppState` models.
-`SelfHostedUiHost` must also defer same-mode dirty refreshes while the active
+`AppUiHost` must also defer same-mode dirty refreshes while the active
 widget tree has transient interaction, such as an open context menu/dropdown or
 an active text input. Background thumbnail or preview completions may mark the
 UI dirty, but they must not rebuild the root tree until the transient surface is
@@ -2542,11 +2540,11 @@ It restores active tabs before list state so grouped panels such as
 Assets/Effects keep showing the surface the user was working in. Export is an
 independent panel/workspace. Splitter layout restoration remains owned by
 `DockSplitter`, while durable Custom layout persistence is owned by
-`SelfHostedWorkspaceLayout` and the preferences store. This keeps app-state data
+`AppUiWorkspaceLayout` and the preferences store. This keeps app-state data
 replacement separate from ephemeral user navigation state and from user-facing
 workspace customization.
 
-Until the i18n layer exists, self-hosted product surfaces are Chinese-first:
+Until the i18n layer exists, app UI product surfaces are Chinese-first:
 menu triggers, dock tab display names, empty states, context-menu rows, dialog
 titles, file-dialog labels, and inspector/export field labels should be Chinese
 unless the text is a file extension, codec, color-space standard, shortcut, or

@@ -1,9 +1,9 @@
-//! Self-hosted application menu bar.
+//! App UI application menu bar.
 //!
 //! This module owns the product menu model, shortcut hints, state-aware row
-//! availability, and the top-level menu bar widget used by the self-hosted
+//! availability, and the top-level menu bar widget used by the app UI
 //! shell. Root layout, modal state, and native dialog resolution stay in
-//! `self_hosted::shell`.
+//! `app_ui::shell`.
 
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
@@ -19,18 +19,18 @@ use crate::app::ui_actions::{
     timeline_clear_in_out_points_action,
 };
 use crate::app::AppState;
-use crate::self_hosted::action_availability::app_state_action_enabled;
-use crate::self_hosted::shortcuts::{
-    shortcut_label_for_action, shortcut_label_for_action_with_overrides, SelfHostedShortcutOverride,
+use crate::app_ui::action_availability::app_state_action_enabled;
+use crate::app_ui::shortcuts::{
+    shortcut_label_for_action, shortcut_label_for_action_with_overrides, AppUiShortcutOverride,
 };
-use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
+use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
-/// Height reserved for the self-hosted top menu bar.
+/// Height reserved for the app UI top menu bar.
 pub const MENU_BAR_HEIGHT: f32 = 24.0;
 
 const MENU_BAR_TRIGGER_GAP: f32 = 2.0;
 
-/// Default Mondrian menu structure for self-hosted shells.
+/// Default Mondrian menu structure for app UI shells.
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
     vec![
         (
@@ -165,7 +165,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
 
 /// Default Mondrian menu structure with user shortcut overrides applied.
 pub fn default_menu_items_with_shortcut_overrides(
-    overrides: &[SelfHostedShortcutOverride],
+    overrides: &[AppUiShortcutOverride],
 ) -> Vec<(&'static str, Vec<MenuItem>)> {
     apply_shortcut_overrides_to_menu_items(default_menu_items(), overrides)
 }
@@ -181,7 +181,7 @@ pub fn default_menu_items_for_app_state(state: &AppState) -> Vec<(&'static str, 
 /// Default menu structure with state availability and shortcut overrides.
 pub fn default_menu_items_for_app_state_with_shortcut_overrides(
     state: &AppState,
-    overrides: &[SelfHostedShortcutOverride],
+    overrides: &[AppUiShortcutOverride],
 ) -> Vec<(&'static str, Vec<MenuItem>)> {
     let items = default_menu_items()
         .into_iter()
@@ -202,7 +202,7 @@ pub fn default_menu_items_for_app_state_with_shortcut_overrides(
 pub fn apply_shell_menu_checked_state(
     items: Vec<(&'static str, Vec<MenuItem>)>,
     workspace_preset: WorkspacePreset,
-    workspace_layout: Option<&SelfHostedWorkspaceLayout>,
+    workspace_layout: Option<&AppUiWorkspaceLayout>,
 ) -> Vec<(&'static str, Vec<MenuItem>)> {
     items
         .into_iter()
@@ -221,7 +221,7 @@ pub fn apply_shell_menu_checked_state(
 fn apply_shell_menu_item_checked_state(
     item: MenuItem,
     workspace_preset: WorkspacePreset,
-    workspace_layout: Option<&SelfHostedWorkspaceLayout>,
+    workspace_layout: Option<&AppUiWorkspaceLayout>,
 ) -> MenuItem {
     let checked = match &item.action {
         Action::TogglePanel(panel) => {
@@ -250,7 +250,7 @@ fn menu_item_with_shortcut(item: MenuItem) -> MenuItem {
 
 fn apply_shortcut_overrides_to_menu_items(
     items: Vec<(&'static str, Vec<MenuItem>)>,
-    overrides: &[SelfHostedShortcutOverride],
+    overrides: &[AppUiShortcutOverride],
 ) -> Vec<(&'static str, Vec<MenuItem>)> {
     items
         .into_iter()
@@ -308,7 +308,7 @@ impl MenuBar {
     /// Build a menu bar from app state and user shortcut overrides.
     pub fn for_app_state_with_shortcut_overrides(
         state: &AppState,
-        overrides: &[SelfHostedShortcutOverride],
+        overrides: &[AppUiShortcutOverride],
     ) -> Self {
         Self::new(default_menu_items_for_app_state_with_shortcut_overrides(
             state, overrides,
@@ -320,7 +320,7 @@ impl MenuBar {
     pub fn refresh_shell_checked_state(
         &mut self,
         workspace_preset: WorkspacePreset,
-        workspace_layout: Option<&SelfHostedWorkspaceLayout>,
+        workspace_layout: Option<&AppUiWorkspaceLayout>,
     ) {
         for panel in PanelKind::ALL {
             self.set_checked_for_action(
@@ -503,7 +503,7 @@ mod tests {
         TIMELINE_NAMESPACE,
     };
     use crate::app::SelectedClipRef;
-    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode, TrackId};
     use mondrian_timeline::clip::{Clip, Transform2D};
@@ -629,16 +629,16 @@ mod tests {
 
     #[test]
     fn shell_menu_checked_state_marks_visible_panels_and_current_workspace() {
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.5,
-            first: Box::new(SelfHostedWorkspaceLayout::Panel {
+            first: Box::new(AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Assets,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
                 tabs: vec![PanelKind::Assets, PanelKind::Effects],
             }),
-            second: Box::new(SelfHostedWorkspaceLayout::Panel {
+            second: Box::new(AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
@@ -662,16 +662,16 @@ mod tests {
 
     #[test]
     fn shell_menu_checked_state_reflects_hidden_grouped_tabs_in_custom_layout() {
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.5,
-            first: Box::new(SelfHostedWorkspaceLayout::Panel {
+            first: Box::new(AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Assets,
                 active_index: 0,
                 hidden_tabs: vec![PanelKind::Effects],
                 tabs: Vec::new(),
             }),
-            second: Box::new(SelfHostedWorkspaceLayout::Panel {
+            second: Box::new(AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn self_hosted_window_menu_excludes_project_browser_and_console_panels() {
+    fn app_ui_window_menu_excludes_project_browser_and_console_panels() {
         let menu_items = default_menu_items();
         let window_items = menu_items
             .iter()
@@ -708,7 +708,7 @@ mod tests {
 
         assert!(
             !labels.iter().any(|label| *label == "Project" || *label == "Console"),
-            "self-hosted product panels should not reintroduce project-browser or console entries"
+            "app UI product panels should not reintroduce project-browser or console entries"
         );
         assert!(
             labels.contains(&"素材"),
@@ -821,17 +821,17 @@ mod tests {
     #[test]
     fn menu_shortcut_hints_follow_user_overrides() {
         let overrides = vec![
-            SelfHostedShortcutOverride {
+            AppUiShortcutOverride {
                 id: "file.save_project".to_owned(),
-                binding: Some(crate::self_hosted::shortcuts::SelfHostedShortcutBinding {
-                    key: crate::self_hosted::shortcuts::SelfHostedShortcutKey::S,
+                binding: Some(crate::app_ui::shortcuts::AppUiShortcutBinding {
+                    key: crate::app_ui::shortcuts::AppUiShortcutKey::S,
                     ctrl: true,
                     alt: true,
                     shift: false,
                     meta: false,
                 }),
             },
-            SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
+            AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
         ];
         let menu_items = default_menu_items_with_shortcut_overrides(&overrides);
 

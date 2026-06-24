@@ -1,4 +1,4 @@
-//! Self-hosted About dialog.
+//! App UI About dialog.
 //!
 //! Product shell modals live in their own modules and report shell-local
 //! actions instead of mutating application state directly.
@@ -26,7 +26,7 @@ const BUTTON_WIDTH: f32 = 84.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
 
-/// Product information modal for the self-hosted shell.
+/// Product information modal for the app UI shell.
 pub struct AboutDialog {
     id: WidgetId,
     surface: DialogSurface,
@@ -189,7 +189,7 @@ mod tests {
     use mondrian_ui_core::widget::EventRequests;
 
     use crate::app::ui_actions::{APP_SHELL_CLOSE_MODAL, APP_SHELL_NAMESPACE};
-    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 
     fn assert_close_modal_action(action: &Action) {
         match action {

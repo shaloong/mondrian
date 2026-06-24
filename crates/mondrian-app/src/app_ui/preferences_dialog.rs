@@ -1,4 +1,4 @@
-//! Self-hosted Preferences dialog.
+//! App UI Preferences dialog.
 //!
 //! This dialog owns the product settings surface for the custom UI shell. It
 //! deliberately depends on app-shell actions instead of legacy egui preference
@@ -19,10 +19,10 @@ use crate::app::ui_actions::{
     PreferencesShortcutReboundPayload, PreferencesTabPayload,
 };
 use crate::app::AppState;
-use crate::self_hosted::shortcuts::{
-    active_shortcuts, default_shortcuts, SelfHostedShortcutKey, SelfHostedShortcutOverride,
+use crate::app_ui::shortcuts::{
+    active_shortcuts, default_shortcuts, AppUiShortcutKey, AppUiShortcutOverride,
 };
-use crate::self_hosted::window::{DEFAULT_SELF_HOSTED_LOG_FILTER, SELF_HOSTED_BACKGROUND_WORKERS};
+use crate::app_ui::window::{APP_UI_BACKGROUND_WORKERS, DEFAULT_APP_UI_LOG_FILTER};
 
 const CARD_MIN_WIDTH: f32 = 480.0;
 const CARD_WIDTH: f32 = 680.0;
@@ -47,9 +47,9 @@ const SHORTCUT_BUTTON_GAP: f32 = 6.0;
 const SHORTCUT_BUTTON_HEIGHT: f32 = 24.0;
 const SHORTCUT_HEADER_ROW_COUNT: usize = 2;
 
-/// Read-only settings/status snapshot shown by the self-hosted preferences UI.
+/// Read-only settings/status snapshot shown by the app UI preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelfHostedPreferencesModel {
+pub struct AppUiPreferencesModel {
     pub theme_preset: ThemePreset,
     pub theme_label: String,
     pub project_status: String,
@@ -66,7 +66,7 @@ pub struct SelfHostedPreferencesModel {
     pub shortcut_rows: Vec<ShortcutPreferenceRow>,
 }
 
-/// One shortcut row shown in the self-hosted preferences UI.
+/// One shortcut row shown in the app UI preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortcutPreferenceRow {
     pub id: String,
@@ -78,9 +78,9 @@ pub struct ShortcutPreferenceRow {
     pub conflict_owner: Option<String>,
 }
 
-impl SelfHostedPreferencesModel {
+impl AppUiPreferencesModel {
     /// Build the preferences model from the state actually owned by the
-    /// self-hosted product shell.
+    /// app UI product shell.
     pub fn from_app_state(
         state: &AppState,
         workspace: WorkspacePreset,
@@ -89,12 +89,12 @@ impl SelfHostedPreferencesModel {
         Self::from_app_state_with_shortcut_overrides(state, workspace, theme_preset, &[])
     }
 
-    /// Build the preferences model using the active self-hosted shortcut table.
+    /// Build the preferences model using the active app UI shortcut table.
     pub fn from_app_state_with_shortcut_overrides(
         state: &AppState,
         workspace: WorkspacePreset,
         theme_preset: ThemePreset,
-        shortcut_overrides: &[SelfHostedShortcutOverride],
+        shortcut_overrides: &[AppUiShortcutOverride],
     ) -> Self {
         let project_status = state
             .current_project_path
@@ -130,14 +130,14 @@ impl SelfHostedPreferencesModel {
                 state.export_draft.output_path.clone()
             },
             runtime_diagnostics: "跟踪已启用".to_owned(),
-            log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
-            background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
+            log_filter: format!("RUST_LOG / {DEFAULT_APP_UI_LOG_FILTER}"),
+            background_workers: APP_UI_BACKGROUND_WORKERS.to_string(),
             shortcut_rows: shortcut_preference_rows(shortcut_overrides),
         }
     }
 }
 
-impl Default for SelfHostedPreferencesModel {
+impl Default for AppUiPreferencesModel {
     fn default() -> Self {
         Self {
             theme_preset: ThemePreset::Dark,
@@ -151,14 +151,14 @@ impl Default for SelfHostedPreferencesModel {
             export_range: export_range_label(TimelineExportRange::SequenceInOut).to_owned(),
             export_output: "未选择".to_owned(),
             runtime_diagnostics: "跟踪已启用".to_owned(),
-            log_filter: format!("RUST_LOG / {DEFAULT_SELF_HOSTED_LOG_FILTER}"),
-            background_workers: SELF_HOSTED_BACKGROUND_WORKERS.to_string(),
+            log_filter: format!("RUST_LOG / {DEFAULT_APP_UI_LOG_FILTER}"),
+            background_workers: APP_UI_BACKGROUND_WORKERS.to_string(),
             shortcut_rows: shortcut_preference_rows(&[]),
         }
     }
 }
 
-/// Product preferences section shown by the self-hosted shell.
+/// Product preferences section shown by the app UI shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferencesDialogTab {
     General,
@@ -200,11 +200,11 @@ impl From<PreferencesTabPayload> for PreferencesDialogTab {
     }
 }
 
-/// Preferences modal for the self-hosted product shell.
+/// Preferences modal for the app UI product shell.
 pub struct PreferencesDialog {
     id: WidgetId,
     active_tab: PreferencesDialogTab,
-    model: SelfHostedPreferencesModel,
+    model: AppUiPreferencesModel,
     surface: DialogSurface,
     bounds: Rect,
     card: Rect,
@@ -231,17 +231,17 @@ struct ShortcutPreferenceButtons {
 impl PreferencesDialog {
     /// Build the preferences dialog with the default General tab.
     pub fn new() -> Self {
-        Self::with_model(SelfHostedPreferencesModel::default())
+        Self::with_model(AppUiPreferencesModel::default())
     }
 
     /// Build the preferences dialog from an explicit model.
-    pub fn with_model(model: SelfHostedPreferencesModel) -> Self {
+    pub fn with_model(model: AppUiPreferencesModel) -> Self {
         Self::with_model_and_tab(model, PreferencesDialogTab::General)
     }
 
     /// Build the preferences dialog from an explicit model and active tab.
     pub fn with_model_and_tab(
-        model: SelfHostedPreferencesModel,
+        model: AppUiPreferencesModel,
         active_tab: PreferencesDialogTab,
     ) -> Self {
         let nav_buttons = PreferencesDialogTab::ALL
@@ -297,12 +297,12 @@ impl PreferencesDialog {
     }
 
     /// Current settings/status snapshot backing the dialog.
-    pub fn model(&self) -> &SelfHostedPreferencesModel {
+    pub fn model(&self) -> &AppUiPreferencesModel {
         &self.model
     }
 
     /// Update the backing settings/status snapshot without replacing widget ids.
-    pub fn set_model(&mut self, model: SelfHostedPreferencesModel) {
+    pub fn set_model(&mut self, model: AppUiPreferencesModel) {
         if self.model == model {
             return;
         }
@@ -439,7 +439,7 @@ impl PreferencesDialog {
             self.cancel_shortcut_capture(ctx);
             return EventResult::Handled;
         }
-        let Some(key) = SelfHostedShortcutKey::from_key_code(key) else {
+        let Some(key) = AppUiShortcutKey::from_key_code(key) else {
             return EventResult::Handled;
         };
         (ctx.dispatch)(app_shell_preferences_shortcut_rebound_action(
@@ -859,9 +859,7 @@ fn pointer_position(event: &UiEvent) -> Option<Point> {
     }
 }
 
-fn shortcut_preference_rows(
-    overrides: &[SelfHostedShortcutOverride],
-) -> Vec<ShortcutPreferenceRow> {
+fn shortcut_preference_rows(overrides: &[AppUiShortcutOverride]) -> Vec<ShortcutPreferenceRow> {
     let active = active_shortcuts(overrides);
     default_shortcuts()
         .into_iter()
@@ -952,7 +950,7 @@ fn paint_shortcut_scrollbar(
 
 fn content_rows_for_tab(
     tab: PreferencesDialogTab,
-    model: &SelfHostedPreferencesModel,
+    model: &AppUiPreferencesModel,
 ) -> Vec<ContentRow> {
     match tab {
         PreferencesDialogTab::General => vec![
@@ -1022,7 +1020,7 @@ mod tests {
         APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
         APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PREFERENCES_THEME_CHANGED,
     };
-    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 
     fn click(dialog: &mut PreferencesDialog, ctx: &mut EventContext<'_>, position: Point) {
         assert_eq!(
@@ -1065,21 +1063,19 @@ mod tests {
     #[test]
     fn preferences_dialog_rebuilds_shortcut_rows_from_registry() {
         let dialog = PreferencesDialog::with_model_and_tab(
-            SelfHostedPreferencesModel::default(),
+            AppUiPreferencesModel::default(),
             PreferencesDialogTab::Shortcuts,
         );
 
         assert_eq!(dialog.active_tab(), PreferencesDialogTab::Shortcuts);
-        assert!(
-            dialog.content_labels.len() > crate::self_hosted::shortcuts::default_shortcuts().len()
-        );
+        assert!(dialog.content_labels.len() > crate::app_ui::shortcuts::default_shortcuts().len());
     }
 
     #[test]
     fn preferences_shortcut_rows_use_active_overrides() {
         let overrides =
-            vec![SelfHostedShortcutOverride { id: "panel.inspector".to_owned(), binding: None }];
-        let model = SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
+            vec![AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None }];
+        let model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
             &AppState::new(),
             WorkspacePreset::Editing,
             ThemePreset::Dark,
@@ -1103,17 +1099,17 @@ mod tests {
 
     #[test]
     fn preferences_shortcut_rows_hide_bindings_taken_by_overrides() {
-        let overrides = vec![SelfHostedShortcutOverride {
+        let overrides = vec![AppUiShortcutOverride {
             id: "file.save_project".to_owned(),
-            binding: Some(crate::self_hosted::shortcuts::SelfHostedShortcutBinding {
-                key: SelfHostedShortcutKey::O,
+            binding: Some(crate::app_ui::shortcuts::AppUiShortcutBinding {
+                key: AppUiShortcutKey::O,
                 ctrl: true,
                 alt: false,
                 shift: false,
                 meta: false,
             }),
         }];
-        let model = SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
+        let model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
             &AppState::new(),
             WorkspacePreset::Editing,
             ThemePreset::Dark,
@@ -1142,17 +1138,17 @@ mod tests {
 
     #[test]
     fn preferences_shortcut_buttons_dispatch_disable_and_default_actions() {
-        let overrides = vec![SelfHostedShortcutOverride {
+        let overrides = vec![AppUiShortcutOverride {
             id: "file.save_project".to_owned(),
-            binding: Some(crate::self_hosted::shortcuts::SelfHostedShortcutBinding {
-                key: crate::self_hosted::shortcuts::SelfHostedShortcutKey::S,
+            binding: Some(crate::app_ui::shortcuts::AppUiShortcutBinding {
+                key: crate::app_ui::shortcuts::AppUiShortcutKey::S,
                 ctrl: true,
                 alt: true,
                 shift: false,
                 meta: false,
             }),
         }];
-        let model = SelfHostedPreferencesModel::from_app_state_with_shortcut_overrides(
+        let model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
             &AppState::new(),
             WorkspacePreset::Editing,
             ThemePreset::Dark,
@@ -1229,7 +1225,7 @@ mod tests {
     #[test]
     fn preferences_shortcut_rebind_captures_next_keydown() {
         let mut dialog = PreferencesDialog::with_model_and_tab(
-            SelfHostedPreferencesModel::default(),
+            AppUiPreferencesModel::default(),
             PreferencesDialogTab::Shortcuts,
         );
         dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
@@ -1300,7 +1296,7 @@ mod tests {
     #[test]
     fn preferences_shortcuts_scroll_to_late_rows_before_dispatch() {
         let mut dialog = PreferencesDialog::with_model_and_tab(
-            SelfHostedPreferencesModel::default(),
+            AppUiPreferencesModel::default(),
             PreferencesDialogTab::Shortcuts,
         );
         dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
@@ -1379,7 +1375,7 @@ mod tests {
         state.export_draft.range = TimelineExportRange::EntireSequence;
         state.export_draft.output_path = "E:/renders/cut.mp4".to_owned();
 
-        let model = SelfHostedPreferencesModel::from_app_state(
+        let model = AppUiPreferencesModel::from_app_state(
             &state,
             WorkspacePreset::Color,
             ThemePreset::Light,

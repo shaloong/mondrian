@@ -1,4 +1,4 @@
-//! Panel adapters for the self-hosted UI shell.
+//! Panel adapters for the app UI shell.
 //!
 //! These adapters translate application-facing panel concepts into generic
 //! `mondrian-ui-widgets` view models. Demo data is kept behind explicit model
@@ -88,11 +88,11 @@ use crate::app::ui_actions::{
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
 };
 use crate::app::{AppState, SelectedClipRef};
-use crate::self_hosted::action_availability::app_state_action_enabled;
-use crate::self_hosted::icons::AppIcon;
-use crate::self_hosted::preview_scale::normalize_preview_resolution_scale;
-use crate::self_hosted::shortcuts::shortcut_label_for_action;
-use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
+use crate::app_ui::action_availability::app_state_action_enabled;
+use crate::app_ui::icons::AppIcon;
+use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
+use crate::app_ui::shortcuts::shortcut_label_for_action;
+use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
 /// Supplies already-decoded thumbnails for asset-grid cards.
 ///
@@ -126,9 +126,9 @@ pub enum AssetThumbnailState {
     Ready(RasterImage),
 }
 
-/// Complete set of view models needed by the self-hosted panel shell.
+/// Complete set of view models needed by the app UI panel shell.
 #[derive(Debug, Clone)]
-pub struct SelfHostedPanelModels {
+pub struct AppUiPanelModels {
     pub assets: AssetGridModel,
     pub effects: PanelListModel,
     pub viewer: ViewerPanelModel,
@@ -138,8 +138,8 @@ pub struct SelfHostedPanelModels {
     pub node_graph: NodeGraphPanelModel,
 }
 
-impl SelfHostedPanelModels {
-    /// Snapshot the current application state into self-hosted panel models.
+impl AppUiPanelModels {
+    /// Snapshot the current application state into app UI panel models.
     ///
     /// This is a read-only boundary: widgets receive generic view models and
     /// emit actions, while domain mutations stay in `AppState` handlers.
@@ -220,7 +220,7 @@ impl SelfHostedPanelModels {
     }
 
     /// Demo fixtures used by tests before the real editor state is wired into
-    /// the self-hosted shell.
+    /// the app UI shell.
     #[cfg(test)]
     pub fn demo() -> Self {
         let state = demo_app_state();
@@ -228,7 +228,7 @@ impl SelfHostedPanelModels {
     }
 }
 
-/// Build a synthetic app state for self-hosted tests.
+/// Build a synthetic app state for app UI tests.
 ///
 /// The generated timeline is intentionally real domain data so timeline widget
 /// actions carry stable ids and can be dispatched through `AppState`.
@@ -745,7 +745,7 @@ impl TimelinePanelModel {
         })
     }
 
-    /// Map the current timeline sequence into self-hosted timeline view models.
+    /// Map the current timeline sequence into app UI timeline view models.
     ///
     /// The widget layer stays index-based and domain-light; this adapter is the
     /// app-side boundary that carries stable track/clip ids into emitted
@@ -1001,7 +1001,7 @@ pub struct InspectorPanelModel {
     pub effects: Vec<InspectorEffectModel>,
 }
 
-/// Effect row data shown by the self-hosted inspector.
+/// Effect row data shown by the app UI inspector.
 #[derive(Debug, Clone)]
 pub struct InspectorEffectModel {
     /// Effect instance id targeted by enable/disable actions.
@@ -1433,14 +1433,14 @@ impl ExportPanelModel {
     }
 }
 
-/// Build the default self-hosted dock tree from explicit panel models.
-pub fn build_dock_tree(models: SelfHostedPanelModels) -> DockSplitter {
+/// Build the default app UI dock tree from explicit panel models.
+pub fn build_dock_tree(models: AppUiPanelModels) -> DockSplitter {
     build_dock_tree_for_preset(models, WorkspacePreset::Editing)
 }
 
-/// Build a self-hosted dock tree for one built-in workspace preset.
+/// Build an app UI dock tree for one built-in workspace preset.
 pub fn build_dock_tree_for_preset(
-    models: SelfHostedPanelModels,
+    models: AppUiPanelModels,
     preset: WorkspacePreset,
 ) -> DockSplitter {
     match preset {
@@ -1452,30 +1452,28 @@ pub fn build_dock_tree_for_preset(
     }
 }
 
-/// Build a self-hosted dock tree from a persisted custom workspace layout.
+/// Build an app UI dock tree from a persisted custom workspace layout.
 pub fn build_dock_tree_from_layout(
-    models: SelfHostedPanelModels,
-    layout: &SelfHostedWorkspaceLayout,
+    models: AppUiPanelModels,
+    layout: &AppUiWorkspaceLayout,
 ) -> Option<DockSplitter> {
     match layout {
-        SelfHostedWorkspaceLayout::Split { direction, ratio, first, second } => {
-            Some(DockSplitter::new(
-                *direction,
-                *ratio,
-                dock_widget_from_layout(models.clone(), first),
-                dock_widget_from_layout(models, second),
-            ))
-        }
-        SelfHostedWorkspaceLayout::Panel { .. } => None,
+        AppUiWorkspaceLayout::Split { direction, ratio, first, second } => Some(DockSplitter::new(
+            *direction,
+            *ratio,
+            dock_widget_from_layout(models.clone(), first),
+            dock_widget_from_layout(models, second),
+        )),
+        AppUiWorkspaceLayout::Panel { .. } => None,
     }
 }
 
 fn dock_widget_from_layout(
-    models: SelfHostedPanelModels,
-    layout: &SelfHostedWorkspaceLayout,
+    models: AppUiPanelModels,
+    layout: &AppUiWorkspaceLayout,
 ) -> Box<dyn Widget> {
     match layout {
-        SelfHostedWorkspaceLayout::Split { direction, ratio, first, second } => {
+        AppUiWorkspaceLayout::Split { direction, ratio, first, second } => {
             Box::new(DockSplitter::new(
                 *direction,
                 *ratio,
@@ -1483,7 +1481,7 @@ fn dock_widget_from_layout(
                 dock_widget_from_layout(models, second),
             ))
         }
-        SelfHostedWorkspaceLayout::Panel { kind, active_index, hidden_tabs, tabs } => {
+        AppUiWorkspaceLayout::Panel { kind, active_index, hidden_tabs, tabs } => {
             let tab_kinds = if tabs.is_empty() {
                 visible_tabs_for_slot(*kind, hidden_tabs)
             } else {
@@ -1500,7 +1498,7 @@ fn dock_widget_from_layout(
     }
 }
 
-fn editing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+fn editing_workspace(models: AppUiPanelModels) -> DockSplitter {
     let viewer_and_inspector = DockSplitter::new(
         SplitDirection::Horizontal,
         0.70,
@@ -1521,7 +1519,7 @@ fn editing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     )
 }
 
-fn color_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+fn color_workspace(models: AppUiPanelModels) -> DockSplitter {
     let right = DockSplitter::new(
         SplitDirection::Vertical,
         0.56,
@@ -1542,7 +1540,7 @@ fn color_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     )
 }
 
-fn audio_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+fn audio_workspace(models: AppUiPanelModels) -> DockSplitter {
     let upper = DockSplitter::new(
         SplitDirection::Horizontal,
         0.34,
@@ -1563,7 +1561,7 @@ fn audio_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     )
 }
 
-fn compositing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+fn compositing_workspace(models: AppUiPanelModels) -> DockSplitter {
     let right = DockSplitter::new(
         SplitDirection::Vertical,
         0.58,
@@ -1584,7 +1582,7 @@ fn compositing_workspace(models: SelfHostedPanelModels) -> DockSplitter {
     )
 }
 
-fn export_workspace(models: SelfHostedPanelModels) -> DockSplitter {
+fn export_workspace(models: AppUiPanelModels) -> DockSplitter {
     DockSplitter::new(
         SplitDirection::Horizontal,
         0.42,
@@ -1596,22 +1594,22 @@ fn export_workspace(models: SelfHostedPanelModels) -> DockSplitter {
 /// Build a dock tree using built-in demo panel fixtures.
 #[cfg(test)]
 pub fn build_demo_dock_tree() -> DockSplitter {
-    build_dock_tree(SelfHostedPanelModels::demo())
+    build_dock_tree(AppUiPanelModels::demo())
 }
 
-fn slot(kind: PanelKind, models: SelfHostedPanelModels) -> Box<dyn Widget> {
+fn slot(kind: PanelKind, models: AppUiPanelModels) -> Box<dyn Widget> {
     slot_with_hidden_tabs(kind, models, &[])
 }
 
 fn slot_with_hidden_tabs(
     kind: PanelKind,
-    models: SelfHostedPanelModels,
+    models: AppUiPanelModels,
     hidden_tabs: &[PanelKind],
 ) -> Box<dyn Widget> {
     slot_with_tabs(visible_tabs_for_slot(kind, hidden_tabs), models)
 }
 
-fn slot_with_tabs(mut tab_kinds: Vec<PanelKind>, models: SelfHostedPanelModels) -> Box<dyn Widget> {
+fn slot_with_tabs(mut tab_kinds: Vec<PanelKind>, models: AppUiPanelModels) -> Box<dyn Widget> {
     if tab_kinds.is_empty() {
         tab_kinds.push(PanelKind::Viewer);
     }
@@ -1670,7 +1668,7 @@ fn default_tabs_for_slot(kind: PanelKind) -> &'static [PanelKind] {
     }
 }
 
-fn panel_content_for_slot(kind: PanelKind, models: &SelfHostedPanelModels) -> Box<dyn Widget> {
+fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn Widget> {
     match kind {
         PanelKind::Assets => Box::new(ScrollView::new(Some(Box::new(asset_grid(&models.assets))))),
         PanelKind::Effects => Box::new(panel_list(&models.effects)),
@@ -3928,7 +3926,7 @@ mod tests {
         TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
         TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
     };
-    use crate::self_hosted::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_effects::EffectNodeExt;
@@ -4026,7 +4024,7 @@ mod tests {
 
     #[test]
     fn demo_panel_models_cover_primary_editor_surfaces() {
-        let models = SelfHostedPanelModels::demo();
+        let models = AppUiPanelModels::demo();
 
         assert!(!models.assets.items.is_empty());
         assert!(models.assets.items.iter().all(|item| item.icon.is_some()));
@@ -4070,16 +4068,16 @@ mod tests {
 
     #[test]
     fn custom_layout_hidden_grouped_tabs_filter_asset_browser_tabs() {
-        let layout = SelfHostedWorkspaceLayout::Split {
+        let layout = AppUiWorkspaceLayout::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.37,
-            first: Box::new(SelfHostedWorkspaceLayout::Panel {
+            first: Box::new(AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Assets,
                 active_index: 1,
                 hidden_tabs: vec![PanelKind::Effects],
                 tabs: Vec::new(),
             }),
-            second: Box::new(SelfHostedWorkspaceLayout::Panel {
+            second: Box::new(AppUiWorkspaceLayout::Panel {
                 kind: PanelKind::Viewer,
                 active_index: 0,
                 hidden_tabs: Vec::new(),
@@ -4088,7 +4086,7 @@ mod tests {
         };
 
         let dock =
-            build_dock_tree_from_layout(SelfHostedPanelModels::demo(), &layout).expect("dock tree");
+            build_dock_tree_from_layout(AppUiPanelModels::demo(), &layout).expect("dock tree");
         let assets = dock_panel_for_kind(&dock, PanelKind::Assets).expect("assets panel");
 
         assert_eq!(assets.tab_count(), 1);
@@ -4112,7 +4110,7 @@ mod tests {
     #[test]
     fn editing_workspace_uses_full_width_bottom_timeline() {
         let mut dock =
-            build_dock_tree_for_preset(SelfHostedPanelModels::demo(), WorkspacePreset::Editing);
+            build_dock_tree_for_preset(AppUiPanelModels::demo(), WorkspacePreset::Editing);
         dock.layout(Rect::new(0.0, 0.0, 1000.0, 600.0));
 
         assert_eq!(
@@ -4184,7 +4182,7 @@ mod tests {
         ];
 
         for (preset, point, expected) in cases {
-            let mut dock = build_dock_tree_for_preset(SelfHostedPanelModels::demo(), preset);
+            let mut dock = build_dock_tree_for_preset(AppUiPanelModels::demo(), preset);
             dock.layout(Rect::new(0.0, 0.0, 1000.0, 600.0));
 
             assert_eq!(
@@ -4198,7 +4196,7 @@ mod tests {
     #[test]
     fn app_state_models_are_safe_without_an_open_project() {
         let state = AppState::new();
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert!(models.timeline.tracks.is_empty());
         assert_eq!(models.timeline.playhead_frame, 0);
@@ -4314,7 +4312,7 @@ mod tests {
 
     #[test]
     fn viewer_panel_play_pause_control_dispatches_toggle_play() {
-        let mut viewer = viewer_panel(&SelfHostedPanelModels::demo().viewer);
+        let mut viewer = viewer_panel(&AppUiPanelModels::demo().viewer);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let play_pause_center = Point::new(250.0, 299.0);
         let actions = RefCell::new(Vec::new());
@@ -4537,8 +4535,8 @@ mod tests {
     }
 
     #[test]
-    fn self_hosted_content_factory_covers_every_panel_kind() {
-        let models = SelfHostedPanelModels::from_app_state(&AppState::new());
+    fn app_ui_content_factory_covers_every_panel_kind() {
+        let models = AppUiPanelModels::from_app_state(&AppState::new());
         let constraint = LayoutConstraint { min: Size::ZERO, max: Size::new(320.0, 240.0) };
 
         for kind in PanelKind::ALL {
@@ -4914,7 +4912,7 @@ mod tests {
         let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
         let mut state = AppState::new();
         state.asset_library = Some(library);
-        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
         let card = grid.card_rect_for_index(0).expect("asset card");
@@ -5049,7 +5047,7 @@ mod tests {
         let asset_id = library.create_solid_color_asset(Some("Old Plate")).expect("create asset");
         let mut state = AppState::new();
         state.asset_library = Some(library);
-        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
         let actions = RefCell::new(Vec::<Action>::new());
@@ -5173,7 +5171,7 @@ mod tests {
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = AppState::new();
         state.asset_library = Some(library);
-        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
         let card = grid.card_rect_for_index(0).expect("folder card");
@@ -5246,7 +5244,7 @@ mod tests {
         let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
         let mut state = AppState::new();
         state.asset_library = Some(library);
-        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
         let first = grid.card_rect_for_index(0).expect("first card").center();
@@ -5323,7 +5321,7 @@ mod tests {
         let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
         let mut state = AppState::new();
         state.asset_library = Some(library);
-        let model = SelfHostedPanelModels::from_app_state(&state).assets;
+        let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
         let actions = RefCell::new(Vec::<Action>::new());
@@ -6312,7 +6310,7 @@ mod tests {
             clip_id,
         }];
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert!(models.timeline.tracks[display_track_index].clips[0].selected);
         assert_eq!(
@@ -6331,7 +6329,7 @@ mod tests {
 
     #[test]
     fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
@@ -6365,7 +6363,7 @@ mod tests {
         );
         state.seek(7);
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
         let colors = current_theme().colors.clone();
 
         assert_eq!(models.viewer.title, "edit");
@@ -6389,7 +6387,7 @@ mod tests {
         );
 
         state.play();
-        let playing_models = SelfHostedPanelModels::from_app_state(&state);
+        let playing_models = AppUiPanelModels::from_app_state(&state);
         assert_eq!(playing_models.viewer.status, "播放中");
         assert_eq!(playing_models.viewer.status_tone, ViewerStatusTone::Accent);
         assert!(playing_models.viewer.playing);
@@ -6473,7 +6471,7 @@ mod tests {
         let mut state = AppState::new();
         state.sequence = Some(Sequence::new("edit"));
 
-        let models = SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
             None,
             None,
@@ -6500,7 +6498,7 @@ mod tests {
 
         let state = AppState::new();
 
-        let models = SelfHostedPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
             None,
             None,
@@ -6519,7 +6517,7 @@ mod tests {
         sequence.settings.preview.resolution_scale = 1.0;
         state.sequence = Some(sequence);
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(models.viewer.preview_quality_label, "1/1");
         assert_eq!(models.viewer.preview_resolution_scale, 1.0);
@@ -6532,7 +6530,7 @@ mod tests {
         sequence.settings.preview.resolution_scale = 0.0;
         state.sequence = Some(sequence);
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(models.viewer.preview_quality_label, "1/8");
         assert_eq!(models.viewer.preview_resolution_scale, 0.125);
@@ -6580,7 +6578,7 @@ mod tests {
             clip_id,
         });
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(
             models.inspector.curve_points,
@@ -6618,7 +6616,7 @@ mod tests {
             clip_id,
         });
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(
             models.inspector.curve_points,
@@ -6640,7 +6638,7 @@ mod tests {
         let mut state = AppState::new();
         state.asset_library = Some(library);
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(models.assets.items.len(), 1);
         assert_eq!(
@@ -6703,7 +6701,7 @@ mod tests {
         let mut state = AppState::new();
         state.asset_library = Some(library);
 
-        let models = SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_and_thumbnails(
             &state,
             None,
             Some(&TestThumbnails),
@@ -6734,7 +6732,7 @@ mod tests {
         let mut state = AppState::new();
         state.asset_library = Some(library);
 
-        let loading = SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+        let loading = AppUiPanelModels::from_app_state_with_asset_folder_and_thumbnails(
             &state,
             None,
             Some(&TestThumbnails(AssetThumbnailState::Loading)),
@@ -6744,7 +6742,7 @@ mod tests {
             mondrian_ui_widgets::AssetGridThumbnailStatus::Loading
         );
 
-        let failed = SelfHostedPanelModels::from_app_state_with_asset_folder_and_thumbnails(
+        let failed = AppUiPanelModels::from_app_state_with_asset_folder_and_thumbnails(
             &state,
             None,
             Some(&TestThumbnails(AssetThumbnailState::Failed)),
@@ -6776,7 +6774,7 @@ mod tests {
         let mut state = AppState::new();
         state.asset_library = Some(library);
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(models.assets.items.len(), 2);
         let folder = &models.assets.items[0];
@@ -6853,8 +6851,7 @@ mod tests {
         let mut state = AppState::new();
         state.asset_library = Some(library);
 
-        let models =
-            SelfHostedPanelModels::from_app_state_with_asset_folder(&state, Some(&folder_id));
+        let models = AppUiPanelModels::from_app_state_with_asset_folder(&state, Some(&folder_id));
 
         assert_eq!(models.assets.subtitle, "项目素材库 / Rushes");
         assert_eq!(
@@ -6922,7 +6919,7 @@ mod tests {
         let mut state = AppState::new();
         state.asset_library = Some(library);
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert!(models.assets.items.is_empty());
         assert!(models.assets.accepts_file_drop);
@@ -7051,7 +7048,7 @@ mod tests {
 
         let selected = state.primary_selected_effect().expect("new effect selected");
         assert_eq!(selected.clip.clip_id, clip_id);
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(
             models.inspector.selected_effect_id,
@@ -7099,7 +7096,7 @@ mod tests {
             .expect("dispatch remove selected effect");
 
         assert!(state.primary_selected_effect().is_none());
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(models.node_graph.selected_clip, Some(selection));
         assert_eq!(
@@ -7145,7 +7142,7 @@ mod tests {
             .dispatch_action(Action::ReorderEffects { clip_id, from: 1, to: 0 })
             .expect("dispatch reorder selected effect");
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
         let selected = state.primary_selected_effect().expect("selected effect survives reorder");
 
         assert_eq!(selected.effect_id, second_id);
@@ -7734,7 +7731,7 @@ mod tests {
             clip_id,
         });
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert!(models.effects.subtitle.is_empty());
         assert!(models.effects.items.iter().all(|item| item.activate_action.is_none()));
@@ -7832,7 +7829,7 @@ mod tests {
             clip_id,
         });
 
-        let models = SelfHostedPanelModels::from_app_state(&state);
+        let models = AppUiPanelModels::from_app_state(&state);
 
         assert_eq!(
             models.inspector.selected_clip,
@@ -7893,7 +7890,7 @@ mod tests {
 
     #[test]
     fn timeline_clip_fallback_colors_use_theme_tokens() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Light);
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
@@ -7940,7 +7937,7 @@ mod tests {
 
     #[test]
     fn panel_domain_accents_use_theme_tokens() {
-        let _theme_guard = crate::self_hosted::test_utils::theme_test_guard();
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         mondrian_ui_theme::set_theme_preset(mondrian_ui_theme::ThemePreset::Light);
         let colors = current_theme().colors.clone();
 

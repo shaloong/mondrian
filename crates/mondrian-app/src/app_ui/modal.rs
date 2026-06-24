@@ -1,6 +1,6 @@
-//! Modal host for self-hosted shell-local dialogs.
+//! Modal host for app UI shell-local dialogs.
 //!
-//! `SelfHostedAppRoot` owns at most one modal at a time. Concrete dialogs stay
+//! `AppUiAppRoot` owns at most one modal at a time. Concrete dialogs stay
 //! in their own modules; this enum is the narrow top-layer boundary that root
 //! layout, event routing, painting, and tests can depend on.
 
@@ -8,15 +8,13 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 
-use crate::self_hosted::about_dialog::AboutDialog;
-use crate::self_hosted::new_project_dialog::{NewProjectDialog, SelfHostedNewProjectDraft};
-use crate::self_hosted::pending_close_dialog::{PendingCloseDialog, PendingCloseDialogAction};
-use crate::self_hosted::preferences_dialog::{
-    PreferencesDialog, PreferencesDialogTab, SelfHostedPreferencesModel,
+use crate::app_ui::about_dialog::AboutDialog;
+use crate::app_ui::new_project_dialog::{AppUiNewProjectDraft, NewProjectDialog};
+use crate::app_ui::pending_close_dialog::{PendingCloseDialog, PendingCloseDialogAction};
+use crate::app_ui::preferences_dialog::{
+    AppUiPreferencesModel, PreferencesDialog, PreferencesDialogTab,
 };
-use crate::self_hosted::sequence_settings_dialog::{
-    SelfHostedSequenceSettingsDraft, SequenceSettingsDialog,
-};
+use crate::app_ui::sequence_settings_dialog::{AppUiSequenceSettingsDraft, SequenceSettingsDialog};
 
 /// Shell-local modal dialog.
 pub enum ShellModal {
@@ -34,7 +32,7 @@ impl ShellModal {
     }
 
     /// Build the new-project modal from an initial draft.
-    pub fn new_project(draft: SelfHostedNewProjectDraft) -> Self {
+    pub fn new_project(draft: AppUiNewProjectDraft) -> Self {
         Self::NewProject(Box::new(NewProjectDialog::new(draft)))
     }
 
@@ -44,20 +42,17 @@ impl ShellModal {
     }
 
     /// Build the product preferences modal.
-    pub fn preferences(model: SelfHostedPreferencesModel) -> Self {
+    pub fn preferences(model: AppUiPreferencesModel) -> Self {
         Self::Preferences(Box::new(PreferencesDialog::with_model(model)))
     }
 
     /// Build the product preferences modal with one selected section.
-    pub fn preferences_with_tab(
-        model: SelfHostedPreferencesModel,
-        tab: PreferencesDialogTab,
-    ) -> Self {
+    pub fn preferences_with_tab(model: AppUiPreferencesModel, tab: PreferencesDialogTab) -> Self {
         Self::Preferences(Box::new(PreferencesDialog::with_model_and_tab(model, tab)))
     }
 
     /// Build the active-sequence settings modal.
-    pub fn sequence_settings(draft: SelfHostedSequenceSettingsDraft) -> Self {
+    pub fn sequence_settings(draft: AppUiSequenceSettingsDraft) -> Self {
         Self::SequenceSettings(Box::new(SequenceSettingsDialog::new(draft)))
     }
 
