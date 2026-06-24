@@ -236,6 +236,7 @@ impl GalleryWidget {
                 | UiEvent::TextInput(_)
                 | UiEvent::ImePreedit(_)
                 | UiEvent::ImeCommit(_)
+                | UiEvent::ImeCancel
         )
     }
 

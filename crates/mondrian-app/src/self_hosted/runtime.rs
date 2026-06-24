@@ -131,21 +131,9 @@ impl WinitUiRuntime {
         event: Ime,
         dispatch: &dyn Fn(Action),
     ) -> EventResult {
-        match event {
-            Ime::Commit(text) => {
-                self.route_window_event(window, router, root, UiEvent::ImeCommit(text), dispatch)
-            }
-            Ime::Preedit(text, _cursor) => {
-                self.route_window_event(window, router, root, UiEvent::ImePreedit(text), dispatch)
-            }
-            Ime::Disabled => self.route_window_event(
-                window,
-                router,
-                root,
-                UiEvent::ImePreedit(String::new()),
-                dispatch,
-            ),
-            Ime::Enabled => EventResult::Ignored,
+        match winit_ime_to_ui_event(event) {
+            Some(event) => self.route_window_event(window, router, root, event, dispatch),
+            None => EventResult::Ignored,
         }
     }
 
@@ -358,6 +346,20 @@ impl WinitUiRuntime {
         if router.take_repaint_request() {
             window.request_redraw();
         }
+    }
+}
+
+/// Convert a winit IME event into Mondrian's platform-neutral UI event.
+///
+/// Winit reports composition cancellation as `Ime::Disabled`; the self-hosted
+/// model keeps that distinct from an empty preedit update so widgets can clear
+/// local composition state without treating a sentinel string as protocol.
+pub fn winit_ime_to_ui_event(event: Ime) -> Option<UiEvent> {
+    match event {
+        Ime::Commit(text) => Some(UiEvent::ImeCommit(text)),
+        Ime::Preedit(text, _cursor) => Some(UiEvent::ImePreedit(text)),
+        Ime::Disabled => Some(UiEvent::ImeCancel),
+        Ime::Enabled => None,
     }
 }
 
@@ -652,6 +654,23 @@ mod tests {
         assert!(printable_key_text(Some("\u{8}")).is_none());
         assert!(printable_key_text(Some("")).is_none());
         assert!(printable_key_text(None).is_none());
+    }
+
+    #[test]
+    fn winit_ime_conversion_preserves_commit_preedit_cancel_semantics() {
+        assert!(matches!(
+            winit_ime_to_ui_event(Ime::Commit("你".into())),
+            Some(UiEvent::ImeCommit(text)) if text == "你"
+        ));
+        assert!(matches!(
+            winit_ime_to_ui_event(Ime::Preedit("ni".into(), Some((0, 2)))),
+            Some(UiEvent::ImePreedit(text)) if text == "ni"
+        ));
+        assert!(matches!(
+            winit_ime_to_ui_event(Ime::Disabled),
+            Some(UiEvent::ImeCancel)
+        ));
+        assert!(winit_ime_to_ui_event(Ime::Enabled).is_none());
     }
 
     #[test]

@@ -191,8 +191,15 @@ workflow.
   Super/Meta/Hyper fallback mapping, focus-loss modifier reset,
   FocusLost/IME cleanup routing, and startup/workspace ignored Escape not
   exiting native windows.
-- P4-IME-001: Harden IME preedit/commit/cancel, caret rectangle requests,
-  focus loss cleanup, and interactions with TextInput selection/edit commands.
+- [done] P4-IME-001: Harden IME preedit/commit/cancel, caret rectangle
+  requests, focus loss cleanup, and interactions with TextInput
+  selection/edit commands. Coverage now spans explicit runtime conversion of
+  winit commit/preedit/cancel events, focused-widget IME commit/cancel routing,
+  preedit display without form dispatch, commit-only `on_change`, cancel and
+  Escape clearing composition without committing, caret rectangle refresh after
+  focus/click/navigation/preedit/cancel, selection replacement on IME commit,
+  preedit shielding of edit keys, stale-focused-widget IME disable, inline
+  rename cleanup, and window focus loss IME disable.
 - P4-CLIP-001: Verify clip/crop/transform correctness for nested scroll views,
   overlays, menus, tooltips, dock panels, and viewer/timeline surfaces.
 - P4-OVERLAY-001: Ensure tooltip, dropdown, context menu, color picker, modal,

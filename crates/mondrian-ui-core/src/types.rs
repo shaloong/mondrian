@@ -403,6 +403,8 @@ pub enum UiEvent {
     ImePreedit(String),
     /// IME committed text (final result of composition)
     ImeCommit(String),
+    /// IME composition cancelled without committing text.
+    ImeCancel,
     FocusGained,
     FocusLost,
     DragEnter {

@@ -327,6 +327,7 @@ impl EventRouter {
                         | UiEvent::TextInput(_)
                         | UiEvent::ImePreedit(_)
                         | UiEvent::ImeCommit(_)
+                        | UiEvent::ImeCancel
                 );
 
                 let target = if is_keyboard {
@@ -954,6 +955,10 @@ mod tests {
                     self.log.borrow_mut().push(format!("commit:{text}"));
                     EventResult::Handled
                 }
+                UiEvent::ImeCancel => {
+                    self.log.borrow_mut().push("ime-cancel".into());
+                    EventResult::Handled
+                }
                 UiEvent::DragEnter { .. } => {
                     self.log.borrow_mut().push("drag-enter".into());
                     EventResult::Handled
@@ -1407,6 +1412,31 @@ mod tests {
         let result = router.route(UiEvent::ImeCommit("你好".into()), &mut tree, &|_| {});
         assert_eq!(result, EventResult::Handled);
         assert!(log.borrow().contains(&"commit:你好".into()));
+    }
+
+    #[test]
+    fn router_sends_ime_cancel_to_focused_widget() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        let _ = router.take_ime_request();
+
+        let result = router.route(UiEvent::ImeCancel, &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(log.borrow().contains(&"ime-cancel".into()));
     }
 
     #[test]

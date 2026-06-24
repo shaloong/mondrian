@@ -815,6 +815,12 @@ impl Widget for TextInput {
                 ctx.request_repaint();
                 EventResult::Handled
             }
+            UiEvent::ImeCancel if self.focused => {
+                self.ime_preedit.clear();
+                self.refresh_ime_area(ctx);
+                ctx.request_repaint();
+                EventResult::Handled
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -1495,6 +1501,56 @@ mod tests {
         assert!(ctx.requests.repaint);
         assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
         assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn ime_cancel_clears_composition_without_committing_text() {
+        let mut ti = TextInput::new("ph").with_text("abc").on_change(change_action);
+        layout(&mut ti);
+        ti.focused = true;
+        ti.cursor = 3;
+        ti.ime_preedit = "ni".into();
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = ti.event(&UiEvent::ImeCancel, &mut ctx);
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(ti.text(), "abc");
+        assert!(ti.ime_preedit.is_empty());
+        assert!(ctx.requests.repaint);
+        assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn ime_commit_replaces_selection_and_clears_preedit() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
+        layout(&mut ti);
+        ti.focused = true;
+        ti.selection_start = Some(7);
+        ti.cursor = 12;
+        ti.ime_preedit = "候选".into();
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = ti.event(&UiEvent::ImeCommit("中".into()), &mut ctx);
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(ti.text(), "before 中");
+        assert_eq!(ti.cursor, 8);
+        assert!(!ti.has_selection());
+        assert!(ti.ime_preedit.is_empty());
+        assert_eq!(actions.borrow().as_slice(), &[change_action("before 中")]);
+        assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
     }
 
     #[test]

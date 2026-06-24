@@ -1805,9 +1805,12 @@ selection changes, and IME preedit updates remain local so form bindings do not
 receive noisy non-mutating actions.
 Winit keyboard and IME conversion lives in the self-hosted shell runtime so
 `ui_demo` and product windows share the same `KeyDown` / `TextInput` /
-`ImePreedit` / `ImeCommit` semantics. Entry binaries route Escape through the
-widget tree first and must not treat ignored Escape as a native window close;
-quitting remains an explicit shell command or platform close request.
+`ImePreedit` / `ImeCommit` / `ImeCancel` semantics. Runtime conversion maps
+winit `Ime::Disabled` to explicit `ImeCancel` rather than an empty preedit
+sentinel; focused text widgets clear local composition without dispatching form
+changes or committing text. Entry binaries route Escape through the widget tree
+first and must not treat ignored Escape as a native window close; quitting
+remains an explicit shell command or platform close request.
 The runtime emits printable `TextInput` only when Ctrl and Meta are clear; Shift
 remains allowed for uppercase and symbol input, and Alt-only text remains
 allowed when winit reports printable text so AltGr-style keyboard layouts do not
