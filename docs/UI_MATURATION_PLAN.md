@@ -39,8 +39,9 @@ shared renderer, text, event, theme, or widget infrastructure.
       coverage for Button, Checkbox, Slider, and TextInput.
 - [x] Extend accessibility metadata to foundational composite widgets: Dropdown, ContextMenu,
       ScrollView, and DockSplitter.
-- [ ] Extend accessibility metadata to editor-scale composite widgets: ColorPicker,
-      TimelineView, AssetGrid, and ViewerSurface.
+- [x] Extend accessibility metadata to ColorPicker and ColorPickerTrigger.
+- [ ] Extend accessibility metadata to editor-scale composite widgets: TimelineView, AssetGrid,
+      and ViewerSurface.
 - [x] Define keyboard routing policy for unmatched shortcuts, system shortcut pass-through, and
       IME switching chords.
 - [x] Define cursor request priority and transient clearing across runtime/window shells.

@@ -9,7 +9,8 @@ use mondrian_core::{CmykColor, Color, HslColor, HsvColor, RgbaColor};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
-    CursorRequest, EventContext, EventRequests, PaintContext, PointerCaptureRequest,
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, CursorRequest,
+    EventContext, EventRequests, PaintContext, PointerCaptureRequest,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
@@ -1467,6 +1468,27 @@ impl Widget for ColorPicker {
     fn accepts_text_input(&self) -> bool {
         self.enabled && self.focused_field.is_some()
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        let rgba = self.color.to_rgba();
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::ColorPicker)
+                .with_name("Color picker")
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused || self.focused_field.is_some(),
+                    disabled: !self.enabled,
+                    expanded: Some(self.mode_menu_open),
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Color {
+                    r: rgba.r,
+                    g: rgba.g,
+                    b: rgba.b,
+                    a: rgba.a,
+                }),
+        )
+    }
 }
 
 fn parse_u8_channel(input: &str) -> Option<f32> {
@@ -1531,6 +1553,7 @@ pub struct ColorPickerTrigger {
     options: ColorPickerTriggerOptions,
     open: bool,
     pressed: bool,
+    focused: bool,
     enabled: bool,
     picker_pointer_captured: bool,
 }
@@ -1550,6 +1573,7 @@ impl ColorPickerTrigger {
             options,
             open: false,
             pressed: false,
+            focused: false,
             enabled: true,
             picker_pointer_captured: false,
         }
@@ -1594,6 +1618,7 @@ impl ColorPickerTrigger {
         if !enabled {
             self.open = false;
             self.pressed = false;
+            self.focused = false;
         }
     }
 
@@ -1769,7 +1794,10 @@ impl Widget for ColorPickerTrigger {
                 self.close_popup(ctx, false);
                 EventResult::Handled
             }
-            UiEvent::FocusGained => EventResult::Handled,
+            UiEvent::FocusGained => {
+                self.focused = true;
+                EventResult::Handled
+            }
             UiEvent::FocusLost => {
                 if self.open
                     || self.pressed
@@ -1782,6 +1810,7 @@ impl Widget for ColorPickerTrigger {
                     ctx.set_eyedropper(false, None);
                 }
                 self.pressed = false;
+                self.focused = false;
                 EventResult::Handled
             }
             _ => EventResult::Ignored,
@@ -1842,6 +1871,28 @@ impl Widget for ColorPickerTrigger {
 
     fn accepts_text_input(&self) -> bool {
         self.enabled && self.open && self.picker.accepts_text_input()
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        let rgba = self.color().to_rgba();
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::ColorPicker)
+                .with_name("Color")
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused,
+                    disabled: !self.enabled,
+                    pressed: Some(self.pressed),
+                    expanded: Some(self.open),
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Color {
+                    r: rgba.r,
+                    g: rgba.g,
+                    b: rgba.b,
+                    a: rgba.a,
+                }),
+        )
     }
 }
 
@@ -1989,6 +2040,11 @@ mod tests {
         fn clear_focus(&mut self) {
             *self.focused.borrow_mut() = None;
         }
+    }
+
+    fn accessibility_color_value(color: Color) -> AccessibilityValue {
+        let rgba = color.to_rgba();
+        AccessibilityValue::Color { r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a }
     }
 
     fn color_action(color: Color) -> Action {
@@ -2217,6 +2273,98 @@ mod tests {
 
         assert!(!trigger.is_open());
         assert!(ctx.requests.pointer_capture.is_none());
+    }
+
+    #[test]
+    fn picker_accessibility_exposes_color_state_and_mode_menu() {
+        let color = Color::from_rgba8(51, 102, 153, 128);
+        let mut picker = ColorPicker::new(color);
+        picker.mode_menu_open = true;
+        picker.focused = true;
+
+        let node = picker.accessibility().expect("picker should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::ColorPicker);
+        assert_eq!(node.name.as_deref(), Some("Color picker"));
+        assert_eq!(node.value, Some(accessibility_color_value(color)));
+        assert!(node.state.focusable);
+        assert!(node.state.focused);
+        assert!(!node.state.disabled);
+        assert_eq!(node.state.expanded, Some(true));
+    }
+
+    #[test]
+    fn disabled_picker_accessibility_exposes_disabled_state() {
+        let picker = ColorPicker::new(Color::BLACK).disabled();
+        let node = picker.accessibility().expect("picker should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::ColorPicker);
+        assert!(!node.state.focusable);
+        assert!(!node.state.focused);
+        assert!(node.state.disabled);
+        assert_eq!(node.state.expanded, Some(false));
+    }
+
+    #[test]
+    fn trigger_accessibility_tracks_color_focus_pressed_and_popup_state() {
+        let color = Color::from_rgba8(10, 20, 30, 255);
+        let mut trigger = ColorPickerTrigger::new(color);
+        trigger.layout(Rect::new(8.0, 8.0, 32.0, 32.0));
+        let center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            trigger.event(&UiEvent::FocusGained, &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseDown {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        let pressed =
+            trigger.accessibility().expect("trigger should expose accessibility metadata");
+        assert_eq!(pressed.role, AccessibilityRole::ColorPicker);
+        assert_eq!(pressed.name.as_deref(), Some("Color"));
+        assert_eq!(pressed.value, Some(accessibility_color_value(color)));
+        assert!(pressed.state.focusable);
+        assert!(pressed.state.focused);
+        assert_eq!(pressed.state.pressed, Some(true));
+        assert_eq!(pressed.state.expanded, Some(false));
+
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseUp {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        let opened = trigger.accessibility().expect("trigger should expose accessibility metadata");
+        assert_eq!(opened.state.pressed, Some(false));
+        assert_eq!(opened.state.expanded, Some(true));
+    }
+
+    #[test]
+    fn disabled_trigger_accessibility_exposes_disabled_closed_state() {
+        let trigger = ColorPickerTrigger::new(Color::BLACK).disabled();
+        let node = trigger.accessibility().expect("trigger should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::ColorPicker);
+        assert!(!node.state.focusable);
+        assert!(!node.state.focused);
+        assert!(node.state.disabled);
+        assert_eq!(node.state.pressed, Some(false));
+        assert_eq!(node.state.expanded, Some(false));
     }
 
     #[test]

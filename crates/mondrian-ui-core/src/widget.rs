@@ -84,6 +84,8 @@ pub enum AccessibilityRole {
     ScrollView,
     /// Draggable splitter between panes.
     Splitter,
+    /// Color well or full color picker control.
+    ColorPicker,
     /// Generic focusable or structural group.
     Group,
 }
@@ -121,6 +123,8 @@ pub enum AccessibilityValue {
         max_x: f32,
         max_y: f32,
     },
+    /// Normalized RGBA color channels in the 0..1 range.
+    Color { r: f32, g: f32, b: f32, a: f32 },
 }
 
 /// Platform-neutral accessibility metadata for a widget.
