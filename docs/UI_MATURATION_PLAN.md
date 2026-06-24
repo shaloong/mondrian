@@ -165,7 +165,13 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 ## Phase 6 - Release-Grade Polish
 
-- [ ] Define compatibility and migration policy after egui removal.
+- [x] Define compatibility and migration policy after egui removal.
+- [x] Treat egui removal as a clean product-line switch: keep project/data compatibility where
+      the engine model requires it, but do not keep egui widget adapters, duplicated panel state
+      paths, or behavior shims once the custom UI owns a workflow.
+- [x] Use the custom UI contracts as the source of truth after migration: theme tokens,
+      accessibility preferences, event routing, renderer diagnostics, retained command buffers,
+      and widget model/layout tests are the compatibility boundary for future panel work.
 - [ ] Add high contrast, text scale, reduced motion, and keyboard-only usability checks.
 - [x] Add theme-level accessibility preferences for high contrast, bounded text scaling, and
       reduced motion without per-widget accessibility branching.
