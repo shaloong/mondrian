@@ -115,6 +115,14 @@ fn legacy_egui_reference_is_not_public_crate_api() {
         "legacy egui module must not be exported as public API"
     );
     assert!(
+        lib_rs.contains("pub(crate) mod shortcuts;"),
+        "legacy egui shortcut preference module should stay crate-private"
+    );
+    assert!(
+        !lib_rs.contains("pub mod shortcuts;"),
+        "legacy egui shortcut preference module must not expose egui key types as public API"
+    );
+    assert!(
         app_rs.contains("pub(crate) struct MondrianApp"),
         "legacy eframe app type should not be public crate API"
     );

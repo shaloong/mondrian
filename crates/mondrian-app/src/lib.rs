@@ -3,4 +3,4 @@ pub mod app;
 pub(crate) mod egui_ui;
 pub(crate) mod product_assets;
 pub mod self_hosted;
-pub mod shortcuts;
+pub(crate) mod shortcuts;

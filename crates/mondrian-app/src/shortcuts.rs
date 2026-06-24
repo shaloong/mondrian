@@ -1,3 +1,10 @@
+#![allow(dead_code)]
+//! Legacy egui shortcut preference model.
+//!
+//! The self-hosted product shell uses `self_hosted::shortcuts`. This module is
+//! crate-private reference code for the old eframe app until P5-CODE removes or
+//! extracts the remaining legacy UI pieces.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

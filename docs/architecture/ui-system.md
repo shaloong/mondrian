@@ -63,6 +63,10 @@ viewer helpers, and the old timeline implementation. New self-hosted UI code
 must not be added there unless it is deliberately deleting or extracting legacy
 behavior. It is crate-private and must not be exposed as public API, product
 binary code, or plugin-extension guidance while it remains reference code.
+The legacy egui shortcut preference module at `mondrian-app/src/shortcuts.rs`
+is also crate-private; new shortcut routing, labels, persistence, and
+Preferences UI must use `self_hosted::shortcuts` and
+`SelfHostedPreferences.shortcut_overrides`.
 The Phase 5 parity audit lives in
 `docs/architecture/self-hosted-ui-parity.md`. It is the source of truth for
 which legacy egui workflows are product-covered by self-hosted UI, which panels
