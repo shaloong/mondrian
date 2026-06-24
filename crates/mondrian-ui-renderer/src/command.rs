@@ -262,6 +262,79 @@ pub fn diagnose_draw_commands(commands: &[DrawCommand]) -> DrawCommandDiagnostic
     diagnostics
 }
 
+/// Error returned when a command stream is not safe to retain and replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedDrawCommandError {
+    /// The command stream has unbalanced clip/transform commands or invalid stack inputs.
+    Structural(DrawCommandDiagnostics),
+}
+
+/// A reusable, structurally validated draw command fragment.
+///
+/// This is the renderer-layer primitive for opt-in paint caching. Widgets can
+/// retain expensive mostly-static paint fragments without retaining widget
+/// layout, event routing, or focus state. The fragment may contain unresolved
+/// text or raster image commands; the normal app frame path still resolves
+/// those commands before GPU submission.
+#[derive(Debug, Clone, Default)]
+pub struct RetainedDrawCommands {
+    commands: Vec<DrawCommand>,
+    diagnostics: DrawCommandDiagnostics,
+}
+
+impl RetainedDrawCommands {
+    /// Validate and retain a self-contained command stream.
+    pub fn new(commands: Vec<DrawCommand>) -> Result<Self, RetainedDrawCommandError> {
+        let diagnostics = diagnose_draw_commands(&commands);
+        if diagnostics.has_structural_errors() {
+            return Err(RetainedDrawCommandError::Structural(diagnostics));
+        }
+
+        Ok(Self { commands, diagnostics })
+    }
+
+    /// Finish an encoder and retain its balanced command stream.
+    pub fn from_encoder(encoder: DrawEncoder) -> Self {
+        let commands = encoder.finish();
+        let diagnostics = diagnose_draw_commands(&commands);
+        debug_assert!(
+            !diagnostics.has_structural_errors(),
+            "DrawEncoder::finish returned structurally invalid commands: {diagnostics:?}"
+        );
+        Self { commands, diagnostics }
+    }
+
+    /// Inspect the retained commands.
+    pub fn commands(&self) -> &[DrawCommand] {
+        &self.commands
+    }
+
+    /// Diagnostics captured when the command stream was retained.
+    pub fn diagnostics(&self) -> DrawCommandDiagnostics {
+        self.diagnostics
+    }
+
+    /// Number of commands retained in this fragment.
+    pub fn command_count(&self) -> usize {
+        self.commands.len()
+    }
+
+    /// Whether this fragment contains no commands.
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+
+    /// Replay the retained fragment into an active encoder.
+    pub fn replay_into(&self, encoder: &mut DrawEncoder) {
+        encoder.append_retained(self);
+    }
+
+    /// Consume this fragment and return the stored command stream.
+    pub fn into_commands(self) -> Vec<DrawCommand> {
+        self.commands
+    }
+}
+
 fn rect_is_valid_clip(rect: Rect) -> bool {
     rect.x.is_finite()
         && rect.y.is_finite()
@@ -455,6 +528,11 @@ impl DrawEncoder {
         self.commands.len()
     }
 
+    /// Append a structurally validated retained command fragment.
+    pub fn append_retained(&mut self, retained: &RetainedDrawCommands) {
+        self.commands.extend_from_slice(retained.commands());
+    }
+
     /// 消耗编码器，返回收集到的命令列表
     pub fn finish(self) -> Vec<DrawCommand> {
         assert_eq!(self.clip_depth, 0, "DrawEncoder: unbalanced clip push/pop");
@@ -603,6 +681,54 @@ mod tests {
         enc.draw_rect(rect(), color(), 4.0);
         assert_eq!(enc.command_count(), 1);
         assert!(!enc.is_empty());
+    }
+
+    #[test]
+    fn retained_draw_commands_replay_balanced_stream() {
+        let mut retained_encoder = DrawEncoder::new();
+        retained_encoder.push_clip(Rect::new(0.25, 0.25, 10.5, 8.5));
+        retained_encoder.draw_rect(rect(), color(), 4.0);
+        retained_encoder.pop_clip();
+        let retained = RetainedDrawCommands::from_encoder(retained_encoder);
+
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_line(Point::ZERO, Point::new(4.0, 4.0), 1.0, Color::WHITE);
+        retained.replay_into(&mut encoder);
+        encoder.draw_rect(Rect::new(4.0, 4.0, 4.0, 4.0), Color::BLACK, 0.0);
+
+        let commands = encoder.finish();
+        assert_eq!(retained.command_count(), 3);
+        assert_eq!(commands.len(), 5);
+        assert_eq!(diagnose_draw_commands(&commands).unclosed_clip_depth, 0);
+        assert_eq!(diagnose_draw_commands(&commands).unmatched_clip_pops, 0);
+    }
+
+    #[test]
+    fn retained_draw_commands_reject_structurally_invalid_streams() {
+        let err = RetainedDrawCommands::new(vec![DrawCommand::PopClip])
+            .expect_err("unmatched pop must not be retained");
+
+        assert_eq!(
+            err,
+            RetainedDrawCommandError::Structural(DrawCommandDiagnostics {
+                command_count: 1,
+                unmatched_clip_pops: 1,
+                ..DrawCommandDiagnostics::default()
+            })
+        );
+    }
+
+    #[test]
+    fn retained_draw_commands_keep_unresolved_commands_observable() {
+        let mut encoder = DrawEncoder::new();
+        let style = mondrian_ui_theme::typography::TypographyTokens::default().body;
+        encoder.draw_text("cached", &style, Point::ZERO, Color::WHITE);
+
+        let retained = RetainedDrawCommands::from_encoder(encoder);
+
+        assert_eq!(retained.command_count(), 1);
+        assert_eq!(retained.diagnostics().unresolved_text_commands, 1);
+        assert!(!retained.diagnostics().has_structural_errors());
     }
 
     #[test]

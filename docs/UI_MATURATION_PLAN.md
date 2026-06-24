@@ -153,7 +153,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Add frame diagnostics for batch count, vertex count, atlas occupancy, fallback counts,
       and clip/scissor skips.
 - [x] Add frame diagnostics for upload bytes and persistent frame cost reporting.
-- [ ] Evaluate retained/cached paint geometry for expensive mostly-static widgets.
+- [x] Evaluate retained/cached paint geometry for expensive mostly-static widgets.
+- [x] Add a renderer-level retained draw command buffer for opt-in static paint fragments;
+      avoid retaining widget tree state or bypassing the shared text/raster resolution path.
 - [x] Add debug overlays or structured logs for UI frame cost and resource pressure.
 - [x] Add de-duplicated app UI frame pressure telemetry for CPU frame time, upload bytes,
       batch/vertex counts, and raster atlas occupancy/page resets.
