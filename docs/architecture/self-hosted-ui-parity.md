@@ -85,6 +85,9 @@ which follow-up Phase 5 item should own any remaining cleanup.
 3. P5-DOCS-001 can be closed when `ui-system.md`, crate/module docs, and run
    instructions describe self-hosted UI as the final product stack and document
    removed compatibility paths.
-4. P5-CI-001 can be closed when the self-hosted focused tests, clippy, and the
-   chosen screenshot/draw-command/performance smoke checks are represented in
-   the required local and CI gates.
+4. P5-CI-001 is closed by the required `self-hosted-ui` CI job and documented
+   local gate: product route contract, `mondrian-app self_hosted`,
+   `mondrian-ui-renderer`, and `mondrian-ui-widgets component_extreme_tests`
+   cover the self-hosted shell, draw-command/primitive rendering, and component
+   stress cases. Performance smoke remains opt-in/manual for baseline
+   comparison because it is intentionally ignored and emits perf JSON.

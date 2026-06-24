@@ -285,5 +285,12 @@ workflow.
   self-hosted winit/wgpu as the product UI path and classify egui preview/theme
   references as legacy migration/reference boundaries rather than current
   product architecture.
-- P5-CI-001: Make self-hosted UI tests, clippy, and any screenshot/draw-command
-  regressions part of the required CI gate.
+- [done] P5-CI-001: Make self-hosted UI tests, clippy, and any screenshot/draw-command
+  regressions part of the required CI gate. CI now has a dedicated
+  `self-hosted-ui` job that runs the product entrypoint contract,
+  `cargo test -p mondrian-app self_hosted`,
+  `cargo test -p mondrian-ui-renderer`, and
+  `cargo test -p mondrian-ui-widgets component_extreme_tests`; clippy remains a
+  required workspace job with `--all-targets --all-features -D warnings`.
+  Performance scale smoke stays opt-in/manual for baseline comparisons because
+  it is ignored by design and emits machine-readable perf JSON.
