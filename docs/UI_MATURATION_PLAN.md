@@ -111,6 +111,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Extract PanelList header/filter chrome, viewport, scrollbar, row hit testing, tree-aware
       filtering, keyboard selection, and selected-row scroll visibility into directly tested
       model/geometry contracts.
+- [x] Extract AssetGrid header/filter chrome, grid sizing, card/preview/footer geometry,
+      visible filtering, hit testing, keyboard movement, and range selection into directly
+      tested model/geometry contracts.
 
 ## Phase 5 - Performance And Observability
 

@@ -4,6 +4,8 @@
 //! such as filtering, selection, activation, drag initiation, and file drops,
 //! while app crates map real domain records into item view models.
 
+mod model;
+
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -25,6 +27,8 @@ use crate::ContextMenu;
 use crate::MenuItem;
 use crate::RasterImage;
 use crate::TextInput;
+
+use self::model as grid_model;
 
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
@@ -554,63 +558,23 @@ impl AssetGrid {
     }
 
     fn header_height(&self) -> f32 {
-        let base = self.title_block_height();
-        if self.filter_input.is_some() {
-            base + self.filter_top_padding() + FILTER_INPUT_HEIGHT + HEADER_GAP
-        } else {
-            base
-        }
-    }
-
-    fn title_block_height(&self) -> f32 {
-        if !self.show_header_text {
-            return 0.0;
-        }
-        if self.subtitle.is_empty() {
-            42.0
-        } else {
-            60.0
-        }
-    }
-
-    fn filter_top_padding(&self) -> f32 {
-        if self.show_header_text {
-            0.0
-        } else {
-            CONTENT_PADDING
-        }
+        grid_model::header_height(
+            self.show_header_text,
+            !self.subtitle.is_empty(),
+            self.filter_input.is_some(),
+        )
     }
 
     fn content_height_for_width(width: f32, item_count: usize) -> f32 {
-        let viewport_width = (width - CONTENT_PADDING * 2.0).max(0.0);
-        let columns = grid_columns_for_width(viewport_width);
-        let rows = item_count.div_ceil(columns);
-        CONTENT_PADDING * 2.0 + rows as f32 * CARD_HEIGHT + rows.saturating_sub(1) as f32 * CARD_GAP
-    }
-
-    fn content_height(&self) -> f32 {
-        let rows = self.visible_indices.len().div_ceil(self.columns.max(1));
-        CONTENT_PADDING * 2.0 + rows as f32 * CARD_HEIGHT + rows.saturating_sub(1) as f32 * CARD_GAP
+        grid_model::content_height_for_width(width, item_count)
     }
 
     fn preview_rect_for_card(&self, card: Rect) -> Rect {
-        let width = (card.width - 12.0).max(0.0);
-        Rect::new(
-            card.x + 6.0,
-            card.y + 6.0,
-            width,
-            width / PREVIEW_ASPECT_RATIO,
-        )
+        grid_model::preview_rect_for_card(card)
     }
 
     fn footer_rect_for_card(&self, card: Rect) -> Rect {
-        let preview = self.preview_rect_for_card(card);
-        Rect::new(
-            card.x + 8.0,
-            preview.y + preview.height + 7.0,
-            (card.width - 16.0).max(0.0),
-            18.0,
-        )
+        grid_model::footer_rect_for_card(card)
     }
 
     fn is_enabled_index(&self, index: usize) -> bool {
@@ -618,12 +582,7 @@ impl AssetGrid {
     }
 
     fn item_matches_query(item: &AssetGridItem, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
-        }
-        item.title.to_lowercase().contains(query)
-            || item.subtitle.to_lowercase().contains(query)
-            || item.badges.iter().any(|badge| badge.label.to_lowercase().contains(query))
+        grid_model::item_matches_query(item, query)
     }
 
     fn item_matches_filter(&self, item: &AssetGridItem) -> bool {
@@ -631,13 +590,7 @@ impl AssetGrid {
     }
 
     fn rebuild_visible_indices(&mut self) {
-        let query = self.filter_query.trim().to_lowercase();
-        self.visible_indices = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| Self::item_matches_query(item, &query).then_some(index))
-            .collect();
+        self.visible_indices = grid_model::rebuild_visible_indices(&self.items, &self.filter_query);
     }
 
     fn normalize_after_filter_change(&mut self) {
@@ -673,18 +626,12 @@ impl AssetGrid {
     }
 
     fn filter_input_rect(&self) -> Option<Rect> {
-        self.filter_input.as_ref()?;
-        let y = if self.show_header_text {
-            self.bounds.y + self.title_block_height() - 4.0
-        } else {
-            self.bounds.y + CONTENT_PADDING
-        };
-        Some(Rect::new(
-            self.bounds.x + HEADER_PADDING_X,
-            y,
-            (self.bounds.width - HEADER_PADDING_X * 2.0).max(0.0),
-            FILTER_INPUT_HEIGHT,
-        ))
+        grid_model::filter_input_rect(
+            self.bounds,
+            self.show_header_text,
+            !self.subtitle.is_empty(),
+            self.filter_input.is_some(),
+        )
     }
 
     fn sync_filter_query_from_input(&mut self) -> bool {
@@ -714,15 +661,11 @@ impl AssetGrid {
     }
 
     fn visible_position_for_index(&self, index: usize) -> Option<usize> {
-        self.visible_indices.iter().position(|candidate| *candidate == index)
+        grid_model::visible_position_for_index(&self.visible_indices, index)
     }
 
     fn visible_enabled_indices(&self) -> Vec<usize> {
-        self.visible_indices
-            .iter()
-            .copied()
-            .filter(|index| self.is_enabled_index(*index))
-            .collect()
+        grid_model::visible_enabled_indices(&self.visible_indices, &self.items)
     }
 
     fn first_enabled(&self) -> Option<usize> {
@@ -734,52 +677,11 @@ impl AssetGrid {
     }
 
     fn move_selection(&mut self, direction: i32) -> Option<usize> {
-        let visible = self.visible_enabled_indices();
-        if visible.is_empty() {
-            return None;
-        }
-        let Some(selected) = self.selected else {
-            return if direction >= 0 {
-                visible.first().copied()
-            } else {
-                visible.last().copied()
-            };
-        };
-        let Some(position) = visible.iter().position(|index| *index == selected) else {
-            return if direction >= 0 {
-                visible.first().copied()
-            } else {
-                visible.last().copied()
-            };
-        };
-        if direction >= 0 {
-            visible
-                .get((position + direction as usize).min(visible.len().saturating_sub(1)))
-                .copied()
-        } else {
-            position
-                .checked_sub(direction.unsigned_abs() as usize)
-                .and_then(|prev| visible.get(prev).copied())
-        }
+        grid_model::move_selection(&self.visible_indices, &self.items, self.selected, direction)
     }
 
     fn selected_range(&self, start: usize, end: usize) -> BTreeSet<usize> {
-        let Some(start_position) = self.visible_position_for_index(start) else {
-            return BTreeSet::new();
-        };
-        let Some(end_position) = self.visible_position_for_index(end) else {
-            return BTreeSet::new();
-        };
-        let (first, last) = if start_position <= end_position {
-            (start_position, end_position)
-        } else {
-            (end_position, start_position)
-        };
-        self.visible_indices[first..=last]
-            .iter()
-            .copied()
-            .filter(|index| self.is_enabled_index(*index))
-            .collect()
+        grid_model::selected_range(&self.visible_indices, &self.items, start, end)
     }
 
     fn set_selection_set(&mut self, selected: BTreeSet<usize>, primary: usize) {
@@ -1052,30 +954,22 @@ impl AssetGrid {
     }
 
     fn card_rect_at_visible_position(&self, visible_position: usize) -> Rect {
-        let columns = self.columns.max(1);
-        let col = visible_position % columns;
-        let row = visible_position / columns;
-        Rect::new(
-            self.viewport.x + CONTENT_PADDING + col as f32 * (self.card_width + CARD_GAP),
-            self.viewport.y + CONTENT_PADDING + row as f32 * (CARD_HEIGHT + CARD_GAP),
+        grid_model::card_rect_at_visible_position(
+            self.viewport,
+            self.columns,
             self.card_width,
-            CARD_HEIGHT,
+            visible_position,
         )
     }
 
     fn index_at(&self, point: Point) -> Option<usize> {
-        if !self.viewport.contains(point) {
-            return None;
-        }
-        self.visible_indices
-            .iter()
-            .copied()
-            .enumerate()
-            .find_map(|(visible_position, index)| {
-                self.card_rect_at_visible_position(visible_position)
-                    .contains(point)
-                    .then_some(index)
-            })
+        grid_model::index_at(
+            &self.visible_indices,
+            self.viewport,
+            self.columns,
+            self.card_width,
+            point,
+        )
     }
 
     fn title_editor_rect(&self, index: usize) -> Option<Rect> {
@@ -1460,15 +1354,10 @@ impl Widget for AssetGrid {
             menu.layout(bounds);
         }
         let header = self.header_height();
-        let viewport_width = (bounds.width - CONTENT_PADDING * 2.0).max(0.0);
-        self.columns = grid_columns_for_width(viewport_width);
-        self.card_width = CARD_TARGET_WIDTH;
-        self.viewport = Rect::new(
-            bounds.x,
-            bounds.y + header,
-            bounds.width.max(0.0),
-            self.content_height().max((bounds.height - header).max(0.0)),
-        );
+        let layout = grid_model::layout_for_bounds(bounds, header, self.visible_indices.len());
+        self.columns = layout.columns;
+        self.card_width = layout.card_width;
+        self.viewport = layout.viewport;
         if let Some(index) = self.rename_editor.as_ref().map(|editor| editor.index) {
             if let Some(rect) = self.title_editor_rect(index) {
                 if let Some(editor) = &mut self.rename_editor {
@@ -1937,27 +1826,8 @@ impl Widget for AssetGrid {
     }
 }
 
-fn grid_columns_for_width(width: f32) -> usize {
-    if width <= CARD_TARGET_WIDTH {
-        return 1;
-    }
-    let columns = ((width + CARD_GAP) / (CARD_TARGET_WIDTH + CARD_GAP)).floor() as usize;
-    columns.max(1)
-}
-
 fn fit_rect_into(source_width: f32, source_height: f32, bounds: Rect) -> Rect {
-    if source_width <= 0.0 || source_height <= 0.0 || bounds.width <= 0.0 || bounds.height <= 0.0 {
-        return bounds;
-    }
-    let scale = (bounds.width / source_width).min(bounds.height / source_height);
-    let width = source_width * scale;
-    let height = source_height * scale;
-    Rect::new(
-        bounds.x + (bounds.width - width) * 0.5,
-        bounds.y + (bounds.height - height) * 0.5,
-        width,
-        height,
-    )
+    grid_model::fit_rect_into(source_width, source_height, bounds)
 }
 
 fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
