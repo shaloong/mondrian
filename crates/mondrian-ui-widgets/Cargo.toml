@@ -23,3 +23,8 @@ tiny-skia = { workspace = true }
 tiny-skia-path = { workspace = true }
 unicode-segmentation = { workspace = true }
 usvg = { workspace = true }
+
+[dev-dependencies]
+mondrian-ui-renderer = { workspace = true }
+pollster = "0.4"
+wgpu = { workspace = true }

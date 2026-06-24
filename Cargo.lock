@@ -2953,13 +2953,16 @@ dependencies = [
  "mondrian-platform",
  "mondrian-ui-core",
  "mondrian-ui-layout",
+ "mondrian-ui-renderer",
  "mondrian-ui-text",
  "mondrian-ui-theme",
+ "pollster",
  "resvg",
  "tiny-skia",
  "tiny-skia-path",
  "unicode-segmentation",
  "usvg",
+ "wgpu",
 ]
 
 [[package]]

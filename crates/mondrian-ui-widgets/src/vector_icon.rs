@@ -561,6 +561,7 @@ fn map_point(point: Point, view_box: Rect, fitted: Rect) -> Point {
 mod tests {
     use super::*;
     use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_renderer::{DrawCommand, DrawEncoder, UiRenderFrameStats, UiRenderer};
     use mondrian_ui_theme::ThemePreset;
 
     #[derive(Default)]
@@ -598,6 +599,16 @@ mod tests {
     }
 
     fn paint_ctx<'a>(encoder: &'a mut PaintRecorder) -> PaintContext<'a> {
+        let theme: &'static mondrian_ui_theme::Theme =
+            Box::leak(Box::new(ThemePreset::Dark.build()));
+        PaintContext {
+            encoder,
+            theme,
+            clip_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+        }
+    }
+
+    fn renderer_paint_ctx<'a>(encoder: &'a mut DrawEncoder) -> PaintContext<'a> {
         let theme: &'static mondrian_ui_theme::Theme =
             Box::leak(Box::new(ThemePreset::Dark.build()));
         PaintContext {
@@ -745,6 +756,44 @@ mod tests {
 
         assert_eq!(recorder.raster_images, 1);
         assert_eq!(recorder.triangles, 0);
+    }
+
+    #[test]
+    fn offscreen_svg_icon_rasterization_reaches_renderer_image_atlas() {
+        let Some(mut harness) = OffscreenHarness::new(48, 48) else {
+            return;
+        };
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg viewBox="0 0 24 24"><path d="M6 6H18V18H6Z" fill="black"/></svg>"#,
+        )
+        .expect("icon");
+        let mut encoder = DrawEncoder::new();
+        {
+            let mut ctx = renderer_paint_ctx(&mut encoder);
+            icon.paint(
+                &mut ctx,
+                Rect::new(8.0, 8.0, 32.0, 32.0),
+                Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 },
+            );
+        }
+
+        let pixels = harness.render(encoder.finish());
+        let center = pixel(&pixels, 48, 24, 24);
+        let outside = pixel(&pixels, 48, 8, 8);
+
+        assert!(
+            center[1] >= 180 && center[0] <= 32 && center[2] <= 32 && center[3] >= 180,
+            "SVG icon center should render as green tinted raster image, got {center:?}"
+        );
+        assert_eq!(
+            outside[3], 0,
+            "transparent SVG icon bounds outside the path should remain transparent, got {outside:?}"
+        );
+
+        let stats = harness.last_stats.expect("render should record stats");
+        assert!(stats.uploaded_raster_images);
+        assert_eq!(stats.failed_raster_images, 0);
+        assert!(stats.image_atlas_entries >= 1);
     }
 
     #[test]
@@ -896,5 +945,137 @@ mod tests {
             .expect_err("empty icon should fail");
 
         assert!(err.to_string().contains("no renderable vector geometry"));
+    }
+
+    struct OffscreenHarness {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        renderer: UiRenderer,
+        texture: wgpu::Texture,
+        size: (u32, u32),
+        last_stats: Option<UiRenderFrameStats>,
+    }
+
+    impl OffscreenHarness {
+        fn new(width: u32, height: u32) -> Option<Self> {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    compatible_surface: None,
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                }))
+                .ok()?;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                    .ok()?;
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ui_vector_icon_offscreen_test_target"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let renderer = UiRenderer::new(&device, format);
+
+            Some(Self {
+                device,
+                queue,
+                renderer,
+                texture,
+                size: (width, height),
+                last_stats: None,
+            })
+        }
+
+        fn render(&mut self, commands: Vec<DrawCommand>) -> Vec<u8> {
+            let view = self.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let stats = self.renderer.render_resolved_commands(
+                &self.device,
+                &self.queue,
+                &view,
+                &commands,
+                self.size,
+            );
+            self.last_stats = Some(stats);
+            self.readback()
+        }
+
+        fn readback(&self) -> Vec<u8> {
+            let (width, height) = self.size;
+            let bytes_per_pixel = 4u32;
+            let unpadded_bytes_per_row = width * bytes_per_pixel;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+            let buffer_size = padded_bytes_per_row as u64 * height as u64;
+
+            let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ui_vector_icon_offscreen_test_readback"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ui_vector_icon_offscreen_test_readback_encoder"),
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            self.queue.submit([encoder.finish()]);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let slice = readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            let _ =
+                self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            rx.recv()
+                .expect("readback map callback should run")
+                .expect("readback map should succeed");
+
+            let mapped = slice.get_mapped_range();
+            let mut out = vec![0u8; width as usize * height as usize * 4];
+            for row in 0..height as usize {
+                let src_start = row * padded_bytes_per_row as usize;
+                let src_end = src_start + unpadded_bytes_per_row as usize;
+                let dst_start = row * unpadded_bytes_per_row as usize;
+                let dst_end = dst_start + unpadded_bytes_per_row as usize;
+                out[dst_start..dst_end].copy_from_slice(&mapped[src_start..src_end]);
+            }
+            drop(mapped);
+            readback.unmap();
+            out
+        }
+    }
+
+    fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+        let index = ((y * width + x) * 4) as usize;
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     }
 }
