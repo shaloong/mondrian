@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use cosmic_text::{CacheKey, FontSystem, LayoutGlyph, SwashCache};
 use mondrian_ui_core::types::Rect;
-use mondrian_ui_renderer::atlas::TextureAtlas;
+use mondrian_ui_renderer::atlas::{TextureAtlas, TextureAtlasStats};
 
 /// 待上传到 GPU 的字形数据（单通道 alpha）
 #[derive(Debug, Clone)]
@@ -117,6 +117,9 @@ impl GlyphAtlas {
     pub fn size(&self) -> (u32, u32) {
         self.atlas.size()
     }
+    pub fn stats(&self) -> TextureAtlasStats {
+        self.atlas.stats()
+    }
     pub fn has_pending(&self) -> bool {
         !self.pending_uploads.is_empty()
     }
@@ -190,6 +193,7 @@ mod tests {
         let atlas = GlyphAtlas::new(1024);
         assert!(!atlas.has_pending());
         assert_eq!(atlas.size(), (1024, 1024));
+        assert_eq!(atlas.stats().entries, 0);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use mondrian_core::Color;
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
-use crate::atlas::TextureAtlas;
+use crate::atlas::{TextureAtlas, TextureAtlasStats};
 use crate::batch::build_batches;
 use crate::command::{raster_image_payload_len, DrawCommand};
 use crate::pipeline::UiPipeline;
@@ -54,6 +54,16 @@ pub struct UiRenderFrameStats {
     /// of disappearing silently, so the app can surface resource pressure while
     /// the frame remains visibly debuggable.
     pub failed_raster_images: u32,
+    /// Entries currently cached in the renderer-owned raster image atlas.
+    pub image_atlas_entries: usize,
+    /// Pixels currently occupied by raster image atlas allocations, including padding.
+    pub image_atlas_used_pixels: u64,
+    /// Total pixels available in the renderer-owned raster image atlas.
+    pub image_atlas_total_pixels: u64,
+    /// Area of the largest currently reusable free rectangle in the raster image atlas.
+    pub image_atlas_largest_free_rect_pixels: u64,
+    /// Allocation requests rejected by the raster image atlas since renderer creation.
+    pub image_atlas_failed_allocations: u64,
 }
 
 /// GPU 2D UI 渲染器
@@ -315,6 +325,11 @@ impl UiRenderer {
         }
     }
 
+    /// Return diagnostics for the renderer-owned raster image atlas.
+    pub fn image_atlas_stats(&self) -> TextureAtlasStats {
+        self.image_atlas.stats()
+    }
+
     fn resolve_raster_images(
         &mut self,
         queue: &wgpu::Queue,
@@ -422,7 +437,13 @@ impl UiRenderer {
             !commands.iter().any(|command| matches!(command, DrawCommand::Text { .. })),
             "UiRenderer::render_resolved_commands received unresolved text commands"
         );
-        let (commands, stats) = self.resolve_raster_images(queue, commands);
+        let (commands, mut stats) = self.resolve_raster_images(queue, commands);
+        let image_atlas_stats = self.image_atlas.stats();
+        stats.image_atlas_entries = image_atlas_stats.entries;
+        stats.image_atlas_used_pixels = image_atlas_stats.used_pixels;
+        stats.image_atlas_total_pixels = image_atlas_stats.total_pixels;
+        stats.image_atlas_largest_free_rect_pixels = image_atlas_stats.largest_free_rect_pixels;
+        stats.image_atlas_failed_allocations = image_atlas_stats.failed_allocations;
         let batches = build_batches(&commands, screen_size);
         self.ensure_msaa_target(device, screen_size);
         let msaa_view = self.msaa_target.as_ref().map(|target| &target.view);
