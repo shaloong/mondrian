@@ -1,7 +1,11 @@
 use super::*;
 
 impl MondrianApp {
-    pub(super) fn sync_startup_viewport_mode(&mut self, ctx: &egui::Context, startup_mode: bool) {
+    pub(in crate::app) fn sync_startup_viewport_mode(
+        &mut self,
+        ctx: &egui::Context,
+        startup_mode: bool,
+    ) {
         if self.startup_viewport_mode == startup_mode {
             return;
         }
@@ -41,7 +45,7 @@ impl MondrianApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1600.0, 900.0)));
     }
 
-    pub(super) fn bootstrap_recovery_age_label(saved_at_unix_ms: u64) -> String {
+    pub(in crate::app) fn bootstrap_recovery_age_label(saved_at_unix_ms: u64) -> String {
         let age_secs = (unix_now_ms().saturating_sub(saved_at_unix_ms)) / 1000;
         if age_secs < 60 {
             format!("{age_secs} 秒前")
@@ -54,7 +58,7 @@ impl MondrianApp {
         }
     }
 
-    pub(super) fn bootstrap_recent_project_meta(project_path: &Path) -> (String, String) {
+    pub(in crate::app) fn bootstrap_recent_project_meta(project_path: &Path) -> (String, String) {
         let metadata = fs::metadata(project_path).ok();
 
         let last_edited_label = metadata
@@ -101,7 +105,7 @@ impl MondrianApp {
         }
     }
 
-    pub(super) fn open_project_dialog(&mut self) {
+    pub(in crate::app) fn open_project_dialog(&mut self) {
         let picked = FileDialog::new()
             .add_filter("Mondrian Project", &[PROJECT_EXTENSION])
             .pick_file();
@@ -121,7 +125,10 @@ impl MondrianApp {
         }
     }
 
-    pub(super) fn open_project_by_path(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
+    pub(in crate::app) fn open_project_by_path(
+        &mut self,
+        project_file: PathBuf,
+    ) -> anyhow::Result<()> {
         if !project_file.exists() {
             let msg = format!(
                 "项目文件不存在，已从最近记录中移除：{}",
@@ -136,7 +143,7 @@ impl MondrianApp {
         Ok(())
     }
 
-    pub(super) fn recover_project_from_candidate(&mut self, index: usize) {
+    pub(in crate::app) fn recover_project_from_candidate(&mut self, index: usize) {
         let Some(candidate) = self.crash_recovery_candidates.get(index).cloned() else {
             return;
         };
@@ -161,7 +168,7 @@ impl MondrianApp {
         }
     }
 
-    pub(super) fn finish_project_opened(&mut self) {
+    pub(in crate::app) fn finish_project_opened(&mut self) {
         self.show_effect_controls = true;
         self.show_effect_library = true;
         self.show_library = true;
@@ -171,7 +178,7 @@ impl MondrianApp {
         self.crash_recovery_candidates = discover_crash_recovery_candidates();
     }
 
-    pub(super) fn record_recent_project(&mut self, project_file: PathBuf) {
+    pub(in crate::app) fn record_recent_project(&mut self, project_file: PathBuf) {
         self.recent_projects.retain(|existing| existing != &project_file);
         self.recent_projects.insert(0, project_file);
         self.recent_projects.truncate(12);

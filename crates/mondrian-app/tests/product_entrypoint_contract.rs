@@ -105,7 +105,8 @@ fn product_main_calls_only_the_self_hosted_window_runner() {
 fn legacy_egui_reference_is_not_public_crate_api() {
     let lib_rs = include_str!("../src/lib.rs");
     let app_rs = include_str!("../src/app/mod.rs");
-    let legacy_preferences_rs = include_str!("../src/app/legacy_egui_preferences.rs");
+    let legacy_boundary_rs = include_str!("../src/app/legacy_egui/mod.rs");
+    let legacy_preferences_rs = include_str!("../src/app/legacy_egui/preferences_model.rs");
 
     assert!(
         lib_rs.contains("pub(crate) mod egui_ui;"),
@@ -132,8 +133,12 @@ fn legacy_egui_reference_is_not_public_crate_api() {
         "legacy eframe app type must not be exported as a product route"
     );
     assert!(
-        app_rs.contains("mod legacy_egui_preferences;"),
-        "legacy egui preference schema should stay behind an explicit legacy module"
+        app_rs.contains("mod legacy_egui;"),
+        "legacy eframe modules should stay behind an explicit legacy boundary"
+    );
+    assert!(
+        legacy_boundary_rs.contains("pub(in crate::app) mod preferences_model;"),
+        "legacy egui preference schema should stay behind the legacy boundary"
     );
     assert!(
         !app_rs.contains("struct AppPreferences"),

@@ -9,7 +9,7 @@ fn margin_i8(value: f32) -> i8 {
     value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
 }
 
-pub(super) fn load_app_preferences(app: &mut MondrianApp) {
+pub(in crate::app) fn load_app_preferences(app: &mut MondrianApp) {
     let Ok(bytes) = fs::read(&app.app_config_path) else {
         app.last_saved_preferences = Some(capture_preferences(app));
         return;
@@ -55,7 +55,7 @@ pub(super) fn load_app_preferences(app: &mut MondrianApp) {
     app.last_saved_preferences = Some(preferences);
 }
 
-pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
+pub(in crate::app) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
     AppPreferences {
         version: 1,
         theme: app.theme,
@@ -87,7 +87,7 @@ pub(super) fn capture_preferences(app: &MondrianApp) -> AppPreferences {
     }
 }
 
-pub(super) fn run_project_autosave_if_needed(app: &mut MondrianApp) {
+pub(in crate::app) fn run_project_autosave_if_needed(app: &mut MondrianApp) {
     if !app.auto_save_enabled {
         app.last_auto_save_at = None;
         app.auto_save_error_reported = false;
@@ -127,7 +127,7 @@ pub(super) fn run_project_autosave_if_needed(app: &mut MondrianApp) {
     }
 }
 
-pub(super) fn run_cache_maintenance_if_needed(app: &mut MondrianApp) {
+pub(in crate::app) fn run_cache_maintenance_if_needed(app: &mut MondrianApp) {
     if let Some(rx) = app.cache_maintenance_rx.as_ref() {
         match rx.try_recv() {
             Ok(Ok(stats)) => {
@@ -191,7 +191,7 @@ pub(super) fn run_cache_maintenance_if_needed(app: &mut MondrianApp) {
     app.last_cache_maintenance_at = Some(now);
 }
 
-pub(super) fn process_global_shortcuts(app: &mut MondrianApp, ctx: &egui::Context) {
+pub(in crate::app) fn process_global_shortcuts(app: &mut MondrianApp, ctx: &egui::Context) {
     if app.show_preferences_dialog || ctx.egui_wants_keyboard_input() {
         return;
     }
@@ -236,7 +236,7 @@ pub(super) fn process_global_shortcuts(app: &mut MondrianApp, ctx: &egui::Contex
     }
 }
 
-pub(super) fn shortcut_binding(
+pub(in crate::app) fn shortcut_binding(
     app: &MondrianApp,
     action: ShortcutAction,
 ) -> Option<ShortcutBinding> {
@@ -251,7 +251,7 @@ pub(super) fn shortcut_binding(
     }
 }
 
-pub(super) fn shortcut_binding_mut(
+pub(in crate::app) fn shortcut_binding_mut(
     app: &mut MondrianApp,
     action: ShortcutAction,
 ) -> &mut Option<ShortcutBinding> {
@@ -266,17 +266,17 @@ pub(super) fn shortcut_binding_mut(
     }
 }
 
-pub(super) fn shortcut_action_title(action: ShortcutAction) -> &'static str {
+pub(in crate::app) fn shortcut_action_title(action: ShortcutAction) -> &'static str {
     action.display_name()
 }
 
-pub(super) fn shortcut_action_label(app: &MondrianApp, action: ShortcutAction) -> String {
+pub(in crate::app) fn shortcut_action_label(app: &MondrianApp, action: ShortcutAction) -> String {
     shortcut_binding(app, action)
         .map(|s| s.display_text())
         .unwrap_or_else(|| "未设置".to_string())
 }
 
-pub(super) fn trigger_import_media(app: &mut MondrianApp) {
+pub(in crate::app) fn trigger_import_media(app: &mut MondrianApp) {
     if !app.state.has_open_project() {
         return;
     }
@@ -284,7 +284,7 @@ pub(super) fn trigger_import_media(app: &mut MondrianApp) {
     app.library_panel.open_import_dialog(&mut app.state);
 }
 
-pub(super) fn save_project_as_dialog(app: &mut MondrianApp) {
+pub(in crate::app) fn save_project_as_dialog(app: &mut MondrianApp) {
     if !app.state.has_open_project() {
         app.state.set_status_hint("当前无可另存项目", true);
         return;
@@ -318,7 +318,7 @@ pub(super) fn save_project_as_dialog(app: &mut MondrianApp) {
         .set_status_hint(format!("项目已另存为：{}", target_path.display()), false);
 }
 
-pub(super) fn capture_shortcut_input(app: &mut MondrianApp, ctx: &egui::Context) {
+pub(in crate::app) fn capture_shortcut_input(app: &mut MondrianApp, ctx: &egui::Context) {
     let Some(action) = app.capturing_shortcut else {
         return;
     };
@@ -367,7 +367,7 @@ pub(super) fn capture_shortcut_input(app: &mut MondrianApp, ctx: &egui::Context)
     app.capturing_shortcut = None;
 }
 
-pub(super) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context) {
+pub(in crate::app) fn draw_preferences_window(app: &mut MondrianApp, ctx: &egui::Context) {
     const WINDOW_DEFAULT_WIDTH: f32 = 800.0;
     const WINDOW_DEFAULT_HEIGHT: f32 = 568.0;
     const WINDOW_MIN_WIDTH: f32 = 760.0;
@@ -1395,7 +1395,7 @@ fn paint_info_icon(ui: &mut egui::Ui, rect: egui::Rect, response: egui::Response
     response.on_hover_text(text);
 }
 
-pub(super) fn persist_preferences_if_needed(app: &mut MondrianApp) {
+pub(in crate::app) fn persist_preferences_if_needed(app: &mut MondrianApp) {
     let snapshot = capture_preferences(app);
     if app.last_saved_preferences.as_ref() == Some(&snapshot) {
         return;
@@ -1431,7 +1431,7 @@ pub(super) fn persist_preferences_if_needed(app: &mut MondrianApp) {
     app.persist_error_reported = false;
 }
 
-pub(super) fn report_persist_error(app: &mut MondrianApp, message: &str) {
+pub(in crate::app) fn report_persist_error(app: &mut MondrianApp, message: &str) {
     if !app.persist_error_reported {
         tracing::error!("{message}");
         app.state.set_status_hint(message.to_string(), true);

@@ -57,19 +57,12 @@ const MAX_STATUS_LOG_ENTRIES: usize = 64;
 mod action_handler;
 mod animation_state;
 mod audio_rendering;
-#[allow(dead_code)]
-mod bootstrap;
-#[allow(dead_code)]
-mod chrome;
 mod clip_clipboard;
 pub(crate) mod exporting;
-mod legacy_egui_preferences;
+#[allow(dead_code)]
+mod legacy_egui;
 pub(crate) mod media_cache;
-#[allow(dead_code)]
-mod new_project;
 mod playback;
-#[allow(dead_code)]
-mod preferences;
 mod project_lifecycle;
 mod selection;
 mod timeline_commands;
@@ -79,7 +72,7 @@ pub(crate) mod viewer_preferences;
 
 use audio_rendering::*;
 use exporting::TimelineExportDraft;
-use legacy_egui_preferences::{
+use legacy_egui::preferences_model::{
     builtin_sequence_presets, default_app_theme, default_auto_save_enabled,
     default_auto_save_interval_secs, default_auto_save_max_recovery_points,
     default_auto_save_retention_days, default_media_cache_auto_cleanup,
@@ -87,6 +80,7 @@ use legacy_egui_preferences::{
     default_show_video_metrics, default_timeline_panel_height, AppPreferences, ColorMode,
     NewProjectDraft, NewProjectTab, PendingCloseAction, PreferencesTab,
 };
+use legacy_egui::{new_project, preferences};
 pub use selection::{SelectedClipRef, SelectedEffectRef, SelectedTrackRef};
 use timeline_editing::*;
 

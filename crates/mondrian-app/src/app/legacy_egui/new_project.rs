@@ -11,7 +11,7 @@ const TAB_LABELS: &[(NewProjectTab, &str)] = &[
     (NewProjectTab::Advanced, "高级"),
 ];
 
-pub(super) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context) {
+pub(in crate::app) fn draw_new_project_window(app: &mut MondrianApp, ctx: &egui::Context) {
     let viewport_id = egui::ViewportId::from_hash_of("new_project_viewport");
     let viewport_builder = egui::ViewportBuilder::default()
         .with_title("新建项目")

@@ -67,8 +67,9 @@ The legacy egui shortcut preference module at `mondrian-app/src/shortcuts.rs`
 is also crate-private; new shortcut routing, labels, persistence, and
 Preferences UI must use `self_hosted::shortcuts` and
 `SelfHostedPreferences.shortcut_overrides`.
-Legacy egui preference and new-project draft schema is isolated in
-`mondrian-app::app::legacy_egui_preferences` with visibility restricted to the
+Legacy eframe/egui editor modules are isolated under
+`mondrian-app::app::legacy_egui`. Legacy preference and new-project draft schema
+lives in `legacy_egui::preferences_model` with visibility restricted to the
 `app` module. It exists only so the reference eframe app can still compile; new
 product preferences must use `self_hosted::preferences_store` and self-hosted
 dialog-local draft models.

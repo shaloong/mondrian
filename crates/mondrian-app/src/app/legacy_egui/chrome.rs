@@ -1,7 +1,7 @@
 use super::*;
 
 impl MondrianApp {
-    pub(super) fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
         ui.ctx().global_style_mut(|style| {
             style.spacing.menu_width = Self::MENU_POPUP_WIDTH;
         });
@@ -338,7 +338,7 @@ impl MondrianApp {
         response
     }
 
-    pub(super) fn draw_status_bar(&self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn draw_status_bar(&self, ui: &mut egui::Ui) {
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), ui.available_height()),
             egui::Layout::left_to_right(egui::Align::Center),
