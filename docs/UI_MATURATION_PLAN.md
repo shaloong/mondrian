@@ -128,6 +128,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       and keyboard seek routing into directly tested model contracts.
 - [x] Extract TimelineView ruler step/label selection and in/out marker/range geometry into
       directly tested model contracts.
+- [x] Extract TimelineView track reorder, in/out drag, and asset-drop target rules into
+      directly tested model contracts.
 
 ## Phase 5 - Performance And Observability
 

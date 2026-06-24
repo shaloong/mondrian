@@ -1629,24 +1629,6 @@ impl TimelineView {
         }
     }
 
-    fn compatible_track_move_target(
-        &self,
-        source_track_index: usize,
-        target_track_index: usize,
-    ) -> usize {
-        let Some(source) = self.tracks.get(source_track_index) else {
-            return source_track_index;
-        };
-        let Some(target) = self.tracks.get(target_track_index) else {
-            return source_track_index;
-        };
-        if source.kind == target.kind {
-            target_track_index
-        } else {
-            source_track_index
-        }
-    }
-
     fn select_clip_from_input(
         &mut self,
         clip_ref: TimelineClipRef,
@@ -1719,15 +1701,18 @@ impl TimelineView {
             self.track_drag = None;
             return false;
         }
-        let Some(target_index) = self.track_index_from_y(position.y) else {
-            return true;
-        };
-        let target_index =
-            self.compatible_track_move_target(drag.track_ref.track_index, target_index);
-        if drag.current_track_index == target_index {
+        let proposed_track_index = self.track_index_from_y(position.y);
+        let update = timeline_model::track_drag_position(
+            drag.track_ref.track_index,
+            drag.current_track_index,
+            proposed_track_index,
+            self.tracks.get(drag.track_ref.track_index).map(|track| track.kind),
+            proposed_track_index.and_then(|index| self.tracks.get(index).map(|track| track.kind)),
+        );
+        if !update.changed {
             return true;
         }
-        drag.current_track_index = target_index;
+        drag.current_track_index = update.track_index;
         drag.moved = true;
         self.track_drag = Some(drag);
         ctx.request_repaint();
@@ -1941,27 +1926,20 @@ impl TimelineView {
         let Some(mut drag) = self.in_out_drag else {
             return false;
         };
-        let frame = self.x_to_frame(position.x).max(0);
-        let frame = match drag.point {
-            TimelineInOutPoint::In => frame,
-            TimelineInOutPoint::Out => frame.max(self.in_point_frame),
-        };
-        if drag.current_frame == frame {
+        let update = timeline_model::in_out_drag_update(
+            drag.point,
+            self.x_to_frame(position.x),
+            drag.current_frame,
+            self.in_point_frame,
+            self.out_point_frame,
+        );
+        if !update.changed {
             return true;
         }
-        drag.current_frame = frame;
+        drag.current_frame = update.current_frame;
         drag.moved = true;
-        match drag.point {
-            TimelineInOutPoint::In => {
-                self.in_point_frame = frame;
-                if self.out_point_frame.is_some_and(|out| out < frame) {
-                    self.out_point_frame = Some(frame);
-                }
-            }
-            TimelineInOutPoint::Out => {
-                self.out_point_frame = Some(frame);
-            }
-        }
+        self.in_point_frame = update.in_point_frame;
+        self.out_point_frame = update.out_point_frame;
         self.in_out_drag = Some(drag);
         ctx.request_repaint();
         true
@@ -2001,8 +1979,16 @@ impl TimelineView {
     }
 
     fn asset_drop_target_at(&self, position: Point) -> Option<(usize, i64)> {
-        let track_index = self.track_index_at(position)?;
-        Some((track_index, self.x_to_frame(position.x).max(0)))
+        let target = timeline_model::asset_drop_target_at(
+            self.body_rect,
+            self.track_height,
+            self.scroll_y,
+            self.tracks.len(),
+            self.pixels_per_frame,
+            self.scroll_x,
+            position,
+        )?;
+        Some((target.track_index, target.frame))
     }
 
     fn hover_asset_drop(&mut self, asset_id: AssetId, position: Point, ctx: &mut EventContext) {

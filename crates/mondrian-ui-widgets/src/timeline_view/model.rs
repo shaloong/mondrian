@@ -3,11 +3,11 @@ use mondrian_ui_core::types::{KeyCode, Modifiers, Point, Rect};
 
 use super::{
     TimelineClipRef, TimelineEditCommand, TimelineInOutPoint, TimelineScrollbarDragKind,
-    TimelineTrackControl, TimelineTrackRef, TimelineTrimEdge, SCROLLBAR_HANDLE_SIZE,
-    SCROLLBAR_MIN_THUMB, SCROLLBAR_THICKNESS, TIMELINE_CONTENT_TRAILING_PADDING,
-    TIMELINE_IN_OUT_MARKER_HIT_RADIUS, TIMELINE_MAX_PIXELS_PER_FRAME, TIMELINE_MAX_TRACK_HEIGHT,
-    TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_SCROLLBAR_GUTTER,
-    TIMELINE_TOOLBAR_HEIGHT,
+    TimelineTrackControl, TimelineTrackKind, TimelineTrackRef, TimelineTrimEdge,
+    SCROLLBAR_HANDLE_SIZE, SCROLLBAR_MIN_THUMB, SCROLLBAR_THICKNESS,
+    TIMELINE_CONTENT_TRAILING_PADDING, TIMELINE_IN_OUT_MARKER_HIT_RADIUS,
+    TIMELINE_MAX_PIXELS_PER_FRAME, TIMELINE_MAX_TRACK_HEIGHT, TIMELINE_MIN_PIXELS_PER_FRAME,
+    TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_SCROLLBAR_GUTTER, TIMELINE_TOOLBAR_HEIGHT,
 };
 
 const CLIP_VERTICAL_INSET: f32 = 4.0;
@@ -39,6 +39,26 @@ pub(super) struct TimelineTrimDragPosition {
     pub start_frame: i64,
     pub duration_frames: i64,
     pub changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TimelineTrackDragPosition {
+    pub track_index: usize,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TimelineInOutDragUpdate {
+    pub in_point_frame: i64,
+    pub out_point_frame: Option<i64>,
+    pub current_frame: i64,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TimelineAssetDropTarget {
+    pub track_index: usize,
+    pub frame: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -175,6 +195,22 @@ pub(super) fn track_index_from_y(
     }
     let index = ((y - body.y + scroll_y.max(0.0)) / track_height).floor();
     (index >= 0.0).then_some(index as usize).filter(|index| *index < track_count)
+}
+
+pub(super) fn asset_drop_target_at(
+    body: Rect,
+    track_height: f32,
+    scroll_y: f32,
+    track_count: usize,
+    pixels_per_frame: f32,
+    scroll_x: f32,
+    point: Point,
+) -> Option<TimelineAssetDropTarget> {
+    let track_index = track_index_at(body, track_height, scroll_y, track_count, point)?;
+    Some(TimelineAssetDropTarget {
+        track_index,
+        frame: x_to_frame(body, pixels_per_frame, scroll_x, point.x),
+    })
 }
 
 pub(super) fn track_header_at(
@@ -409,6 +445,56 @@ pub(super) fn trim_drag_position(
         start_frame,
         duration_frames,
         changed: current_start_frame != start_frame || current_duration_frames != duration_frames,
+    }
+}
+
+pub(super) fn track_drag_position(
+    source_track_index: usize,
+    current_track_index: usize,
+    proposed_track_index: Option<usize>,
+    source_kind: Option<TimelineTrackKind>,
+    proposed_kind: Option<TimelineTrackKind>,
+) -> TimelineTrackDragPosition {
+    let track_index = match proposed_track_index {
+        None => current_track_index,
+        Some(target_track_index) if source_kind.is_some() && source_kind == proposed_kind => {
+            target_track_index
+        }
+        Some(_) => source_track_index,
+    };
+    TimelineTrackDragPosition {
+        track_index,
+        changed: current_track_index != track_index,
+    }
+}
+
+pub(super) fn in_out_drag_update(
+    point: TimelineInOutPoint,
+    pointer_frame: i64,
+    current_drag_frame: i64,
+    in_point_frame: i64,
+    out_point_frame: Option<i64>,
+) -> TimelineInOutDragUpdate {
+    let frame = pointer_frame.max(0);
+    let (in_point_frame, out_point_frame, current_frame) = match point {
+        TimelineInOutPoint::In => {
+            let out_point_frame = if out_point_frame.is_some_and(|out| out < frame) {
+                Some(frame)
+            } else {
+                out_point_frame
+            };
+            (frame, out_point_frame, frame)
+        }
+        TimelineInOutPoint::Out => {
+            let frame = frame.max(in_point_frame);
+            (in_point_frame, Some(frame), frame)
+        }
+    };
+    TimelineInOutDragUpdate {
+        in_point_frame,
+        out_point_frame,
+        current_frame,
+        changed: current_drag_frame != current_frame,
     }
 }
 
@@ -800,6 +886,28 @@ mod tests {
     }
 
     #[test]
+    fn asset_drop_target_uses_body_track_hit_and_frame_mapping() {
+        let body = Rect::new(100.0, 50.0, 300.0, 90.0);
+
+        assert_eq!(
+            asset_drop_target_at(body, 30.0, 15.0, 4, 2.0, 14.0, Point::new(126.0, 66.0)),
+            Some(TimelineAssetDropTarget { track_index: 1, frame: 20 })
+        );
+        assert_eq!(
+            asset_drop_target_at(body, 30.0, 0.0, 4, 2.0, 0.0, Point::new(90.0, 66.0)),
+            None
+        );
+        assert_eq!(
+            asset_drop_target_at(body, 30.0, 0.0, 4, 2.0, 0.0, Point::new(126.0, 200.0)),
+            None
+        );
+        assert_eq!(
+            asset_drop_target_at(body, 30.0, 0.0, 4, 0.0, 0.0, Point::new(126.0, 60.0)),
+            Some(TimelineAssetDropTarget { track_index: 0, frame: 0 })
+        );
+    }
+
+    #[test]
     fn track_control_hit_testing_uses_stable_right_aligned_slots() {
         let body = Rect::new(100.0, 50.0, 300.0, 120.0);
         let header = Rect::new(0.0, 50.0, 120.0, 120.0);
@@ -912,6 +1020,84 @@ mod tests {
         assert_eq!(
             trim_drag_position(TimelineTrimEdge::In, 0, None, -10, 1, -10, 1),
             TimelineTrimDragPosition { start_frame: 0, duration_frames: 1, changed: true }
+        );
+    }
+
+    #[test]
+    fn track_drag_position_only_moves_between_compatible_track_kinds() {
+        assert_eq!(
+            track_drag_position(
+                1,
+                1,
+                Some(3),
+                Some(TimelineTrackKind::Video),
+                Some(TimelineTrackKind::Video),
+            ),
+            TimelineTrackDragPosition { track_index: 3, changed: true }
+        );
+        assert_eq!(
+            track_drag_position(
+                1,
+                3,
+                Some(2),
+                Some(TimelineTrackKind::Video),
+                Some(TimelineTrackKind::Audio),
+            ),
+            TimelineTrackDragPosition { track_index: 1, changed: true }
+        );
+        assert_eq!(
+            track_drag_position(
+                1,
+                3,
+                None,
+                Some(TimelineTrackKind::Video),
+                Some(TimelineTrackKind::Video),
+            ),
+            TimelineTrackDragPosition { track_index: 3, changed: false }
+        );
+        assert_eq!(
+            track_drag_position(1, 1, Some(3), None, Some(TimelineTrackKind::Video)),
+            TimelineTrackDragPosition { track_index: 1, changed: false }
+        );
+    }
+
+    #[test]
+    fn in_out_drag_update_clamps_frames_and_keeps_ordered_range() {
+        assert_eq!(
+            in_out_drag_update(TimelineInOutPoint::In, -5, 10, 10, Some(20)),
+            TimelineInOutDragUpdate {
+                in_point_frame: 0,
+                out_point_frame: Some(20),
+                current_frame: 0,
+                changed: true
+            }
+        );
+        assert_eq!(
+            in_out_drag_update(TimelineInOutPoint::In, 30, 10, 10, Some(20)),
+            TimelineInOutDragUpdate {
+                in_point_frame: 30,
+                out_point_frame: Some(30),
+                current_frame: 30,
+                changed: true
+            }
+        );
+        assert_eq!(
+            in_out_drag_update(TimelineInOutPoint::Out, 8, 20, 12, Some(20)),
+            TimelineInOutDragUpdate {
+                in_point_frame: 12,
+                out_point_frame: Some(12),
+                current_frame: 12,
+                changed: true
+            }
+        );
+        assert_eq!(
+            in_out_drag_update(TimelineInOutPoint::Out, 20, 20, 12, Some(20)),
+            TimelineInOutDragUpdate {
+                in_point_frame: 12,
+                out_point_frame: Some(20),
+                current_frame: 20,
+                changed: false
+            }
         );
     }
 
