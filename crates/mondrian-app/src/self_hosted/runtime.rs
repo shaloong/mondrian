@@ -695,6 +695,18 @@ mod tests {
     }
 
     #[test]
+    fn modifier_key_edge_tracking_maps_alt_graph_to_alt() {
+        let mut modifiers = Modifiers::none();
+
+        update_modifiers_from_key(&Key::Named(NamedKey::AltGraph), true, &mut modifiers);
+        assert_eq!(modifiers, Modifiers { alt: true, ..Modifiers::none() });
+        assert!(should_route_printable_text(modifiers));
+
+        update_modifiers_from_key(&Key::Named(NamedKey::AltGraph), false, &mut modifiers);
+        assert_eq!(modifiers, Modifiers::none());
+    }
+
+    #[test]
     fn modifier_key_edge_tracking_updates_system_meta_keys() {
         for key in [NamedKey::Super, NamedKey::Meta, NamedKey::Hyper] {
             let mut modifiers = Modifiers::none();

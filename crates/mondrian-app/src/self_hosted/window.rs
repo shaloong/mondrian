@@ -159,7 +159,7 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::Focused(false) => {
-                        session.modifiers_state = Modifiers::none();
+                        reset_modifiers_on_window_focus_loss(&mut session.modifiers_state);
                         if should_route_focus_lost_to_ui(session.ui_runtime.is_eyedropper_active())
                         {
                             let _ = session.ui_runtime.route_window_event(
@@ -557,6 +557,10 @@ fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
 
 fn should_route_focus_lost_to_ui(eyedropper_active: bool) -> bool {
     !eyedropper_active
+}
+
+fn reset_modifiers_on_window_focus_loss(modifiers: &mut Modifiers) {
+    *modifiers = Modifiers::none();
 }
 
 fn should_exit_on_ignored_keyboard_input(
@@ -1008,6 +1012,15 @@ mod tests {
     fn focus_loss_is_deferred_while_desktop_eyedropper_is_active() {
         assert!(!should_route_focus_lost_to_ui(true));
         assert!(should_route_focus_lost_to_ui(false));
+    }
+
+    #[test]
+    fn window_focus_loss_resets_tracked_modifiers() {
+        let mut modifiers = Modifiers { ctrl: true, alt: true, shift: true, meta: true };
+
+        reset_modifiers_on_window_focus_loss(&mut modifiers);
+
+        assert_eq!(modifiers, Modifiers::none());
     }
 
     #[test]

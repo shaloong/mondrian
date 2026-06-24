@@ -180,9 +180,17 @@ workflow.
 
 ## Phase 4: Reliability And Platform Hardening
 
-- P4-INPUT-002: Verify unmatched shortcuts, OS/input-method shortcuts, AltGr,
-  Meta/Super, modifier drift, focus loss, and text-input shielding through
-  runtime and router tests.
+- [done] P4-INPUT-002: Verify unmatched shortcuts, OS/input-method shortcuts,
+  AltGr, Meta/Super, modifier drift, focus loss, and text-input shielding
+  through runtime and router tests. Coverage now spans unmatched shortcut
+  chords returning `Ignored` without dispatch, printable text shielding from
+  unmodified/Shift shortcut dispatch while Ctrl shortcuts still dispatch after
+  focused widgets decline them, AltGraph key-edge fallback as UI `alt` with
+  Alt-only printable text allowed for AltGr-style input, Ctrl/Ctrl+Alt/Meta
+  printable suppression, `ModifiersChanged` snapshot conversion,
+  Super/Meta/Hyper fallback mapping, focus-loss modifier reset,
+  FocusLost/IME cleanup routing, and startup/workspace ignored Escape not
+  exiting native windows.
 - P4-IME-001: Harden IME preedit/commit/cancel, caret rectangle requests,
   focus loss cleanup, and interactions with TextInput selection/edit commands.
 - P4-CLIP-001: Verify clip/crop/transform correctness for nested scroll views,
