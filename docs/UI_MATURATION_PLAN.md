@@ -8,7 +8,7 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 - [x] Replace the simple row-packed `TextureAtlas` allocator with a fragmentation-resistant
       allocator and expose resource pressure diagnostics.
-- [ ] Add atlas generation/page semantics so glyph and raster image caches can survive long
+- [x] Add atlas generation/page semantics so glyph and raster image caches can survive long
       editing sessions without silent exhaustion.
 - [x] Add draw command diagnostics for unbalanced clip/transform stacks, unresolved text,
       invalid clip bounds, and invalid translate offsets.

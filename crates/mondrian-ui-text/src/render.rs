@@ -6,7 +6,7 @@ use mondrian_core::Color;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_renderer::command::DrawCommand;
 
-use crate::atlas::GlyphAtlas;
+use crate::atlas::{GlyphAtlas, GlyphRasterizeOutcome};
 use crate::font::FontManager;
 use crate::layout::TextLayout;
 
@@ -26,6 +26,10 @@ pub struct TextResolveStats {
     pub glyphs_resolved: u32,
     /// Number of laid-out glyphs that could not be rasterized or atlas-allocated.
     pub missing_glyphs: u32,
+    /// Atlas page resets triggered while resolving this frame.
+    pub atlas_page_resets: u32,
+    /// Glyph atlas generation after this resolve pass.
+    pub atlas_generation: u64,
 }
 
 impl TextResolveStats {
@@ -34,6 +38,8 @@ impl TextResolveStats {
         self.glyphs_requested = self.glyphs_requested.saturating_add(other.glyphs_requested);
         self.glyphs_resolved = self.glyphs_resolved.saturating_add(other.glyphs_resolved);
         self.missing_glyphs = self.missing_glyphs.saturating_add(other.missing_glyphs);
+        self.atlas_page_resets = self.atlas_page_resets.saturating_add(other.atlas_page_resets);
+        self.atlas_generation = other.atlas_generation;
     }
 }
 
@@ -62,7 +68,7 @@ impl TextRenderer {
         color: Color,
         max_width: Option<f32>,
     ) -> Vec<DrawCommand> {
-        self.layout_and_render_with_stats(text, font_size, position, color, max_width)
+        self.layout_and_render_with_stats(text, font_size, position, color, max_width, true)
             .commands
     }
 
@@ -73,6 +79,7 @@ impl TextRenderer {
         position: Point,
         color: Color,
         max_width: Option<f32>,
+        allow_atlas_page_reset: bool,
     ) -> ResolvedTextCommands {
         let attrs = cosmic_text::Attrs::new()
             .family(cosmic_text::Family::SansSerif)
@@ -89,21 +96,32 @@ impl TextRenderer {
         let mut stats = TextResolveStats::default();
         for (line_y, glyph) in layout.positioned_glyphs() {
             stats.glyphs_requested = stats.glyphs_requested.saturating_add(1);
-            if let Some((uv_rect, bmp_w, bmp_h, top, left)) =
-                self.atlas.get_or_rasterize(font_system, glyph, 0.0)
-            {
-                let bitmap_x = position.x + glyph.x + left as f32;
-                let bitmap_top = position.y + line_y - top as f32;
-                commands.push(DrawCommand::Image {
-                    bounds: Rect::new(bitmap_x, bitmap_top, bmp_w as f32, bmp_h as f32),
-                    uv_rect,
-                    tint: color,
-                });
-                stats.glyphs_resolved = stats.glyphs_resolved.saturating_add(1);
-            } else {
-                stats.missing_glyphs = stats.missing_glyphs.saturating_add(1);
+            match self.atlas.get_or_rasterize_with_policy(
+                font_system,
+                glyph,
+                allow_atlas_page_reset,
+            ) {
+                GlyphRasterizeOutcome::Resolved(uv_rect, bmp_w, bmp_h, top, left) => {
+                    let bitmap_x = position.x + glyph.x + left as f32;
+                    let bitmap_top = position.y + line_y - top as f32;
+                    commands.push(DrawCommand::Image {
+                        bounds: Rect::new(bitmap_x, bitmap_top, bmp_w as f32, bmp_h as f32),
+                        uv_rect,
+                        tint: color,
+                    });
+                    stats.glyphs_resolved = stats.glyphs_resolved.saturating_add(1);
+                }
+                GlyphRasterizeOutcome::PageReset => {
+                    stats.atlas_page_resets = stats.atlas_page_resets.saturating_add(1);
+                    stats.atlas_generation = self.atlas.generation();
+                    return ResolvedTextCommands { commands: Vec::new(), stats };
+                }
+                GlyphRasterizeOutcome::Missing => {
+                    stats.missing_glyphs = stats.missing_glyphs.saturating_add(1);
+                }
             }
         }
+        stats.atlas_generation = self.atlas.generation();
         ResolvedTextCommands { commands, stats }
     }
 
@@ -148,27 +166,45 @@ pub fn resolve_text_commands(
     commands: Vec<DrawCommand>,
     text_renderer: &mut TextRenderer,
 ) -> ResolvedTextCommands {
-    let mut resolved = Vec::with_capacity(commands.len());
-    let mut stats = TextResolveStats::default();
-    for cmd in commands {
-        match cmd {
-            DrawCommand::Text { text, style, position, max_width, color } => {
-                let mut glyph_result = text_renderer.layout_and_render_with_stats(
-                    &text,
-                    style.font_size,
-                    position,
-                    color,
-                    max_width,
-                );
-                glyph_result.stats.text_commands =
-                    glyph_result.stats.text_commands.saturating_add(1);
-                stats.add(glyph_result.stats);
-                resolved.append(&mut glyph_result.commands);
+    let mut allow_atlas_page_reset = true;
+    let mut atlas_page_resets = 0u32;
+    loop {
+        let mut resolved = Vec::with_capacity(commands.len());
+        let mut stats = TextResolveStats::default();
+        let mut restart_after_page_reset = false;
+        for cmd in commands.iter().cloned() {
+            match cmd {
+                DrawCommand::Text { text, style, position, max_width, color } => {
+                    let mut glyph_result = text_renderer.layout_and_render_with_stats(
+                        &text,
+                        style.font_size,
+                        position,
+                        color,
+                        max_width,
+                        allow_atlas_page_reset,
+                    );
+                    glyph_result.stats.text_commands =
+                        glyph_result.stats.text_commands.saturating_add(1);
+                    let page_reset = glyph_result.stats.atlas_page_resets > 0;
+                    stats.add(glyph_result.stats);
+                    if page_reset && allow_atlas_page_reset {
+                        restart_after_page_reset = true;
+                        break;
+                    }
+                    resolved.append(&mut glyph_result.commands);
+                }
+                _ => resolved.push(cmd),
             }
-            _ => resolved.push(cmd),
         }
+        stats.atlas_generation = text_renderer.atlas.generation();
+        if restart_after_page_reset {
+            atlas_page_resets = atlas_page_resets.saturating_add(stats.atlas_page_resets);
+            allow_atlas_page_reset = false;
+            continue;
+        }
+        stats.atlas_page_resets = stats.atlas_page_resets.saturating_add(atlas_page_resets);
+        return ResolvedTextCommands { commands: resolved, stats };
     }
-    ResolvedTextCommands { commands: resolved, stats }
 }
 
 impl Default for TextRenderer {
@@ -274,6 +310,49 @@ mod tests {
         let stats = harness.last_stats.expect("render should record stats");
         assert_eq!(stats.unresolved_text_commands, 0);
         assert_eq!(stats.failed_raster_images, 0);
+    }
+
+    #[test]
+    fn resolve_text_commands_restarts_frame_after_atlas_page_reset() {
+        let mut text_renderer = TextRenderer::new();
+        text_renderer.atlas.fill_page_for_test();
+
+        let style = mondrian_ui_theme::typography::TextStyle {
+            font_size: 18.0,
+            line_height: 22.0,
+            font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+            letter_spacing: 0.0,
+        };
+        let commands = vec![
+            DrawCommand::Text {
+                text: "A".to_string(),
+                style: style.clone(),
+                position: Point::new(0.0, 20.0),
+                max_width: None,
+                color: Color::WHITE,
+            },
+            DrawCommand::Text {
+                text: "B".to_string(),
+                style,
+                position: Point::new(20.0, 20.0),
+                max_width: None,
+                color: Color::WHITE,
+            },
+        ];
+
+        let resolved = resolve_text_commands(commands, &mut text_renderer);
+        let image_count = resolved
+            .commands
+            .iter()
+            .filter(|command| matches!(command, DrawCommand::Image { .. }))
+            .count();
+
+        assert_eq!(resolved.stats.atlas_page_resets, 1);
+        assert_eq!(resolved.stats.atlas_generation, 1);
+        assert_eq!(resolved.stats.text_commands, 2);
+        assert_eq!(resolved.stats.missing_glyphs, 0);
+        assert!(image_count >= 2);
+        assert!(text_renderer.atlas.has_pending());
     }
 
     #[test]

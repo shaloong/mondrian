@@ -28,6 +28,12 @@ pub struct GlyphAtlas {
     pad: u32,
 }
 
+pub(crate) enum GlyphRasterizeOutcome {
+    Resolved(Rect, u32, u32, i32, i32),
+    Missing,
+    PageReset,
+}
+
 impl GlyphAtlas {
     pub fn new(atlas_size: u32) -> Self {
         Self {
@@ -51,6 +57,28 @@ impl GlyphAtlas {
         glyph: &LayoutGlyph,
         _sub_x: f32,
     ) -> Option<(Rect, u32, u32, i32, i32)> {
+        match self.get_or_rasterize_with_policy(font_system, glyph, true) {
+            GlyphRasterizeOutcome::Resolved(uv, width, height, top, left) => {
+                Some((uv, width, height, top, left))
+            }
+            GlyphRasterizeOutcome::PageReset => {
+                match self.get_or_rasterize_with_policy(font_system, glyph, false) {
+                    GlyphRasterizeOutcome::Resolved(uv, width, height, top, left) => {
+                        Some((uv, width, height, top, left))
+                    }
+                    GlyphRasterizeOutcome::Missing | GlyphRasterizeOutcome::PageReset => None,
+                }
+            }
+            GlyphRasterizeOutcome::Missing => None,
+        }
+    }
+
+    pub(crate) fn get_or_rasterize_with_policy(
+        &mut self,
+        font_system: &mut FontSystem,
+        glyph: &LayoutGlyph,
+        allow_page_reset: bool,
+    ) -> GlyphRasterizeOutcome {
         // UI text atlas intentionally ignores subpixel bins (SubpixelBin).
         // We construct CacheKey with position (0,0) rather than going through
         // LayoutGlyph::physical(), because physical() encodes glyph.x.fract()
@@ -70,26 +98,41 @@ impl GlyphAtlas {
             glyph.cache_key_flags,
         );
         if let Some(&(uv, w, h, top, left)) = self.glyph_map.get(&cache_key) {
-            return Some((uv, w, h, top, left));
+            return GlyphRasterizeOutcome::Resolved(uv, w, h, top, left);
         }
 
         let image = self.cache.get_image(font_system, cache_key);
         let (bmp_w, bmp_h, top, left, alpha) = match image {
             Some(img) => swash_to_alpha(img),
-            None => return None,
+            None => return GlyphRasterizeOutcome::Missing,
         };
         if bmp_w == 0 || bmp_h == 0 {
-            return None;
+            return GlyphRasterizeOutcome::Missing;
         }
 
         // Allocate and upload a transparent border around the glyph. The UV rect
         // still points at the inner glyph bitmap, but linear filtering can now
         // sample the border without bleeding from uninitialized or adjacent texels.
-        let pad_twice = self.pad.checked_mul(2)?;
-        let alloc_w = bmp_w.checked_add(pad_twice)?;
-        let alloc_h = bmp_h.checked_add(pad_twice)?;
+        let Some(pad_twice) = self.pad.checked_mul(2) else {
+            return GlyphRasterizeOutcome::Missing;
+        };
+        let Some(alloc_w) = bmp_w.checked_add(pad_twice) else {
+            return GlyphRasterizeOutcome::Missing;
+        };
+        let Some(alloc_h) = bmp_h.checked_add(pad_twice) else {
+            return GlyphRasterizeOutcome::Missing;
+        };
+        if alloc_w > self.atlas.width || alloc_h > self.atlas.height {
+            return GlyphRasterizeOutcome::Missing;
+        }
         let alloc_key = format!("glyph_{cache_key:?}");
-        let allocation = self.atlas.allocate_pixels(&alloc_key, alloc_w, alloc_h)?;
+        let Some(allocation) = self.atlas.allocate_pixels(&alloc_key, alloc_w, alloc_h) else {
+            if allow_page_reset {
+                self.reset_page();
+                return GlyphRasterizeOutcome::PageReset;
+            }
+            return GlyphRasterizeOutcome::Missing;
+        };
 
         let px = allocation.x + self.pad;
         let py = allocation.y + self.pad;
@@ -102,7 +145,10 @@ impl GlyphAtlas {
         );
 
         self.glyph_map.insert(cache_key, (uv_rect, bmp_w, bmp_h, top, left));
-        let padded_alpha = alpha_with_transparent_padding(&alpha, bmp_w, bmp_h, self.pad)?;
+        let Some(padded_alpha) = alpha_with_transparent_padding(&alpha, bmp_w, bmp_h, self.pad)
+        else {
+            return GlyphRasterizeOutcome::Missing;
+        };
         self.pending_uploads.push(GlyphUpload {
             x: allocation.x,
             y: allocation.y,
@@ -111,7 +157,7 @@ impl GlyphAtlas {
             data: padded_alpha,
         });
 
-        Some((uv_rect, bmp_w, bmp_h, top, left))
+        GlyphRasterizeOutcome::Resolved(uv_rect, bmp_w, bmp_h, top, left)
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -120,8 +166,23 @@ impl GlyphAtlas {
     pub fn stats(&self) -> TextureAtlasStats {
         self.atlas.stats()
     }
+    pub fn generation(&self) -> u64 {
+        self.atlas.generation()
+    }
     pub fn has_pending(&self) -> bool {
         !self.pending_uploads.is_empty()
+    }
+
+    fn reset_page(&mut self) {
+        self.atlas.reset_page();
+        self.glyph_map.clear();
+        self.pending_uploads.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fill_page_for_test(&mut self) {
+        let (width, height) = self.atlas.size();
+        self.atlas.allocate_pixels("test.stale.full.page", width, height).unwrap();
     }
 }
 
@@ -413,6 +474,26 @@ mod tests {
             first.map(|(r, _, _, _, _)| r),
             second.map(|(r, _, _, _, _)| r)
         );
+    }
+
+    #[test]
+    fn atlas_resets_stale_page_and_retries_current_glyph() {
+        let mut atlas = GlyphAtlas::new(64);
+        let mut mgr = FontManager::new();
+        let attrs = cosmic_text::Attrs::new();
+        let layout =
+            crate::layout::TextLayout::new_single_line(&mut mgr.font_system, "A", attrs, 16.0);
+        let glyph = layout.glyphs().into_iter().next().expect("glyph");
+
+        atlas.atlas.allocate_pixels("stale", 64, 64).unwrap();
+        assert_eq!(atlas.generation(), 0);
+
+        let resolved = atlas.get_or_rasterize(&mut mgr.font_system, &glyph, 0.0);
+
+        assert!(resolved.is_some());
+        assert_eq!(atlas.generation(), 1);
+        assert_eq!(atlas.stats().page_resets, 1);
+        assert!(atlas.has_pending());
     }
 
     // ── Bearing & Placement Tests ────────────────────────────────────────

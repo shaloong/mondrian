@@ -53,6 +53,12 @@ pub struct TextureAtlasStats {
     pub largest_free_rect_pixels: u64,
     /// Number of allocation requests rejected because the item could not fit.
     pub failed_allocations: u64,
+    /// Current logical page generation.
+    ///
+    /// Cached UVs are only valid for the generation they were allocated in.
+    pub generation: u64,
+    /// Number of times this atlas has discarded cached entries and started a new page.
+    pub page_resets: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +99,8 @@ pub struct TextureAtlas {
     free_rects: Vec<FreeRect>,
     used_pixels: u64,
     failed_allocations: u64,
+    generation: u64,
+    page_resets: u64,
 }
 
 impl TextureAtlas {
@@ -110,7 +118,26 @@ impl TextureAtlas {
             free_rects,
             used_pixels: 0,
             failed_allocations: 0,
+            generation: 0,
+            page_resets: 0,
         }
+    }
+
+    /// Discard all cached entries and start a fresh logical atlas page.
+    ///
+    /// The backing GPU texture is owned by higher layers; callers that use this
+    /// reset must rebuild any draw commands that referenced the previous
+    /// generation before submitting a frame.
+    pub fn reset_page(&mut self) {
+        self.entries.clear();
+        self.free_rects = if self.width == 0 || self.height == 0 {
+            Vec::new()
+        } else {
+            vec![FreeRect { x: 0, y: 0, width: self.width, height: self.height }]
+        };
+        self.used_pixels = 0;
+        self.generation = self.generation.saturating_add(1);
+        self.page_resets = self.page_resets.saturating_add(1);
     }
 
     /// 分配一个图集槽位，返回其像素坐标。
@@ -173,6 +200,11 @@ impl TextureAtlas {
         self.entries.len()
     }
 
+    /// Current logical page generation.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Return allocator diagnostics useful for renderer telemetry.
     pub fn stats(&self) -> TextureAtlasStats {
         let total_pixels = self.width as u64 * self.height as u64;
@@ -192,6 +224,8 @@ impl TextureAtlas {
             },
             largest_free_rect_pixels,
             failed_allocations: self.failed_allocations,
+            generation: self.generation,
+            page_resets: self.page_resets,
         }
     }
 
@@ -455,6 +489,8 @@ mod tests {
         assert_eq!(stats.total_pixels, 10_000);
         assert!((stats.occupancy - 0.05).abs() < f32::EPSILON);
         assert_eq!(stats.failed_allocations, 2);
+        assert_eq!(stats.generation, 0);
+        assert_eq!(stats.page_resets, 0);
         assert!(stats.largest_free_rect_pixels > 0);
     }
 
@@ -467,5 +503,23 @@ mod tests {
         assert_eq!(stats.total_pixels, 0);
         assert_eq!(stats.occupancy, 0.0);
         assert_eq!(stats.failed_allocations, 1);
+    }
+
+    #[test]
+    fn atlas_reset_page_discards_entries_and_advances_generation() {
+        let mut atlas = TextureAtlas::new(64, 64);
+        atlas.allocate_pixels("a", 32, 32).unwrap();
+        assert_eq!(atlas.entry_count(), 1);
+        assert_eq!(atlas.generation(), 0);
+
+        atlas.reset_page();
+
+        let stats = atlas.stats();
+        assert_eq!(atlas.entry_count(), 0);
+        assert_eq!(atlas.get_pixels("a"), None);
+        assert_eq!(stats.used_pixels, 0);
+        assert_eq!(stats.generation, 1);
+        assert_eq!(stats.page_resets, 1);
+        assert!(atlas.allocate_pixels("b", 64, 64).is_some());
     }
 }

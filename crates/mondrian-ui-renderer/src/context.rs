@@ -35,6 +35,17 @@ struct ImageCacheEntry {
     uv_rect: mondrian_ui_core::types::Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RasterImageResolve {
+    Resolved {
+        uv_rect: mondrian_ui_core::types::Rect,
+        uploaded: bool,
+        upload_bytes: u64,
+    },
+    Failed,
+    PageReset,
+}
+
 /// 字形上传数据
 pub struct GlyphUpload {
     pub x: u32,
@@ -121,6 +132,12 @@ pub struct UiRenderFrameStats {
     pub image_atlas_largest_free_rect_pixels: u64,
     /// Allocation requests rejected by the raster image atlas since renderer creation.
     pub image_atlas_failed_allocations: u64,
+    /// Current renderer-owned raster image atlas generation.
+    pub image_atlas_generation: u64,
+    /// Raster image atlas page resets since renderer creation.
+    pub image_atlas_page_resets: u64,
+    /// Raster image atlas page resets triggered while resolving this frame.
+    pub image_atlas_page_resets_this_frame: u32,
 }
 
 /// GPU 2D UI 渲染器
@@ -398,33 +415,68 @@ impl UiRenderer {
         queue: &wgpu::Queue,
         commands: &[DrawCommand],
     ) -> (Vec<DrawCommand>, UiRenderFrameStats) {
-        let mut stats = UiRenderFrameStats::default();
-        let mut resolved = Vec::with_capacity(commands.len());
+        let mut aggregate_stats = UiRenderFrameStats::default();
+        let mut allow_page_reset = true;
+        loop {
+            let mut pass_stats = UiRenderFrameStats::default();
+            let mut resolved = Vec::with_capacity(commands.len());
+            let mut restart_after_page_reset = false;
 
-        for command in commands {
-            match command {
-                DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => {
-                    if let Some((uv_rect, uploaded, upload_bytes)) =
-                        self.resolve_raster_image(queue, key, *width, *height, rgba)
-                    {
-                        stats.uploaded_raster_images |= uploaded;
-                        stats.raster_image_upload_bytes =
-                            stats.raster_image_upload_bytes.saturating_add(upload_bytes);
-                        resolved.push(DrawCommand::RasterAtlasImage {
-                            bounds: *bounds,
-                            uv_rect,
-                            tint: *tint,
-                        });
-                    } else {
-                        stats.failed_raster_images = stats.failed_raster_images.saturating_add(1);
-                        resolved.push(raster_image_failure_fallback(*bounds, *tint));
+            for command in commands {
+                match command {
+                    DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => {
+                        match self.resolve_raster_image(
+                            queue,
+                            key,
+                            *width,
+                            *height,
+                            rgba,
+                            allow_page_reset,
+                        ) {
+                            RasterImageResolve::Resolved { uv_rect, uploaded, upload_bytes } => {
+                                pass_stats.uploaded_raster_images |= uploaded;
+                                pass_stats.raster_image_upload_bytes = pass_stats
+                                    .raster_image_upload_bytes
+                                    .saturating_add(upload_bytes);
+                                resolved.push(DrawCommand::RasterAtlasImage {
+                                    bounds: *bounds,
+                                    uv_rect,
+                                    tint: *tint,
+                                });
+                            }
+                            RasterImageResolve::PageReset => {
+                                pass_stats.image_atlas_page_resets_this_frame =
+                                    pass_stats.image_atlas_page_resets_this_frame.saturating_add(1);
+                                restart_after_page_reset = true;
+                                break;
+                            }
+                            RasterImageResolve::Failed => {
+                                pass_stats.failed_raster_images =
+                                    pass_stats.failed_raster_images.saturating_add(1);
+                                resolved.push(raster_image_failure_fallback(*bounds, *tint));
+                            }
+                        }
                     }
-                }
-                other => resolved.push(other.clone()),
+                    other => resolved.push(other.clone()),
+                };
             }
-        }
 
-        (resolved, stats)
+            aggregate_stats.raster_image_upload_bytes = aggregate_stats
+                .raster_image_upload_bytes
+                .saturating_add(pass_stats.raster_image_upload_bytes);
+            aggregate_stats.uploaded_raster_images |= pass_stats.uploaded_raster_images;
+            aggregate_stats.image_atlas_page_resets_this_frame = aggregate_stats
+                .image_atlas_page_resets_this_frame
+                .saturating_add(pass_stats.image_atlas_page_resets_this_frame);
+
+            if restart_after_page_reset && allow_page_reset {
+                allow_page_reset = false;
+                continue;
+            }
+
+            aggregate_stats.failed_raster_images = pass_stats.failed_raster_images;
+            return (resolved, aggregate_stats);
+        }
     }
 
     fn resolve_raster_image(
@@ -434,21 +486,43 @@ impl UiRenderer {
         width: u32,
         height: u32,
         rgba: &[u8],
-    ) -> Option<(mondrian_ui_core::types::Rect, bool, u64)> {
-        let expected_len = raster_image_payload_len(width, height)?;
+        allow_page_reset: bool,
+    ) -> RasterImageResolve {
+        let Some(expected_len) = raster_image_payload_len(width, height) else {
+            return RasterImageResolve::Failed;
+        };
         if width == 0 || height == 0 || rgba.len() != expected_len {
-            return None;
+            return RasterImageResolve::Failed;
         }
 
         let cache_key = format!("{key}@{width}x{height}");
         if let Some(entry) = self.image_cache.get(&cache_key) {
-            return Some((entry.uv_rect, false, 0));
+            return RasterImageResolve::Resolved {
+                uv_rect: entry.uv_rect,
+                uploaded: false,
+                upload_bytes: 0,
+            };
         }
 
-        let pad_twice = IMAGE_ATLAS_PAD.checked_mul(2)?;
-        let alloc_w = width.checked_add(pad_twice)?;
-        let alloc_h = height.checked_add(pad_twice)?;
-        let allocated = self.image_atlas.allocate_pixels(&cache_key, alloc_w, alloc_h)?;
+        let Some(pad_twice) = IMAGE_ATLAS_PAD.checked_mul(2) else {
+            return RasterImageResolve::Failed;
+        };
+        let Some(alloc_w) = width.checked_add(pad_twice) else {
+            return RasterImageResolve::Failed;
+        };
+        let Some(alloc_h) = height.checked_add(pad_twice) else {
+            return RasterImageResolve::Failed;
+        };
+        if alloc_w > ATLAS_SIZE || alloc_h > ATLAS_SIZE {
+            return RasterImageResolve::Failed;
+        }
+        let Some(allocated) = self.image_atlas.allocate_pixels(&cache_key, alloc_w, alloc_h) else {
+            if allow_page_reset {
+                self.reset_image_atlas_page();
+                return RasterImageResolve::PageReset;
+            }
+            return RasterImageResolve::Failed;
+        };
         let px = allocated.x + IMAGE_ATLAS_PAD;
         let py = allocated.y + IMAGE_ATLAS_PAD;
         let uv_rect = mondrian_ui_core::types::Rect::new(
@@ -457,8 +531,11 @@ impl UiRenderer {
             width as f32 / ATLAS_SIZE as f32,
             height as f32 / ATLAS_SIZE as f32,
         );
-        let (upload_width, upload_height, padded_rgba) =
-            rgba_with_edge_padding(rgba, width, height, IMAGE_ATLAS_PAD)?;
+        let Some((upload_width, upload_height, padded_rgba)) =
+            rgba_with_edge_padding(rgba, width, height, IMAGE_ATLAS_PAD)
+        else {
+            return RasterImageResolve::Failed;
+        };
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -481,7 +558,16 @@ impl UiRenderer {
         );
 
         self.image_cache.insert(cache_key, ImageCacheEntry { uv_rect });
-        Some((uv_rect, true, padded_rgba.len() as u64))
+        RasterImageResolve::Resolved {
+            uv_rect,
+            uploaded: true,
+            upload_bytes: padded_rgba.len() as u64,
+        }
+    }
+
+    fn reset_image_atlas_page(&mut self) {
+        self.image_atlas.reset_page();
+        self.image_cache.clear();
     }
 
     /// Render draw commands that have already had text commands resolved to
@@ -521,6 +607,8 @@ impl UiRenderer {
         stats.image_atlas_total_pixels = image_atlas_stats.total_pixels;
         stats.image_atlas_largest_free_rect_pixels = image_atlas_stats.largest_free_rect_pixels;
         stats.image_atlas_failed_allocations = image_atlas_stats.failed_allocations;
+        stats.image_atlas_generation = image_atlas_stats.generation;
+        stats.image_atlas_page_resets = image_atlas_stats.page_resets;
         let batches = build_batches(&commands, screen_size);
         stats.batch_count = batches.len();
         stats.vertex_count = batches.iter().map(|batch| batch.vertices.len()).sum();
@@ -1008,6 +1096,50 @@ mod tests {
         assert!(stats.image_atlas_entries >= 1);
         assert_eq!(stats.raster_image_upload_bytes, 6 * 6 * 4);
         assert!(stats.gpu_upload_bytes >= stats.raster_image_upload_bytes);
+    }
+
+    #[test]
+    fn offscreen_renderer_resets_stale_raster_image_page_and_retries_frame() {
+        let Some(mut harness) = OffscreenHarness::new(32, 32) else {
+            return;
+        };
+        harness
+            .renderer
+            .image_atlas
+            .allocate_pixels("test.stale.full.page", ATLAS_SIZE, ATLAS_SIZE)
+            .expect("stale allocation should fill the atlas");
+        harness.renderer.image_cache.insert(
+            "test.stale.full.page@1x1".to_string(),
+            ImageCacheEntry { uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0) },
+        );
+
+        let rgba = vec![
+            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+        ];
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_raster_image(
+            "new.image.after.reset",
+            Rect::new(8.0, 8.0, 16.0, 16.0),
+            2,
+            2,
+            std::sync::Arc::from(rgba),
+            Color::WHITE,
+        );
+
+        let pixels = harness.render(encoder.finish());
+        let center = pixel(&pixels, 32, 16, 16);
+        assert!(
+            center[0] >= 240 && center[3] >= 240,
+            "raster image should render after atlas page reset, got {center:?}"
+        );
+
+        let stats = harness.last_stats.expect("render should record stats");
+        assert_eq!(stats.image_atlas_page_resets_this_frame, 1);
+        assert_eq!(stats.image_atlas_generation, 1);
+        assert_eq!(stats.image_atlas_page_resets, 1);
+        assert_eq!(stats.failed_raster_images, 0);
+        assert!(stats.uploaded_raster_images);
+        assert!(!harness.renderer.image_cache.contains_key("test.stale.full.page@1x1"));
     }
 
     #[test]
