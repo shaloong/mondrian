@@ -35,7 +35,10 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [ ] Harden focus traversal, keyboard navigation, mouse capture release, window focus loss,
       and overlay hit testing as explicit contracts.
 - [x] Add route diagnostics for dropped shortcuts, stale focused widgets, and capture owners.
-- [ ] Add accessibility-ready metadata to core widgets: role, name, state, value, focus order.
+- [x] Add accessibility-ready metadata primitives, focus-order collection, and core control
+      coverage for Button, Checkbox, Slider, and TextInput.
+- [ ] Extend accessibility metadata to composite widgets: Dropdown, ContextMenu, ColorPicker,
+      ScrollView, DockSplitter, TimelineView, AssetGrid, and ViewerSurface.
 - [x] Define keyboard routing policy for unmatched shortcuts, system shortcut pass-through, and
       IME switching chords.
 - [x] Define cursor request priority and transient clearing across runtime/window shells.

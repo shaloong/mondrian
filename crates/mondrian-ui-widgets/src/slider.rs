@@ -4,7 +4,10 @@
 
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
+    PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 /// Adapter that maps the current slider value to an editor [`Action`].
@@ -336,6 +339,24 @@ impl Widget for Slider {
     fn can_focus(&self) -> bool {
         self.enabled
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Slider)
+                .with_name("Slider")
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused,
+                    disabled: !self.enabled,
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Number {
+                    value: self.value,
+                    min: self.min,
+                    max: self.max,
+                }),
+        )
+    }
 }
 
 impl Slider {
@@ -561,6 +582,21 @@ mod tests {
         assert!(!slider.can_focus());
         assert!(actions.borrow().is_empty());
         assert!(!ctx.requests.repaint);
+    }
+
+    #[test]
+    fn slider_accessibility_exposes_numeric_range() {
+        let slider = Slider::new(25.0, 0.0, 100.0);
+
+        let node = slider.accessibility().expect("slider should expose accessibility");
+
+        assert_eq!(node.role, AccessibilityRole::Slider);
+        assert_eq!(node.name.as_deref(), Some("Slider"));
+        assert!(node.state.focusable);
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Number { value: 25.0, min: 0.0, max: 100.0 })
+        );
     }
 
     #[test]

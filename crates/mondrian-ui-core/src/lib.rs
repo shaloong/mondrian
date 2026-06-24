@@ -26,6 +26,7 @@ pub use tooltip::{TooltipManager, TooltipState};
 pub use tree::{TreeWalker, WidgetTree};
 pub use types::*;
 pub use widget::{
-    CursorRequest, DrawCommandEncoder, EventContext, EventRequests, EyedropperRequest,
-    PaintContext, Widget,
+    collect_accessibility_nodes, AccessibilityNode, AccessibilityRole, AccessibilityState,
+    AccessibilityValue, CursorRequest, DrawCommandEncoder, EventContext, EventRequests,
+    EyedropperRequest, PaintContext, Widget,
 };

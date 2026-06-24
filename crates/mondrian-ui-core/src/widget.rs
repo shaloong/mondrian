@@ -65,6 +65,101 @@ pub struct EyedropperRequest {
     pub hotspot: Option<Point>,
 }
 
+/// Platform-neutral accessibility role for a widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessibilityRole {
+    /// Static text or label.
+    Label,
+    /// Push button.
+    Button,
+    /// Binary checkbox.
+    Checkbox,
+    /// Numeric slider.
+    Slider,
+    /// Editable single-line or multiline text field.
+    TextInput,
+    /// Generic focusable or structural group.
+    Group,
+}
+
+/// Accessibility state exposed by a widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessibilityState {
+    /// Whether the control can receive focus.
+    pub focusable: bool,
+    /// Whether the control currently has focus.
+    pub focused: bool,
+    /// Whether the control is disabled.
+    pub disabled: bool,
+    /// Optional checked state for checkboxes and similar controls.
+    pub checked: Option<bool>,
+    /// Optional pressed state for push buttons.
+    pub pressed: Option<bool>,
+    /// Optional expanded state for popovers, dropdowns, and disclosure widgets.
+    pub expanded: Option<bool>,
+    /// Optional selected state for list items, tabs, and timeline objects.
+    pub selected: Option<bool>,
+}
+
+/// Accessibility value exposed by a widget.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AccessibilityValue {
+    /// Editable or readable text value.
+    Text(String),
+    /// Numeric value with an inclusive range.
+    Number { value: f32, min: f32, max: f32 },
+}
+
+/// Platform-neutral accessibility metadata for a widget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessibilityNode {
+    /// Widget identifier that owns this metadata.
+    pub widget_id: WidgetId,
+    /// Semantic role.
+    pub role: AccessibilityRole,
+    /// User-facing accessible name.
+    pub name: Option<String>,
+    /// Current state.
+    pub state: AccessibilityState,
+    /// Optional value for editable or range controls.
+    pub value: Option<AccessibilityValue>,
+    /// Sequential focus order assigned by [`collect_accessibility_nodes`].
+    pub focus_order: Option<u32>,
+}
+
+impl AccessibilityNode {
+    /// Create metadata for a widget.
+    pub fn new(widget_id: WidgetId, role: AccessibilityRole) -> Self {
+        Self {
+            widget_id,
+            role,
+            name: None,
+            state: AccessibilityState::default(),
+            value: None,
+            focus_order: None,
+        }
+    }
+
+    /// Set the accessible name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.name = (!name.is_empty()).then_some(name);
+        self
+    }
+
+    /// Set the accessibility state.
+    pub fn with_state(mut self, state: AccessibilityState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// Set the accessibility value.
+    pub fn with_value(mut self, value: AccessibilityValue) -> Self {
+        self.value = Some(value);
+        self
+    }
+}
+
 /// Side-effect requests emitted by widgets while handling an input event.
 ///
 /// Widgets stay platform independent: they record intent here, and the app or
@@ -456,6 +551,45 @@ pub trait Widget {
     fn accepts_text_input(&self) -> bool {
         false
     }
+
+    /// Accessibility metadata for this widget.
+    ///
+    /// Containers that are only layout structure can return `None`; controls
+    /// with user-visible semantics should return a node so platform bridges can
+    /// expose roles, names, values, state, and focus order.
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        None
+    }
+}
+
+/// Collect accessibility metadata from a widget subtree.
+///
+/// Focus order is assigned in the same logical child traversal order used by
+/// focus traversal. Non-focusable nodes keep `focus_order = None`.
+pub fn collect_accessibility_nodes(root: &dyn Widget) -> Vec<AccessibilityNode> {
+    let mut nodes = Vec::new();
+    let mut next_focus_order = 0;
+    collect_accessibility_nodes_inner(root, &mut nodes, &mut next_focus_order);
+    nodes
+}
+
+fn collect_accessibility_nodes_inner(
+    widget: &dyn Widget,
+    nodes: &mut Vec<AccessibilityNode>,
+    next_focus_order: &mut u32,
+) {
+    if let Some(mut node) = widget.accessibility() {
+        if node.state.focusable && node.focus_order.is_none() {
+            node.focus_order = Some(*next_focus_order);
+            *next_focus_order = next_focus_order.saturating_add(1);
+        }
+        nodes.push(node);
+    }
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child(index) {
+            collect_accessibility_nodes_inner(child, nodes, next_focus_order);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -557,6 +691,75 @@ mod tests {
         }
     }
 
+    struct AccessibilityTestWidget {
+        id: WidgetId,
+        role: Option<AccessibilityRole>,
+        focusable: bool,
+        children: Vec<Box<dyn Widget>>,
+    }
+
+    impl AccessibilityTestWidget {
+        fn new(role: Option<AccessibilityRole>, focusable: bool) -> Self {
+            Self {
+                id: WidgetId::new(),
+                role,
+                focusable,
+                children: Vec::new(),
+            }
+        }
+
+        fn with_children(children: Vec<Box<dyn Widget>>) -> Self {
+            Self {
+                id: WidgetId::new(),
+                role: None,
+                focusable: false,
+                children,
+            }
+        }
+    }
+
+    impl Widget for AccessibilityTestWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::ZERO
+        }
+
+        fn layout(&mut self, _bounds: Rect) {}
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn child_count(&self) -> usize {
+            self.children.len()
+        }
+
+        fn child(&self, index: usize) -> Option<&dyn Widget> {
+            self.children.get(index).map(|child| child.as_ref())
+        }
+
+        fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+            match self.children.get_mut(index) {
+                Some(child) => Some(child.as_mut()),
+                None => None,
+            }
+        }
+
+        fn accessibility(&self) -> Option<AccessibilityNode> {
+            self.role.map(|role| {
+                AccessibilityNode::new(self.id, role).with_state(AccessibilityState {
+                    focusable: self.focusable,
+                    ..AccessibilityState::default()
+                })
+            })
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Widget contract tests
     // ═══════════════════════════════════════════════════════════════════════
@@ -640,6 +843,38 @@ mod tests {
     fn widget_id_is_accessible() {
         let w = TestWidget::new(Color::from_hex(0xFF0000));
         assert_eq!(w.id(), w.id); // idempotent
+    }
+
+    #[test]
+    fn accessibility_collection_assigns_focus_order_in_tree_order() {
+        let root = AccessibilityTestWidget::with_children(vec![
+            Box::new(AccessibilityTestWidget::new(
+                Some(AccessibilityRole::Label),
+                false,
+            )),
+            Box::new(AccessibilityTestWidget::new(
+                Some(AccessibilityRole::Button),
+                true,
+            )),
+            Box::new(AccessibilityTestWidget::with_children(vec![Box::new(
+                AccessibilityTestWidget::new(Some(AccessibilityRole::TextInput), true),
+            )])),
+        ]);
+
+        let nodes = collect_accessibility_nodes(&root);
+
+        assert_eq!(
+            nodes.iter().map(|node| node.role).collect::<Vec<_>>(),
+            vec![
+                AccessibilityRole::Label,
+                AccessibilityRole::Button,
+                AccessibilityRole::TextInput,
+            ]
+        );
+        assert_eq!(
+            nodes.iter().map(|node| node.focus_order).collect::<Vec<_>>(),
+            vec![None, Some(0), Some(1)]
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════

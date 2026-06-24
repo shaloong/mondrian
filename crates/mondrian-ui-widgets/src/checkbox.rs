@@ -4,7 +4,9 @@
 
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::centered_text_origin_y;
@@ -249,6 +251,19 @@ impl Widget for Checkbox {
     fn can_focus(&self) -> bool {
         self.enabled
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Checkbox)
+                .with_name(self.label.clone())
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    disabled: !self.enabled,
+                    checked: Some(self.checked),
+                    ..AccessibilityState::default()
+                }),
+        )
+    }
 }
 
 fn checkmark_triangles(box_rect: Rect) -> [Point; 12] {
@@ -442,6 +457,19 @@ mod tests {
         let mut cb = Checkbox::new("Opt", false);
         cb.set_checked(true);
         assert!(cb.is_checked());
+    }
+
+    #[test]
+    fn checkbox_accessibility_exposes_checked_state() {
+        let cb = Checkbox::new("Enable effects", true);
+
+        let node = cb.accessibility().expect("checkbox should expose accessibility");
+
+        assert_eq!(node.role, AccessibilityRole::Checkbox);
+        assert_eq!(node.name.as_deref(), Some("Enable effects"));
+        assert!(node.state.focusable);
+        assert_eq!(node.state.checked, Some(true));
+        assert!(!node.state.disabled);
     }
 
     #[test]

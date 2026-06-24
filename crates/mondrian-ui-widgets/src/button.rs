@@ -4,7 +4,9 @@
 
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::{centered_text_origin_y, paint_focus_ring};
@@ -269,6 +271,20 @@ impl Widget for Button {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Button)
+                .with_name(self.label.clone())
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focus_visible,
+                    disabled: !self.enabled,
+                    pressed: Some(self.state == ButtonState::Pressed),
+                    ..AccessibilityState::default()
+                }),
+        )
     }
 }
 
@@ -549,6 +565,19 @@ mod tests {
         assert_eq!(b.state(), ButtonState::Normal);
         assert!(!b.can_focus());
         assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn button_accessibility_exposes_role_name_and_disabled_state() {
+        let button = Button::new("Render").disabled();
+
+        let node = button.accessibility().expect("button should expose accessibility");
+
+        assert_eq!(node.role, AccessibilityRole::Button);
+        assert_eq!(node.name.as_deref(), Some("Render"));
+        assert!(!node.state.focusable);
+        assert!(node.state.disabled);
+        assert_eq!(node.state.pressed, Some(false));
     }
 
     #[test]

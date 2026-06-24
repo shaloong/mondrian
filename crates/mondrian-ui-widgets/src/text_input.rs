@@ -18,7 +18,10 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
+    PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_text::TextRenderer;
 
@@ -944,6 +947,20 @@ impl Widget for TextInput {
         self.enabled && self.focused
     }
 
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::TextInput)
+                .with_name(self.placeholder.clone())
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused,
+                    disabled: !self.enabled,
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Text(self.text.clone())),
+        )
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
@@ -1165,6 +1182,20 @@ mod tests {
         assert_eq!(ti.cursor, 0);
         assert!(!ti.has_selection());
         assert!(!ti.focused);
+    }
+
+    #[test]
+    fn text_input_accessibility_exposes_name_value_and_state() {
+        let mut ti = TextInput::new("Search assets").with_text("clip");
+        ti.focused = true;
+
+        let node = ti.accessibility().expect("text input should expose accessibility");
+
+        assert_eq!(node.role, AccessibilityRole::TextInput);
+        assert_eq!(node.name.as_deref(), Some("Search assets"));
+        assert!(node.state.focusable);
+        assert!(node.state.focused);
+        assert_eq!(node.value, Some(AccessibilityValue::Text("clip".into())));
     }
 
     #[test]
