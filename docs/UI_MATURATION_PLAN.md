@@ -96,6 +96,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       dimensions come from semantic theme tokens.
 - [x] Tokenize PanelList row chrome, badge sizing/radius, accent swatches, focus/drop rings, and
       scrollbar alpha against theme-derived visual tokens.
+- [x] Tokenize Dropdown/Menu trigger chrome, popup radius, row padding/radius, separator geometry,
+      scrollbar sizing, shortcut text, and icon/checkmark lanes against theme-derived visual tokens.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.

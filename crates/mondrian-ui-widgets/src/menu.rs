@@ -9,6 +9,7 @@ use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::Theme;
 use std::cell::Cell;
 
 use crate::paint::{horizontal_stroke_rect, paint_focus_ring, paint_popover_shadow};
@@ -35,6 +36,88 @@ const MENU_ROW_ICON_GAP: f32 = 8.0;
 const MENU_ROW_SHORTCUT_GAP: f32 = 24.0;
 const MENU_SCROLLBAR_SPACE: f32 = 8.0;
 const MENU_VIEWPORT_MARGIN: f32 = 4.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MenuVisualTokens {
+    filled_trigger_radius: f32,
+    menu_bar_trigger_radius: f32,
+    filled_trigger_padding_x: f32,
+    menu_bar_trigger_padding_x: f32,
+    menu_bar_font_size: f32,
+    popup_radius: f32,
+    popup_border_inset: f32,
+    row_radius: f32,
+    row_font_size: f32,
+    row_hover_alpha: f32,
+    row_padding_x: f32,
+    row_icon_size: f32,
+    row_icon_gap: f32,
+    row_shortcut_gap: f32,
+    shortcut_font_size: f32,
+    separator_inset_x: f32,
+    separator_width: f32,
+    separator_alpha: f32,
+    scrollbar_right_inset: f32,
+    scrollbar_top_inset: f32,
+    scrollbar_width: f32,
+    scrollbar_min_thumb_height: f32,
+    arrow_right_inset: f32,
+    arrow_half_width: f32,
+    arrow_top_offset: f32,
+    arrow_bottom_offset: f32,
+    check_start_offset_x: f32,
+    check_width: f32,
+}
+
+impl MenuVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            filled_trigger_radius: spacing.radius_sm,
+            menu_bar_trigger_radius: spacing.radius_sm,
+            filled_trigger_padding_x: spacing.sm + spacing.border_emphasis,
+            menu_bar_trigger_padding_x: spacing.sm + spacing.border_standard,
+            menu_bar_font_size: theme.typography.button.font_size,
+            popup_radius: spacing.radius_lg.min(spacing.radius_md),
+            popup_border_inset: spacing.border_standard,
+            row_radius: spacing.radius_sm,
+            row_font_size: theme.typography.small.font_size,
+            row_hover_alpha: 0.72,
+            row_padding_x: spacing.md,
+            row_icon_size: spacing.icon_size + spacing.border_standard,
+            row_icon_gap: spacing.sm + spacing.border_emphasis,
+            row_shortcut_gap: spacing.icon_size + spacing.md,
+            shortcut_font_size: theme.typography.metadata.font_size,
+            separator_inset_x: spacing.sm,
+            separator_width: spacing.border_standard,
+            separator_alpha: 0.86,
+            scrollbar_right_inset: spacing.xs + spacing.border_standard,
+            scrollbar_top_inset: spacing.border_emphasis + spacing.border_standard,
+            scrollbar_width: spacing.border_emphasis + spacing.border_standard,
+            scrollbar_min_thumb_height: spacing.icon_size + spacing.border_emphasis,
+            arrow_right_inset: spacing.icon_size + spacing.border_emphasis,
+            arrow_half_width: spacing.xs,
+            arrow_top_offset: spacing.border_emphasis,
+            arrow_bottom_offset: spacing.border_emphasis + spacing.border_standard,
+            check_start_offset_x: spacing.border_standard,
+            check_width: spacing.md - spacing.border_standard * 0.5,
+        }
+    }
+
+    fn trigger_padding_x(self, style: DropdownTriggerStyle) -> f32 {
+        match style {
+            DropdownTriggerStyle::Filled => self.filled_trigger_padding_x,
+            DropdownTriggerStyle::MenuBar => self.menu_bar_trigger_padding_x,
+        }
+    }
+
+    fn trigger_radius(self, style: DropdownTriggerStyle) -> f32 {
+        match style {
+            DropdownTriggerStyle::Filled => self.filled_trigger_radius,
+            DropdownTriggerStyle::MenuBar => self.menu_bar_trigger_radius,
+        }
+    }
+}
 
 pub(crate) fn anchored_menu_rect(
     anchor: Rect,
@@ -94,7 +177,7 @@ pub(crate) fn paint_menu_trigger(
     style: DropdownTriggerStyle,
 ) {
     let tokens = &ctx.theme.colors;
-    let spacing = &ctx.theme.spacing;
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
     match style {
         DropdownTriggerStyle::Filled => {
             let fill = if open {
@@ -102,13 +185,13 @@ pub(crate) fn paint_menu_trigger(
             } else {
                 tokens.surface
             };
-            ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
+            ctx.encoder.draw_rect(rect, fill, visual.trigger_radius(style));
             paint_menu_trigger_label(ctx, rect, label, tokens.foreground, true, style);
             paint_menu_arrow(ctx, rect);
         }
         DropdownTriggerStyle::MenuBar => {
             if open {
-                ctx.encoder.draw_rect(rect, tokens.surface_2, spacing.radius_sm);
+                ctx.encoder.draw_rect(rect, tokens.surface_2, visual.trigger_radius(style));
             }
             paint_menu_trigger_label(ctx, rect, label, tokens.text_secondary, false, style);
         }
@@ -127,7 +210,8 @@ pub(crate) fn paint_menu_trigger_label(
         return;
     }
     let reserved_right = if reserve_arrow { MENU_ARROW_SPACE } else { 0.0 };
-    let padding_x = trigger_padding_x(style);
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
+    let padding_x = visual.trigger_padding_x(style);
     let text_width = rect.width - padding_x * 2.0 - reserved_right;
     if text_width <= 0.0 {
         return;
@@ -152,9 +236,10 @@ fn trigger_padding_x(style: DropdownTriggerStyle) -> f32 {
 }
 
 fn trigger_font_size(ctx: &PaintContext, style: DropdownTriggerStyle) -> f32 {
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
     match style {
         DropdownTriggerStyle::Filled => ctx.theme.typography.body.font_size,
-        DropdownTriggerStyle::MenuBar => 12.5,
+        DropdownTriggerStyle::MenuBar => visual.menu_bar_font_size,
     }
 }
 
@@ -167,14 +252,14 @@ fn trigger_text_y(rect: Rect, font_size: f32, style: DropdownTriggerStyle) -> f3
 
 pub(crate) fn paint_menu_popup_chrome(ctx: &mut PaintContext, rect: Rect) {
     let tokens = &ctx.theme.colors;
-    let spacing = &ctx.theme.spacing;
-    let radius = 8.0_f32.min(spacing.radius_lg);
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
+    let radius = visual.popup_radius;
     paint_popover_shadow(ctx, rect, radius);
     ctx.encoder.draw_rect(rect, tokens.border_strong, radius);
     ctx.encoder.draw_rect(
-        rect.inset(1.0, 1.0),
+        rect.inset(visual.popup_border_inset, visual.popup_border_inset),
         tokens.popover,
-        (radius - 1.0).max(0.0),
+        (radius - visual.popup_border_inset).max(0.0),
     );
 }
 
@@ -188,16 +273,16 @@ pub(crate) fn paint_menu_row(
     state: MenuRowPaint,
 ) {
     let tokens = &ctx.theme.colors;
-    let spacing = &ctx.theme.spacing;
-    let font_size = MENU_MEASURE_FONT_SIZE;
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
+    let font_size = visual.row_font_size;
     let fill = if state.hovered && state.enabled {
         let mut hover = tokens.surface_2;
-        hover.a *= 0.72;
+        hover.a *= visual.row_hover_alpha;
         hover
     } else {
         tokens.popover
     };
-    ctx.encoder.draw_rect(rect, fill, spacing.radius_sm);
+    ctx.encoder.draw_rect(rect, fill, visual.row_radius);
     let text_color = if state.enabled {
         if state.hovered {
             tokens.foreground
@@ -216,9 +301,9 @@ pub(crate) fn paint_menu_row(
             };
             paint_menu_checkmark(ctx, rect, check_color);
         } else if let Some(icon) = icon {
-            let icon_size = MENU_ROW_ICON_SIZE.min(rect.height).max(1.0);
+            let icon_size = visual.row_icon_size.min(rect.height).max(1.0);
             let icon_rect = Rect::new(
-                rect.x + MENU_ROW_PADDING_X,
+                rect.x + visual.row_padding_x,
                 rect.y + (rect.height - icon_size).max(0.0) * 0.5,
                 icon_size,
                 icon_size,
@@ -228,20 +313,20 @@ pub(crate) fn paint_menu_row(
     }
 
     let icon_lane_width = if reserve_icon_lane {
-        MENU_ROW_ICON_SIZE + MENU_ROW_ICON_GAP
+        visual.row_icon_size + visual.row_icon_gap
     } else {
         0.0
     };
-    let text_x = rect.x + MENU_ROW_PADDING_X + icon_lane_width;
+    let text_x = rect.x + visual.row_padding_x + icon_lane_width;
     let shortcut_width = shortcut
         .filter(|shortcut| !shortcut.is_empty())
         .map(|shortcut| measure_single_line(shortcut, font_size).0)
         .unwrap_or(0.0);
-    let shortcut_x = rect.x + rect.width - MENU_ROW_PADDING_X - shortcut_width;
+    let shortcut_x = rect.x + rect.width - visual.row_padding_x - shortcut_width;
     let text_right = if shortcut_width > 0.0 {
-        (shortcut_x - MENU_ROW_SHORTCUT_GAP).max(text_x)
+        (shortcut_x - visual.row_shortcut_gap).max(text_x)
     } else {
-        rect.x + rect.width - MENU_ROW_PADDING_X
+        rect.x + rect.width - visual.row_padding_x
     };
     let text_clip = Rect::new(text_x, rect.y, (text_right - text_x).max(0.0), rect.height);
     if text_clip.width > 0.0 {
@@ -258,15 +343,18 @@ pub(crate) fn paint_menu_row(
         let shortcut_clip = Rect::new(
             shortcut_x.max(text_x),
             rect.y,
-            (rect.x + rect.width - MENU_ROW_PADDING_X - shortcut_x).max(0.0),
+            (rect.x + rect.width - visual.row_padding_x - shortcut_x).max(0.0),
             rect.height,
         );
         if shortcut_clip.width > 0.0 {
             ctx.push_clip(shortcut_clip);
             ctx.encoder.draw_text(
                 shortcut,
-                12.0,
-                Point::new(shortcut_clip.x, menu_row_text_y(rect, 12.0)),
+                visual.shortcut_font_size,
+                Point::new(
+                    shortcut_clip.x,
+                    menu_row_text_y(rect, visual.shortcut_font_size),
+                ),
                 tokens.text_secondary,
             );
             ctx.pop_clip();
@@ -276,14 +364,15 @@ pub(crate) fn paint_menu_row(
 
 pub(crate) fn paint_menu_separator(ctx: &mut PaintContext, rect: Rect) {
     let tokens = &ctx.theme.colors;
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
     let line = horizontal_stroke_rect(
         rect.y + rect.height * 0.5,
-        rect.x + 6.0,
-        rect.width - 12.0,
-        1.0,
+        rect.x + visual.separator_inset_x,
+        rect.width - visual.separator_inset_x * 2.0,
+        visual.separator_width,
     );
     let mut border = tokens.border;
-    border.a *= 0.86;
+    border.a *= visual.separator_alpha;
     ctx.encoder.draw_rect(line, border, 0.0);
 }
 
@@ -298,35 +387,42 @@ pub(crate) fn paint_menu_scrollbar(
     if max_scroll_y <= 0.0 || content_height <= 0.0 {
         return;
     }
-    let spacing = &ctx.theme.spacing;
     let tokens = &ctx.theme.colors;
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
     let track = Rect::new(
-        menu_rect.x + menu_rect.width - 5.0,
-        menu_rect.y + 3.0,
-        3.0,
-        (menu_rect.height - 6.0).max(1.0),
+        menu_rect.x + menu_rect.width - visual.scrollbar_right_inset,
+        menu_rect.y + visual.scrollbar_top_inset,
+        visual.scrollbar_width,
+        (menu_rect.height - visual.scrollbar_top_inset * 2.0).max(1.0),
     );
     let thumb_h = (track.height * (visible_content_height / content_height))
-        .max(16.0)
+        .max(visual.scrollbar_min_thumb_height)
         .min(track.height);
     let thumb_range = (track.height - thumb_h).max(0.0);
     let thumb_y = track.y + (scroll_offset / max_scroll_y) * thumb_range;
     ctx.encoder.draw_rect(
         Rect::new(track.x, thumb_y, track.width, thumb_h),
         tokens.muted_foreground,
-        spacing.radius_full,
+        ctx.theme.spacing.radius_full,
     );
 }
 
 fn paint_menu_arrow(ctx: &mut PaintContext, rect: Rect) {
     let tokens = &ctx.theme.colors;
-    let arrow_x = rect.x + rect.width - 16.0;
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
+    let arrow_x = rect.x + rect.width - visual.arrow_right_inset;
     let arrow_y = rect.y + rect.height * 0.5;
     ctx.encoder.draw_triangles(
         &[
-            Point::new(arrow_x - 4.0, arrow_y - 2.0),
-            Point::new(arrow_x + 4.0, arrow_y - 2.0),
-            Point::new(arrow_x, arrow_y + 3.0),
+            Point::new(
+                arrow_x - visual.arrow_half_width,
+                arrow_y - visual.arrow_top_offset,
+            ),
+            Point::new(
+                arrow_x + visual.arrow_half_width,
+                arrow_y - visual.arrow_top_offset,
+            ),
+            Point::new(arrow_x, arrow_y + visual.arrow_bottom_offset),
         ],
         tokens.foreground,
     );
@@ -337,7 +433,8 @@ fn menu_row_text_y(rect: Rect, font_size: f32) -> f32 {
 }
 
 fn paint_menu_checkmark(ctx: &mut PaintContext, rect: Rect, color: Color) {
-    let x = rect.x + MENU_ROW_PADDING_X + 1.0;
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
+    let x = rect.x + visual.row_padding_x + visual.check_start_offset_x;
     let y = rect.y + rect.height * 0.5;
     ctx.encoder.draw_line(
         Point::new(x, y + 0.5),
@@ -347,7 +444,7 @@ fn paint_menu_checkmark(ctx: &mut PaintContext, rect: Rect, color: Color) {
     );
     ctx.encoder.draw_line(
         Point::new(x + 3.0, y + 3.8),
-        Point::new(x + 9.5, y - 4.0),
+        Point::new(x + visual.check_width, y - 4.0),
         1.5,
         color,
     );
@@ -987,7 +1084,12 @@ impl Widget for Dropdown {
         } else {
             let rect = self.trigger_rect();
             let tokens = &ctx.theme.colors;
-            ctx.encoder.draw_rect(rect, tokens.muted, ctx.theme.spacing.radius_sm);
+            let visual = MenuVisualTokens::from_theme(ctx.theme);
+            ctx.encoder.draw_rect(
+                rect,
+                tokens.muted,
+                visual.trigger_radius(self.trigger_style),
+            );
             paint_menu_trigger_label(
                 ctx,
                 rect,
@@ -998,7 +1100,12 @@ impl Widget for Dropdown {
             );
         }
         if self.focus_visible && !self.open {
-            paint_focus_ring(ctx, self.trigger_rect(), ctx.theme.spacing.radius_sm);
+            let visual = MenuVisualTokens::from_theme(ctx.theme);
+            paint_focus_ring(
+                ctx,
+                self.trigger_rect(),
+                visual.trigger_radius(self.trigger_style),
+            );
         }
     }
 
@@ -1056,6 +1163,7 @@ mod tests {
     struct RecordingEncoder {
         rects: Vec<Rect>,
         rect_colors: Vec<Color>,
+        rect_radii: Vec<f32>,
         soft_shadows: Vec<SoftShadowCommand>,
         clips: Vec<Rect>,
         clip_pops: usize,
@@ -1074,9 +1182,10 @@ mod tests {
             self.clip_pops += 1;
         }
 
-        fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32) {
             self.rects.push(bounds);
             self.rect_colors.push(color);
+            self.rect_radii.push(corner_radius);
         }
 
         fn draw_soft_shadow(
@@ -1723,6 +1832,28 @@ mod tests {
     }
 
     #[test]
+    fn menu_visual_tokens_follow_theme_spacing_and_typography() {
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let visual = MenuVisualTokens::from_theme(&theme);
+
+        assert_eq!(visual.filled_trigger_radius, theme.spacing.radius_sm);
+        assert_eq!(visual.row_radius, theme.spacing.radius_sm);
+        assert_eq!(
+            visual.popup_radius,
+            theme.spacing.radius_lg.min(theme.spacing.radius_md)
+        );
+        assert_eq!(visual.row_font_size, theme.typography.small.font_size);
+        assert_eq!(
+            visual.shortcut_font_size,
+            theme.typography.metadata.font_size
+        );
+        assert_eq!(
+            visual.scrollbar_min_thumb_height,
+            theme.spacing.icon_size + theme.spacing.border_emphasis
+        );
+    }
+
+    #[test]
     fn dropdown_trigger_clips_long_label_before_arrow() {
         let mut d = Dropdown::new(
             "Very long trigger label that must not cover the arrow",
@@ -1961,6 +2092,10 @@ mod tests {
         assert!(encoder.soft_shadows[0].color.a > encoder.soft_shadows[1].color.a);
         assert_eq!(encoder.rects[0], popup);
         assert_eq!(encoder.rect_colors[0], theme.colors.border_strong);
+        assert_eq!(
+            encoder.rect_radii[0],
+            MenuVisualTokens::from_theme(&theme).popup_radius
+        );
     }
 
     #[test]
@@ -2009,6 +2144,10 @@ mod tests {
         assert_eq!(encoder.clips, vec![Rect::new(20.0, 20.0, 44.0, 24.0)]);
         assert_eq!(encoder.clip_pops, 1);
         assert_eq!(encoder.lines, 0);
+        assert_eq!(
+            encoder.rect_radii[0],
+            MenuVisualTokens::from_theme(&theme).row_radius
+        );
     }
 
     #[test]
