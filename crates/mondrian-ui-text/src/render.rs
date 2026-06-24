@@ -774,6 +774,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn small_mixed_script_and_emoji_text_resolves_without_missing_glyphs() {
+        let mut r = TextRenderer::new();
+        let text = "A你🙂B";
+        for &fs in &[10.0, 12.0, 14.0] {
+            let resolved = r.layout_and_render_with_stats(
+                text,
+                fs,
+                Point::new(16.0, 24.0),
+                Color::WHITE,
+                None,
+                true,
+            );
+            assert_eq!(
+                resolved.stats.missing_glyphs, 0,
+                "mixed Latin/CJK/emoji text should resolve through font fallback at {fs}px"
+            );
+            assert!(
+                resolved.stats.glyphs_requested >= 4,
+                "expected at least one glyph per user-visible mixed-script character at {fs}px"
+            );
+            assert_eq!(
+                resolved.stats.glyphs_requested, resolved.stats.glyphs_resolved,
+                "all requested glyphs should resolve to renderer image commands at {fs}px"
+            );
+
+            let bounds = image_bounds(&resolved.commands);
+            assert!(
+                bounds.len() >= 4,
+                "expected visible glyph image bounds for mixed-script text at {fs}px"
+            );
+            for bounds in bounds {
+                assert!(bounds.x.is_finite() && bounds.y.is_finite());
+                assert!(bounds.width > 0.0 && bounds.height > 0.0);
+                assert!(
+                    bounds.width <= fs * 6.0 && bounds.height <= fs * 6.0,
+                    "fallback glyph bounds should stay proportional at {fs}px: {bounds:?}"
+                );
+            }
+        }
+    }
+
     /// 'i' and 'l' should have similar center positions relative to their advance origin.
     #[test]
     fn i_and_l_have_consistent_centers() {

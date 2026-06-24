@@ -26,9 +26,16 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 - [x] Separate text input state, editing commands, geometry, IME integration, and paint.
 - [ ] Add multiline text editing with selection, clipboard, IME, scroll, and undo semantics.
-- [ ] Decide whether subpixel glyph atlas bins are needed for rich text/code-style editors.
-- [ ] Add text visual regression tests for small sizes, CJK, mixed scripts, emoji fallback,
+- [x] Decide whether subpixel glyph atlas bins are needed for rich text/code-style editors.
+      Current UI text keeps stable whole-glyph atlas keys and applies subpixel positioning in
+      image bounds; subpixel atlas bins are deferred until a rich text/code editor proves the
+      atlas cost is worth the sharper per-bin rasterization.
+- [x] Add text visual regression tests for small sizes, CJK, mixed scripts, emoji fallback,
       caret placement, selection paint, and IME preedit.
+- [x] Add TextInput component visual coverage for small clipped fields, mixed CJK/emoji
+      committed text, selection chrome, caret chrome, and IME preedit underline.
+- [x] Add text renderer coverage proving small mixed Latin/CJK/emoji glyph fallback resolves
+      without missing glyphs and produces finite proportional glyph image bounds.
 - [x] Extract TextInput IME preedit into a `TextCompositionState` model with direct activity
       and clearing coverage.
 - [x] Move TextInput committed edit state and IME composition state into dedicated

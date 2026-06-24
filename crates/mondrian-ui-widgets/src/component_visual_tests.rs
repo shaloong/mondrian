@@ -105,6 +105,74 @@ fn form_control_visual_scenarios_emit_stable_layers_text_and_vectors() {
 }
 
 #[test]
+fn text_input_visual_scenarios_cover_small_bounds_selection_caret_and_ime() {
+    let actions = RefCell::new(Vec::new());
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+    let mut mixed_input = TextInput::new("Search media").with_text("A你🙂B");
+    mixed_input.layout(Rect::new(8.0, 8.0, 128.0, 24.0));
+    assert_eq!(
+        mixed_input.event(&UiEvent::FocusGained, &mut ctx),
+        EventResult::Handled
+    );
+    assert_eq!(
+        mixed_input.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: Modifiers { ctrl: true, ..Modifiers::none() },
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert_eq!(
+        mixed_input.event(&UiEvent::ImePreedit("pin yin".to_owned()), &mut ctx),
+        EventResult::Handled
+    );
+
+    let mixed_paint = paint_widget(&mixed_input, Rect::new(0.0, 0.0, 160.0, 48.0));
+    assert!(
+        mixed_paint.texts.iter().any(|text| text.text == "A你🙂B"),
+        "committed mixed Latin/CJK/emoji text should remain visible"
+    );
+    assert!(
+        mixed_paint.texts.iter().any(|text| text.text == "pin yin"),
+        "IME preedit text should paint beside the committed text"
+    );
+    assert!(
+        mixed_paint.lines.iter().any(|(_, _, width)| *width > 0.0),
+        "IME preedit should emit an underline stroke"
+    );
+    assert!(
+        mixed_paint.rects.len() >= 4,
+        "focused selected text input should paint background, selection, and caret chrome"
+    );
+    assert!(
+        mixed_paint
+            .clips
+            .iter()
+            .any(|clip| clip.x > 8.0 && clip.width < 128.0 && clip.height <= 24.0),
+        "mixed-script text must stay clipped to the padded content lane"
+    );
+
+    let mut tiny_input = TextInput::new("Tiny search").with_text("abcdef 你好");
+    tiny_input.layout(Rect::new(8.0, 36.0, 56.0, 16.0));
+    let tiny_paint = paint_widget(&tiny_input, Rect::new(0.0, 0.0, 96.0, 64.0));
+    assert!(
+        tiny_paint.texts.iter().any(|text| text.text == "abcdef 你好"),
+        "small text fields should still emit the committed text command"
+    );
+    assert!(
+        tiny_paint.clips.iter().any(|clip| clip.width <= 40.0 && clip.height <= 16.0),
+        "small text fields should clip text to a positive, bounded lane"
+    );
+}
+
+#[test]
 fn popup_component_visual_scenarios_emit_overlay_text_icons_and_color_geometry() {
     let actions = RefCell::new(Vec::new());
     let mut focus = DummyFocus;
