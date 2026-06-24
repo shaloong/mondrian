@@ -2,11 +2,13 @@
 //!
 //! Provides a compact model-based color editor for the custom UI stack.
 
+mod geometry;
 mod model;
 
 use std::cell::Cell;
 use std::f32::consts::TAU;
 
+use geometry::ColorPickerGeometry;
 use model::{apply_field_texts, field_text, hue_for_color, ColorField};
 use mondrian_core::{Color, HsvColor};
 use mondrian_editor_state::Action;
@@ -17,10 +19,9 @@ use mondrian_ui_core::widget::{
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
-use crate::form_layout::{FormLayout, FormRowOptions, FormRowRects};
 use crate::menu::{
-    anchored_menu_rect, paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger,
-    rect_has_paintable_area, DropdownTriggerStyle, MenuRowPaint,
+    paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, rect_has_paintable_area,
+    DropdownTriggerStyle, MenuRowPaint,
 };
 use crate::paint::{
     color_with_alpha, mix_color, paint_checkerboard, paint_focus_ring, paint_shadow, soft_border,
@@ -415,141 +416,60 @@ impl ColorPicker {
         }
     }
 
-    fn swatch_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x + 12.0,
-            self.bounds.y + 12.0,
-            SWATCH_SIZE,
-            SWATCH_SIZE,
-        )
-    }
-
-    fn mode_trigger_rect(&self) -> Rect {
-        let x = if self.show_swatch {
-            self.bounds.x + 58.0
-        } else {
-            self.bounds.x + 12.0
-        };
-        Rect::new(
-            x,
-            self.bounds.y + 12.0,
-            MODE_TRIGGER_WIDTH.min((self.bounds.x + self.bounds.width - x - 12.0).max(1.0)),
-            MODE_HEIGHT,
-        )
-    }
-
-    fn mode_menu_rect(&self) -> Rect {
-        let trigger = self.mode_trigger_rect();
-        anchored_menu_rect(
-            trigger,
-            trigger.width,
-            MODE_HEIGHT * MODES.len() as f32 + 8.0,
-            6.0,
+    fn geometry(&self) -> ColorPickerGeometry {
+        ColorPickerGeometry::new(
+            self.bounds,
+            self.mode,
+            self.area_mode,
+            self.show_swatch,
+            self.mode_menu_open,
             self.overlay_viewport.get(),
         )
     }
 
+    fn swatch_rect(&self) -> Rect {
+        self.geometry().swatch_rect()
+    }
+
+    fn mode_trigger_rect(&self) -> Rect {
+        self.geometry().mode_trigger_rect()
+    }
+
+    fn mode_menu_rect(&self) -> Rect {
+        self.geometry().mode_menu_rect()
+    }
+
     fn eyedropper_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x + self.bounds.width - 40.0,
-            self.bounds.y + 12.0,
-            28.0,
-            28.0,
-        )
+        self.geometry().eyedropper_rect()
     }
 
     fn mode_item_rect(&self, mode: ColorPickerMode) -> Rect {
-        let menu = self.mode_menu_rect();
-        let index = MODES.iter().position(|candidate| *candidate == mode).unwrap_or(0);
-        Rect::new(
-            menu.x + 2.0,
-            menu.y + 4.0 + MODE_HEIGHT * index as f32,
-            (menu.width - 4.0).max(1.0),
-            MODE_HEIGHT - 1.0,
-        )
+        self.geometry().mode_item_rect(mode)
     }
 
     fn color_area_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x + 10.0,
-            self.bounds.y + PICKER_TOP,
-            (self.bounds.width - 20.0).max(1.0),
-            COLOR_AREA_HEIGHT,
-        )
+        self.geometry().color_area_rect()
     }
 
     fn hue_bar_rect(&self) -> Rect {
-        let area = self.color_area_rect();
-        Rect::new(
-            area.x,
-            area.y + area.height + BAR_GAP,
-            area.width,
-            BAR_HEIGHT,
-        )
+        self.geometry().hue_bar_rect()
     }
 
     fn alpha_bar_rect(&self) -> Rect {
-        let hue = self.hue_bar_rect();
-        Rect::new(hue.x, hue.y + hue.height + BAR_GAP, hue.width, BAR_HEIGHT)
+        self.geometry().alpha_bar_rect()
     }
 
+    #[cfg(test)]
     fn fields_top(&self) -> f32 {
-        let alpha = self.alpha_bar_rect();
-        alpha.y + alpha.height + FIELD_TOP_GAP
-    }
-
-    fn field_column_count(&self) -> usize {
-        match self.mode {
-            ColorPickerMode::Hex => 1,
-            ColorPickerMode::Rgb | ColorPickerMode::Hsl | ColorPickerMode::Hsv => 4,
-            ColorPickerMode::Cmyk => 5,
-        }
-    }
-
-    fn field_at_index(&self, index: usize) -> Option<ColorField> {
-        self.active_fields().get(index).copied()
-    }
-
-    fn field_label_width(&self, index: usize) -> f32 {
-        match self.field_at_index(index) {
-            Some(ColorField::Hex) => 28.0,
-            Some(_) => 14.0,
-            None => 14.0,
-        }
-    }
-
-    fn field_column_rect(&self, index: usize) -> Rect {
-        let col_gap = 6.0;
-        let columns = self.field_column_count().max(1);
-        let col = index % columns;
-        let row = index / columns;
-        let total_gap = col_gap * (columns.saturating_sub(1)) as f32;
-        let total_w = (self.bounds.width - 20.0 - total_gap).max(1.0);
-        let col_w = total_w / columns as f32;
-        let x = self.bounds.x + 10.0 + col as f32 * (col_w + col_gap);
-        let y = self.fields_top() + row as f32 * (ROW_HEIGHT + ROW_GAP);
-        Rect::new(x, y, col_w, ROW_HEIGHT)
-    }
-
-    fn field_row_rects(&self, index: usize) -> FormRowRects {
-        let column = self.field_column_rect(index);
-        let layout = FormLayout::new(FormRowOptions {
-            label_width: self.field_label_width(index),
-            control_gap: 0.0,
-            label_height: 14.0,
-            compact_label_y_offset: -7.0,
-            ..FormRowOptions::default()
-        });
-        layout.row_rects(column, column.y, ROW_HEIGHT, ROW_HEIGHT, ROW_HEIGHT)
+        self.geometry().fields_top()
     }
 
     fn field_rect(&self, index: usize) -> Rect {
-        self.field_row_rects(index).control
+        self.geometry().field_rect(index)
     }
 
     fn field_label_pos(&self, index: usize) -> Point {
-        let label = self.field_row_rects(index).label;
-        Point::new(label.x + 2.0, label.y)
+        self.geometry().field_label_pos(index)
     }
 
     fn field_text(&self, field: ColorField) -> String {
@@ -601,8 +521,7 @@ impl ColorPicker {
     }
 
     fn mode_chrome_contains(&self, point: Point) -> bool {
-        self.mode_trigger_rect().contains(point)
-            || (self.mode_menu_open && self.mode_menu_rect().contains(point))
+        self.geometry().mode_chrome_contains(point)
     }
 
     fn drag_target_at(&self, point: Point) -> Option<ColorDragTarget> {
@@ -618,28 +537,11 @@ impl ColorPicker {
     }
 
     fn color_area_hit_test(&self, point: Point) -> bool {
-        match self.area_mode {
-            ColorPickerAreaMode::Square => self.color_area_rect().contains(point),
-            ColorPickerAreaMode::Wheel => {
-                let wheel = self.color_wheel_rect();
-                let center = wheel.center();
-                let radius = wheel.width.min(wheel.height) * 0.5;
-                let dx = point.x - center.x;
-                let dy = point.y - center.y;
-                dx * dx + dy * dy <= radius * radius
-            }
-        }
+        self.geometry().color_area_hit_test(point)
     }
 
     fn color_wheel_rect(&self) -> Rect {
-        let area = self.color_area_rect().inset(1.0, 1.0);
-        let size = area.width.min(area.height).max(1.0);
-        Rect::new(
-            area.x + (area.width - size) * 0.5,
-            area.y + (area.height - size) * 0.5,
-            size,
-            size,
-        )
+        self.geometry().color_wheel_rect()
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {

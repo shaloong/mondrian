@@ -101,6 +101,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       scrollbar track/thumb geometry into directly tested model/geometry contracts.
 - [x] Extract ColorPicker field formatting, channel parsing, hue preservation, and visible-field
       color application into directly tested model contracts.
+- [x] Extract ColorPicker swatch, mode menu, eyedropper, color area, wheel, and field-row
+      geometry into directly tested layout contracts.
 
 ## Phase 5 - Performance And Observability
 
