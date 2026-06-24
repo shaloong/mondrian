@@ -228,8 +228,14 @@ workflow.
   angles and tiny sizes, rounded-rect SDF finite behavior, triangle winding and
   invalid/degenerate geometry rejection, conservative clip snapping, invalid
   scissor rejection, and shader validation.
-- P4-PERF-001: Add performance smoke coverage for large asset libraries, long
-  timelines, many clips, many effects, resize loops, and sustained playback.
+- [done] P4-PERF-001: Add performance smoke coverage for large asset
+  libraries, long timelines, many clips, many effects, resize loops, and
+  sustained playback. `self_hosted_ui_scale_smoke` now builds a synthetic
+  SQLite-backed project library, a 14-track long timeline, hundreds of clips
+  and effect nodes, then measures cold root build, repeated model refresh,
+  resize loops, draw-command emission, and sustained playback refresh. The
+  ignored smoke emits `MONDRIAN_PERF_JSON` and supports environment-variable
+  scaling for baseline/current comparisons.
 - P4-GPU-001: Verify renderer resource lifecycle across window replacement,
   resize, surface loss, DPI changes, and startup-to-workspace transition.
 - P4-ERROR-001: Surface app/action errors in self-hosted shell status without

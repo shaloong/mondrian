@@ -1901,6 +1901,19 @@ event routing and model refresh have completed, so native side effects stay out
 of widget code and out of `AppState`. Native platform close requests must enter
 the same pending-action queue as `app.shell.quit`; entrypoints must not call the
 event-loop exit primitive directly from `WindowEvent::CloseRequested`.
+Self-hosted UI scale coverage lives in the ignored
+`self_hosted_ui_scale_smoke` test:
+`cargo test -p mondrian-app self_hosted_ui_scale_smoke -- --ignored --nocapture`.
+It constructs a real SQLite-backed asset library and a long synthetic
+`AppState`, then exercises panel-model snapshotting, cold root build, repeated
+refresh, resize loops, draw-command emission, and sustained playback refresh
+without requiring real media files or a GPU surface. The default scenario uses
+hundreds of assets, clips, and effect nodes; `MONDRIAN_UI_PERF_ASSETS`,
+`MONDRIAN_UI_PERF_CLIPS`, `MONDRIAN_UI_PERF_EFFECTS`,
+`MONDRIAN_UI_PERF_RESIZE_ITERS`, `MONDRIAN_UI_PERF_PLAYBACK_FRAMES`,
+`MONDRIAN_UI_PERF_REFRESH_ITERS`, and the matching `*_MS` threshold variables
+can scale the smoke for baseline/current comparisons. Successful runs print
+`MONDRIAN_PERF_JSON` and append it to `MONDRIAN_PERF_OUTPUT` when configured.
 Shell chrome that presents transient project status should keep error feedback
 visible without requiring the user to scroll a compact dock panel. Dock panels
 should stay focused on editing surfaces rather than general project diagnostics.
