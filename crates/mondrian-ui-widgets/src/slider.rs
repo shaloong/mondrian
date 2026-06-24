@@ -2,6 +2,9 @@
 //!
 //! 拖拽滑块，用于数值调节。
 
+mod model;
+
+use model::{SliderGeometry, SliderModel};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -16,44 +19,35 @@ pub type SliderChangeAction = dyn Fn(f32) -> Action;
 /// Slider Widget —— 拖拽滑块控制数值
 pub struct Slider {
     id: WidgetId,
-    value: f32,
-    min: f32,
-    max: f32,
+    model: SliderModel,
     bounds: Rect,
     enabled: bool,
     dragging: bool,
     focused: bool,
     focus_visible: bool,
-    track_height: f32,
-    thumb_size: f32,
-    step: Option<f32>,
+    geometry: SliderGeometry,
     on_change: Option<Box<SliderChangeAction>>,
 }
 
 impl Slider {
     /// Create a slider with a clamped initial value.
     pub fn new(value: f32, min: f32, max: f32) -> Self {
-        let (min, max) = ordered_range(min, max);
         Self {
             id: WidgetId::new(),
-            value: clamp_finite(value, min, max),
-            min,
-            max,
+            model: SliderModel::new(value, min, max),
             bounds: Rect::ZERO,
             enabled: true,
             dragging: false,
             focused: false,
             focus_visible: false,
-            track_height: 4.0,
-            thumb_size: 12.0,
-            step: None,
+            geometry: SliderGeometry::new(4.0, 12.0),
             on_change: None,
         }
     }
 
     /// Return the current value.
     pub fn value(&self) -> f32 {
-        self.value
+        self.model.value()
     }
 
     /// Dispatch an action whenever user input changes the value.
@@ -68,7 +62,7 @@ impl Slider {
     /// snapshots from app state stay exact. Pointer and keyboard edits are
     /// snapped to `min + n * step` and clamped to the slider bounds.
     pub fn with_step(mut self, step: f32) -> Self {
-        self.step = (step.is_finite() && step > 0.0).then_some(step);
+        self.model.set_step(step);
         self
     }
 
@@ -94,68 +88,23 @@ impl Slider {
     }
 
     fn range(&self) -> f32 {
-        self.max - self.min
+        self.model.range()
     }
 
     fn ratio(&self) -> f32 {
-        let range = self.range();
-        if range > 0.0 {
-            ((self.value - self.min) / range).clamp(0.0, 1.0)
-        } else {
-            0.5
-        }
-    }
-
-    fn effective_thumb_size(&self) -> f32 {
-        self.thumb_size.min((self.bounds.height - 2.0).max(1.0))
+        self.model.ratio()
     }
 
     fn track_rect(&self) -> Rect {
-        let thumb_size = self.effective_thumb_size();
-        let track_height = self.track_height.min(self.bounds.height.max(1.0));
-        let track_y = self.bounds.y + self.bounds.height * 0.5 - track_height * 0.5;
-        Rect::new(
-            self.bounds.x + thumb_size * 0.5,
-            track_y,
-            (self.bounds.width - thumb_size).max(0.0),
-            track_height,
-        )
+        self.geometry.track_rect(self.bounds)
     }
 
     fn thumb_rect(&self) -> Rect {
-        let thumb_size = self.effective_thumb_size();
-        let track = self.track_rect();
-        let center_x = track.x + track.width * self.ratio();
-        let x = center_x - thumb_size * 0.5;
-        let y = self.bounds.y + (self.bounds.height - thumb_size) * 0.5;
-        Rect::new(x, y, thumb_size, thumb_size)
-    }
-
-    fn quantize_value(&self, value: f32) -> f32 {
-        if !value.is_finite() {
-            return self.value;
-        }
-        let clamped = value.clamp(self.min, self.max);
-        let Some(step) = self.step else {
-            return clamped;
-        };
-        if clamped <= self.min {
-            return self.min;
-        }
-        if clamped >= self.max {
-            return self.max;
-        }
-        let steps = ((clamped - self.min) / step).round();
-        (self.min + steps * step).clamp(self.min, self.max)
+        self.geometry.thumb_rect(self.bounds, self.ratio())
     }
 
     fn set_value(&mut self, value: f32) -> bool {
-        let next = self.quantize_value(value);
-        if (next - self.value).abs() <= f32::EPSILON {
-            return false;
-        }
-        self.value = next;
-        true
+        self.model.set_value(value)
     }
 
     fn set_value_from_input(&mut self, value: f32, ctx: &mut EventContext) -> bool {
@@ -169,32 +118,23 @@ impl Slider {
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
         if let Some(action) = &self.on_change {
-            (ctx.dispatch)(action(self.value));
+            (ctx.dispatch)(action(self.value()));
         }
     }
 
     fn keyboard_step(&self, modifiers: Modifiers) -> f32 {
-        let base = self.step.unwrap_or_else(|| self.range().abs() / 100.0);
-        if modifiers.shift {
-            base * 10.0
-        } else {
-            base
-        }
+        self.model.keyboard_step(modifiers)
     }
 
     fn page_step(&self) -> f32 {
-        if let Some(step) = self.step {
-            step * 10.0
-        } else {
-            self.range().abs() / 10.0
-        }
+        self.model.page_step()
     }
 
     fn nudge(&mut self, delta: f32, ctx: &mut EventContext) -> EventResult {
         if self.range() <= 0.0 {
             return EventResult::Ignored;
         }
-        if self.set_value_from_input(self.value + delta, ctx) {
+        if self.set_value_from_input(self.value() + delta, ctx) {
             EventResult::Handled
         } else {
             EventResult::Ignored
@@ -208,7 +148,7 @@ impl Widget for Slider {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        constraint.constrain(Size::new(100.0, self.thumb_size + 4.0))
+        constraint.constrain(self.geometry.measure_size())
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -271,14 +211,14 @@ impl Widget for Slider {
                     KeyCode::PageDown => self.nudge(-self.page_step(), ctx),
                     KeyCode::PageUp => self.nudge(self.page_step(), ctx),
                     KeyCode::Home => {
-                        if self.set_value_from_input(self.min, ctx) {
+                        if self.set_value_from_input(self.model.min(), ctx) {
                             EventResult::Handled
                         } else {
                             EventResult::Ignored
                         }
                     }
                     KeyCode::End => {
-                        if self.set_value_from_input(self.max, ctx) {
+                        if self.set_value_from_input(self.model.max(), ctx) {
                             EventResult::Handled
                         } else {
                             EventResult::Ignored
@@ -351,9 +291,9 @@ impl Widget for Slider {
                     ..AccessibilityState::default()
                 })
                 .with_value(AccessibilityValue::Number {
-                    value: self.value,
-                    min: self.min,
-                    max: self.max,
+                    value: self.value(),
+                    min: self.model.min(),
+                    max: self.model.max(),
                 }),
         )
     }
@@ -365,34 +305,8 @@ impl Slider {
         if range <= 0.0 {
             return;
         }
-        let track = self.track_rect();
-        let ratio = if track.width > 0.0 {
-            ((position.x - track.x) / track.width).clamp(0.0, 1.0)
-        } else if position.x >= self.bounds.x + self.bounds.width * 0.5 {
-            1.0
-        } else {
-            0.0
-        };
-        self.set_value_from_input(self.min + range * ratio, ctx);
-    }
-}
-
-fn ordered_range(min: f32, max: f32) -> (f32, f32) {
-    if !min.is_finite() || !max.is_finite() {
-        return (0.0, 1.0);
-    }
-    if min <= max {
-        (min, max)
-    } else {
-        (max, min)
-    }
-}
-
-fn clamp_finite(value: f32, min: f32, max: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(min, max)
-    } else {
-        min
+        let ratio = self.geometry.ratio_at_position(self.bounds, *position);
+        self.set_value_from_input(self.model.value_at_ratio(ratio), ctx);
     }
 }
 
