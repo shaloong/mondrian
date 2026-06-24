@@ -37,8 +37,10 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Add route diagnostics for dropped shortcuts, stale focused widgets, and capture owners.
 - [x] Add accessibility-ready metadata primitives, focus-order collection, and core control
       coverage for Button, Checkbox, Slider, and TextInput.
-- [ ] Extend accessibility metadata to composite widgets: Dropdown, ContextMenu, ColorPicker,
-      ScrollView, DockSplitter, TimelineView, AssetGrid, and ViewerSurface.
+- [x] Extend accessibility metadata to foundational composite widgets: Dropdown, ContextMenu,
+      ScrollView, and DockSplitter.
+- [ ] Extend accessibility metadata to editor-scale composite widgets: ColorPicker,
+      TimelineView, AssetGrid, and ViewerSurface.
 - [x] Define keyboard routing policy for unmatched shortcuts, system shortcut pass-through, and
       IME switching chords.
 - [x] Define cursor request priority and transient clearing across runtime/window shells.

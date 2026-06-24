@@ -3,7 +3,9 @@
 //! 在指定位置弹出菜单项列表。点击选项或外部区域关闭。
 
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use std::cell::Cell;
 
@@ -342,6 +344,18 @@ impl Widget for ContextMenu {
     fn hit_test(&self, point: Point) -> bool {
         self.visible && self.bounds_rect().contains(point)
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        self.visible.then(|| {
+            AccessibilityNode::new(self.id, AccessibilityRole::Menu)
+                .with_name("Context menu")
+                .with_state(AccessibilityState {
+                    expanded: Some(true),
+                    selected: Some(self.hovered.is_some()),
+                    ..AccessibilityState::default()
+                })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -453,6 +467,25 @@ mod tests {
         );
         assert!(!menu.visible);
         assert_eq!(cell.into_inner(), vec![Action::Cut]);
+    }
+
+    #[test]
+    fn context_menu_accessibility_tracks_visibility_and_hover_selection() {
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new("Cut", Action::Cut)],
+        );
+        menu.hovered = Some(0);
+
+        let node = menu.accessibility().expect("visible context menu should expose accessibility");
+
+        assert_eq!(node.role, AccessibilityRole::Menu);
+        assert_eq!(node.name.as_deref(), Some("Context menu"));
+        assert_eq!(node.state.expanded, Some(true));
+        assert_eq!(node.state.selected, Some(true));
+
+        menu.visible = false;
+        assert!(menu.accessibility().is_none());
     }
 
     #[test]

@@ -78,6 +78,12 @@ pub enum AccessibilityRole {
     Slider,
     /// Editable single-line or multiline text field.
     TextInput,
+    /// Popup or dropdown menu.
+    Menu,
+    /// Scrollable viewport.
+    ScrollView,
+    /// Draggable splitter between panes.
+    Splitter,
     /// Generic focusable or structural group.
     Group,
 }
@@ -108,6 +114,13 @@ pub enum AccessibilityValue {
     Text(String),
     /// Numeric value with an inclusive range.
     Number { value: f32, min: f32, max: f32 },
+    /// Scroll position and range.
+    Scroll {
+        x: f32,
+        y: f32,
+        max_x: f32,
+        max_y: f32,
+    },
 }
 
 /// Platform-neutral accessibility metadata for a widget.

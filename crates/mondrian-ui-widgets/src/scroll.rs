@@ -4,7 +4,9 @@
 
 use glam::Vec2;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityValue, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 fn finite_nonnegative(value: f32) -> f32 {
@@ -769,6 +771,19 @@ impl Widget for ScrollView {
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::ScrollView)
+                .with_name("Scroll view")
+                .with_value(AccessibilityValue::Scroll {
+                    x: self.scroll_offset.x,
+                    y: self.scroll_offset.y,
+                    max_x: self.max_scroll_x(),
+                    max_y: self.max_scroll_y(),
+                }),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1002,6 +1017,28 @@ mod tests {
         rebuilt.restore_state(&original.state());
 
         assert_eq!(rebuilt.scroll_offset(), Vec2::new(120.0, 180.0));
+    }
+
+    #[test]
+    fn scroll_view_accessibility_exposes_scroll_range() {
+        let child = Spacer::new(600.0, 900.0);
+        let mut scroll = ScrollView::new(Some(Box::new(child))).with_axes(ScrollAxes::Both);
+        scroll.layout(Rect::new(0.0, 0.0, 300.0, 240.0));
+        scroll.set_scroll_offset(Vec2::new(120.0, 180.0));
+
+        let node = scroll.accessibility().expect("scroll view should expose accessibility");
+
+        assert_eq!(node.role, AccessibilityRole::ScrollView);
+        assert_eq!(node.name.as_deref(), Some("Scroll view"));
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Scroll {
+                x: 120.0,
+                y: 180.0,
+                max_x: scroll.max_scroll_x(),
+                max_y: scroll.max_scroll_y(),
+            })
+        );
     }
 
     #[test]

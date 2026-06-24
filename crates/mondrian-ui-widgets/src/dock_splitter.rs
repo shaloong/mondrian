@@ -3,7 +3,10 @@
 //! 水平/垂直方向可拖拽调整比例的分割容器。
 
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
+    PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::paint::{horizontal_stroke_rect, vertical_stroke_rect};
@@ -417,6 +420,22 @@ impl Widget for DockSplitter {
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        let name = match self.direction {
+            SplitDirection::Horizontal => "Horizontal splitter",
+            SplitDirection::Vertical => "Vertical splitter",
+        };
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Splitter)
+                .with_name(name)
+                .with_state(AccessibilityState {
+                    pressed: Some(self.dragging),
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Number { value: self.ratio, min: 0.1, max: 0.9 }),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -521,6 +540,22 @@ mod tests {
     fn default_grab_zone_is_six_pixels() {
         let splitter = splitter(SplitDirection::Horizontal);
         assert_eq!(splitter.grab_rect.width, 6.0);
+    }
+
+    #[test]
+    fn dock_splitter_accessibility_exposes_ratio_and_drag_state() {
+        let mut splitter = splitter(SplitDirection::Horizontal);
+        splitter.dragging = true;
+
+        let node = splitter.accessibility().expect("splitter should expose accessibility");
+
+        assert_eq!(node.role, AccessibilityRole::Splitter);
+        assert_eq!(node.name.as_deref(), Some("Horizontal splitter"));
+        assert_eq!(node.state.pressed, Some(true));
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Number { value: 0.5, min: 0.1, max: 0.9 })
+        );
     }
 
     #[test]
