@@ -942,6 +942,10 @@ as the root viewport for flipping and edge clamping; using the unbounded
 `TreeWalker::paint()` helper in production shells makes dropdowns, color-picker
 mode menus, and tooltips think the screen is infinite and can push popups off
 the visible window.
+After the widget tree overlay pass, the self-hosted runtime paints shell-owned
+overlays in deterministic bottom-to-top order: active desktop eyedropper chrome
+first, then tooltip chrome. This keeps textual hover help readable above
+sampling affordances while still leaving widget popups below shell affordances.
 
 ## Scroll Views
 

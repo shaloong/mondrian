@@ -209,8 +209,15 @@ workflow.
   scroll hit-test clipping, menu/context-menu/tooltip viewport clamps, viewer
   viewport/canvas clipping, timeline clip label/waveform clipping, and
   non-finite scroll offset sanitization.
-- P4-OVERLAY-001: Ensure tooltip, dropdown, context menu, color picker, modal,
-  drag preview, and eyedropper overlays have deterministic top-layer ordering.
+- [done] P4-OVERLAY-001: Ensure tooltip, dropdown, context menu, color picker,
+  modal, drag preview, and eyedropper overlays have deterministic top-layer
+  ordering. Coverage now spans tree-wide overlay-after-normal paint order,
+  earlier-child overlays painting above later-sibling normal content,
+  overlay-first pointer routing, top overlay capture invalidation, captured
+  descendants inside ancestor overlays, modal child z-order and modal-over-menu
+  hit testing, ScrollView child overlay escape from viewport hit-test clipping,
+  menu/context-menu/dropdown/color-picker invalid overlay clip skips, tooltip
+  viewport clamping, and shell-owned eyedropper-before-tooltip paint ordering.
 - P4-RENDER-001: Finish basic primitive rendering QA: lines at all angles,
   circles, rounded rects, triangles, MSAA resolve, pixel snapping, and invalid
   clip sanitizer behavior.

@@ -33,6 +33,12 @@ pub struct WinitUiRuntime {
     last_timer_tick: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellOverlayLayer {
+    Eyedropper,
+    Tooltip,
+}
+
 impl Default for WinitUiRuntime {
     fn default() -> Self {
         Self {
@@ -271,18 +277,29 @@ impl WinitUiRuntime {
         cursor: Point,
         router: &EventRouter,
     ) {
-        if self.eyedropper.is_active() {
-            paint_eyedropper_overlay(encoder, theme, cursor, self.eyedropper.preview_color());
-        }
-
+        let tooltip_visible = router.current_tooltip().is_some();
         if let Some(state) = router.current_tooltip().cloned() {
             self.tooltip.update_state(state);
         } else {
             self.tooltip.clear();
         }
 
-        let mut ctx = PaintContext { encoder, theme, clip_rect };
-        self.tooltip.paint_overlay(&mut ctx);
+        for layer in shell_overlay_layers(self.eyedropper.is_active(), tooltip_visible) {
+            match layer {
+                ShellOverlayLayer::Eyedropper => {
+                    paint_eyedropper_overlay(
+                        encoder,
+                        theme,
+                        cursor,
+                        self.eyedropper.preview_color(),
+                    );
+                }
+                ShellOverlayLayer::Tooltip => {
+                    let mut ctx = PaintContext { encoder, theme, clip_rect };
+                    self.tooltip.paint_overlay(&mut ctx);
+                }
+            }
+        }
     }
 
     /// Advance shell timers and schedule the next native wakeup if needed.
@@ -347,6 +364,17 @@ impl WinitUiRuntime {
             window.request_redraw();
         }
     }
+}
+
+fn shell_overlay_layers(eyedropper_active: bool, tooltip_visible: bool) -> Vec<ShellOverlayLayer> {
+    let mut layers = Vec::with_capacity(2);
+    if eyedropper_active {
+        layers.push(ShellOverlayLayer::Eyedropper);
+    }
+    if tooltip_visible {
+        layers.push(ShellOverlayLayer::Tooltip);
+    }
+    layers
 }
 
 /// Convert a winit IME event into Mondrian's platform-neutral UI event.
@@ -852,5 +880,22 @@ mod tests {
         assert_eq!(encoder.rect_colors[0], theme.colors.eyedropper_overlay);
         assert_eq!(encoder.rect_colors[1], Color::from_hex(0x336699));
         assert_eq!(encoder.rect_colors[2], theme.colors.color_handle_inner);
+    }
+
+    #[test]
+    fn shell_overlay_layers_keep_tooltips_above_eyedropper() {
+        assert_eq!(shell_overlay_layers(false, false), Vec::new());
+        assert_eq!(
+            shell_overlay_layers(true, false),
+            vec![ShellOverlayLayer::Eyedropper]
+        );
+        assert_eq!(
+            shell_overlay_layers(false, true),
+            vec![ShellOverlayLayer::Tooltip]
+        );
+        assert_eq!(
+            shell_overlay_layers(true, true),
+            vec![ShellOverlayLayer::Eyedropper, ShellOverlayLayer::Tooltip]
+        );
     }
 }
