@@ -4,6 +4,60 @@ This document tracks the remaining lower-level custom UI work. It intentionally 
 `mondrian-app::app_ui` product panels and shell composition unless a task directly affects
 shared renderer, text, event, theme, or widget infrastructure.
 
+## Closure Queue
+
+These are the remaining immature areas that still need closed, testable slices before the
+custom UI line can be considered production-grade.
+
+1. Text editing depth:
+   - [ ] Define a multiline text document model with grapheme-safe line/column navigation,
+         selection ranges, editable line wrapping, and command coalescing.
+   - [ ] Add multiline TextInput geometry for caret rectangles, selection rectangles, vertical
+         scrolling, IME preedit placement, and clipped paint.
+   - [ ] Add clipboard cut/copy/paste, undo/redo, Home/End/PageUp/PageDown, word navigation,
+         and IME commit/preedit behavior across line boundaries.
+   - [ ] Add focused unit and visual tests for multiline selection, mixed CJK/emoji text,
+         empty lines, long lines, CRLF paste normalization, scroll-to-caret, and disabled or
+         read-only states.
+
+2. Widget Module depth:
+   - [ ] Continue splitting large widget Modules where event routing and paint still live in
+         the same file as state/model/layout. Priority order: `text_input.rs`, `menu.rs`,
+         `scroll.rs`, `color_picker.rs`, `viewer_surface.rs`, `timeline_view.rs`, and
+         `asset_grid.rs`.
+   - [ ] For each split, keep the external Widget Interface stable and put the test surface on
+         model/layout/interaction contracts rather than private paint details.
+   - [ ] Delete shallow pass-through helpers that fail the deletion test, especially where they
+         only mirror one call site without improving locality.
+
+3. Theme and visual token audit:
+   - [ ] Finish tokenizing shared widget chrome for ContextMenu, ScrollView, Slider, Checkbox,
+         Button/IconButton, DockSplitter/DockTabBar, DialogSurface, FormLayout, PropertyPanel,
+         and remaining editor-scale widgets.
+   - [ ] Ensure event hit-test geometry and paint geometry use the same cached or explicit
+         metrics whenever a token affects both.
+   - [ ] Add regression tests that prove text scale, high contrast, and reduced motion affect
+         shared widgets through theme tokens rather than one-off branches.
+
+4. Renderer and primitive reliability hardening:
+   - [ ] Keep the offscreen primitive harness active for line/circle/triangle edge cases,
+         including subpixel positions, 45-degree thin lines, high-DPI scaling, clip nesting,
+         and zero/near-zero dimensions.
+   - [ ] Add a policy for CPU rasterization versus GPU analytic rendering for vector
+         primitives and icons, with tests that lock the chosen behavior for thin lines and
+         rounded/circular shapes.
+
+5. Event/platform release checks:
+   - [ ] Run keyboard-only traversal scripts across composite widgets and editor-scale widgets.
+   - [ ] Verify unmatched shortcut pass-through, IME switching chords, clipboard failures,
+         native file drag fallback diagnostics, cursor priority, overlay z-order, and pointer
+         capture release in one smoke matrix.
+
+6. Release-grade verification:
+   - [ ] Run cross-backend/cross-GPU smoke tests and record the backend/device diagnostics.
+   - [ ] Keep app-level panel migration on top of these contracts; do not add product-panel
+         one-off fixes that bypass renderer, event, text, theme, or widget Modules.
+
 ## Phase 1 - Renderer Reliability
 
 - [x] Replace the simple row-packed `TextureAtlas` allocator with a fragmentation-resistant
@@ -98,6 +152,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       scrollbar alpha against theme-derived visual tokens.
 - [x] Tokenize Dropdown/Menu trigger chrome, popup radius, row padding/radius, separator geometry,
       scrollbar sizing, shortcut text, and icon/checkmark lanes against theme-derived visual tokens.
+- [x] Tokenize ContextMenu popup geometry, row measurement, icon/checkmark lane reservation, and
+      viewport scroll sizing against cached theme-derived visual tokens.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.

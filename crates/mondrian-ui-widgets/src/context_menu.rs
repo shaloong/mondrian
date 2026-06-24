@@ -7,12 +7,14 @@ use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
 use std::cell::Cell;
 
 use crate::menu::{
-    anchored_menu_rect, menu_item_text_width, paint_menu_popup_chrome, paint_menu_row,
-    paint_menu_scrollbar, paint_menu_separator, rect_has_paintable_area, MenuItem, MenuRowPaint,
+    anchored_menu_rect, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
+    paint_menu_separator, rect_has_paintable_area, MenuItem, MenuRowPaint,
 };
+use crate::text_metrics::measure_single_line;
 
 /// 右键弹出菜单
 ///
@@ -22,18 +24,53 @@ pub struct ContextMenu {
     items: Vec<MenuItem>,
     anchor: Point,
     bounds: Rect,
-    item_height: f32,
-    min_width: f32,
     visible: bool,
     hovered: Option<usize>,
     local_command: Option<String>,
     overlay_viewport: Cell<Option<Rect>>,
     scroll_offset: Cell<f32>,
+    visual: Cell<ContextMenuVisualTokens>,
 }
 
-const CONTEXT_MENU_PADDING_X: f32 = 8.0;
-const CONTEXT_MENU_ROW_PADDING_X: f32 = 16.0;
-const CONTEXT_MENU_ICON_LANE_WIDTH: f32 = 24.0;
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ContextMenuVisualTokens {
+    outer_padding: f32,
+    row_padding_x: f32,
+    icon_lane_width: f32,
+    item_height: f32,
+    min_width: f32,
+    row_font_size: f32,
+    shortcut_gap: f32,
+    viewport_vertical_margin: f32,
+    anchor_gap: f32,
+}
+
+impl ContextMenuVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            outer_padding: spacing.sm + spacing.border_emphasis,
+            row_padding_x: spacing.md + spacing.sm,
+            icon_lane_width: spacing.icon_size + spacing.md,
+            item_height: (spacing.interact_height - spacing.border_emphasis).max(1.0),
+            min_width: spacing.inspector_group_header_height * 5.0,
+            row_font_size: theme.typography.small.font_size,
+            shortcut_gap: spacing.icon_size + spacing.md,
+            viewport_vertical_margin: spacing.sm + spacing.border_emphasis,
+            anchor_gap: spacing.radius_none,
+        }
+    }
+
+    fn content_padding_y(self) -> f32 {
+        self.outer_padding * 0.5
+    }
+}
+
+impl Default for ContextMenuVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
+}
 
 impl ContextMenu {
     pub fn new(anchor: Point, items: Vec<MenuItem>) -> Self {
@@ -42,13 +79,12 @@ impl ContextMenu {
             items,
             anchor,
             bounds: Rect::ZERO,
-            item_height: 26.0,
-            min_width: 140.0,
             visible: true,
             hovered: None,
             local_command: None,
             overlay_viewport: Cell::new(None),
             scroll_offset: Cell::new(0.0),
+            visual: Cell::new(ContextMenuVisualTokens::default()),
         }
     }
 
@@ -62,27 +98,30 @@ impl ContextMenu {
     }
 
     fn bounds_rect(&self) -> Rect {
+        let visual = self.visual.get();
         anchored_menu_rect(
             Rect::new(self.anchor.x, self.anchor.y, 0.0, 0.0),
-            self.menu_width() + CONTEXT_MENU_PADDING_X,
-            8.0 + self.visible_content_height(),
-            0.0,
+            self.menu_width() + visual.outer_padding,
+            visual.outer_padding + self.visible_content_height(),
+            visual.anchor_gap,
             self.overlay_viewport.get(),
         )
     }
 
     fn item_rect(&self, idx: usize) -> Rect {
         let bounds = self.bounds_rect();
+        let visual = self.visual.get();
         Rect::new(
-            bounds.x + CONTEXT_MENU_PADDING_X * 0.5,
-            bounds.y + 4.0 + idx as f32 * self.item_height - self.scroll_offset.get(),
+            bounds.x + visual.outer_padding * 0.5,
+            bounds.y + visual.content_padding_y() + idx as f32 * self.item_height()
+                - self.scroll_offset.get(),
             self.menu_width(),
-            self.item_height,
+            self.item_height(),
         )
     }
 
     fn content_height(&self) -> f32 {
-        self.items.len() as f32 * self.item_height
+        self.items.len() as f32 * self.item_height()
     }
 
     fn visible_content_height(&self) -> f32 {
@@ -92,7 +131,8 @@ impl ContextMenu {
         else {
             return content_height;
         };
-        let available = (viewport.height - 8.0).max(self.item_height);
+        let available =
+            (viewport.height - self.visual.get().viewport_vertical_margin).max(self.item_height());
         content_height.min(available)
     }
 
@@ -109,15 +149,31 @@ impl ContextMenu {
             .items
             .iter()
             .filter(|item| !item.is_separator())
-            .map(menu_item_text_width)
+            .map(|item| self.menu_item_text_width(item))
             .fold(0.0, f32::max);
-        self.min_width
-            .max(longest_item + CONTEXT_MENU_ROW_PADDING_X * 2.0 + self.icon_lane_width())
+        let visual = self.visual.get();
+        visual
+            .min_width
+            .max(longest_item + visual.row_padding_x * 2.0 + self.icon_lane_width())
+    }
+
+    fn item_height(&self) -> f32 {
+        self.visual.get().item_height
+    }
+
+    fn menu_item_text_width(&self, item: &MenuItem) -> f32 {
+        let visual = self.visual.get();
+        let label_width = measure_single_line(&item.label, visual.row_font_size).0;
+        let Some(shortcut) = item.shortcut.as_deref().filter(|shortcut| !shortcut.is_empty())
+        else {
+            return label_width;
+        };
+        label_width + visual.shortcut_gap + measure_single_line(shortcut, visual.row_font_size).0
     }
 
     fn icon_lane_width(&self) -> f32 {
-        if self.items.iter().any(|item| item.icon.is_some()) {
-            CONTEXT_MENU_ICON_LANE_WIDTH
+        if self.items.iter().any(|item| item.icon.is_some() || item.checked) {
+            self.visual.get().icon_lane_width
         } else {
             0.0
         }
@@ -128,11 +184,12 @@ impl ContextMenu {
         if !bounds.contains(position) {
             return None;
         }
-        let relative_y = position.y - (bounds.y + 4.0) + self.scroll_offset.get();
+        let relative_y = position.y - (bounds.y + self.visual.get().content_padding_y())
+            + self.scroll_offset.get();
         if relative_y < 0.0 {
             return None;
         }
-        let index = (relative_y / self.item_height).floor() as usize;
+        let index = (relative_y / self.item_height()).floor() as usize;
         if index < self.items.len() && self.item_rect(index).contains(position) {
             Some(index)
         } else {
@@ -190,8 +247,8 @@ impl ContextMenu {
         let Some(index) = self.hovered else {
             return;
         };
-        let row_top = index as f32 * self.item_height;
-        let row_bottom = row_top + self.item_height;
+        let row_top = index as f32 * self.item_height();
+        let row_bottom = row_top + self.item_height();
         let view_top = self.scroll_offset.get();
         let view_bottom = view_top + self.visible_content_height();
         if row_top < view_top {
@@ -210,8 +267,9 @@ impl Widget for ContextMenu {
 
     fn measure(&self, _c: LayoutConstraint) -> Size {
         if self.visible {
-            let h = 8.0 + self.items.len() as f32 * self.item_height;
-            Size::new(self.menu_width() + CONTEXT_MENU_PADDING_X, h)
+            let visual = self.visual.get();
+            let h = visual.outer_padding + self.items.len() as f32 * self.item_height();
+            Size::new(self.menu_width() + visual.outer_padding, h)
         } else {
             Size::ZERO
         }
@@ -291,6 +349,7 @@ impl Widget for ContextMenu {
             return;
         }
 
+        self.visual.set(ContextMenuVisualTokens::from_theme(ctx.theme));
         if !rect_has_paintable_area(ctx.clip_rect) {
             self.overlay_viewport.set(None);
             return;
@@ -322,7 +381,7 @@ impl Widget for ContextMenu {
                 reserve_icon_lane,
                 MenuRowPaint {
                     enabled: item.enabled,
-                    active: false,
+                    active: item.checked,
                     hovered: self.hovered == Some(i),
                 },
             );
@@ -894,6 +953,38 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_visual_metrics_follow_theme_tokens() {
+        let menu = ContextMenu::new(
+            Point::new(20.0, 20.0),
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        );
+        let mut theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        theme.spacing.sm = 8.0;
+        theme.spacing.md = 12.0;
+        theme.spacing.icon_size = 16.0;
+        theme.spacing.interact_height = 34.0;
+        theme.spacing.border_emphasis = 2.0;
+        theme.spacing.inspector_group_header_height = 32.0;
+        theme.typography.small.font_size = 13.0;
+        let clip_rect = Rect::new(0.0, 0.0, 300.0, 200.0);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        menu.paint_overlay(&mut ctx);
+
+        let visual = ContextMenuVisualTokens::from_theme(&theme);
+        assert_eq!(menu.item_rect(0).height, visual.item_height);
+        assert_eq!(
+            menu.measure(LayoutConstraint::LOOSE).height,
+            visual.outer_padding + visual.item_height
+        );
+        assert_eq!(
+            menu.measure(LayoutConstraint::LOOSE).width,
+            visual.min_width + visual.outer_padding
+        );
+    }
+
+    #[test]
     fn context_menu_icon_items_reserve_lane_and_paint_geometry() {
         let plain = ContextMenu::new(
             Point::new(100.0, 100.0),
@@ -928,6 +1019,33 @@ mod tests {
         );
         assert_eq!(encoder.triangles + encoder.raster_images, 1);
         assert!(icon.triangle_count() > 0);
+    }
+
+    #[test]
+    fn context_menu_checked_items_reserve_lane_and_paint_checkmark() {
+        let label = "Toggle linked selection for selected tracks";
+        let plain = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new(label, Action::Copy)],
+        );
+        let checked = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new(label, Action::Copy).checked(true)],
+        );
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let clip_rect = Rect::new(0.0, 0.0, 500.0, 300.0);
+        let mut encoder = RecordingEncoder::default();
+
+        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        checked.paint_overlay(&mut ctx);
+
+        assert!(
+            checked.measure(LayoutConstraint::LOOSE).width
+                > plain.measure(LayoutConstraint::LOOSE).width
+        );
+        assert_eq!(encoder.lines, 2);
+        assert_eq!(encoder.texts, vec![label]);
+        assert_eq!(encoder.triangles + encoder.raster_images, 0);
     }
 
     #[test]
