@@ -236,8 +236,14 @@ workflow.
   resize loops, draw-command emission, and sustained playback refresh. The
   ignored smoke emits `MONDRIAN_PERF_JSON` and supports environment-variable
   scaling for baseline/current comparisons.
-- P4-GPU-001: Verify renderer resource lifecycle across window replacement,
-  resize, surface loss, DPI changes, and startup-to-workspace transition.
+- [done] P4-GPU-001: Verify renderer resource lifecycle across window
+  replacement, resize, surface loss, DPI changes, and startup-to-workspace
+  transition. Coverage now locks the shared frame-result policy for presented,
+  skipped, reconfigured, and resource-upload frames; render diagnostic
+  de-duplication; glyph upload preservation; zero-size resize suppression;
+  same-size resize no-ops; real resize reconfigure/relayout/redraw; and
+  same-size or size-changing DPI relayout behavior. Startup-to-workspace mode
+  mapping and replacement remain owned by the window-session boundary.
 - P4-ERROR-001: Surface app/action errors in self-hosted shell status without
   requiring Console/Project panel iteration.
 - P4-PERSIST-001: Verify preferences and workspace layout persistence across

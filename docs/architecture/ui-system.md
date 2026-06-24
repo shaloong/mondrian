@@ -1914,6 +1914,15 @@ hundreds of assets, clips, and effect nodes; `MONDRIAN_UI_PERF_ASSETS`,
 `MONDRIAN_UI_PERF_REFRESH_ITERS`, and the matching `*_MS` threshold variables
 can scale the smoke for baseline/current comparisons. Successful runs print
 `MONDRIAN_PERF_JSON` and append it to `MONDRIAN_PERF_OUTPUT` when configured.
+The native window surface lifecycle is centralized in the self-hosted window
+session. Zero-sized resize events, such as minimize transitions, must not
+reconfigure the surface or relayout the root. Real size changes reconfigure the
+surface, update root bounds, relayout, and request a redraw. Same-size resize
+events are no-ops, while `ScaleFactorChanged` always relayouts and redraws so
+DPI-dependent geometry can settle even when the physical surface size is
+unchanged. `SelfHostedFrameRenderer` treats lost/outdated surfaces as
+`Reconfigured`, schedules a follow-up redraw, skips timeout/occluded frames, and
+requests a deterministic follow-up frame after text or raster atlas uploads.
 Shell chrome that presents transient project status should keep error feedback
 visible without requiring the user to scroll a compact dock panel. Dock panels
 should stay focused on editing surfaces rather than general project diagnostics.

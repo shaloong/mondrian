@@ -66,6 +66,20 @@ enum WindowCornerPreference {
     Round,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceLifecycleReason {
+    Resize,
+    ScaleFactorChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SurfaceLifecycleUpdate {
+    reconfigure_surface: bool,
+    relayout_root: bool,
+    request_redraw: bool,
+    bounds: Option<Rect>,
+}
+
 struct SelfHostedWindowSession {
     role: SelfHostedWindowRole,
     window: Arc<winit::window::Window>,
@@ -289,20 +303,30 @@ pub fn run_self_hosted_app() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::Resized(new_size) => {
-                        if new_size.width > 0 && new_size.height > 0 {
-                            session.config.width = new_size.width;
-                            session.config.height = new_size.height;
-                            session.surface.configure(&device, &session.config);
-                            let b = Rect::new(
-                                0.0,
-                                0.0,
-                                new_size.width as f32,
-                                new_size.height as f32,
-                            );
-                            session.current_bounds.set(b);
-                            TreeWalker::layout(host.active_root_mut(), b);
-                            session.window.request_redraw();
-                        }
+                        apply_surface_lifecycle_update(
+                            SurfaceLifecycleReason::Resize,
+                            (new_size.width, new_size.height),
+                            &device,
+                            &mut session,
+                            &mut host,
+                        );
+                    }
+
+                    WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                        let size = session.window.inner_size();
+                        tracing::debug!(
+                            scale_factor,
+                            width = size.width,
+                            height = size.height,
+                            "self-hosted window scale factor changed"
+                        );
+                        apply_surface_lifecycle_update(
+                            SurfaceLifecycleReason::ScaleFactorChanged,
+                            (size.width, size.height),
+                            &device,
+                            &mut session,
+                            &mut host,
+                        );
                     }
 
                     WindowEvent::HoveredFile(path) => {
@@ -572,6 +596,60 @@ fn should_exit_on_ignored_keyboard_input(
 
 fn native_close_request_action() -> mondrian_editor_state::Action {
     app_shell_quit_action()
+}
+
+fn surface_lifecycle_update(
+    reason: SurfaceLifecycleReason,
+    current_size: (u32, u32),
+    next_size: (u32, u32),
+) -> SurfaceLifecycleUpdate {
+    if next_size.0 == 0 || next_size.1 == 0 {
+        return SurfaceLifecycleUpdate {
+            reconfigure_surface: false,
+            relayout_root: false,
+            request_redraw: false,
+            bounds: None,
+        };
+    }
+
+    let size_changed = current_size != next_size;
+    let relayout_root = size_changed || reason == SurfaceLifecycleReason::ScaleFactorChanged;
+    let bounds = relayout_root.then(|| Rect::new(0.0, 0.0, next_size.0 as f32, next_size.1 as f32));
+
+    SurfaceLifecycleUpdate {
+        reconfigure_surface: size_changed,
+        relayout_root,
+        request_redraw: relayout_root,
+        bounds,
+    }
+}
+
+fn apply_surface_lifecycle_update(
+    reason: SurfaceLifecycleReason,
+    next_size: (u32, u32),
+    device: &wgpu::Device,
+    session: &mut SelfHostedWindowSession,
+    host: &mut SelfHostedUiHost,
+) {
+    let update = surface_lifecycle_update(
+        reason,
+        (session.config.width, session.config.height),
+        next_size,
+    );
+    if update.reconfigure_surface {
+        session.config.width = next_size.0;
+        session.config.height = next_size.1;
+        session.surface.configure(device, &session.config);
+    }
+    if update.relayout_root {
+        if let Some(bounds) = update.bounds {
+            session.current_bounds.set(bounds);
+            TreeWalker::layout(host.active_root_mut(), bounds);
+        }
+    }
+    if update.request_redraw {
+        session.window.request_redraw();
+    }
 }
 
 impl SelfHostedWindowSession {
@@ -1043,6 +1121,93 @@ mod tests {
     #[test]
     fn native_close_request_uses_app_shell_quit_action() {
         assert_eq!(native_close_request_action(), app_shell_quit_action());
+    }
+
+    #[test]
+    fn surface_lifecycle_ignores_zero_sized_windows() {
+        for reason in [
+            SurfaceLifecycleReason::Resize,
+            SurfaceLifecycleReason::ScaleFactorChanged,
+        ] {
+            assert_eq!(
+                surface_lifecycle_update(reason, (1280, 720), (0, 720)),
+                SurfaceLifecycleUpdate {
+                    reconfigure_surface: false,
+                    relayout_root: false,
+                    request_redraw: false,
+                    bounds: None,
+                }
+            );
+            assert_eq!(
+                surface_lifecycle_update(reason, (1280, 720), (1280, 0)),
+                SurfaceLifecycleUpdate {
+                    reconfigure_surface: false,
+                    relayout_root: false,
+                    request_redraw: false,
+                    bounds: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn surface_lifecycle_reconfigures_and_relayouts_on_real_resize() {
+        assert_eq!(
+            surface_lifecycle_update(SurfaceLifecycleReason::Resize, (1280, 720), (1600, 900)),
+            SurfaceLifecycleUpdate {
+                reconfigure_surface: true,
+                relayout_root: true,
+                request_redraw: true,
+                bounds: Some(Rect::new(0.0, 0.0, 1600.0, 900.0)),
+            }
+        );
+    }
+
+    #[test]
+    fn surface_lifecycle_skips_redundant_same_size_resize() {
+        assert_eq!(
+            surface_lifecycle_update(SurfaceLifecycleReason::Resize, (1280, 720), (1280, 720)),
+            SurfaceLifecycleUpdate {
+                reconfigure_surface: false,
+                relayout_root: false,
+                request_redraw: false,
+                bounds: None,
+            }
+        );
+    }
+
+    #[test]
+    fn surface_lifecycle_relayouts_same_size_dpi_change() {
+        assert_eq!(
+            surface_lifecycle_update(
+                SurfaceLifecycleReason::ScaleFactorChanged,
+                (1280, 720),
+                (1280, 720),
+            ),
+            SurfaceLifecycleUpdate {
+                reconfigure_surface: false,
+                relayout_root: true,
+                request_redraw: true,
+                bounds: Some(Rect::new(0.0, 0.0, 1280.0, 720.0)),
+            }
+        );
+    }
+
+    #[test]
+    fn surface_lifecycle_reconfigures_dpi_size_changes() {
+        assert_eq!(
+            surface_lifecycle_update(
+                SurfaceLifecycleReason::ScaleFactorChanged,
+                (1280, 720),
+                (1920, 1080),
+            ),
+            SurfaceLifecycleUpdate {
+                reconfigure_surface: true,
+                relayout_root: true,
+                request_redraw: true,
+                bounds: Some(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
+            }
+        );
     }
 
     #[test]
