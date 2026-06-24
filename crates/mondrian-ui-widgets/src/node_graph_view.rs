@@ -5,6 +5,8 @@
 //! effects, masks, or render passes into [`NodeGraphNode`] and
 //! [`NodeGraphEdge`] values without coupling this crate to editor state.
 
+mod model;
+
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -12,6 +14,8 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, MouseButton, UiEvent, Widget};
 
 use crate::paint::{color_with_alpha, mix_color, paint_focus_ring, soft_border};
+
+use self::model as graph_model;
 
 const DEFAULT_WIDTH: f32 = 460.0;
 const DEFAULT_HEIGHT: f32 = 260.0;
@@ -196,30 +200,19 @@ impl NodeGraphView {
     }
 
     fn graph_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x,
-            self.bounds.y + HEADER_HEIGHT,
-            self.bounds.width,
-            (self.bounds.height - HEADER_HEIGHT).max(0.0),
-        )
+        graph_model::graph_rect(self.bounds)
     }
 
     fn node_rect_by_id(&self, id: &str) -> Option<Rect> {
-        self.node_rects
-            .iter()
-            .find_map(|(node_id, rect)| (node_id == id).then_some(*rect))
+        graph_model::node_rect_by_id(&self.node_rects, id)
     }
 
     fn node_id_at(&self, position: Point) -> Option<String> {
-        self.node_rects
-            .iter()
-            .find_map(|(id, rect)| rect.contains(position).then(|| id.clone()))
+        graph_model::node_id_at(&self.node_rects, position)
     }
 
     fn selected_index(&self) -> Option<usize> {
-        self.selected_node_id
-            .as_deref()
-            .and_then(|selected| self.nodes.iter().position(|node| node.id == selected))
+        graph_model::selected_index(&self.nodes, self.selected_node_id.as_deref())
     }
 
     fn select_index_from_input(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
@@ -248,32 +241,23 @@ impl NodeGraphView {
     }
 
     fn step_selection(&mut self, direction: i32, ctx: &mut EventContext) -> EventResult {
-        if self.nodes.is_empty() {
+        let Some(next) =
+            graph_model::step_selection(self.nodes.len(), self.selected_index(), direction)
+        else {
             return EventResult::Ignored;
-        }
-        let next = match self.selected_index() {
-            Some(current) if direction < 0 => (current + self.nodes.len() - 1) % self.nodes.len(),
-            Some(current) => (current + 1) % self.nodes.len(),
-            None if direction < 0 => self.nodes.len() - 1,
-            None => 0,
         };
         self.select_index_from_input(next, ctx)
     }
 
     fn select_edge_node(&mut self, last: bool, ctx: &mut EventContext) -> EventResult {
-        let index = if last {
-            self.nodes.len().checked_sub(1)
-        } else {
-            (!self.nodes.is_empty()).then_some(0)
-        };
-        let Some(index) = index else {
+        let Some(index) = graph_model::edge_node_index(self.nodes.len(), last) else {
             return EventResult::Ignored;
         };
         self.select_index_from_input(index, ctx)
     }
 
     fn relayout_nodes(&mut self) {
-        let rects = layout_node_rects(self.graph_rect(), self.nodes.len());
+        let rects = graph_model::layout_node_rects(self.graph_rect(), self.nodes.len());
         self.node_rects = self
             .nodes
             .iter()
@@ -489,19 +473,11 @@ impl Widget for NodeGraphView {
 
 fn paint_edge(ctx: &mut PaintContext, from: Rect, to: Rect) {
     let colors = &ctx.theme.colors;
-    let start = Point::new(from.x + from.width, from.y + from.height * 0.5);
-    let end = Point::new(to.x, to.y + to.height * 0.5);
-    let mid_x = start.x + (end.x - start.x) * 0.5;
     let color = color_with_alpha(colors.muted_foreground, 0.42);
 
-    ctx.encoder.draw_line(start, Point::new(mid_x, start.y), 1.5, color);
-    ctx.encoder.draw_line(
-        Point::new(mid_x, start.y),
-        Point::new(mid_x, end.y),
-        1.5,
-        color,
-    );
-    ctx.encoder.draw_line(Point::new(mid_x, end.y), end, 1.5, color);
+    for (start, end) in graph_model::edge_segments(from, to) {
+        ctx.encoder.draw_line(start, end, 1.5, color);
+    }
 }
 
 fn paint_ports(ctx: &mut PaintContext, rect: Rect, selected: bool, alpha: f32) {
@@ -511,53 +487,9 @@ fn paint_ports(ctx: &mut PaintContext, rect: Rect, selected: bool, alpha: f32) {
     } else {
         colors.muted_foreground
     };
-    let y = rect.y + rect.height * 0.5 - PORT_SIZE * 0.5;
-    ctx.encoder.draw_rect(
-        Rect::new(rect.x - PORT_SIZE * 0.5, y, PORT_SIZE, PORT_SIZE),
-        color_with_alpha(fill, alpha),
-        PORT_SIZE * 0.5,
-    );
-    ctx.encoder.draw_rect(
-        Rect::new(
-            rect.x + rect.width - PORT_SIZE * 0.5,
-            y,
-            PORT_SIZE,
-            PORT_SIZE,
-        ),
-        color_with_alpha(fill, alpha),
-        PORT_SIZE * 0.5,
-    );
-}
-
-fn layout_node_rects(bounds: Rect, count: usize) -> Vec<Rect> {
-    if count == 0 {
-        return Vec::new();
+    for port in graph_model::port_rects(rect) {
+        ctx.encoder.draw_rect(port, color_with_alpha(fill, alpha), PORT_SIZE * 0.5);
     }
-
-    let inner = bounds.inset(PADDING, PADDING);
-    let columns =
-        (((inner.width + NODE_GAP_X) / (NODE_WIDTH + NODE_GAP_X)).floor() as usize).clamp(1, count);
-    let rows = count.div_ceil(columns);
-    let total_height = rows as f32 * NODE_HEIGHT + rows.saturating_sub(1) as f32 * NODE_GAP_Y;
-    let start_y = inner.y + ((inner.height - total_height).max(0.0) * 0.5);
-    let mut rects = Vec::with_capacity(count);
-
-    for index in 0..count {
-        let row = index / columns;
-        let col = index % columns;
-        let row_count = (count - row * columns).min(columns);
-        let total_width =
-            row_count as f32 * NODE_WIDTH + row_count.saturating_sub(1) as f32 * NODE_GAP_X;
-        let start_x = inner.x + ((inner.width - total_width).max(0.0) * 0.5);
-        rects.push(Rect::new(
-            start_x + col as f32 * (NODE_WIDTH + NODE_GAP_X),
-            start_y + row as f32 * (NODE_HEIGHT + NODE_GAP_Y),
-            NODE_WIDTH.min(inner.width.max(1.0)),
-            NODE_HEIGHT,
-        ));
-    }
-
-    rects
 }
 
 #[cfg(test)]
@@ -607,7 +539,7 @@ mod tests {
 
     #[test]
     fn layout_node_rects_centers_single_row_nodes() {
-        let rects = layout_node_rects(Rect::new(0.0, 0.0, 640.0, 220.0), 3);
+        let rects = graph_model::layout_node_rects(Rect::new(0.0, 0.0, 640.0, 220.0), 3);
 
         assert_eq!(rects.len(), 3);
         assert!(rects[0].x > 20.0);
@@ -618,7 +550,7 @@ mod tests {
 
     #[test]
     fn layout_node_rects_wraps_when_width_is_constrained() {
-        let rects = layout_node_rects(Rect::new(0.0, 0.0, 240.0, 260.0), 3);
+        let rects = graph_model::layout_node_rects(Rect::new(0.0, 0.0, 240.0, 260.0), 3);
 
         assert_eq!(rects.len(), 3);
         assert!(rects[1].y > rects[0].y);

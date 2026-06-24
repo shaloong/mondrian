@@ -114,6 +114,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Extract AssetGrid header/filter chrome, grid sizing, card/preview/footer geometry,
       visible filtering, hit testing, keyboard movement, and range selection into directly
       tested model/geometry contracts.
+- [x] Extract NodeGraphView graph body geometry, node layout, stable-id hit testing, selection
+      stepping, edge routing, and port geometry into directly tested model/layout contracts.
 
 ## Phase 5 - Performance And Observability
 
