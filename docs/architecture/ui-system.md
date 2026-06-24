@@ -1010,6 +1010,13 @@ ceiling their bottom-right edge before GPU scissoring. Ordinary shape, image,
 line, and vector geometry keeps subpixel coordinates so SDF antialiasing, MSAA,
 and linear texture filtering behave like browser/native UI renderers instead of
 rounding designer-authored geometry into visibly rough edges.
+Line rendering uses GPU analytic segment SDF in the fragment shader. The CPU
+batcher emits an expanded local-space quad with round-cap and antialias padding,
+but it must not pre-rasterize hairlines or snap endpoints to integer pixels.
+The shader derives the segment endpoints from that padded local geometry; CPU
+coverage tests and shader-contract tests must stay in sync so 45-degree
+hairlines remain connected and stable across subpixel phases and all primary
+angles.
 
 `ScrollView` defaults to vertical-only scrolling so inspector/property panels
 continue to wrap and measure against their panel width. Scroll content fills the

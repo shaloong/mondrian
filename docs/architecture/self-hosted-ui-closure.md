@@ -218,9 +218,16 @@ workflow.
   hit testing, ScrollView child overlay escape from viewport hit-test clipping,
   menu/context-menu/dropdown/color-picker invalid overlay clip skips, tooltip
   viewport clamping, and shell-owned eyedropper-before-tooltip paint ordering.
-- P4-RENDER-001: Finish basic primitive rendering QA: lines at all angles,
-  circles, rounded rects, triangles, MSAA resolve, pixel snapping, and invalid
-  clip sanitizer behavior.
+- [done] P4-RENDER-001: Finish basic primitive rendering QA: lines at all
+  angles, circles, rounded rects, triangles, MSAA resolve, pixel snapping, and
+  invalid clip sanitizer behavior. Coverage now spans GPU analytic line SDF
+  shader contracts, 45-degree hairline centerline continuity, 45-degree pixel
+  visibility, 45-degree alpha-profile stability, 45-degree cap-to-cap connected
+  coverage, primary-angle subpixel line coverage, line winding/front faces,
+  round caps and minimum hairline width, circle SDF boundaries at primary
+  angles and tiny sizes, rounded-rect SDF finite behavior, triangle winding and
+  invalid/degenerate geometry rejection, conservative clip snapping, invalid
+  scissor rejection, and shader validation.
 - P4-PERF-001: Add performance smoke coverage for large asset libraries, long
   timelines, many clips, many effects, resize loops, and sustained playback.
 - P4-GPU-001: Verify renderer resource lifecycle across window replacement,

@@ -147,6 +147,18 @@ mod tests {
             fragment.contains(&smoothstep_expr),
             "fragment shader must keep line alpha edge scale {smoothstep_expr:?} in sync with CPU coverage tests"
         );
+        assert!(
+            fragment.contains("let axis_padding = center_y;"),
+            "fragment shader must derive line cap padding from the expanded local geometry width"
+        );
+        assert!(
+            fragment.contains("let a = vec2<f32>(axis_padding, center_y);"),
+            "fragment shader must keep the analytic line segment inside the padded local quad"
+        );
+        assert!(
+            fragment.contains("max(in.rect_size.x - axis_padding, axis_padding)"),
+            "fragment shader must preserve finite zero-length and short-line segment endpoints"
+        );
     }
 
     #[test]
