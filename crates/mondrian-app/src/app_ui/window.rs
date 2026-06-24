@@ -5,6 +5,7 @@
 //! native event-loop wiring, renderer setup, shell command application, and the
 //! bridge between widget-dispatched actions and `AppState`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::app::ui_actions::app_shell_quit_action;
@@ -335,7 +336,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::HoveredFile(path) => {
-                        let _ = session.ui_runtime.route_hovered_file(
+                        let result = session.ui_runtime.route_hovered_file(
                             &session.window,
                             &mut session.router,
                             host.active_root_mut(),
@@ -343,16 +344,22 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.last_cursor,
                             &dispatch_action,
                         );
+                        if let Some(diagnostic) = native_file_hover_diagnostic(result) {
+                            log_native_file_dnd_diagnostic(diagnostic);
+                        }
                         session.window.request_redraw();
                     }
 
                     WindowEvent::HoveredFileCancelled => {
-                        let _ = session.ui_runtime.route_hovered_file_cancelled(
+                        let result = session.ui_runtime.route_hovered_file_cancelled(
                             &session.window,
                             &mut session.router,
                             host.active_root_mut(),
                             &dispatch_action,
                         );
+                        if let Some(diagnostic) = native_file_hover_cancelled_diagnostic(result) {
+                            log_native_file_dnd_diagnostic(diagnostic);
+                        }
                         session.window.request_redraw();
                     }
 
@@ -367,8 +374,12 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.last_cursor,
                             &dispatch_action,
                         );
-                        if result == EventResult::Ignored {
-                            pending_actions.push(mondrian_editor_state::Action::ImportMedia(paths));
+                        let handling = native_file_drop_handling(result, paths);
+                        if let Some(action) = handling.action {
+                            pending_actions.push(action);
+                        }
+                        if let Some(diagnostic) = handling.diagnostic {
+                            log_native_file_dnd_diagnostic(diagnostic);
                         }
                         drain_actions_and_sync_window_session(
                             &mut host,
@@ -621,6 +632,67 @@ fn log_backend_event(event: AppUiBackendEvent) {
         }
         AppUiBackendEvent::SurfaceTimeout | AppUiBackendEvent::SurfaceOccluded => {
             tracing::debug!(?event, "app UI render backend skipped frame")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeFileDndDiagnostic {
+    HoverUnhandled,
+    HoverCancelUnhandled,
+    DropImportedAsMedia { file_count: usize },
+    DropIgnoredEmpty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeFileDropHandling {
+    action: Option<mondrian_editor_state::Action>,
+    diagnostic: Option<NativeFileDndDiagnostic>,
+}
+
+fn native_file_hover_diagnostic(result: EventResult) -> Option<NativeFileDndDiagnostic> {
+    (result == EventResult::Ignored).then_some(NativeFileDndDiagnostic::HoverUnhandled)
+}
+
+fn native_file_hover_cancelled_diagnostic(result: EventResult) -> Option<NativeFileDndDiagnostic> {
+    (result == EventResult::Ignored).then_some(NativeFileDndDiagnostic::HoverCancelUnhandled)
+}
+
+fn native_file_drop_handling(result: EventResult, paths: Vec<PathBuf>) -> NativeFileDropHandling {
+    if result == EventResult::Handled {
+        return NativeFileDropHandling { action: None, diagnostic: None };
+    }
+
+    if paths.is_empty() {
+        return NativeFileDropHandling {
+            action: None,
+            diagnostic: Some(NativeFileDndDiagnostic::DropIgnoredEmpty),
+        };
+    }
+
+    let file_count = paths.len();
+    NativeFileDropHandling {
+        action: Some(mondrian_editor_state::Action::ImportMedia(paths)),
+        diagnostic: Some(NativeFileDndDiagnostic::DropImportedAsMedia { file_count }),
+    }
+}
+
+fn log_native_file_dnd_diagnostic(diagnostic: NativeFileDndDiagnostic) {
+    match diagnostic {
+        NativeFileDndDiagnostic::HoverUnhandled => {
+            tracing::debug!("app UI native file hover was not handled by widgets")
+        }
+        NativeFileDndDiagnostic::HoverCancelUnhandled => {
+            tracing::debug!("app UI native file hover cancellation had no active widget target")
+        }
+        NativeFileDndDiagnostic::DropImportedAsMedia { file_count } => {
+            tracing::info!(
+                file_count,
+                "app UI native file drop fell back to media import"
+            )
+        }
+        NativeFileDndDiagnostic::DropIgnoredEmpty => {
+            tracing::warn!("app UI native file drop ignored empty path list")
         }
     }
 }
@@ -1046,6 +1118,7 @@ mod platform_window_chrome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_editor_state::Action;
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
 
@@ -1197,6 +1270,58 @@ mod tests {
     #[test]
     fn native_close_request_uses_app_shell_quit_action() {
         assert_eq!(native_close_request_action(), app_shell_quit_action());
+    }
+
+    #[test]
+    fn native_file_hover_diagnostics_only_report_unhandled_routes() {
+        assert_eq!(
+            native_file_hover_diagnostic(EventResult::Ignored),
+            Some(NativeFileDndDiagnostic::HoverUnhandled)
+        );
+        assert_eq!(native_file_hover_diagnostic(EventResult::Handled), None);
+        assert_eq!(
+            native_file_hover_cancelled_diagnostic(EventResult::Ignored),
+            Some(NativeFileDndDiagnostic::HoverCancelUnhandled)
+        );
+        assert_eq!(
+            native_file_hover_cancelled_diagnostic(EventResult::Handled),
+            None
+        );
+    }
+
+    #[test]
+    fn native_file_drop_ignored_by_widgets_falls_back_to_media_import() {
+        let paths = vec![
+            PathBuf::from("E:/media/a.mov"),
+            PathBuf::from("E:/media/b.wav"),
+        ];
+
+        assert_eq!(
+            native_file_drop_handling(EventResult::Ignored, paths.clone()),
+            NativeFileDropHandling {
+                action: Some(Action::ImportMedia(paths)),
+                diagnostic: Some(NativeFileDndDiagnostic::DropImportedAsMedia { file_count: 2 }),
+            }
+        );
+    }
+
+    #[test]
+    fn native_file_drop_handled_by_widgets_does_not_fallback_import() {
+        assert_eq!(
+            native_file_drop_handling(EventResult::Handled, vec![PathBuf::from("E:/media/a.mov")]),
+            NativeFileDropHandling { action: None, diagnostic: None }
+        );
+    }
+
+    #[test]
+    fn native_file_drop_empty_ignored_route_does_not_import() {
+        assert_eq!(
+            native_file_drop_handling(EventResult::Ignored, Vec::new()),
+            NativeFileDropHandling {
+                action: None,
+                diagnostic: Some(NativeFileDndDiagnostic::DropIgnoredEmpty),
+            }
+        );
     }
 
     #[test]

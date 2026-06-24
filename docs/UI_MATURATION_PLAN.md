@@ -36,8 +36,9 @@ shared renderer, text, event, theme, or widget infrastructure.
       and overlay hit testing as explicit contracts.
 - [x] Add route diagnostics for dropped shortcuts, stale focused widgets, and capture owners.
 - [ ] Add accessibility-ready metadata to core widgets: role, name, state, value, focus order.
-- [ ] Define platform behavior for unhandled shortcuts, IME switching, cursor requests,
-      drag-and-drop, and clipboard failures.
+- [ ] Define platform behavior for unhandled shortcuts, IME switching, cursor requests, and
+      clipboard failures.
+- [x] Define native file drag-and-drop fallback behavior and diagnostics.
 
 ## Phase 4 - Widget Productionization
 
