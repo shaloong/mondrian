@@ -116,6 +116,9 @@ shared renderer, text, event, theme, or widget infrastructure.
       tested model/geometry contracts.
 - [x] Extract NodeGraphView graph body geometry, node layout, stable-id hit testing, selection
       stepping, edge routing, and port geometry into directly tested model/layout contracts.
+- [x] Extract ViewerSurface canvas fitting, transport control collapse/layout, chip/dropdown
+      geometry, keyboard control routing, and safe-guide rectangles into directly tested
+      model/layout contracts.
 
 ## Phase 5 - Performance And Observability
 

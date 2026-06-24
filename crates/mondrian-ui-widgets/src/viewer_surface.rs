@@ -5,6 +5,8 @@
 //! preview decoding and pass already-renderable frame images across this
 //! domain-light boundary.
 
+mod model;
+
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -21,6 +23,8 @@ use crate::paint::{
 };
 use crate::text_metrics::measure_single_line;
 use crate::{RasterImage, VectorIcon};
+
+use self::model as viewer_model;
 
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
@@ -315,35 +319,17 @@ impl ViewerSurface {
         self.enabled
     }
 
-    fn aspect_ratio(&self) -> f32 {
-        (self.source_width as f32 / self.source_height as f32).clamp(0.1, 10.0)
-    }
-
     fn canvas_viewport_rect(&self) -> Rect {
-        let chrome_top = 14.0;
-        let chrome_bottom = 44.0;
-        let padding = 16.0;
-        Rect::new(
-            self.bounds.x + padding,
-            self.bounds.y + chrome_top,
-            (self.bounds.width - padding * 2.0).max(0.0),
-            (self.bounds.height - chrome_top - chrome_bottom).max(0.0),
-        )
+        viewer_model::canvas_viewport_rect(self.bounds)
     }
 
     fn canvas_rect(&self) -> Rect {
-        let available = self.canvas_viewport_rect();
-        if let Some(scale) = self.zoom_scale {
-            let width = self.source_width as f32 * scale;
-            let height = self.source_height as f32 * scale;
-            return Rect::new(
-                available.x + (available.width - width) * 0.5,
-                available.y + (available.height - height) * 0.5,
-                width.max(0.0),
-                height.max(0.0),
-            );
-        }
-        fit_aspect(available, self.aspect_ratio())
+        viewer_model::canvas_rect(
+            self.bounds,
+            self.source_width,
+            self.source_height,
+            self.zoom_scale,
+        )
     }
 
     fn metadata_text(&self) -> String {
@@ -358,158 +344,68 @@ impl ViewerSurface {
     }
 
     fn control_strip_rect(&self) -> Rect {
-        let controls = self.visible_controls();
-        let width = controls.iter().map(|control| self.control_width(*control)).sum::<f32>()
-            + TRANSPORT_BUTTON_GAP * (controls.len().saturating_sub(1) as f32);
-        Rect::new(
-            self.bounds.x + (self.bounds.width - width) * 0.5,
-            self.bounds.y + self.bounds.height - 34.0,
-            width,
-            TRANSPORT_BUTTON_SIZE,
-        )
+        viewer_model::control_strip_rect(self.bounds)
     }
 
     fn visible_controls(&self) -> &'static [ViewerControl] {
-        if self.bounds.width >= 236.0 {
-            &FULL_VIEWER_CONTROLS
-        } else if self.bounds.width >= 180.0 {
-            &JUMP_VIEWER_CONTROLS
-        } else if self.bounds.width >= 116.0 {
-            &BASIC_VIEWER_CONTROLS
-        } else {
-            &MINIMAL_VIEWER_CONTROLS
-        }
-    }
-
-    fn control_width(&self, control: ViewerControl) -> f32 {
-        match control {
-            ViewerControl::MarkIn
-            | ViewerControl::MarkOut
-            | ViewerControl::JumpStart
-            | ViewerControl::StepBack
-            | ViewerControl::PlayPause
-            | ViewerControl::StepForward
-            | ViewerControl::JumpEnd => TRANSPORT_BUTTON_SIZE,
-        }
+        viewer_model::visible_controls(self.bounds.width)
     }
 
     fn control_rect(&self, control: ViewerControl) -> Rect {
-        let strip = self.control_strip_rect();
-        let mut x = strip.x;
-        for &candidate in self.visible_controls() {
-            let width = self.control_width(candidate);
-            if candidate == control {
-                return Rect::new(x, strip.y, width, TRANSPORT_BUTTON_SIZE);
-            }
-            x += width + TRANSPORT_BUTTON_GAP;
-        }
-        Rect::ZERO
+        viewer_model::control_rect(self.bounds, control)
     }
 
     fn control_at(&self, point: Point) -> Option<ViewerControl> {
-        self.visible_controls()
-            .iter()
-            .copied()
-            .find(|control| self.control_rect(*control).contains(point))
+        viewer_model::control_at(self.bounds, point)
     }
 
     fn preview_quality_rect(&self) -> Rect {
-        let control_strip = self.control_strip_rect();
-        let left = control_strip.x + control_strip.width + 12.0;
-        let right = self.bounds.x + self.bounds.width - 14.0;
-        let available = right - left;
-        if available < 48.0 {
-            return Rect::ZERO;
-        }
-        let wanted =
-            (self.preview_quality_label.chars().count() as f32 * 7.0 + 28.0).clamp(50.0, 86.0);
-        let width = wanted.min(available);
-        Rect::new(
-            right - width,
-            self.bounds.y + self.bounds.height - 29.0,
-            width,
-            22.0,
-        )
+        viewer_model::preview_quality_rect(self.bounds, &self.preview_quality_label)
     }
 
     fn zoom_rect(&self) -> Rect {
-        let quality = self.preview_quality_rect();
-        if quality.width <= 0.0 {
-            return Rect::ZERO;
-        }
-        let control_strip = self.control_strip_rect();
-        let left = control_strip.x + control_strip.width + 12.0;
-        let right = quality.x - 6.0;
-        let available = right - left;
-        if available < 42.0 {
-            return Rect::ZERO;
-        }
-        let wanted = (self.zoom_label.chars().count() as f32 * 7.0 + 28.0).clamp(50.0, 78.0);
-        let width = wanted.min(available);
-        Rect::new(right - width, quality.y, width, quality.height)
+        viewer_model::zoom_rect(self.bounds, &self.zoom_label, &self.preview_quality_label)
     }
 
     fn preview_quality_at(&self, point: Point) -> bool {
-        let rect = self.preview_quality_rect();
-        rect.width > 0.0 && rect.height > 0.0 && rect.contains(point)
+        viewer_model::point_in_rect(self.preview_quality_rect(), point)
     }
 
     fn zoom_at(&self, point: Point) -> bool {
-        let rect = self.zoom_rect();
-        rect.width > 0.0 && rect.height > 0.0 && rect.contains(point)
-    }
-
-    fn dropdown_anchor_rect(&self, dropdown: ViewerDropdown) -> Rect {
-        match dropdown {
-            ViewerDropdown::Zoom => self.zoom_rect(),
-            ViewerDropdown::PreviewQuality => self.preview_quality_rect(),
-        }
+        viewer_model::point_in_rect(self.zoom_rect(), point)
     }
 
     fn dropdown_options_len(dropdown: ViewerDropdown) -> usize {
-        match dropdown {
-            ViewerDropdown::Zoom => VIEWER_ZOOM_OPTIONS.len(),
-            ViewerDropdown::PreviewQuality => VIEWER_PREVIEW_QUALITY_OPTIONS.len(),
-        }
+        viewer_model::dropdown_options_len(dropdown)
     }
 
     fn dropdown_rect(&self, dropdown: ViewerDropdown) -> Rect {
-        let anchor = self.dropdown_anchor_rect(dropdown);
-        if anchor.width <= 0.0 || anchor.height <= 0.0 {
-            return Rect::ZERO;
-        }
-        let row_count = Self::dropdown_options_len(dropdown) as f32;
-        let width: f32 = match dropdown {
-            ViewerDropdown::Zoom => 92.0,
-            ViewerDropdown::PreviewQuality => 74.0,
-        };
-        let height = row_count * VIEWER_DROPDOWN_ROW_HEIGHT + VIEWER_DROPDOWN_PAD_Y * 2.0;
-        let min_x = self.bounds.x + 8.0;
-        let max_x = (self.bounds.x + self.bounds.width - width - 8.0).max(min_x);
-        let x = (anchor.x + anchor.width - width).clamp(min_x, max_x);
-        let y = (anchor.y - height - 6.0).max(self.bounds.y + 8.0);
-        Rect::new(x, y, width, height)
+        viewer_model::dropdown_rect(
+            self.bounds,
+            dropdown,
+            &self.zoom_label,
+            &self.preview_quality_label,
+        )
     }
 
     fn dropdown_row_rect(&self, dropdown: ViewerDropdown, index: usize) -> Rect {
-        let menu = self.dropdown_rect(dropdown);
-        Rect::new(
-            menu.x + VIEWER_DROPDOWN_PAD_X,
-            menu.y + VIEWER_DROPDOWN_PAD_Y + index as f32 * VIEWER_DROPDOWN_ROW_HEIGHT,
-            (menu.width - VIEWER_DROPDOWN_PAD_X * 2.0).max(0.0),
-            VIEWER_DROPDOWN_ROW_HEIGHT,
+        viewer_model::dropdown_row_rect(
+            self.bounds,
+            dropdown,
+            &self.zoom_label,
+            &self.preview_quality_label,
+            index,
         )
     }
 
     fn dropdown_item_at(&self, point: Point) -> Option<(ViewerDropdown, usize)> {
-        let dropdown = self.open_dropdown?;
-        let menu = self.dropdown_rect(dropdown);
-        if !menu.contains(point) {
-            return None;
-        }
-        (0..Self::dropdown_options_len(dropdown))
-            .find(|index| self.dropdown_row_rect(dropdown, *index).contains(point))
-            .map(|index| (dropdown, index))
+        viewer_model::dropdown_item_at(
+            self.bounds,
+            self.open_dropdown,
+            &self.zoom_label,
+            &self.preview_quality_label,
+            point,
+        )
     }
 
     fn dispatch_control(&self, control: ViewerControl, ctx: &mut EventContext) {
@@ -546,19 +442,7 @@ impl ViewerSurface {
     }
 
     fn keyboard_control(&self, key: KeyCode, modifiers: Modifiers) -> Option<ViewerControl> {
-        if modifiers != Modifiers::none() {
-            return None;
-        }
-        match key {
-            KeyCode::Space => Some(ViewerControl::PlayPause),
-            KeyCode::Left => Some(ViewerControl::StepBack),
-            KeyCode::Right => Some(ViewerControl::StepForward),
-            KeyCode::Home => Some(ViewerControl::JumpStart),
-            KeyCode::End => Some(ViewerControl::JumpEnd),
-            KeyCode::I => Some(ViewerControl::MarkIn),
-            KeyCode::O => Some(ViewerControl::MarkOut),
-            _ => None,
-        }
+        viewer_model::keyboard_control(key, modifiers)
     }
 
     fn clear_interaction_state(&mut self) -> bool {
@@ -1317,30 +1201,6 @@ fn paint_mark_out_icon(ctx: &mut PaintContext, rect: Rect, color: Color) {
     ctx.encoder.draw_rect(Rect::new(x + 20.0, y + 7.0, 2.0, 12.0), color, 1.0);
 }
 
-fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
-    if bounds.width <= 0.0 || bounds.height <= 0.0 {
-        return Rect::new(bounds.x, bounds.y, 0.0, 0.0);
-    }
-    let available_aspect = bounds.width / bounds.height;
-    if available_aspect > aspect {
-        let width = bounds.height * aspect;
-        Rect::new(
-            bounds.x + (bounds.width - width) * 0.5,
-            bounds.y,
-            width,
-            bounds.height,
-        )
-    } else {
-        let height = bounds.width / aspect;
-        Rect::new(
-            bounds.x,
-            bounds.y + (bounds.height - height) * 0.5,
-            bounds.width,
-            height,
-        )
-    }
-}
-
 fn status_badge_colors(surface: &ViewerSurface, ctx: &PaintContext) -> (Color, Color) {
     let colors = &ctx.theme.colors;
     if !surface.enabled {
@@ -1365,9 +1225,9 @@ fn status_badge_colors(surface: &ViewerSurface, ctx: &PaintContext) -> (Color, C
 }
 
 fn paint_safe_guides(ctx: &mut PaintContext, canvas: Rect, enabled: bool) {
-    if canvas.width <= 0.0 || canvas.height <= 0.0 {
+    let Some((action, title)) = viewer_model::safe_guide_rects(canvas) else {
         return;
-    }
+    };
     let colors = &ctx.theme.colors;
     let mut guide = colors.safe_guide;
     let mut inner_guide = colors.safe_guide_inner;
@@ -1375,8 +1235,6 @@ fn paint_safe_guides(ctx: &mut PaintContext, canvas: Rect, enabled: bool) {
         guide.a *= 0.56;
         inner_guide.a *= 0.56;
     }
-    let action = canvas.inset(canvas.width * 0.05, canvas.height * 0.05);
-    let title = canvas.inset(canvas.width * 0.10, canvas.height * 0.10);
     draw_rect_outline(ctx, action, guide);
     draw_rect_outline(ctx, title, inner_guide);
 }
