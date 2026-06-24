@@ -145,8 +145,11 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 ## Phase 5 - Performance And Observability
 
-- [ ] Add repeatable renderer benchmarks for batching, atlas churn, raster uploads, text
+- [x] Add repeatable renderer benchmarks for batching, atlas churn, raster uploads, text
       command resolution, and large timeline-style command streams.
+- [x] Add renderer-crate Criterion benchmarks for dense batching, timeline-style command
+      streams, TextureAtlas fragmentation churn, raster image command payloads, and retained
+      command replay.
 - [x] Add repeatable Criterion UI pipeline benchmarks for dense command batching,
       timeline-style command streams, TextureAtlas churn, raster atlas allocation pressure,
       and warmed mixed-script text command resolution.

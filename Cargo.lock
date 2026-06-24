@@ -2898,6 +2898,7 @@ name = "mondrian-ui-renderer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "criterion",
  "glam",
  "mondrian-core",
  "mondrian-ui-core",
