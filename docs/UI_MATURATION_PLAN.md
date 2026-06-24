@@ -119,6 +119,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Extract ViewerSurface canvas fitting, transport control collapse/layout, chip/dropdown
       geometry, keyboard control routing, and safe-guide rectangles into directly tested
       model/layout contracts.
+- [x] Extract TimelineView viewport layout, frame/track coordinate mapping, track-control hit
+      testing, clip rectangles, trim-edge hit testing, and scrollbar track geometry into
+      directly tested model/layout contracts.
 
 ## Phase 5 - Performance And Observability
 

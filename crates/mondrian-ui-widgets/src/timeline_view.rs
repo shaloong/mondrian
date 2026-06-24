@@ -5,6 +5,8 @@
 //! map real `Sequence` / `Track` / `Clip` data into these view models without
 //! pulling timeline command logic into the widget layer.
 
+mod model;
+
 use mondrian_core::types::{AssetId, Rational, TimeCode};
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
@@ -19,6 +21,8 @@ use mondrian_ui_theme::colors::ColorTokens;
 use crate::paint::{centered_text_origin_y, color_with_alpha};
 use crate::text_metrics::measure_single_line;
 use crate::{ContextMenu, MenuItem, VectorIcon};
+
+use self::model as timeline_model;
 
 const SCROLLBAR_THICKNESS: f32 = 12.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
@@ -979,30 +983,15 @@ impl TimelineView {
     }
 
     fn horizontal_scrollbar_track_rect(&self) -> Option<Rect> {
-        (self.body_rect.width > SCROLLBAR_MIN_THUMB).then_some(Rect::new(
-            self.body_rect.x + SCROLLBAR_HANDLE_SIZE * 0.5,
-            self.body_rect.y + self.body_rect.height,
-            (self.body_rect.width - SCROLLBAR_HANDLE_SIZE).max(0.0),
-            SCROLLBAR_THICKNESS,
-        ))
+        timeline_model::horizontal_scrollbar_track_rect(self.body_rect)
     }
 
     fn vertical_scrollbar_track_rect(&self) -> Option<Rect> {
-        (self.body_rect.height > SCROLLBAR_MIN_THUMB).then_some(Rect::new(
-            self.body_rect.x + self.body_rect.width,
-            self.body_rect.y + SCROLLBAR_HANDLE_SIZE * 0.5,
-            SCROLLBAR_THICKNESS,
-            (self.body_rect.height - SCROLLBAR_HANDLE_SIZE).max(0.0),
-        ))
+        timeline_model::vertical_scrollbar_track_rect(self.body_rect)
     }
 
     fn scrollbar_clip_rect(&self) -> Rect {
-        Rect::new(
-            self.body_rect.x,
-            self.body_rect.y,
-            self.body_rect.width + TIMELINE_SCROLLBAR_GUTTER,
-            self.body_rect.height + TIMELINE_SCROLLBAR_GUTTER,
-        )
+        timeline_model::scrollbar_clip_rect(self.body_rect)
     }
 
     fn horizontal_scrollbar_thumb_rect(&self) -> Option<Rect> {
@@ -1249,13 +1238,11 @@ impl TimelineView {
     }
 
     fn frame_to_x(&self, frame: i64) -> f32 {
-        self.body_rect.x + frame.max(0) as f32 * self.pixels_per_frame - self.scroll_x
+        timeline_model::frame_to_x(self.body_rect, self.pixels_per_frame, self.scroll_x, frame)
     }
 
     fn x_to_frame(&self, x: f32) -> i64 {
-        ((x - self.body_rect.x + self.scroll_x) / self.pixels_per_frame)
-            .round()
-            .max(0.0) as i64
+        timeline_model::x_to_frame(self.body_rect, self.pixels_per_frame, self.scroll_x, x)
     }
 
     fn snap_threshold_frames(&self) -> i64 {
@@ -1358,64 +1345,58 @@ impl TimelineView {
     }
 
     fn track_y(&self, track_index: usize) -> f32 {
-        self.body_rect.y + track_index as f32 * self.track_height - self.scroll_y
+        timeline_model::track_y(
+            self.body_rect,
+            self.track_height,
+            self.scroll_y,
+            track_index,
+        )
     }
 
     fn track_index_at(&self, point: Point) -> Option<usize> {
-        if !self.body_rect.contains(point) {
-            return None;
-        }
-        self.track_index_from_y(point.y)
+        timeline_model::track_index_at(
+            self.body_rect,
+            self.track_height,
+            self.scroll_y,
+            self.tracks.len(),
+            point,
+        )
     }
 
     fn track_index_from_y(&self, y: f32) -> Option<usize> {
-        let index = ((y - self.body_rect.y + self.scroll_y) / self.track_height).floor();
-        (index >= 0.0)
-            .then_some(index as usize)
-            .filter(|index| *index < self.tracks.len())
+        timeline_model::track_index_from_y(
+            self.body_rect,
+            self.track_height,
+            self.scroll_y,
+            self.tracks.len(),
+            y,
+        )
     }
 
     fn track_header_at(&self, point: Point) -> Option<TimelineTrackRef> {
-        if !self.header_rect.contains(point) {
-            return None;
-        }
-        let index = ((point.y - self.body_rect.y + self.scroll_y) / self.track_height).floor();
-        (index >= 0.0)
-            .then_some(TimelineTrackRef { track_index: index as usize })
-            .filter(|track_ref| track_ref.track_index < self.tracks.len())
+        timeline_model::track_header_at(
+            self.header_rect,
+            self.body_rect,
+            self.track_height,
+            self.scroll_y,
+            self.tracks.len(),
+            point,
+        )
     }
 
     fn track_control_rect(&self, header: Rect, control: TimelineTrackControl) -> Rect {
-        let size = 18.0;
-        let gap = 8.0;
-        let right_padding = 8.0;
-        let group_width = size * 3.0 + gap * 2.0;
-        let start_x = header.x + header.width - right_padding - group_width;
-        let y = header.y + (header.height - size) * 0.5;
-        let index = match control {
-            TimelineTrackControl::Visibility => 0.0,
-            TimelineTrackControl::Mute => 1.0,
-            TimelineTrackControl::Lock => 2.0,
-        };
-        Rect::new(start_x + index * (size + gap), y, size, size)
+        timeline_model::track_control_rect(header, control)
     }
 
     fn track_control_at(&self, point: Point) -> Option<(TimelineTrackRef, TimelineTrackControl)> {
-        let track_ref = self.track_header_at(point)?;
-        let header = Rect::new(
-            self.header_rect.x,
-            self.track_y(track_ref.track_index),
-            self.header_rect.width,
+        timeline_model::track_control_at(
+            self.header_rect,
+            self.body_rect,
             self.track_height,
-        );
-        [
-            TimelineTrackControl::Visibility,
-            TimelineTrackControl::Mute,
-            TimelineTrackControl::Lock,
-        ]
-        .into_iter()
-        .find(|control| self.track_control_rect(header, *control).contains(point))
-        .map(|control| (track_ref, control))
+            self.scroll_y,
+            self.tracks.len(),
+            point,
+        )
     }
 
     fn in_out_marker_at(&self, point: Point) -> Option<TimelineInOutPoint> {
@@ -1599,10 +1580,16 @@ impl TimelineView {
     }
 
     fn clip_rect_at(&self, track_index: usize, start_frame: i64, clip: &TimelineClip) -> Rect {
-        let x = self.frame_to_x(start_frame);
-        let y = self.track_y(track_index) + 4.0;
-        let width = (clip.duration_frames.max(1) as f32 * self.pixels_per_frame).max(8.0);
-        Rect::new(x, y, width, self.track_height - 8.0)
+        timeline_model::clip_rect(
+            self.body_rect,
+            self.pixels_per_frame,
+            self.scroll_x,
+            self.track_height,
+            self.scroll_y,
+            track_index,
+            start_frame,
+            clip.duration_frames,
+        )
     }
 
     fn clip_rect_for_preview(
@@ -1611,10 +1598,16 @@ impl TimelineView {
         start_frame: i64,
         duration_frames: i64,
     ) -> Rect {
-        let x = self.frame_to_x(start_frame);
-        let y = self.track_y(track_index) + 4.0;
-        let width = (duration_frames.max(1) as f32 * self.pixels_per_frame).max(8.0);
-        Rect::new(x, y, width, self.track_height - 8.0)
+        timeline_model::clip_rect(
+            self.body_rect,
+            self.pixels_per_frame,
+            self.scroll_x,
+            self.track_height,
+            self.scroll_y,
+            track_index,
+            start_frame,
+            duration_frames,
+        )
     }
 
     fn hit_clip(&self, point: Point) -> Option<TimelineClipRef> {
@@ -1634,17 +1627,7 @@ impl TimelineView {
     fn hit_clip_edge(&self, clip_ref: TimelineClipRef, point: Point) -> Option<TimelineTrimEdge> {
         let clip = self.clip(clip_ref)?;
         let rect = self.clip_rect(clip_ref.track_index, clip);
-        if !rect.contains(point) {
-            return None;
-        }
-        let edge_width = 6.0_f32.min((rect.width * 0.35).max(3.0));
-        if point.x <= rect.x + edge_width {
-            Some(TimelineTrimEdge::In)
-        } else if point.x >= rect.x + rect.width - edge_width {
-            Some(TimelineTrimEdge::Out)
-        } else {
-            None
-        }
+        timeline_model::hit_clip_edge(rect, point)
     }
 
     fn clip(&self, clip_ref: TimelineClipRef) -> Option<&TimelineClip> {
@@ -3820,32 +3803,11 @@ impl Widget for TimelineView {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        let top_chrome = TIMELINE_TOOLBAR_HEIGHT + self.ruler_height;
-        let available_content_width = (bounds.width - self.header_width).max(0.0);
-        let available_content_height = (bounds.height - top_chrome).max(0.0);
-        let vertical_gutter = TIMELINE_SCROLLBAR_GUTTER.min(available_content_width);
-        let horizontal_gutter = TIMELINE_SCROLLBAR_GUTTER.min(available_content_height);
-        let viewport_width = (available_content_width - vertical_gutter).max(0.0);
-        let viewport_height = (available_content_height - horizontal_gutter).max(0.0);
-        self.toolbar_rect = Rect::new(bounds.x, bounds.y, bounds.width, TIMELINE_TOOLBAR_HEIGHT);
-        self.header_rect = Rect::new(
-            bounds.x,
-            bounds.y + top_chrome,
-            self.header_width,
-            viewport_height,
-        );
-        self.ruler_rect = Rect::new(
-            bounds.x + self.header_width,
-            bounds.y + TIMELINE_TOOLBAR_HEIGHT,
-            viewport_width,
-            self.ruler_height,
-        );
-        self.body_rect = Rect::new(
-            bounds.x + self.header_width,
-            bounds.y + top_chrome,
-            viewport_width,
-            viewport_height,
-        );
+        let rects = timeline_model::layout_rects(bounds, self.header_width, self.ruler_height);
+        self.toolbar_rect = rects.toolbar;
+        self.header_rect = rects.header;
+        self.ruler_rect = rects.ruler;
+        self.body_rect = rects.body;
         self.clamp_scroll();
     }
 
