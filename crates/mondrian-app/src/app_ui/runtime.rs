@@ -17,7 +17,7 @@ use mondrian_ui_core::types::{
 };
 use mondrian_ui_core::widget::{CursorRequest, DrawCommandEncoder, ImeRequest, PaintContext};
 use mondrian_ui_core::Widget;
-use mondrian_ui_events::EventRouter;
+use mondrian_ui_events::{EventRouteDiagnostics, EventRouter};
 use mondrian_ui_theme::Theme;
 use mondrian_ui_tooltip::TooltipWidget;
 use winit::event::{
@@ -79,6 +79,7 @@ impl WinitUiRuntime {
         let mut tree = WidgetTreeView::new(root);
         let result = router.route(event, &mut tree, dispatch);
         self.apply_router_requests(window, router, tooltip_was_visible);
+        log_route_diagnostics(router.take_diagnostics());
         result
     }
 
@@ -375,6 +376,37 @@ fn shell_overlay_layers(eyedropper_active: bool, tooltip_visible: bool) -> Vec<S
         layers.push(ShellOverlayLayer::Tooltip);
     }
     layers
+}
+
+fn log_route_diagnostics(diagnostics: EventRouteDiagnostics) {
+    if !diagnostics.has_events() {
+        return;
+    }
+
+    if diagnostics.stale_captured_widgets > 0
+        || diagnostics.stale_hovered_widgets > 0
+        || diagnostics.stale_drag_targets > 0
+        || diagnostics.stale_focused_widgets > 0
+        || diagnostics.unfocusable_focused_widgets > 0
+        || diagnostics.overlay_capture_preemptions > 0
+    {
+        tracing::warn!(
+            stale_captured_widgets = diagnostics.stale_captured_widgets,
+            stale_hovered_widgets = diagnostics.stale_hovered_widgets,
+            stale_drag_targets = diagnostics.stale_drag_targets,
+            stale_focused_widgets = diagnostics.stale_focused_widgets,
+            unfocusable_focused_widgets = diagnostics.unfocusable_focused_widgets,
+            overlay_capture_preemptions = diagnostics.overlay_capture_preemptions,
+            "app UI event router repaired route state"
+        );
+    }
+
+    if diagnostics.unmatched_shortcut_chords > 0 {
+        tracing::debug!(
+            unmatched_shortcut_chords = diagnostics.unmatched_shortcut_chords,
+            "app UI event router left shortcut-like chords unhandled"
+        );
+    }
 }
 
 /// Convert a winit IME event into Mondrian's platform-neutral UI event.

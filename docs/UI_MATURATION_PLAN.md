@@ -34,7 +34,7 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 - [ ] Harden focus traversal, keyboard navigation, mouse capture release, window focus loss,
       and overlay hit testing as explicit contracts.
-- [ ] Add route diagnostics for dropped shortcuts, stale focused widgets, and capture owners.
+- [x] Add route diagnostics for dropped shortcuts, stale focused widgets, and capture owners.
 - [ ] Add accessibility-ready metadata to core widgets: role, name, state, value, focus order.
 - [ ] Define platform behavior for unhandled shortcuts, IME switching, cursor requests,
       drag-and-drop, and clipboard failures.

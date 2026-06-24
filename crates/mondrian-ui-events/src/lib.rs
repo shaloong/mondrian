@@ -9,5 +9,5 @@ pub mod router;
 pub mod shortcut_manager;
 
 pub use focus_manager::FocusManagerImpl;
-pub use router::EventRouter;
+pub use router::{EventRouteDiagnostics, EventRouter};
 pub use shortcut_manager::ShortcutManagerImpl;

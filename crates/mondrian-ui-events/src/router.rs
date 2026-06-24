@@ -22,6 +22,38 @@ use crate::focus_manager::FocusManagerImpl;
 use crate::hit_test::{hit_test_deepest, overlay_hit_test_deepest};
 use crate::shortcut_manager::ShortcutManagerImpl;
 
+/// Diagnostics accumulated while routing UI events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventRouteDiagnostics {
+    /// Shortcut-like key chords that reached shortcut resolution but had no binding.
+    pub unmatched_shortcut_chords: u32,
+    /// Captured widgets that disappeared from the widget tree and were released.
+    pub stale_captured_widgets: u32,
+    /// Hovered widgets that disappeared from the widget tree and were cleared.
+    pub stale_hovered_widgets: u32,
+    /// Drag targets that disappeared from the widget tree and were cleared.
+    pub stale_drag_targets: u32,
+    /// Focused widgets that disappeared from the widget tree and were cleared.
+    pub stale_focused_widgets: u32,
+    /// Focused widgets that became unfocusable and were blurred.
+    pub unfocusable_focused_widgets: u32,
+    /// Pointer captures preempted by a top-level overlay hit.
+    pub overlay_capture_preemptions: u32,
+}
+
+impl EventRouteDiagnostics {
+    /// Whether any route diagnostic event was recorded.
+    pub fn has_events(self) -> bool {
+        self.unmatched_shortcut_chords > 0
+            || self.stale_captured_widgets > 0
+            || self.stale_hovered_widgets > 0
+            || self.stale_drag_targets > 0
+            || self.stale_focused_widgets > 0
+            || self.unfocusable_focused_widgets > 0
+            || self.overlay_capture_preemptions > 0
+    }
+}
+
 /// 事件路由器
 ///
 /// 拥有 FocusManager + ShortcutManager，在 route() 时将其注入 EventContext。
@@ -41,6 +73,7 @@ pub struct EventRouter {
     last_cursor_request: Option<CursorRequest>,
     last_eyedropper_request: Option<EyedropperRequest>,
     repaint_requested: bool,
+    diagnostics: EventRouteDiagnostics,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +108,7 @@ impl EventRouter {
             last_cursor_request: None,
             last_eyedropper_request: None,
             repaint_requested: false,
+            diagnostics: EventRouteDiagnostics::default(),
         }
     }
 
@@ -93,6 +127,7 @@ impl EventRouter {
             last_cursor_request: None,
             last_eyedropper_request: None,
             repaint_requested: false,
+            diagnostics: EventRouteDiagnostics::default(),
         }
     }
 
@@ -119,6 +154,7 @@ impl EventRouter {
             last_cursor_request: None,
             last_eyedropper_request: None,
             repaint_requested: false,
+            diagnostics: EventRouteDiagnostics::default(),
         }
     }
 
@@ -165,6 +201,11 @@ impl EventRouter {
         let requested = self.repaint_requested;
         self.repaint_requested = false;
         requested
+    }
+
+    /// Take route diagnostics accumulated since the last call.
+    pub fn take_diagnostics(&mut self) -> EventRouteDiagnostics {
+        std::mem::take(&mut self.diagnostics)
     }
 
     pub fn set_capture(&mut self, widget: Option<WidgetId>) {
@@ -421,6 +462,9 @@ impl EventRouter {
                         {
                             dispatch(action);
                             return EventResult::Handled;
+                        } else if should_diagnose_unmatched_shortcut(*key, *modifiers) {
+                            self.diagnostics.unmatched_shortcut_chords =
+                                self.diagnostics.unmatched_shortcut_chords.saturating_add(1);
                         }
                     }
                 }
@@ -587,6 +631,8 @@ impl EventRouter {
                 if overlay != captured && !self.is_ancestor_or_self(tree, overlay, captured) =>
             {
                 self.captured = None;
+                self.diagnostics.overlay_capture_preemptions =
+                    self.diagnostics.overlay_capture_preemptions.saturating_add(1);
                 Some(overlay)
             }
             _ => Some(captured),
@@ -596,9 +642,13 @@ impl EventRouter {
     fn prune_stale_widget_state(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
         if self.captured.is_some_and(|id| tree.get(id).is_none()) {
             self.captured = None;
+            self.diagnostics.stale_captured_widgets =
+                self.diagnostics.stale_captured_widgets.saturating_add(1);
         }
         if self.hovered.is_some_and(|id| tree.get(id).is_none()) {
             self.hovered = None;
+            self.diagnostics.stale_hovered_widgets =
+                self.diagnostics.stale_hovered_widgets.saturating_add(1);
         }
         if self
             .active_drag
@@ -609,6 +659,8 @@ impl EventRouter {
             if let Some(drag) = self.active_drag.as_mut() {
                 drag.target = None;
             }
+            self.diagnostics.stale_drag_targets =
+                self.diagnostics.stale_drag_targets.saturating_add(1);
         }
         if let Some(focused) = self.focus_mgr.focused_widget() {
             match tree.get(focused) {
@@ -617,10 +669,14 @@ impl EventRouter {
                     self.send_focus_lost(tree, focused, dispatch);
                     self.focus_mgr.release_focus(focused);
                     self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+                    self.diagnostics.unfocusable_focused_widgets =
+                        self.diagnostics.unfocusable_focused_widgets.saturating_add(1);
                 }
                 None => {
                     self.focus_mgr.release_focus(focused);
                     self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+                    self.diagnostics.stale_focused_widgets =
+                        self.diagnostics.stale_focused_widgets.saturating_add(1);
                 }
             }
         }
@@ -803,6 +859,38 @@ fn focused_text_input_owns_key(
         && !modifiers.ctrl
         && !modifiers.alt
         && !modifiers.meta
+}
+
+fn should_diagnose_unmatched_shortcut(key: KeyCode, modifiers: Modifiers) -> bool {
+    modifiers.ctrl
+        || modifiers.alt
+        || modifiers.meta
+        || matches!(
+            key,
+            KeyCode::F1
+                | KeyCode::F2
+                | KeyCode::F3
+                | KeyCode::F4
+                | KeyCode::F5
+                | KeyCode::F6
+                | KeyCode::F7
+                | KeyCode::F8
+                | KeyCode::F9
+                | KeyCode::F10
+                | KeyCode::F11
+                | KeyCode::F12
+                | KeyCode::Escape
+                | KeyCode::Delete
+                | KeyCode::Insert
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
+        )
 }
 
 fn is_text_entry_key(key: KeyCode) -> bool {
@@ -1504,6 +1592,14 @@ mod tests {
             );
         }
         assert!(dispatched.borrow().is_empty());
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                unmatched_shortcut_chords: 4,
+                ..EventRouteDiagnostics::default()
+            }
+        );
+        assert_eq!(router.take_diagnostics(), EventRouteDiagnostics::default());
     }
 
     #[test]
@@ -1850,6 +1946,13 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert_eq!(log.borrow().as_slice(), ["modal:down"]);
         assert_eq!(router.captured(), None);
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                overlay_capture_preemptions: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
     }
 
     #[test]
@@ -2123,6 +2226,14 @@ mod tests {
 
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(router.captured(), None);
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                stale_captured_widgets: 1,
+                stale_focused_widgets: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
     }
 
     #[test]
@@ -2145,6 +2256,13 @@ mod tests {
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(router.focused(), None);
         assert_eq!(router.focus_manager().focused_widget(), None);
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                stale_focused_widgets: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
     }
 
     #[test]
@@ -2223,6 +2341,13 @@ mod tests {
         assert_eq!(router.focused(), None);
         assert_eq!(router.focus_manager().focused_widget(), None);
         assert_eq!(log.borrow().as_slice(), ["focus-lost"]);
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                unfocusable_focused_widgets: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
         let ime = router
             .take_ime_request()
             .expect("unfocusable focused widget should disable IME");
