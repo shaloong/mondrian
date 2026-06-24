@@ -62,6 +62,11 @@ reference code only. That module contains egui panels, egui theme tokens,
 viewer helpers, and the old timeline implementation. New self-hosted UI code
 must not be added there unless it is deliberately deleting or extracting legacy
 behavior.
+The Phase 5 parity audit lives in
+`docs/architecture/self-hosted-ui-parity.md`. It is the source of truth for
+which legacy egui workflows are product-covered by self-hosted UI, which panels
+are intentionally retired, and which remaining egui references must be removed
+or quarantined before the compatibility path can disappear.
 
 The self-hosted UI application adapter lives under
 `mondrian-app/src/self_hosted`. `self_hosted::runtime` owns winit-side request

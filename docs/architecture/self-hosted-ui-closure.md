@@ -259,8 +259,11 @@ workflow.
 
 ## Phase 5: egui Retirement
 
-- P5-PARITY-001: Produce a final self-hosted parity checklist for every legacy
-  egui workflow that remains product-relevant.
+- [done] P5-PARITY-001: Produce a final self-hosted parity checklist for every
+  legacy egui workflow that remains product-relevant. The audit now lives in
+  `docs/architecture/self-hosted-ui-parity.md` and classifies product entry,
+  project/sequence/preferences flows, editor panels, shared infrastructure,
+  retired panels, and remaining legacy egui reference boundaries.
 - P5-ROUTE-001: Remove or quarantine product entrypoints that can still launch
   legacy egui unintentionally.
 - P5-CODE-001: Delete legacy egui code that is no longer needed as reference, or
