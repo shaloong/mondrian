@@ -11,6 +11,18 @@ pub struct TextStyle {
     pub letter_spacing: f32,
 }
 
+impl TextStyle {
+    /// Return this style with font size and line height scaled together.
+    pub fn scaled(&self, scale: f32) -> Self {
+        Self {
+            font_size: self.font_size * scale,
+            line_height: self.line_height * scale,
+            font_weight: self.font_weight,
+            letter_spacing: self.letter_spacing,
+        }
+    }
+}
+
 /// 字重
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontWeight {
@@ -47,6 +59,25 @@ pub struct TypographyTokens {
     pub heading_h2: TextStyle,
     pub heading_h3: TextStyle,
     pub tab_label: TextStyle,
+}
+
+impl TypographyTokens {
+    /// Return typography tokens scaled by one accessibility text scale factor.
+    pub fn scaled(&self, scale: f32) -> Self {
+        Self {
+            small: self.small.scaled(scale),
+            body: self.body.scaled(scale),
+            large: self.large.scaled(scale),
+            mono_small: self.mono_small.scaled(scale),
+            mono_large: self.mono_large.scaled(scale),
+            button: self.button.scaled(scale),
+            metadata: self.metadata.scaled(scale),
+            heading_h1: self.heading_h1.scaled(scale),
+            heading_h2: self.heading_h2.scaled(scale),
+            heading_h3: self.heading_h3.scaled(scale),
+            tab_label: self.tab_label.scaled(scale),
+        }
+    }
 }
 
 impl Default for TypographyTokens {

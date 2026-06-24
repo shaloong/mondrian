@@ -383,6 +383,51 @@ impl ColorTokens {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl ColorTokens {
+    /// Return a high-contrast variant of these semantic color tokens.
+    pub fn with_high_contrast(mut self) -> Self {
+        if relative_luminance(self.background) < 0.5 {
+            self.foreground = Color::WHITE;
+            self.card_foreground = Color::WHITE;
+            self.popover_foreground = Color::WHITE;
+            self.primary_foreground = Color::WHITE;
+            self.secondary_foreground = Color::WHITE;
+            self.accent_foreground = Color::WHITE;
+            self.text_secondary = Color::from_hex(0xE4E4E7);
+            self.text_tertiary = Color::from_hex(0xD4D4D8);
+            self.text_disabled = Color::from_hex(0xA1A1AA);
+            self.muted_foreground = Color::from_hex(0xE4E4E7);
+            self.border = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.28 };
+            self.border_strong = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.42 };
+            self.input = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.32 };
+            self.ring = Color::from_hex(0x60A5FA);
+            self.timeline_tick_major = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.42 };
+            self.timeline_tick_minor = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.20 };
+            self.safe_guide = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.26 };
+            self.safe_guide_inner = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.18 };
+            self.scrollbar_thumb = Color::WHITE;
+        } else {
+            self.foreground = Color::BLACK;
+            self.card_foreground = Color::BLACK;
+            self.popover_foreground = Color::BLACK;
+            self.secondary_foreground = Color::from_hex(0x111827);
+            self.accent_foreground = Color::from_hex(0x111827);
+            self.text_secondary = Color::from_hex(0x1F2937);
+            self.text_tertiary = Color::from_hex(0x374151);
+            self.text_disabled = Color::from_hex(0x4B5563);
+            self.muted_foreground = Color::from_hex(0x1F2937);
+            self.border = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.22 };
+            self.border_strong = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.34 };
+            self.input = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 };
+            self.ring = Color::from_hex(0x1D4ED8);
+            self.timeline_tick_major = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.44 };
+            self.timeline_tick_minor = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.22 };
+            self.safe_guide = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.30 };
+            self.safe_guide_inner = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.22 };
+            self.scrollbar_thumb = Color::from_hex(0x52525B);
+        }
+        self
+    }
+
     pub fn to_wgpu(&self, color: &Color) -> [f32; 4] {
         [color.r, color.g, color.b, color.a]
     }
@@ -415,4 +460,8 @@ impl ColorTokens {
             self.foreground
         }
     }
+}
+
+fn relative_luminance(color: Color) -> f32 {
+    0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
 }

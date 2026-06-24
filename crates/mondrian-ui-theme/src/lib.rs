@@ -3,12 +3,14 @@
 //! 提供语义化的颜色、排版、间距 Token。
 //! 所有 UI 代码通过此 crate 获取主题值，禁止硬编码。
 
+pub mod accessibility;
 pub mod colors;
 pub mod spacing;
 pub mod typography;
 
 use std::sync::RwLock;
 
+pub use accessibility::AccessibilityPreferences;
 use colors::ColorTokens;
 use serde::{Deserialize, Serialize};
 use spacing::SpacingTokens;
@@ -169,6 +171,94 @@ mod tests {
         ];
 
         assert!(styles.iter().all(|style| style.letter_spacing == 0.0));
+    }
+
+    #[test]
+    fn accessibility_preferences_scale_text_and_reduce_motion() {
+        let theme = ThemePreset::Dark.build().with_accessibility(
+            AccessibilityPreferences::default()
+                .with_text_scale(1.25)
+                .with_reduced_motion(true),
+        );
+
+        assert_eq!(theme.typography.body.font_size, 17.5);
+        assert_eq!(theme.typography.body.line_height, 25.0);
+        assert_eq!(theme.spacing.animation_duration_ms, 0);
+        assert_eq!(
+            theme.spacing.animation_ease,
+            spacing::AnimationEasing::Linear
+        );
+    }
+
+    #[test]
+    fn accessibility_text_scale_is_clamped_and_nonfinite_safe() {
+        let small = ThemePreset::Dark
+            .build()
+            .with_accessibility(AccessibilityPreferences::default().with_text_scale(0.1));
+        let large = ThemePreset::Dark
+            .build()
+            .with_accessibility(AccessibilityPreferences::default().with_text_scale(4.0));
+        let nonfinite = ThemePreset::Dark
+            .build()
+            .with_accessibility(AccessibilityPreferences::default().with_text_scale(f32::NAN));
+
+        assert_eq!(small.typography.body.font_size, 14.0 * 0.85);
+        assert_eq!(large.typography.body.font_size, 14.0 * 1.6);
+        assert_eq!(nonfinite.typography.body.font_size, 14.0);
+    }
+
+    #[test]
+    fn high_contrast_theme_strengthens_readable_tokens() {
+        let dark = ThemePreset::Dark.build();
+        let high_dark = dark
+            .clone()
+            .with_accessibility(AccessibilityPreferences::default().with_high_contrast(true));
+        let light = ThemePreset::Light.build();
+        let high_light = light
+            .clone()
+            .with_accessibility(AccessibilityPreferences::default().with_high_contrast(true));
+
+        assert!(
+            contrast_delta(high_dark.colors.background, high_dark.colors.border)
+                > contrast_delta(dark.colors.background, dark.colors.border)
+        );
+        assert!(
+            contrast_delta(high_dark.colors.background, high_dark.colors.input)
+                > contrast_delta(dark.colors.background, dark.colors.input)
+        );
+        assert!(
+            contrast_delta(high_light.colors.background, high_light.colors.border)
+                > contrast_delta(light.colors.background, light.colors.border)
+        );
+        assert!(
+            contrast_delta(high_light.colors.background, high_light.colors.input)
+                > contrast_delta(light.colors.background, light.colors.input)
+        );
+        assert_eq!(high_dark.colors.foreground, mondrian_core::Color::WHITE);
+        assert_eq!(high_light.colors.foreground, mondrian_core::Color::BLACK);
+    }
+
+    fn contrast_delta(background: mondrian_core::Color, foreground: mondrian_core::Color) -> f32 {
+        (relative_luminance(composite_over(foreground, background))
+            - relative_luminance(background))
+        .abs()
+    }
+
+    fn composite_over(
+        foreground: mondrian_core::Color,
+        background: mondrian_core::Color,
+    ) -> mondrian_core::Color {
+        let inverse_alpha = 1.0 - foreground.a;
+        mondrian_core::Color {
+            r: foreground.r * foreground.a + background.r * inverse_alpha,
+            g: foreground.g * foreground.a + background.g * inverse_alpha,
+            b: foreground.b * foreground.a + background.b * inverse_alpha,
+            a: 1.0,
+        }
+    }
+
+    fn relative_luminance(color: mondrian_core::Color) -> f32 {
+        0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
     }
 
     #[test]

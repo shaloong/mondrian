@@ -90,6 +90,15 @@ pub enum AnimationEasing {
     Spring,
 }
 
+impl SpacingTokens {
+    /// Return spacing tokens with nonessential theme animation disabled.
+    pub fn with_reduced_motion(mut self) -> Self {
+        self.animation_duration_ms = 0;
+        self.animation_ease = AnimationEasing::Linear;
+        self
+    }
+}
+
 impl Default for SpacingTokens {
     fn default() -> Self {
         Self {

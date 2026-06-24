@@ -167,6 +167,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 - [ ] Define compatibility and migration policy after egui removal.
 - [ ] Add high contrast, text scale, reduced motion, and keyboard-only usability checks.
+- [x] Add theme-level accessibility preferences for high contrast, bounded text scaling, and
+      reduced motion without per-widget accessibility branching.
 - [ ] Run cross-GPU/backend smoke tests before considering the custom UI line complete.
 - [ ] Keep app-level panel work on top of these contracts instead of adding one-off fixes in
       product panels.
