@@ -428,6 +428,7 @@ impl SelfHostedUiHost {
 
     fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
         let previous_project_path = self.app_state.borrow().current_project_path.clone();
+        let previous_status_hint = self.app_state.borrow().status_hint.clone();
         let result = self.app_state.borrow_mut().dispatch_action(action);
         if result.is_ok() {
             let current_project_path = self.app_state.borrow().current_project_path.clone();
@@ -437,8 +438,24 @@ impl SelfHostedUiHost {
                 }
                 self.refresh_recovery_candidates();
             }
+        } else if let Err(err) = &result {
+            self.set_unreported_action_error_status(previous_status_hint, err);
         }
         result
+    }
+
+    fn set_unreported_action_error_status(
+        &self,
+        previous_status_hint: Option<(String, bool)>,
+        err: &mondrian_core::MondrianError,
+    ) {
+        let mut state = self.app_state.borrow_mut();
+        let current_status_hint = state.status_hint.clone();
+        let has_new_error = current_status_hint.as_ref().is_some_and(|(_, is_error)| *is_error)
+            && current_status_hint != previous_status_hint;
+        if !has_new_error {
+            state.set_status_hint(format!("操作失败：{err}"), true);
+        }
     }
 
     fn record_recent_project(&mut self, project_file: PathBuf) {
@@ -1152,6 +1169,51 @@ mod tests {
         state.sequence = Some(Sequence::new("Edit"));
         state.current_project_path = Some(PathBuf::from("E:/projects/edit.mdp"));
         state
+    }
+
+    #[test]
+    fn editor_action_error_without_status_hint_surfaces_in_status_bar_state() {
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            AppState::new(),
+            SelfHostedPreferences::default(),
+            temp_preferences_path("action-error-status"),
+        );
+
+        let err = host
+            .dispatch_editor_action(Action::Custom {
+                namespace: crate::app::ui_actions::TIMELINE_NAMESPACE.to_owned(),
+                name: "unknown".to_owned(),
+                payload: serde_json::Value::Null,
+            })
+            .expect_err("unknown registered UI action should fail");
+
+        let state = host.app_state();
+        let (message, is_error) = state.status_hint.as_ref().expect("status hint");
+        assert!(*is_error);
+        assert!(message.contains("操作失败"));
+        assert!(message.contains("unknown self-hosted UI action"));
+        assert!(err.to_string().contains("unknown self-hosted UI action"));
+    }
+
+    #[test]
+    fn editor_action_error_keeps_specific_status_hint_from_app_state() {
+        let mut state = AppState::new();
+        state.set_status_hint("Previous failure", true);
+        let mut host = SelfHostedUiHost::new_with_preferences_path(
+            state,
+            SelfHostedPreferences::default(),
+            temp_preferences_path("action-specific-error-status"),
+        );
+
+        let _ = host
+            .dispatch_editor_action(Action::ImportMedia(vec![PathBuf::from("")]))
+            .expect_err("empty import should fail");
+
+        let state = host.app_state();
+        let (message, is_error) = state.status_hint.as_ref().expect("status hint");
+        assert!(*is_error);
+        assert_ne!(message, "Previous failure");
+        assert!(message.contains("导入失败"));
     }
 
     fn saved_workspace_app_state(name: &str) -> AppState {

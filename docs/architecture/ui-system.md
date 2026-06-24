@@ -1901,6 +1901,13 @@ event routing and model refresh have completed, so native side effects stay out
 of widget code and out of `AppState`. Native platform close requests must enter
 the same pending-action queue as `app.shell.quit`; entrypoints must not call the
 event-loop exit primitive directly from `WindowEvent::CloseRequested`.
+Editor actions dispatched from the self-hosted host must surface failures in
+the status bar. `AppState` action handlers should set specific localized
+`status_hint` errors when they can explain the failing workflow. If an action
+returns an error without setting a new error hint, `SelfHostedUiHost` writes a
+generic `操作失败：...` fallback so failures are visible without opening a
+diagnostics panel. The fallback must not overwrite a newer action-specific
+error produced by `AppState`.
 Self-hosted UI scale coverage lives in the ignored
 `self_hosted_ui_scale_smoke` test:
 `cargo test -p mondrian-app self_hosted_ui_scale_smoke -- --ignored --nocapture`.

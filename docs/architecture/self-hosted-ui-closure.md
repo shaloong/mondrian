@@ -244,8 +244,11 @@ workflow.
   same-size resize no-ops; real resize reconfigure/relayout/redraw; and
   same-size or size-changing DPI relayout behavior. Startup-to-workspace mode
   mapping and replacement remain owned by the window-session boundary.
-- P4-ERROR-001: Surface app/action errors in self-hosted shell status without
-  requiring Console/Project panel iteration.
+- [done] P4-ERROR-001: Surface app/action errors in self-hosted shell status
+  without requiring Console/Project panel iteration. `SelfHostedUiHost`
+  preserves action-specific `AppState::status_hint` errors and writes a generic
+  error status when an editor action returns an error without reporting one, so
+  shell-dispatched failures cannot disappear into tracing-only diagnostics.
 - P4-PERSIST-001: Verify preferences and workspace layout persistence across
   versions, missing panels, hidden tabs, invalid ratios, and stale panel ids.
 
