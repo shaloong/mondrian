@@ -10,32 +10,27 @@ use std::{sync::mpsc, thread};
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
     automation::{
-        interpolation_mode_from_keyframe, timecode_to_ticks, InterpolationType, Keyframe,
-        PropertyHost, PropertyMutation, PropertyValue, TimeTicks,
+        interpolation_mode_from_keyframe, InterpolationType, Keyframe, PropertyHost,
+        PropertyMutation, PropertyValue, TimeTicks,
     },
     events::{AppEvent, EventBus},
     types::{
-        AssetId, ClipId, Color, ColorEngine, ColorSpace, EffectId, KeyframeId, OcioConfigSource,
-        Rational, Resolution, SequenceId, TimeCode, TrackId,
+        AssetId, ClipId, Color, EffectId, KeyframeId, Rational, Resolution, SequenceId, TimeCode,
+        TrackId,
     },
-    ProjectColorManagement, ProjectSettings,
+    ProjectSettings,
 };
 use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
 };
-use mondrian_export::queue::{JobStatus, RenderQueue};
+use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{
     AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioSyncController, AudioTrackConfig,
     AudioTrackData, ClockRole, RealtimeAudioOutput,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;
-use mondrian_timeline::sequence::{
-    AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, EditingMode, ExportBitDepth, FieldOrder,
-    MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio, PreviewRenderFormat,
-    Sequence, SequenceCollection, SequencePreset, SequenceSettings, VideoDisplayFormat, VideoRange,
-};
-use rfd::FileDialog;
+use mondrian_timeline::sequence::{Sequence, SequenceCollection, SequenceSettings};
 use serde::{Deserialize, Serialize};
 
 const PROJECT_EXTENSION: &str = "mdp";
@@ -47,16 +42,12 @@ mod animation_state;
 mod audio_rendering;
 mod clip_clipboard;
 pub(crate) mod exporting;
-#[allow(dead_code)]
-mod legacy_egui;
-pub(crate) mod media_cache;
 mod playback;
 mod project_lifecycle;
 mod selection;
 mod timeline_commands;
 mod timeline_editing;
 pub mod ui_actions;
-pub(crate) mod viewer_preferences;
 
 use audio_rendering::*;
 use exporting::TimelineExportDraft;
@@ -543,13 +534,6 @@ fn ui_diag_slow_threshold_ms() -> u64 {
     })
 }
 
-fn log_ui_stage_slow(stage: &str, elapsed: std::time::Duration) {
-    let elapsed_ms = elapsed.as_millis() as u64;
-    if elapsed_ms >= ui_diag_slow_threshold_ms() {
-        tracing::warn!("[ui-diag] {} slow: {}ms", stage, elapsed_ms);
-    }
-}
-
 fn audio_idle_warmup_enabled() -> bool {
     static AUDIO_IDLE_WARMUP: OnceLock<bool> = OnceLock::new();
     *AUDIO_IDLE_WARMUP.get_or_init(|| {
@@ -619,39 +603,6 @@ pub(crate) fn app_data_dir() -> PathBuf {
     base.join("mondrian")
 }
 
-fn app_lut_library_dir() -> PathBuf {
-    app_data_dir().join("LUTs")
-}
-
-fn sanitize_filename(raw: &str) -> String {
-    let mut s = raw
-        .chars()
-        .map(|c| {
-            if c == '\\'
-                || c == '/'
-                || c == ':'
-                || c == '*'
-                || c == '?'
-                || c == '"'
-                || c == '<'
-                || c == '>'
-                || c == '|'
-            {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect::<String>();
-
-    s = s.trim().to_string();
-    if s.is_empty() {
-        "未命名项目".to_string()
-    } else {
-        s
-    }
-}
-
 fn ensure_project_extension(path: PathBuf) -> PathBuf {
     let has_expected_ext = path
         .extension()
@@ -663,151 +614,6 @@ fn ensure_project_extension(path: PathBuf) -> PathBuf {
         path
     } else {
         path.with_extension(PROJECT_EXTENSION)
-    }
-}
-
-fn editing_mode_label(value: EditingMode) -> &'static str {
-    match value {
-        EditingMode::Custom => "自定义",
-        EditingMode::Dslr1080p => "DSLR 1080p",
-        EditingMode::Dslr720p => "DSLR 720p",
-        EditingMode::Avchd1080p => "AVCHD 1080p",
-        EditingMode::DigitalCinema4k => "Digital Cinema 4K",
-        EditingMode::SocialVertical1080p => "社媒竖屏 1080p",
-    }
-}
-
-fn frame_rate_label(value: Rational) -> String {
-    let fps = value.to_f64();
-    if (fps.fract()).abs() < 0.001 {
-        format!("{fps:.0} fps")
-    } else if (fps * 10.0).fract().abs() < 0.001 {
-        format!("{fps:.1} fps")
-    } else {
-        format!("{fps:.3} fps")
-    }
-}
-
-fn pixel_aspect_ratio_label(value: PixelAspectRatio) -> &'static str {
-    match value {
-        PixelAspectRatio::Square => "方形像素 (1.0)",
-        PixelAspectRatio::D1DvNtsc => "D1/DV NTSC (0.9091)",
-        PixelAspectRatio::D1DvNtscWidescreen => "D1/DV NTSC 宽银幕 16:9 (1.2121)",
-        PixelAspectRatio::D1DvPal => "D1/DV PAL (1.0940)",
-        PixelAspectRatio::D1DvPalWidescreen => "D1/DV PAL 宽银幕 16:9 (1.4587)",
-        PixelAspectRatio::Anamorphic2x => "变形 2:1 (2.0)",
-        PixelAspectRatio::HdAnamorphic1080 => "HD 变形 1080 (1.333)",
-        PixelAspectRatio::DvcproHd => "DVCPRO HD (1.5)",
-        PixelAspectRatio::Unknown => "未知 PAR",
-    }
-}
-
-fn field_order_label(value: FieldOrder) -> &'static str {
-    match value {
-        FieldOrder::Progressive => "逐行扫描",
-        FieldOrder::UpperFirst => "高场优先",
-        FieldOrder::LowerFirst => "低场优先",
-    }
-}
-
-fn video_display_format_label(value: VideoDisplayFormat) -> &'static str {
-    match value {
-        VideoDisplayFormat::Timecode2997DropFrame => "29.97 fps 丢帧时间码",
-        VideoDisplayFormat::Timecode2997NonDropFrame => "29.97 fps 无丢帧时间码",
-        VideoDisplayFormat::FeetAndFrames16mm => "英尺 + 帧 16mm",
-        VideoDisplayFormat::FeetAndFrames35mm => "英尺 + 帧 35mm",
-        VideoDisplayFormat::Frames => "画框",
-    }
-}
-
-fn color_space_label(value: ColorSpace) -> &'static str {
-    match value {
-        ColorSpace::Rec709 => "Rec. 709",
-        ColorSpace::Rec2100Hlg => "Rec. 2100 HLG",
-        ColorSpace::Rec2100Pq => "Rec. 2100 PQ",
-        ColorSpace::Srgb => "sRGB",
-        ColorSpace::Rec2020 => "Rec. 2020",
-        ColorSpace::DciP3 => "DCI-P3",
-        ColorSpace::AppleLog => "Apple Log",
-        ColorSpace::SLog3 => "S-Log3",
-        ColorSpace::ArriLogC4 => "ARRI LogC4",
-    }
-}
-
-fn color_space_options() -> [ColorSpace; 9] {
-    [
-        ColorSpace::Rec709,
-        ColorSpace::Rec2100Hlg,
-        ColorSpace::Rec2100Pq,
-        ColorSpace::Srgb,
-        ColorSpace::Rec2020,
-        ColorSpace::DciP3,
-        ColorSpace::AppleLog,
-        ColorSpace::SLog3,
-        ColorSpace::ArriLogC4,
-    ]
-}
-
-fn color_workflow_label(value: ColorWorkflow) -> &'static str {
-    match value {
-        ColorWorkflow::DisplayReferred => "显示参考",
-        ColorWorkflow::SceneReferred => "场景参考",
-        ColorWorkflow::Aces => "ACES",
-    }
-}
-
-fn missing_color_metadata_policy_label(value: MissingColorMetadataPolicy) -> &'static str {
-    match value {
-        MissingColorMetadataPolicy::AssumeRec709 => "按 Rec. 709 解释",
-        MissingColorMetadataPolicy::AssumeSequenceWorkingSpace => "按序列工作空间解释",
-        MissingColorMetadataPolicy::RejectMedia => "拒绝导入/渲染",
-    }
-}
-
-fn nested_color_processing_label(value: NestedColorProcessing) -> &'static str {
-    match value {
-        NestedColorProcessing::PreserveChildWorkingSpace => "保留子序列工作空间",
-        NestedColorProcessing::ForceParentWorkingSpace => "强制父序列工作空间",
-        NestedColorProcessing::BakeChildOutputTransform => "烘焙子序列输出变换",
-    }
-}
-
-fn video_range_label(value: VideoRange) -> &'static str {
-    match value {
-        VideoRange::Full => "全范围",
-        VideoRange::Legal => "视频合法范围",
-    }
-}
-
-fn export_bit_depth_label(value: ExportBitDepth) -> &'static str {
-    match value {
-        ExportBitDepth::Eight => "8-bit",
-        ExportBitDepth::Ten => "10-bit",
-        ExportBitDepth::SixteenFloat => "16-bit float",
-    }
-}
-
-fn audio_display_format_label(value: AudioDisplayFormat) -> &'static str {
-    match value {
-        AudioDisplayFormat::AudioSamples => "音频采样",
-        AudioDisplayFormat::Milliseconds => "毫秒",
-    }
-}
-
-fn audio_channel_layout_label(value: AudioChannelLayout) -> &'static str {
-    match value {
-        AudioChannelLayout::Mono => "单声道",
-        AudioChannelLayout::Stereo => "立体声",
-        AudioChannelLayout::Surround51 => "5.1 环绕声",
-    }
-}
-
-fn preview_render_format_label(value: PreviewRenderFormat) -> &'static str {
-    match value {
-        PreviewRenderFormat::IFrameOnly => "I-frame Only",
-        PreviewRenderFormat::ProResProxy => "ProRes Proxy",
-        PreviewRenderFormat::DnxHrLb => "DNxHR LB",
-        PreviewRenderFormat::LosslessRgba => "无损 RGBA",
     }
 }
 
@@ -917,33 +723,6 @@ pub(crate) fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate
 
     candidates.sort_by_key(|m| std::cmp::Reverse(m.saved_at_unix_ms));
     candidates
-}
-
-fn clear_all_crash_recovery_points() -> anyhow::Result<usize> {
-    let root = std::env::temp_dir().join("mondrian-runtime");
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(0),
-    };
-
-    let mut removed_files = 0usize;
-    for entry in entries {
-        let entry = match entry {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let autosave_dir = entry.path().join("autosave");
-        if !autosave_dir.exists() {
-            continue;
-        }
-
-        if let Ok(files) = fs::read_dir(&autosave_dir) {
-            removed_files += files.filter_map(Result::ok).count();
-        }
-        let _ = fs::remove_dir_all(&autosave_dir);
-    }
-
-    Ok(removed_files)
 }
 
 fn collect_files_by_name(

@@ -1,4 +1,6 @@
-//! Route-level guards for keeping legacy egui out of product launch paths.
+//! Route-level guards for keeping the product on the self-hosted UI path.
+
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BinEntry {
@@ -102,65 +104,36 @@ fn product_main_calls_only_the_self_hosted_window_runner() {
 }
 
 #[test]
-fn legacy_egui_reference_is_not_public_crate_api() {
+fn legacy_egui_reference_code_is_removed_from_product_crate() {
+    let manifest = include_str!("../Cargo.toml");
     let lib_rs = include_str!("../src/lib.rs");
     let app_rs = include_str!("../src/app/mod.rs");
-    let legacy_app_rs = include_str!("../src/app/legacy_egui/app.rs");
-    let legacy_boundary_rs = include_str!("../src/app/legacy_egui/mod.rs");
-    let legacy_preferences_rs = include_str!("../src/app/legacy_egui/preferences_model.rs");
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    assert!(
-        lib_rs.contains("pub(crate) mod egui_ui;"),
-        "legacy egui module should stay crate-private while it is reference code"
-    );
-    assert!(
-        !lib_rs.contains("pub mod egui_ui;"),
-        "legacy egui module must not be exported as public API"
-    );
-    assert!(
-        lib_rs.contains("pub(crate) mod shortcuts;"),
-        "legacy egui shortcut preference module should stay crate-private"
-    );
-    assert!(
-        !lib_rs.contains("pub mod shortcuts;"),
-        "legacy egui shortcut preference module must not expose egui key types as public API"
-    );
-    assert!(
-        !app_rs.contains("struct MondrianApp"),
-        "legacy eframe app type must not live in app/mod.rs"
-    );
-    assert!(
-        legacy_app_rs.contains("pub(in crate::app) struct MondrianApp"),
-        "legacy eframe app type should stay restricted to the app legacy boundary"
-    );
-    assert!(
-        !legacy_app_rs.contains("pub(crate) struct MondrianApp")
-            && !legacy_app_rs.contains("pub struct MondrianApp")
-            && !app_rs.contains("pub struct MondrianApp"),
-        "legacy eframe app type must not be exported as a product route or crate API"
-    );
-    assert!(
-        legacy_boundary_rs.contains("pub(in crate::app) mod app;"),
-        "legacy eframe app implementation should stay behind the legacy boundary"
-    );
-    assert!(
-        !app_rs.contains("pub struct MondrianApp"),
-        "legacy eframe app type must not be exported as a product route"
-    );
-    assert!(
-        app_rs.contains("mod legacy_egui;"),
-        "legacy eframe modules should stay behind an explicit legacy boundary"
-    );
-    assert!(
-        legacy_boundary_rs.contains("pub(in crate::app) mod preferences_model;"),
-        "legacy egui preference schema should stay behind the legacy boundary"
-    );
-    assert!(
-        !app_rs.contains("struct AppPreferences"),
-        "legacy egui preference schema must not live in app/mod.rs"
-    );
-    assert!(
-        legacy_preferences_rs.contains("struct AppPreferences"),
-        "legacy egui preference schema should remain isolated while the reference app compiles"
-    );
+    for forbidden in [
+        "mod egui_ui",
+        "mod shortcuts",
+        "legacy_egui",
+        "MondrianApp",
+        "AppPreferences",
+    ] {
+        assert!(
+            !lib_rs.contains(forbidden) && !app_rs.contains(forbidden),
+            "legacy UI token `{forbidden}` must not remain in app crate entry modules"
+        );
+    }
+
+    for removed_path in ["src/egui_ui", "src/app/legacy_egui", "src/shortcuts.rs"] {
+        assert!(
+            !manifest_dir.join(removed_path).exists(),
+            "legacy UI path `{removed_path}` must stay deleted"
+        );
+    }
+
+    for forbidden_dependency in ["egui", "eframe", "egui-wgpu", "egui_extras"] {
+        assert!(
+            !manifest.contains(forbidden_dependency),
+            "legacy UI dependency `{forbidden_dependency}` must stay removed from mondrian-app"
+        );
+    }
 }

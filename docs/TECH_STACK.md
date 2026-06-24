@@ -70,33 +70,29 @@ Linux   → Vulkan
 WebGPU  → 浏览器版（未来）
 ```
 
-当前使用 wgpu 29.0，与 egui 0.34 共享同一 wgpu 设备（unified GPU），preview 与 export compositor 均通过同一 device/queue 提交工作。
+当前使用 wgpu 29.0。产品 UI 是 self-hosted winit/wgpu shell；preview 与
+export compositor 均通过同一 device/queue 语义提交工作，不再保留 egui/eframe
+产品路径。
 
 ---
 
-## 四、UI 框架：两阶段策略
+## 四、UI 框架：self-hosted winit/wgpu
 
-### Phase 1（原型 / v0.1~v0.2）：egui
+Mondrian 的产品 UI 走自研 self-hosted 栈：
 
-````toml
-egui     = "0.34"
-eframe   = "0.34"
 ```text
+winit / mondrian-platform
+wgpu / mondrian-ui-renderer
+cosmic-text / mondrian-ui-text
+mondrian-ui-core / layout / events / widgets / tooltip / theme
+mondrian-editor-ui / mondrian-app::self_hosted
+```
 
-- 纯 Rust，零依赖
-- 立即模式，适合开发调试面板
-- 可内嵌到 wgpu 渲染窗口（egui-wgpu）
-
-### Phase 2（生产 / v0.3+）：CXX-Qt
-
-```toml
-cxx-qt     = "0.7"
-cxx-qt-lib = "0.7"
-````
-
-- Qt Quick (QML) 作为 UI 层
-- Rust 作为逻辑/引擎层
-- 原因：专业 NLE 软件需要复杂的可停靠面板、原生菜单、拖拽行为
+- Rust 负责窗口、事件、布局、渲染、组件、文本、主题和编辑器状态接入。
+- UI token、dock/panel、overlay、shortcut、IME、tooltip、drag/drop、viewer 和
+  timeline 行为在 self-hosted 栈内收敛。
+- 旧 egui/eframe 原型代码已从 `mondrian-app` crate 删除；后续 UI 工作不得新增
+  egui 兼容路径。
 
 ---
 

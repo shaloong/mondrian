@@ -267,24 +267,19 @@ workflow.
 - [done] P5-ROUTE-001: Remove or quarantine product entrypoints that can still
   launch legacy egui unintentionally. The product `mondrian` binary remains the
   only default run target and launches `self_hosted::window::run_self_hosted_app`;
-  developer binaries are explicitly self-hosted diagnostics. Legacy egui modules
-  and `MondrianApp` are crate-private reference code, stale plugin docs no
-  longer advertise `mondrian_app::egui_ui`, and an integration route contract
-  test now guards the manifest, `main.rs`, and legacy API visibility.
+  developer binaries are explicitly self-hosted diagnostics. The legacy egui
+  modules and `MondrianApp` implementation have been deleted, stale plugin docs
+  no longer advertise `mondrian_app::egui_ui`, and an integration route contract
+  test now guards the manifest, `main.rs`, dependency graph, and removed source
+  paths.
 - P5-CODE-001: Delete legacy egui code that is no longer needed as reference, or
-  move it behind an explicit reference-only boundary. Progress: legacy egui
-  shortcut preferences are crate-private, and media-cache filesystem cleanup /
-  usage policy has moved from `egui_ui::viewer_panel` into the neutral
-  `app::media_cache` module with focused coverage. Viewer preference
-  persistence/defaults have also moved from the legacy viewer panel into the
-  neutral `app::viewer_preferences` module, leaving the old viewer as a
-  snapshot/apply consumer while it remains reference code. Legacy egui
-  eframe UI modules, including the old `MondrianApp` implementation, are now
-  isolated under `app::legacy_egui`, and the legacy preference/new-project
-  draft schema lives in `legacy_egui::preferences_model`, with route-contract
-  coverage preventing them from drifting back into `app/mod.rs`. This boundary
-  is a deletion boundary, not a compatibility layer: new product UI work must
-  land on the self-hosted stack.
+  move useful helpers into neutral self-hosted/app modules. Progress: the old
+  `egui_ui`, `app::legacy_egui`, crate-level legacy `shortcuts`, and temporary
+  egui-extraction helper modules have been deleted from `mondrian-app`;
+  route-contract coverage now keeps them from returning. New product UI work
+  must land on the self-hosted stack, and future cache/viewer preference logic
+  must be introduced from real self-hosted call sites rather than compatibility
+  leftovers.
 - P5-DOCS-001: Update architecture docs to describe the final self-hosted UI
   stack, ownership model, test strategy, and removed compatibility paths.
   Progress: overview, renderer, export, and design-guideline docs now describe

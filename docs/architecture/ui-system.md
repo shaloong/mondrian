@@ -57,33 +57,19 @@ galleries, pipeline smoke tests, and visual diagnostics. Binaries in `src/bin`
 must stay thin; reusable runtime, panel, or mapping logic belongs in library
 modules. The product shell should not be mirrored by a second launcher binary.
 
-The legacy egui UI lives under `mondrian-app/src/egui_ui` and remains migration
-reference code only. That module contains egui panels, egui theme tokens,
-viewer helpers, and the old timeline implementation. New self-hosted UI code
-must not be added there unless it is deliberately deleting or extracting legacy
-behavior. It is crate-private and must not be exposed as public API, product
-binary code, or plugin-extension guidance while it remains reference code.
-The legacy egui shortcut preference module at `mondrian-app/src/shortcuts.rs`
-is also crate-private; new shortcut routing, labels, persistence, and
-Preferences UI must use `self_hosted::shortcuts` and
-`SelfHostedPreferences.shortcut_overrides`.
-Legacy eframe/egui editor modules, including the old `MondrianApp`, are isolated
-under `mondrian-app::app::legacy_egui`. Legacy preference and new-project draft
-schema lives in `legacy_egui::preferences_model` with visibility restricted to
-the `app` module. This is a deletion boundary, not a compatibility layer: new UI
-work, product preferences, and dialog-local draft models must use the
-self-hosted stack (`self_hosted::*`, including `self_hosted::preferences_store`).
-Media-cache filesystem policy is not a UI concern: `mondrian-app::app::media_cache`
-owns cache usage statistics, size/age cleanup, and clear-directory behavior.
-Legacy viewer panels may call it before clearing their GPU textures, decoder
-pools, and prefetch state, but app preferences and future self-hosted
-preferences must not depend on `egui_ui::viewer_panel` for cache maintenance.
-Viewer preference persistence is also an app-layer concern:
-`mondrian-app::app::viewer_preferences` owns preview scale, proxy/decode,
-prefetch/cache toggles, display profile, and canvas-background defaults as a
-toolkit-neutral serialized model. Legacy viewer panels may snapshot/apply that
-model while they remain reference code, but they must not own the schema or
-default migration rules.
+The legacy egui UI has been removed from `mondrian-app`: there is no
+`src/egui_ui`, `src/app/legacy_egui`, or old crate-level `shortcuts.rs` module.
+New UI work, product preferences, shortcut routing, and dialog-local draft
+models must use the self-hosted stack (`self_hosted::*`, including
+`self_hosted::shortcuts` and `self_hosted::preferences_store`). Reintroducing an
+egui/eframe product path is a route-contract violation.
+The temporary media-cache and viewer-preference extractions that existed only to
+separate legacy egui code have also been removed. Future cache policy, preview
+scale, proxy/decode, prefetch, display-profile, or viewer-canvas preferences
+must be introduced from an actual self-hosted product call site as app-layer
+services or `self_hosted::preferences_store` schema, not as compatibility
+adapters for removed egui behavior. Widget code must not own filesystem cleanup
+or schema migration rules.
 The Phase 5 parity audit lives in
 `docs/architecture/self-hosted-ui-parity.md`. It is the source of truth for
 which legacy egui workflows are product-covered by self-hosted UI, which panels
@@ -1123,7 +1109,7 @@ Timeline context menu entries for adding video/audio tracks emit only a
 and `AppState` routes it through the existing undoable track creation commands.
 Timeline pointer tools are widget-local session state. `TimelineTool::Select`
 keeps normal selection, move, trim, and seek behavior. `TimelineTool::Blade`
-matches the egui-era workflow without adding a separate app command by seeking
+matches the editor workflow without adding a separate app command by seeking
 to the clicked frame and dispatching `TimelineEditCommand::SplitAtPlayhead`.
 Shortcut keys `V` and `B` switch these widget-local tools; undoable timeline
 mutation still starts only at the app command boundary. `TimelineViewState`
@@ -1191,9 +1177,8 @@ Nested-sequence navigation stays in this boundary as well. `TimelineClip` only
 marks that a clip is nested, never stores a `SequenceId`; when the clip context
 menu is opened the widget emits `TimelineEditCommand::OpenNestedSequence` with
 the local `TimelineClipRef`, and the app adapter resolves that ref to
-`ui.timeline.open_nested_sequence`. `AppState` then calls the same
-`open_nested_sequence` path used by the egui timeline, preserving sequence
-navigation stack behavior.
+`ui.timeline.open_nested_sequence`. `AppState` then calls the centralized
+`open_nested_sequence` path, preserving sequence navigation stack behavior.
 Sequence navigation follows the same action boundary, but it is not exposed as
 a top-level menu bucket. Nested-sequence return, active-default selection,
 sequence creation, switching, duplication, deletion, and settings belong in
@@ -1268,8 +1253,8 @@ plain delete.
 Timeline structure mutations that can invalidate ids, such as removing tracks,
 must call the app selection pruning helper after the sequence mutation succeeds.
 That pruning removes stale selected tracks, clips, masks, and animation
-keyframes regardless of whether the mutation came from legacy egui,
-self-hosted UI, shortcuts, or scripts.
+keyframes regardless of whether the mutation came from self-hosted UI,
+shortcuts, scripts, or another app command caller.
 Panel model adapters should read primary and multi-clip selection through the
 same AppState selection queries instead of depending on `SelectionState` fields.
 Timeline mutations that move clips should refresh selected clip track metadata
@@ -1665,7 +1650,7 @@ presets remain template factories and can always be selected again to reset the
 visible dock tree without deleting the saved Custom layout.
 The self-hosted Assets panel maps real library cards to `ui.assets.prepare_drag`;
 `AppState` resolves the asset record and reuses the existing `begin_drag_asset`
-path so later Timeline drop handling stays shared with the egui implementation.
+path so later Timeline drop handling stays shared across self-hosted panels.
 The same left dock hosts the Effects browser as an `Effects` tab so effect
 insertion remains visible without changing the default split layout.
 Asset cards are fixed-size browser cells. Their preview well uses a 16:9 aspect
@@ -1705,7 +1690,8 @@ state directly. Real timeline panels should map `Sequence` / `Track` / `Clip`
 data into `TimelineTrack` / `TimelineClip` view models, then translate
 selection and seek callbacks into semantic `Action`s or undoable commands at
 the app layer. This keeps the renderer-facing timeline primitive testable while
-preserving a clean path for progressively replacing the old egui timeline.
+preserving a clean separation between reusable timeline widgets and product
+state mutation.
 The visual baseline is compact NLE density: 42px default tracks, 28px ruler,
 132px minimum track header column, subtle alternating lane fills, weak row
 separators, a one-pixel playhead with a small five-sided ruler handle,

@@ -106,7 +106,7 @@ DecoderPool::get_frame(clip_id, local_time)
 FrameCompositor::composite(clips, effects, keyframes)
   → GPU compositing (BatchedCompositor, up to 4 layers/pass)
   → GPU color conversion (Rec709/sRGB)
-  → Preview adapter (self-hosted ViewerSurface, legacy egui callback, or export)
+  → Preview adapter (self-hosted ViewerSurface or export)
       │
       ▼
 预览窗口显示

@@ -1,6 +1,10 @@
 use super::*;
+use mondrian_core::ColorSpace;
 use mondrian_effects::EffectRenderOp;
 use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation, Transform2D};
+use mondrian_timeline::sequence::{
+    ColorWorkflow, ExportBitDepth, FieldOrder, PixelAspectRatio, VideoRange,
+};
 
 fn create_state_with_sequence() -> AppState {
     let mut state = AppState::new();

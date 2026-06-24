@@ -1020,5 +1020,5 @@ pub(super) fn find_clip_mut_by_selection(
 }
 
 // ─────────────────────────────────────────────
-//  MondrianApp — eframe::App 实现
+//  Timeline editing helpers
 // ─────────────────────────────────────────────

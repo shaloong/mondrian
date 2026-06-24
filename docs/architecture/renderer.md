@@ -207,8 +207,7 @@ MONDRIAN_RENDER_PROFILE=1 cargo run -p mondrian-app
 
 ## 7. 预览集成边界
 
-BatchedCompositor 的核心职责是输出可由预览或导出消费的合成结果。legacy egui
-reference path 通过 `CallbackTrait` 以零拷贝方式直接提交给 egui 预览窗口；self-hosted
+BatchedCompositor 的核心职责是输出可由预览或导出消费的合成结果。self-hosted
 产品路径由 `SelfHostedPreviewService` / `ViewerSurface` 负责把 app-state 预览结果映射为
 自研 UI 可绘制的 frame，不应复制 renderer/export 的 timeline 解释规则。
 
@@ -221,10 +220,9 @@ pub struct CompositedFrame {
     pub color_space: ColorSpace,
 }
 
-/// Legacy egui reference callback; product self-hosted preview uses its own
-/// ViewerSurface adapter boundary.
-pub trait CallbackTrait {
-    fn paint(&self, frame: &CompositedFrame, ui: &mut egui::Ui);
+/// Product preview adapter boundary.
+pub trait PreviewFrameConsumer {
+    fn submit(&self, frame: &CompositedFrame);
 }
 ```
 
