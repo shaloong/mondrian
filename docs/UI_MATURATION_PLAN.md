@@ -94,6 +94,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [ ] Split large widgets into state/model, layout/geometry, events, paint, and tests.
 - [ ] Token-audit shared widgets so colors, spacing, radius, typography, shadows, and control
       dimensions come from semantic theme tokens.
+- [x] Tokenize PanelList row chrome, badge sizing/radius, accent swatches, focus/drop rings, and
+      scrollbar alpha against theme-derived visual tokens.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.

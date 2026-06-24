@@ -11,6 +11,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::Theme;
 use std::time::{Duration, Instant};
 
 use crate::paint::{centered_text_origin_y, color_with_alpha, mix_color};
@@ -27,6 +28,92 @@ const ROW_ICON_GAP: f32 = 8.0;
 const ROW_ICON_SIZE: f32 = 16.0;
 const FILTER_INPUT_HEIGHT: f32 = 30.0;
 const FILTER_INPUT_GAP: f32 = 10.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PanelListVisualTokens {
+    panel_background_mix: f32,
+    row_radius: f32,
+    row_selected_alpha: f32,
+    row_hover_alpha: f32,
+    row_clip_inset_x: f32,
+    row_clip_inset_y: f32,
+    row_text_padding_x: f32,
+    tree_indent: f32,
+    tree_icon_size: f32,
+    tree_icon_gap: f32,
+    badge_gap: f32,
+    badge_empty_reserved: f32,
+    badge_right_inset: f32,
+    badge_height_padding: f32,
+    badge_min_height: f32,
+    badge_max_height: f32,
+    badge_radius: f32,
+    badge_clip_inset_x: f32,
+    badge_clip_inset_y: f32,
+    badge_text_inset_x: f32,
+    badge_width_padding: f32,
+    badge_min_width: f32,
+    badge_max_width: f32,
+    badge_max_width_fraction: f32,
+    accent_x_offset: f32,
+    accent_width: f32,
+    accent_vertical_inset: f32,
+    accent_min_height: f32,
+    accent_radius: f32,
+    accent_alpha: f32,
+    focus_outset: f32,
+    focus_radius: f32,
+    focus_alpha: f32,
+    drop_fill_alpha: f32,
+    drop_ring_alpha: f32,
+    scrollbar_idle_alpha: f32,
+    scrollbar_active_alpha: f32,
+}
+
+impl PanelListVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            panel_background_mix: 0.24,
+            row_radius: spacing.radius_sm,
+            row_selected_alpha: 0.085,
+            row_hover_alpha: 0.05,
+            row_clip_inset_x: spacing.xs,
+            row_clip_inset_y: spacing.border_emphasis,
+            row_text_padding_x: spacing.md,
+            tree_indent: spacing.icon_size,
+            tree_icon_size: spacing.icon_size,
+            tree_icon_gap: spacing.xs,
+            badge_gap: spacing.icon_size,
+            badge_empty_reserved: spacing.sm + spacing.border_emphasis,
+            badge_right_inset: spacing.md,
+            badge_height_padding: spacing.md + spacing.border_emphasis,
+            badge_min_height: spacing.icon_size + spacing.border_emphasis,
+            badge_max_height: spacing.icon_size + spacing.sm + spacing.border_emphasis,
+            badge_radius: spacing.radius_sm,
+            badge_clip_inset_x: spacing.sm,
+            badge_clip_inset_y: spacing.border_standard,
+            badge_text_inset_x: spacing.sm + spacing.border_emphasis,
+            badge_width_padding: spacing.icon_size + spacing.border_emphasis,
+            badge_min_width: spacing.icon_size * 2.0,
+            badge_max_width: spacing.icon_size * 6.0 + spacing.md + spacing.border_emphasis,
+            badge_max_width_fraction: 0.34,
+            accent_x_offset: spacing.sm + spacing.border_emphasis,
+            accent_width: spacing.border_emphasis + spacing.border_standard,
+            accent_vertical_inset: spacing.md - spacing.border_standard,
+            accent_min_height: spacing.icon_size - spacing.sm,
+            accent_radius: (spacing.border_emphasis + spacing.border_standard) * 0.5,
+            accent_alpha: 0.72,
+            focus_outset: spacing.border_emphasis,
+            focus_radius: spacing.radius_sm + spacing.border_emphasis,
+            focus_alpha: 0.34,
+            drop_fill_alpha: 0.12,
+            drop_ring_alpha: 0.48,
+            scrollbar_idle_alpha: 0.64,
+            scrollbar_active_alpha: 0.88,
+        }
+    }
+}
 
 /// Dynamic action factory used when a panel-list item changes state.
 pub type PanelListAction = dyn Fn(usize, &PanelListItem) -> Action;
@@ -762,30 +849,30 @@ impl PanelList {
     fn paint_row(&self, ctx: &mut PaintContext, index: usize, row: Rect) {
         let item = &self.items[index];
         let colors = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
+        let visual = PanelListVisualTokens::from_theme(ctx.theme);
         let selected = self.selected == Some(index);
         let hovered = self.hovered == Some(index) && !item.disabled;
 
         let fill = if selected {
-            color_with_alpha(colors.foreground, 0.085)
+            color_with_alpha(colors.foreground, visual.row_selected_alpha)
         } else if hovered {
-            color_with_alpha(colors.foreground, 0.05)
+            color_with_alpha(colors.foreground, visual.row_hover_alpha)
         } else {
             Color::TRANSPARENT
         };
         if fill.a > 0.0 {
-            ctx.encoder.draw_rect(row, fill, 6.0);
+            ctx.encoder.draw_rect(row, fill, visual.row_radius);
         }
 
         let badge_width = item
             .badge
             .as_ref()
-            .map(|badge| panel_list_badge_width(ctx, &badge.label, row.width))
+            .map(|badge| panel_list_badge_width(ctx, &visual, &badge.label, row.width))
             .unwrap_or(0.0);
         let badge_reserved = if item.badge.is_some() {
-            badge_width + 14.0
+            badge_width + visual.badge_gap
         } else {
-            8.0
+            visual.badge_empty_reserved
         };
         let title_color = if item.disabled {
             colors.muted_foreground
@@ -798,15 +885,16 @@ impl PanelList {
             title_color
         };
         let has_tree_gutter = item.tree_expanded.is_some() || item.tree_depth > 0;
-        let mut text_x = row.x + 10.0 + item.tree_depth as f32 * 14.0;
+        let mut text_x =
+            row.x + visual.row_text_padding_x + item.tree_depth as f32 * visual.tree_indent;
 
-        ctx.push_clip(row.inset(4.0, 2.0));
+        ctx.push_clip(row.inset(visual.row_clip_inset_x, visual.row_clip_inset_y));
         if has_tree_gutter {
             let icon_rect = Rect::new(
                 text_x,
-                row.y + (row.height - 14.0).max(0.0) * 0.5,
-                14.0,
-                14.0,
+                row.y + (row.height - visual.tree_icon_size).max(0.0) * 0.5,
+                visual.tree_icon_size,
+                visual.tree_icon_size,
             );
             if let Some(expanded) = item.tree_expanded {
                 let icon = if expanded {
@@ -818,12 +906,21 @@ impl PanelList {
                     icon.paint(ctx, icon_rect, color_with_alpha(text_color, 0.82));
                 }
             }
-            text_x += 18.0;
+            text_x += visual.tree_icon_size + visual.tree_icon_gap;
         }
         if let Some(accent) = item.accent {
-            let swatch = Rect::new(row.x + 8.0, row.y + 9.0, 3.0, (row.height - 18.0).max(8.0));
-            ctx.encoder.draw_rect(swatch, color_with_alpha(accent, 0.72), 1.5);
-            text_x += 10.0;
+            let swatch = Rect::new(
+                row.x + visual.accent_x_offset,
+                row.y + visual.accent_vertical_inset,
+                visual.accent_width,
+                (row.height - visual.accent_vertical_inset * 2.0).max(visual.accent_min_height),
+            );
+            ctx.encoder.draw_rect(
+                swatch,
+                color_with_alpha(accent, visual.accent_alpha),
+                visual.accent_radius,
+            );
+            text_x += visual.accent_x_offset + visual.accent_width;
         }
         if let Some(icon) = &item.icon {
             let icon_size = ctx.theme.spacing.icon_size.clamp(1.0, ROW_ICON_SIZE);
@@ -864,22 +961,26 @@ impl PanelList {
         ctx.pop_clip();
 
         if let Some(badge) = &item.badge {
-            let badge_height = (row.height - 12.0).clamp(16.0, 22.0);
+            let badge_height = (row.height - visual.badge_height_padding)
+                .clamp(visual.badge_min_height, visual.badge_max_height);
             let badge_rect = Rect::new(
-                row.x + row.width - badge_width - 10.0,
+                row.x + row.width - badge_width - visual.badge_right_inset,
                 row.y + (row.height - badge_height) * 0.5,
                 badge_width,
                 badge_height,
             );
             let (fill, text) = panel_list_badge_colors(ctx, badge);
-            ctx.encoder.draw_rect(badge_rect, fill, spacing.radius_sm);
-            ctx.push_clip(badge_rect.inset(6.0, 1.0));
+            ctx.encoder.draw_rect(badge_rect, fill, visual.badge_radius);
+            ctx.push_clip(badge_rect.inset(visual.badge_clip_inset_x, visual.badge_clip_inset_y));
             let badge_text_y =
                 centered_text_origin_y(badge_rect, ctx.theme.typography.small.line_height);
             ctx.encoder.draw_text(
                 &badge.label,
                 ctx.theme.typography.small.font_size,
-                snap_point(Point::new(badge_rect.x + 8.0, badge_text_y)),
+                snap_point(Point::new(
+                    badge_rect.x + visual.badge_text_inset_x,
+                    badge_text_y,
+                )),
                 text,
             );
             ctx.pop_clip();
@@ -887,10 +988,16 @@ impl PanelList {
     }
 }
 
-fn panel_list_badge_width(ctx: &PaintContext, label: &str, row_width: f32) -> f32 {
+fn panel_list_badge_width(
+    ctx: &PaintContext,
+    visual: &PanelListVisualTokens,
+    label: &str,
+    row_width: f32,
+) -> f32 {
     let text_width = measure_single_line(label, ctx.theme.typography.small.font_size).0;
-    let max_width = (row_width * 0.34).clamp(32.0, 96.0);
-    (text_width + 16.0).clamp(32.0, max_width)
+    let max_width = (row_width * visual.badge_max_width_fraction)
+        .clamp(visual.badge_min_width, visual.badge_max_width);
+    (text_width + visual.badge_width_padding).clamp(visual.badge_min_width, max_width)
 }
 
 fn panel_list_badge_colors(ctx: &PaintContext, badge: &PanelListBadge) -> (Color, Color) {
@@ -1141,10 +1248,10 @@ impl Widget for PanelList {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
+        let visual = PanelListVisualTokens::from_theme(ctx.theme);
         ctx.encoder.draw_rect(
             self.bounds,
-            mix_color(colors.background, colors.card, 0.24),
+            mix_color(colors.background, colors.card, visual.panel_background_mix),
             0.0,
         );
 
@@ -1198,32 +1305,38 @@ impl Widget for PanelList {
         if let Some(thumb) = self.scrollbar_thumb_rect() {
             let mut thumb_color = colors.scrollbar_thumb;
             thumb_color.a = if self.scrollbar_hovered || self.scrollbar_dragging {
-                0.88
+                visual.scrollbar_active_alpha
             } else {
-                0.64
+                visual.scrollbar_idle_alpha
             };
             ctx.encoder.draw_rect(thumb, thumb_color, thumb.width * 0.5);
         }
 
         if self.focus_visible {
             let mut ring = colors.ring;
-            ring.a = 0.34;
-            ctx.encoder
-                .draw_rect(self.bounds.inset(-2.0, -2.0), ring, spacing.radius_sm + 2.0);
+            ring.a = visual.focus_alpha;
+            ctx.encoder.draw_rect(
+                self.bounds.inset(-visual.focus_outset, -visual.focus_outset),
+                ring,
+                visual.focus_radius,
+            );
         }
 
         if self.drop_hovered {
             let mut fill = colors.accent;
-            fill.a = 0.12;
+            fill.a = visual.drop_fill_alpha;
             ctx.encoder.draw_rect(
-                self.viewport.inset(-2.0, -2.0),
+                self.viewport.inset(-visual.focus_outset, -visual.focus_outset),
                 fill,
-                spacing.radius_sm + 1.0,
+                (visual.focus_radius - ctx.theme.spacing.border_standard).max(0.0),
             );
             let mut ring = colors.ring;
-            ring.a = 0.48;
-            ctx.encoder
-                .draw_rect(self.bounds.inset(-2.0, -2.0), ring, spacing.radius_sm + 2.0);
+            ring.a = visual.drop_ring_alpha;
+            ctx.encoder.draw_rect(
+                self.bounds.inset(-visual.focus_outset, -visual.focus_outset),
+                ring,
+                visual.focus_radius,
+            );
         }
     }
 
@@ -1315,6 +1428,7 @@ mod tests {
         rects: usize,
         rect_bounds: Vec<Rect>,
         rect_colors: Vec<Color>,
+        rect_radii: Vec<f32>,
         lines: usize,
         triangles: usize,
         raster_images: usize,
@@ -1329,10 +1443,11 @@ mod tests {
 
         fn pop_clip(&mut self) {}
 
-        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
             self.rects += 1;
             self.rect_bounds.push(bounds);
             self.rect_colors.push(color);
+            self.rect_radii.push(corner_radius);
         }
 
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
@@ -2692,6 +2807,21 @@ mod tests {
     }
 
     #[test]
+    fn panel_list_visual_tokens_follow_theme_spacing() {
+        let theme = ThemePreset::Dark.build();
+        let visual = PanelListVisualTokens::from_theme(&theme);
+
+        assert_eq!(visual.row_radius, theme.spacing.radius_sm);
+        assert_eq!(visual.badge_radius, theme.spacing.radius_sm);
+        assert_eq!(
+            visual.focus_radius,
+            theme.spacing.radius_sm + theme.spacing.border_emphasis
+        );
+        assert_eq!(visual.tree_icon_size, theme.spacing.icon_size);
+        assert_eq!(visual.badge_min_width, theme.spacing.icon_size * 2.0);
+    }
+
+    #[test]
     fn paint_badge_uses_dynamic_width_and_semantic_tone() {
         let mut list = PanelList::new(
             "Effects",
@@ -2721,6 +2851,13 @@ mod tests {
                 .iter()
                 .any(|color| *color == color_with_alpha(theme.colors.warning, 0.22)),
             "warning badges should use the theme warning token"
+        );
+        assert!(
+            encoder
+                .rect_radii
+                .iter()
+                .any(|radius| (*radius - theme.spacing.radius_sm).abs() < f32::EPSILON),
+            "badge radius should come from theme spacing tokens"
         );
     }
 
@@ -2793,6 +2930,13 @@ mod tests {
                 .iter()
                 .any(|color| *color == color_with_alpha(theme.colors.foreground, 0.085)),
             "selected rows should use a subdued neutral fill"
+        );
+        assert!(
+            encoder
+                .rect_radii
+                .iter()
+                .any(|radius| (*radius - theme.spacing.radius_sm).abs() < f32::EPSILON),
+            "selected row radius should come from theme spacing tokens"
         );
         assert!(!encoder.rect_bounds.windows(2).any(|pair| {
             pair[0].width > pair[1].width
