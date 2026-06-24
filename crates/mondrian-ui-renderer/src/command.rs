@@ -146,6 +146,131 @@ pub enum DrawCommand {
     PopTransform,
 }
 
+/// Structural diagnostics for a draw command stream.
+///
+/// The batch builder remains tolerant so a bad widget does not crash the frame in
+/// release builds. These counters make those issues observable by tests, debug
+/// overlays, and frame telemetry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DrawCommandDiagnostics {
+    /// Total commands inspected.
+    pub command_count: usize,
+    /// Deepest clip stack depth reached by the command stream.
+    pub max_clip_depth: u32,
+    /// Deepest transform stack depth reached by the command stream.
+    pub max_transform_depth: u32,
+    /// `PopClip` commands without a matching preceding `PushClip`.
+    pub unmatched_clip_pops: u32,
+    /// `PopTransform` commands without a matching preceding `PushTranslate`.
+    pub unmatched_transform_pops: u32,
+    /// Clip pushes still open at the end of the stream.
+    pub unclosed_clip_depth: u32,
+    /// Transform pushes still open at the end of the stream.
+    pub unclosed_transform_depth: u32,
+    /// Text commands that reached a low-level renderer entry point unresolved.
+    pub unresolved_text_commands: u32,
+    /// Raster image commands that have not yet been resolved into image-atlas draws.
+    pub unresolved_raster_images: u32,
+    /// Clip commands with non-finite coordinates or non-positive size.
+    pub invalid_clip_bounds: u32,
+    /// Translate commands with non-finite offsets.
+    pub invalid_translate_offsets: u32,
+}
+
+impl DrawCommandDiagnostics {
+    /// Whether the stream has structural issues that can change rendering semantics.
+    pub fn has_structural_errors(self) -> bool {
+        self.unmatched_clip_pops > 0
+            || self.unmatched_transform_pops > 0
+            || self.unclosed_clip_depth > 0
+            || self.unclosed_transform_depth > 0
+            || self.invalid_clip_bounds > 0
+            || self.invalid_translate_offsets > 0
+    }
+
+    /// Whether the stream contains commands that should have been resolved first.
+    pub fn has_unresolved_commands(self) -> bool {
+        self.unresolved_text_commands > 0 || self.unresolved_raster_images > 0
+    }
+}
+
+/// Inspect a draw command stream without mutating it.
+pub fn diagnose_draw_commands(commands: &[DrawCommand]) -> DrawCommandDiagnostics {
+    let mut diagnostics = DrawCommandDiagnostics {
+        command_count: commands.len(),
+        ..DrawCommandDiagnostics::default()
+    };
+    let mut clip_depth = 0u32;
+    let mut transform_depth = 0u32;
+
+    for command in commands {
+        match command {
+            DrawCommand::PushClip { bounds } => {
+                clip_depth = clip_depth.saturating_add(1);
+                diagnostics.max_clip_depth = diagnostics.max_clip_depth.max(clip_depth);
+                if !rect_is_valid_clip(*bounds) {
+                    diagnostics.invalid_clip_bounds =
+                        diagnostics.invalid_clip_bounds.saturating_add(1);
+                }
+            }
+            DrawCommand::PopClip => {
+                if clip_depth == 0 {
+                    diagnostics.unmatched_clip_pops =
+                        diagnostics.unmatched_clip_pops.saturating_add(1);
+                } else {
+                    clip_depth -= 1;
+                }
+            }
+            DrawCommand::PushTranslate { offset } => {
+                transform_depth = transform_depth.saturating_add(1);
+                diagnostics.max_transform_depth =
+                    diagnostics.max_transform_depth.max(transform_depth);
+                if !offset.x.is_finite() || !offset.y.is_finite() {
+                    diagnostics.invalid_translate_offsets =
+                        diagnostics.invalid_translate_offsets.saturating_add(1);
+                }
+            }
+            DrawCommand::PopTransform => {
+                if transform_depth == 0 {
+                    diagnostics.unmatched_transform_pops =
+                        diagnostics.unmatched_transform_pops.saturating_add(1);
+                } else {
+                    transform_depth -= 1;
+                }
+            }
+            DrawCommand::Text { .. } => {
+                diagnostics.unresolved_text_commands =
+                    diagnostics.unresolved_text_commands.saturating_add(1);
+            }
+            DrawCommand::RasterImage { .. } => {
+                diagnostics.unresolved_raster_images =
+                    diagnostics.unresolved_raster_images.saturating_add(1);
+            }
+            DrawCommand::Rect { .. }
+            | DrawCommand::SoftShadow { .. }
+            | DrawCommand::GradientRect { .. }
+            | DrawCommand::Image { .. }
+            | DrawCommand::RasterAtlasImage { .. }
+            | DrawCommand::Line { .. }
+            | DrawCommand::Triangles { .. }
+            | DrawCommand::ColoredTriangles { .. } => {}
+        }
+    }
+
+    diagnostics.unclosed_clip_depth = clip_depth;
+    diagnostics.unclosed_transform_depth = transform_depth;
+    diagnostics
+}
+
+fn rect_is_valid_clip(rect: Rect) -> bool {
+    rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite()
+        && rect.width > 0.0
+        && rect.height > 0.0
+}
+
 /// 绘制命令收集器
 ///
 /// 在 Widget::paint() 中使用，将绘制命令追加到内部缓冲区。
@@ -618,6 +743,94 @@ mod tests {
             }
             other => panic!("expected colored triangles command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn command_diagnostics_reports_balanced_stream() {
+        let commands = vec![
+            DrawCommand::PushClip { bounds: rect() },
+            DrawCommand::PushTranslate { offset: Vec2::new(2.0, 3.0) },
+            DrawCommand::Rect { bounds: rect(), color: color(), corner_radius: 0.0 },
+            DrawCommand::PopTransform,
+            DrawCommand::PopClip,
+        ];
+
+        let diagnostics = diagnose_draw_commands(&commands);
+
+        assert_eq!(diagnostics.command_count, commands.len());
+        assert_eq!(diagnostics.max_clip_depth, 1);
+        assert_eq!(diagnostics.max_transform_depth, 1);
+        assert!(!diagnostics.has_structural_errors());
+        assert!(!diagnostics.has_unresolved_commands());
+    }
+
+    #[test]
+    fn command_diagnostics_reports_stack_mismatches() {
+        let commands = vec![
+            DrawCommand::PopClip,
+            DrawCommand::PopTransform,
+            DrawCommand::PushClip { bounds: rect() },
+            DrawCommand::PushTranslate { offset: Vec2::ZERO },
+        ];
+
+        let diagnostics = diagnose_draw_commands(&commands);
+
+        assert_eq!(diagnostics.unmatched_clip_pops, 1);
+        assert_eq!(diagnostics.unmatched_transform_pops, 1);
+        assert_eq!(diagnostics.unclosed_clip_depth, 1);
+        assert_eq!(diagnostics.unclosed_transform_depth, 1);
+        assert!(diagnostics.has_structural_errors());
+    }
+
+    #[test]
+    fn command_diagnostics_reports_unresolved_commands() {
+        let style = TextStyle {
+            font_size: 14.0,
+            line_height: 20.0,
+            font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+            letter_spacing: 0.0,
+        };
+        let commands = vec![
+            DrawCommand::Text {
+                text: "hello".to_string(),
+                style,
+                position: Point::ZERO,
+                max_width: None,
+                color: color(),
+            },
+            DrawCommand::RasterImage {
+                key: "thumb".to_string(),
+                bounds: rect(),
+                width: 1,
+                height: 1,
+                rgba: Arc::from(vec![255u8; 4]),
+                tint: color(),
+            },
+        ];
+
+        let diagnostics = diagnose_draw_commands(&commands);
+
+        assert_eq!(diagnostics.unresolved_text_commands, 1);
+        assert_eq!(diagnostics.unresolved_raster_images, 1);
+        assert!(diagnostics.has_unresolved_commands());
+    }
+
+    #[test]
+    fn command_diagnostics_reports_invalid_clip_and_translate() {
+        let commands = vec![
+            DrawCommand::PushClip { bounds: Rect::new(f32::NAN, 0.0, 10.0, 10.0) },
+            DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 0.0, 10.0) },
+            DrawCommand::PushTranslate { offset: Vec2::new(f32::INFINITY, 0.0) },
+            DrawCommand::PopTransform,
+            DrawCommand::PopClip,
+            DrawCommand::PopClip,
+        ];
+
+        let diagnostics = diagnose_draw_commands(&commands);
+
+        assert_eq!(diagnostics.invalid_clip_bounds, 2);
+        assert_eq!(diagnostics.invalid_translate_offsets, 1);
+        assert!(diagnostics.has_structural_errors());
     }
 
     #[test]

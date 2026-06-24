@@ -9,7 +9,7 @@ use wgpu::util::DeviceExt;
 
 use crate::atlas::{TextureAtlas, TextureAtlasStats};
 use crate::batch::build_batches;
-use crate::command::{raster_image_payload_len, DrawCommand};
+use crate::command::{diagnose_draw_commands, raster_image_payload_len, DrawCommand};
 use crate::pipeline::UiPipeline;
 use crate::shape::RectVertex;
 
@@ -46,6 +46,26 @@ pub struct GlyphUpload {
 /// Diagnostics produced while submitting one resolved UI frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UiRenderFrameStats {
+    /// Commands inspected before low-level rendering.
+    pub command_count: usize,
+    /// Deepest clip stack depth reached by the submitted command stream.
+    pub max_clip_depth: u32,
+    /// Deepest transform stack depth reached by the submitted command stream.
+    pub max_transform_depth: u32,
+    /// `PopClip` commands without a matching preceding `PushClip`.
+    pub unmatched_clip_pops: u32,
+    /// `PopTransform` commands without a matching preceding `PushTranslate`.
+    pub unmatched_transform_pops: u32,
+    /// Clip pushes still open at the end of the submitted stream.
+    pub unclosed_clip_depth: u32,
+    /// Transform pushes still open at the end of the submitted stream.
+    pub unclosed_transform_depth: u32,
+    /// Text commands that reached this low-level renderer entry point unresolved.
+    pub unresolved_text_commands: u32,
+    /// Clip commands with non-finite coordinates or non-positive size.
+    pub invalid_clip_bounds: u32,
+    /// Translate commands with non-finite offsets.
+    pub invalid_translate_offsets: u32,
     /// The frame uploaded new raster images into the renderer-owned image atlas.
     pub uploaded_raster_images: bool,
     /// Raster images that could not be uploaded or allocated in the image atlas.
@@ -433,11 +453,22 @@ impl UiRenderer {
         commands: &[DrawCommand],
         screen_size: (u32, u32),
     ) -> UiRenderFrameStats {
-        debug_assert!(
-            !commands.iter().any(|command| matches!(command, DrawCommand::Text { .. })),
+        let command_diagnostics = diagnose_draw_commands(commands);
+        debug_assert_eq!(
+            command_diagnostics.unresolved_text_commands, 0,
             "UiRenderer::render_resolved_commands received unresolved text commands"
         );
         let (commands, mut stats) = self.resolve_raster_images(queue, commands);
+        stats.command_count = command_diagnostics.command_count;
+        stats.max_clip_depth = command_diagnostics.max_clip_depth;
+        stats.max_transform_depth = command_diagnostics.max_transform_depth;
+        stats.unmatched_clip_pops = command_diagnostics.unmatched_clip_pops;
+        stats.unmatched_transform_pops = command_diagnostics.unmatched_transform_pops;
+        stats.unclosed_clip_depth = command_diagnostics.unclosed_clip_depth;
+        stats.unclosed_transform_depth = command_diagnostics.unclosed_transform_depth;
+        stats.unresolved_text_commands = command_diagnostics.unresolved_text_commands;
+        stats.invalid_clip_bounds = command_diagnostics.invalid_clip_bounds;
+        stats.invalid_translate_offsets = command_diagnostics.invalid_translate_offsets;
         let image_atlas_stats = self.image_atlas.stats();
         stats.image_atlas_entries = image_atlas_stats.entries;
         stats.image_atlas_used_pixels = image_atlas_stats.used_pixels;
