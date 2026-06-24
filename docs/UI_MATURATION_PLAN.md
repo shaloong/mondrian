@@ -31,6 +31,9 @@ shared renderer, text, event, theme, or widget infrastructure.
       caret placement, selection paint, and IME preedit.
 - [x] Extract TextInput IME preedit into a `TextCompositionState` model with direct activity
       and clearing coverage.
+- [x] Move TextInput committed edit state and IME composition state into dedicated
+      `text_input` submodules so event and paint extraction can proceed without expanding the
+      root widget file.
 - [x] Extract TextInput committed text, cursor, and selection into a `TextEditState` model with
       direct unit coverage for selection collapse and grapheme-safe deletion.
 - [x] Centralize TextInput committed text edits behind one command path with explicit empty
