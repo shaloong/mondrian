@@ -8,13 +8,11 @@ use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
+use std::cell::Cell;
 
 use crate::paint::centered_text_origin_y;
 use crate::text_metrics::measure_single_line;
-
-const CHECKBOX_BOX_SIZE: f32 = 16.0;
-const CHECKBOX_LABEL_X: f32 = 20.0;
-const CHECKBOX_HEIGHT: f32 = 22.0;
 
 /// Adapter that maps the current checkbox state to an editor [`Action`].
 pub type CheckboxChangeAction = dyn Fn(bool) -> Action;
@@ -30,6 +28,41 @@ pub struct Checkbox {
     pressed: bool,
     pub on_toggle: Option<Action>,
     on_change: Option<Box<CheckboxChangeAction>>,
+    visual: Cell<CheckboxVisualTokens>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CheckboxVisualTokens {
+    box_size: f32,
+    box_left_inset: f32,
+    label_gap: f32,
+    control_height: f32,
+    label_font_size: f32,
+    border_width: f32,
+}
+
+impl CheckboxVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            box_size: spacing.icon_size + spacing.border_emphasis,
+            box_left_inset: spacing.border_emphasis,
+            label_gap: spacing.border_emphasis,
+            control_height: theme.typography.body.line_height + spacing.border_emphasis,
+            label_font_size: theme.typography.body.font_size,
+            border_width: spacing.border_standard,
+        }
+    }
+
+    fn label_x(self) -> f32 {
+        self.box_left_inset + self.box_size + self.label_gap
+    }
+}
+
+impl Default for CheckboxVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
 }
 
 impl Checkbox {
@@ -45,6 +78,7 @@ impl Checkbox {
             pressed: false,
             on_toggle: None,
             on_change: None,
+            visual: Cell::new(CheckboxVisualTokens::default()),
         }
     }
 
@@ -108,8 +142,9 @@ impl Widget for Checkbox {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        let (label_width, _) = measure_single_line(&self.label, 14.0);
-        let preferred = Size::new(CHECKBOX_LABEL_X + label_width, CHECKBOX_HEIGHT);
+        let visual = self.visual.get();
+        let (label_width, _) = measure_single_line(&self.label, visual.label_font_size);
+        let preferred = Size::new(visual.label_x() + label_width, visual.control_height);
         constraint.constrain(preferred)
     }
 
@@ -169,14 +204,16 @@ impl Widget for Checkbox {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        self.visual.set(CheckboxVisualTokens::from_theme(ctx.theme));
+        let visual = self.visual.get();
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
 
         let box_rect = Rect::new(
-            (self.bounds.x + 2.0).round(),
-            (self.bounds.y + (self.bounds.height - CHECKBOX_BOX_SIZE) * 0.5).round(),
-            CHECKBOX_BOX_SIZE,
-            CHECKBOX_BOX_SIZE,
+            (self.bounds.x + visual.box_left_inset).round(),
+            (self.bounds.y + (self.bounds.height - visual.box_size) * 0.5).round(),
+            visual.box_size,
+            visual.box_size,
         );
 
         // Fill color
@@ -200,7 +237,7 @@ impl Widget for Checkbox {
         };
 
         // Rounded border: draw slightly larger rounded rect behind fill
-        let border_inset = 1.0;
+        let border_inset = visual.border_width;
         let border_rect = box_rect.inset(-border_inset, -border_inset);
         ctx.encoder
             .draw_rect(border_rect, border_color, spacing.radius_sm + border_inset);
@@ -220,11 +257,10 @@ impl Widget for Checkbox {
 
         // Label text
         if !self.label.is_empty() {
-            let font_size = ctx.theme.typography.body.font_size;
             let text_clip = Rect::new(
-                self.bounds.x + CHECKBOX_LABEL_X,
+                self.bounds.x + visual.label_x(),
                 self.bounds.y,
-                (self.bounds.width - CHECKBOX_LABEL_X).max(0.0),
+                (self.bounds.width - visual.label_x()).max(0.0),
                 self.bounds.height,
             );
             let tx = text_clip.x;
@@ -232,7 +268,7 @@ impl Widget for Checkbox {
             ctx.push_clip(text_clip);
             ctx.encoder.draw_text(
                 &self.label,
-                font_size,
+                visual.label_font_size,
                 Point::new(tx, ty),
                 if self.enabled {
                     tokens.foreground
@@ -267,12 +303,18 @@ impl Widget for Checkbox {
 }
 
 fn checkmark_triangles(box_rect: Rect) -> [Point; 12] {
-    let p0 = Point::new(box_rect.x + 3.0, box_rect.y + 9.0);
-    let p1 = Point::new(box_rect.x + 5.0, box_rect.y + 7.0);
-    let p2 = Point::new(box_rect.x + 7.0, box_rect.y + 9.0);
-    let p3 = Point::new(box_rect.x + 12.0, box_rect.y + 4.0);
-    let p4 = Point::new(box_rect.x + 14.0, box_rect.y + 6.0);
-    let p5 = Point::new(box_rect.x + 7.0, box_rect.y + 13.0);
+    let point = |x: f32, y: f32| {
+        Point::new(
+            (box_rect.x + box_rect.width * x).round(),
+            (box_rect.y + box_rect.height * y).round(),
+        )
+    };
+    let p0 = point(0.1875, 0.5625);
+    let p1 = point(0.3125, 0.4375);
+    let p2 = point(0.4375, 0.5625);
+    let p3 = point(0.75, 0.25);
+    let p4 = point(0.875, 0.375);
+    let p5 = point(0.4375, 0.8125);
 
     [p5, p0, p1, p5, p1, p2, p5, p2, p3, p3, p4, p5]
 }
@@ -287,11 +329,14 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingEncoder {
+        rects: Vec<Rect>,
+        rect_radii: Vec<f32>,
         lines: Vec<(Point, Point, f32)>,
         triangles: Vec<Point>,
         clips: Vec<Rect>,
         clip_pops: usize,
         texts: Vec<String>,
+        text_font_sizes: Vec<f32>,
     }
 
     impl DrawCommandEncoder for RecordingEncoder {
@@ -303,7 +348,10 @@ mod tests {
             self.clip_pops += 1;
         }
 
-        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {}
+        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, corner_radius: f32) {
+            self.rects.push(bounds);
+            self.rect_radii.push(corner_radius);
+        }
 
         fn draw_line(
             &mut self,
@@ -322,11 +370,12 @@ mod tests {
         fn draw_text(
             &mut self,
             text: &str,
-            _font_size: f32,
+            font_size: f32,
             _position: Point,
             _color: mondrian_core::Color,
         ) {
             self.texts.push(text.into());
+            self.text_font_sizes.push(font_size);
         }
 
         fn push_translate(&mut self, _offset: glam::Vec2) {}
@@ -542,6 +591,45 @@ mod tests {
         assert_eq!(encoder.texts, vec!["A very long checkbox label"]);
         assert_eq!(encoder.clips, vec![Rect::new(30.0, 20.0, 60.0, 22.0)]);
         assert_eq!(encoder.clip_pops, 1);
+    }
+
+    #[test]
+    fn checkbox_visual_metrics_follow_theme_tokens() {
+        let cb = Checkbox::new("Tokenized", false);
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.icon_size = 18.0;
+        theme.spacing.border_emphasis = 3.0;
+        theme.spacing.border_standard = 2.0;
+        theme.typography.body.font_size = 15.0;
+        theme.typography.body.line_height = 24.0;
+
+        let visual = CheckboxVisualTokens::from_theme(&theme);
+        assert_eq!(visual.box_size, 21.0);
+        assert_eq!(visual.label_x(), 27.0);
+
+        let mut cb = cb;
+        cb.layout(Rect::new(10.0, 20.0, 120.0, 30.0));
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        cb.paint(&mut ctx);
+
+        assert_eq!(
+            cb.measure(LayoutConstraint::LOOSE).height,
+            visual.control_height
+        );
+        assert_eq!(encoder.rects[1], Rect::new(13.0, 25.0, 21.0, 21.0));
+        assert_eq!(encoder.rects[0], Rect::new(11.0, 23.0, 25.0, 25.0));
+        assert_eq!(
+            encoder.rect_radii[0],
+            theme.spacing.radius_sm + visual.border_width
+        );
+        assert_eq!(encoder.clips, vec![Rect::new(37.0, 20.0, 93.0, 30.0)]);
+        assert_eq!(encoder.text_font_sizes, vec![15.0]);
     }
 
     #[test]

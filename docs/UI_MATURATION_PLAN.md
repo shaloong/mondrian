@@ -154,6 +154,8 @@ custom UI line can be considered production-grade.
       scrollbar sizing, shortcut text, and icon/checkmark lanes against theme-derived visual tokens.
 - [x] Tokenize ContextMenu popup geometry, row measurement, icon/checkmark lane reservation, and
       viewport scroll sizing against cached theme-derived visual tokens.
+- [x] Tokenize Checkbox box sizing, label geometry, typography, border width, and proportional
+      checkmark geometry against theme-derived visual tokens.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.
