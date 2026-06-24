@@ -444,6 +444,17 @@ impl TextInput {
         self.update_scroll(DEFAULT_FONT_SIZE);
     }
 
+    fn move_cursor_with_selection(&mut self, pos: usize, extend_selection: bool) {
+        if extend_selection {
+            if self.selection_start.is_none() {
+                self.selection_start = Some(self.cursor);
+            }
+        } else {
+            self.clear_selection();
+        }
+        self.move_cursor_to(pos.min(self.len_graphemes()));
+    }
+
     fn dispatch_change(&self, ctx: &mut EventContext) {
         if let Some(factory) = &self.on_change {
             (ctx.dispatch)(factory(&self.text));
@@ -691,39 +702,25 @@ impl Widget for TextInput {
                     }
                     // ── Word navigation ────────────────────────────────
                     KeyCode::Left if word_navigation => {
-                        if !shift {
-                            self.clear_selection();
-                        } else if self.selection_start.is_none() {
-                            self.selection_start = Some(self.cursor);
-                        }
-                        self.move_cursor_to(self.prev_word_boundary(self.cursor));
+                        self.move_cursor_with_selection(
+                            self.prev_word_boundary(self.cursor),
+                            shift,
+                        );
                         EventResult::Handled
                     }
                     KeyCode::Right if word_navigation => {
-                        if !shift {
-                            self.clear_selection();
-                        } else if self.selection_start.is_none() {
-                            self.selection_start = Some(self.cursor);
-                        }
-                        self.move_cursor_to(self.next_word_boundary(self.cursor));
+                        self.move_cursor_with_selection(
+                            self.next_word_boundary(self.cursor),
+                            shift,
+                        );
                         EventResult::Handled
                     }
                     KeyCode::Home if word_navigation => {
-                        if !shift {
-                            self.clear_selection();
-                        } else if self.selection_start.is_none() {
-                            self.selection_start = Some(self.cursor);
-                        }
-                        self.move_cursor_to(0);
+                        self.move_cursor_with_selection(0, shift);
                         EventResult::Handled
                     }
                     KeyCode::End if word_navigation => {
-                        if !shift {
-                            self.clear_selection();
-                        } else if self.selection_start.is_none() {
-                            self.selection_start = Some(self.cursor);
-                        }
-                        self.move_cursor_to(self.len_graphemes());
+                        self.move_cursor_with_selection(self.len_graphemes(), shift);
                         EventResult::Handled
                     }
                     // ── Deletion ────────────────────────────────────────
@@ -743,52 +740,19 @@ impl Widget for TextInput {
                     }
                     // ── Navigation ──────────────────────────────────────
                     KeyCode::Left if local_navigation => {
-                        if shift {
-                            if self.selection_start.is_none() {
-                                self.selection_start = Some(self.cursor);
-                            }
-                        } else {
-                            self.clear_selection();
-                        }
-                        if self.cursor > 0 {
-                            self.move_cursor_to(self.cursor - 1);
-                        }
+                        self.move_cursor_with_selection(self.cursor.saturating_sub(1), shift);
                         EventResult::Handled
                     }
                     KeyCode::Right if local_navigation => {
-                        if shift {
-                            if self.selection_start.is_none() {
-                                self.selection_start = Some(self.cursor);
-                            }
-                        } else {
-                            self.clear_selection();
-                        }
-                        let total = self.len_graphemes();
-                        if self.cursor < total {
-                            self.move_cursor_to(self.cursor + 1);
-                        }
+                        self.move_cursor_with_selection(self.cursor + 1, shift);
                         EventResult::Handled
                     }
                     KeyCode::Home if local_navigation => {
-                        if shift {
-                            if self.selection_start.is_none() {
-                                self.selection_start = Some(self.cursor);
-                            }
-                        } else {
-                            self.clear_selection();
-                        }
-                        self.move_cursor_to(0);
+                        self.move_cursor_with_selection(0, shift);
                         EventResult::Handled
                     }
                     KeyCode::End if local_navigation => {
-                        if shift {
-                            if self.selection_start.is_none() {
-                                self.selection_start = Some(self.cursor);
-                            }
-                        } else {
-                            self.clear_selection();
-                        }
-                        self.move_cursor_to(self.len_graphemes());
+                        self.move_cursor_with_selection(self.len_graphemes(), shift);
                         EventResult::Handled
                     }
                     _ => EventResult::Ignored,
@@ -1932,6 +1896,29 @@ mod tests {
         kd_shift(&mut ti, KeyCode::Left, &mut ctx);
         assert!(ti.has_selection());
         assert_eq!(ti.selection_start, Some(3));
+    }
+
+    #[test]
+    fn shift_navigation_at_boundaries_preserves_empty_anchor() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        ti.focused = true;
+        ti.cursor = 0;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        kd_shift(&mut ti, KeyCode::Left, &mut ctx);
+        assert_eq!(ti.cursor, 0);
+        assert_eq!(ti.selection_start, Some(0));
+        assert!(!ti.has_selection());
+
+        ti.cursor = ti.len_graphemes();
+        ti.clear_selection();
+        kd_shift(&mut ti, KeyCode::Right, &mut ctx);
+        assert_eq!(ti.cursor, 3);
+        assert_eq!(ti.selection_start, Some(3));
+        assert!(!ti.has_selection());
     }
 
     #[test]

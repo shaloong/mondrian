@@ -29,6 +29,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [ ] Decide whether subpixel glyph atlas bins are needed for rich text/code-style editors.
 - [ ] Add text visual regression tests for small sizes, CJK, mixed scripts, emoji fallback,
       caret placement, selection paint, and IME preedit.
+- [x] Centralize TextInput keyboard navigation selection semantics so plain, Shift, word,
+      and boundary movement share one editing path.
 - [x] Extract a shared TextInput geometry snapshot for content clips, text origins, IME caret
       bounds, and paint.
 - [x] Add TextInput paint coverage for mixed CJK/emoji text, selection highlight, committed
