@@ -36,6 +36,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       root widget file.
 - [x] Move TextInput geometry and horizontal scroll math into a dedicated `text_input::geometry`
       module with direct edge-case coverage.
+- [x] Move TextInput keyboard command classification into a dedicated `text_input::commands`
+      module with direct modifier-routing coverage.
 - [x] Extract TextInput committed text, cursor, and selection into a `TextEditState` model with
       direct unit coverage for selection collapse and grapheme-safe deletion.
 - [x] Centralize TextInput committed text edits behind one command path with explicit empty

@@ -23,10 +23,12 @@ use mondrian_ui_core::widget::{
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_text::TextRenderer;
 
+mod commands;
 mod composition;
 mod edit;
 mod geometry;
 
+use commands::{classify_key_command, TextInputKeyCommand};
 use composition::TextCompositionState;
 use edit::TextEditState;
 use geometry::{
@@ -359,6 +361,84 @@ impl TextInput {
     fn prev_word_boundary(&self, from: usize) -> usize {
         self.edit.prev_word_boundary(from)
     }
+
+    fn execute_key_command(
+        &mut self,
+        command: TextInputKeyCommand,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        match command {
+            TextInputKeyCommand::SelectAll => {
+                self.move_cursor_to(self.len_graphemes());
+                self.edit.selection_start = Some(0);
+                EventResult::Handled
+            }
+            TextInputKeyCommand::Copy => {
+                if let Some((start, end)) = self.selection_byte_range() {
+                    let _ = ctx.platform.clipboard_copy(&self.edit.text()[start..end]);
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            TextInputKeyCommand::Paste => {
+                if let Ok(Some(clip)) = ctx.platform.clipboard_paste() {
+                    self.commit_text_at_cursor(&clip, EmptyTextCommitPolicy::PreserveSelection);
+                }
+                EventResult::Handled
+            }
+            TextInputKeyCommand::Cut => {
+                if let Some((start, end)) = self.selection_byte_range() {
+                    if ctx.platform.clipboard_copy(&self.edit.text()[start..end]).is_ok() {
+                        self.delete_selection();
+                    }
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            TextInputKeyCommand::MoveLeft { word, extend_selection } => {
+                let target = if word {
+                    self.prev_word_boundary(self.edit.cursor)
+                } else {
+                    self.edit.cursor.saturating_sub(1)
+                };
+                self.move_cursor_with_selection(target, extend_selection);
+                EventResult::Handled
+            }
+            TextInputKeyCommand::MoveRight { word, extend_selection } => {
+                let target = if word {
+                    self.next_word_boundary(self.edit.cursor)
+                } else {
+                    self.edit.cursor + 1
+                };
+                self.move_cursor_with_selection(target, extend_selection);
+                EventResult::Handled
+            }
+            TextInputKeyCommand::MoveHome { extend_selection } => {
+                self.move_cursor_with_selection(0, extend_selection);
+                EventResult::Handled
+            }
+            TextInputKeyCommand::MoveEnd { extend_selection } => {
+                self.move_cursor_with_selection(self.len_graphemes(), extend_selection);
+                EventResult::Handled
+            }
+            TextInputKeyCommand::DeleteBackward => {
+                if !self.delete_selection() {
+                    self.delete_grapheme_before();
+                }
+                self.update_scroll(DEFAULT_FONT_SIZE);
+                EventResult::Handled
+            }
+            TextInputKeyCommand::DeleteForward => {
+                if !self.delete_selection() {
+                    self.delete_grapheme_at();
+                }
+                self.update_scroll(DEFAULT_FONT_SIZE);
+                EventResult::Handled
+            }
+        }
+    }
 }
 
 impl Widget for TextInput {
@@ -499,105 +579,11 @@ impl Widget for TextInput {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
-                let shift = modifiers.shift;
-                let exact_ctrl =
-                    modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.meta;
-                let word_navigation = modifiers.ctrl && !modifiers.alt && !modifiers.meta;
-                let local_navigation = !modifiers.ctrl && !modifiers.alt && !modifiers.meta;
-                let plain_delete = *modifiers == Modifiers::none();
                 let before_text = self.edit.text.clone();
-
-                let result = match key {
-                    // ── Ctrl shortcuts ─────────────────────────────────
-                    KeyCode::A if exact_ctrl => {
-                        self.move_cursor_to(self.len_graphemes());
-                        self.edit.selection_start = Some(0);
-                        EventResult::Handled
-                    }
-                    KeyCode::C if exact_ctrl => {
-                        if let Some((start, end)) = self.selection_byte_range() {
-                            let _ = ctx.platform.clipboard_copy(&self.edit.text()[start..end]);
-                            EventResult::Handled
-                        } else {
-                            EventResult::Ignored
-                        }
-                    }
-                    KeyCode::V if exact_ctrl => {
-                        if let Ok(Some(clip)) = ctx.platform.clipboard_paste() {
-                            self.commit_text_at_cursor(
-                                &clip,
-                                EmptyTextCommitPolicy::PreserveSelection,
-                            );
-                        }
-                        EventResult::Handled
-                    }
-                    KeyCode::X if exact_ctrl => {
-                        if let Some((start, end)) = self.selection_byte_range() {
-                            if ctx.platform.clipboard_copy(&self.edit.text()[start..end]).is_ok() {
-                                self.delete_selection();
-                            }
-                            EventResult::Handled
-                        } else {
-                            EventResult::Ignored
-                        }
-                    }
-                    // ── Word navigation ────────────────────────────────
-                    KeyCode::Left if word_navigation => {
-                        self.move_cursor_with_selection(
-                            self.prev_word_boundary(self.edit.cursor),
-                            shift,
-                        );
-                        EventResult::Handled
-                    }
-                    KeyCode::Right if word_navigation => {
-                        self.move_cursor_with_selection(
-                            self.next_word_boundary(self.edit.cursor),
-                            shift,
-                        );
-                        EventResult::Handled
-                    }
-                    KeyCode::Home if word_navigation => {
-                        self.move_cursor_with_selection(0, shift);
-                        EventResult::Handled
-                    }
-                    KeyCode::End if word_navigation => {
-                        self.move_cursor_with_selection(self.len_graphemes(), shift);
-                        EventResult::Handled
-                    }
-                    // ── Deletion ────────────────────────────────────────
-                    KeyCode::Backspace if plain_delete => {
-                        if !self.delete_selection() {
-                            self.delete_grapheme_before();
-                        }
-                        self.update_scroll(DEFAULT_FONT_SIZE);
-                        EventResult::Handled
-                    }
-                    KeyCode::Delete if plain_delete => {
-                        if !self.delete_selection() {
-                            self.delete_grapheme_at();
-                        }
-                        self.update_scroll(DEFAULT_FONT_SIZE);
-                        EventResult::Handled
-                    }
-                    // ── Navigation ──────────────────────────────────────
-                    KeyCode::Left if local_navigation => {
-                        self.move_cursor_with_selection(self.edit.cursor.saturating_sub(1), shift);
-                        EventResult::Handled
-                    }
-                    KeyCode::Right if local_navigation => {
-                        self.move_cursor_with_selection(self.edit.cursor + 1, shift);
-                        EventResult::Handled
-                    }
-                    KeyCode::Home if local_navigation => {
-                        self.move_cursor_with_selection(0, shift);
-                        EventResult::Handled
-                    }
-                    KeyCode::End if local_navigation => {
-                        self.move_cursor_with_selection(self.len_graphemes(), shift);
-                        EventResult::Handled
-                    }
-                    _ => EventResult::Ignored,
-                };
+                let result = classify_key_command(*key, *modifiers)
+                    .map_or(EventResult::Ignored, |command| {
+                        self.execute_key_command(command, ctx)
+                    });
                 if result == EventResult::Handled {
                     self.refresh_ime_area(ctx);
                     if self.edit.text != before_text {
