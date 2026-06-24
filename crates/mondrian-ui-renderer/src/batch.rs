@@ -1066,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn build_batches_gradient_rect_uses_six_vertices_with_corner_colors() {
+    fn build_batches_gradient_rect_uses_screen_space_corner_colors() {
         let colors = [
             Color::from_rgba8(255, 0, 0, 255),
             Color::from_rgba8(0, 255, 0, 255),
@@ -1084,10 +1084,10 @@ mod tests {
         assert_eq!(batches.len(), 1);
         let vertices = &batches[0].vertices;
         assert_eq!(vertices.len(), 6);
-        assert_eq!(vertices[0].color, [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(vertices[1].color, [0.0, 1.0, 0.0, 1.0]);
-        assert_eq!(vertices[2].color, [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(vertices[5].color, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(vertices[0].color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(vertices[1].color, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(vertices[2].color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(vertices[5].color, [0.0, 1.0, 0.0, 1.0]);
     }
 
     #[test]

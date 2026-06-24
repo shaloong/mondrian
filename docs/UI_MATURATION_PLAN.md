@@ -17,8 +17,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Build an offscreen visual regression harness for renderer primitives.
 - [x] Add GPU readback coverage for filled rects, 45-degree hairlines, and circle-shaped
       rounded rectangles.
-- [ ] Extend offscreen visual regression coverage to triangles, clips, gradients, text glyphs,
-      and SVG/raster icons.
+- [x] Extend offscreen visual regression coverage to triangles, clips, and gradients.
+- [ ] Extend offscreen visual regression coverage to text glyphs and SVG/raster icons.
 - [ ] Capture golden images at representative DPI scales: 1.0, 1.25, 1.5, and 2.0.
 
 ## Phase 2 - Text And Input Maturity

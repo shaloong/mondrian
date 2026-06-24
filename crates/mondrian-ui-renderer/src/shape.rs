@@ -317,12 +317,12 @@ pub fn generate_gradient_rect_vertices(
     };
 
     [
-        v(x0, y0, 0.0, 0.0, top_left),
-        v(x1, y0, 1.0, 0.0, top_right),
-        v(x0, y1, 0.0, 1.0, bottom_left),
-        v(x0, y1, 0.0, 1.0, bottom_left),
-        v(x1, y0, 1.0, 0.0, top_right),
-        v(x1, y1, 1.0, 1.0, bottom_right),
+        v(x0, y0, 0.0, 1.0, bottom_left),
+        v(x1, y0, 1.0, 1.0, bottom_right),
+        v(x0, y1, 0.0, 0.0, top_left),
+        v(x0, y1, 0.0, 0.0, top_left),
+        v(x1, y0, 1.0, 1.0, bottom_right),
+        v(x1, y1, 1.0, 0.0, top_right),
     ]
 }
 

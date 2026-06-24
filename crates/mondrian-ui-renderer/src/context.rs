@@ -564,7 +564,7 @@ impl UiRenderer {
 mod tests {
     use super::*;
     use crate::command::DrawEncoder;
-    use mondrian_ui_core::types::Rect;
+    use mondrian_ui_core::types::{Point, Rect};
 
     #[test]
     fn scissor_none_uses_full_screen() {
@@ -751,6 +751,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn offscreen_renderer_applies_clip_scissor_to_rects() {
+        let Some(mut harness) = OffscreenHarness::new(64, 64) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.push_clip(Rect::new(24.0, 24.0, 16.0, 16.0));
+        encoder.draw_rect(
+            Rect::new(0.0, 0.0, 64.0, 64.0),
+            Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            0.0,
+        );
+        encoder.pop_clip();
+
+        let pixels = harness.render(encoder.finish());
+
+        assert!(
+            pixel(&pixels, 64, 32, 32)[3] >= 240,
+            "clip interior should render"
+        );
+        for (x, y) in [(20, 32), (43, 32), (32, 20), (32, 43)] {
+            let outside = pixel(&pixels, 64, x, y);
+            assert_eq!(
+                outside[3], 0,
+                "clip should reject ({x},{y}), got {outside:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn offscreen_renderer_preserves_gradient_corner_direction() {
+        let Some(mut harness) = OffscreenHarness::new(64, 64) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_gradient_rect(
+            Rect::new(8.0, 8.0, 48.0, 48.0),
+            [
+                Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+                Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 },
+                Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 },
+                Color::WHITE,
+            ],
+            0.0,
+        );
+
+        let pixels = harness.render(encoder.finish());
+        assert_dominant_channel(pixel(&pixels, 64, 10, 10), 0, "top-left");
+        assert_dominant_channel(pixel(&pixels, 64, 53, 10), 1, "top-right");
+        assert_dominant_channel(pixel(&pixels, 64, 10, 53), 2, "bottom-left");
+
+        let bottom_right = pixel(&pixels, 64, 53, 53);
+        assert!(
+            bottom_right[0] >= 180
+                && bottom_right[1] >= 180
+                && bottom_right[2] >= 180
+                && bottom_right[3] >= 240,
+            "bottom-right should remain close to white, got {bottom_right:?}"
+        );
+    }
+
+    #[test]
+    fn offscreen_renderer_draws_filled_triangles_with_stable_winding() {
+        let Some(mut harness) = OffscreenHarness::new(64, 64) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_triangles(
+            &[
+                Point::new(8.0, 8.0),
+                Point::new(56.0, 8.0),
+                Point::new(8.0, 56.0),
+            ],
+            Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 },
+        );
+
+        let pixels = harness.render(encoder.finish());
+
+        let inside = pixel(&pixels, 64, 20, 20);
+        assert!(
+            inside[1] >= 240 && inside[3] >= 240,
+            "triangle interior got {inside:?}"
+        );
+
+        let outside = pixel(&pixels, 64, 54, 54);
+        assert_eq!(
+            outside[3], 0,
+            "triangle outside should stay transparent, got {outside:?}"
+        );
+    }
+
     struct OffscreenHarness {
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -893,5 +984,25 @@ mod tests {
             }
         }
         max_alpha
+    }
+
+    fn assert_dominant_channel(pixel: [u8; 4], channel: usize, label: &str) {
+        assert!(
+            pixel[3] >= 240,
+            "{label} alpha should be opaque, got {pixel:?}"
+        );
+        for candidate in 0..3 {
+            if candidate == channel {
+                assert!(
+                    pixel[candidate] >= 150,
+                    "{label} expected channel {channel} to dominate, got {pixel:?}"
+                );
+            } else {
+                assert!(
+                    pixel[channel] > pixel[candidate].saturating_add(48),
+                    "{label} expected channel {channel} to dominate channel {candidate}, got {pixel:?}"
+                );
+            }
+        }
     }
 }
