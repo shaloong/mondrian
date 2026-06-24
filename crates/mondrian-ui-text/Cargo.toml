@@ -18,4 +18,9 @@ fontdb = { version = "0.23", default-features = false, features = ["fontconfig"]
 wgpu        = { workspace = true }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 pollster = "0.4"
+
+[[bench]]
+name = "ui_pipeline"
+harness = false

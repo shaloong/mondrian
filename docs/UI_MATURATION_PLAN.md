@@ -147,6 +147,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 - [ ] Add repeatable renderer benchmarks for batching, atlas churn, raster uploads, text
       command resolution, and large timeline-style command streams.
+- [x] Add repeatable Criterion UI pipeline benchmarks for dense command batching,
+      timeline-style command streams, TextureAtlas churn, raster atlas allocation pressure,
+      and warmed mixed-script text command resolution.
 - [x] Add frame diagnostics for batch count, vertex count, atlas occupancy, fallback counts,
       and clip/scissor skips.
 - [x] Add frame diagnostics for upload bytes and persistent frame cost reporting.
