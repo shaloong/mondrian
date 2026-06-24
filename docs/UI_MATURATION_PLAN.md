@@ -12,7 +12,7 @@ shared renderer, text, event, theme, or widget infrastructure.
       editing sessions without silent exhaustion.
 - [x] Add draw command diagnostics for unbalanced clip/transform stacks, unresolved text,
       invalid clip bounds, and invalid translate offsets.
-- [ ] Add explicit debug diagnostics for backend fallbacks that would otherwise be silently
+- [x] Add explicit debug diagnostics for backend fallbacks that would otherwise be silently
       tolerated.
 - [x] Build an offscreen visual regression harness for renderer primitives.
 - [x] Add GPU readback coverage for filled rects, 45-degree hairlines, and circle-shaped

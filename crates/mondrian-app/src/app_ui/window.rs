@@ -11,7 +11,9 @@ use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
-use crate::app_ui::rendering::{AppUiFrameRenderer, AppUiRenderDiagnosticReporter};
+use crate::app_ui::rendering::{
+    AppUiBackendEvent, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
+};
 use crate::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
@@ -294,6 +296,11 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             host.mark_dirty();
                             session.window.request_redraw();
                         }
+                        if let Some(event) =
+                            session.render_diagnostic_reporter.changed_backend_event(frame_result)
+                        {
+                            log_backend_event(event);
+                        }
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
                         }
@@ -561,12 +568,40 @@ fn preferred_app_ui_surface_format(
     adapter: &wgpu::Adapter,
     fallback: wgpu::TextureFormat,
 ) -> wgpu::TextureFormat {
-    surface
-        .get_capabilities(adapter)
-        .formats
-        .into_iter()
-        .find(|format| is_srgb_surface_format(*format))
-        .unwrap_or(fallback)
+    let capabilities = surface.get_capabilities(adapter);
+    let choice = choose_app_ui_surface_format(&capabilities.formats, fallback);
+    if let Some(fallback) = choice.fallback {
+        tracing::warn!(
+            ?fallback,
+            "app UI surface format fallback; colors may be less consistent on this backend"
+        );
+    }
+    choice.format
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppUiSurfaceFormatChoice {
+    format: wgpu::TextureFormat,
+    fallback: Option<AppUiSurfaceFormatFallback>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppUiSurfaceFormatFallback {
+    NoSrgbFormat { selected: wgpu::TextureFormat },
+}
+
+fn choose_app_ui_surface_format(
+    formats: &[wgpu::TextureFormat],
+    fallback: wgpu::TextureFormat,
+) -> AppUiSurfaceFormatChoice {
+    if let Some(format) = formats.iter().copied().find(|format| is_srgb_surface_format(*format)) {
+        return AppUiSurfaceFormatChoice { format, fallback: None };
+    }
+
+    AppUiSurfaceFormatChoice {
+        format: fallback,
+        fallback: Some(AppUiSurfaceFormatFallback::NoSrgbFormat { selected: fallback }),
+    }
 }
 
 fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
@@ -574,6 +609,20 @@ fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
         format,
         wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
     )
+}
+
+fn log_backend_event(event: AppUiBackendEvent) {
+    match event {
+        AppUiBackendEvent::SurfaceSuboptimal
+        | AppUiBackendEvent::SurfaceOutdated
+        | AppUiBackendEvent::SurfaceLost
+        | AppUiBackendEvent::SurfaceUnavailable => {
+            tracing::warn!(?event, "app UI render backend fallback")
+        }
+        AppUiBackendEvent::SurfaceTimeout | AppUiBackendEvent::SurfaceOccluded => {
+            tracing::debug!(?event, "app UI render backend skipped frame")
+        }
+    }
 }
 
 fn should_route_focus_lost_to_ui(eyedropper_active: bool) -> bool {
@@ -1006,6 +1055,43 @@ mod tests {
         assert!(is_srgb_surface_format(wgpu::TextureFormat::Rgba8UnormSrgb));
         assert!(!is_srgb_surface_format(wgpu::TextureFormat::Bgra8Unorm));
         assert!(!is_srgb_surface_format(wgpu::TextureFormat::Rgba8Unorm));
+    }
+
+    #[test]
+    fn surface_format_choice_prefers_srgb_without_fallback() {
+        assert_eq!(
+            choose_app_ui_surface_format(
+                &[
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    wgpu::TextureFormat::Bgra8UnormSrgb,
+                ],
+                wgpu::TextureFormat::Bgra8Unorm,
+            ),
+            AppUiSurfaceFormatChoice {
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                fallback: None,
+            }
+        );
+    }
+
+    #[test]
+    fn surface_format_choice_reports_non_srgb_fallback() {
+        assert_eq!(
+            choose_app_ui_surface_format(
+                &[
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    wgpu::TextureFormat::Rgba8Unorm
+                ],
+                wgpu::TextureFormat::Bgra8Unorm,
+            ),
+            AppUiSurfaceFormatChoice {
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                fallback: Some(AppUiSurfaceFormatFallback::NoSrgbFormat {
+                    selected: wgpu::TextureFormat::Bgra8Unorm,
+                }),
+            }
+        );
     }
 
     struct CursorFocusWidget {

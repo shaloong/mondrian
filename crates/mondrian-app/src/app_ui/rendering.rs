@@ -23,6 +23,24 @@ impl AppUiFrameDiagnostics {
     }
 }
 
+/// Backend-level surface event observed while acquiring or presenting a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppUiBackendEvent {
+    /// The surface produced a suboptimal texture that can be presented, but the
+    /// backend recommends reconfiguration soon.
+    SurfaceSuboptimal,
+    /// The backend timed out while acquiring the next surface texture.
+    SurfaceTimeout,
+    /// The surface is occluded and skipped this frame.
+    SurfaceOccluded,
+    /// The surface became outdated and was reconfigured.
+    SurfaceOutdated,
+    /// The surface was lost and was reconfigured.
+    SurfaceLost,
+    /// A non-exhaustive backend surface state was reported by wgpu.
+    SurfaceUnavailable,
+}
+
 /// Result of submitting one app UI frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppUiFrameResult {
@@ -33,11 +51,19 @@ pub enum AppUiFrameResult {
         uploaded_resources: bool,
         /// Resource diagnostics for this frame.
         diagnostics: AppUiFrameDiagnostics,
+        /// Optional backend event for presented frames.
+        backend_event: Option<AppUiBackendEvent>,
     },
     /// The surface was temporarily unavailable and the frame was skipped.
-    Skipped,
+    Skipped {
+        /// Backend event that caused the skip.
+        backend_event: AppUiBackendEvent,
+    },
     /// The surface was lost/outdated and was reconfigured for the next frame.
-    Reconfigured,
+    Reconfigured {
+        /// Backend event that caused the reconfigure.
+        backend_event: AppUiBackendEvent,
+    },
 }
 
 impl AppUiFrameResult {
@@ -45,8 +71,8 @@ impl AppUiFrameResult {
     pub fn needs_follow_up_redraw(self) -> bool {
         match self {
             AppUiFrameResult::Presented { uploaded_resources, .. } => uploaded_resources,
-            AppUiFrameResult::Reconfigured => true,
-            AppUiFrameResult::Skipped => false,
+            AppUiFrameResult::Reconfigured { .. } => true,
+            AppUiFrameResult::Skipped { .. } => false,
         }
     }
 
@@ -54,9 +80,18 @@ impl AppUiFrameResult {
     pub fn diagnostics(self) -> AppUiFrameDiagnostics {
         match self {
             AppUiFrameResult::Presented { diagnostics, .. } => diagnostics,
-            AppUiFrameResult::Skipped | AppUiFrameResult::Reconfigured => {
+            AppUiFrameResult::Skipped { .. } | AppUiFrameResult::Reconfigured { .. } => {
                 AppUiFrameDiagnostics::default()
             }
+        }
+    }
+
+    /// Backend surface event associated with this frame, if any.
+    pub fn backend_event(self) -> Option<AppUiBackendEvent> {
+        match self {
+            AppUiFrameResult::Presented { backend_event, .. } => backend_event,
+            AppUiFrameResult::Skipped { backend_event }
+            | AppUiFrameResult::Reconfigured { backend_event } => Some(backend_event),
         }
     }
 }
@@ -65,6 +100,7 @@ impl AppUiFrameResult {
 #[derive(Debug, Default)]
 pub struct AppUiRenderDiagnosticReporter {
     last_reported: Option<AppUiFrameDiagnostics>,
+    last_backend_event: Option<AppUiBackendEvent>,
 }
 
 impl AppUiRenderDiagnosticReporter {
@@ -80,6 +116,20 @@ impl AppUiRenderDiagnosticReporter {
         }
         self.last_reported = Some(diagnostics);
         Some(diagnostics)
+    }
+
+    /// Return backend diagnostics that should be logged for this frame, if any.
+    pub fn changed_backend_event(&mut self, result: AppUiFrameResult) -> Option<AppUiBackendEvent> {
+        let event = result.backend_event();
+        if event.is_none() {
+            self.last_backend_event = None;
+            return None;
+        }
+        if self.last_backend_event == event {
+            return None;
+        }
+        self.last_backend_event = event;
+        event
     }
 }
 
@@ -118,8 +168,7 @@ impl AppUiFrameRenderer {
         }
 
         match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(output)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
+            wgpu::CurrentSurfaceTexture::Success(output) => {
                 let view = output.texture.create_view(&Default::default());
                 let render_stats = self.ui_renderer.render_resolved_commands(
                     device,
@@ -135,16 +184,45 @@ impl AppUiFrameRenderer {
                         text_missing_glyphs: text_stats.missing_glyphs,
                         raster_image_failures: render_stats.failed_raster_images,
                     },
+                    backend_event: None,
                 }
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                AppUiFrameResult::Skipped
+            wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
+                let view = output.texture.create_view(&Default::default());
+                let render_stats = self.ui_renderer.render_resolved_commands(
+                    device,
+                    queue,
+                    &view,
+                    &commands,
+                    screen_size,
+                );
+                output.present();
+                AppUiFrameResult::Presented {
+                    uploaded_resources: uploaded_glyphs || render_stats.uploaded_raster_images,
+                    diagnostics: AppUiFrameDiagnostics {
+                        text_missing_glyphs: text_stats.missing_glyphs,
+                        raster_image_failures: render_stats.failed_raster_images,
+                    },
+                    backend_event: Some(AppUiBackendEvent::SurfaceSuboptimal),
+                }
             }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                AppUiFrameResult::Skipped { backend_event: AppUiBackendEvent::SurfaceTimeout }
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                AppUiFrameResult::Skipped { backend_event: AppUiBackendEvent::SurfaceOccluded }
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(device, config);
-                AppUiFrameResult::Reconfigured
+                AppUiFrameResult::Reconfigured { backend_event: AppUiBackendEvent::SurfaceOutdated }
             }
-            _ => AppUiFrameResult::Skipped,
+            wgpu::CurrentSurfaceTexture::Lost => {
+                surface.configure(device, config);
+                AppUiFrameResult::Reconfigured { backend_event: AppUiBackendEvent::SurfaceLost }
+            }
+            _ => AppUiFrameResult::Skipped {
+                backend_event: AppUiBackendEvent::SurfaceUnavailable,
+            },
         }
     }
 }
@@ -171,15 +249,23 @@ mod tests {
         assert!(!AppUiFrameResult::Presented {
             uploaded_resources: false,
             diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
+            backend_event: None,
         }
         .needs_follow_up_redraw());
         assert!(AppUiFrameResult::Presented {
             uploaded_resources: true,
             diagnostics: AppUiFrameDiagnostics::default(),
+            backend_event: None,
         }
         .needs_follow_up_redraw());
-        assert!(AppUiFrameResult::Reconfigured.needs_follow_up_redraw());
-        assert!(!AppUiFrameResult::Skipped.needs_follow_up_redraw());
+        assert!(
+            AppUiFrameResult::Reconfigured { backend_event: AppUiBackendEvent::SurfaceLost }
+                .needs_follow_up_redraw()
+        );
+        assert!(
+            !AppUiFrameResult::Skipped { backend_event: AppUiBackendEvent::SurfaceTimeout }
+                .needs_follow_up_redraw()
+        );
     }
 
     #[test]
@@ -188,14 +274,17 @@ mod tests {
         let failed = AppUiFrameResult::Presented {
             uploaded_resources: false,
             diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
+            backend_event: None,
         };
         let changed = AppUiFrameResult::Presented {
             uploaded_resources: false,
             diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 },
+            backend_event: None,
         };
         let healthy = AppUiFrameResult::Presented {
             uploaded_resources: false,
             diagnostics: AppUiFrameDiagnostics::default(),
+            backend_event: None,
         };
 
         assert_eq!(
@@ -211,6 +300,34 @@ mod tests {
         assert_eq!(
             reporter.changed_failure(failed),
             Some(AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
+        );
+    }
+
+    #[test]
+    fn render_diagnostic_reporter_only_reports_changed_backend_events() {
+        let mut reporter = AppUiRenderDiagnosticReporter::default();
+        let timeout =
+            AppUiFrameResult::Skipped { backend_event: AppUiBackendEvent::SurfaceTimeout };
+        let lost = AppUiFrameResult::Reconfigured { backend_event: AppUiBackendEvent::SurfaceLost };
+        let healthy = AppUiFrameResult::Presented {
+            uploaded_resources: false,
+            diagnostics: AppUiFrameDiagnostics::default(),
+            backend_event: None,
+        };
+
+        assert_eq!(
+            reporter.changed_backend_event(timeout),
+            Some(AppUiBackendEvent::SurfaceTimeout)
+        );
+        assert_eq!(reporter.changed_backend_event(timeout), None);
+        assert_eq!(
+            reporter.changed_backend_event(lost),
+            Some(AppUiBackendEvent::SurfaceLost)
+        );
+        assert_eq!(reporter.changed_backend_event(healthy), None);
+        assert_eq!(
+            reporter.changed_backend_event(timeout),
+            Some(AppUiBackendEvent::SurfaceTimeout)
         );
     }
 
