@@ -200,8 +200,15 @@ workflow.
   focus/click/navigation/preedit/cancel, selection replacement on IME commit,
   preedit shielding of edit keys, stale-focused-widget IME disable, inline
   rename cleanup, and window focus loss IME disable.
-- P4-CLIP-001: Verify clip/crop/transform correctness for nested scroll views,
-  overlays, menus, tooltips, dock panels, and viewer/timeline surfaces.
+- [done] P4-CLIP-001: Verify clip/crop/transform correctness for nested
+  scroll views, overlays, menus, tooltips, dock panels, and viewer/timeline
+  surfaces. Coverage now spans renderer conservative clip snapping, invalid
+  scissor rejection, nested clip-stack intersection, transform-stack clip
+  application, `PaintContext::push_clip()` intersection with the active context
+  clip, ScrollView child-vs-chrome clip scopes, overlay escape from normal
+  scroll hit-test clipping, menu/context-menu/tooltip viewport clamps, viewer
+  viewport/canvas clipping, timeline clip label/waveform clipping, and
+  non-finite scroll offset sanitization.
 - P4-OVERLAY-001: Ensure tooltip, dropdown, context menu, color picker, modal,
   drag preview, and eyedropper overlays have deterministic top-layer ordering.
 - P4-RENDER-001: Finish basic primitive rendering QA: lines at all angles,

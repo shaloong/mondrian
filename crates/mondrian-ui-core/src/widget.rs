@@ -470,18 +470,25 @@ mod tests {
 
     struct MockEncoder {
         rects: Vec<(Rect, Color, f32)>,
+        clips: Vec<Rect>,
         clips_pushed: usize,
         clips_popped: usize,
     }
 
     impl MockEncoder {
         fn new() -> Self {
-            Self { rects: vec![], clips_pushed: 0, clips_popped: 0 }
+            Self {
+                rects: vec![],
+                clips: vec![],
+                clips_pushed: 0,
+                clips_popped: 0,
+            }
         }
     }
 
     impl DrawCommandEncoder for MockEncoder {
-        fn push_clip(&mut self, _bounds: Rect) {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
             self.clips_pushed += 1;
         }
         fn pop_clip(&mut self) {
@@ -645,5 +652,24 @@ mod tests {
         encoder.draw_rect(Rect::ZERO, Color::from_hex(0xFF0000), 4.0);
         encoder.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
         encoder.pop_clip();
+    }
+
+    #[test]
+    fn paint_context_push_clip_intersects_with_current_clip_rect() {
+        let mut encoder = MockEncoder::new();
+        let final_clip = {
+            let mut ctx = mock_paint_ctx(&mut encoder);
+            ctx.clip_rect = Rect::new(10.0, 20.0, 100.0, 80.0);
+
+            ctx.push_clip(Rect::new(50.0, 0.0, 100.0, 60.0));
+            ctx.pop_clip();
+
+            ctx.clip_rect
+        };
+
+        assert_eq!(encoder.clips, vec![Rect::new(50.0, 20.0, 60.0, 40.0)]);
+        assert_eq!(encoder.clips_pushed, 1);
+        assert_eq!(encoder.clips_popped, 1);
+        assert_eq!(final_clip, Rect::new(10.0, 20.0, 100.0, 80.0));
     }
 }
