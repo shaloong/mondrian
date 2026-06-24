@@ -11,17 +11,17 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::TextInput;
 
+mod model;
+
+use model::NumberInputModel;
+
 /// Adapter that maps the current numeric value to an editor [`Action`].
 pub type NumberInputChangeAction = dyn Fn(f64) -> Action;
 
 /// Single-line numeric input.
 pub struct NumberInput {
     input: TextInput,
-    min: f64,
-    max: f64,
-    step: Option<f64>,
-    decimals: usize,
-    committed_value: f64,
+    model: NumberInputModel,
     focused: bool,
     width: f32,
     on_change: Option<Box<NumberInputChangeAction>>,
@@ -30,15 +30,11 @@ pub struct NumberInput {
 impl NumberInput {
     /// Create a number input with a clamped initial value.
     pub fn new(value: f64, min: f64, max: f64) -> Self {
-        let (min, max) = ordered_range(min, max);
-        let value = clamp_finite(value, min, max);
+        let model = NumberInputModel::new(value, min, max);
+        let text = model.display_text();
         Self {
-            input: TextInput::new("").with_text(format_number(value, 0)),
-            min,
-            max,
-            step: None,
-            decimals: 0,
-            committed_value: value,
+            input: TextInput::new("").with_text(text),
+            model,
             focused: false,
             width: 200.0,
             on_change: None,
@@ -75,14 +71,13 @@ impl NumberInput {
 
     /// Set the number of decimals used for initial/displayed values.
     pub fn with_decimals(mut self, decimals: usize) -> Self {
-        self.decimals = decimals.min(6);
-        self.input.set_text(format_number(self.committed_value, self.decimals));
+        self.input.set_text(self.model.set_decimals(decimals));
         self
     }
 
     /// Quantize submitted values to a fixed step.
     pub fn with_step(mut self, step: f64) -> Self {
-        self.step = (step.is_finite() && step > 0.0).then_some(step);
+        self.model.set_step(step);
         self
     }
 
@@ -99,43 +94,7 @@ impl NumberInput {
 
     /// Current parsed and normalized value, if the raw text is numeric.
     pub fn value(&self) -> Option<f64> {
-        self.normalized_text_value()
-    }
-
-    fn normalized_text_value(&self) -> Option<f64> {
-        parse_number(self.input.text()).map(|value| self.normalize(value))
-    }
-
-    fn normalize(&self, value: f64) -> f64 {
-        if !value.is_finite() {
-            return self.committed_value;
-        }
-        let clamped = value.clamp(self.min, self.max);
-        if let Some(step) = self.step {
-            let steps = ((clamped - self.min) / step).round();
-            (self.min + steps * step).clamp(self.min, self.max)
-        } else {
-            clamped
-        }
-    }
-
-    fn keyboard_step(&self, modifiers: Modifiers) -> f64 {
-        let base = self.step.unwrap_or_else(|| {
-            if self.decimals == 0 {
-                1.0
-            } else {
-                10_f64.powi(-(self.decimals as i32))
-            }
-        });
-        if modifiers.shift {
-            base * 10.0
-        } else {
-            base
-        }
-    }
-
-    fn page_step(&self) -> f64 {
-        self.step.unwrap_or_else(|| self.keyboard_step(Modifiers::none())) * 10.0
+        self.model.normalized_text_value(self.input.text())
     }
 
     fn dispatch_value(&self, value: f64, ctx: &mut EventContext) {
@@ -145,40 +104,32 @@ impl NumberInput {
     }
 
     fn set_value_from_keyboard(&mut self, value: f64, ctx: &mut EventContext) -> EventResult {
-        let next = self.normalize(value);
-        if (next - self.committed_value).abs() <= f64::EPSILON
-            && self.input.text() == format_number(next, self.decimals)
-        {
+        let Some(update) = self.model.set_from_keyboard(value, self.input.text()) else {
             return EventResult::Ignored;
-        }
-        self.committed_value = next;
-        self.input.set_text(format_number(next, self.decimals));
-        self.dispatch_value(next, ctx);
+        };
+        self.input.set_text(update.text);
+        self.dispatch_value(update.value, ctx);
         ctx.request_repaint();
         EventResult::Handled
     }
 
     fn nudge(&mut self, delta: f64, ctx: &mut EventContext) -> EventResult {
-        let value = self.normalized_text_value().unwrap_or(self.committed_value);
+        let value = self.value().unwrap_or_else(|| self.model.committed_value());
         self.set_value_from_keyboard(value + delta, ctx)
     }
 
     fn dispatch_if_valid(&mut self, ctx: &mut EventContext) {
-        let Some(value) = self.normalized_text_value() else {
+        let Some(value) = self.model.commit_valid_text(self.input.text()) else {
             return;
         };
-        self.committed_value = value;
         self.dispatch_value(value, ctx);
     }
 
     fn commit_display_text(&mut self) -> bool {
-        let value = self.normalized_text_value().unwrap_or(self.committed_value);
-        self.committed_value = value;
-        let text = format_number(value, self.decimals);
-        if self.input.text() == text {
+        let Some(update) = self.model.commit_display_text(self.input.text()) else {
             return false;
-        }
-        self.input.set_text(text);
+        };
+        self.input.set_text(update.text);
         true
     }
 }
@@ -203,12 +154,12 @@ impl Widget for NumberInput {
         if self.focused && self.input.can_focus() {
             if let UiEvent::KeyDown { key, modifiers } = event {
                 if !modifiers.ctrl && !modifiers.alt && !modifiers.meta {
-                    let step = self.keyboard_step(*modifiers);
+                    let step = self.model.keyboard_step(*modifiers);
                     match key {
                         KeyCode::Up => return self.nudge(step, ctx),
                         KeyCode::Down => return self.nudge(-step, ctx),
-                        KeyCode::PageUp => return self.nudge(self.page_step(), ctx),
-                        KeyCode::PageDown => return self.nudge(-self.page_step(), ctx),
+                        KeyCode::PageUp => return self.nudge(self.model.page_step(), ctx),
+                        KeyCode::PageDown => return self.nudge(-self.model.page_step(), ctx),
                         _ => {}
                     }
                 }
@@ -256,42 +207,6 @@ impl Widget for NumberInput {
 
     fn panel_kind(&self) -> Option<mondrian_editor_state::state::PanelKind> {
         self.input.panel_kind()
-    }
-}
-
-fn ordered_range(min: f64, max: f64) -> (f64, f64) {
-    if !min.is_finite() || !max.is_finite() {
-        return (0.0, 1.0);
-    }
-    if min <= max {
-        (min, max)
-    } else {
-        (max, min)
-    }
-}
-
-fn clamp_finite(value: f64, min: f64, max: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(min, max)
-    } else {
-        min
-    }
-}
-
-fn parse_number(text: &str) -> Option<f64> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let value = trimmed.parse::<f64>().ok()?;
-    value.is_finite().then_some(value)
-}
-
-fn format_number(value: f64, decimals: usize) -> String {
-    if decimals == 0 {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.decimals$}")
     }
 }
 

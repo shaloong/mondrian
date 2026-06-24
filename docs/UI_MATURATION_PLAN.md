@@ -55,7 +55,7 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 ## Phase 3 - Event And Platform Semantics
 
-- [ ] Harden focus traversal, keyboard navigation, mouse capture release, window focus loss,
+- [x] Harden focus traversal, keyboard navigation, mouse capture release, window focus loss,
       and overlay hit testing as explicit contracts.
 - [x] Constrain framework Tab traversal to plain Tab/Shift+Tab so modified Tab chords remain
       available to shortcut resolution or platform handling.
@@ -93,6 +93,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       handoff, and disabled/read-only states.
 - [x] Add a nested ScrollView overlay stress test proving child overlays remain hit-testable and
       paint outside ancestor viewport clips while clip stacks stay balanced.
+- [x] Extract NumberInput numeric range, parsing, quantization, display formatting, committed
+      value, and keyboard step semantics into a directly tested model module.
 
 ## Phase 5 - Performance And Observability
 
