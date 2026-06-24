@@ -2095,6 +2095,20 @@ impl TimelineView {
         self.on_edit_command_available.as_ref().is_none_or(|factory| factory(command))
     }
 
+    fn edit_command_context(&self) -> timeline_model::TimelineEditCommandContext {
+        timeline_model::TimelineEditCommandContext {
+            selected_clip: self.selected_clip,
+            selected_track: self.selected_track,
+            in_point_frame: self.in_point_frame,
+            has_out_point: self.out_point_frame.is_some(),
+            clip_intersects_playhead: self.clip_intersects_playhead(),
+            selected_clip_is_nested: self
+                .selected_clip
+                .and_then(|clip_ref| self.clip(clip_ref))
+                .is_some_and(|clip| clip.nested),
+        }
+    }
+
     fn track_add_action(&self, kind: TimelineTrackKind) -> Action {
         self.on_track_add.as_ref().map_or(Action::NoOp, |factory| factory(kind))
     }
@@ -2121,31 +2135,7 @@ impl TimelineView {
     }
 
     fn edit_command_has_local_target(&self, command: TimelineEditCommand) -> bool {
-        match command {
-            TimelineEditCommand::PasteAtPlayhead
-            | TimelineEditCommand::MarkInAtPlayhead
-            | TimelineEditCommand::MarkOutAtPlayhead
-            | TimelineEditCommand::TogglePlayback => true,
-            TimelineEditCommand::ClearInOutPoints => {
-                self.in_point_frame > 0 || self.out_point_frame.is_some()
-            }
-            TimelineEditCommand::SplitAtPlayhead => self.clip_intersects_playhead(),
-            TimelineEditCommand::DeleteSelection | TimelineEditCommand::RippleDeleteSelection => {
-                self.selected_clip.is_some() || self.selected_track.is_some()
-            }
-            TimelineEditCommand::CutSelection
-            | TimelineEditCommand::CopySelection
-            | TimelineEditCommand::DuplicateSelection
-            | TimelineEditCommand::TrimSelectionInToPlayhead
-            | TimelineEditCommand::EnableSelection
-            | TimelineEditCommand::DisableSelection => self.selected_clip.is_some(),
-            TimelineEditCommand::TrimSelectionOutToPlayhead
-            | TimelineEditCommand::RollSelectedCutToPlayhead => self.selected_clip.is_some(),
-            TimelineEditCommand::OpenNestedSequence(clip_ref) => {
-                self.selected_clip == Some(clip_ref)
-                    && self.clip(clip_ref).is_some_and(|clip| clip.nested)
-            }
-        }
+        timeline_model::edit_command_has_local_target(command, self.edit_command_context())
     }
 
     fn clip_intersects_playhead(&self) -> bool {
@@ -2337,16 +2327,13 @@ impl TimelineView {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
-        if modifiers.ctrl || modifiers.meta || modifiers.alt {
+        let Some(target) = timeline_model::keyboard_seek_frame(
+            key,
+            modifiers,
+            self.playhead_frame,
+            self.max_content_frame(),
+        ) else {
             return false;
-        }
-        let step = if modifiers.shift { 10 } else { 1 };
-        let target = match key {
-            KeyCode::Left => self.playhead_frame.saturating_sub(step),
-            KeyCode::Right => self.playhead_frame.saturating_add(step),
-            KeyCode::Home => 0,
-            KeyCode::End => self.max_content_frame(),
-            _ => return false,
         };
         self.seek_from_input(target, ctx);
         true
@@ -2358,45 +2345,8 @@ impl TimelineView {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
-        if modifiers.alt {
+        let Some(command) = timeline_model::keyboard_edit_command(key, modifiers) else {
             return false;
-        }
-        let command = match key {
-            KeyCode::X if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
-                TimelineEditCommand::CutSelection
-            }
-            KeyCode::C if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
-                TimelineEditCommand::CopySelection
-            }
-            KeyCode::V if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
-                TimelineEditCommand::PasteAtPlayhead
-            }
-            KeyCode::D if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
-                TimelineEditCommand::DuplicateSelection
-            }
-            KeyCode::K if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
-                TimelineEditCommand::SplitAtPlayhead
-            }
-            KeyCode::B if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
-                TimelineEditCommand::SplitAtPlayhead
-            }
-            KeyCode::I if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
-                TimelineEditCommand::MarkInAtPlayhead
-            }
-            KeyCode::O if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
-                TimelineEditCommand::MarkOutAtPlayhead
-            }
-            KeyCode::Space if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
-                TimelineEditCommand::TogglePlayback
-            }
-            KeyCode::Delete | KeyCode::Backspace if !modifiers.ctrl && !modifiers.meta => {
-                if modifiers.shift {
-                    TimelineEditCommand::RippleDeleteSelection
-                } else {
-                    TimelineEditCommand::DeleteSelection
-                }
-            }
-            _ => return false,
         };
         self.dispatch_edit_command(command, ctx)
     }

@@ -1,11 +1,11 @@
-use mondrian_ui_core::types::{Point, Rect};
+use mondrian_ui_core::types::{KeyCode, Modifiers, Point, Rect};
 
 use super::{
-    TimelineScrollbarDragKind, TimelineTrackControl, TimelineTrackRef, TimelineTrimEdge,
-    SCROLLBAR_HANDLE_SIZE, SCROLLBAR_MIN_THUMB, SCROLLBAR_THICKNESS,
-    TIMELINE_CONTENT_TRAILING_PADDING, TIMELINE_MAX_PIXELS_PER_FRAME, TIMELINE_MAX_TRACK_HEIGHT,
-    TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_SCROLLBAR_GUTTER,
-    TIMELINE_TOOLBAR_HEIGHT,
+    TimelineClipRef, TimelineEditCommand, TimelineScrollbarDragKind, TimelineTrackControl,
+    TimelineTrackRef, TimelineTrimEdge, SCROLLBAR_HANDLE_SIZE, SCROLLBAR_MIN_THUMB,
+    SCROLLBAR_THICKNESS, TIMELINE_CONTENT_TRAILING_PADDING, TIMELINE_MAX_PIXELS_PER_FRAME,
+    TIMELINE_MAX_TRACK_HEIGHT, TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MIN_TRACK_HEIGHT,
+    TIMELINE_SCROLLBAR_GUTTER, TIMELINE_TOOLBAR_HEIGHT,
 };
 
 const CLIP_VERTICAL_INSET: f32 = 4.0;
@@ -49,6 +49,16 @@ pub(super) struct TimelineHorizontalZoomUpdate {
 pub(super) struct TimelineTrackResizeUpdate {
     pub track_height: f32,
     pub scroll_y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TimelineEditCommandContext {
+    pub selected_clip: Option<TimelineClipRef>,
+    pub selected_track: Option<TimelineTrackRef>,
+    pub in_point_frame: i64,
+    pub has_out_point: bool,
+    pub clip_intersects_playhead: bool,
+    pub selected_clip_is_nested: bool,
 }
 
 pub(super) fn layout_rects(
@@ -462,6 +472,98 @@ pub(super) fn track_resize_for_handle_delta(
     })
 }
 
+pub(super) fn edit_command_has_local_target(
+    command: TimelineEditCommand,
+    context: TimelineEditCommandContext,
+) -> bool {
+    match command {
+        TimelineEditCommand::PasteAtPlayhead
+        | TimelineEditCommand::MarkInAtPlayhead
+        | TimelineEditCommand::MarkOutAtPlayhead
+        | TimelineEditCommand::TogglePlayback => true,
+        TimelineEditCommand::ClearInOutPoints => {
+            context.in_point_frame > 0 || context.has_out_point
+        }
+        TimelineEditCommand::SplitAtPlayhead => context.clip_intersects_playhead,
+        TimelineEditCommand::DeleteSelection | TimelineEditCommand::RippleDeleteSelection => {
+            context.selected_clip.is_some() || context.selected_track.is_some()
+        }
+        TimelineEditCommand::CutSelection
+        | TimelineEditCommand::CopySelection
+        | TimelineEditCommand::DuplicateSelection
+        | TimelineEditCommand::TrimSelectionInToPlayhead
+        | TimelineEditCommand::TrimSelectionOutToPlayhead
+        | TimelineEditCommand::RollSelectedCutToPlayhead
+        | TimelineEditCommand::EnableSelection
+        | TimelineEditCommand::DisableSelection => context.selected_clip.is_some(),
+        TimelineEditCommand::OpenNestedSequence(clip_ref) => {
+            context.selected_clip == Some(clip_ref) && context.selected_clip_is_nested
+        }
+    }
+}
+
+pub(super) fn keyboard_edit_command(
+    key: KeyCode,
+    modifiers: Modifiers,
+) -> Option<TimelineEditCommand> {
+    if modifiers.alt {
+        return None;
+    }
+    match key {
+        KeyCode::X if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+            Some(TimelineEditCommand::CutSelection)
+        }
+        KeyCode::C if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+            Some(TimelineEditCommand::CopySelection)
+        }
+        KeyCode::V if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+            Some(TimelineEditCommand::PasteAtPlayhead)
+        }
+        KeyCode::D if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+            Some(TimelineEditCommand::DuplicateSelection)
+        }
+        KeyCode::K | KeyCode::B if !modifiers.shift && (modifiers.ctrl || modifiers.meta) => {
+            Some(TimelineEditCommand::SplitAtPlayhead)
+        }
+        KeyCode::I if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
+            Some(TimelineEditCommand::MarkInAtPlayhead)
+        }
+        KeyCode::O if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
+            Some(TimelineEditCommand::MarkOutAtPlayhead)
+        }
+        KeyCode::Space if !modifiers.ctrl && !modifiers.meta && !modifiers.shift => {
+            Some(TimelineEditCommand::TogglePlayback)
+        }
+        KeyCode::Delete | KeyCode::Backspace if !modifiers.ctrl && !modifiers.meta => {
+            if modifiers.shift {
+                Some(TimelineEditCommand::RippleDeleteSelection)
+            } else {
+                Some(TimelineEditCommand::DeleteSelection)
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn keyboard_seek_frame(
+    key: KeyCode,
+    modifiers: Modifiers,
+    playhead_frame: i64,
+    max_content_frame: i64,
+) -> Option<i64> {
+    if modifiers.ctrl || modifiers.meta || modifiers.alt {
+        return None;
+    }
+    let step = if modifiers.shift { 10 } else { 1 };
+    match key {
+        KeyCode::Left => Some(playhead_frame.saturating_sub(step).max(0)),
+        KeyCode::Right => Some(playhead_frame.saturating_add(step)),
+        KeyCode::Home => Some(0),
+        KeyCode::End => Some(max_content_frame.max(0)),
+        _ => None,
+    }
+}
+
 fn clamp_unordered(value: f32, min: f32, max: f32) -> f32 {
     value.clamp(min.min(max), min.max(max))
 }
@@ -787,6 +889,203 @@ mod tests {
         .unwrap();
         assert!(recovered.track_height.is_finite());
         assert!(recovered.scroll_y.is_finite());
+    }
+
+    #[test]
+    fn edit_command_targeting_uses_selection_playhead_and_mark_context() {
+        let clip_ref = TimelineClipRef { track_index: 1, clip_index: 2 };
+        let track_ref = TimelineTrackRef { track_index: 1 };
+        let empty = TimelineEditCommandContext {
+            selected_clip: None,
+            selected_track: None,
+            in_point_frame: 0,
+            has_out_point: false,
+            clip_intersects_playhead: false,
+            selected_clip_is_nested: false,
+        };
+
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::PasteAtPlayhead,
+            empty
+        ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::CutSelection,
+            empty
+        ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::DeleteSelection,
+            empty
+        ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::ClearInOutPoints,
+            empty
+        ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::SplitAtPlayhead,
+            empty
+        ));
+
+        let selected_track =
+            TimelineEditCommandContext { selected_track: Some(track_ref), ..empty };
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::DeleteSelection,
+            selected_track
+        ));
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::RippleDeleteSelection,
+            selected_track
+        ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::CopySelection,
+            selected_track
+        ));
+
+        let selected_clip = TimelineEditCommandContext {
+            selected_clip: Some(clip_ref),
+            clip_intersects_playhead: true,
+            in_point_frame: 12,
+            ..empty
+        };
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::CopySelection,
+            selected_clip
+        ));
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::SplitAtPlayhead,
+            selected_clip
+        ));
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::ClearInOutPoints,
+            selected_clip
+        ));
+    }
+
+    #[test]
+    fn edit_command_targeting_requires_selected_nested_clip_for_open_nested_sequence() {
+        let clip_ref = TimelineClipRef { track_index: 0, clip_index: 0 };
+        let other_ref = TimelineClipRef { track_index: 0, clip_index: 1 };
+        let context = TimelineEditCommandContext {
+            selected_clip: Some(clip_ref),
+            selected_track: None,
+            in_point_frame: 0,
+            has_out_point: false,
+            clip_intersects_playhead: false,
+            selected_clip_is_nested: true,
+        };
+
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::OpenNestedSequence(clip_ref),
+            context
+        ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::OpenNestedSequence(other_ref),
+            context
+        ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::OpenNestedSequence(clip_ref),
+            TimelineEditCommandContext { selected_clip_is_nested: false, ..context }
+        ));
+    }
+
+    #[test]
+    fn keyboard_edit_command_maps_owned_chords_and_leaves_alt_or_extra_shift_unmatched() {
+        let ctrl = Modifiers { ctrl: true, ..Default::default() };
+        let meta = Modifiers { meta: true, ..Default::default() };
+        let alt_ctrl = Modifiers { ctrl: true, alt: true, ..Default::default() };
+        let shift_ctrl = Modifiers { ctrl: true, shift: true, ..Default::default() };
+
+        assert_eq!(
+            keyboard_edit_command(KeyCode::X, ctrl),
+            Some(TimelineEditCommand::CutSelection)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::C, meta),
+            Some(TimelineEditCommand::CopySelection)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::V, ctrl),
+            Some(TimelineEditCommand::PasteAtPlayhead)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::D, ctrl),
+            Some(TimelineEditCommand::DuplicateSelection)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::K, ctrl),
+            Some(TimelineEditCommand::SplitAtPlayhead)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::B, ctrl),
+            Some(TimelineEditCommand::SplitAtPlayhead)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::I, Modifiers::none()),
+            Some(TimelineEditCommand::MarkInAtPlayhead)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::O, Modifiers::none()),
+            Some(TimelineEditCommand::MarkOutAtPlayhead)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::Space, Modifiers::none()),
+            Some(TimelineEditCommand::TogglePlayback)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::Delete, Modifiers::none()),
+            Some(TimelineEditCommand::DeleteSelection)
+        );
+        assert_eq!(
+            keyboard_edit_command(KeyCode::Backspace, Modifiers::shift()),
+            Some(TimelineEditCommand::RippleDeleteSelection)
+        );
+        assert_eq!(keyboard_edit_command(KeyCode::X, alt_ctrl), None);
+        assert_eq!(keyboard_edit_command(KeyCode::X, shift_ctrl), None);
+        assert_eq!(keyboard_edit_command(KeyCode::I, ctrl), None);
+    }
+
+    #[test]
+    fn keyboard_seek_frame_maps_plain_navigation_and_ignores_system_chords() {
+        assert_eq!(
+            keyboard_seek_frame(KeyCode::Left, Modifiers::none(), 20, 100),
+            Some(19)
+        );
+        assert_eq!(
+            keyboard_seek_frame(KeyCode::Left, Modifiers::shift(), 5, 100),
+            Some(0)
+        );
+        assert_eq!(
+            keyboard_seek_frame(KeyCode::Right, Modifiers::shift(), i64::MAX - 5, 100),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            keyboard_seek_frame(KeyCode::Home, Modifiers::none(), 20, 100),
+            Some(0)
+        );
+        assert_eq!(
+            keyboard_seek_frame(KeyCode::End, Modifiers::none(), 20, 100),
+            Some(100)
+        );
+        assert_eq!(
+            keyboard_seek_frame(KeyCode::End, Modifiers::none(), 20, -100),
+            Some(0)
+        );
+        assert_eq!(
+            keyboard_seek_frame(KeyCode::Right, Modifiers::ctrl(), 20, 100),
+            None
+        );
+        assert_eq!(
+            keyboard_seek_frame(
+                KeyCode::Right,
+                Modifiers { alt: true, ..Default::default() },
+                20,
+                100,
+            ),
+            None
+        );
+        assert_eq!(
+            keyboard_seek_frame(KeyCode::A, Modifiers::none(), 20, 100),
+            None
+        );
     }
 
     #[test]

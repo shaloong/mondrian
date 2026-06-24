@@ -124,6 +124,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       directly tested model/layout contracts.
 - [x] Extract TimelineView clip drag, trim drag, scrollbar thumb scroll, horizontal zoom, and
       vertical track-resize math into directly tested interaction contracts.
+- [x] Extract TimelineView edit-command target availability, keyboard edit-command routing,
+      and keyboard seek routing into directly tested model contracts.
 
 ## Phase 5 - Performance And Observability
 
