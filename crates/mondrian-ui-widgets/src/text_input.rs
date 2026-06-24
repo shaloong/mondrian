@@ -102,6 +102,12 @@ struct TextInputGeometry {
     caret: Rect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmptyTextCommitPolicy {
+    PreserveSelection,
+    ReplaceSelection,
+}
+
 /// TextInput Widget —— 单行文本输入框
 pub struct TextInput {
     id: WidgetId,
@@ -428,14 +434,26 @@ impl TextInput {
         true
     }
 
-    /// Insert text at cursor, updating cursor by grapheme count.
-    fn insert_at_cursor(&mut self, s: &str) {
-        let normalized = normalize_single_line_input(s);
-        let count = self.grapheme_count(&normalized);
+    fn insert_normalized_at_cursor(&mut self, s: &str) {
+        let count = self.grapheme_count(s);
         let idx = self.cursor_byte_idx();
-        self.text.insert_str(idx, &normalized);
+        self.text.insert_str(idx, s);
         self.cursor += count;
         self.update_scroll(DEFAULT_FONT_SIZE);
+    }
+
+    fn commit_text_at_cursor(&mut self, input: &str, empty_policy: EmptyTextCommitPolicy) -> bool {
+        let normalized = normalize_single_line_input(input);
+        if normalized.is_empty() && empty_policy == EmptyTextCommitPolicy::PreserveSelection {
+            return false;
+        }
+
+        let before_text = self.text.clone();
+        self.delete_selection();
+        if !normalized.is_empty() {
+            self.insert_normalized_at_cursor(&normalized);
+        }
+        before_text != self.text
     }
 
     /// Move cursor and keep it visible.
@@ -682,11 +700,10 @@ impl Widget for TextInput {
                     }
                     KeyCode::V if exact_ctrl => {
                         if let Ok(Some(clip)) = ctx.platform.clipboard_paste() {
-                            let normalized = normalize_single_line_input(&clip);
-                            if !normalized.is_empty() {
-                                self.delete_selection();
-                                self.insert_at_cursor(&normalized);
-                            }
+                            self.commit_text_at_cursor(
+                                &clip,
+                                EmptyTextCommitPolicy::PreserveSelection,
+                            );
                         }
                         EventResult::Handled
                     }
@@ -768,24 +785,22 @@ impl Widget for TextInput {
             }
             // ── Text input ─────────────────────────────────────────────
             UiEvent::TextInput(ch) if self.focused => {
-                let before_text = self.text.clone();
-                self.delete_selection();
-                self.insert_at_cursor(ch);
+                let text_changed =
+                    self.commit_text_at_cursor(ch, EmptyTextCommitPolicy::ReplaceSelection);
                 self.ime_preedit.clear();
                 self.refresh_ime_area(ctx);
-                if self.text != before_text {
+                if text_changed {
                     self.dispatch_change(ctx);
                 }
                 ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::ImeCommit(ch) if self.focused => {
-                let before_text = self.text.clone();
-                self.delete_selection();
                 self.ime_preedit.clear();
-                self.insert_at_cursor(ch);
+                let text_changed =
+                    self.commit_text_at_cursor(ch, EmptyTextCommitPolicy::ReplaceSelection);
                 self.refresh_ime_area(ctx);
-                if self.text != before_text {
+                if text_changed {
                     self.dispatch_change(ctx);
                 }
                 ctx.request_repaint();
@@ -1617,6 +1632,33 @@ mod tests {
         assert!(!ti.has_selection());
         assert!(ti.ime_preedit.is_empty());
         assert_eq!(actions.borrow().as_slice(), &[change_action("before 中")]);
+        assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
+    }
+
+    #[test]
+    fn empty_ime_commit_replaces_selection_and_dispatches_when_text_changes() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut ti = TextInput::new("ph").with_text("abc").on_change(change_action);
+        layout(&mut ti);
+        ti.focused = true;
+        ti.selection_start = Some(1);
+        ti.cursor = 2;
+        ti.ime_preedit = "候选".into();
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
+        let result = ti.event(&UiEvent::ImeCommit(String::new()), &mut ctx);
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(ti.text(), "ac");
+        assert_eq!(ti.cursor, 1);
+        assert!(!ti.has_selection());
+        assert!(ti.ime_preedit.is_empty());
+        assert_eq!(actions.borrow().as_slice(), &[change_action("ac")]);
+        assert!(ctx.requests.repaint);
         assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
     }
 
