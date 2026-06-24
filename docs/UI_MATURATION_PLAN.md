@@ -99,6 +99,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       geometry into directly tested model/geometry contracts.
 - [x] Extract ScrollView offset clamping, content normalization, viewport/child bounds, and
       scrollbar track/thumb geometry into directly tested model/geometry contracts.
+- [x] Extract ColorPicker field formatting, channel parsing, hue preservation, and visible-field
+      color application into directly tested model contracts.
 
 ## Phase 5 - Performance And Observability
 

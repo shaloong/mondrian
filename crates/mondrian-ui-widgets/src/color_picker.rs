@@ -2,10 +2,13 @@
 //!
 //! Provides a compact model-based color editor for the custom UI stack.
 
+mod model;
+
 use std::cell::Cell;
 use std::f32::consts::TAU;
 
-use mondrian_core::{CmykColor, Color, HslColor, HsvColor, RgbaColor};
+use model::{apply_field_texts, field_text, hue_for_color, ColorField};
+use mondrian_core::{Color, HsvColor};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -104,43 +107,6 @@ pub enum ColorPickerAreaMode {
 
 /// Adapter that maps the current picker color to an editor [`Action`].
 pub type ColorChangeAction = dyn Fn(Color) -> Action;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ColorField {
-    Hex,
-    R,
-    G,
-    B,
-    A,
-    H,
-    S,
-    L,
-    V,
-    C,
-    M,
-    Y,
-    K,
-}
-
-impl ColorField {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Hex => "Hex",
-            Self::R => "R",
-            Self::G => "G",
-            Self::B => "B",
-            Self::A => "A",
-            Self::H => "H",
-            Self::S => "S",
-            Self::L => "L",
-            Self::V => "V",
-            Self::C => "C",
-            Self::M => "M",
-            Self::Y => "Y",
-            Self::K => "K",
-        }
-    }
-}
 
 /// Color picker widget with model tabs and text inputs.
 pub struct ColorPicker {
@@ -363,10 +329,7 @@ impl ColorPicker {
     }
 
     fn update_hue_from_color(&mut self) {
-        let hsv = self.color.to_hsv();
-        if hsv.s > 0.001 && hsv.v > 0.001 {
-            self.hue = hsv.h;
-        }
+        self.hue = hue_for_color(self.hue, self.color);
     }
 
     fn cancel_interaction(&mut self) {
@@ -590,29 +553,7 @@ impl ColorPicker {
     }
 
     fn field_text(&self, field: ColorField) -> String {
-        match field {
-            ColorField::Hex => self.color.to_hex_rgba(),
-            ColorField::R => int_channel(self.color.r).to_string(),
-            ColorField::G => int_channel(self.color.g).to_string(),
-            ColorField::B => int_channel(self.color.b).to_string(),
-            ColorField::A => percent_channel(self.color.a).to_string(),
-            ColorField::H => match self.mode {
-                ColorPickerMode::Hsl => format_number(self.color.to_hsl().h),
-                ColorPickerMode::Hsv => format_number(self.color.to_hsv().h),
-                _ => "0".into(),
-            },
-            ColorField::S => match self.mode {
-                ColorPickerMode::Hsl => percent_channel(self.color.to_hsl().s).to_string(),
-                ColorPickerMode::Hsv => percent_channel(self.color.to_hsv().s).to_string(),
-                _ => "0".into(),
-            },
-            ColorField::L => percent_channel(self.color.to_hsl().l).to_string(),
-            ColorField::V => percent_channel(self.color.to_hsv().v).to_string(),
-            ColorField::C => percent_channel(self.color.to_cmyk().c).to_string(),
-            ColorField::M => percent_channel(self.color.to_cmyk().m).to_string(),
-            ColorField::Y => percent_channel(self.color.to_cmyk().y).to_string(),
-            ColorField::K => percent_channel(self.color.to_cmyk().k).to_string(),
-        }
+        field_text(self.color, self.mode, field)
     }
 
     fn sync_fields_from_color(&mut self) {
@@ -627,77 +568,12 @@ impl ColorPicker {
         let old = self.color;
         let fields = self.active_fields();
         let text = |index: usize| self.fields[index].text();
-        let parsed = match self.mode {
-            ColorPickerMode::Hex => Color::parse_hex(text(0)).ok(),
-            ColorPickerMode::Rgb => {
-                let r = parse_u8_channel(text(0));
-                let g = parse_u8_channel(text(1));
-                let b = parse_u8_channel(text(2));
-                let a = parse_percent_channel(text(3));
-                match (r, g, b, a) {
-                    (Some(r), Some(g), Some(b), Some(a)) => {
-                        Some(Color::from_rgba(RgbaColor { r, g, b, a }))
-                    }
-                    _ => None,
-                }
-            }
-            ColorPickerMode::Hsl => {
-                let h = parse_hue(text(0));
-                let s = parse_percent_channel(text(1));
-                let l = parse_percent_channel(text(2));
-                let a = parse_percent_channel(text(3));
-                match (h, s, l, a) {
-                    (Some(h), Some(s), Some(l), Some(a)) => {
-                        Some(Color::from_hsl(HslColor { h, s, l, a }))
-                    }
-                    _ => None,
-                }
-            }
-            ColorPickerMode::Hsv => {
-                let h = parse_hue(text(0));
-                let s = parse_percent_channel(text(1));
-                let v = parse_percent_channel(text(2));
-                let a = parse_percent_channel(text(3));
-                match (h, s, v, a) {
-                    (Some(h), Some(s), Some(v), Some(a)) => {
-                        Some(Color::from_hsv(HsvColor { h, s, v, a }))
-                    }
-                    _ => None,
-                }
-            }
-            ColorPickerMode::Cmyk => {
-                let c = parse_percent_channel(text(0));
-                let m = parse_percent_channel(text(1));
-                let y = parse_percent_channel(text(2));
-                let k = parse_percent_channel(text(3));
-                let a = parse_percent_channel(text(4));
-                match (c, m, y, k, a) {
-                    (Some(c), Some(m), Some(y), Some(k), Some(a)) => {
-                        Some(Color::from_cmyk(CmykColor { c, m, y, k, a }))
-                    }
-                    _ => None,
-                }
-            }
-        };
-
-        let Some(color) = parsed else {
+        let Some(update) = apply_field_texts(old, self.hue, self.mode, fields, text) else {
             return false;
         };
-
-        if fields.is_empty() {
-            return false;
-        }
-
-        self.color = color;
-        match self.mode {
-            ColorPickerMode::Hsl | ColorPickerMode::Hsv => {
-                if let Some(hue) = parse_hue(text(0)) {
-                    self.hue = hue;
-                }
-            }
-            _ => self.update_hue_from_color(),
-        }
-        self.color != old
+        self.color = update.color;
+        self.hue = update.hue;
+        update.color_changed
     }
 
     fn hovered_mode_at(&self, point: Point) -> Option<ColorPickerMode> {
@@ -1488,36 +1364,6 @@ impl Widget for ColorPicker {
                     a: rgba.a,
                 }),
         )
-    }
-}
-
-fn parse_u8_channel(input: &str) -> Option<f32> {
-    let value = input.trim().parse::<f32>().ok()?;
-    Some((value.round() / 255.0).clamp(0.0, 1.0))
-}
-
-fn parse_percent_channel(input: &str) -> Option<f32> {
-    let value = input.trim().trim_end_matches('%').parse::<f32>().ok()?;
-    Some((value / 100.0).clamp(0.0, 1.0))
-}
-
-fn parse_hue(input: &str) -> Option<f32> {
-    Some(input.trim().parse::<f32>().ok()?.rem_euclid(360.0))
-}
-
-fn int_channel(value: f32) -> u8 {
-    (value.clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
-fn percent_channel(value: f32) -> u8 {
-    (value.clamp(0.0, 1.0) * 100.0).round() as u8
-}
-
-fn format_number(value: f32) -> String {
-    if (value.round() - value).abs() <= 0.01 {
-        format!("{:.0}", value)
-    } else {
-        format!("{:.1}", value)
     }
 }
 
