@@ -109,6 +109,29 @@ enum EmptyTextCommitPolicy {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TextCompositionState {
+    preedit: String,
+}
+
+impl TextCompositionState {
+    fn preedit(&self) -> &str {
+        &self.preedit
+    }
+
+    fn is_active(&self) -> bool {
+        !self.preedit.is_empty()
+    }
+
+    fn set_preedit(&mut self, preedit: String) {
+        self.preedit = preedit;
+    }
+
+    fn clear(&mut self) {
+        self.preedit.clear();
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TextEditState {
     text: String,
     /// Cursor position as grapheme cluster index.
@@ -344,8 +367,7 @@ pub struct TextInput {
     last_blink: Cell<Instant>,
     /// Horizontal scroll offset to keep cursor visible.
     scroll_x: Cell<f32>,
-    /// IME composition text shown before the platform commits it.
-    ime_preedit: String,
+    composition: TextCompositionState,
     on_change: Option<Box<TextInputChangeAction>>,
 }
 
@@ -362,7 +384,7 @@ impl TextInput {
             cursor_visible: Cell::new(true),
             last_blink: Cell::new(Instant::now()),
             scroll_x: Cell::new(0.0),
-            ime_preedit: String::new(),
+            composition: TextCompositionState::default(),
             on_change: None,
         }
     }
@@ -385,7 +407,7 @@ impl TextInput {
             self.focused = false;
             self.mouse_down = false;
             self.edit.clear_selection();
-            self.ime_preedit.clear();
+            self.composition.clear();
             self.cursor_visible.set(false);
         }
     }
@@ -481,10 +503,10 @@ impl TextInput {
         let text_x = content_left - self.scroll_x.get();
         let text_y =
             self.bounds.y + (self.bounds.height - Self::line_height(font_size)).max(0.0) * 0.5;
-        let preedit_w = if self.ime_preedit.is_empty() {
+        let preedit_w = if !self.composition.is_active() {
             0.0
         } else {
-            measure_text_width(&self.ime_preedit, font_size)
+            measure_text_width(self.composition.preedit(), font_size)
         };
         let caret_width = 2.0;
         let max_caret_x = (content_right - caret_width).max(content_left);
@@ -647,7 +669,7 @@ impl Widget for TextInput {
             if self.focused
                 || self.mouse_down
                 || self.has_selection()
-                || !self.ime_preedit.is_empty()
+                || self.composition.is_active()
             {
                 ctx.release_pointer_capture(self.id);
                 ctx.set_ime_enabled(false, None);
@@ -656,7 +678,7 @@ impl Widget for TextInput {
             self.focused = false;
             self.mouse_down = false;
             self.clear_selection();
-            self.ime_preedit.clear();
+            self.composition.clear();
             return EventResult::Ignored;
         }
         match event {
@@ -676,18 +698,18 @@ impl Widget for TextInput {
                         self.clear_selection();
                     }
                     self.mouse_down = true;
-                    self.ime_preedit.clear();
+                    self.composition.clear();
                     ctx.request_pointer_capture(self.id);
                     ctx.request_repaint();
                 } else {
                     let changed = self.focused
                         || self.mouse_down
                         || self.has_selection()
-                        || !self.ime_preedit.is_empty();
+                        || self.composition.is_active();
                     self.focused = false;
                     self.clear_selection();
                     self.mouse_down = false;
-                    self.ime_preedit.clear();
+                    self.composition.clear();
                     ctx.release_pointer_capture(self.id);
                     ctx.set_ime_enabled(false, None);
                     self.refresh_ime_area(ctx);
@@ -738,11 +760,11 @@ impl Widget for TextInput {
                 let changed = self.focused
                     || self.mouse_down
                     || self.has_selection()
-                    || !self.ime_preedit.is_empty();
+                    || self.composition.is_active();
                 self.focused = false;
                 self.mouse_down = false;
                 self.clear_selection();
-                self.ime_preedit.clear();
+                self.composition.clear();
                 ctx.release_pointer_capture(self.id);
                 ctx.set_ime_enabled(false, None);
                 if changed {
@@ -753,15 +775,15 @@ impl Widget for TextInput {
             // ── Keyboard ───────────────────────────────────────────────
             UiEvent::KeyDown { key: KeyCode::Escape, modifiers }
                 if self.focused
-                    && !self.ime_preedit.is_empty()
+                    && self.composition.is_active()
                     && *modifiers == Modifiers::none() =>
             {
-                self.ime_preedit.clear();
+                self.composition.clear();
                 self.refresh_ime_area(ctx);
                 ctx.request_repaint();
                 EventResult::Handled
             }
-            UiEvent::KeyDown { .. } if self.focused && !self.ime_preedit.is_empty() => {
+            UiEvent::KeyDown { .. } if self.focused && self.composition.is_active() => {
                 self.refresh_ime_area(ctx);
                 EventResult::Handled
             }
@@ -878,7 +900,7 @@ impl Widget for TextInput {
             UiEvent::TextInput(ch) if self.focused => {
                 let text_changed =
                     self.commit_text_at_cursor(ch, EmptyTextCommitPolicy::ReplaceSelection);
-                self.ime_preedit.clear();
+                self.composition.clear();
                 self.refresh_ime_area(ctx);
                 if text_changed {
                     self.dispatch_change(ctx);
@@ -887,7 +909,7 @@ impl Widget for TextInput {
                 EventResult::Handled
             }
             UiEvent::ImeCommit(ch) if self.focused => {
-                self.ime_preedit.clear();
+                self.composition.clear();
                 let text_changed =
                     self.commit_text_at_cursor(ch, EmptyTextCommitPolicy::ReplaceSelection);
                 self.refresh_ime_area(ctx);
@@ -898,13 +920,13 @@ impl Widget for TextInput {
                 EventResult::Handled
             }
             UiEvent::ImePreedit(preedit) if self.focused => {
-                self.ime_preedit = preedit.clone();
+                self.composition.set_preedit(preedit.clone());
                 self.refresh_ime_area(ctx);
                 ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::ImeCancel if self.focused => {
-                self.ime_preedit.clear();
+                self.composition.clear();
                 self.refresh_ime_area(ctx);
                 ctx.request_repaint();
                 EventResult::Handled
@@ -978,17 +1000,17 @@ impl Widget for TextInput {
             );
         }
 
-        if self.enabled && self.focused && !self.ime_preedit.is_empty() {
+        if self.enabled && self.focused && self.composition.is_active() {
             let prefix_byte = self.grapheme_byte_idx(self.edit.cursor);
             let preedit_x = text_x + measure_text_width(&text[..prefix_byte], font_size);
             ctx.encoder.draw_text(
-                &self.ime_preedit,
+                self.composition.preedit(),
                 font_size,
                 Point::new(preedit_x, text_y),
                 tokens.foreground,
             );
             let underline_y = text_y + font_size * 1.25;
-            let underline_w = measure_text_width(&self.ime_preedit, font_size).max(4.0);
+            let underline_w = measure_text_width(self.composition.preedit(), font_size).max(4.0);
             ctx.encoder.draw_line(
                 Point::new(preedit_x, underline_y),
                 Point::new(preedit_x + underline_w, underline_y),
@@ -1599,6 +1621,21 @@ mod tests {
     }
 
     #[test]
+    fn text_composition_state_tracks_preedit_activity() {
+        let mut composition = TextCompositionState::default();
+        assert!(!composition.is_active());
+        assert_eq!(composition.preedit(), "");
+
+        composition.set_preedit("ni".into());
+        assert!(composition.is_active());
+        assert_eq!(composition.preedit(), "ni");
+
+        composition.clear();
+        assert!(!composition.is_active());
+        assert_eq!(composition.preedit(), "");
+    }
+
+    #[test]
     fn ime_preedit_is_stored_until_commit() {
         let mut ti = TextInput::new("ph").with_text("ni");
         ti.focused = true;
@@ -1609,11 +1646,11 @@ mod tests {
 
         let result = ti.event(&UiEvent::ImePreedit("你".into()), &mut ctx);
         assert_eq!(result, EventResult::Handled);
-        assert_eq!(ti.ime_preedit, "你");
+        assert_eq!(ti.composition.preedit(), "你");
 
         let result = ti.event(&UiEvent::ImeCommit("你".into()), &mut ctx);
         assert_eq!(result, EventResult::Handled);
-        assert!(ti.ime_preedit.is_empty());
+        assert!(!ti.composition.is_active());
     }
 
     #[test]
@@ -1647,7 +1684,7 @@ mod tests {
         layout(&mut ti);
         ti.focused = true;
         ti.edit.cursor = 3;
-        ti.ime_preedit = "ni".into();
+        ti.composition.set_preedit("ni".into());
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut f = DummyFocus;
@@ -1668,7 +1705,7 @@ mod tests {
             );
             assert_eq!(ti.text(), "abc");
             assert_eq!(ti.edit.cursor, 3);
-            assert_eq!(ti.ime_preedit, "ni");
+            assert_eq!(ti.composition.preedit(), "ni");
             assert!(!ti.has_selection());
         }
         assert!(actions.borrow().is_empty());
@@ -1680,7 +1717,7 @@ mod tests {
         layout(&mut ti);
         ti.focused = true;
         ti.edit.cursor = 3;
-        ti.ime_preedit = "ni".into();
+        ti.composition.set_preedit("ni".into());
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut f = DummyFocus;
@@ -1695,7 +1732,7 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(ti.text(), "abc");
-        assert!(ti.ime_preedit.is_empty());
+        assert!(!ti.composition.is_active());
         assert!(ctx.requests.repaint);
         assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
         assert!(actions.borrow().is_empty());
@@ -1707,7 +1744,7 @@ mod tests {
         layout(&mut ti);
         ti.focused = true;
         ti.edit.cursor = 3;
-        ti.ime_preedit = "ni".into();
+        ti.composition.set_preedit("ni".into());
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
         let mut f = DummyFocus;
@@ -1719,7 +1756,7 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(ti.text(), "abc");
-        assert!(ti.ime_preedit.is_empty());
+        assert!(!ti.composition.is_active());
         assert!(ctx.requests.repaint);
         assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
         assert!(actions.borrow().is_empty());
@@ -1734,7 +1771,7 @@ mod tests {
         ti.focused = true;
         ti.edit.selection_start = Some(7);
         ti.edit.cursor = 12;
-        ti.ime_preedit = "候选".into();
+        ti.composition.set_preedit("候选".into());
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
@@ -1746,7 +1783,7 @@ mod tests {
         assert_eq!(ti.text(), "before 中");
         assert_eq!(ti.edit.cursor, 8);
         assert!(!ti.has_selection());
-        assert!(ti.ime_preedit.is_empty());
+        assert!(!ti.composition.is_active());
         assert_eq!(actions.borrow().as_slice(), &[change_action("before 中")]);
         assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
     }
@@ -1760,7 +1797,7 @@ mod tests {
         ti.focused = true;
         ti.edit.selection_start = Some(1);
         ti.edit.cursor = 2;
-        ti.ime_preedit = "候选".into();
+        ti.composition.set_preedit("候选".into());
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
@@ -1772,7 +1809,7 @@ mod tests {
         assert_eq!(ti.text(), "ac");
         assert_eq!(ti.edit.cursor, 1);
         assert!(!ti.has_selection());
-        assert!(ti.ime_preedit.is_empty());
+        assert!(!ti.composition.is_active());
         assert_eq!(actions.borrow().as_slice(), &[change_action("ac")]);
         assert!(ctx.requests.repaint);
         assert!(ctx.requests.ime.is_some_and(|ime| ime.enabled));
@@ -2380,7 +2417,7 @@ mod tests {
     fn text_geometry_keeps_clip_text_and_ime_caret_in_one_coordinate_space() {
         let mut ti = TextInput::new("ph").with_text("abc");
         ti.edit.cursor = 2;
-        ti.ime_preedit = "ni".into();
+        ti.composition.set_preedit("ni".into());
         ti.layout(Rect::new(10.0, 20.0, 160.0, 32.0));
 
         let geometry = ti.text_geometry(DEFAULT_FONT_SIZE);
@@ -2540,7 +2577,7 @@ mod tests {
         ti.focused = true;
         ti.edit.cursor = 2;
         ti.edit.selection_start = Some(4);
-        ti.ime_preedit = "拼音".into();
+        ti.composition.set_preedit("拼音".into());
         ti.cursor_visible.set(true);
         ti.last_blink.set(Instant::now());
         ti.layout(Rect::new(0.0, 0.0, 240.0, 30.0));
