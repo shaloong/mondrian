@@ -281,5 +281,9 @@ workflow.
   snapshot/apply consumer while it remains reference code.
 - P5-DOCS-001: Update architecture docs to describe the final self-hosted UI
   stack, ownership model, test strategy, and removed compatibility paths.
+  Progress: overview, renderer, export, and design-guideline docs now describe
+  self-hosted winit/wgpu as the product UI path and classify egui preview/theme
+  references as legacy migration/reference boundaries rather than current
+  product architecture.
 - P5-CI-001: Make self-hosted UI tests, clippy, and any screenshot/draw-command
   regressions part of the required CI gate.

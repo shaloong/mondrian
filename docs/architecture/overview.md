@@ -106,7 +106,7 @@ DecoderPool::get_frame(clip_id, local_time)
 FrameCompositor::composite(clips, effects, keyframes)
   → GPU compositing (BatchedCompositor, up to 4 layers/pass)
   → GPU color conversion (Rec709/sRGB)
-  → Zero-copy callback (CompositedFrame → egui wgpu pass)
+  → Preview adapter (self-hosted ViewerSurface, legacy egui callback, or export)
       │
       ▼
 预览窗口显示
@@ -185,19 +185,22 @@ pub struct AssetId(Uuid);
 
 新建类型模式（newtype）防止 ID 混淆。
 
-### 4.4 应用级主题系统（Dark / Light / System）
+### 4.4 应用级主题系统（Dark / Light）
 
-`mondrian-app` 的主题是应用级配置，不进入项目文件。主题策略与 VS Code 一致，支持：
+`mondrian-app` 的主题是应用级配置，不进入项目文件。当前产品路径是
+self-hosted winit/wgpu UI：主题预设持久化在
+`self_hosted::preferences_store::SelfHostedPreferences.theme_preset`，并通过
+`mondrian-ui-theme::ThemePreset` 构建运行时 token。
 
-- `System`：跟随操作系统深浅色。
 - `Dark`：强制深色。
 - `Light`：强制浅色。
 
 实现约定：
 
-- 主题模式持久化在应用配置（`AppPreferences.theme`）。
-- 每帧调用 `egui_ui::theme::apply_theme`，将主题偏好映射到 egui 的 `ThemePreference`。
-- 通过统一 token 表（色板 + 度量）驱动 `Visuals`、字体、间距、圆角等样式，禁止业务面板散落硬编码主题值。
+- 主题模式持久化在 self-hosted shell preferences，不写入 `.mdp` 项目文件。
+- `SelfHostedUiHost` 在应用偏好变更时调用 `mondrian-ui-theme::set_theme_preset`
+  更新全局 token；可复用 widgets 只消费传入的 theme/token，不读写偏好文件。
+- 通过统一 token 表（色板 + 度量）驱动颜色、字体、间距、圆角等样式，禁止业务面板散落硬编码主题值。
 - 支持插件覆写入口：插件可注册 token override，在不改业务面板代码的前提下覆写颜色与样式度量。
 
 当前已经收口的 token 规范包括：
@@ -210,17 +213,18 @@ pub struct AssetId(Uuid);
 
 ### 4.5 启动引导窗口（透明圆角）
 
-`mondrian-app` 启动阶段使用独立 viewport 模式显示项目引导界面，glow渲染以确保圆角卡片外侧为真实透明而非黑底：
+self-hosted 产品入口使用 `self_hosted::window` 创建启动窗口，并由
+`SelfHostedUiHost` 在新建/打开项目后切换到工作区窗口。启动阶段使用透明、
+无系统装饰、固定尺寸窗口显示项目引导界面，确保圆角卡片外侧为真实透明而非黑底：
 
-- NativeOptions 初始即启用透明窗口（`with_transparent(true)`），并以无系统装饰、固定尺寸启动。
-- NativeOptions 初始尺寸必须与 `theme::tokens::startup_viewport_size` 对齐，避免用户看到“先短后高”的首屏尺寸跳变。
-- App 在创建阶段立即同步 `startup_viewport_mode`，避免首帧清屏误用不透明底色。
-- `eframe::App::clear_color` 在启动模式返回全透明 RGBA，在进入主工作区后恢复常规窗口填充色。
-- 启动 UI 的 `CentralPanel` 使用透明 `Frame`，外层不再绘制兜底背景，圆角仅由启动卡片自身负责。
+- winit window 初始即启用 transparent/undecorated/fixed-size 启动角色。
+- 启动窗口尺寸由 self-hosted startup/layout token 控制，避免首屏尺寸跳变。
+- 渲染器启动帧使用透明清屏；进入工作区后窗口 session 会重建为可调整尺寸的 workspace 角色。
+- 启动 UI 外层不再绘制兜底背景，圆角仅由启动卡片自身负责。
 - 避免在启动页最外层绘制“整窗不透明底板”。若在透明窗口上绘制接近全屏的不透明矩形，即使窗口透明链路正确，也会产生“黑底仍在”的视觉结果。
 - 当前启动页仅绘制左右两块内容卡片（左品牌卡、右操作卡），窗口其余区域保持透明。
 
-打开或新建项目后，viewport 会切换回主工作区模式（可调整尺寸、带系统装饰）。
+打开或新建项目后，同一产品 host 切换到主工作区模式（可调整尺寸、自研标题栏/菜单栏）。
 
 ---
 
@@ -275,7 +279,7 @@ GPU Color Conversion (optional, compute shader)
       ▼
 CompositedFrame (CallbackTrait)
   ├─ Wraps composited wgpu texture
-  ├─ Rendered directly in egui wgpu render pass
+  ├─ Consumed by preview/export integration paths
   └─ Zero CPU readback (GPU→GPU path)
 ```
 

@@ -25,15 +25,19 @@ RenderQueue（异步后台任务）
        输出文件 (.mp4 / .mov / .gif)
 ```
 
-导出 compositor 与 eframe preview 共享同一 wgpu device/queue（unified GPU），避免跨设备拷贝开销。GPU compositing 路径在导出中同样可用，包括 pass fusion 和 compute shader 效果加速。
+导出 compositor 与产品预览应共享同一套 timeline render-plan、effect graph 和 GPU
+compositing 语义。legacy eframe preview 仍保留统一 device/queue 的参考路径；self-hosted
+预览继续收敛到 `SelfHostedPreviewService` / `ViewerSurface` 边界，不能复制导出侧的
+素材递归、离线检查或 effect 解释规则。
 
-`mondrian-app::app::exporting` 是 UI 无关的导出编排边界。egui 与自研 UI
-都应提交 `TimelineExportRequest` 或对应的 `ui.export.enqueue` action，由
+`mondrian-app::app::exporting` 是 UI 无关的导出编排边界。self-hosted UI
+提交 `ui.export.enqueue` action；legacy egui reference 可提交等价
+`TimelineExportRequest`。两者最终都由
 `AppState` 负责解析目标序列、递归收集嵌套序列素材、过滤 synthetic adjustment
 asset、检查离线素材、构造 `TimelineExportInput`，最后将 `RenderJob` 放入
 `RenderQueue`。面板代码不应复制这些业务规则。
-同一模块也提供共享内置预设列表和 `TimelineExportDraft`，避免 egui 与自研
-UI 在预设命名、默认选择、草稿状态持久化上分叉。
+同一模块也提供共享内置预设列表和 `TimelineExportDraft`，避免 legacy reference
+与 self-hosted 产品 UI 在预设命名、默认选择、草稿状态持久化上分叉。
 
 ---
 

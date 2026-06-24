@@ -18,7 +18,7 @@ Mondrian 的核心气质是：
 
 ## 2. 当前阶段的设计判断
 
-这份规范以现有 `egui` 桌面实现为准，不强行要求当前产品还没有的区域或组件。
+这份规范以当前 self-hosted winit/wgpu 产品 UI 为准；旧 `egui` 桌面实现只作为迁移参考。
 
 当前主布局采用：
 
@@ -172,7 +172,10 @@ Mondrian 采用以 `8px` 为节奏基线的圆角体系：
 
 ## 8. Token 与实现约束
 
-当前 `crates/mondrian-app/src/egui_ui/theme.rs` 中，以下内容已经作为统一基元使用：
+当前 self-hosted UI 以 `mondrian-ui-theme` semantic tokens 和
+`mondrian-ui-widgets` 组件样式为统一基元；旧
+`crates/mondrian-app/src/egui_ui/theme.rs` 仅作为 legacy reference。以下容器/结构
+语义仍需在自研 UI 中保持对应关系：
 
 - `panel_frame`
 - `section_frame`
