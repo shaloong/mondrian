@@ -1714,6 +1714,7 @@ mod tests {
     use glam::Vec2;
     use mondrian_core::types::AssetId;
     use mondrian_core::{ColorSpace, Rational, Resolution};
+    use mondrian_platform::ClipboardError;
     use mondrian_timeline::sequence::{
         AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, EditingMode, ExportBitDepth,
         FieldOrder, MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio,
@@ -1782,10 +1783,12 @@ mod tests {
     }
 
     impl PlatformService for FakePlatform {
-        fn clipboard_copy(&self, _text: &str) {}
+        fn clipboard_copy(&self, _text: &str) -> Result<(), ClipboardError> {
+            Err(ClipboardError::Unavailable)
+        }
 
-        fn clipboard_paste(&self) -> Option<String> {
-            None
+        fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+            Err(ClipboardError::Unavailable)
         }
 
         fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {

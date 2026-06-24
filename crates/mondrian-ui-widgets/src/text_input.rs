@@ -646,14 +646,14 @@ impl Widget for TextInput {
                     }
                     KeyCode::C if exact_ctrl => {
                         if let Some((start, end)) = self.selection_byte_range() {
-                            ctx.platform.clipboard_copy(&self.text[start..end]);
+                            let _ = ctx.platform.clipboard_copy(&self.text[start..end]);
                             EventResult::Handled
                         } else {
                             EventResult::Ignored
                         }
                     }
                     KeyCode::V if exact_ctrl => {
-                        if let Some(clip) = ctx.platform.clipboard_paste() {
+                        if let Ok(Some(clip)) = ctx.platform.clipboard_paste() {
                             let normalized = normalize_single_line_input(&clip);
                             if !normalized.is_empty() {
                                 self.delete_selection();
@@ -664,8 +664,9 @@ impl Widget for TextInput {
                     }
                     KeyCode::X if exact_ctrl => {
                         if let Some((start, end)) = self.selection_byte_range() {
-                            ctx.platform.clipboard_copy(&self.text[start..end]);
-                            self.delete_selection();
+                            if ctx.platform.clipboard_copy(&self.text[start..end]).is_ok() {
+                                self.delete_selection();
+                            }
                             EventResult::Handled
                         } else {
                             EventResult::Ignored
@@ -957,7 +958,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
-    use mondrian_platform::{FileFilter, PlatformService};
+    use mondrian_platform::{ClipboardError, FileFilter, PlatformService};
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
@@ -1039,14 +1040,40 @@ mod tests {
     }
 
     struct ClipboardPlatform {
-        text: String,
+        paste_result: Result<Option<String>, ClipboardError>,
+        copy_result: Result<(), ClipboardError>,
+    }
+
+    impl ClipboardPlatform {
+        fn with_text(text: impl Into<String>) -> Self {
+            Self {
+                paste_result: Ok(Some(text.into())),
+                copy_result: Ok(()),
+            }
+        }
+
+        fn paste_failure() -> Self {
+            Self {
+                paste_result: Err(ClipboardError::ReadFailed),
+                copy_result: Ok(()),
+            }
+        }
+
+        fn copy_failure() -> Self {
+            Self {
+                paste_result: Ok(None),
+                copy_result: Err(ClipboardError::WriteFailed),
+            }
+        }
     }
 
     impl PlatformService for ClipboardPlatform {
-        fn clipboard_copy(&self, _text: &str) {}
+        fn clipboard_copy(&self, _text: &str) -> Result<(), ClipboardError> {
+            self.copy_result
+        }
 
-        fn clipboard_paste(&self) -> Option<String> {
-            Some(self.text.clone())
+        fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+            self.paste_result.clone()
         }
 
         fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
@@ -1342,7 +1369,7 @@ mod tests {
 
     #[test]
     fn paste_normalizes_line_breaks_for_single_line_editing() {
-        let platform = ClipboardPlatform { text: "first\r\nsecond\u{2028}third".to_owned() };
+        let platform = ClipboardPlatform::with_text("first\r\nsecond\u{2028}third");
         let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
         ti.focused = true;
         ti.selection_start = Some(7);
@@ -1373,7 +1400,36 @@ mod tests {
 
     #[test]
     fn paste_empty_clipboard_preserves_selection_without_dispatching_change() {
-        let platform = ClipboardPlatform { text: String::new() };
+        let platform = ClipboardPlatform::with_text("");
+        let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
+        ti.focused = true;
+        ti.selection_start = Some(7);
+        ti.cursor = 12;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = EventContext {
+            focus: &mut focus,
+            shortcut: &mut shortcuts,
+            tooltip: &mut tooltip,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+
+        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+
+        assert_eq!(ti.text(), "before after");
+        assert_eq!(ti.selection_byte_range(), Some((7, 12)));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn paste_failure_preserves_selection_without_dispatching_change() {
+        let platform = ClipboardPlatform::paste_failure();
         let mut ti = TextInput::new("ph").with_text("before after").on_change(change_action);
         ti.focused = true;
         ti.selection_start = Some(7);
@@ -1885,6 +1941,7 @@ mod tests {
 
     #[test]
     fn ctrl_x_cuts() {
+        let platform = ClipboardPlatform::with_text("");
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
         ti.selection_start = Some(1);
@@ -1896,11 +1953,52 @@ mod tests {
         let binding = |a: Action| {
             cell.borrow_mut().push(a);
         };
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &binding);
+        let mut requests = EventRequests::default();
+        let mut ctx = EventContext {
+            focus: &mut f,
+            shortcut: &mut s,
+            tooltip: &mut t,
+            dispatch: &binding,
+            platform: &platform,
+            requests: &mut requests,
+        };
         kd_ctrl(&mut ti, KeyCode::X, &mut ctx);
         assert_eq!(ti.text(), "ho");
         assert_eq!(ti.cursor, 1);
         assert!(!ti.has_selection());
+    }
+
+    #[test]
+    fn ctrl_x_preserves_selection_when_clipboard_copy_fails() {
+        let platform = ClipboardPlatform::copy_failure();
+        let mut ti = TextInput::new("ph").with_text("hello").on_change(change_action);
+        ti.focused = true;
+        ti.selection_start = Some(1);
+        ti.cursor = 4;
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = EventContext {
+            focus: &mut focus,
+            shortcut: &mut shortcuts,
+            tooltip: &mut tooltip,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+
+        let result = ti.event(
+            &UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(ti.text(), "hello");
+        assert_eq!(ti.selection_byte_range(), Some((1, 4)));
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]
@@ -1921,7 +2019,7 @@ mod tests {
 
     #[test]
     fn modified_text_editing_chords_are_ignored_for_shortcut_routing() {
-        let platform = ClipboardPlatform { text: "paste".to_owned() };
+        let platform = ClipboardPlatform::with_text("paste");
         let mut ti = TextInput::new("ph").with_text("hello world").on_change(change_action);
         ti.focused = true;
         ti.selection_start = Some(0);

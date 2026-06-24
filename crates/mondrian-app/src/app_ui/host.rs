@@ -1018,7 +1018,7 @@ mod tests {
     use mondrian_core::types::{AssetId, ClipId, TrackId};
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
-    use mondrian_platform::{FileFilter, NoopPlatformService};
+    use mondrian_platform::{ClipboardError, FileFilter, NoopPlatformService};
     use mondrian_timeline::Sequence;
     use mondrian_ui_core::tree::TreeWalker;
     use mondrian_ui_core::types::{Modifiers, MouseButton, Point, Rect, SplitDirection};
@@ -1049,10 +1049,12 @@ mod tests {
     }
 
     impl PlatformService for CountingPlatform {
-        fn clipboard_copy(&self, _text: &str) {}
+        fn clipboard_copy(&self, _text: &str) -> Result<(), ClipboardError> {
+            Err(ClipboardError::Unavailable)
+        }
 
-        fn clipboard_paste(&self) -> Option<String> {
-            None
+        fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+            Err(ClipboardError::Unavailable)
         }
 
         fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
@@ -1081,10 +1083,12 @@ mod tests {
     }
 
     impl PlatformService for StartupProjectPlatform {
-        fn clipboard_copy(&self, _text: &str) {}
+        fn clipboard_copy(&self, _text: &str) -> Result<(), ClipboardError> {
+            Err(ClipboardError::Unavailable)
+        }
 
-        fn clipboard_paste(&self) -> Option<String> {
-            None
+        fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+            Err(ClipboardError::Unavailable)
         }
 
         fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
@@ -1112,10 +1116,12 @@ mod tests {
     }
 
     impl PlatformService for ProjectDialogPlatform {
-        fn clipboard_copy(&self, _text: &str) {}
+        fn clipboard_copy(&self, _text: &str) -> Result<(), ClipboardError> {
+            Err(ClipboardError::Unavailable)
+        }
 
-        fn clipboard_paste(&self) -> Option<String> {
-            None
+        fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+            Err(ClipboardError::Unavailable)
         }
 
         fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {

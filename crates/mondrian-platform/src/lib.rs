@@ -30,6 +30,17 @@ impl FileFilter {
     }
 }
 
+/// Clipboard operation failure reported by the platform boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardError {
+    /// The current platform or process context cannot access a clipboard.
+    Unavailable,
+    /// Text could not be written to the clipboard.
+    WriteFailed,
+    /// Text could not be read from the clipboard.
+    ReadFailed,
+}
+
 /// 平台服务 —— 所有 OS 交互的统一入口
 ///
 /// ## 设计原则
@@ -40,11 +51,14 @@ impl FileFilter {
 pub trait PlatformService: Send + Sync {
     // ── 剪贴板 ──────────────────────────────────────────────────────────────
 
-    /// 复制文本到剪贴板
-    fn clipboard_copy(&self, text: &str);
+    /// 复制文本到剪贴板。
+    fn clipboard_copy(&self, text: &str) -> Result<(), ClipboardError>;
 
-    /// 从剪贴板粘贴文本
-    fn clipboard_paste(&self) -> Option<String>;
+    /// 从剪贴板粘贴文本。
+    ///
+    /// `Ok(None)` means the clipboard is accessible but does not currently
+    /// provide text to paste. `Err` means platform access itself failed.
+    fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError>;
 
     // ── 文件对话框 ──────────────────────────────────────────────────────────
 
@@ -82,10 +96,12 @@ pub trait PlatformService: Send + Sync {
 pub struct NoopPlatformService;
 
 impl PlatformService for NoopPlatformService {
-    fn clipboard_copy(&self, _text: &str) {}
+    fn clipboard_copy(&self, _text: &str) -> Result<(), ClipboardError> {
+        Err(ClipboardError::Unavailable)
+    }
 
-    fn clipboard_paste(&self) -> Option<String> {
-        None
+    fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+        Err(ClipboardError::Unavailable)
     }
 
     fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
@@ -121,12 +137,17 @@ impl PlatformService for NoopPlatformService {
 pub struct SystemPlatformService;
 
 impl PlatformService for SystemPlatformService {
-    fn clipboard_copy(&self, text: &str) {
-        let _ = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
+    fn clipboard_copy(&self, text: &str) -> Result<(), ClipboardError> {
+        let mut clipboard = arboard::Clipboard::new().map_err(|_| ClipboardError::Unavailable)?;
+        clipboard.set_text(text).map_err(|_| ClipboardError::WriteFailed)
     }
 
-    fn clipboard_paste(&self) -> Option<String> {
-        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()).ok()
+    fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+        let mut clipboard = arboard::Clipboard::new().map_err(|_| ClipboardError::Unavailable)?;
+        match clipboard.get_text() {
+            Ok(text) => Ok(Some(text)),
+            Err(_) => Err(ClipboardError::ReadFailed),
+        }
     }
 
     fn open_file_dialog(&self, title: &str, filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
@@ -457,15 +478,18 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn noop_clipboard_paste_returns_none() {
+    fn noop_clipboard_paste_reports_unavailable() {
         let svc = NoopPlatformService;
-        assert_eq!(svc.clipboard_paste(), None);
+        assert_eq!(svc.clipboard_paste(), Err(ClipboardError::Unavailable));
     }
 
     #[test]
-    fn noop_clipboard_copy_does_not_panic() {
+    fn noop_clipboard_copy_reports_unavailable() {
         let svc = NoopPlatformService;
-        svc.clipboard_copy("any text");
+        assert_eq!(
+            svc.clipboard_copy("any text"),
+            Err(ClipboardError::Unavailable)
+        );
     }
 
     #[test]
@@ -501,7 +525,7 @@ mod tests {
     #[test]
     fn platform_service_is_object_safe() {
         let svc: &dyn PlatformService = &NoopPlatformService;
-        assert_eq!(svc.clipboard_paste(), None);
+        assert_eq!(svc.clipboard_paste(), Err(ClipboardError::Unavailable));
     }
 
     #[test]
@@ -553,16 +577,18 @@ mod tests {
 
     /// A test mock that returns controlled values.
     struct MockPlatformService {
-        clipboard_content: Option<String>,
+        clipboard_content: Result<Option<String>, ClipboardError>,
         file_dialog_result: Option<Vec<PathBuf>>,
         save_dialog_result: Option<PathBuf>,
         folder_dialog_result: Option<PathBuf>,
     }
 
     impl PlatformService for MockPlatformService {
-        fn clipboard_copy(&self, _text: &str) {}
+        fn clipboard_copy(&self, _text: &str) -> Result<(), ClipboardError> {
+            Ok(())
+        }
 
-        fn clipboard_paste(&self) -> Option<String> {
+        fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
             self.clipboard_content.clone()
         }
 
@@ -593,13 +619,13 @@ mod tests {
     #[test]
     fn mock_platform_service_returns_configured_values() {
         let mock = MockPlatformService {
-            clipboard_content: Some("copied text".into()),
+            clipboard_content: Ok(Some("copied text".into())),
             file_dialog_result: Some(vec![PathBuf::from("/test/file.mp4")]),
             save_dialog_result: Some(PathBuf::from("/test/output.mp4")),
             folder_dialog_result: Some(PathBuf::from("/test/folder")),
         };
 
-        assert_eq!(mock.clipboard_paste(), Some("copied text".into()));
+        assert_eq!(mock.clipboard_paste(), Ok(Some("copied text".into())));
         assert_eq!(
             mock.open_file_dialog("", &[]),
             Some(vec![PathBuf::from("/test/file.mp4")])

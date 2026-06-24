@@ -798,7 +798,7 @@ mod tests {
     };
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
-    use mondrian_platform::{FileFilter, PlatformService};
+    use mondrian_platform::{ClipboardError, FileFilter, PlatformService};
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use std::cell::RefCell;
     use std::path::Path;
@@ -809,10 +809,12 @@ mod tests {
     }
 
     impl PlatformService for SaveProjectPlatform {
-        fn clipboard_copy(&self, _text: &str) {}
+        fn clipboard_copy(&self, _text: &str) -> Result<(), ClipboardError> {
+            Err(ClipboardError::Unavailable)
+        }
 
-        fn clipboard_paste(&self) -> Option<String> {
-            None
+        fn clipboard_paste(&self) -> Result<Option<String>, ClipboardError> {
+            Err(ClipboardError::Unavailable)
         }
 
         fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
