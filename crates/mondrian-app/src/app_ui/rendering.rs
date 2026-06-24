@@ -6,6 +6,12 @@
 
 use mondrian_ui_renderer::{DrawCommand, GlyphUpload, UiRenderer};
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
+use std::time::Instant;
+
+const SLOW_FRAME_CPU_MICROS: u64 = 16_000;
+const HIGH_GPU_UPLOAD_BYTES: u64 = 4 * 1024 * 1024;
+const HIGH_ATLAS_OCCUPANCY_BPS: u16 = 8_500;
+const LOW_LARGEST_FREE_RECT_PIXELS: u64 = 64 * 64;
 
 /// Resource diagnostics observed while rendering an app UI frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -21,6 +27,132 @@ impl AppUiFrameDiagnostics {
     pub fn has_failures(self) -> bool {
         self.text_missing_glyphs > 0 || self.raster_image_failures > 0
     }
+}
+
+/// Structured frame-cost and resource-pressure metrics for a presented app UI frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AppUiFrameMetrics {
+    /// Draw commands after text resolution and raster-image fallback resolution.
+    pub command_count: usize,
+    /// Low-level render batches produced before render-pass filtering.
+    pub batch_count: usize,
+    /// Vertices produced before render-pass filtering.
+    pub vertex_count: usize,
+    /// CPU time spent in the full app UI frame path, including text resolution,
+    /// glyph uploads, raster image resolution, batching, and surface present.
+    pub frame_cpu_time_micros: u64,
+    /// CPU time spent inside the low-level renderer entry point.
+    pub renderer_cpu_time_micros: u64,
+    /// Bytes uploaded to the glyph atlas this frame.
+    pub glyph_upload_bytes: u64,
+    /// Bytes uploaded to the renderer-owned raster-image atlas this frame.
+    pub raster_image_upload_bytes: u64,
+    /// Bytes uploaded by the low-level renderer entry point.
+    pub renderer_upload_bytes: u64,
+    /// Total UI upload bytes observed by this app UI frame path.
+    pub total_upload_bytes: u64,
+    /// Renderer-owned raster image atlas entries after this frame.
+    pub image_atlas_entries: usize,
+    /// Renderer-owned raster image atlas occupancy in basis points.
+    pub image_atlas_occupancy_bps: u16,
+    /// Largest reusable raster image atlas free rectangle area.
+    pub image_atlas_largest_free_rect_pixels: u64,
+    /// Raster image atlas page resets triggered by this frame.
+    pub image_atlas_page_resets_this_frame: u32,
+    /// Raster image atlas allocation failures accumulated by the renderer.
+    pub image_atlas_failed_allocations: u64,
+}
+
+impl AppUiFrameMetrics {
+    fn from_stats(
+        frame_cpu_time_micros: u64,
+        glyph_upload_bytes: u64,
+        render_stats: mondrian_ui_renderer::UiRenderFrameStats,
+    ) -> Self {
+        let image_atlas_occupancy_bps = if render_stats.image_atlas_total_pixels == 0 {
+            0
+        } else {
+            ((render_stats.image_atlas_used_pixels.saturating_mul(10_000)
+                / render_stats.image_atlas_total_pixels)
+                .min(10_000)) as u16
+        };
+        Self {
+            command_count: render_stats.command_count,
+            batch_count: render_stats.batch_count,
+            vertex_count: render_stats.vertex_count,
+            frame_cpu_time_micros,
+            renderer_cpu_time_micros: render_stats.frame_cpu_time_micros,
+            glyph_upload_bytes,
+            raster_image_upload_bytes: render_stats.raster_image_upload_bytes,
+            renderer_upload_bytes: render_stats.gpu_upload_bytes,
+            total_upload_bytes: glyph_upload_bytes.saturating_add(render_stats.gpu_upload_bytes),
+            image_atlas_entries: render_stats.image_atlas_entries,
+            image_atlas_occupancy_bps,
+            image_atlas_largest_free_rect_pixels: render_stats.image_atlas_largest_free_rect_pixels,
+            image_atlas_page_resets_this_frame: render_stats.image_atlas_page_resets_this_frame,
+            image_atlas_failed_allocations: render_stats.image_atlas_failed_allocations,
+        }
+    }
+
+    /// Whether this frame crossed a slow CPU-frame threshold.
+    pub fn is_slow_frame(self) -> bool {
+        self.frame_cpu_time_micros >= SLOW_FRAME_CPU_MICROS
+    }
+
+    /// Whether this frame uploaded enough data to be worth surfacing.
+    pub fn has_high_upload_pressure(self) -> bool {
+        self.total_upload_bytes >= HIGH_GPU_UPLOAD_BYTES
+    }
+
+    /// Whether the raster image atlas is near pressure or has churned.
+    pub fn has_image_atlas_pressure(self) -> bool {
+        self.image_atlas_page_resets_this_frame > 0
+            || self.image_atlas_failed_allocations > 0
+            || self.image_atlas_occupancy_bps >= HIGH_ATLAS_OCCUPANCY_BPS
+            || (self.image_atlas_entries > 0
+                && self.image_atlas_largest_free_rect_pixels <= LOW_LARGEST_FREE_RECT_PIXELS)
+    }
+}
+
+/// App UI frame pressure event suitable for structured logs and future overlays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppUiFramePressure {
+    /// Whether the full app UI frame crossed the slow CPU-frame threshold.
+    pub slow_frame: bool,
+    /// Whether the frame uploaded enough data to indicate resource churn.
+    pub high_upload: bool,
+    /// Whether the renderer-owned raster image atlas is under pressure.
+    pub image_atlas_pressure: bool,
+    /// Metrics that caused this pressure event.
+    pub metrics: AppUiFrameMetrics,
+}
+
+impl AppUiFramePressure {
+    fn from_metrics(metrics: AppUiFrameMetrics) -> Option<Self> {
+        let pressure = Self {
+            slow_frame: metrics.is_slow_frame(),
+            high_upload: metrics.has_high_upload_pressure(),
+            image_atlas_pressure: metrics.has_image_atlas_pressure(),
+            metrics,
+        };
+        (pressure.slow_frame || pressure.high_upload || pressure.image_atlas_pressure)
+            .then_some(pressure)
+    }
+
+    fn signature(self) -> AppUiFramePressureSignature {
+        AppUiFramePressureSignature {
+            slow_frame: self.slow_frame,
+            high_upload: self.high_upload,
+            image_atlas_pressure: self.image_atlas_pressure,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppUiFramePressureSignature {
+    slow_frame: bool,
+    high_upload: bool,
+    image_atlas_pressure: bool,
 }
 
 /// Backend-level surface event observed while acquiring or presenting a frame.
@@ -51,6 +183,8 @@ pub enum AppUiFrameResult {
         uploaded_resources: bool,
         /// Resource diagnostics for this frame.
         diagnostics: AppUiFrameDiagnostics,
+        /// Structured frame-cost and resource-pressure metrics.
+        metrics: AppUiFrameMetrics,
         /// Optional backend event for presented frames.
         backend_event: Option<AppUiBackendEvent>,
     },
@@ -86,6 +220,16 @@ impl AppUiFrameResult {
         }
     }
 
+    /// Structured metrics for presented frames.
+    pub fn metrics(self) -> AppUiFrameMetrics {
+        match self {
+            AppUiFrameResult::Presented { metrics, .. } => metrics,
+            AppUiFrameResult::Skipped { .. } | AppUiFrameResult::Reconfigured { .. } => {
+                AppUiFrameMetrics::default()
+            }
+        }
+    }
+
     /// Backend surface event associated with this frame, if any.
     pub fn backend_event(self) -> Option<AppUiBackendEvent> {
         match self {
@@ -101,6 +245,7 @@ impl AppUiFrameResult {
 pub struct AppUiRenderDiagnosticReporter {
     last_reported: Option<AppUiFrameDiagnostics>,
     last_backend_event: Option<AppUiBackendEvent>,
+    last_pressure: Option<AppUiFramePressureSignature>,
 }
 
 impl AppUiRenderDiagnosticReporter {
@@ -131,6 +276,21 @@ impl AppUiRenderDiagnosticReporter {
         self.last_backend_event = event;
         event
     }
+
+    /// Return frame pressure that should be logged for this frame, if any.
+    pub fn changed_pressure(&mut self, result: AppUiFrameResult) -> Option<AppUiFramePressure> {
+        let pressure = AppUiFramePressure::from_metrics(result.metrics());
+        let Some(pressure) = pressure else {
+            self.last_pressure = None;
+            return None;
+        };
+        let signature = pressure.signature();
+        if self.last_pressure == Some(signature) {
+            return None;
+        }
+        self.last_pressure = Some(signature);
+        Some(pressure)
+    }
 }
 
 /// GPU frame renderer shared by app UI and demo windows.
@@ -158,14 +318,17 @@ impl AppUiFrameRenderer {
         screen_size: (u32, u32),
         commands: Vec<DrawCommand>,
     ) -> AppUiFrameResult {
+        let frame_started = Instant::now();
         let resolved_text = resolve_text_commands(commands, &mut self.text_renderer);
         let text_stats = resolved_text.stats;
         let commands = resolved_text.commands;
         let pending = renderer_glyph_uploads(self.text_renderer.take_pending_uploads());
         let uploaded_glyphs = !pending.is_empty();
-        if uploaded_glyphs {
-            self.ui_renderer.upload_glyphs(queue, &pending);
-        }
+        let glyph_upload_stats = if uploaded_glyphs {
+            self.ui_renderer.upload_glyphs(queue, &pending)
+        } else {
+            mondrian_ui_renderer::GlyphUploadStats::default()
+        };
 
         match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output) => {
@@ -178,14 +341,14 @@ impl AppUiFrameRenderer {
                     screen_size,
                 );
                 output.present();
-                AppUiFrameResult::Presented {
-                    uploaded_resources: uploaded_glyphs || render_stats.uploaded_raster_images,
-                    diagnostics: AppUiFrameDiagnostics {
-                        text_missing_glyphs: text_stats.missing_glyphs,
-                        raster_image_failures: render_stats.failed_raster_images,
-                    },
-                    backend_event: None,
-                }
+                presented_result(
+                    frame_started,
+                    glyph_upload_stats.upload_bytes,
+                    uploaded_glyphs,
+                    text_stats.missing_glyphs,
+                    render_stats,
+                    None,
+                )
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
                 let view = output.texture.create_view(&Default::default());
@@ -197,14 +360,14 @@ impl AppUiFrameRenderer {
                     screen_size,
                 );
                 output.present();
-                AppUiFrameResult::Presented {
-                    uploaded_resources: uploaded_glyphs || render_stats.uploaded_raster_images,
-                    diagnostics: AppUiFrameDiagnostics {
-                        text_missing_glyphs: text_stats.missing_glyphs,
-                        raster_image_failures: render_stats.failed_raster_images,
-                    },
-                    backend_event: Some(AppUiBackendEvent::SurfaceSuboptimal),
-                }
+                presented_result(
+                    frame_started,
+                    glyph_upload_stats.upload_bytes,
+                    uploaded_glyphs,
+                    text_stats.missing_glyphs,
+                    render_stats,
+                    Some(AppUiBackendEvent::SurfaceSuboptimal),
+                )
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
                 AppUiFrameResult::Skipped { backend_event: AppUiBackendEvent::SurfaceTimeout }
@@ -227,6 +390,31 @@ impl AppUiFrameRenderer {
     }
 }
 
+fn presented_result(
+    frame_started: Instant,
+    glyph_upload_bytes: u64,
+    uploaded_glyphs: bool,
+    text_missing_glyphs: u32,
+    render_stats: mondrian_ui_renderer::UiRenderFrameStats,
+    backend_event: Option<AppUiBackendEvent>,
+) -> AppUiFrameResult {
+    let frame_cpu_time_micros =
+        frame_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+    AppUiFrameResult::Presented {
+        uploaded_resources: uploaded_glyphs || render_stats.uploaded_raster_images,
+        diagnostics: AppUiFrameDiagnostics {
+            text_missing_glyphs,
+            raster_image_failures: render_stats.failed_raster_images,
+        },
+        metrics: AppUiFrameMetrics::from_stats(
+            frame_cpu_time_micros,
+            glyph_upload_bytes,
+            render_stats,
+        ),
+        backend_event,
+    }
+}
+
 fn renderer_glyph_uploads(uploads: Vec<mondrian_ui_text::atlas::GlyphUpload>) -> Vec<GlyphUpload> {
     uploads
         .into_iter()
@@ -244,19 +432,35 @@ fn renderer_glyph_uploads(uploads: Vec<mondrian_ui_text::atlas::GlyphUpload>) ->
 mod tests {
     use super::*;
 
+    fn presented(
+        uploaded_resources: bool,
+        diagnostics: AppUiFrameDiagnostics,
+        metrics: AppUiFrameMetrics,
+        backend_event: Option<AppUiBackendEvent>,
+    ) -> AppUiFrameResult {
+        AppUiFrameResult::Presented {
+            uploaded_resources,
+            diagnostics,
+            metrics,
+            backend_event,
+        }
+    }
+
     #[test]
     fn frame_result_requests_follow_up_after_resource_upload_or_reconfigure() {
-        assert!(!AppUiFrameResult::Presented {
-            uploaded_resources: false,
-            diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
-            backend_event: None,
-        }
+        assert!(!presented(
+            false,
+            AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
+            AppUiFrameMetrics::default(),
+            None,
+        )
         .needs_follow_up_redraw());
-        assert!(AppUiFrameResult::Presented {
-            uploaded_resources: true,
-            diagnostics: AppUiFrameDiagnostics::default(),
-            backend_event: None,
-        }
+        assert!(presented(
+            true,
+            AppUiFrameDiagnostics::default(),
+            AppUiFrameMetrics::default(),
+            None,
+        )
         .needs_follow_up_redraw());
         assert!(
             AppUiFrameResult::Reconfigured { backend_event: AppUiBackendEvent::SurfaceLost }
@@ -271,21 +475,24 @@ mod tests {
     #[test]
     fn render_diagnostic_reporter_only_reports_changed_failures() {
         let mut reporter = AppUiRenderDiagnosticReporter::default();
-        let failed = AppUiFrameResult::Presented {
-            uploaded_resources: false,
-            diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
-            backend_event: None,
-        };
-        let changed = AppUiFrameResult::Presented {
-            uploaded_resources: false,
-            diagnostics: AppUiFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 },
-            backend_event: None,
-        };
-        let healthy = AppUiFrameResult::Presented {
-            uploaded_resources: false,
-            diagnostics: AppUiFrameDiagnostics::default(),
-            backend_event: None,
-        };
+        let failed = presented(
+            false,
+            AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
+            AppUiFrameMetrics::default(),
+            None,
+        );
+        let changed = presented(
+            false,
+            AppUiFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 },
+            AppUiFrameMetrics::default(),
+            None,
+        );
+        let healthy = presented(
+            false,
+            AppUiFrameDiagnostics::default(),
+            AppUiFrameMetrics::default(),
+            None,
+        );
 
         assert_eq!(
             reporter.changed_failure(failed),
@@ -309,11 +516,12 @@ mod tests {
         let timeout =
             AppUiFrameResult::Skipped { backend_event: AppUiBackendEvent::SurfaceTimeout };
         let lost = AppUiFrameResult::Reconfigured { backend_event: AppUiBackendEvent::SurfaceLost };
-        let healthy = AppUiFrameResult::Presented {
-            uploaded_resources: false,
-            diagnostics: AppUiFrameDiagnostics::default(),
-            backend_event: None,
-        };
+        let healthy = presented(
+            false,
+            AppUiFrameDiagnostics::default(),
+            AppUiFrameMetrics::default(),
+            None,
+        );
 
         assert_eq!(
             reporter.changed_backend_event(timeout),
@@ -328,6 +536,79 @@ mod tests {
         assert_eq!(
             reporter.changed_backend_event(timeout),
             Some(AppUiBackendEvent::SurfaceTimeout)
+        );
+    }
+
+    #[test]
+    fn frame_metrics_detect_slow_upload_and_atlas_pressure() {
+        let metrics = AppUiFrameMetrics {
+            frame_cpu_time_micros: SLOW_FRAME_CPU_MICROS,
+            total_upload_bytes: HIGH_GPU_UPLOAD_BYTES,
+            image_atlas_entries: 4,
+            image_atlas_occupancy_bps: HIGH_ATLAS_OCCUPANCY_BPS,
+            image_atlas_largest_free_rect_pixels: LOW_LARGEST_FREE_RECT_PIXELS,
+            ..AppUiFrameMetrics::default()
+        };
+
+        assert!(metrics.is_slow_frame());
+        assert!(metrics.has_high_upload_pressure());
+        assert!(metrics.has_image_atlas_pressure());
+        let pressure = AppUiFramePressure::from_metrics(metrics).expect("pressure event");
+        assert!(pressure.slow_frame);
+        assert!(pressure.high_upload);
+        assert!(pressure.image_atlas_pressure);
+    }
+
+    #[test]
+    fn render_diagnostic_reporter_only_reports_changed_pressure_signatures() {
+        let mut reporter = AppUiRenderDiagnosticReporter::default();
+        let slow = presented(
+            false,
+            AppUiFrameDiagnostics::default(),
+            AppUiFrameMetrics {
+                frame_cpu_time_micros: SLOW_FRAME_CPU_MICROS,
+                ..AppUiFrameMetrics::default()
+            },
+            None,
+        );
+        let same_slow = presented(
+            false,
+            AppUiFrameDiagnostics::default(),
+            AppUiFrameMetrics {
+                frame_cpu_time_micros: SLOW_FRAME_CPU_MICROS + 5_000,
+                ..AppUiFrameMetrics::default()
+            },
+            None,
+        );
+        let upload_and_slow = presented(
+            false,
+            AppUiFrameDiagnostics::default(),
+            AppUiFrameMetrics {
+                frame_cpu_time_micros: SLOW_FRAME_CPU_MICROS + 1,
+                total_upload_bytes: HIGH_GPU_UPLOAD_BYTES,
+                ..AppUiFrameMetrics::default()
+            },
+            None,
+        );
+        let healthy = presented(
+            false,
+            AppUiFrameDiagnostics::default(),
+            AppUiFrameMetrics::default(),
+            None,
+        );
+
+        assert_eq!(
+            reporter.changed_pressure(slow).map(|event| event.slow_frame),
+            Some(true)
+        );
+        assert_eq!(reporter.changed_pressure(same_slow), None);
+        let pressure = reporter.changed_pressure(upload_and_slow).expect("new pressure signature");
+        assert!(pressure.slow_frame);
+        assert!(pressure.high_upload);
+        assert_eq!(reporter.changed_pressure(healthy), None);
+        assert_eq!(
+            reporter.changed_pressure(slow).map(|event| event.slow_frame),
+            Some(true)
         );
     }
 

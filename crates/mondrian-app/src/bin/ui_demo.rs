@@ -13,7 +13,9 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use mondrian_app::app_ui::icons::AppIcon;
-use mondrian_app::app_ui::rendering::{AppUiFrameRenderer, AppUiRenderDiagnosticReporter};
+use mondrian_app::app_ui::rendering::{
+    AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
+};
 use mondrian_app::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
     winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
@@ -1597,6 +1599,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         diagnostics.raster_image_failures
                     );
                 }
+                if let Some(pressure) = render_diagnostic_reporter.changed_pressure(frame_result) {
+                    log_demo_frame_pressure(pressure);
+                }
                 if frame_result.needs_follow_up_redraw() {
                     window.request_redraw();
                 }
@@ -1757,6 +1762,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
+}
+
+fn log_demo_frame_pressure(pressure: AppUiFramePressure) {
+    let metrics = pressure.metrics;
+    if pressure.high_upload || pressure.image_atlas_pressure {
+        tracing::warn!(
+            slow_frame = pressure.slow_frame,
+            high_upload = pressure.high_upload,
+            image_atlas_pressure = pressure.image_atlas_pressure,
+            frame_cpu_time_micros = metrics.frame_cpu_time_micros,
+            renderer_cpu_time_micros = metrics.renderer_cpu_time_micros,
+            total_upload_bytes = metrics.total_upload_bytes,
+            glyph_upload_bytes = metrics.glyph_upload_bytes,
+            raster_image_upload_bytes = metrics.raster_image_upload_bytes,
+            renderer_upload_bytes = metrics.renderer_upload_bytes,
+            command_count = metrics.command_count,
+            batch_count = metrics.batch_count,
+            vertex_count = metrics.vertex_count,
+            image_atlas_entries = metrics.image_atlas_entries,
+            image_atlas_occupancy_bps = metrics.image_atlas_occupancy_bps,
+            image_atlas_largest_free_rect_pixels = metrics.image_atlas_largest_free_rect_pixels,
+            image_atlas_page_resets_this_frame = metrics.image_atlas_page_resets_this_frame,
+            image_atlas_failed_allocations = metrics.image_atlas_failed_allocations,
+            "ui_demo render frame pressure"
+        );
+        return;
+    }
+
+    tracing::debug!(
+        slow_frame = pressure.slow_frame,
+        high_upload = pressure.high_upload,
+        image_atlas_pressure = pressure.image_atlas_pressure,
+        frame_cpu_time_micros = metrics.frame_cpu_time_micros,
+        renderer_cpu_time_micros = metrics.renderer_cpu_time_micros,
+        total_upload_bytes = metrics.total_upload_bytes,
+        glyph_upload_bytes = metrics.glyph_upload_bytes,
+        raster_image_upload_bytes = metrics.raster_image_upload_bytes,
+        renderer_upload_bytes = metrics.renderer_upload_bytes,
+        command_count = metrics.command_count,
+        batch_count = metrics.batch_count,
+        vertex_count = metrics.vertex_count,
+        image_atlas_entries = metrics.image_atlas_entries,
+        image_atlas_occupancy_bps = metrics.image_atlas_occupancy_bps,
+        image_atlas_largest_free_rect_pixels = metrics.image_atlas_largest_free_rect_pixels,
+        image_atlas_page_resets_this_frame = metrics.image_atlas_page_resets_this_frame,
+        image_atlas_failed_allocations = metrics.image_atlas_failed_allocations,
+        "ui_demo render frame pressure"
+    );
 }
 
 // ── Shape Panel Widget ────────────────────────────────────────────────────────

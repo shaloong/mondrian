@@ -13,7 +13,7 @@ use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
 use crate::app_ui::rendering::{
-    AppUiBackendEvent, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
+    AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };
 use crate::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
@@ -301,6 +301,11 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.render_diagnostic_reporter.changed_backend_event(frame_result)
                         {
                             log_backend_event(event);
+                        }
+                        if let Some(pressure) =
+                            session.render_diagnostic_reporter.changed_pressure(frame_result)
+                        {
+                            log_frame_pressure(pressure);
                         }
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
@@ -634,6 +639,54 @@ fn log_backend_event(event: AppUiBackendEvent) {
             tracing::debug!(?event, "app UI render backend skipped frame")
         }
     }
+}
+
+fn log_frame_pressure(pressure: AppUiFramePressure) {
+    let metrics = pressure.metrics;
+    if pressure.high_upload || pressure.image_atlas_pressure {
+        tracing::warn!(
+            slow_frame = pressure.slow_frame,
+            high_upload = pressure.high_upload,
+            image_atlas_pressure = pressure.image_atlas_pressure,
+            frame_cpu_time_micros = metrics.frame_cpu_time_micros,
+            renderer_cpu_time_micros = metrics.renderer_cpu_time_micros,
+            total_upload_bytes = metrics.total_upload_bytes,
+            glyph_upload_bytes = metrics.glyph_upload_bytes,
+            raster_image_upload_bytes = metrics.raster_image_upload_bytes,
+            renderer_upload_bytes = metrics.renderer_upload_bytes,
+            command_count = metrics.command_count,
+            batch_count = metrics.batch_count,
+            vertex_count = metrics.vertex_count,
+            image_atlas_entries = metrics.image_atlas_entries,
+            image_atlas_occupancy_bps = metrics.image_atlas_occupancy_bps,
+            image_atlas_largest_free_rect_pixels = metrics.image_atlas_largest_free_rect_pixels,
+            image_atlas_page_resets_this_frame = metrics.image_atlas_page_resets_this_frame,
+            image_atlas_failed_allocations = metrics.image_atlas_failed_allocations,
+            "app UI render frame pressure"
+        );
+        return;
+    }
+
+    tracing::debug!(
+        slow_frame = pressure.slow_frame,
+        high_upload = pressure.high_upload,
+        image_atlas_pressure = pressure.image_atlas_pressure,
+        frame_cpu_time_micros = metrics.frame_cpu_time_micros,
+        renderer_cpu_time_micros = metrics.renderer_cpu_time_micros,
+        total_upload_bytes = metrics.total_upload_bytes,
+        glyph_upload_bytes = metrics.glyph_upload_bytes,
+        raster_image_upload_bytes = metrics.raster_image_upload_bytes,
+        renderer_upload_bytes = metrics.renderer_upload_bytes,
+        command_count = metrics.command_count,
+        batch_count = metrics.batch_count,
+        vertex_count = metrics.vertex_count,
+        image_atlas_entries = metrics.image_atlas_entries,
+        image_atlas_occupancy_bps = metrics.image_atlas_occupancy_bps,
+        image_atlas_largest_free_rect_pixels = metrics.image_atlas_largest_free_rect_pixels,
+        image_atlas_page_resets_this_frame = metrics.image_atlas_page_resets_this_frame,
+        image_atlas_failed_allocations = metrics.image_atlas_failed_allocations,
+        "app UI render frame pressure"
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

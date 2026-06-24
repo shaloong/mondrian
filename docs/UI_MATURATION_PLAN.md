@@ -154,7 +154,9 @@ shared renderer, text, event, theme, or widget infrastructure.
       and clip/scissor skips.
 - [x] Add frame diagnostics for upload bytes and persistent frame cost reporting.
 - [ ] Evaluate retained/cached paint geometry for expensive mostly-static widgets.
-- [ ] Add debug overlays or structured logs for UI frame cost and resource pressure.
+- [x] Add debug overlays or structured logs for UI frame cost and resource pressure.
+- [x] Add de-duplicated app UI frame pressure telemetry for CPU frame time, upload bytes,
+      batch/vertex counts, and raster atlas occupancy/page resets.
 
 ## Phase 6 - Release-Grade Polish
 
