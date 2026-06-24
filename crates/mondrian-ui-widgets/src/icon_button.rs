@@ -4,12 +4,12 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
+use std::cell::Cell;
 
 use crate::button::ButtonState;
 use crate::paint::{color_with_alpha, paint_focus_ring};
 use crate::vector_icon::VectorIcon;
-
-const ICON_BUTTON_SIZE: f32 = 28.0;
 
 /// A compact button that paints vector icon geometry instead of text.
 pub struct IconButton {
@@ -21,6 +21,33 @@ pub struct IconButton {
     enabled: bool,
     on_click: Option<Action>,
     focus_visible: bool,
+    visual: Cell<IconButtonVisualTokens>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct IconButtonVisualTokens {
+    size: f32,
+    icon_inset: f32,
+    radius: f32,
+    icon_alpha: f32,
+}
+
+impl IconButtonVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            size: spacing.interact_height,
+            icon_inset: spacing.sm - spacing.border_standard,
+            radius: spacing.radius_md,
+            icon_alpha: 0.92,
+        }
+    }
+}
+
+impl Default for IconButtonVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
 }
 
 impl IconButton {
@@ -35,6 +62,7 @@ impl IconButton {
             enabled: true,
             on_click: None,
             focus_visible: false,
+            visual: Cell::new(IconButtonVisualTokens::default()),
         }
     }
 
@@ -100,7 +128,8 @@ impl Widget for IconButton {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        constraint.constrain(Size::new(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
+        let visual = self.visual.get();
+        constraint.constrain(Size::new(visual.size, visual.size))
     }
 
     fn layout(&mut self, bounds: Rect) {
@@ -203,8 +232,9 @@ impl Widget for IconButton {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        self.visual.set(IconButtonVisualTokens::from_theme(ctx.theme));
+        let visual = self.visual.get();
         let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
         let bg = if !self.enabled {
             tokens.muted
         } else {
@@ -220,12 +250,16 @@ impl Widget for IconButton {
             tokens.muted_foreground
         };
 
-        ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_md);
+        ctx.encoder.draw_rect(self.bounds, bg, visual.radius);
         if self.focus_visible {
-            paint_focus_ring(ctx, self.bounds, spacing.radius_md);
+            paint_focus_ring(ctx, self.bounds, visual.radius);
         }
-        let icon_color = color_with_alpha(icon_color, 0.92);
-        self.icon.paint(ctx, self.bounds.inset(5.0, 5.0), icon_color);
+        let icon_color = color_with_alpha(icon_color, visual.icon_alpha);
+        self.icon.paint(
+            ctx,
+            self.bounds.inset(visual.icon_inset, visual.icon_inset),
+            icon_color,
+        );
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -249,9 +283,15 @@ mod tests {
 
     #[derive(Default)]
     struct PaintRecorder {
+        rects: Vec<Rect>,
+        rect_radii: Vec<f32>,
         lines: usize,
         triangles: usize,
+        triangle_bounds: Vec<Rect>,
+        triangle_tints: Vec<Color>,
         raster_images: usize,
+        raster_bounds: Vec<Rect>,
+        raster_tints: Vec<Color>,
         texts: Vec<String>,
     }
 
@@ -281,23 +321,30 @@ mod tests {
     impl DrawCommandEncoder for PaintRecorder {
         fn push_clip(&mut self, _bounds: Rect) {}
         fn pop_clip(&mut self) {}
-        fn draw_rect(&mut self, _bounds: Rect, _color: Color, _corner_radius: f32) {}
+        fn draw_rect(&mut self, bounds: Rect, _color: Color, corner_radius: f32) {
+            self.rects.push(bounds);
+            self.rect_radii.push(corner_radius);
+        }
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
             self.lines += 1;
         }
-        fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
+        fn draw_triangles(&mut self, vertices: &[Point], color: Color) {
             self.triangles += vertices.len();
+            self.triangle_bounds.push(bounds_for_points(vertices));
+            self.triangle_tints.push(color);
         }
         fn draw_raster_image(
             &mut self,
             _key: &str,
-            _bounds: Rect,
+            bounds: Rect,
             _width: u32,
             _height: u32,
             _rgba: std::sync::Arc<[u8]>,
-            _tint: Color,
+            tint: Color,
         ) {
             self.raster_images += 1;
+            self.raster_bounds.push(bounds);
+            self.raster_tints.push(tint);
         }
         fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
             self.texts.push(text.to_owned());
@@ -321,6 +368,20 @@ mod tests {
             r#"<svg viewBox="0 0 24 24"><path d="M6 12L18 12" fill="none" stroke="black"/></svg>"#,
         )
         .expect("svg icon")
+    }
+
+    fn bounds_for_points(points: &[Point]) -> Rect {
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for point in points {
+            min_x = min_x.min(point.x);
+            min_y = min_y.min(point.y);
+            max_x = max_x.max(point.x);
+            max_y = max_y.max(point.y);
+        }
+        Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
     }
 
     #[test]
@@ -523,6 +584,60 @@ mod tests {
         assert_eq!(recorder.lines, 0);
         assert!(recorder.triangles > 0 || recorder.raster_images > 0);
         assert!(recorder.texts.is_empty());
+    }
+
+    #[test]
+    fn icon_button_visual_metrics_follow_theme_tokens() {
+        let mut button = IconButton::new(test_icon());
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.interact_height = 34.0;
+        theme.spacing.sm = 8.0;
+        theme.spacing.border_standard = 2.0;
+        theme.spacing.radius_md = 9.0;
+        let visual = IconButtonVisualTokens::from_theme(&theme);
+        button.layout(Rect::new(10.0, 20.0, visual.size, visual.size));
+        let mut recorder = PaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut recorder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 240.0, 120.0),
+        };
+
+        button.paint(&mut ctx);
+
+        assert_eq!(
+            button.measure(LayoutConstraint::LOOSE),
+            Size::new(visual.size, visual.size)
+        );
+        assert_eq!(
+            recorder.rects[0],
+            Rect::new(10.0, 20.0, visual.size, visual.size)
+        );
+        assert_eq!(recorder.rect_radii[0], visual.radius);
+        let expected_icon = Rect::new(
+            10.0 + visual.icon_inset,
+            20.0 + visual.icon_inset,
+            visual.size - visual.icon_inset * 2.0,
+            visual.size - visual.icon_inset * 2.0,
+        );
+        let painted_icon = recorder
+            .triangle_bounds
+            .first()
+            .copied()
+            .or_else(|| recorder.raster_bounds.first().copied())
+            .expect("icon should paint vector geometry or a raster fallback");
+        assert!(expected_icon.contains(Point::new(painted_icon.x, painted_icon.y)));
+        assert!(expected_icon.contains(Point::new(
+            painted_icon.x + painted_icon.width,
+            painted_icon.y + painted_icon.height
+        )));
+        let tint = recorder
+            .triangle_tints
+            .first()
+            .copied()
+            .or_else(|| recorder.raster_tints.first().copied())
+            .expect("icon should have a tint");
+        assert_eq!(tint.a, visual.icon_alpha);
     }
 
     #[test]
