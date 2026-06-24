@@ -105,6 +105,9 @@ shared renderer, text, event, theme, or widget infrastructure.
       geometry into directly tested layout contracts.
 - [x] Extract ColorPicker drag and keyboard color interaction math into directly tested
       interaction contracts while keeping focus/capture/dispatch in the widget layer.
+- [x] Extract CurveEditor point normalization, endpoint anchoring, neighbor constraints,
+      screen/curve coordinate mapping, hit testing, and insertion geometry into directly tested
+      model/geometry contracts.
 
 ## Phase 5 - Performance And Observability
 
