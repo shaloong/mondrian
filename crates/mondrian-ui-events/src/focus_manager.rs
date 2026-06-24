@@ -1,6 +1,6 @@
 //! FocusManager 实现
 //!
-//! 跟踪当前聚焦的 Widget 和 Panel，支持 Tab / Shift+Tab 遍历。
+//! 跟踪当前聚焦的 Widget 和 Panel。
 
 use mondrian_editor_state::state::PanelKind;
 use mondrian_ui_core::focus::FocusManager;
@@ -45,15 +45,6 @@ impl FocusManager for FocusManagerImpl {
             self.widget = None;
             self.panel = None;
         }
-    }
-
-    fn focus_next(&mut self) {
-        // Tab traversal requires WidgetTree access which is owned by EventRouter.
-        // The EventRouter should call WidgetTree-based traversal when this is invoked.
-    }
-
-    fn focus_prev(&mut self) {
-        // See focus_next
     }
 
     fn clear_focus(&mut self) {

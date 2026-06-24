@@ -2186,10 +2186,6 @@ mod tests {
             }
         }
 
-        fn focus_next(&mut self) {}
-
-        fn focus_prev(&mut self) {}
-
         fn clear_focus(&mut self) {
             self.focused = None;
         }

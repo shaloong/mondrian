@@ -123,8 +123,6 @@ mod tests {
         }
         fn request_focus(&mut self, _widget: WidgetId) {}
         fn release_focus(&mut self, _widget: WidgetId) {}
-        fn focus_next(&mut self) {}
-        fn focus_prev(&mut self) {}
         fn clear_focus(&mut self) {}
     }
 

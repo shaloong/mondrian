@@ -75,6 +75,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Extract pointer capture ownership into a dedicated event-router state module with direct
       coverage for capture, owner-only release, clear, stale-owner pruning, overlay preemption,
       drag cancellation, and window focus loss.
+- [x] Remove inert `FocusManager::focus_next` / `focus_prev` methods so focus traversal remains
+      an explicit event-router contract backed by `WidgetTree` traversal instead of no-op manager
+      methods.
 
 ## Phase 4 - Widget Productionization
 
