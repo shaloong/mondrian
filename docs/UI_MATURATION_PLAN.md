@@ -59,6 +59,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and Popup.
 - [ ] Add composition stress tests for nested clipping, nested scroll views, overlays, focus
       handoff, and disabled/read-only states.
+- [x] Add a nested ScrollView overlay stress test proving child overlays remain hit-testable and
+      paint outside ancestor viewport clips while clip stacks stay balanced.
 
 ## Phase 5 - Performance And Observability
 

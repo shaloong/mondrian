@@ -4,7 +4,9 @@ use glam::Vec2;
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext, PointerCaptureRequest};
+use mondrian_ui_core::widget::{
+    DrawCommandEncoder, EventContext, PaintContext, PointerCaptureRequest,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::{Theme, ThemePreset};
 
@@ -33,6 +35,89 @@ struct RecordingEncoder {
     texts: Vec<TextCommand>,
     clip_depth: i32,
     transform_depth: i32,
+}
+
+struct NestedOverlayWidget {
+    id: WidgetId,
+    bounds: Rect,
+    open: bool,
+}
+
+impl NestedOverlayWidget {
+    fn new() -> Self {
+        Self {
+            id: WidgetId::new(),
+            bounds: Rect::ZERO,
+            open: false,
+        }
+    }
+
+    fn trigger_rect(&self) -> Rect {
+        Rect::new(self.bounds.x, self.bounds.y, 64.0, 24.0)
+    }
+
+    fn overlay_rect(&self) -> Rect {
+        Rect::new(self.bounds.x, self.bounds.y + 28.0, 96.0, 44.0)
+    }
+}
+
+impl Widget for NestedOverlayWidget {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(72.0, 28.0))
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+                if self.trigger_rect().contains(*position) =>
+            {
+                self.open = true;
+                ctx.request_repaint();
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        ctx.encoder.draw_rect(self.trigger_rect(), ctx.theme.colors.surface, 4.0);
+        ctx.encoder.draw_text(
+            "Nested trigger",
+            ctx.theme.typography.body.font_size,
+            Point::new(self.bounds.x + 6.0, self.bounds.y + 6.0),
+            ctx.theme.colors.foreground,
+        );
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if !self.open {
+            return;
+        }
+        let rect = self.overlay_rect();
+        ctx.encoder.draw_rect(rect, ctx.theme.colors.popover, 6.0);
+        ctx.encoder.draw_text(
+            "Nested overlay item",
+            ctx.theme.typography.body.font_size,
+            Point::new(rect.x + 6.0, rect.y + 8.0),
+            ctx.theme.colors.foreground,
+        );
+    }
+
+    fn overlay_hit_test(&self, point: Point) -> bool {
+        self.open && self.overlay_rect().contains(point)
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.trigger_rect().contains(point)
+    }
 }
 
 impl RecordingEncoder {
@@ -573,6 +658,53 @@ fn overlay_and_scroll_container_extremes_keep_paint_and_event_state_stable() {
     assert!(
         scroll_paint.texts.iter().any(|text| text.text.contains("Scrollable")),
         "scroll view should paint translated child content through a balanced clip"
+    );
+}
+
+#[test]
+fn nested_scroll_views_do_not_clip_child_overlays() {
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let inner_scroll = ScrollView::new(Some(Box::new(NestedOverlayWidget::new())));
+    let mut outer_scroll = ScrollView::new(Some(Box::new(inner_scroll)));
+    outer_scroll.layout(Rect::new(0.0, 0.0, 72.0, 32.0));
+    let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+    assert_eq!(
+        outer_scroll.event(
+            &UiEvent::MouseDown {
+                position: Point::new(16.0, 14.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    let _ = outer_scroll.event(
+        &UiEvent::MouseUp {
+            position: Point::new(16.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+
+    assert!(
+        outer_scroll.overlay_hit_test(Point::new(16.0, 50.0)),
+        "nested child overlay should remain hit-testable outside the outer scroll viewport"
+    );
+    let paint = paint_widget(&outer_scroll, Rect::new(0.0, 0.0, 120.0, 120.0));
+    assert!(
+        paint.texts.iter().any(|text| text.text == "Nested overlay item"),
+        "nested child overlay should paint outside ancestor scroll clips"
+    );
+    assert!(
+        paint.clips.iter().any(|clip| clip.height <= 32.0),
+        "outer scroll viewport should still establish a bounded content clip"
     );
 }
 
