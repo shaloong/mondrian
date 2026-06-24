@@ -34,6 +34,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 
 - [ ] Harden focus traversal, keyboard navigation, mouse capture release, window focus loss,
       and overlay hit testing as explicit contracts.
+- [x] Constrain framework Tab traversal to plain Tab/Shift+Tab so modified Tab chords remain
+      available to shortcut resolution or platform handling.
 - [x] Add route diagnostics for dropped shortcuts, stale focused widgets, and capture owners.
 - [x] Add accessibility-ready metadata primitives, focus-order collection, and core control
       coverage for Button, Checkbox, Slider, and TextInput.

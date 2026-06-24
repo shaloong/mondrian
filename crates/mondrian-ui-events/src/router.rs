@@ -319,36 +319,37 @@ impl EventRouter {
             _ => {
                 // ── Tab / Shift+Tab: framework-level focus traversal ──────────
                 if let UiEvent::KeyDown { key: KeyCode::Tab, modifiers } = &event {
-                    let reverse = modifiers.shift;
-                    let current = self.focus_mgr.focused_widget();
-                    let traversal_origin = current.unwrap_or_default();
-                    let next = if reverse {
-                        TreeWalker::focus_prev(tree, traversal_origin)
-                    } else {
-                        TreeWalker::focus_next(tree, traversal_origin)
-                    };
-                    if next.is_none() {
-                        self.focused = self.focus_mgr.focused_widget();
-                        return EventResult::Ignored;
-                    }
-                    if next == current {
+                    if let Some(reverse) = tab_traversal_reverse(*modifiers) {
+                        let current = self.focus_mgr.focused_widget();
+                        let traversal_origin = current.unwrap_or_default();
+                        let next = if reverse {
+                            TreeWalker::focus_prev(tree, traversal_origin)
+                        } else {
+                            TreeWalker::focus_next(tree, traversal_origin)
+                        };
+                        if next.is_none() {
+                            self.focused = self.focus_mgr.focused_widget();
+                            return EventResult::Ignored;
+                        }
+                        if next == current {
+                            self.focused = self.focus_mgr.focused_widget();
+                            return EventResult::Handled;
+                        }
+                        // Blur current
+                        if let Some(current_id) = current {
+                            self.send_focus_lost(tree, current_id, dispatch);
+                        }
+                        // Focus next
+                        if let Some(next_id) = next {
+                            self.send_focus_gained(tree, next_id, dispatch);
+                        }
+                        let panel = next
+                            .and_then(|id| panel_kind_for_widget(tree, id))
+                            .or_else(|| self.focus_mgr.focused_panel());
+                        self.focus_mgr.set_focused_widget(next, panel);
                         self.focused = self.focus_mgr.focused_widget();
                         return EventResult::Handled;
                     }
-                    // Blur current
-                    if let Some(current_id) = current {
-                        self.send_focus_lost(tree, current_id, dispatch);
-                    }
-                    // Focus next
-                    if let Some(next_id) = next {
-                        self.send_focus_gained(tree, next_id, dispatch);
-                    }
-                    let panel = next
-                        .and_then(|id| panel_kind_for_widget(tree, id))
-                        .or_else(|| self.focus_mgr.focused_panel());
-                    self.focus_mgr.set_focused_widget(next, panel);
-                    self.focused = self.focus_mgr.focused_widget();
-                    return EventResult::Handled;
                 }
 
                 let position = match &event {
@@ -824,6 +825,10 @@ impl EventRouter {
     }
 }
 
+fn tab_traversal_reverse(modifiers: Modifiers) -> Option<bool> {
+    (!modifiers.ctrl && !modifiers.alt && !modifiers.meta).then_some(modifiers.shift)
+}
+
 fn panel_kind_for_widget(tree: &dyn WidgetTree, widget: WidgetId) -> Option<PanelKind> {
     let mut current = Some(widget);
     while let Some(id) = current {
@@ -949,6 +954,25 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::rc::Rc;
+
+    #[test]
+    fn tab_traversal_only_accepts_unmodified_tab_or_shift_tab() {
+        assert_eq!(tab_traversal_reverse(Modifiers::none()), Some(false));
+        assert_eq!(tab_traversal_reverse(Modifiers::shift()), Some(true));
+        assert_eq!(tab_traversal_reverse(Modifiers::ctrl()), None);
+        assert_eq!(
+            tab_traversal_reverse(Modifiers { alt: true, ..Modifiers::none() }),
+            None
+        );
+        assert_eq!(
+            tab_traversal_reverse(Modifiers { meta: true, ..Modifiers::none() }),
+            None
+        );
+        assert_eq!(
+            tab_traversal_reverse(Modifiers { ctrl: true, shift: true, ..Modifiers::none() }),
+            None
+        );
+    }
 
     #[test]
     fn router_new_has_no_hover() {
@@ -1850,6 +1874,32 @@ mod tests {
             router.focus_manager().focused_panel(),
             Some(PanelKind::Timeline)
         );
+    }
+
+    #[test]
+    fn router_leaves_modified_tab_for_shortcut_resolution() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::new(KeyCode::Tab, Modifiers::ctrl()),
+            Action::SaveProject,
+        );
+        let actions = RefCell::new(Vec::new());
+
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::ctrl() },
+            &mut tree,
+            &|action| actions.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert!(log.borrow().is_empty());
     }
 
     #[test]
