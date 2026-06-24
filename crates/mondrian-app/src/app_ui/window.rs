@@ -974,6 +974,7 @@ fn update_window_cursor_icon(host: &AppUiHost, session: &mut AppUiWindowSession)
 fn window_cursor_icon(host: &AppUiHost, session: &AppUiWindowSession) -> winit::window::CursorIcon {
     winit_cursor_icon_for_ui_state(
         session.ui_runtime.is_eyedropper_active(),
+        session.ui_runtime.widget_cursor_request(),
         splitter_direction_at_cursor(host, session.last_cursor),
         focused_widget_accepts_text_input(
             host.active_root(),

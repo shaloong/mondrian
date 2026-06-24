@@ -1672,6 +1672,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     && TEXT_INPUT_ID.with(|id| id.get()) == router.focused();
                 window.set_cursor_icon(winit_cursor_icon_for_ui_state(
                     ui_runtime.is_eyedropper_active(),
+                    ui_runtime.widget_cursor_request(),
                     direction,
                     is_text,
                 ));

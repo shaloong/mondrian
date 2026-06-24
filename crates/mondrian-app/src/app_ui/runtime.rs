@@ -30,6 +30,7 @@ use winit::keyboard::{Key, NamedKey};
 pub struct WinitUiRuntime {
     eyedropper: DesktopEyedropper,
     tooltip: TooltipWidget,
+    widget_cursor: Option<CursorRequest>,
     last_timer_tick: Instant,
 }
 
@@ -44,6 +45,7 @@ impl Default for WinitUiRuntime {
         Self {
             eyedropper: DesktopEyedropper::new(),
             tooltip: TooltipWidget::new(),
+            widget_cursor: None,
             last_timer_tick: Instant::now(),
         }
     }
@@ -65,6 +67,14 @@ impl WinitUiRuntime {
         self.eyedropper.preview_color()
     }
 
+    /// Latest cursor requested by routed widgets.
+    ///
+    /// This is transient pointer state: pointer and drag events that do not
+    /// request a cursor clear the previous widget request.
+    pub fn widget_cursor_request(&self) -> Option<CursorRequest> {
+        self.widget_cursor
+    }
+
     /// Route one UI event through the framework and apply shell side effects.
     pub fn route_window_event(
         &mut self,
@@ -76,9 +86,10 @@ impl WinitUiRuntime {
     ) -> EventResult {
         self.tick_tooltip(window, router);
         let tooltip_was_visible = router.current_tooltip().is_some();
+        let updates_cursor = event_updates_widget_cursor(&event);
         let mut tree = WidgetTreeView::new(root);
         let result = router.route(event, &mut tree, dispatch);
-        self.apply_router_requests(window, router, tooltip_was_visible);
+        self.apply_router_requests(window, router, tooltip_was_visible, updates_cursor);
         log_route_diagnostics(router.take_diagnostics());
         result
     }
@@ -339,6 +350,7 @@ impl WinitUiRuntime {
         window: &winit::window::Window,
         router: &mut EventRouter,
         tooltip_was_visible: bool,
+        event_updates_cursor: bool,
     ) {
         if tooltip_was_visible && router.current_tooltip().is_none() {
             window.request_redraw();
@@ -347,7 +359,10 @@ impl WinitUiRuntime {
             apply_ime_request(window, request);
         }
         if let Some(cursor) = router.take_cursor_request() {
+            self.widget_cursor = Some(cursor);
             apply_cursor_request(window, cursor);
+        } else if event_updates_cursor {
+            self.widget_cursor = None;
         }
         if let Some(request) = router.take_eyedropper_request() {
             if request.active {
@@ -536,22 +551,51 @@ pub fn winit_modifiers_to_ui_modifiers(modifiers: winit::event::Modifiers) -> Mo
 
 /// Choose the shell cursor icon from transient UI state.
 ///
-/// Priority is global sampling first, splitter resize affordances second,
-/// then focused text editing. The bins provide state; the runtime owns the
-/// precedence so demo and app shells do not drift.
+/// Priority is global sampling first, routed widget requests second, splitter
+/// resize affordances third, then focused text editing. The bins provide state;
+/// the runtime owns the precedence so demo and app shells do not drift.
 pub fn winit_cursor_icon_for_ui_state(
     eyedropper_active: bool,
+    widget_cursor: Option<CursorRequest>,
     splitter_direction: Option<SplitDirection>,
     focused_text: bool,
 ) -> winit::window::CursorIcon {
     if eyedropper_active {
         return winit::window::CursorIcon::Crosshair;
     }
+    if let Some(cursor) = widget_cursor {
+        return winit_cursor_icon_for_request(cursor);
+    }
     match splitter_direction {
         Some(SplitDirection::Horizontal) => winit::window::CursorIcon::ColResize,
         Some(SplitDirection::Vertical) => winit::window::CursorIcon::RowResize,
         None if focused_text => winit::window::CursorIcon::Text,
         None => winit::window::CursorIcon::Default,
+    }
+}
+
+fn event_updates_widget_cursor(event: &UiEvent) -> bool {
+    matches!(
+        event,
+        UiEvent::MouseMove { .. }
+            | UiEvent::MouseDown { .. }
+            | UiEvent::MouseUp { .. }
+            | UiEvent::MouseWheel { .. }
+            | UiEvent::DragEnter { .. }
+            | UiEvent::DragOver { .. }
+            | UiEvent::Drop { .. }
+            | UiEvent::FocusLost
+    )
+}
+
+fn winit_cursor_icon_for_request(cursor: CursorRequest) -> winit::window::CursorIcon {
+    match cursor {
+        CursorRequest::Crosshair => winit::window::CursorIcon::Crosshair,
+        CursorRequest::Default => winit::window::CursorIcon::Default,
+        CursorRequest::Grab => winit::window::CursorIcon::Grab,
+        CursorRequest::Grabbing => winit::window::CursorIcon::Grabbing,
+        CursorRequest::EwResize => winit::window::CursorIcon::EwResize,
+        CursorRequest::NsResize => winit::window::CursorIcon::NsResize,
     }
 }
 
@@ -601,15 +645,7 @@ pub fn paint_eyedropper_overlay(
 }
 
 fn apply_cursor_request(window: &winit::window::Window, cursor: CursorRequest) {
-    let icon = match cursor {
-        CursorRequest::Crosshair => winit::window::CursorIcon::Crosshair,
-        CursorRequest::Default => winit::window::CursorIcon::Default,
-        CursorRequest::Grab => winit::window::CursorIcon::Grab,
-        CursorRequest::Grabbing => winit::window::CursorIcon::Grabbing,
-        CursorRequest::EwResize => winit::window::CursorIcon::EwResize,
-        CursorRequest::NsResize => winit::window::CursorIcon::NsResize,
-    };
-    window.set_cursor_icon(icon);
+    window.set_cursor_icon(winit_cursor_icon_for_request(cursor));
 }
 
 fn apply_ime_request(window: &winit::window::Window, request: ImeRequest) {
@@ -876,25 +912,81 @@ mod tests {
     #[test]
     fn cursor_icon_priority_matches_shell_contract() {
         assert_eq!(
-            winit_cursor_icon_for_ui_state(true, Some(SplitDirection::Horizontal), true),
+            winit_cursor_icon_for_ui_state(
+                true,
+                Some(CursorRequest::Grab),
+                Some(SplitDirection::Horizontal),
+                true
+            ),
             winit::window::CursorIcon::Crosshair
         );
         assert_eq!(
-            winit_cursor_icon_for_ui_state(false, Some(SplitDirection::Horizontal), true),
+            winit_cursor_icon_for_ui_state(
+                false,
+                Some(CursorRequest::Grab),
+                Some(SplitDirection::Horizontal),
+                true
+            ),
+            winit::window::CursorIcon::Grab
+        );
+        assert_eq!(
+            winit_cursor_icon_for_ui_state(
+                false,
+                Some(CursorRequest::Default),
+                Some(SplitDirection::Horizontal),
+                true
+            ),
+            winit::window::CursorIcon::Default
+        );
+        assert_eq!(
+            winit_cursor_icon_for_ui_state(false, None, Some(SplitDirection::Horizontal), true),
             winit::window::CursorIcon::ColResize
         );
         assert_eq!(
-            winit_cursor_icon_for_ui_state(false, Some(SplitDirection::Vertical), true),
+            winit_cursor_icon_for_ui_state(false, None, Some(SplitDirection::Vertical), true),
             winit::window::CursorIcon::RowResize
         );
         assert_eq!(
-            winit_cursor_icon_for_ui_state(false, None, true),
+            winit_cursor_icon_for_ui_state(false, None, None, true),
             winit::window::CursorIcon::Text
         );
         assert_eq!(
-            winit_cursor_icon_for_ui_state(false, None, false),
+            winit_cursor_icon_for_ui_state(false, None, None, false),
             winit::window::CursorIcon::Default
         );
+    }
+
+    #[test]
+    fn widget_cursor_updates_only_for_pointer_route_events() {
+        assert!(event_updates_widget_cursor(&UiEvent::MouseMove {
+            position: Point::ZERO,
+            modifiers: Modifiers::none(),
+        }));
+        assert!(event_updates_widget_cursor(&UiEvent::MouseDown {
+            position: Point::ZERO,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        }));
+        assert!(event_updates_widget_cursor(&UiEvent::MouseUp {
+            position: Point::ZERO,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        }));
+        assert!(event_updates_widget_cursor(&UiEvent::MouseWheel {
+            delta: 1.0,
+            position: Point::ZERO,
+            modifiers: Modifiers::none(),
+        }));
+        assert!(event_updates_widget_cursor(&UiEvent::FocusLost));
+
+        assert!(!event_updates_widget_cursor(&UiEvent::KeyDown {
+            key: KeyCode::A,
+            modifiers: Modifiers::ctrl(),
+        }));
+        assert!(!event_updates_widget_cursor(&UiEvent::TextInput(
+            "a".into()
+        )));
+        assert!(!event_updates_widget_cursor(&UiEvent::ImeCancel));
     }
 
     #[test]
