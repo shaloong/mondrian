@@ -105,6 +105,7 @@ fn product_main_calls_only_the_self_hosted_window_runner() {
 fn legacy_egui_reference_is_not_public_crate_api() {
     let lib_rs = include_str!("../src/lib.rs");
     let app_rs = include_str!("../src/app/mod.rs");
+    let legacy_preferences_rs = include_str!("../src/app/legacy_egui_preferences.rs");
 
     assert!(
         lib_rs.contains("pub(crate) mod egui_ui;"),
@@ -129,5 +130,17 @@ fn legacy_egui_reference_is_not_public_crate_api() {
     assert!(
         !app_rs.contains("pub struct MondrianApp"),
         "legacy eframe app type must not be exported as a product route"
+    );
+    assert!(
+        app_rs.contains("mod legacy_egui_preferences;"),
+        "legacy egui preference schema should stay behind an explicit legacy module"
+    );
+    assert!(
+        !app_rs.contains("struct AppPreferences"),
+        "legacy egui preference schema must not live in app/mod.rs"
+    );
+    assert!(
+        legacy_preferences_rs.contains("struct AppPreferences"),
+        "legacy egui preference schema should remain isolated while the reference app compiles"
     );
 }

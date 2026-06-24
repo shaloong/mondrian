@@ -278,7 +278,10 @@ workflow.
   `app::media_cache` module with focused coverage. Viewer preference
   persistence/defaults have also moved from the legacy viewer panel into the
   neutral `app::viewer_preferences` module, leaving the old viewer as a
-  snapshot/apply consumer while it remains reference code.
+  snapshot/apply consumer while it remains reference code. Legacy egui
+  preference and new-project draft schema is now isolated in
+  `app::legacy_egui_preferences`, with route-contract coverage preventing it
+  from drifting back into `app/mod.rs`.
 - P5-DOCS-001: Update architecture docs to describe the final self-hosted UI
   stack, ownership model, test strategy, and removed compatibility paths.
   Progress: overview, renderer, export, and design-guideline docs now describe

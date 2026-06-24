@@ -67,6 +67,11 @@ The legacy egui shortcut preference module at `mondrian-app/src/shortcuts.rs`
 is also crate-private; new shortcut routing, labels, persistence, and
 Preferences UI must use `self_hosted::shortcuts` and
 `SelfHostedPreferences.shortcut_overrides`.
+Legacy egui preference and new-project draft schema is isolated in
+`mondrian-app::app::legacy_egui_preferences` with visibility restricted to the
+`app` module. It exists only so the reference eframe app can still compile; new
+product preferences must use `self_hosted::preferences_store` and self-hosted
+dialog-local draft models.
 Media-cache filesystem policy is not a UI concern: `mondrian-app::app::media_cache`
 owns cache usage statistics, size/age cleanup, and clear-directory behavior.
 Legacy viewer panels may call it before clearing their GPU textures, decoder
