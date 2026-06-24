@@ -92,6 +92,16 @@ fn grapheme_is_whitespace(grapheme: &str) -> bool {
 /// Adapter that maps the current input value to an editor [`Action`].
 pub type TextInputChangeAction = dyn Fn(&str) -> Action;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TextInputGeometry {
+    clip: Rect,
+    text_origin: Point,
+    content_left: f32,
+    content_right: f32,
+    visible_width: f32,
+    caret: Rect,
+}
+
 /// TextInput Widget —— 单行文本输入框
 pub struct TextInput {
     id: WidgetId,
@@ -287,37 +297,58 @@ impl TextInput {
         self.update_scroll(font_size);
     }
 
-    fn visible_width(&self) -> f32 {
-        (self.bounds.width - HORIZONTAL_PADDING * 2.0).max(1.0)
-    }
-
-    fn content_left(&self) -> f32 {
-        self.bounds.x + HORIZONTAL_PADDING
-    }
-
-    fn content_right(&self) -> f32 {
-        (self.bounds.x + self.bounds.width - HORIZONTAL_PADDING).max(self.content_left())
-    }
-
-    fn content_clip_rect(&self) -> Rect {
-        Rect::new(
-            self.content_left(),
-            self.bounds.y,
-            self.visible_width(),
-            self.bounds.height,
-        )
-    }
-
     fn line_height(font_size: f32) -> f32 {
         font_size * 1.3
     }
 
-    fn text_y(&self, font_size: f32) -> f32 {
-        self.bounds.y + (self.bounds.height - Self::line_height(font_size)).max(0.0) * 0.5
+    fn text_geometry(&self, font_size: f32) -> TextInputGeometry {
+        let content_left = self.bounds.x + HORIZONTAL_PADDING;
+        let content_right =
+            (self.bounds.x + self.bounds.width - HORIZONTAL_PADDING).max(content_left);
+        let visible_width = (self.bounds.width - HORIZONTAL_PADDING * 2.0).max(1.0);
+        let text_x = content_left - self.scroll_x.get();
+        let text_y =
+            self.bounds.y + (self.bounds.height - Self::line_height(font_size)).max(0.0) * 0.5;
+        let preedit_w = if self.ime_preedit.is_empty() {
+            0.0
+        } else {
+            measure_text_width(&self.ime_preedit, font_size)
+        };
+        let caret_width = 2.0;
+        let max_caret_x = (content_right - caret_width).max(content_left);
+        let caret_x =
+            (text_x + self.cursor_text_x(font_size) + preedit_w).clamp(content_left, max_caret_x);
+
+        TextInputGeometry {
+            clip: Rect::new(
+                content_left,
+                self.bounds.y,
+                visible_width,
+                self.bounds.height,
+            ),
+            text_origin: Point::new(text_x, text_y),
+            content_left,
+            content_right,
+            visible_width,
+            caret: Rect::new(
+                caret_x,
+                self.bounds.y + VERTICAL_PADDING,
+                caret_width,
+                (self.bounds.height - VERTICAL_PADDING * 2.0).max(1.0),
+            ),
+        }
     }
 
-    fn text_x(&self) -> f32 {
-        self.content_left() - self.scroll_x.get()
+    fn visible_width(&self) -> f32 {
+        self.text_geometry(DEFAULT_FONT_SIZE).visible_width
+    }
+
+    fn content_left(&self) -> f32 {
+        self.text_geometry(DEFAULT_FONT_SIZE).content_left
+    }
+
+    fn content_right(&self) -> f32 {
+        self.text_geometry(DEFAULT_FONT_SIZE).content_right
     }
 
     fn cursor_text_x(&self, font_size: f32) -> f32 {
@@ -328,25 +359,8 @@ impl TextInput {
         }
     }
 
-    fn cursor_screen_x(&self, font_size: f32) -> f32 {
-        let preedit_w = if self.ime_preedit.is_empty() {
-            0.0
-        } else {
-            measure_text_width(&self.ime_preedit, font_size)
-        };
-        self.text_x() + self.cursor_text_x(font_size) + preedit_w
-    }
-
     fn cursor_area(&self, font_size: f32) -> Rect {
-        let caret_width = 2.0;
-        let max_x = (self.content_right() - caret_width).max(self.content_left());
-        let x = self.cursor_screen_x(font_size).clamp(self.content_left(), max_x);
-        Rect::new(
-            x,
-            self.bounds.y + VERTICAL_PADDING,
-            caret_width,
-            (self.bounds.height - VERTICAL_PADDING * 2.0).max(1.0),
-        )
+        self.text_geometry(font_size).caret
     }
 
     fn refresh_ime_area(&self, ctx: &mut EventContext) {
@@ -854,13 +868,12 @@ impl Widget for TextInput {
         );
         ctx.encoder.draw_rect(self.bounds, bg, spacing.radius_sm);
 
-        // Clip text content to padded area
-        let clip = self.content_clip_rect();
-        ctx.push_clip(clip);
+        // Clip text content to padded area.
+        let geometry = self.text_geometry(font_size);
+        ctx.push_clip(geometry.clip);
 
-        let sx = self.scroll_x.get();
-        let text_x = self.content_left() - sx;
-        let text_y = self.text_y(font_size);
+        let text_x = geometry.text_origin.x;
+        let text_y = geometry.text_origin.y;
 
         // Selection highlight
         if self.enabled {
@@ -922,13 +935,12 @@ impl Widget for TextInput {
                 self.last_blink.set(now);
             }
             if self.cursor_visible.get() {
-                let cursor_area = self.cursor_area(font_size);
                 let cursor_color = if self.has_selection() {
                     tokens.primary
                 } else {
                     tokens.foreground
                 };
-                ctx.encoder.draw_rect(cursor_area, cursor_color, 0.0);
+                ctx.encoder.draw_rect(geometry.caret, cursor_color, 0.0);
             }
         }
 
@@ -2217,6 +2229,34 @@ mod tests {
         let caret = ti.cursor_area(DEFAULT_FONT_SIZE);
         assert!(caret.x >= ti.content_left());
         assert!(caret.x + caret.width <= ti.content_right() + 0.1);
+    }
+
+    #[test]
+    fn text_geometry_keeps_clip_text_and_ime_caret_in_one_coordinate_space() {
+        let mut ti = TextInput::new("ph").with_text("abc");
+        ti.cursor = 2;
+        ti.ime_preedit = "ni".into();
+        ti.layout(Rect::new(10.0, 20.0, 160.0, 32.0));
+
+        let geometry = ti.text_geometry(DEFAULT_FONT_SIZE);
+        let expected_left = 18.0;
+        let expected_width = 144.0;
+        let expected_caret_x = expected_left
+            + measure_text_width("ab", DEFAULT_FONT_SIZE)
+            + measure_text_width("ni", DEFAULT_FONT_SIZE);
+
+        assert_eq!(
+            geometry.clip,
+            Rect::new(expected_left, 20.0, expected_width, 32.0)
+        );
+        assert_eq!(geometry.text_origin.x, expected_left);
+        assert_eq!(geometry.content_left, expected_left);
+        assert_eq!(geometry.content_right, 162.0);
+        assert_eq!(geometry.visible_width, expected_width);
+        assert!((geometry.caret.x - expected_caret_x).abs() <= 0.1);
+        assert_eq!(geometry.caret.y, 24.0);
+        assert_eq!(geometry.caret.width, 2.0);
+        assert_eq!(geometry.caret.height, 24.0);
     }
 
     #[test]
