@@ -14,6 +14,7 @@ use mondrian_ui_core::widget::{
     PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{current_theme, Theme};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,6 +45,46 @@ const PREVIEW_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const CARD_RADIUS: f32 = 7.0;
 const ICON_SIZE: f32 = 22.0;
 const RENAME_MENU_COMMAND: &str = "asset_grid.rename";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AssetGridVisualTokens {
+    footer_title_font_size: f32,
+    footer_subtitle_font_size: f32,
+    badge_font_size: f32,
+    badge_edge_inset: f32,
+    badge_gap: f32,
+    badge_padding_x: f32,
+    badge_min_width: f32,
+    badge_height: f32,
+    badge_radius: f32,
+    preview_background: Color,
+    neutral_badge_fill: Color,
+    neutral_badge_text: Color,
+    failed_thumbnail_mark: Color,
+}
+
+impl AssetGridVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        let typography = &theme.typography;
+        let colors = &theme.colors;
+        Self {
+            footer_title_font_size: typography.small.font_size,
+            footer_subtitle_font_size: typography.metadata.font_size,
+            badge_font_size: typography.metadata.font_size,
+            badge_edge_inset: spacing.sm,
+            badge_gap: spacing.xs,
+            badge_padding_x: spacing.sm,
+            badge_min_width: (spacing.interact_height - spacing.xs).max(spacing.md),
+            badge_height: (spacing.interact_height - spacing.md).max(1.0),
+            badge_radius: spacing.radius_sm,
+            preview_background: colors.viewer_stage,
+            neutral_badge_fill: color_with_alpha(colors.popover, 0.78),
+            neutral_badge_text: colors.popover_foreground,
+            failed_thumbnail_mark: color_with_alpha(colors.background, 0.78),
+        }
+    }
+}
 
 /// Dynamic action factory for [`AssetGrid`] item selection or activation.
 pub type AssetGridAction = dyn Fn(usize, &AssetGridItem) -> Action;
@@ -1012,8 +1053,10 @@ impl AssetGrid {
         let visible_position = self.visible_position_for_index(index)?;
         let card = self.card_rect_at_visible_position(visible_position);
         let footer = self.footer_rect_for_card(card);
-        let title_font_size = 12.0;
-        let duration_font_size = 11.0;
+        let theme = current_theme();
+        let visual = AssetGridVisualTokens::from_theme(&theme);
+        let title_font_size = visual.footer_title_font_size;
+        let duration_font_size = visual.footer_subtitle_font_size;
         let (title_width, title_text_width, duration_text_width) =
             self.footer_text_metrics(item, footer, title_font_size, duration_font_size);
         let duration_width = if item.subtitle.is_empty() {
@@ -1121,40 +1164,45 @@ impl AssetGrid {
         }
     }
 
-    fn paint_badges(
-        &self,
-        ctx: &mut PaintContext,
-        item: &AssetGridItem,
-        preview: Rect,
-        text_color: Color,
-    ) {
+    fn paint_badges(&self, ctx: &mut PaintContext, item: &AssetGridItem, preview: Rect) {
         if item.badges.is_empty() {
             return;
         }
-        let font_size = 10.0;
-        let min_x = preview.x + 5.0;
-        let mut x = preview.x + preview.width - 5.0;
-        let max_badge_width = (preview.width - 10.0).max(24.0);
+        let visual = AssetGridVisualTokens::from_theme(ctx.theme);
+        let font_size = visual.badge_font_size;
+        let min_x = preview.x + visual.badge_edge_inset;
+        let mut x = preview.x + preview.width - visual.badge_edge_inset;
+        let max_badge_width =
+            (preview.width - visual.badge_edge_inset * 2.0).max(visual.badge_min_width);
         for badge in item.badges.iter().rev() {
             let text_width = measure_single_line(&badge.label, font_size).0;
-            let desired_width = (text_width + 10.0).clamp(24.0, max_badge_width);
+            let desired_width = (text_width + visual.badge_padding_x * 2.0)
+                .clamp(visual.badge_min_width, max_badge_width);
             let available_width = x - min_x;
-            if available_width < 22.0 {
+            if available_width < visual.badge_min_width - 2.0 {
                 break;
             }
             let badge_width = desired_width.min(available_width);
-            let badge_rect = Rect::new(x - badge_width, preview.y + 5.0, badge_width, 18.0);
-            let (fill, text) = badge_colors(ctx, badge, text_color);
-            ctx.encoder.draw_rect(badge_rect, fill, 4.0);
-            ctx.push_clip(badge_rect.inset(4.0, 1.0));
+            let badge_rect = Rect::new(
+                x - badge_width,
+                preview.y + visual.badge_edge_inset,
+                badge_width,
+                visual.badge_height,
+            );
+            let (fill, text) = badge_colors(ctx, badge);
+            ctx.encoder.draw_rect(badge_rect, fill, visual.badge_radius);
+            ctx.push_clip(badge_rect.inset(visual.badge_padding_x - 1.0, 1.0));
             ctx.encoder.draw_text(
                 &badge.label,
                 font_size,
-                snap_point(Point::new(badge_rect.x + 5.0, badge_rect.y + 4.0)),
+                snap_point(Point::new(
+                    badge_rect.x + visual.badge_padding_x,
+                    centered_text_origin_y(badge_rect, ctx.theme.typography.metadata.line_height),
+                )),
                 text,
             );
             ctx.pop_clip();
-            x = badge_rect.x - 4.0;
+            x = badge_rect.x - visual.badge_gap;
         }
     }
 
@@ -1188,6 +1236,7 @@ impl AssetGrid {
         let item = &self.items[index];
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
+        let visual = AssetGridVisualTokens::from_theme(ctx.theme);
         let primary_selected = self.selected == Some(index);
         let selected = self.selected_indices.contains(&index);
         let hovered = self.hovered == Some(index) && !item.disabled;
@@ -1226,7 +1275,7 @@ impl AssetGrid {
             soft_border(colors.border),
             spacing.radius_sm + 1.0,
         );
-        ctx.encoder.draw_rect(preview, Color::from_hex(0x000000), spacing.radius_sm);
+        ctx.encoder.draw_rect(preview, visual.preview_background, spacing.radius_sm);
 
         let text_color = if item.disabled {
             colors.muted_foreground
@@ -1275,18 +1324,18 @@ impl AssetGrid {
                     paint_thumbnail_loading(ctx, preview, text_color);
                 }
                 AssetGridThumbnailStatus::Failed => {
-                    paint_thumbnail_failed(ctx, preview, colors.muted_foreground);
+                    paint_thumbnail_failed(ctx, preview, colors.muted_foreground, visual);
                 }
             }
         }
-        self.paint_badges(ctx, item, preview, text_color);
+        self.paint_badges(ctx, item, preview);
 
         let footer = self.footer_rect_for_card(rect);
         ctx.push_clip(footer);
         let editing_title = self.rename_editor.as_ref().is_some_and(|editor| editor.index == index);
         if !editing_title {
-            let font_size = ctx.theme.typography.small.font_size;
-            let duration_font_size = ctx.theme.typography.metadata.font_size;
+            let font_size = visual.footer_title_font_size;
+            let duration_font_size = visual.footer_subtitle_font_size;
             let (title_width, _, _) =
                 self.footer_text_metrics(item, footer, font_size, duration_font_size);
             let duration_width = if item.subtitle.is_empty() {
@@ -1876,7 +1925,12 @@ fn paint_thumbnail_loading(ctx: &mut PaintContext, preview: Rect, color: Color) 
     }
 }
 
-fn paint_thumbnail_failed(ctx: &mut PaintContext, preview: Rect, color: Color) {
+fn paint_thumbnail_failed(
+    ctx: &mut PaintContext,
+    preview: Rect,
+    color: Color,
+    visual: AssetGridVisualTokens,
+) {
     let chip = Rect::new(
         preview.x + 8.0,
         preview.y + preview.height - 24.0,
@@ -1893,27 +1947,21 @@ fn paint_thumbnail_failed(ctx: &mut PaintContext, preview: Rect, color: Color) {
     ctx.encoder.draw_triangles(&triangle, color_with_alpha(color, 0.70));
     ctx.encoder.draw_rect(
         Rect::new(center.x - 0.75, chip.y + 7.0, 1.5, 4.5),
-        color_with_alpha(Color::BLACK, 0.78),
+        visual.failed_thumbnail_mark,
         0.75,
     );
     ctx.encoder.draw_rect(
         Rect::new(center.x - 0.75, chip.y + 12.4, 1.5, 1.5),
-        color_with_alpha(Color::BLACK, 0.78),
+        visual.failed_thumbnail_mark,
         0.75,
     );
 }
 
-fn badge_colors(
-    ctx: &PaintContext,
-    badge: &AssetGridBadge,
-    _neutral_text: Color,
-) -> (Color, Color) {
+fn badge_colors(ctx: &PaintContext, badge: &AssetGridBadge) -> (Color, Color) {
     let colors = &ctx.theme.colors;
+    let visual = AssetGridVisualTokens::from_theme(ctx.theme);
     match badge.tone {
-        AssetGridBadgeTone::Neutral => (
-            color_with_alpha(Color::BLACK, 0.50),
-            Color::from_hex(0xE6EAF0),
-        ),
+        AssetGridBadgeTone::Neutral => (visual.neutral_badge_fill, visual.neutral_badge_text),
         AssetGridBadgeTone::Accent => (color_with_alpha(colors.primary, 0.22), colors.primary),
         AssetGridBadgeTone::Success => (color_with_alpha(colors.success, 0.22), colors.success),
         AssetGridBadgeTone::Warning => (color_with_alpha(colors.warning, 0.22), colors.warning),
@@ -2520,8 +2568,45 @@ mod tests {
             "normal asset cards should rest transparent until hover or selection"
         );
         assert!(
-            encoder.rect_colors.iter().any(|color| *color == Color::from_hex(0x000000)),
-            "asset previews should use a black media well for letterboxing"
+            encoder.rect_colors.contains(&theme.colors.viewer_stage),
+            "asset previews should use the theme viewer-stage media well"
+        );
+        assert_ne!(theme.colors.viewer_stage, Color::from_hex(0x000000));
+    }
+
+    #[test]
+    fn asset_grid_visual_tokens_follow_theme_typography_and_surfaces() {
+        let dark = ThemePreset::Dark.build();
+        let light = ThemePreset::Light.build();
+        let dark_tokens = AssetGridVisualTokens::from_theme(&dark);
+        let light_tokens = AssetGridVisualTokens::from_theme(&light);
+
+        assert_eq!(
+            dark_tokens.footer_title_font_size,
+            dark.typography.small.font_size
+        );
+        assert_eq!(
+            dark_tokens.footer_subtitle_font_size,
+            dark.typography.metadata.font_size
+        );
+        assert_eq!(
+            dark_tokens.badge_font_size,
+            dark.typography.metadata.font_size
+        );
+        assert_eq!(dark_tokens.badge_radius, dark.spacing.radius_sm);
+        assert_eq!(dark_tokens.preview_background, dark.colors.viewer_stage);
+        assert_eq!(light_tokens.preview_background, light.colors.viewer_stage);
+        assert_ne!(
+            dark_tokens.preview_background,
+            light_tokens.preview_background
+        );
+        assert_eq!(
+            dark_tokens.neutral_badge_text,
+            dark.colors.popover_foreground
+        );
+        assert_eq!(
+            light_tokens.neutral_badge_text,
+            light.colors.popover_foreground
         );
     }
 
@@ -2581,6 +2666,11 @@ mod tests {
                 .iter()
                 .any(|color| *color == color_with_alpha(theme.colors.warning, 0.22)),
             "warning badges should use the theme warning token"
+        );
+        let visual = AssetGridVisualTokens::from_theme(&theme);
+        assert!(
+            encoder.rect_colors.contains(&visual.neutral_badge_fill),
+            "neutral badges should use derived theme tokens instead of fixed colors"
         );
         let badge_clips: Vec<Rect> = encoder
             .clips

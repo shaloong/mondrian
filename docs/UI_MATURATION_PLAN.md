@@ -90,6 +90,8 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.
+- [x] Tokenize AssetGrid preview wells, badge typography/chrome, footer typography, and
+      thumbnail warning marks against theme-derived visual tokens.
 - [ ] Add composition stress tests for nested clipping, nested scroll views, overlays, focus
       handoff, and disabled/read-only states.
 - [x] Add a nested ScrollView overlay stress test proving child overlays remain hit-testable and
