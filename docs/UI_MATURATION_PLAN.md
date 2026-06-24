@@ -97,6 +97,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       value, and keyboard step semantics into a directly tested model module.
 - [x] Extract Slider numeric range, step quantization, keyboard increments, and track/thumb
       geometry into directly tested model/geometry contracts.
+- [x] Extract ScrollView offset clamping, content normalization, viewport/child bounds, and
+      scrollbar track/thumb geometry into directly tested model/geometry contracts.
 
 ## Phase 5 - Performance And Observability
 

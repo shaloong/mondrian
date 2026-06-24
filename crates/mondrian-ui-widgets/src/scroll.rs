@@ -2,20 +2,15 @@
 //!
 //! 虚拟滚动容器。子内容按滚动后的屏幕坐标布局，绘制阶段只负责裁剪。
 
+mod model;
+
 use glam::Vec2;
+use model::{clamp_scroll_offset, finite_nonnegative, normalized_content_size, ScrollbarLayout};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityValue, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-
-fn finite_nonnegative(value: f32) -> f32 {
-    if value.is_finite() {
-        value.max(0.0)
-    } else {
-        0.0
-    }
-}
 
 /// Axes that a [`ScrollView`] may scroll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,12 +97,7 @@ impl ScrollView {
     }
 
     fn viewport_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x,
-            self.bounds.y,
-            self.viewport_size.width,
-            self.viewport_size.height,
-        )
+        self.scrollbar_layout().viewport_rect()
     }
 
     /// Return the scroll state needed to restore this view after rebuilding.
@@ -155,6 +145,17 @@ impl ScrollView {
         self.dragging_thumb.is_some()
     }
 
+    fn scrollbar_layout(&self) -> ScrollbarLayout {
+        ScrollbarLayout::new(
+            self.axes,
+            self.bounds,
+            self.viewport_size,
+            self.content_size,
+            self.scroll_offset,
+            self.scrollbar_width,
+        )
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset.y = self.max_scroll_y();
         self.layout_child();
@@ -165,51 +166,32 @@ impl ScrollView {
     }
 
     fn max_scroll_y(&self) -> f32 {
-        if self.axes.vertical() {
-            (finite_nonnegative(self.content_size.height)
-                - finite_nonnegative(self.viewport_size.height))
-            .max(0.0)
-        } else {
-            0.0
-        }
+        self.scrollbar_layout().max_scroll_y()
     }
 
     fn max_scroll_x(&self) -> f32 {
-        if self.axes.horizontal() {
-            (finite_nonnegative(self.content_size.width)
-                - finite_nonnegative(self.viewport_size.width))
-            .max(0.0)
-        } else {
-            0.0
-        }
+        self.scrollbar_layout().max_scroll_x()
     }
 
     fn has_vertical_scrollbar(&self) -> bool {
-        self.max_scroll_y() > 0.0 && self.viewport_size.height > 0.0
+        self.scrollbar_layout().has_vertical_scrollbar()
     }
 
     fn has_horizontal_scrollbar(&self) -> bool {
-        self.max_scroll_x() > 0.0 && self.viewport_size.width > 0.0
+        self.scrollbar_layout().has_horizontal_scrollbar()
     }
 
     fn clamp_scroll_offset(&mut self) {
-        self.scroll_offset.x = finite_nonnegative(self.scroll_offset.x).min(self.max_scroll_x());
-        self.scroll_offset.y = finite_nonnegative(self.scroll_offset.y).min(self.max_scroll_y());
+        self.scroll_offset = clamp_scroll_offset(
+            self.scroll_offset,
+            self.axes,
+            self.content_size,
+            self.viewport_size,
+        );
     }
 
     fn normalized_content_size(&self, measured: Size, viewport: Size) -> Size {
-        Size::new(
-            if self.axes.horizontal() {
-                measured.width.max(viewport.width)
-            } else {
-                viewport.width
-            },
-            if self.axes.vertical() {
-                measured.height.max(viewport.height)
-            } else {
-                viewport.height
-            },
-        )
+        normalized_content_size(self.axes, measured, viewport)
     }
 
     fn measure_child_for_viewport(child: &dyn Widget, axes: ScrollAxes, viewport: Size) -> Size {
@@ -321,12 +303,7 @@ impl ScrollView {
     }
 
     fn child_bounds(&self) -> Rect {
-        Rect::new(
-            self.bounds.x - self.scroll_offset.x,
-            self.bounds.y - self.scroll_offset.y,
-            self.content_size.width,
-            self.content_size.height,
-        )
+        self.scrollbar_layout().child_bounds()
     }
 
     fn layout_child(&mut self) {
@@ -345,72 +322,31 @@ impl ScrollView {
     }
 
     fn vertical_scrollbar_track_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x + self.bounds.width - self.scrollbar_width + 2.0,
-            self.bounds.y,
-            (self.scrollbar_width - 4.0).max(1.0),
-            self.viewport_size.height.max(0.0),
-        )
+        self.scrollbar_layout().track_rect(ScrollbarAxis::Vertical)
     }
 
     fn horizontal_scrollbar_track_rect(&self) -> Rect {
-        Rect::new(
-            self.bounds.x,
-            self.bounds.y + self.bounds.height - self.scrollbar_width + 2.0,
-            self.viewport_size.width.max(0.0),
-            (self.scrollbar_width - 4.0).max(1.0),
-        )
+        self.scrollbar_layout().track_rect(ScrollbarAxis::Horizontal)
     }
 
     fn vertical_scrollbar_thumb_rect(&self) -> Option<Rect> {
-        if !self.has_vertical_scrollbar() {
-            return None;
-        }
-        let track = self.vertical_scrollbar_track_rect();
-        let thumb_h = (track.height * (self.viewport_size.height / self.content_size.height))
-            .max(16.0)
-            .min(track.height);
-        let thumb_range = (track.height - thumb_h).max(0.0);
-        let max_scroll = self.max_scroll_y().max(1.0);
-        let thumb_y = track.y + (self.scroll_offset.y / max_scroll) * thumb_range;
-        Some(Rect::new(track.x, thumb_y, track.width, thumb_h))
+        self.scrollbar_layout().thumb_rect(ScrollbarAxis::Vertical)
     }
 
     fn horizontal_scrollbar_thumb_rect(&self) -> Option<Rect> {
-        if !self.has_horizontal_scrollbar() {
-            return None;
-        }
-        let track = self.horizontal_scrollbar_track_rect();
-        if track.width <= 0.0 {
-            return None;
-        }
-        let thumb_w = (track.width * (self.viewport_size.width / self.content_size.width))
-            .max(16.0)
-            .min(track.width);
-        let thumb_range = (track.width - thumb_w).max(0.0);
-        let max_scroll = self.max_scroll_x().max(1.0);
-        let thumb_x = track.x + (self.scroll_offset.x / max_scroll) * thumb_range;
-        Some(Rect::new(thumb_x, track.y, thumb_w, track.height))
+        self.scrollbar_layout().thumb_rect(ScrollbarAxis::Horizontal)
     }
 
     fn scroll_offset_for_thumb_delta(&self, delta_y: f32) -> f32 {
-        let Some(thumb) = self.vertical_scrollbar_thumb_rect() else {
-            return self.scroll_offset.y;
-        };
-        let track = self.vertical_scrollbar_track_rect();
-        let thumb_range = (track.height - thumb.height).max(1.0);
-        let scroll_range = self.max_scroll_y();
-        self.drag_start_scroll.y + (delta_y / thumb_range) * scroll_range
+        self.scrollbar_layout()
+            .scroll_for_thumb_delta(ScrollbarAxis::Vertical, self.drag_start_scroll, delta_y)
+            .unwrap_or(self.scroll_offset.y)
     }
 
     fn scroll_x_for_thumb_delta(&self, delta_x: f32) -> f32 {
-        let Some(thumb) = self.horizontal_scrollbar_thumb_rect() else {
-            return self.scroll_offset.x;
-        };
-        let track = self.horizontal_scrollbar_track_rect();
-        let thumb_range = (track.width - thumb.width).max(1.0);
-        let scroll_range = self.max_scroll_x();
-        self.drag_start_scroll.x + (delta_x / thumb_range) * scroll_range
+        self.scrollbar_layout()
+            .scroll_for_thumb_delta(ScrollbarAxis::Horizontal, self.drag_start_scroll, delta_x)
+            .unwrap_or(self.scroll_offset.x)
     }
 
     fn page_axis_at(&mut self, axis: ScrollbarAxis, position: Point) -> bool {
