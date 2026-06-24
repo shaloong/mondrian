@@ -249,8 +249,13 @@ workflow.
   preserves action-specific `AppState::status_hint` errors and writes a generic
   error status when an editor action returns an error without reporting one, so
   shell-dispatched failures cannot disappear into tracing-only diagnostics.
-- P4-PERSIST-001: Verify preferences and workspace layout persistence across
-  versions, missing panels, hidden tabs, invalid ratios, and stale panel ids.
+- [done] P4-PERSIST-001: Verify preferences and workspace layout persistence
+  across versions, missing panels, hidden tabs, invalid ratios, and stale panel
+  ids. Preferences loading now rejects incompatible schema versions, keeps
+  malformed/partial files on clean defaults, filters missing recent projects and
+  invalid shortcut overrides, sanitizes custom layout ratios/tab indices/hidden
+  grouped tabs, and downgrades Custom workspace preferences without a
+  materializable split-root layout back to Editing.
 
 ## Phase 5: egui Retirement
 

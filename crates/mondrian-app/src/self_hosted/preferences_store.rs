@@ -16,6 +16,7 @@ use crate::self_hosted::shortcuts::{is_known_shortcut_id, SelfHostedShortcutOver
 use crate::self_hosted::workspace_layout::SelfHostedWorkspaceLayout;
 
 const SELF_HOSTED_PREFERENCES_FILE: &str = "self_hosted_preferences.json";
+const SELF_HOSTED_PREFERENCES_VERSION: u32 = 1;
 /// Maximum number of recent projects kept by the self-hosted startup surface.
 pub const MAX_RECENT_PROJECTS: usize = 12;
 
@@ -41,7 +42,7 @@ pub struct SelfHostedPreferences {
 impl Default for SelfHostedPreferences {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: SELF_HOSTED_PREFERENCES_VERSION,
             theme_preset: ThemePreset::Dark,
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
@@ -60,6 +61,10 @@ impl SelfHostedPreferences {
     }
 
     fn sanitize_loaded(mut self) -> Self {
+        if self.version != SELF_HOSTED_PREFERENCES_VERSION {
+            return Self::default();
+        }
+
         let mut sanitized = Vec::new();
         for path in self.recent_projects {
             if !path.exists() || sanitized.contains(&path) {
@@ -87,6 +92,15 @@ impl SelfHostedPreferences {
 
         self.custom_workspace_layout =
             self.custom_workspace_layout.and_then(SelfHostedWorkspaceLayout::sanitized);
+        if self.workspace_preset == WorkspacePreset::Custom
+            && !self
+                .custom_workspace_layout
+                .as_ref()
+                .is_some_and(SelfHostedWorkspaceLayout::is_split_root)
+        {
+            self.workspace_preset = WorkspacePreset::Editing;
+            self.custom_workspace_layout = None;
+        }
         self
     }
 }
@@ -157,6 +171,29 @@ mod tests {
     fn malformed_preferences_file_uses_defaults() {
         let path = temp_preferences_path("malformed-preferences");
         fs::write(&path, b"{not json").expect("write malformed fixture");
+
+        let preferences = load_self_hosted_preferences_from(&path);
+        fs::remove_file(path).ok();
+
+        assert_eq!(preferences, SelfHostedPreferences::default());
+    }
+
+    #[test]
+    fn incompatible_preferences_version_uses_defaults() {
+        let path = temp_preferences_path("future-preferences");
+        fs::write(
+            &path,
+            serde_json::to_vec(&SelfHostedPreferences {
+                version: SELF_HOSTED_PREFERENCES_VERSION + 1,
+                theme_preset: ThemePreset::Light,
+                workspace_preset: WorkspacePreset::Export,
+                recent_projects: Vec::new(),
+                shortcut_overrides: Vec::new(),
+                custom_workspace_layout: None,
+            })
+            .expect("serialize preferences"),
+        )
+        .expect("write future preferences");
 
         let preferences = load_self_hosted_preferences_from(&path);
         fs::remove_file(path).ok();
@@ -264,6 +301,38 @@ mod tests {
                 }),
             })
         );
+    }
+
+    #[test]
+    fn loading_custom_workspace_without_split_root_downgrades_to_editing() {
+        let path = temp_preferences_path("custom-panel-root-filter");
+        fs::write(
+            &path,
+            serde_json::to_vec(&SelfHostedPreferences {
+                version: SELF_HOSTED_PREFERENCES_VERSION,
+                theme_preset: ThemePreset::Dark,
+                workspace_preset: WorkspacePreset::Custom,
+                recent_projects: Vec::new(),
+                shortcut_overrides: Vec::new(),
+                custom_workspace_layout: Some(SelfHostedWorkspaceLayout::Panel {
+                    kind: mondrian_editor_state::state::PanelKind::Assets,
+                    active_index: 0,
+                    hidden_tabs: vec![mondrian_editor_state::state::PanelKind::Effects],
+                    tabs: vec![
+                        mondrian_editor_state::state::PanelKind::Assets,
+                        mondrian_editor_state::state::PanelKind::Effects,
+                    ],
+                }),
+            })
+            .expect("serialize preferences"),
+        )
+        .expect("write preferences");
+
+        let preferences = load_self_hosted_preferences_from(&path);
+        fs::remove_file(path).ok();
+
+        assert_eq!(preferences.workspace_preset, WorkspacePreset::Editing);
+        assert_eq!(preferences.custom_workspace_layout, None);
     }
 
     #[test]

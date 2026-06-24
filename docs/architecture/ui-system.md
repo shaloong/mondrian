@@ -2501,6 +2501,14 @@ changed workspace preset/layout back through `self_hosted::preferences_store`.
 Widget-local layout changes that do not dispatch an action, such as splitter
 drags, are synchronized explicitly by the window runner after the interaction
 settles. Editor-state actions and widget models remain disk-I/O free.
+Preference loading is intentionally strict while the self-hosted UI is alpha:
+files with an incompatible schema version, malformed JSON, or missing required
+fields fall back to clean defaults. Loaded recent projects are filtered to
+existing, de-duplicated paths; shortcut overrides must reference known
+descriptors; and custom workspace layouts are sanitized before use. If the
+stored workspace preset is Custom but the stored layout cannot materialize as a
+split-root dock tree, the shell downgrades to the Editing preset and drops the
+stale custom layout instead of opening a broken workspace.
 
 Panel model refreshes must not erase local panel interaction state. Reusable
 widgets expose small explicit state snapshots for UI-local affordances such as
