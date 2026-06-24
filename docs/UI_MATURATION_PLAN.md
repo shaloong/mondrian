@@ -108,6 +108,9 @@ shared renderer, text, event, theme, or widget infrastructure.
 - [x] Extract CurveEditor point normalization, endpoint anchoring, neighbor constraints,
       screen/curve coordinate mapping, hit testing, and insertion geometry into directly tested
       model/geometry contracts.
+- [x] Extract PanelList header/filter chrome, viewport, scrollbar, row hit testing, tree-aware
+      filtering, keyboard selection, and selected-row scroll visibility into directly tested
+      model/geometry contracts.
 
 ## Phase 5 - Performance And Observability
 

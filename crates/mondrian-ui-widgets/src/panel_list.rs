@@ -4,6 +4,8 @@
 //! browsers. It owns selection and scrolling locally, while exposing typed
 //! action adapters so application state can remain outside the UI crate.
 
+mod model;
+
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
@@ -15,6 +17,8 @@ use crate::paint::{centered_text_origin_y, color_with_alpha, mix_color};
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 use crate::TextInput;
+
+use self::model as panel_model;
 
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
@@ -438,91 +442,63 @@ impl PanelList {
     }
 
     fn header_height(&self) -> f32 {
-        let base = self.title_block_height();
-        if self.filter_input.is_some() {
-            base + self.filter_top_padding() + FILTER_INPUT_HEIGHT + FILTER_INPUT_GAP
-        } else {
-            base
-        }
-    }
-
-    fn title_block_height(&self) -> f32 {
-        if !self.show_header_text {
-            return 0.0;
-        }
-        if self.subtitle.is_empty() {
-            42.0
-        } else {
-            60.0
-        }
-    }
-
-    fn filter_top_padding(&self) -> f32 {
-        if self.show_header_text {
-            0.0
-        } else {
-            8.0
-        }
+        panel_model::header_height(
+            self.show_header_text,
+            !self.subtitle.is_empty(),
+            self.filter_input.is_some(),
+        )
     }
 
     fn content_height(&self) -> f32 {
-        self.visible_indices.len() as f32 * self.row_height
-    }
-
-    fn max_scroll_y(&self) -> f32 {
-        (self.content_height() - self.viewport.height).max(0.0)
+        panel_model::content_height(self.visible_indices.len(), self.row_height)
     }
 
     fn clamp_scroll(&mut self) {
-        self.scroll_y = self.scroll_y.clamp(0.0, self.max_scroll_y());
+        self.scroll_y = panel_model::clamp_scroll_y(
+            self.scroll_y,
+            self.visible_indices.len(),
+            self.row_height,
+            self.viewport.height,
+        );
     }
 
     fn set_scroll_y(&mut self, scroll_y: f32) -> bool {
         let old = self.scroll_y;
-        self.scroll_y = scroll_y.clamp(0.0, self.max_scroll_y());
+        self.scroll_y = panel_model::clamp_scroll_y(
+            scroll_y,
+            self.visible_indices.len(),
+            self.row_height,
+            self.viewport.height,
+        );
         (self.scroll_y - old).abs() > 0.01
     }
 
     fn scrollbar_track_rect(&self) -> Option<Rect> {
-        (self.max_scroll_y() > 0.0 && self.viewport.height > 0.0).then_some(Rect::new(
-            self.viewport.x + self.viewport.width - 6.0,
-            self.viewport.y + 2.0,
-            4.0,
-            (self.viewport.height - 4.0).max(0.0),
-        ))
+        panel_model::scrollbar_track_rect(
+            self.viewport,
+            self.visible_indices.len(),
+            self.row_height,
+        )
     }
 
     fn scrollbar_thumb_rect(&self) -> Option<Rect> {
-        let track = self.scrollbar_track_rect()?;
-        let content_height = self.content_height();
-        if content_height <= 0.0 {
-            return None;
-        }
-        let thumb_height = (self.viewport.height / content_height * track.height)
-            .clamp(24.0, track.height.max(24.0));
-        let travel = (track.height - thumb_height).max(0.0);
-        let y = if self.max_scroll_y() <= 0.0 {
-            track.y
-        } else {
-            track.y + (self.scroll_y / self.max_scroll_y()) * travel
-        };
-        Some(Rect::new(
-            track.x,
-            y,
-            track.width,
-            thumb_height.min(track.height),
-        ))
+        panel_model::scrollbar_thumb_rect(
+            self.viewport,
+            self.visible_indices.len(),
+            self.row_height,
+            self.scroll_y,
+        )
     }
 
     fn scroll_y_for_thumb_delta(&self, delta_y: f32) -> f32 {
-        let Some(track) = self.scrollbar_track_rect() else {
-            return self.scroll_y;
-        };
-        let Some(thumb) = self.scrollbar_thumb_rect() else {
-            return self.scroll_y;
-        };
-        let travel = (track.height - thumb.height).max(1.0);
-        self.drag_start_scroll_y + delta_y / travel * self.max_scroll_y()
+        panel_model::scroll_y_for_thumb_delta(
+            self.viewport,
+            self.visible_indices.len(),
+            self.row_height,
+            self.scroll_y,
+            self.drag_start_scroll_y,
+            delta_y,
+        )
     }
 
     fn is_enabled_index(&self, index: usize) -> bool {
@@ -530,16 +506,7 @@ impl PanelList {
     }
 
     fn item_matches_query(item: &PanelListItem, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
-        }
-
-        item.title.to_lowercase().contains(query)
-            || item.subtitle.to_lowercase().contains(query)
-            || item
-                .badge
-                .as_ref()
-                .is_some_and(|badge| badge.label.to_lowercase().contains(query))
+        panel_model::item_matches_query(item, query)
     }
 
     fn item_matches_filter(&self, item: &PanelListItem) -> bool {
@@ -547,82 +514,31 @@ impl PanelList {
     }
 
     fn rebuild_visible_indices(&mut self) {
-        let query = self.filter_query.trim().to_lowercase();
-        let filtering = !query.is_empty();
-        let mut hidden_child_depth = None;
-        self.visible_indices.clear();
-        for (index, item) in self.items.iter().enumerate() {
-            if !filtering {
-                if let Some(depth) = hidden_child_depth {
-                    if item.tree_depth > depth {
-                        continue;
-                    }
-                    hidden_child_depth = None;
-                }
-            }
-
-            if Self::item_matches_query(item, &query) {
-                self.visible_indices.push(index);
-            }
-
-            if !filtering && item.tree_expanded == Some(false) {
-                hidden_child_depth = Some(item.tree_depth);
-            }
-        }
-    }
-
-    fn visible_position_for_index(&self, index: usize) -> Option<usize> {
-        self.visible_indices.iter().position(|candidate| *candidate == index)
+        self.visible_indices =
+            panel_model::rebuild_visible_indices(&self.items, &self.filter_query);
     }
 
     fn row_rect_for_visible_position(&self, visible_position: usize) -> Rect {
-        let y = self.viewport.y + visible_position as f32 * self.row_height - self.scroll_y;
-        Rect::new(
-            self.viewport.x,
-            y + 2.0,
-            self.viewport.width,
-            self.row_height - 4.0,
+        panel_model::row_rect_for_visible_position(
+            self.viewport,
+            visible_position,
+            self.row_height,
+            self.scroll_y,
         )
     }
 
-    fn visible_enabled_indices(&self) -> Vec<usize> {
-        self.visible_indices
-            .iter()
-            .copied()
-            .filter(|index| self.is_enabled_index(*index))
-            .collect()
-    }
-
     fn index_at(&self, point: Point) -> Option<usize> {
-        if !self.viewport.contains(point) {
-            return None;
-        }
-        if self.scrollbar_track_rect().is_some_and(|track| track.contains(point)) {
-            return None;
-        }
-        let rel_y = point.y - self.viewport.y + self.scroll_y;
-        let visible_row = (rel_y / self.row_height).floor() as usize;
-        self.visible_indices.get(visible_row).copied()
+        panel_model::index_at(
+            &self.visible_indices,
+            self.viewport,
+            self.row_height,
+            self.scroll_y,
+            point,
+        )
     }
 
     fn next_enabled_from(&self, start: usize, direction: i32) -> Option<usize> {
-        let visible = self.visible_enabled_indices();
-        if visible.is_empty() {
-            return None;
-        }
-
-        let start_position = visible
-            .iter()
-            .position(|index| *index >= start)
-            .unwrap_or_else(|| visible.len().saturating_sub(1));
-        if direction >= 0 {
-            visible.get(start_position).copied()
-        } else {
-            visible
-                .iter()
-                .rposition(|index| *index <= start)
-                .and_then(|position| visible.get(position).copied())
-        }
+        panel_model::next_enabled_from(&self.visible_indices, &self.items, start, direction)
     }
 
     fn first_enabled(&self) -> Option<usize> {
@@ -637,50 +553,17 @@ impl PanelList {
     }
 
     fn move_selection(&mut self, direction: i32) -> Option<usize> {
-        let visible = self.visible_enabled_indices();
-        if visible.is_empty() {
-            return None;
-        }
-
-        let Some(selected) = self.selected else {
-            return if direction >= 0 {
-                visible.first().copied()
-            } else {
-                visible.last().copied()
-            };
-        };
-        let Some(position) = visible.iter().position(|index| *index == selected) else {
-            return if direction >= 0 {
-                visible.first().copied()
-            } else {
-                visible.last().copied()
-            };
-        };
-        if direction >= 0 {
-            visible.get(position + 1).copied()
-        } else {
-            position.checked_sub(1).and_then(|prev| visible.get(prev).copied())
-        }
+        panel_model::move_selection(&self.visible_indices, &self.items, self.selected, direction)
     }
 
     fn ensure_selected_visible(&mut self) {
-        let Some(index) = self.selected else {
-            return;
-        };
-        if self.viewport.height <= 0.0 {
-            return;
-        }
-        let Some(visible_position) = self.visible_position_for_index(index) else {
-            return;
-        };
-        let top = visible_position as f32 * self.row_height;
-        let bottom = top + self.row_height;
-        if top < self.scroll_y {
-            self.scroll_y = top;
-        } else if bottom > self.scroll_y + self.viewport.height {
-            self.scroll_y = bottom - self.viewport.height;
-        }
-        self.clamp_scroll();
+        self.scroll_y = panel_model::scroll_y_with_selected_visible(
+            self.selected,
+            &self.visible_indices,
+            self.row_height,
+            self.viewport.height,
+            self.scroll_y,
+        );
     }
 
     fn select_from_input(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
@@ -697,18 +580,12 @@ impl PanelList {
     }
 
     fn filter_input_rect(&self) -> Option<Rect> {
-        self.filter_input.as_ref()?;
-        let y = if self.show_header_text {
-            self.bounds.y + self.title_block_height() - 4.0
-        } else {
-            self.bounds.y + 8.0
-        };
-        Some(Rect::new(
-            self.bounds.x + 8.0,
-            y,
-            (self.bounds.width - 16.0).max(0.0),
-            FILTER_INPUT_HEIGHT,
-        ))
+        panel_model::filter_input_rect(
+            self.bounds,
+            self.show_header_text,
+            !self.subtitle.is_empty(),
+            self.filter_input.is_some(),
+        )
     }
 
     fn sync_filter_query_from_input(&mut self) -> bool {
@@ -1041,19 +918,13 @@ impl Widget for PanelList {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        let padding = 8.0;
         let header = self.header_height();
         if let Some(rect) = self.filter_input_rect() {
             if let Some(input) = &mut self.filter_input {
                 input.layout(rect);
             }
         }
-        self.viewport = Rect::new(
-            bounds.x + padding,
-            bounds.y + header,
-            (bounds.width - padding * 2.0).max(0.0),
-            (bounds.height - header - padding).max(0.0),
-        );
+        self.viewport = panel_model::viewport_rect(bounds, header);
         self.clamp_scroll();
         self.ensure_selected_visible();
     }
