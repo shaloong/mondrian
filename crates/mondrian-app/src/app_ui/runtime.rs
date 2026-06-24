@@ -107,33 +107,23 @@ impl WinitUiRuntime {
         let pressed = event.state == ElementState::Pressed;
         update_modifiers_from_key(&event.logical_key, pressed, modifiers);
 
+        let plan = keyboard_route_plan(
+            &event.logical_key,
+            event.text.as_deref(),
+            pressed,
+            *modifiers,
+        );
         let mut result = EventResult::Ignored;
-        if let Some(key) = winit_key_to_keycode(&event.logical_key) {
-            result = self.route_window_event(
-                window,
-                router,
-                root,
-                if pressed {
-                    UiEvent::KeyDown { key, modifiers: *modifiers }
-                } else {
-                    UiEvent::KeyUp { key, modifiers: *modifiers }
-                },
-                dispatch,
-            );
+        if let Some(key_event) = plan.key_event {
+            result =
+                self.route_window_event(window, router, root, key_event.into_ui_event(), dispatch);
         }
 
-        if pressed && should_route_printable_text(*modifiers) {
-            if let Some(text) = printable_key_text(event.text.as_deref()) {
-                let text_result = self.route_window_event(
-                    window,
-                    router,
-                    root,
-                    UiEvent::TextInput(text),
-                    dispatch,
-                );
-                if text_result == EventResult::Handled {
-                    result = EventResult::Handled;
-                }
+        if let Some(text) = plan.text_input {
+            let text_result =
+                self.route_window_event(window, router, root, UiEvent::TextInput(text), dispatch);
+            if text_result == EventResult::Handled {
+                result = EventResult::Handled;
             }
         }
 
@@ -620,6 +610,47 @@ fn should_route_printable_text(modifiers: Modifiers) -> bool {
     !modifiers.ctrl && !modifiers.meta
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeyboardRoutePlan {
+    key_event: Option<RoutedKeyEvent>,
+    text_input: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutedKeyEvent {
+    Down { key: KeyCode, modifiers: Modifiers },
+    Up { key: KeyCode, modifiers: Modifiers },
+}
+
+impl RoutedKeyEvent {
+    fn into_ui_event(self) -> UiEvent {
+        match self {
+            Self::Down { key, modifiers } => UiEvent::KeyDown { key, modifiers },
+            Self::Up { key, modifiers } => UiEvent::KeyUp { key, modifiers },
+        }
+    }
+}
+
+fn keyboard_route_plan(
+    key: &Key,
+    text: Option<&str>,
+    pressed: bool,
+    modifiers: Modifiers,
+) -> KeyboardRoutePlan {
+    let key_event = winit_key_to_keycode(key).map(|key| {
+        if pressed {
+            RoutedKeyEvent::Down { key, modifiers }
+        } else {
+            RoutedKeyEvent::Up { key, modifiers }
+        }
+    });
+    let text_input = (pressed && should_route_printable_text(modifiers))
+        .then(|| printable_key_text(text))
+        .flatten();
+
+    KeyboardRoutePlan { key_event, text_input }
+}
+
 /// Paint the shell-owned eyedropper magnifier.
 pub fn paint_eyedropper_overlay(
     encoder: &mut dyn DrawCommandEncoder,
@@ -792,6 +823,84 @@ mod tests {
             shift: true,
             ..Modifiers::none()
         }));
+    }
+
+    #[test]
+    fn keyboard_route_plan_leaves_system_shortcuts_as_key_events_without_text() {
+        assert_eq!(
+            keyboard_route_plan(
+                &Key::Character(" ".into()),
+                Some(" "),
+                true,
+                Modifiers::ctrl()
+            ),
+            KeyboardRoutePlan {
+                key_event: Some(RoutedKeyEvent::Down {
+                    key: KeyCode::Space,
+                    modifiers: Modifiers::ctrl(),
+                }),
+                text_input: None,
+            }
+        );
+        assert_eq!(
+            keyboard_route_plan(
+                &Key::Character(" ".into()),
+                Some(" "),
+                true,
+                Modifiers { meta: true, ..Modifiers::none() }
+            ),
+            KeyboardRoutePlan {
+                key_event: Some(RoutedKeyEvent::Down {
+                    key: KeyCode::Space,
+                    modifiers: Modifiers { meta: true, ..Modifiers::none() },
+                }),
+                text_input: None,
+            }
+        );
+    }
+
+    #[test]
+    fn keyboard_route_plan_does_not_route_modifier_only_input_switch_chords() {
+        assert_eq!(
+            keyboard_route_plan(
+                &Key::Named(NamedKey::Alt),
+                None,
+                true,
+                Modifiers { alt: true, shift: true, ..Modifiers::none() },
+            ),
+            KeyboardRoutePlan { key_event: None, text_input: None }
+        );
+        assert_eq!(
+            keyboard_route_plan(
+                &Key::Named(NamedKey::Shift),
+                None,
+                true,
+                Modifiers { alt: true, shift: true, ..Modifiers::none() },
+            ),
+            KeyboardRoutePlan { key_event: None, text_input: None }
+        );
+    }
+
+    #[test]
+    fn keyboard_route_plan_preserves_platform_text_for_alt_graph_and_dead_keys() {
+        assert_eq!(
+            keyboard_route_plan(
+                &Key::Character("é".into()),
+                Some("é"),
+                true,
+                Modifiers { alt: true, ..Modifiers::none() },
+            ),
+            KeyboardRoutePlan { key_event: None, text_input: Some("é".into()) }
+        );
+        assert_eq!(
+            keyboard_route_plan(
+                &Key::Character("é".into()),
+                Some("é"),
+                false,
+                Modifiers::none()
+            ),
+            KeyboardRoutePlan { key_event: None, text_input: None }
+        );
     }
 
     #[test]

@@ -36,7 +36,8 @@ shared renderer, text, event, theme, or widget infrastructure.
       and overlay hit testing as explicit contracts.
 - [x] Add route diagnostics for dropped shortcuts, stale focused widgets, and capture owners.
 - [ ] Add accessibility-ready metadata to core widgets: role, name, state, value, focus order.
-- [ ] Define platform behavior for unhandled shortcuts and IME switching.
+- [x] Define keyboard routing policy for unmatched shortcuts, system shortcut pass-through, and
+      IME switching chords.
 - [x] Define cursor request priority and transient clearing across runtime/window shells.
 - [x] Define clipboard failure behavior in `PlatformService` and TextInput clipboard commands.
 - [x] Define native file drag-and-drop fallback behavior and diagnostics.
