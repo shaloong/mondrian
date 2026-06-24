@@ -72,6 +72,12 @@ owns cache usage statistics, size/age cleanup, and clear-directory behavior.
 Legacy viewer panels may call it before clearing their GPU textures, decoder
 pools, and prefetch state, but app preferences and future self-hosted
 preferences must not depend on `egui_ui::viewer_panel` for cache maintenance.
+Viewer preference persistence is also an app-layer concern:
+`mondrian-app::app::viewer_preferences` owns preview scale, proxy/decode,
+prefetch/cache toggles, display profile, and canvas-background defaults as a
+toolkit-neutral serialized model. Legacy viewer panels may snapshot/apply that
+model while they remain reference code, but they must not own the schema or
+default migration rules.
 The Phase 5 parity audit lives in
 `docs/architecture/self-hosted-ui-parity.md`. It is the source of truth for
 which legacy egui workflows are product-covered by self-hosted UI, which panels

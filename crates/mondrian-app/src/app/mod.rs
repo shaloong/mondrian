@@ -39,6 +39,7 @@ use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
 use crate::app::media_cache::MediaCacheCleanupStats;
+use crate::app::viewer_preferences::ViewerPreferences;
 use crate::egui_ui::{
     effect_controls_panel::EffectControlsPanel,
     effect_library_panel::EffectLibraryPanel,
@@ -46,7 +47,7 @@ use crate::egui_ui::{
     library_panel::LibraryPanel,
     startup::{BootstrapAction, BootstrapRecentProjectItem, BootstrapRecoveryItem},
     timeline_panel::TimelinePanel,
-    viewer_panel::{ViewerPanel, ViewerPreferences},
+    viewer_panel::ViewerPanel,
 };
 use crate::shortcuts::{ShortcutAction, ShortcutBinding, ShortcutKey, ShortcutPreferences};
 
@@ -74,6 +75,7 @@ mod selection;
 mod timeline_commands;
 mod timeline_editing;
 pub mod ui_actions;
+pub(crate) mod viewer_preferences;
 
 use audio_rendering::*;
 use exporting::TimelineExportDraft;

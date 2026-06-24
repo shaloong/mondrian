@@ -5,6 +5,7 @@ use crate::{
             clear_media_cache_dir, media_cache_usage_stats, run_media_cache_maintenance_for_dir,
             MediaCacheCleanupStats, MediaCachePolicy, MediaCacheUsageStats,
         },
+        viewer_preferences::{PreviewScaleMode, ViewerPreferences},
         AppState, SelectedClipRef,
     },
     egui_ui::theme::{self, palette, tokens, typography},
@@ -37,7 +38,6 @@ use mondrian_timeline::sequence::{
     ColorContext, ColorWorkflow, MissingColorMetadataPolicy, NestedColorProcessing, Sequence,
 };
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
@@ -247,80 +247,11 @@ struct CachedAssetPreview {
     color_space: ColorSpace,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-enum PreviewScaleMode {
-    #[default]
-    Full,
-    Half,
-    Quarter,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ViewerPreferences {
-    preview_scale_mode: PreviewScaleMode,
-    proxy_config: mondrian_media::ProxyConfig,
-    #[serde(default)]
-    decode_backend: mondrian_media::PreviewDecodeBackend,
-    #[serde(default = "default_prefetch_enabled")]
-    prefetch_enabled: bool,
-    #[serde(default = "default_layer_cache_enabled")]
-    layer_cache_enabled: bool,
-    #[serde(default = "DisplayColorProfile::rec709_reference")]
-    display_profile: DisplayColorProfile,
-    /// Canvas background color (letterbox/pillarbox), stored as 0xRRGGBB hex.
-    #[serde(default = "default_canvas_bg")]
-    canvas_bg_hex: u32,
-}
-
-fn default_canvas_bg() -> u32 {
-    0x2a2a2a
-}
-
 fn hex_to_bg(hex: u32) -> egui::Color32 {
     let r = ((hex >> 16) & 0xFF) as u8;
     let g = ((hex >> 8) & 0xFF) as u8;
     let b = (hex & 0xFF) as u8;
     egui::Color32::from_rgb(r, g, b)
-}
-
-const fn default_prefetch_enabled() -> bool {
-    true
-}
-
-const fn default_layer_cache_enabled() -> bool {
-    true
-}
-
-impl Default for ViewerPreferences {
-    fn default() -> Self {
-        Self {
-            preview_scale_mode: PreviewScaleMode::default(),
-            proxy_config: mondrian_media::ProxyConfig::default(),
-            decode_backend: mondrian_media::PreviewDecodeBackend::default(),
-            prefetch_enabled: default_prefetch_enabled(),
-            layer_cache_enabled: default_layer_cache_enabled(),
-            display_profile: DisplayColorProfile::rec709_reference(),
-            canvas_bg_hex: default_canvas_bg(),
-        }
-    }
-}
-
-impl PreviewScaleMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Full => "全分辨率",
-            Self::Half => "1/2",
-            Self::Quarter => "1/4",
-        }
-    }
-
-    fn factor(self) -> f32 {
-        match self {
-            Self::Full => 1.0,
-            Self::Half => 0.5,
-            Self::Quarter => 0.25,
-        }
-    }
 }
 
 impl Hash for CompositeFrameSignature {
@@ -566,6 +497,7 @@ impl Default for ViewerPanel {
         }
 
         let (proxy_done_tx, proxy_done_rx) = mpsc::channel();
+        let default_preferences = ViewerPreferences::default();
         Self {
             preview_texture: None,
             gpu_composited_frame: None,
@@ -580,7 +512,7 @@ impl Default for ViewerPanel {
             queued_request: None,
             texture_cache: VecDeque::new(),
             layer_frame_cache: Arc::new(Mutex::new(LayerFrameCache::default())),
-            preview_scale_mode: PreviewScaleMode::default(),
+            preview_scale_mode: default_preferences.preview_scale_mode,
             next_decode_generation: 1,
             latest_decode_generation: Arc::new(AtomicU64::new(0)),
             prefetch_in_flight: Arc::new(Mutex::new(HashSet::new())),
@@ -598,18 +530,18 @@ impl Default for ViewerPanel {
             last_committed_generation: None,
             was_playing_last_frame: false,
             last_timeline_frame: None,
-            proxy_config: mondrian_media::ProxyConfig::default(),
-            decode_backend: mondrian_media::PreviewDecodeBackend::default(),
-            prefetch_enabled: default_prefetch_enabled(),
-            layer_cache_enabled: default_layer_cache_enabled(),
-            display_profile: DisplayColorProfile::rec709_reference(),
+            proxy_config: default_preferences.proxy_config,
+            decode_backend: default_preferences.decode_backend,
+            prefetch_enabled: default_preferences.prefetch_enabled,
+            layer_cache_enabled: default_preferences.layer_cache_enabled,
+            display_profile: default_preferences.display_profile,
             proxy_jobs_in_flight: Arc::new(Mutex::new(HashSet::new())),
             proxy_done_tx,
             proxy_done_rx,
             show_color_diagnostics: false,
             ocio_display: None,
             ocio_view: None,
-            canvas_bg_hex: default_canvas_bg(),
+            canvas_bg_hex: default_preferences.canvas_bg_hex,
             canvas_selected_clip: None,
             canvas_drag: None,
             mask_tool: None,

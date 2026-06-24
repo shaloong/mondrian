@@ -275,7 +275,10 @@ workflow.
   move it behind an explicit reference-only boundary. Progress: legacy egui
   shortcut preferences are crate-private, and media-cache filesystem cleanup /
   usage policy has moved from `egui_ui::viewer_panel` into the neutral
-  `app::media_cache` module with focused coverage.
+  `app::media_cache` module with focused coverage. Viewer preference
+  persistence/defaults have also moved from the legacy viewer panel into the
+  neutral `app::viewer_preferences` module, leaving the old viewer as a
+  snapshot/apply consumer while it remains reference code.
 - P5-DOCS-001: Update architecture docs to describe the final self-hosted UI
   stack, ownership model, test strategy, and removed compatibility paths.
 - P5-CI-001: Make self-hosted UI tests, clippy, and any screenshot/draw-command
