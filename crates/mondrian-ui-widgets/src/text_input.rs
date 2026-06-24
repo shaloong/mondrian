@@ -1130,6 +1130,8 @@ mod tests {
     struct RecordingEncoder {
         ops: Vec<PaintOp>,
         clips: Vec<Rect>,
+        rects: Vec<Rect>,
+        lines: Vec<(Point, Point, f32)>,
         texts: Vec<(String, Point)>,
     }
 
@@ -1143,17 +1145,19 @@ mod tests {
             self.ops.push(PaintOp::PopClip);
         }
 
-        fn draw_rect(&mut self, _bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+            self.rects.push(bounds);
             self.ops.push(PaintOp::Rect);
         }
 
         fn draw_line(
             &mut self,
-            _start: Point,
-            _end: Point,
-            _width: f32,
+            start: Point,
+            end: Point,
+            width: f32,
             _color: mondrian_core::Color,
         ) {
+            self.lines.push((start, end, width));
             self.ops.push(PaintOp::Line);
         }
 
@@ -2343,6 +2347,84 @@ mod tests {
             .rposition(|op| *op == PaintOp::Rect)
             .expect("paint should draw caret rect");
         assert!(caret_idx > text_idx);
+    }
+
+    #[test]
+    fn paint_handles_cjk_emoji_selection_and_ime_preedit_in_one_clip() {
+        let mut ti = TextInput::new("ph").with_text("A你😊B");
+        ti.focused = true;
+        ti.cursor = 2;
+        ti.selection_start = Some(4);
+        ti.ime_preedit = "拼音".into();
+        ti.cursor_visible.set(true);
+        ti.last_blink.set(Instant::now());
+        ti.layout(Rect::new(0.0, 0.0, 240.0, 30.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 240.0, 30.0),
+        };
+
+        ti.paint(&mut ctx);
+
+        let push_idx = encoder
+            .ops
+            .iter()
+            .position(|op| *op == PaintOp::PushClip)
+            .expect("paint should push the text content clip");
+        let pop_idx = encoder
+            .ops
+            .iter()
+            .position(|op| *op == PaintOp::PopClip)
+            .expect("paint should pop the text content clip");
+        let selection_idx = encoder.ops[push_idx..pop_idx]
+            .iter()
+            .position(|op| *op == PaintOp::Rect)
+            .map(|offset| push_idx + offset)
+            .expect("paint should draw selected CJK/emoji range before text");
+        let text_idx = encoder
+            .ops
+            .iter()
+            .position(|op| *op == PaintOp::Text("A你😊B".into()))
+            .expect("paint should draw committed mixed-script text");
+        let preedit_idx = encoder
+            .ops
+            .iter()
+            .position(|op| *op == PaintOp::Text("拼音".into()))
+            .expect("paint should draw IME preedit text");
+        let underline_idx = encoder
+            .ops
+            .iter()
+            .position(|op| *op == PaintOp::Line)
+            .expect("paint should underline IME preedit text");
+        assert!(selection_idx < text_idx, "ops={:?}", encoder.ops);
+        assert!(text_idx < preedit_idx, "ops={:?}", encoder.ops);
+        assert!(preedit_idx < underline_idx, "ops={:?}", encoder.ops);
+
+        let clip = encoder.clips[0];
+        let selection_rect_ordinal =
+            encoder.ops[..=selection_idx].iter().filter(|op| **op == PaintOp::Rect).count() - 1;
+        let selection_rect = encoder.rects[selection_rect_ordinal];
+        assert!(selection_rect.width > 0.0);
+        assert!(selection_rect.height > 0.0);
+        assert!(selection_rect.x >= clip.x - 0.1);
+        assert!(selection_rect.x + selection_rect.width <= clip.x + clip.width + 0.1);
+
+        let (_, preedit_pos) = encoder
+            .texts
+            .iter()
+            .find(|(text, _)| text == "拼音")
+            .expect("preedit text should be recorded");
+        assert!(preedit_pos.x >= clip.x - 0.1);
+        assert!(preedit_pos.x <= clip.x + clip.width + 0.1);
+
+        let (underline_start, underline_end, underline_width) = encoder.lines[0];
+        assert!(underline_width > 0.0);
+        assert!(underline_end.x > underline_start.x);
+        assert!(underline_start.x >= clip.x - 0.1);
+        assert!(underline_end.x <= clip.x + clip.width + 0.1);
     }
 
     #[test]
