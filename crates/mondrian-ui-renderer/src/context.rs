@@ -888,6 +888,44 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_renderer_keeps_subpixel_45_degree_hairlines_connected_at_dpi_scales() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let physical_size = scaled_u32(96.0, scale);
+            let Some(mut harness) = OffscreenHarness::new(physical_size, physical_size) else {
+                return;
+            };
+            let mut encoder = DrawEncoder::new();
+            let cases = [
+                ((8.25, 10.75), (36.25, 38.75), "positive-a"),
+                ((48.75, 12.25), (76.75, 40.25), "positive-b"),
+                ((10.50, 80.25), (38.50, 52.25), "negative-a"),
+                ((52.25, 82.75), (80.25, 54.75), "negative-b"),
+            ];
+
+            for ((sx, sy), (ex, ey), _) in cases {
+                encoder.draw_line(
+                    scaled_point(sx, sy, scale),
+                    scaled_point(ex, ey, scale),
+                    scale,
+                    Color::WHITE,
+                );
+            }
+
+            let pixels = harness.render(encoder.finish());
+            for ((sx, sy), (ex, ey), label) in cases {
+                assert_readback_line_coverage_connects_caps(
+                    &pixels,
+                    physical_size,
+                    scaled_point(sx, sy, scale),
+                    scaled_point(ex, ey, scale),
+                    24,
+                    &format!("scale {scale} {label}"),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn offscreen_renderer_draws_square_rounded_rect_as_circle() {
         let Some(mut harness) = OffscreenHarness::new(64, 64) else {
             return;
@@ -1411,6 +1449,105 @@ mod tests {
             }
         }
         max_alpha
+    }
+
+    fn assert_readback_line_coverage_connects_caps(
+        pixels: &[u8],
+        width: u32,
+        start: Point,
+        end: Point,
+        min_alpha: u8,
+        label: &str,
+    ) {
+        let height = pixels.len() as u32 / (width * 4);
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let len = dx.hypot(dy);
+        let (ux, uy) = if len > 0.001 {
+            (dx / len, dy / len)
+        } else {
+            (1.0, 0.0)
+        };
+
+        let min_x = (start.x.min(end.x).floor() as i32 - 4).max(0);
+        let max_x = (start.x.max(end.x).ceil() as i32 + 4).min(width as i32 - 1);
+        let min_y = (start.y.min(end.y).floor() as i32 - 4).max(0);
+        let max_y = (start.y.max(end.y).ceil() as i32 + 4).min(height as i32 - 1);
+        assert!(
+            min_x <= max_x && min_y <= max_y,
+            "{label} line bounds should intersect the render target"
+        );
+
+        let grid_width = (max_x - min_x + 1) as usize;
+        let grid_height = (max_y - min_y + 1) as usize;
+        let mut visible = vec![false; grid_width * grid_height];
+        let mut start_seed = None;
+        let mut end_pixels = vec![false; grid_width * grid_height];
+
+        for gy in 0..grid_height {
+            for gx in 0..grid_width {
+                let x = min_x + gx as i32;
+                let y = min_y + gy as i32;
+                let alpha = pixel(pixels, width, x as u32, y as u32)[3];
+                if alpha < min_alpha {
+                    continue;
+                }
+
+                let idx = gy * grid_width + gx;
+                visible[idx] = true;
+                let center_x = x as f32 + 0.5;
+                let center_y = y as f32 + 0.5;
+                let projected = (center_x - start.x) * ux + (center_y - start.y) * uy;
+                if projected <= 2.0 {
+                    start_seed.get_or_insert(idx);
+                }
+                if projected >= len - 2.0 {
+                    end_pixels[idx] = true;
+                }
+            }
+        }
+
+        let seed = start_seed.unwrap_or_else(|| {
+            panic!(
+                "{label} line coverage should include a visible start cap above alpha {min_alpha}"
+            )
+        });
+        assert!(
+            end_pixels.iter().any(|is_end| *is_end),
+            "{label} line coverage should include a visible end cap above alpha {min_alpha}"
+        );
+
+        let mut visited = vec![false; grid_width * grid_height];
+        let mut queue = std::collections::VecDeque::from([seed]);
+        visited[seed] = true;
+
+        while let Some(idx) = queue.pop_front() {
+            if end_pixels[idx] {
+                return;
+            }
+
+            let gx = idx % grid_width;
+            let gy = idx / grid_width;
+            for oy in -1_i32..=1 {
+                for ox in -1_i32..=1 {
+                    if ox == 0 && oy == 0 {
+                        continue;
+                    }
+                    let nx = gx as i32 + ox;
+                    let ny = gy as i32 + oy;
+                    if nx < 0 || ny < 0 || nx >= grid_width as i32 || ny >= grid_height as i32 {
+                        continue;
+                    }
+                    let next = ny as usize * grid_width + nx as usize;
+                    if visible[next] && !visited[next] {
+                        visited[next] = true;
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+
+        panic!("{label} line coverage should form an 8-connected visible path from start cap to end cap above alpha {min_alpha}");
     }
 
     fn scaled_u32(logical: f32, scale: f32) -> u32 {

@@ -43,7 +43,7 @@ custom UI line can be considered production-grade.
    - [ ] Keep the offscreen primitive harness active for line/circle/triangle edge cases,
          including subpixel positions, 45-degree thin lines, high-DPI scaling, clip nesting,
          and zero/near-zero dimensions.
-   - [ ] Add a policy for CPU rasterization versus GPU analytic rendering for vector
+   - [x] Add a policy for CPU rasterization versus GPU analytic rendering for vector
          primitives and icons, with tests that lock the chosen behavior for thin lines and
          rounded/circular shapes.
 
@@ -75,6 +75,8 @@ custom UI line can be considered production-grade.
 - [x] Extend offscreen visual regression coverage to text glyphs and renderer raster images.
 - [x] Extend offscreen visual regression coverage to SVG icon rasterization.
 - [x] Capture golden images at representative DPI scales: 1.0, 1.25, 1.5, and 2.0.
+- [x] Add GPU readback coverage proving subpixel 45-degree hairlines stay visibly connected at
+      representative DPI scales.
 
 ## Phase 2 - Text And Input Maturity
 
