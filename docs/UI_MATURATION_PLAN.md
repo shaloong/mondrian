@@ -173,6 +173,9 @@ custom UI line can be considered production-grade.
       outline radius against theme-derived visual tokens.
 - [x] Tokenize FormLayout default label width, control gap, label height, compact/tall label
       offsets, and tall-row threshold against theme-derived row options.
+- [x] Tokenize PropertyPanel row options, title/subtitle/row/section/empty-state typography,
+      header and empty-state geometry, section bounds, divider stroke, selection chrome, and
+      icon alpha against theme-derived visual tokens.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.
