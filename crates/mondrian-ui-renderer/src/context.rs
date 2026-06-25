@@ -994,6 +994,97 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_renderer_clips_line_circle_and_triangle_primitives() {
+        let Some(mut harness) = OffscreenHarness::new(96, 96) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.push_clip(Rect::new(16.0, 16.0, 64.0, 64.0));
+        encoder.push_clip(Rect::new(28.0, 28.0, 40.0, 40.0));
+        encoder.draw_line(
+            Point::new(12.0, 48.0),
+            Point::new(84.0, 48.0),
+            2.0,
+            Color::WHITE,
+        );
+        encoder.draw_rect(Rect::new(38.0, 38.0, 20.0, 20.0), Color::WHITE, 10.0);
+        encoder.draw_triangles(
+            &[
+                Point::new(44.0, 20.0),
+                Point::new(76.0, 76.0),
+                Point::new(12.0, 76.0),
+            ],
+            Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 },
+        );
+        encoder.pop_clip();
+        encoder.pop_clip();
+
+        let pixels = harness.render(encoder.finish());
+
+        for (x, y, label) in [
+            (48, 48, "line/circle center"),
+            (44, 44, "triangle interior"),
+        ] {
+            let sample = pixel(&pixels, 96, x, y);
+            assert!(
+                sample[3] >= 180,
+                "{label} inside nested clip should render, got {sample:?}"
+            );
+        }
+
+        for (x, y, label) in [
+            (24, 48, "left of nested clip"),
+            (72, 48, "right of nested clip"),
+            (48, 24, "above nested clip"),
+            (48, 72, "below nested clip"),
+            (14, 48, "outside parent clip"),
+        ] {
+            let sample = pixel(&pixels, 96, x, y);
+            assert_eq!(
+                sample[3], 0,
+                "{label} should be clipped out for all primitive types, got {sample:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn offscreen_renderer_handles_near_zero_primitives_without_background_pollution() {
+        let Some(mut harness) = OffscreenHarness::new(32, 32) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_rect(Rect::new(8.0, 8.0, 0.0, 16.0), Color::WHITE, 0.0);
+        encoder.draw_rect(Rect::new(10.0, 8.0, 0.001, 0.001), Color::WHITE, 0.001);
+        encoder.draw_line(
+            Point::new(12.0, 12.0),
+            Point::new(12.0, 12.0),
+            0.0,
+            Color::WHITE,
+        );
+        encoder.draw_triangles(
+            &[
+                Point::new(16.0, 16.0),
+                Point::new(16.0, 16.0),
+                Point::new(16.0, 16.0),
+            ],
+            Color::WHITE,
+        );
+
+        let pixels = harness.render(encoder.finish());
+        let visible_pixels = pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0).count();
+        assert!(
+            visible_pixels <= 16,
+            "near-zero primitives should not pollute the frame, visible pixel count={visible_pixels}"
+        );
+
+        let stats = harness.last_stats.expect("render should record stats");
+        assert!(
+            stats.submitted_vertices <= 12,
+            "zero-width rects and degenerate triangles should be skipped before GPU submission, stats={stats:?}"
+        );
+    }
+
+    #[test]
     fn offscreen_renderer_reports_scissor_skipped_batches() {
         let Some(mut harness) = OffscreenHarness::new(64, 64) else {
             return;

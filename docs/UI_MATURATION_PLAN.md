@@ -77,6 +77,8 @@ custom UI line can be considered production-grade.
 - [x] Capture golden images at representative DPI scales: 1.0, 1.25, 1.5, and 2.0.
 - [x] Add GPU readback coverage proving subpixel 45-degree hairlines stay visibly connected at
       representative DPI scales.
+- [x] Add GPU readback coverage for clipped line/circle/triangle primitives and near-zero
+      primitive robustness.
 
 ## Phase 2 - Text And Input Maturity
 
