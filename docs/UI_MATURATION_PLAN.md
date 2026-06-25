@@ -146,6 +146,9 @@ custom UI line can be considered production-grade.
 - [x] Centralize event-router focus transitions so Tab traversal, click-to-focus, blur, window
       focus loss, stale-focus pruning, panel normalization, and IME disable paths share explicit
       helper contracts with ordering coverage.
+- [x] Add an event-router release smoke matrix covering unmatched modified shortcut pass-through,
+      modified Tab/IME-switching chord pass-through, overlay preemption of stale pointer capture,
+      capture release on window focus loss, repaint request emission, and IME disable on blur.
 
 ## Phase 4 - Widget Productionization
 

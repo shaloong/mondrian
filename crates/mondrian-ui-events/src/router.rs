@@ -2027,6 +2027,108 @@ mod tests {
     }
 
     #[test]
+    fn router_release_smoke_preserves_platform_pass_through_and_overlay_capture_contracts() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let root = OverlayRecordingWidget::new(
+            "root",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let root_id = root.id();
+        let captured = OverlayRecordingWidget::new(
+            "captured",
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let captured_id = captured.id();
+        let overlay = OverlayRecordingWidget::new(
+            "overlay",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let overlay_id = overlay.id();
+        let mut tree = TestTree {
+            root: root_id,
+            nodes: HashMap::from([
+                (root_id, Box::new(root) as Box<dyn Widget>),
+                (captured_id, Box::new(captured) as Box<dyn Widget>),
+                (overlay_id, Box::new(overlay) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(captured_id, root_id), (overlay_id, root_id)]),
+            children: HashMap::from([(root_id, vec![captured_id, overlay_id])]),
+        };
+        let mut router = EventRouter::new(root_id);
+        let actions = RefCell::new(Vec::new());
+
+        for (key, modifiers) in [
+            (
+                KeyCode::F,
+                Modifiers { ctrl: true, alt: true, ..Modifiers::none() },
+            ),
+            (KeyCode::Tab, Modifiers::ctrl()),
+            (
+                KeyCode::Space,
+                Modifiers { meta: true, ..Modifiers::none() },
+            ),
+        ] {
+            let result = router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &|action| {
+                actions.borrow_mut().push(action)
+            });
+
+            assert_eq!(
+                result,
+                EventResult::Ignored,
+                "unmatched modified chord {modifiers:?}+{key:?} must remain available to the platform"
+            );
+        }
+        assert!(actions.borrow().is_empty());
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.captured(), None);
+
+        router.set_capture(Some(captured_id));
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(50.0, 50.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|action| actions.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["overlay:down"]);
+        assert_eq!(router.captured(), None);
+
+        router.set_capture(Some(overlay_id));
+        let result = router.route(UiEvent::FocusLost, &mut tree, &|action| {
+            actions.borrow_mut().push(action)
+        });
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.captured(), None);
+        assert_eq!(router.focused(), None);
+        let ime = router.take_ime_request().expect("window blur should always disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+        assert!(router.take_repaint_request());
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                unmatched_shortcut_chords: 3,
+                overlay_capture_preemptions: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
+    }
+
+    #[test]
     fn router_preserves_capture_inside_ancestor_overlay() {
         let log = Rc::new(RefCell::new(Vec::new()));
         let root = OverlayRecordingWidget::new(
