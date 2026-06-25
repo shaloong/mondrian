@@ -164,6 +164,8 @@ custom UI line can be considered production-grade.
       theme-derived visual tokens while keeping numeric model and geometry contracts pure.
 - [x] Tokenize DockSplitter handle size, grab zone, separator stroke widths, lane alpha, and
       active stroke alpha against theme-derived visual tokens.
+- [x] Tokenize DockTabBar height, tab width/padding, hover chrome, active indicator, and drop
+      indicator geometry/alpha against theme-derived visual tokens.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.

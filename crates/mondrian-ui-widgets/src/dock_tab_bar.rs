@@ -7,6 +7,8 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::paint::{centered_text_origin_y, color_with_alpha};
@@ -34,10 +36,78 @@ pub struct DockTabBar {
     drag_candidate: Option<TabDragCandidate>,
     drop_hover: Option<TabDropHover>,
     on_tab_drop: Option<Rc<DockTabDropAction>>,
+    visual: Cell<DockTabBarVisualTokens>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DockTabBarVisualTokens {
     bar_height: f32,
     tab_min_width: f32,
     tab_max_width: f32,
     tab_padding_x: f32,
+    tab_font_size: f32,
+    tab_inset_x: f32,
+    tab_inset_y: f32,
+    hover_active_alpha: f32,
+    hover_inactive_alpha: f32,
+    indicator_empty_width: f32,
+    indicator_padding_x: f32,
+    indicator_min_width: f32,
+    indicator_height: f32,
+    indicator_bottom_inset: f32,
+    indicator_alpha: f32,
+    drop_lane_width: f32,
+    drop_lane_inset_y: f32,
+    drop_lane_alpha: f32,
+    drop_indicator_width: f32,
+    drop_indicator_inset_y: f32,
+    drop_indicator_alpha: f32,
+    drop_cap_width: f32,
+    drop_cap_height: f32,
+    drop_cap_inset_y: f32,
+    radius: f32,
+    drop_radius: f32,
+}
+
+impl DockTabBarVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            bar_height: (spacing.interact_height - spacing.border_emphasis).max(1.0),
+            tab_min_width: (spacing.interact_height + spacing.md + spacing.border_emphasis)
+                .max(1.0),
+            tab_max_width: (spacing.inspector_panel_width * 0.43).max(1.0),
+            tab_padding_x: spacing.md + spacing.sm + spacing.border_emphasis,
+            tab_font_size: theme.typography.tab_label.font_size,
+            tab_inset_x: spacing.border_emphasis,
+            tab_inset_y: spacing.border_emphasis + spacing.border_standard,
+            hover_active_alpha: 0.40,
+            hover_inactive_alpha: 0.28,
+            indicator_empty_width: (spacing.icon_size + spacing.border_emphasis).max(1.0),
+            indicator_padding_x: spacing.sm + spacing.border_emphasis,
+            indicator_min_width: (spacing.icon_size + spacing.border_emphasis).max(1.0),
+            indicator_height: spacing.border_emphasis.max(1.0),
+            indicator_bottom_inset: spacing.border_emphasis,
+            indicator_alpha: 0.86,
+            drop_lane_width: spacing.xs,
+            drop_lane_inset_y: spacing.xs,
+            drop_lane_alpha: 0.14,
+            drop_indicator_width: spacing.border_emphasis.max(1.0),
+            drop_indicator_inset_y: (spacing.sm - spacing.border_standard).max(0.0),
+            drop_indicator_alpha: 0.82,
+            drop_cap_width: (spacing.icon_size - spacing.sm).max(1.0),
+            drop_cap_height: spacing.border_emphasis.max(1.0),
+            drop_cap_inset_y: spacing.border_emphasis + spacing.border_standard,
+            radius: spacing.radius_sm,
+            drop_radius: spacing.radius_sm.min(spacing.xs * 0.5),
+        }
+    }
+}
+
+impl Default for DockTabBarVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,10 +132,7 @@ impl DockTabBar {
             drag_candidate: None,
             drop_hover: None,
             on_tab_drop: None,
-            bar_height: 26.0,
-            tab_min_width: 40.0,
-            tab_max_width: 148.0,
-            tab_padding_x: 18.0,
+            visual: Cell::new(DockTabBarVisualTokens::default()),
         }
     }
 
@@ -106,15 +173,16 @@ impl DockTabBar {
             return Vec::new();
         }
 
-        let font_size = 12.0;
+        let visual = self.visual.get();
+        let font_size = self.visual.get().tab_font_size;
         let available = self.bounds.width.max(0.0);
         let desired = self
             .tabs
             .iter()
             .map(|tab| {
                 let label_width = measure_single_line(&tab.label, font_size).0;
-                (label_width + self.tab_padding_x * 2.0)
-                    .clamp(self.tab_min_width, self.tab_max_width)
+                (label_width + visual.tab_padding_x * 2.0)
+                    .clamp(visual.tab_min_width, visual.tab_max_width)
             })
             .collect::<Vec<_>>();
         let desired_total: f32 = desired.iter().sum();
@@ -131,7 +199,7 @@ impl DockTabBar {
             .map(|(i, _)| {
                 let remaining = (self.bounds.x + available - x).max(0.0);
                 let width = (desired[i] * scale).min(remaining);
-                let rect = Rect::new(x, self.bounds.y, width, self.bar_height);
+                let rect = Rect::new(x, self.bounds.y, width, visual.bar_height);
                 x += width;
                 rect
             })
@@ -240,11 +308,20 @@ impl Widget for DockTabBar {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        constraint.constrain(Size::new(constraint.max.width.min(600.0), self.bar_height))
+        let visual = self.visual.get();
+        constraint.constrain(Size::new(
+            constraint.max.width.min(600.0),
+            visual.bar_height,
+        ))
     }
 
     fn layout(&mut self, bounds: Rect) {
-        self.bounds = Rect::new(bounds.x, bounds.y, bounds.width, self.bar_height);
+        self.bounds = Rect::new(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            self.visual.get().bar_height,
+        );
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -305,8 +382,9 @@ impl Widget for DockTabBar {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        self.visual.set(DockTabBarVisualTokens::from_theme(ctx.theme));
+        let visual = self.visual.get();
         let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
 
         let bg = self.bounds;
         let bar_fill = tokens.card;
@@ -321,12 +399,19 @@ impl Widget for DockTabBar {
             let is_active = tab.active;
             let is_hovered = self.hovered_tab == Some(i);
 
-            let inset = r.inset(2.0, 3.0);
+            let inset = r.inset(visual.tab_inset_x, visual.tab_inset_y);
             if is_hovered {
                 ctx.encoder.draw_rect(
                     inset,
-                    color_with_alpha(tokens.surface_2, if is_active { 0.40 } else { 0.28 }),
-                    spacing.radius_sm,
+                    color_with_alpha(
+                        tokens.surface_2,
+                        if is_active {
+                            visual.hover_active_alpha
+                        } else {
+                            visual.hover_inactive_alpha
+                        },
+                    ),
+                    visual.radius,
                 );
             }
 
@@ -348,39 +433,70 @@ impl Widget for DockTabBar {
 
             if is_active {
                 let label_width = if tab.label.is_empty() {
-                    16.0
+                    visual.indicator_empty_width
                 } else {
                     measure_single_line(&tab.label, ctx.theme.typography.tab_label.font_size).0
                 };
-                let indicator_width = (label_width + 8.0).clamp(16.0, inset.width.max(16.0));
+                let indicator_width = (label_width + visual.indicator_padding_x).clamp(
+                    visual.indicator_min_width,
+                    inset.width.max(visual.indicator_min_width),
+                );
                 let indicator = Rect::new(
                     inset.x + (inset.width - indicator_width) * 0.5,
-                    bg.y + bg.height - 2.0,
+                    bg.y + bg.height - visual.indicator_bottom_inset,
                     indicator_width,
-                    2.0,
+                    visual.indicator_height,
                 );
-                ctx.encoder.draw_rect(indicator, color_with_alpha(tokens.foreground, 0.86), 1.0);
+                ctx.encoder.draw_rect(
+                    indicator,
+                    color_with_alpha(tokens.foreground, visual.indicator_alpha),
+                    visual.indicator_height * 0.5,
+                );
             }
         }
 
         if let Some(hover) = self.drop_hover {
             let x = self.insert_indicator_x(hover.insert_index);
             ctx.encoder.draw_rect(
-                Rect::new(x - 2.0, bg.y + 4.0, 4.0, (bg.height - 8.0).max(0.0)),
-                color_with_alpha(tokens.foreground, 0.14),
-                2.0,
+                Rect::new(
+                    x - visual.drop_lane_width * 0.5,
+                    bg.y + visual.drop_lane_inset_y,
+                    visual.drop_lane_width,
+                    (bg.height - visual.drop_lane_inset_y * 2.0).max(0.0),
+                ),
+                color_with_alpha(tokens.foreground, visual.drop_lane_alpha),
+                visual.drop_radius,
             );
-            let indicator = Rect::new(x - 1.0, bg.y + 5.0, 2.0, (bg.height - 10.0).max(0.0));
-            ctx.encoder.draw_rect(indicator, color_with_alpha(tokens.foreground, 0.82), 1.0);
-            ctx.encoder.draw_rect(
-                Rect::new(x - 4.0, bg.y + 3.0, 8.0, 2.0),
-                color_with_alpha(tokens.foreground, 0.82),
-                1.0,
+            let indicator = Rect::new(
+                x - visual.drop_indicator_width * 0.5,
+                bg.y + visual.drop_indicator_inset_y,
+                visual.drop_indicator_width,
+                (bg.height - visual.drop_indicator_inset_y * 2.0).max(0.0),
             );
             ctx.encoder.draw_rect(
-                Rect::new(x - 4.0, bg.y + bg.height - 5.0, 8.0, 2.0),
-                color_with_alpha(tokens.foreground, 0.82),
-                1.0,
+                indicator,
+                color_with_alpha(tokens.foreground, visual.drop_indicator_alpha),
+                visual.drop_indicator_width * 0.5,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(
+                    x - visual.drop_cap_width * 0.5,
+                    bg.y + visual.drop_cap_inset_y,
+                    visual.drop_cap_width,
+                    visual.drop_cap_height,
+                ),
+                color_with_alpha(tokens.foreground, visual.drop_indicator_alpha),
+                visual.drop_cap_height * 0.5,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(
+                    x - visual.drop_cap_width * 0.5,
+                    bg.y + bg.height - visual.drop_cap_inset_y - visual.drop_cap_height,
+                    visual.drop_cap_width,
+                    visual.drop_cap_height,
+                ),
+                color_with_alpha(tokens.foreground, visual.drop_indicator_alpha),
+                visual.drop_cap_height * 0.5,
             );
         }
     }
@@ -413,7 +529,10 @@ mod tests {
         clips: Vec<Rect>,
         clip_pops: usize,
         rects: Vec<Rect>,
+        colors: Vec<mondrian_core::Color>,
+        radii: Vec<f32>,
         texts: Vec<String>,
+        text_font_sizes: Vec<f32>,
     }
 
     impl DrawCommandEncoder for PaintRecorder {
@@ -425,8 +544,10 @@ mod tests {
             self.clip_pops += 1;
         }
 
-        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32) {
             self.rects.push(bounds);
+            self.colors.push(color);
+            self.radii.push(corner_radius);
         }
 
         fn draw_line(
@@ -441,11 +562,12 @@ mod tests {
         fn draw_text(
             &mut self,
             text: &str,
-            _font_size: f32,
+            font_size: f32,
             _position: Point,
             _color: mondrian_core::Color,
         ) {
             self.texts.push(text.into());
+            self.text_font_sizes.push(font_size);
         }
 
         fn push_translate(&mut self, _offset: glam::Vec2) {}
@@ -674,7 +796,11 @@ mod tests {
         };
         bar.paint(&mut paint_ctx);
 
-        assert!(encoder.rects.iter().any(|rect| rect.width == 2.0 && rect.height > 10.0));
+        let visual = DockTabBarVisualTokens::from_theme(&theme);
+        assert!(encoder
+            .rects
+            .iter()
+            .any(|rect| rect.width == visual.drop_indicator_width && rect.height > 10.0));
     }
 
     #[test]
@@ -803,13 +929,70 @@ mod tests {
             encoder.texts,
             vec!["A very long tab label".to_string(), "Second".to_string()]
         );
-        assert_eq!(
-            encoder.clips,
-            vec![
-                Rect::new(2.0, 3.0, 101.24535, 20.0),
-                Rect::new(107.24535, 3.0, 50.754646, 20.0)
-            ]
-        );
+        let visual = DockTabBarVisualTokens::from_theme(&theme);
+        let expected = bar
+            .tab_rects()
+            .into_iter()
+            .map(|rect| rect.inset(visual.tab_inset_x, visual.tab_inset_y))
+            .collect::<Vec<_>>();
+        assert_eq!(encoder.clips, expected);
         assert_eq!(encoder.clip_pops, 2);
+    }
+
+    #[test]
+    fn tab_bar_visual_metrics_follow_theme_tokens() {
+        let mut bar = DockTabBar::new(make_tabs(0));
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.interact_height = 34.0;
+        theme.spacing.border_emphasis = 3.0;
+        theme.spacing.border_standard = 2.0;
+        theme.spacing.md = 12.0;
+        theme.spacing.sm = 8.0;
+        theme.spacing.radius_sm = 7.0;
+        theme.typography.tab_label.font_size = 13.0;
+        let visual = DockTabBarVisualTokens::from_theme(&theme);
+        bar.layout(Rect::new(10.0, 20.0, 260.0, 99.0));
+        bar.hovered_tab = Some(0);
+        let mut encoder = PaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 120.0),
+        };
+
+        bar.paint(&mut ctx);
+
+        assert_eq!(
+            bar.bounds.height,
+            DockTabBarVisualTokens::default().bar_height
+        );
+        assert_eq!(
+            bar.measure(LayoutConstraint::LOOSE).height,
+            visual.bar_height
+        );
+        let rects = bar.tab_rects();
+        assert_eq!(rects[0].height, visual.bar_height);
+        assert_eq!(
+            encoder.rects[1],
+            rects[0].inset(visual.tab_inset_x, visual.tab_inset_y)
+        );
+        assert_eq!(
+            encoder.colors[1],
+            color_with_alpha(theme.colors.surface_2, visual.hover_active_alpha)
+        );
+        assert_eq!(encoder.radii[1], visual.radius);
+        assert_eq!(
+            encoder.text_font_sizes[0],
+            theme.typography.tab_label.font_size
+        );
+        let active_indicator = encoder
+            .rects
+            .iter()
+            .find(|rect| rect.height == visual.indicator_height)
+            .expect("active tab should paint indicator");
+        assert_eq!(
+            active_indicator.y,
+            bar.bounds.y + bar.bounds.height - visual.indicator_bottom_inset
+        );
     }
 }
