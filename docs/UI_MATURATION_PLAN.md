@@ -166,6 +166,9 @@ custom UI line can be considered production-grade.
       active stroke alpha against theme-derived visual tokens.
 - [x] Tokenize DockTabBar height, tab width/padding, hover chrome, active indicator, and drop
       indicator geometry/alpha against theme-derived visual tokens.
+- [x] Tokenize ScrollView scrollbar width, track inset, minimum thumb length, hover expansion,
+      radius, and alpha chrome against explicit theme-derived metrics shared by layout, hit
+      testing, drag mapping, and paint.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.

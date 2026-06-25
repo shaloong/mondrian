@@ -4,13 +4,18 @@
 
 mod model;
 
+use crate::paint::color_with_alpha;
 use glam::Vec2;
-use model::{clamp_scroll_offset, finite_nonnegative, normalized_content_size, ScrollbarLayout};
+use model::{
+    clamp_scroll_offset, finite_nonnegative, normalized_content_size, ScrollbarLayout,
+    ScrollbarMetrics,
+};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityValue, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
 
 /// Axes that a [`ScrollView`] may scroll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +44,46 @@ enum ScrollbarAxis {
     Vertical,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScrollViewVisualTokens {
+    scrollbar_metrics: ScrollbarMetrics,
+    min_scrollbar_width: f32,
+    hover_expand: f32,
+    track_idle_alpha: f32,
+    track_active_alpha: f32,
+    thumb_idle_alpha: f32,
+    thumb_hover_alpha: f32,
+    thumb_drag_alpha: f32,
+    scrollbar_radius: f32,
+}
+
+impl ScrollViewVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            scrollbar_metrics: ScrollbarMetrics::new(
+                spacing.timeline_scrollbar_size,
+                spacing.border_emphasis,
+                spacing.icon_size + spacing.border_emphasis,
+            ),
+            min_scrollbar_width: spacing.xs,
+            hover_expand: spacing.border_standard,
+            track_idle_alpha: 0.03,
+            track_active_alpha: 0.06,
+            thumb_idle_alpha: 0.18,
+            thumb_hover_alpha: 0.30,
+            thumb_drag_alpha: 0.42,
+            scrollbar_radius: spacing.radius_full,
+        }
+    }
+}
+
+impl Default for ScrollViewVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
+}
+
 /// Snapshot of scroll position that can survive widget-tree rebuilds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollViewState {
@@ -54,7 +99,7 @@ pub struct ScrollView {
     content_size: Size,
     scroll_offset: Vec2,
     axes: ScrollAxes,
-    scrollbar_width: f32,
+    scrollbar_metrics: ScrollbarMetrics,
     dragging_thumb: Option<ScrollbarAxis>,
     hovered_thumb: Option<ScrollbarAxis>,
     drag_start_position: Point,
@@ -71,7 +116,7 @@ impl ScrollView {
             content_size: Size::ZERO,
             scroll_offset: Vec2::ZERO,
             axes: ScrollAxes::Vertical,
-            scrollbar_width: 8.0,
+            scrollbar_metrics: ScrollViewVisualTokens::default().scrollbar_metrics,
             dragging_thumb: None,
             hovered_thumb: None,
             drag_start_position: Point::ZERO,
@@ -88,7 +133,8 @@ impl ScrollView {
 
     /// Set the visual scrollbar lane width.
     pub fn with_scrollbar_width(mut self, width: f32) -> Self {
-        self.scrollbar_width = width.max(4.0);
+        let min_width = ScrollViewVisualTokens::default().min_scrollbar_width;
+        self.scrollbar_metrics = self.scrollbar_metrics.with_width(width.max(min_width));
         self
     }
 
@@ -152,7 +198,7 @@ impl ScrollView {
             self.viewport_size,
             self.content_size,
             self.scroll_offset,
-            self.scrollbar_width,
+            self.scrollbar_metrics,
         )
     }
 
@@ -227,14 +273,14 @@ impl ScrollView {
             viewport = Size::new(
                 (bounds_size.width
                     - if reserve_vertical {
-                        self.scrollbar_width
+                        self.scrollbar_metrics.width
                     } else {
                         0.0
                     })
                 .max(0.0),
                 (bounds_size.height
                     - if reserve_horizontal {
-                        self.scrollbar_width
+                        self.scrollbar_metrics.width
                     } else {
                         0.0
                     })
@@ -412,8 +458,8 @@ impl Widget for ScrollView {
                 let (_viewport, content) =
                     self.resolve_viewport_and_content_size_for_bounds(bounds_size, child.as_ref());
                 constraint.constrain(Size::new(
-                    bounds_size.width.min(content.width + self.scrollbar_width),
-                    bounds_size.height.min(content.height + self.scrollbar_width),
+                    bounds_size.width.min(content.width + self.scrollbar_metrics.width),
+                    bounds_size.height.min(content.height + self.scrollbar_metrics.width),
                 ))
             } else {
                 let child_size = child.measure(LayoutConstraint {
@@ -606,32 +652,39 @@ impl Widget for ScrollView {
             ctx.push_clip(chrome_clip);
         }
 
+        let visual = ScrollViewVisualTokens::from_theme(ctx.theme);
         if let Some(mut sb_rect) = self.vertical_scrollbar_thumb_rect() {
             let dragging = self.dragging_thumb == Some(ScrollbarAxis::Vertical);
             let hovered = self.hovered_thumb == Some(ScrollbarAxis::Vertical);
             let active = dragging || hovered;
             if active {
                 sb_rect = Rect::new(
-                    sb_rect.x - 1.0,
+                    sb_rect.x - visual.hover_expand,
                     sb_rect.y,
-                    sb_rect.width + 2.0,
+                    sb_rect.width + visual.hover_expand * 2.0,
                     sb_rect.height,
                 );
             }
             let track = self.vertical_scrollbar_track_rect();
-            let mut track_color = ctx.theme.colors.scrollbar_thumb;
-            track_color.a *= if active { 0.06 } else { 0.03 };
-            ctx.encoder.draw_rect(track, track_color, ctx.theme.spacing.radius_full);
+            let track_color = color_with_alpha(
+                ctx.theme.colors.scrollbar_thumb,
+                if active {
+                    visual.track_active_alpha
+                } else {
+                    visual.track_idle_alpha
+                },
+            );
+            ctx.encoder.draw_rect(track, track_color, visual.scrollbar_radius);
 
-            let mut thumb_color = ctx.theme.colors.scrollbar_thumb;
-            thumb_color.a *= if dragging {
-                0.42
+            let thumb_alpha = if dragging {
+                visual.thumb_drag_alpha
             } else if hovered {
-                0.30
+                visual.thumb_hover_alpha
             } else {
-                0.18
+                visual.thumb_idle_alpha
             };
-            ctx.encoder.draw_rect(sb_rect, thumb_color, ctx.theme.spacing.radius_full);
+            let thumb_color = color_with_alpha(ctx.theme.colors.scrollbar_thumb, thumb_alpha);
+            ctx.encoder.draw_rect(sb_rect, thumb_color, visual.scrollbar_radius);
         }
 
         if let Some(mut sb_rect) = self.horizontal_scrollbar_thumb_rect() {
@@ -641,25 +694,31 @@ impl Widget for ScrollView {
             if active {
                 sb_rect = Rect::new(
                     sb_rect.x,
-                    sb_rect.y - 1.0,
+                    sb_rect.y - visual.hover_expand,
                     sb_rect.width,
-                    sb_rect.height + 2.0,
+                    sb_rect.height + visual.hover_expand * 2.0,
                 );
             }
             let track = self.horizontal_scrollbar_track_rect();
-            let mut track_color = ctx.theme.colors.scrollbar_thumb;
-            track_color.a *= if active { 0.06 } else { 0.03 };
-            ctx.encoder.draw_rect(track, track_color, ctx.theme.spacing.radius_full);
+            let track_color = color_with_alpha(
+                ctx.theme.colors.scrollbar_thumb,
+                if active {
+                    visual.track_active_alpha
+                } else {
+                    visual.track_idle_alpha
+                },
+            );
+            ctx.encoder.draw_rect(track, track_color, visual.scrollbar_radius);
 
-            let mut thumb_color = ctx.theme.colors.scrollbar_thumb;
-            thumb_color.a *= if dragging {
-                0.42
+            let thumb_alpha = if dragging {
+                visual.thumb_drag_alpha
             } else if hovered {
-                0.30
+                visual.thumb_hover_alpha
             } else {
-                0.18
+                visual.thumb_idle_alpha
             };
-            ctx.encoder.draw_rect(sb_rect, thumb_color, ctx.theme.spacing.radius_full);
+            let thumb_color = color_with_alpha(ctx.theme.colors.scrollbar_thumb, thumb_alpha);
+            ctx.encoder.draw_rect(sb_rect, thumb_color, visual.scrollbar_radius);
         }
 
         if has_scrollbar {
@@ -903,6 +962,8 @@ mod tests {
     struct RecordingEncoder {
         translations: Vec<Vec2>,
         rects: Vec<Rect>,
+        rect_colors: Vec<Color>,
+        rect_radii: Vec<f32>,
         clips: Vec<Rect>,
         clip_depth: usize,
         rect_clip_depths: Vec<usize>,
@@ -918,8 +979,10 @@ mod tests {
             self.clip_depth = self.clip_depth.saturating_sub(1);
         }
 
-        fn draw_rect(&mut self, bounds: Rect, _color: Color, _corner_radius: f32) {
+        fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
             self.rects.push(bounds);
+            self.rect_colors.push(color);
+            self.rect_radii.push(corner_radius);
             self.rect_clip_depths.push(self.clip_depth);
         }
 
@@ -938,6 +1001,51 @@ mod tests {
     fn scroll_view_new_has_zero_offset() {
         let sv = ScrollView::new(None);
         assert_eq!(sv.scroll_offset(), Vec2::ZERO);
+    }
+
+    #[test]
+    fn scroll_view_visual_tokens_follow_theme_spacing() {
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.timeline_scrollbar_size = 12.0;
+        theme.spacing.border_emphasis = 3.0;
+        theme.spacing.icon_size = 18.0;
+        theme.spacing.xs = 5.0;
+        theme.spacing.border_standard = 2.0;
+        theme.spacing.radius_full = 77.0;
+
+        let visual = ScrollViewVisualTokens::from_theme(&theme);
+
+        assert_eq!(visual.scrollbar_metrics.width, 12.0);
+        assert_eq!(visual.scrollbar_metrics.track_inset, 3.0);
+        assert_eq!(visual.scrollbar_metrics.min_thumb_len, 21.0);
+        assert_eq!(visual.min_scrollbar_width, 5.0);
+        assert_eq!(visual.hover_expand, 2.0);
+        assert_eq!(visual.scrollbar_radius, 77.0);
+    }
+
+    #[test]
+    fn scroll_view_scrollbar_width_builder_updates_shared_layout_metrics() {
+        let last_layout = Rc::new(RefCell::new(None));
+        let child = RecordingChild {
+            id: WidgetId::new(),
+            preferred: Size::new(40.0, 800.0),
+            last_mouse_down: Rc::new(RefCell::new(None)),
+            last_layout: Rc::clone(&last_layout),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child))).with_scrollbar_width(12.0);
+
+        sv.layout(Rect::new(20.0, 30.0, 300.0, 200.0));
+
+        assert_eq!(sv.scrollbar_metrics.width, 12.0);
+        assert_eq!(
+            *last_layout.borrow(),
+            Some(Rect::new(20.0, 30.0, 288.0, 800.0))
+        );
+        assert_eq!(sv.viewport_rect(), Rect::new(20.0, 30.0, 288.0, 200.0));
+        assert_eq!(
+            sv.vertical_scrollbar_track_rect(),
+            Rect::new(20.0 + 300.0 - 12.0 + 2.0, 30.0, 8.0, 200.0)
+        );
     }
 
     #[test]
@@ -1097,6 +1205,33 @@ mod tests {
             "scrollbar chrome must be GPU-clipped by the scroll view bounds"
         );
         assert_eq!(final_clip, Rect::new(0.0, 0.0, 200.0, 200.0));
+    }
+
+    #[test]
+    fn scroll_view_scrollbar_paint_uses_visual_tokens() {
+        let child = Spacer::new(200.0, 800.0);
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
+
+        let mut encoder = RecordingEncoder::default();
+        let theme = ThemePreset::Dark.build();
+        let visual = ScrollViewVisualTokens::from_theme(&theme);
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 400.0, 400.0),
+        };
+
+        sv.paint(&mut ctx);
+
+        assert_eq!(encoder.rect_radii, vec![visual.scrollbar_radius; 2]);
+        assert_eq!(
+            encoder.rect_colors,
+            vec![
+                color_with_alpha(theme.colors.scrollbar_thumb, visual.track_idle_alpha),
+                color_with_alpha(theme.colors.scrollbar_thumb, visual.thumb_idle_alpha),
+            ]
+        );
     }
 
     #[test]

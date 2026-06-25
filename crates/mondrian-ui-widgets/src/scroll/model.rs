@@ -56,13 +56,37 @@ fn max_scroll_y(axes: ScrollAxes, content_size: Size, viewport_size: Size) -> f3
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ScrollbarMetrics {
+    pub(super) width: f32,
+    pub(super) track_inset: f32,
+    pub(super) min_thumb_len: f32,
+}
+
+impl ScrollbarMetrics {
+    pub(super) fn new(width: f32, track_inset: f32, min_thumb_len: f32) -> Self {
+        let width = finite_nonnegative(width).max(1.0);
+        let track_inset = finite_nonnegative(track_inset).min(width * 0.5);
+        let min_thumb_len = finite_nonnegative(min_thumb_len).max(1.0);
+        Self { width, track_inset, min_thumb_len }
+    }
+
+    pub(super) fn with_width(self, width: f32) -> Self {
+        Self::new(width, self.track_inset, self.min_thumb_len)
+    }
+
+    fn track_thickness(self) -> f32 {
+        (self.width - self.track_inset * 2.0).max(1.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ScrollbarLayout {
     axes: ScrollAxes,
     bounds: Rect,
     viewport_size: Size,
     content_size: Size,
     scroll_offset: Vec2,
-    scrollbar_width: f32,
+    metrics: ScrollbarMetrics,
 }
 
 impl ScrollbarLayout {
@@ -72,7 +96,7 @@ impl ScrollbarLayout {
         viewport_size: Size,
         content_size: Size,
         scroll_offset: Vec2,
-        scrollbar_width: f32,
+        metrics: ScrollbarMetrics,
     ) -> Self {
         Self {
             axes,
@@ -80,7 +104,7 @@ impl ScrollbarLayout {
             viewport_size,
             content_size,
             scroll_offset,
-            scrollbar_width,
+            metrics,
         }
     }
 
@@ -122,14 +146,14 @@ impl ScrollbarLayout {
         match axis {
             ScrollbarAxis::Horizontal => Rect::new(
                 self.bounds.x,
-                self.bounds.y + self.bounds.height - self.scrollbar_width + 2.0,
+                self.bounds.y + self.bounds.height - self.metrics.width + self.metrics.track_inset,
                 self.viewport_size.width.max(0.0),
-                (self.scrollbar_width - 4.0).max(1.0),
+                self.metrics.track_thickness(),
             ),
             ScrollbarAxis::Vertical => Rect::new(
-                self.bounds.x + self.bounds.width - self.scrollbar_width + 2.0,
+                self.bounds.x + self.bounds.width - self.metrics.width + self.metrics.track_inset,
                 self.bounds.y,
-                (self.scrollbar_width - 4.0).max(1.0),
+                self.metrics.track_thickness(),
                 self.viewport_size.height.max(0.0),
             ),
         }
@@ -171,7 +195,7 @@ impl ScrollbarLayout {
         }
         let track = self.track_rect(ScrollbarAxis::Vertical);
         let thumb_h = (track.height * (self.viewport_size.height / self.content_size.height))
-            .max(16.0)
+            .max(self.metrics.min_thumb_len)
             .min(track.height);
         let thumb_range = (track.height - thumb_h).max(0.0);
         let max_scroll = self.max_scroll_y().max(1.0);
@@ -188,7 +212,7 @@ impl ScrollbarLayout {
             return None;
         }
         let thumb_w = (track.width * (self.viewport_size.width / self.content_size.width))
-            .max(16.0)
+            .max(self.metrics.min_thumb_len)
             .min(track.width);
         let thumb_range = (track.width - thumb_w).max(0.0);
         let max_scroll = self.max_scroll_x().max(1.0);
@@ -200,6 +224,10 @@ impl ScrollbarLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn default_scrollbar_metrics() -> ScrollbarMetrics {
+        ScrollbarMetrics::new(8.0, 2.0, 16.0)
+    }
 
     #[test]
     fn clamp_scroll_offset_recovers_nonfinite_and_respects_axes() {
@@ -249,7 +277,7 @@ mod tests {
             Size::new(192.0, 100.0),
             Size::new(192.0, 500.0),
             Vec2::new(0.0, 200.0),
-            8.0,
+            default_scrollbar_metrics(),
         );
 
         let track = layout.track_rect(ScrollbarAxis::Vertical);
@@ -268,7 +296,7 @@ mod tests {
             Size::new(192.0, 92.0),
             Size::new(400.0, 500.0),
             Vec2::new(30.0, 40.0),
-            8.0,
+            default_scrollbar_metrics(),
         );
 
         assert_eq!(layout.viewport_rect(), Rect::new(10.0, 20.0, 192.0, 92.0));
@@ -283,12 +311,31 @@ mod tests {
             Size::new(92.0, 100.0),
             Size::new(92.0, 500.0),
             Vec2::ZERO,
-            8.0,
+            default_scrollbar_metrics(),
         );
 
         assert_eq!(
             layout.scroll_for_thumb_delta(ScrollbarAxis::Vertical, Vec2::ZERO, 80.0),
             Some(400.0)
         );
+    }
+
+    #[test]
+    fn scrollbar_metrics_control_track_and_min_thumb_geometry() {
+        let layout = ScrollbarLayout::new(
+            ScrollAxes::Vertical,
+            Rect::new(10.0, 20.0, 120.0, 100.0),
+            Size::new(108.0, 100.0),
+            Size::new(108.0, 2000.0),
+            Vec2::ZERO,
+            ScrollbarMetrics::new(12.0, 3.0, 24.0),
+        );
+
+        let track = layout.track_rect(ScrollbarAxis::Vertical);
+        let thumb = layout.thumb_rect(ScrollbarAxis::Vertical).expect("thumb");
+
+        assert_eq!(track, Rect::new(121.0, 20.0, 6.0, 100.0));
+        assert_eq!(thumb.width, 6.0);
+        assert_eq!(thumb.height, 24.0);
     }
 }
