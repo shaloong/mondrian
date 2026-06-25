@@ -171,6 +171,8 @@ custom UI line can be considered production-grade.
       testing, drag mapping, and paint.
 - [x] Tokenize DialogSurface content padding, border width, scrim radius, card radius, and
       outline radius against theme-derived visual tokens.
+- [x] Tokenize FormLayout default label width, control gap, label height, compact/tall label
+      offsets, and tall-row threshold against theme-derived row options.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.

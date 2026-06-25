@@ -4,6 +4,7 @@
 //! their child widgets, while this module computes stable label/control rects.
 
 use mondrian_ui_core::types::*;
+use mondrian_ui_theme::{Theme, ThemePreset};
 
 /// Layout options for a labeled form row.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -22,16 +23,26 @@ pub struct FormRowOptions {
     pub tall_row_multiplier: f32,
 }
 
+impl FormRowOptions {
+    /// Create row options from theme spacing and typography tokens.
+    pub fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        let typography = &theme.typography;
+        Self {
+            label_width: spacing.property_row_height * 3.0 + spacing.border_emphasis * 4.0,
+            control_gap: (spacing.md - spacing.border_emphasis).max(0.0),
+            label_height: typography.small.line_height,
+            compact_label_y_offset: spacing.radius_none,
+            tall_label_y_offset: spacing.xs,
+            tall_row_multiplier: (typography.body.line_height / typography.small.line_height)
+                + 0.25,
+        }
+    }
+}
+
 impl Default for FormRowOptions {
     fn default() -> Self {
-        Self {
-            label_width: 92.0,
-            control_gap: 8.0,
-            label_height: 16.0,
-            compact_label_y_offset: 0.0,
-            tall_label_y_offset: 4.0,
-            tall_row_multiplier: 1.5,
-        }
+        Self::from_theme(&ThemePreset::Dark.build())
     }
 }
 
@@ -141,6 +152,27 @@ mod tests {
         assert_eq!(rects.row, Rect::new(10.0, 40.0, 300.0, 34.0));
         assert_eq!(rects.label, Rect::new(10.0, 49.0, 92.0, 16.0));
         assert_eq!(rects.control, Rect::new(110.0, 45.0, 200.0, 24.0));
+    }
+
+    #[test]
+    fn row_options_follow_theme_spacing_and_typography() {
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.property_row_height = 32.0;
+        theme.spacing.border_emphasis = 3.0;
+        theme.spacing.md = 14.0;
+        theme.spacing.xs = 5.0;
+        theme.spacing.radius_none = 0.25;
+        theme.typography.small.line_height = 15.0;
+        theme.typography.body.line_height = 21.0;
+
+        let options = FormRowOptions::from_theme(&theme);
+
+        assert_eq!(options.label_width, 108.0);
+        assert_eq!(options.control_gap, 11.0);
+        assert_eq!(options.label_height, 15.0);
+        assert_eq!(options.compact_label_y_offset, 0.25);
+        assert_eq!(options.tall_label_y_offset, 5.0);
+        assert!((options.tall_row_multiplier - 1.65).abs() < f32::EPSILON);
     }
 
     #[test]
