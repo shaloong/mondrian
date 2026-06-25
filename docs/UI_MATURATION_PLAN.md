@@ -169,6 +169,8 @@ custom UI line can be considered production-grade.
 - [x] Tokenize ScrollView scrollbar width, track inset, minimum thumb length, hover expansion,
       radius, and alpha chrome against explicit theme-derived metrics shared by layout, hit
       testing, drag mapping, and paint.
+- [x] Tokenize DialogSurface content padding, border width, scrim radius, card radius, and
+      outline radius against theme-derived visual tokens.
 - [x] Add component visual regression scenarios for TextInput, Dropdown, ContextMenu,
       Tooltip, Slider, Checkbox, ColorPicker, ScrollView, DockSplitter, and popup-owning
       controls.

@@ -6,8 +6,37 @@
 use mondrian_core::Color;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::PaintContext;
+use mondrian_ui_theme::{Theme, ThemePreset};
 
 use crate::paint::{horizontal_stroke_rect, vertical_stroke_rect};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DialogSurfaceVisualTokens {
+    content_padding: f32,
+    border_width: f32,
+    scrim_radius: f32,
+    card_radius: f32,
+    outline_radius: f32,
+}
+
+impl DialogSurfaceVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            content_padding: spacing.md * 2.0,
+            border_width: spacing.border_standard,
+            scrim_radius: spacing.radius_none,
+            card_radius: spacing.radius_md,
+            outline_radius: spacing.radius_none,
+        }
+    }
+}
+
+impl Default for DialogSurfaceVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
+}
 
 /// Theme-aware modal surface geometry and chrome.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,11 +50,12 @@ pub struct DialogSurface {
 impl DialogSurface {
     /// Create a modal surface with minimum and preferred card sizes.
     pub fn new(min_size: Size, preferred_size: Size) -> Self {
+        let visual = DialogSurfaceVisualTokens::default();
         Self {
             min_size,
             preferred_size,
-            content_padding: 20.0,
-            border_width: 1.0,
+            content_padding: visual.content_padding,
+            border_width: visual.border_width,
         }
     }
 
@@ -70,40 +100,42 @@ impl DialogSurface {
 
     /// Paint the modal scrim, card, and subtle outline.
     pub fn paint(&self, bounds: Rect, card: Rect, ctx: &mut PaintContext) {
-        ctx.encoder.draw_rect(
-            bounds,
-            ctx.theme.colors.modal_scrim,
-            ctx.theme.spacing.radius_none,
-        );
-        ctx.encoder
-            .draw_rect(card, ctx.theme.colors.popover, ctx.theme.spacing.radius_md);
+        let visual = DialogSurfaceVisualTokens::from_theme(ctx.theme);
+        ctx.encoder.draw_rect(bounds, ctx.theme.colors.modal_scrim, visual.scrim_radius);
+        ctx.encoder.draw_rect(card, ctx.theme.colors.popover, visual.card_radius);
         if self.border_width <= 0.0 {
             return;
         }
-        paint_rect_outline(ctx, card, self.border_width, ctx.theme.colors.border);
+        paint_rect_outline(
+            ctx,
+            card,
+            self.border_width,
+            ctx.theme.colors.border,
+            visual.outline_radius,
+        );
     }
 }
 
-fn paint_rect_outline(ctx: &mut PaintContext, rect: Rect, width: f32, color: Color) {
+fn paint_rect_outline(ctx: &mut PaintContext, rect: Rect, width: f32, color: Color, radius: f32) {
     ctx.encoder.draw_rect(
         horizontal_stroke_rect(rect.y, rect.x, rect.width, width),
         color,
-        0.0,
+        radius,
     );
     ctx.encoder.draw_rect(
         horizontal_stroke_rect(rect.y + rect.height, rect.x, rect.width, width),
         color,
-        0.0,
+        radius,
     );
     ctx.encoder.draw_rect(
         vertical_stroke_rect(rect.x, rect.y, rect.height, width),
         color,
-        0.0,
+        radius,
     );
     ctx.encoder.draw_rect(
         vertical_stroke_rect(rect.x + rect.width, rect.y, rect.height, width),
         color,
-        0.0,
+        radius,
     );
 }
 
@@ -184,8 +216,31 @@ mod tests {
     }
 
     #[test]
+    fn visual_tokens_follow_theme_spacing() {
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.md = 13.0;
+        theme.spacing.border_standard = 2.0;
+        theme.spacing.radius_none = 0.5;
+        theme.spacing.radius_md = 9.0;
+
+        let visual = DialogSurfaceVisualTokens::from_theme(&theme);
+        let surface = DialogSurface::new(Size::new(1.0, 1.0), Size::new(10.0, 10.0));
+
+        assert_eq!(visual.content_padding, 26.0);
+        assert_eq!(visual.border_width, 2.0);
+        assert_eq!(visual.scrim_radius, 0.5);
+        assert_eq!(visual.card_radius, 9.0);
+        assert_eq!(
+            surface.content_rect(Rect::new(0.0, 0.0, 100.0, 100.0)),
+            Rect::new(20.0, 20.0, 60.0, 60.0),
+            "default surface geometry preserves the dark preset token-derived padding"
+        );
+    }
+
+    #[test]
     fn paint_uses_modal_theme_tokens() {
         let theme = ThemePreset::Dark.build();
+        let visual = DialogSurfaceVisualTokens::from_theme(&theme);
         let mut recorder = Recorder::default();
         let mut ctx = PaintContext {
             encoder: &mut recorder,
@@ -205,7 +260,7 @@ mod tests {
             PaintCommand::Rect(
                 Rect::new(0.0, 0.0, 200.0, 100.0),
                 theme.colors.modal_scrim,
-                theme.spacing.radius_none,
+                visual.scrim_radius,
             )
         );
         assert_eq!(
@@ -213,7 +268,7 @@ mod tests {
             PaintCommand::Rect(
                 Rect::new(10.0, 20.0, 50.0, 40.0),
                 theme.colors.popover,
-                theme.spacing.radius_md,
+                visual.card_radius,
             )
         );
         assert_eq!(recorder.commands.len(), 6);
