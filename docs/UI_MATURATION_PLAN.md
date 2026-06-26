@@ -117,6 +117,10 @@ custom UI line can be considered production-grade.
       bounds, and paint.
 - [x] Add TextInput paint coverage for mixed CJK/emoji text, selection highlight, committed
       text/preedit ordering, and IME underline inside the content clip.
+- [x] Add a grapheme-safe multiline text edit model with normalized line endings, line/column
+      to UTF-8 byte mapping, cross-line selection ranges, vertical navigation, paste
+      replacement, and line-join delete behavior as the foundation for multiline TextInput
+      geometry, IME, paint, clipboard, and undo integration.
 
 ## Phase 3 - Event And Platform Semantics
 

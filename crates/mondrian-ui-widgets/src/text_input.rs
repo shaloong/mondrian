@@ -28,6 +28,7 @@ mod composition;
 mod edit;
 mod geometry;
 mod ime;
+mod multiline;
 mod paint;
 
 use commands::{classify_key_command, TextInputKeyCommand};
@@ -38,6 +39,7 @@ use geometry::{
     text_x_from_pointer as pointer_text_x_from_geometry, TextInputGeometry,
 };
 use ime::{classify_ime_key, request_disabled_ime, request_enabled_ime, ImeKeyDisposition};
+pub use multiline::{MultilineTextEditState, TextPosition, TextSelection};
 use paint::{paint_text_input, TextInputPaintSnapshot};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
