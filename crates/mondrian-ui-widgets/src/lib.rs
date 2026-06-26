@@ -72,7 +72,7 @@ pub use property_panel::{PropertyPanel, PropertyPanelOptions, PropertyRow, Prope
 pub use raster_image::RasterImage;
 pub use scroll::{ScrollView, ScrollViewState};
 pub use slider::Slider;
-pub use text_input::{TextInput, TextInputChangeAction};
+pub use text_input::{MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction};
 pub use timeline_view::{
     TimelineAssetDrop, TimelineAssetDropAction, TimelineClip, TimelineClipAction, TimelineClipMove,
     TimelineClipMoveAction, TimelineClipRef, TimelineClipTrim, TimelineClipTrimAction,

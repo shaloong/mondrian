@@ -1,14 +1,20 @@
-//! 文本输入框控件
+//! Text input widgets: single-line and multiline.
 //!
-//! 单行文本编辑。支持：
-//! - 光标移动、退格删除、Home/End
-//! - 鼠标拖拽选择（可超出控件边界）
-//! - Shift+Click / Shift+Arrow 选区扩展
-//! - Ctrl+A/C/X/V 剪贴板操作
-//! - Ctrl+Left/Right 按词跳转
-//! - IME 多字符输入
-//! - 基于 grapheme cluster 的光标（正确处理 emoji / 组合字符）
-//! - 时间驱动的闪烁光标（500ms 周期）
+//! ## Single-line editor (`TextInput`)
+//!
+//! Cursor navigation, backspace/delete, Home/End, mouse drag selection
+//! (extendable beyond widget bounds), Shift+Click/Shift+Arrow selection
+//! expansion, Ctrl+A/C/X/V clipboard, Ctrl+Left/Right word navigation,
+//! grapheme-safe cursor (emoji / combining marks), IME multi-codepoint
+//! input, timed blinking cursor (500 ms cycle).
+//!
+//! ## Multiline editor (`MultilineTextInput`)
+//!
+//! Line/column document model with grapheme-safe navigation, selection
+//! spanning multiple lines, vertical scrolling, IME preedit across line
+//! boundaries, clipboard cut/copy/paste, undo/redo, Home/End/PageUp/PageDown,
+//! word navigation, platform-aware keybindings (Win/Lin/Mac), tab behavior,
+//! read-only mode, double-click word selection, and drag auto-scroll.
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -29,6 +35,10 @@ mod edit;
 mod geometry;
 mod ime;
 mod multiline;
+mod multiline_commands;
+mod multiline_geometry;
+mod multiline_paint;
+mod multiline_widget;
 mod paint;
 
 use commands::{classify_key_command, TextInputKeyCommand};
@@ -40,6 +50,8 @@ use geometry::{
 };
 use ime::{classify_ime_key, request_disabled_ime, request_enabled_ime, ImeKeyDisposition};
 pub use multiline::{MultilineTextEditState, TextPosition, TextSelection};
+pub use multiline_commands::TabBehavior;
+pub use multiline_widget::MultilineTextInput;
 use paint::{paint_text_input, TextInputPaintSnapshot};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;

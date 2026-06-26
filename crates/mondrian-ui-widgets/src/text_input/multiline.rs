@@ -156,6 +156,12 @@ impl MultilineTextEditState {
         self.preferred_column = None;
     }
 
+    /// Drop the selection without moving the cursor. After this call,
+    /// [`selection`] returns `None`.
+    pub fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+    }
+
     /// Move one grapheme to the left, crossing line boundaries.
     pub fn move_left(&mut self, extend_selection: bool) {
         self.update_selection_anchor(extend_selection);
