@@ -1,565 +1,42 @@
-//! Dropdown Menu 控件
+//! Dropdown menu widget.
 //!
-//! 点击展开菜单列表，点击选项或外部区域关闭，派发 Action。
+//! Click-triggered popup list that dispatches an Action on selection.
+//! Shared paint, geometry, and model primitives are consumed by
+//! `ContextMenu`, `ColorPicker` mode dropdowns, and menu bars.
 
-use mondrian_core::Color;
+mod geometry;
+mod model;
+mod paint;
+
+pub(crate) use geometry::{anchored_menu_rect, rect_has_paintable_area};
+pub use model::{DropdownTriggerStyle, MenuItem, MenuItemKind};
+pub(crate) use model::{MenuRowPaint, MenuVisualTokens};
+pub(crate) use paint::{
+    paint_disabled_trigger, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
+    paint_menu_separator, paint_menu_trigger, paint_open_menu,
+};
+
+use std::cell::Cell;
+
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_theme::Theme;
-use std::cell::Cell;
 
-use crate::paint::{horizontal_stroke_rect, paint_focus_ring, paint_popover_shadow};
-use crate::text_metrics::measure_single_line;
-use crate::vector_icon::VectorIcon;
+use crate::paint::paint_focus_ring;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct MenuRowPaint {
-    pub enabled: bool,
-    pub active: bool,
-    pub hovered: bool,
-}
+use geometry::{
+    clamp_scroll_offset, item_at, item_rect, max_scroll_y, menu_rect, preferred_trigger_width,
+    scroll_to_visible, trigger_height, trigger_rect, visible_item_count,
+};
 
-const MENU_MEASURE_FONT_SIZE: f32 = 13.0;
-const MENU_MIN_WIDTH: f32 = 160.0;
-const MENU_TRIGGER_HEIGHT: f32 = 28.0;
-const MENU_BAR_TRIGGER_HEIGHT: f32 = 22.0;
-const MENU_TRIGGER_PADDING_X: f32 = 8.0;
-const MENU_ARROW_SPACE: f32 = 24.0;
-const MENU_POPUP_PADDING: f32 = 6.0;
-const MENU_ROW_PADDING_X: f32 = 10.0;
-const MENU_ROW_ICON_SIZE: f32 = 15.0;
-const MENU_ROW_ICON_GAP: f32 = 8.0;
-const MENU_ROW_SHORTCUT_GAP: f32 = 24.0;
-const MENU_SCROLLBAR_SPACE: f32 = 8.0;
-const MENU_VIEWPORT_MARGIN: f32 = 4.0;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct MenuVisualTokens {
-    filled_trigger_radius: f32,
-    menu_bar_trigger_radius: f32,
-    filled_trigger_padding_x: f32,
-    menu_bar_trigger_padding_x: f32,
-    menu_bar_font_size: f32,
-    popup_radius: f32,
-    popup_border_inset: f32,
-    row_radius: f32,
-    row_font_size: f32,
-    row_hover_alpha: f32,
-    row_padding_x: f32,
-    row_icon_size: f32,
-    row_icon_gap: f32,
-    row_shortcut_gap: f32,
-    shortcut_font_size: f32,
-    separator_inset_x: f32,
-    separator_width: f32,
-    separator_alpha: f32,
-    scrollbar_right_inset: f32,
-    scrollbar_top_inset: f32,
-    scrollbar_width: f32,
-    scrollbar_min_thumb_height: f32,
-    arrow_right_inset: f32,
-    arrow_half_width: f32,
-    arrow_top_offset: f32,
-    arrow_bottom_offset: f32,
-    check_start_offset_x: f32,
-    check_width: f32,
-}
-
-impl MenuVisualTokens {
-    fn from_theme(theme: &Theme) -> Self {
-        let spacing = &theme.spacing;
-        Self {
-            filled_trigger_radius: spacing.radius_sm,
-            menu_bar_trigger_radius: spacing.radius_sm,
-            filled_trigger_padding_x: spacing.sm + spacing.border_emphasis,
-            menu_bar_trigger_padding_x: spacing.sm + spacing.border_standard,
-            menu_bar_font_size: theme.typography.button.font_size,
-            popup_radius: spacing.radius_lg.min(spacing.radius_md),
-            popup_border_inset: spacing.border_standard,
-            row_radius: spacing.radius_sm,
-            row_font_size: theme.typography.small.font_size,
-            row_hover_alpha: 0.72,
-            row_padding_x: spacing.md,
-            row_icon_size: spacing.icon_size + spacing.border_standard,
-            row_icon_gap: spacing.sm + spacing.border_emphasis,
-            row_shortcut_gap: spacing.icon_size + spacing.md,
-            shortcut_font_size: theme.typography.metadata.font_size,
-            separator_inset_x: spacing.sm,
-            separator_width: spacing.border_standard,
-            separator_alpha: 0.86,
-            scrollbar_right_inset: spacing.xs + spacing.border_standard,
-            scrollbar_top_inset: spacing.border_emphasis + spacing.border_standard,
-            scrollbar_width: spacing.border_emphasis + spacing.border_standard,
-            scrollbar_min_thumb_height: spacing.icon_size + spacing.border_emphasis,
-            arrow_right_inset: spacing.icon_size + spacing.border_emphasis,
-            arrow_half_width: spacing.xs,
-            arrow_top_offset: spacing.border_emphasis,
-            arrow_bottom_offset: spacing.border_emphasis + spacing.border_standard,
-            check_start_offset_x: spacing.border_standard,
-            check_width: spacing.md - spacing.border_standard * 0.5,
-        }
-    }
-
-    fn trigger_padding_x(self, style: DropdownTriggerStyle) -> f32 {
-        match style {
-            DropdownTriggerStyle::Filled => self.filled_trigger_padding_x,
-            DropdownTriggerStyle::MenuBar => self.menu_bar_trigger_padding_x,
-        }
-    }
-
-    fn trigger_radius(self, style: DropdownTriggerStyle) -> f32 {
-        match style {
-            DropdownTriggerStyle::Filled => self.filled_trigger_radius,
-            DropdownTriggerStyle::MenuBar => self.menu_bar_trigger_radius,
-        }
-    }
-}
-
-pub(crate) fn anchored_menu_rect(
-    anchor: Rect,
-    width: f32,
-    height: f32,
-    gap: f32,
-    viewport: Option<Rect>,
-) -> Rect {
-    let width = width.max(1.0);
-    let height = height.max(1.0);
-    let below = Rect::new(anchor.x, anchor.y + anchor.height + gap, width, height);
-    let Some(viewport) = viewport.filter(|rect| rect_has_paintable_area(*rect)) else {
-        return below;
-    };
-
-    let left = viewport.x + MENU_VIEWPORT_MARGIN;
-    let right = viewport.x + viewport.width - MENU_VIEWPORT_MARGIN;
-    let top = viewport.y + MENU_VIEWPORT_MARGIN;
-    let bottom = viewport.y + viewport.height - MENU_VIEWPORT_MARGIN;
-    let x = anchor.x.clamp(left, (right - width).max(left));
-    let below_y = anchor.y + anchor.height + gap;
-    let above_y = anchor.y - gap - height;
-    let space_below = bottom - below_y;
-    let space_above = above_y + height - top;
-    let mut y = if space_below < height && space_above > space_below {
-        above_y
-    } else {
-        below_y
-    };
-    y = y.clamp(top, (bottom - height).max(top));
-    Rect::new(x, y, width, height)
-}
-
-pub(crate) fn rect_has_paintable_area(rect: Rect) -> bool {
-    rect.x.is_finite()
-        && rect.y.is_finite()
-        && rect.width.is_finite()
-        && rect.height.is_finite()
-        && rect.width > 0.0
-        && rect.height > 0.0
-}
-
-/// Visual treatment for a dropdown trigger.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DropdownTriggerStyle {
-    /// Filled rounded rectangle suitable for form and toolbar dropdowns.
-    Filled,
-    /// Lightweight transparent trigger suitable for native-style menu bars.
-    MenuBar,
-}
-
-pub(crate) fn paint_menu_trigger(
-    ctx: &mut PaintContext,
-    rect: Rect,
-    label: &str,
-    open: bool,
-    style: DropdownTriggerStyle,
-) {
-    let tokens = &ctx.theme.colors;
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    match style {
-        DropdownTriggerStyle::Filled => {
-            let fill = if open {
-                tokens.surface_2
-            } else {
-                tokens.surface
-            };
-            ctx.encoder.draw_rect(rect, fill, visual.trigger_radius(style));
-            paint_menu_trigger_label(ctx, rect, label, tokens.foreground, true, style);
-            paint_menu_arrow(ctx, rect);
-        }
-        DropdownTriggerStyle::MenuBar => {
-            if open {
-                ctx.encoder.draw_rect(rect, tokens.surface_2, visual.trigger_radius(style));
-            }
-            paint_menu_trigger_label(ctx, rect, label, tokens.text_secondary, false, style);
-        }
-    }
-}
-
-pub(crate) fn paint_menu_trigger_label(
-    ctx: &mut PaintContext,
-    rect: Rect,
-    label: &str,
-    color: Color,
-    reserve_arrow: bool,
-    style: DropdownTriggerStyle,
-) {
-    if label.is_empty() {
-        return;
-    }
-    let reserved_right = if reserve_arrow { MENU_ARROW_SPACE } else { 0.0 };
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    let padding_x = visual.trigger_padding_x(style);
-    let text_width = rect.width - padding_x * 2.0 - reserved_right;
-    if text_width <= 0.0 {
-        return;
-    }
-    let clip = Rect::new(rect.x + padding_x, rect.y, text_width, rect.height);
-    ctx.push_clip(clip);
-    let font_size = trigger_font_size(ctx, style);
-    ctx.encoder.draw_text(
-        label,
-        font_size,
-        Point::new(rect.x + padding_x, trigger_text_y(rect, font_size, style)),
-        color,
-    );
-    ctx.pop_clip();
-}
-
-fn trigger_padding_x(style: DropdownTriggerStyle) -> f32 {
-    match style {
-        DropdownTriggerStyle::Filled => MENU_TRIGGER_PADDING_X,
-        DropdownTriggerStyle::MenuBar => 7.0,
-    }
-}
-
-fn trigger_font_size(ctx: &PaintContext, style: DropdownTriggerStyle) -> f32 {
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    match style {
-        DropdownTriggerStyle::Filled => ctx.theme.typography.body.font_size,
-        DropdownTriggerStyle::MenuBar => visual.menu_bar_font_size,
-    }
-}
-
-fn trigger_text_y(rect: Rect, font_size: f32, style: DropdownTriggerStyle) -> f32 {
-    match style {
-        DropdownTriggerStyle::Filled => rect.y + 5.0,
-        DropdownTriggerStyle::MenuBar => rect.y + ((rect.height - font_size) * 0.5).max(0.0) - 0.5,
-    }
-}
-
-pub(crate) fn paint_menu_popup_chrome(ctx: &mut PaintContext, rect: Rect) {
-    let tokens = &ctx.theme.colors;
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    let radius = visual.popup_radius;
-    paint_popover_shadow(ctx, rect, radius);
-    ctx.encoder.draw_rect(rect, tokens.border_strong, radius);
-    ctx.encoder.draw_rect(
-        rect.inset(visual.popup_border_inset, visual.popup_border_inset),
-        tokens.popover,
-        (radius - visual.popup_border_inset).max(0.0),
-    );
-}
-
-pub(crate) fn paint_menu_row(
-    ctx: &mut PaintContext,
-    rect: Rect,
-    label: &str,
-    shortcut: Option<&str>,
-    icon: Option<&VectorIcon>,
-    reserve_icon_lane: bool,
-    state: MenuRowPaint,
-) {
-    let tokens = &ctx.theme.colors;
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    let font_size = visual.row_font_size;
-    let fill = if state.hovered && state.enabled {
-        let mut hover = tokens.surface_2;
-        hover.a *= visual.row_hover_alpha;
-        hover
-    } else {
-        tokens.popover
-    };
-    ctx.encoder.draw_rect(rect, fill, visual.row_radius);
-    let text_color = if state.enabled {
-        if state.hovered {
-            tokens.foreground
-        } else {
-            tokens.popover_foreground
-        }
-    } else {
-        tokens.text_disabled
-    };
-    if reserve_icon_lane {
-        if state.active {
-            let check_color = if state.enabled {
-                tokens.primary
-            } else {
-                tokens.text_disabled
-            };
-            paint_menu_checkmark(ctx, rect, check_color);
-        } else if let Some(icon) = icon {
-            let icon_size = visual.row_icon_size.min(rect.height).max(1.0);
-            let icon_rect = Rect::new(
-                rect.x + visual.row_padding_x,
-                rect.y + (rect.height - icon_size).max(0.0) * 0.5,
-                icon_size,
-                icon_size,
-            );
-            icon.paint(ctx, icon_rect, text_color);
-        }
-    }
-
-    let icon_lane_width = if reserve_icon_lane {
-        visual.row_icon_size + visual.row_icon_gap
-    } else {
-        0.0
-    };
-    let text_x = rect.x + visual.row_padding_x + icon_lane_width;
-    let shortcut_width = shortcut
-        .filter(|shortcut| !shortcut.is_empty())
-        .map(|shortcut| measure_single_line(shortcut, font_size).0)
-        .unwrap_or(0.0);
-    let shortcut_x = rect.x + rect.width - visual.row_padding_x - shortcut_width;
-    let text_right = if shortcut_width > 0.0 {
-        (shortcut_x - visual.row_shortcut_gap).max(text_x)
-    } else {
-        rect.x + rect.width - visual.row_padding_x
-    };
-    let text_clip = Rect::new(text_x, rect.y, (text_right - text_x).max(0.0), rect.height);
-    if text_clip.width > 0.0 {
-        ctx.push_clip(text_clip);
-        ctx.encoder.draw_text(
-            label,
-            font_size,
-            Point::new(text_x, menu_row_text_y(rect, font_size)),
-            text_color,
-        );
-        ctx.pop_clip();
-    }
-    if let Some(shortcut) = shortcut.filter(|shortcut| !shortcut.is_empty()) {
-        let shortcut_clip = Rect::new(
-            shortcut_x.max(text_x),
-            rect.y,
-            (rect.x + rect.width - visual.row_padding_x - shortcut_x).max(0.0),
-            rect.height,
-        );
-        if shortcut_clip.width > 0.0 {
-            ctx.push_clip(shortcut_clip);
-            ctx.encoder.draw_text(
-                shortcut,
-                visual.shortcut_font_size,
-                Point::new(
-                    shortcut_clip.x,
-                    menu_row_text_y(rect, visual.shortcut_font_size),
-                ),
-                tokens.text_secondary,
-            );
-            ctx.pop_clip();
-        }
-    }
-}
-
-pub(crate) fn paint_menu_separator(ctx: &mut PaintContext, rect: Rect) {
-    let tokens = &ctx.theme.colors;
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    let line = horizontal_stroke_rect(
-        rect.y + rect.height * 0.5,
-        rect.x + visual.separator_inset_x,
-        rect.width - visual.separator_inset_x * 2.0,
-        visual.separator_width,
-    );
-    let mut border = tokens.border;
-    border.a *= visual.separator_alpha;
-    ctx.encoder.draw_rect(line, border, 0.0);
-}
-
-pub(crate) fn paint_menu_scrollbar(
-    ctx: &mut PaintContext,
-    menu_rect: Rect,
-    visible_content_height: f32,
-    content_height: f32,
-    scroll_offset: f32,
-) {
-    let max_scroll_y = (content_height - visible_content_height).max(0.0);
-    if max_scroll_y <= 0.0 || content_height <= 0.0 {
-        return;
-    }
-    let tokens = &ctx.theme.colors;
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    let track = Rect::new(
-        menu_rect.x + menu_rect.width - visual.scrollbar_right_inset,
-        menu_rect.y + visual.scrollbar_top_inset,
-        visual.scrollbar_width,
-        (menu_rect.height - visual.scrollbar_top_inset * 2.0).max(1.0),
-    );
-    let thumb_h = (track.height * (visible_content_height / content_height))
-        .max(visual.scrollbar_min_thumb_height)
-        .min(track.height);
-    let thumb_range = (track.height - thumb_h).max(0.0);
-    let thumb_y = track.y + (scroll_offset / max_scroll_y) * thumb_range;
-    ctx.encoder.draw_rect(
-        Rect::new(track.x, thumb_y, track.width, thumb_h),
-        tokens.muted_foreground,
-        ctx.theme.spacing.radius_full,
-    );
-}
-
-fn paint_menu_arrow(ctx: &mut PaintContext, rect: Rect) {
-    let tokens = &ctx.theme.colors;
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    let arrow_x = rect.x + rect.width - visual.arrow_right_inset;
-    let arrow_y = rect.y + rect.height * 0.5;
-    ctx.encoder.draw_triangles(
-        &[
-            Point::new(
-                arrow_x - visual.arrow_half_width,
-                arrow_y - visual.arrow_top_offset,
-            ),
-            Point::new(
-                arrow_x + visual.arrow_half_width,
-                arrow_y - visual.arrow_top_offset,
-            ),
-            Point::new(arrow_x, arrow_y + visual.arrow_bottom_offset),
-        ],
-        tokens.foreground,
-    );
-}
-
-fn menu_row_text_y(rect: Rect, font_size: f32) -> f32 {
-    rect.y + ((rect.height - font_size * 1.3) * 0.5).max(0.0)
-}
-
-fn paint_menu_checkmark(ctx: &mut PaintContext, rect: Rect, color: Color) {
-    let visual = MenuVisualTokens::from_theme(ctx.theme);
-    let x = rect.x + visual.row_padding_x + visual.check_start_offset_x;
-    let y = rect.y + rect.height * 0.5;
-    ctx.encoder.draw_line(
-        Point::new(x, y + 0.5),
-        Point::new(x + 3.2, y + 3.8),
-        1.5,
-        color,
-    );
-    ctx.encoder.draw_line(
-        Point::new(x + 3.0, y + 3.8),
-        Point::new(x + visual.check_width, y - 4.0),
-        1.5,
-        color,
-    );
-}
-
-/// Menu row behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuItemKind {
-    /// Clickable menu row that may dispatch an action when enabled.
-    Action,
-    /// Visual divider row that never dispatches an action.
-    Separator,
-}
-
-/// 菜单选项
-#[derive(Debug, Clone)]
-pub struct MenuItem {
-    pub label: String,
-    pub action: Action,
-    /// Component-local command emitted by popups that should not dispatch an
-    /// editor action.
-    pub local_command: Option<String>,
-    pub enabled: bool,
-    pub kind: MenuItemKind,
-    pub icon: Option<VectorIcon>,
-    pub shortcut: Option<String>,
-    pub checked: bool,
-}
-
-impl MenuItem {
-    pub fn new(label: impl Into<String>, action: Action) -> Self {
-        Self {
-            label: label.into(),
-            action,
-            local_command: None,
-            enabled: true,
-            kind: MenuItemKind::Action,
-            icon: None,
-            shortcut: None,
-            checked: false,
-        }
-    }
-
-    /// Create a menu row that reports a component-local command instead of
-    /// dispatching an app action.
-    pub fn local(label: impl Into<String>, command: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            action: Action::NoOp,
-            local_command: Some(command.into()),
-            enabled: true,
-            kind: MenuItemKind::Action,
-            icon: None,
-            shortcut: None,
-            checked: false,
-        }
-    }
-
-    /// Create a visual divider row.
-    pub fn separator() -> Self {
-        Self {
-            label: String::new(),
-            action: Action::DeselectAll,
-            local_command: None,
-            enabled: false,
-            kind: MenuItemKind::Separator,
-            icon: None,
-            shortcut: None,
-            checked: false,
-        }
-    }
-
-    /// Paint a vector icon before this item label.
-    pub fn with_icon(mut self, icon: VectorIcon) -> Self {
-        self.icon = Some(icon);
-        self
-    }
-
-    /// Paint a right-aligned keyboard shortcut hint for this item.
-    pub fn with_shortcut(mut self, shortcut: impl Into<String>) -> Self {
-        self.shortcut = Some(shortcut.into());
-        self
-    }
-
-    /// Mark this item as representing the current checked/selected state.
-    pub fn checked(mut self, checked: bool) -> Self {
-        self.checked = checked;
-        self
-    }
-
-    pub fn disabled(mut self) -> Self {
-        self.enabled = false;
-        self
-    }
-
-    pub fn is_separator(&self) -> bool {
-        self.kind == MenuItemKind::Separator
-    }
-
-    pub fn is_activatable(&self) -> bool {
-        self.enabled && !self.is_separator()
-    }
-}
-
-pub(crate) fn menu_item_text_width(item: &MenuItem) -> f32 {
-    let label_width = measure_single_line(&item.label, MENU_MEASURE_FONT_SIZE).0;
-    let Some(shortcut) = item.shortcut.as_deref().filter(|shortcut| !shortcut.is_empty()) else {
-        return label_width;
-    };
-    label_width + MENU_ROW_SHORTCUT_GAP + measure_single_line(shortcut, MENU_MEASURE_FONT_SIZE).0
-}
-
-/// Dropdown 菜单
+/// Dropdown menu widget.
 ///
-/// 点击按钮展开选项列表，选中后关闭。
+/// Click the trigger to open a popup list. Select an item to dispatch its
+/// [`Action`] and close. Open-state selects the first activatable item;
+/// keyboard navigation skips disabled items and separators.
 pub struct Dropdown {
     id: WidgetId,
     #[allow(dead_code)]
@@ -656,7 +133,7 @@ impl Dropdown {
 
     /// Whether a point is inside the closed trigger chrome.
     pub fn trigger_contains(&self, point: Point) -> bool {
-        self.trigger_rect().contains(point)
+        trigger_rect(self.bounds, self.trigger_style).contains(point)
     }
 
     /// Close the popup menu if it is open.
@@ -678,127 +155,77 @@ impl Dropdown {
     /// Limit how many rows are visible before the open menu scrolls.
     pub fn with_max_visible_items(mut self, max_visible_items: usize) -> Self {
         self.max_visible_items = max_visible_items.max(1);
-        self.clamp_scroll_offset();
+        self.scroll_offset = clamp_scroll_offset(
+            self.scroll_offset,
+            max_scroll_y(
+                self.items.len(),
+                visible_item_count(self.items.len(), self.max_visible_items),
+                self.item_height,
+            ),
+        );
         self
     }
 
-    fn trigger_rect(&self) -> Rect {
-        let height = self.trigger_height().min(self.bounds.height.max(0.0));
-        Rect::new(
-            self.bounds.x,
-            self.bounds.y + ((self.bounds.height - height) * 0.5).max(0.0),
-            self.bounds.width,
-            height,
-        )
-    }
+    // ── Internal helpers ────────────────────────────────────────────────────────
 
-    fn trigger_height(&self) -> f32 {
-        match self.trigger_style {
-            DropdownTriggerStyle::Filled => MENU_TRIGGER_HEIGHT,
-            DropdownTriggerStyle::MenuBar => MENU_BAR_TRIGGER_HEIGHT,
-        }
+    fn trigger_rect(&self) -> Rect {
+        trigger_rect(self.bounds, self.trigger_style)
     }
 
     fn preferred_trigger_width(&self) -> f32 {
-        let (label_width, _) = measure_single_line(&self.label, MENU_MEASURE_FONT_SIZE);
-        match self.trigger_style {
-            DropdownTriggerStyle::Filled => {
-                MENU_MIN_WIDTH.max(label_width + MENU_TRIGGER_PADDING_X * 2.0 + MENU_ARROW_SPACE)
-            }
-            DropdownTriggerStyle::MenuBar => {
-                (label_width + trigger_padding_x(self.trigger_style) * 2.0).max(28.0)
-            }
-        }
-    }
-
-    fn preferred_menu_width(&self) -> f32 {
-        let longest_item = self
-            .items
-            .iter()
-            .filter(|item| !item.is_separator())
-            .map(menu_item_text_width)
-            .fold(0.0, f32::max);
-        let scrollbar = if self.items.len() > self.max_visible_items {
-            MENU_SCROLLBAR_SPACE
-        } else {
-            0.0
-        };
-        self.preferred_trigger_width()
-            .max(MENU_MIN_WIDTH)
-            .max(longest_item + MENU_ROW_PADDING_X * 2.0 + self.icon_lane_width() + scrollbar)
-    }
-
-    fn icon_lane_width(&self) -> f32 {
-        if self.items.iter().any(|item| item.icon.is_some() || item.checked) {
-            MENU_ROW_ICON_SIZE + MENU_ROW_ICON_GAP
-        } else {
-            0.0
-        }
-    }
-
-    fn menu_width(&self) -> f32 {
-        self.bounds.width.max(self.preferred_menu_width())
+        preferred_trigger_width(&self.label, self.trigger_style)
     }
 
     fn visible_item_count(&self) -> usize {
-        self.items.len().min(self.max_visible_items.max(1))
-    }
-
-    fn visible_content_height(&self) -> f32 {
-        self.visible_item_count() as f32 * self.item_height
-    }
-
-    fn content_height(&self) -> f32 {
-        self.items.len() as f32 * self.item_height
+        visible_item_count(self.items.len(), self.max_visible_items)
     }
 
     fn max_scroll_y(&self) -> f32 {
-        (self.content_height() - self.visible_content_height()).max(0.0)
-    }
-
-    fn clamp_scroll_offset(&mut self) {
-        self.scroll_offset = self.scroll_offset.clamp(0.0, self.max_scroll_y());
-    }
-
-    fn menu_rect(&self) -> Rect {
-        anchored_menu_rect(
-            self.trigger_rect(),
-            self.menu_width(),
-            self.visible_content_height() + MENU_POPUP_PADDING * 2.0,
-            2.0,
-            self.overlay_viewport.get(),
-        )
-    }
-
-    fn item_rect(&self, index: usize) -> Rect {
-        let menu = self.menu_rect();
-        Rect::new(
-            menu.x + MENU_POPUP_PADDING,
-            menu.y + MENU_POPUP_PADDING + index as f32 * self.item_height - self.scroll_offset,
-            (menu.width - MENU_POPUP_PADDING * 2.0).max(1.0),
+        max_scroll_y(
+            self.items.len(),
+            self.visible_item_count(),
             self.item_height,
         )
     }
 
+    fn clamp_scroll_offset(&mut self) {
+        self.scroll_offset = clamp_scroll_offset(self.scroll_offset, self.max_scroll_y());
+    }
+
+    fn menu_rect(&self) -> Rect {
+        menu_rect(
+            self.bounds,
+            &self.items,
+            &self.label,
+            self.trigger_style,
+            self.max_visible_items,
+            self.item_height,
+            self.overlay_viewport.get(),
+        )
+    }
+
+    #[allow(dead_code)]
+    fn item_rect(&self, index: usize) -> Rect {
+        item_rect(
+            self.menu_rect(),
+            index,
+            self.item_height,
+            self.scroll_offset,
+        )
+    }
+
     fn item_at(&self, position: Point) -> Option<usize> {
-        if !self.menu_rect().contains(position) {
-            return None;
-        }
-        let relative_y =
-            position.y - (self.menu_rect().y + MENU_POPUP_PADDING) + self.scroll_offset;
-        if relative_y < 0.0 {
-            return None;
-        }
-        let index = (relative_y / self.item_height).floor() as usize;
-        if index < self.items.len() && self.item_rect(index).contains(position) {
-            Some(index)
-        } else {
-            None
-        }
+        item_at(
+            self.menu_rect(),
+            self.items.len(),
+            self.item_height,
+            self.scroll_offset,
+            position,
+        )
     }
 
     fn first_activatable_index(&self) -> Option<usize> {
-        self.items.iter().position(MenuItem::is_activatable)
+        self.items.iter().position(|item| item.is_activatable())
     }
 
     fn next_activatable_index(&self, direction: i32) -> Option<usize> {
@@ -824,19 +251,13 @@ impl Dropdown {
     }
 
     fn ensure_hover_visible(&mut self) {
-        let Some(index) = self.hovered_index else {
-            return;
-        };
-        let row_top = index as f32 * self.item_height;
-        let row_bottom = row_top + self.item_height;
-        let view_top = self.scroll_offset;
-        let view_bottom = self.scroll_offset + self.visible_content_height();
-        if row_top < view_top {
-            self.scroll_offset = row_top;
-        } else if row_bottom > view_bottom {
-            self.scroll_offset = row_bottom - self.visible_content_height();
-        }
-        self.clamp_scroll_offset();
+        self.scroll_offset = scroll_to_visible(
+            self.hovered_index,
+            self.scroll_offset,
+            self.visible_item_count(),
+            self.items.len(),
+            self.item_height,
+        );
     }
 
     fn activate_hovered(&mut self, ctx: &mut EventContext) -> bool {
@@ -876,58 +297,6 @@ impl Dropdown {
         self.suppress_next_release = false;
         ctx.release_pointer_capture(self.id);
     }
-
-    fn paint_open_menu(&self, ctx: &mut PaintContext) {
-        if !self.open {
-            return;
-        }
-
-        if !rect_has_paintable_area(ctx.clip_rect) {
-            self.overlay_viewport.set(None);
-            return;
-        }
-        self.overlay_viewport.set(Some(ctx.clip_rect));
-        let menu_bg = self.menu_rect();
-
-        paint_menu_popup_chrome(ctx, menu_bg);
-        ctx.push_clip(menu_bg.inset(1.0, 1.0));
-        let reserve_icon_lane = self.icon_lane_width() > 0.0;
-
-        for (i, item) in self.items.iter().enumerate() {
-            let item_rect = self.item_rect(i);
-            if !item_rect.intersects(&menu_bg) {
-                continue;
-            }
-
-            if item.is_separator() {
-                paint_menu_separator(ctx, item_rect);
-                continue;
-            }
-
-            paint_menu_row(
-                ctx,
-                item_rect,
-                &item.label,
-                item.shortcut.as_deref(),
-                item.icon.as_ref(),
-                reserve_icon_lane,
-                MenuRowPaint {
-                    enabled: item.enabled,
-                    active: item.checked,
-                    hovered: self.hovered_index == Some(i),
-                },
-            );
-        }
-        ctx.pop_clip();
-
-        paint_menu_scrollbar(
-            ctx,
-            menu_bg,
-            self.visible_content_height(),
-            self.content_height(),
-            self.scroll_offset,
-        );
-    }
 }
 
 impl Widget for Dropdown {
@@ -938,7 +307,7 @@ impl Widget for Dropdown {
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         constraint.constrain(Size::new(
             self.preferred_trigger_width(),
-            self.trigger_height(),
+            trigger_height(self.trigger_style),
         ))
     }
 
@@ -1082,22 +451,7 @@ impl Widget for Dropdown {
                 self.trigger_style,
             );
         } else {
-            let rect = self.trigger_rect();
-            let tokens = &ctx.theme.colors;
-            let visual = MenuVisualTokens::from_theme(ctx.theme);
-            ctx.encoder.draw_rect(
-                rect,
-                tokens.muted,
-                visual.trigger_radius(self.trigger_style),
-            );
-            paint_menu_trigger_label(
-                ctx,
-                rect,
-                &self.label,
-                tokens.muted_foreground,
-                false,
-                self.trigger_style,
-            );
+            paint_disabled_trigger(ctx, &self.label, self.bounds, self.trigger_style);
         }
         if self.focus_visible && !self.open {
             let visual = MenuVisualTokens::from_theme(ctx.theme);
@@ -1110,7 +464,19 @@ impl Widget for Dropdown {
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
-        self.paint_open_menu(ctx);
+        paint_open_menu(
+            ctx,
+            self.bounds,
+            &self.items,
+            &self.label,
+            self.trigger_style,
+            self.max_visible_items,
+            self.item_height,
+            self.hovered_index,
+            self.scroll_offset,
+            &self.overlay_viewport,
+            self.open,
+        );
     }
 
     fn overlay_hit_test(&self, _point: Point) -> bool {
@@ -1144,6 +510,9 @@ impl Widget for Dropdown {
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::VectorIcon;
+    use glam;
+    use mondrian_core::Color;
     use mondrian_editor_state::state::PanelKind;
     use mondrian_platform::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
@@ -1825,10 +1194,10 @@ mod tests {
         let menu_bar_size = menu_bar_dropdown.measure(LayoutConstraint::LOOSE);
         let filled_size = filled_dropdown.measure(LayoutConstraint::LOOSE);
 
-        assert_eq!(menu_bar_size.height, MENU_BAR_TRIGGER_HEIGHT);
+        assert_eq!(menu_bar_size.height, model::MENU_BAR_TRIGGER_HEIGHT);
         assert!(menu_bar_size.width < 48.0);
-        assert_eq!(filled_size.height, MENU_TRIGGER_HEIGHT);
-        assert!(filled_size.width >= MENU_MIN_WIDTH);
+        assert_eq!(filled_size.height, model::MENU_TRIGGER_HEIGHT);
+        assert!(filled_size.width >= model::MENU_MIN_WIDTH);
     }
 
     #[test]
