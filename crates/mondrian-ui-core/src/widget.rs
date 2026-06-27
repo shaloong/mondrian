@@ -55,6 +55,8 @@ pub enum CursorRequest {
     Grabbing,
     EwResize,
     NsResize,
+    /// Text input I-beam cursor.
+    Text,
 }
 
 /// Eyedropper mode requested by a widget (for screen color sampling).

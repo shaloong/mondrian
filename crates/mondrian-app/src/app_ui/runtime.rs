@@ -586,6 +586,7 @@ fn winit_cursor_icon_for_request(cursor: CursorRequest) -> winit::window::Cursor
         CursorRequest::Grabbing => winit::window::CursorIcon::Grabbing,
         CursorRequest::EwResize => winit::window::CursorIcon::EwResize,
         CursorRequest::NsResize => winit::window::CursorIcon::NsResize,
+        CursorRequest::Text => winit::window::CursorIcon::Text,
     }
 }
 

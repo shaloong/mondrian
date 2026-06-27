@@ -7,8 +7,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
-    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
-    PaintContext,
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, CursorRequest,
+    EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
@@ -1027,6 +1027,9 @@ impl Widget for MultilineTextInput {
 
             // ── Mouse move (drag select + auto-scroll) ──
             UiEvent::MouseMove { position, .. } => {
+                if self.bounds.contains(*position) && self.enabled {
+                    ctx.set_cursor(CursorRequest::Text);
+                }
                 if !self.mouse_down {
                     return EventResult::Ignored;
                 }

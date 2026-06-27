@@ -23,8 +23,8 @@ use std::time::Instant;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
-    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
-    PaintContext,
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, CursorRequest,
+    EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_text::TextRenderer;
@@ -534,6 +534,9 @@ impl Widget for TextInput {
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
+                if self.bounds.contains(*position) && self.enabled {
+                    ctx.set_cursor(CursorRequest::Text);
+                }
                 if self.mouse_down {
                     if self.edit.selection_start.is_none() {
                         self.edit.selection_start = Some(self.edit.cursor);
