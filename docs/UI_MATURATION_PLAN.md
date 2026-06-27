@@ -22,9 +22,10 @@ custom UI line can be considered production-grade.
 
 2. Widget Module depth:
     - [ ] Continue splitting large widget Modules where event routing and paint still live in
-          the same file as state/model/layout. Remaining priority order: `viewer_surface.rs`,
-          `timeline_view.rs`, and `asset_grid.rs`.
-          (`text_input.rs`, `menu.rs`, `scroll.rs`, and `color_picker.rs` already split.)
+          the same file as state/model/layout. Remaining priority order: `timeline_view.rs`,
+          and `asset_grid.rs`.
+          (`text_input.rs`, `menu.rs`, `scroll.rs`, `color_picker.rs`, and `viewer_surface.rs`
+          already split.)
     - [x] For each split, keep the external Widget Interface stable and put the test surface on
           model/layout/interaction contracts rather than private paint details.
     - [ ] Delete shallow pass-through helpers that fail the deletion test, especially where they

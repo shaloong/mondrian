@@ -6,6 +6,7 @@
 //! pulling timeline command logic into the widget layer.
 
 mod model;
+mod paint;
 
 use mondrian_core::types::{AssetId, Rational};
 use mondrian_core::Color;
@@ -3634,23 +3635,11 @@ impl TimelineView {
 }
 
 fn navigator_body_color(colors: &ColorTokens, hovered: bool, active: bool) -> Color {
-    if active {
-        colors.timeline_navigator_body_active
-    } else if hovered {
-        colors.timeline_navigator_body_hover
-    } else {
-        colors.timeline_navigator_body
-    }
+    paint::navigator_body_color(colors, hovered, active)
 }
 
 fn navigator_handle_color(colors: &ColorTokens, hovered: bool, active: bool) -> Color {
-    if active {
-        colors.timeline_navigator_handle_active
-    } else if hovered {
-        colors.timeline_navigator_handle_hover
-    } else {
-        colors.timeline_navigator_handle
-    }
+    paint::navigator_handle_color(colors, hovered, active)
 }
 
 impl Widget for TimelineView {
