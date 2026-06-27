@@ -330,7 +330,7 @@ impl DockPanel {
         position: Point,
         ctx: &mut EventContext,
     ) -> EventResult {
-        if !self.content_bounds().contains(position) {
+        if !self.bounds.contains(position) {
             return EventResult::Ignored;
         }
         if !self.can_accept_panel_drop(dragged) {
