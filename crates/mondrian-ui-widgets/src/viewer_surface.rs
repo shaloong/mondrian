@@ -701,7 +701,7 @@ impl Widget for ViewerSurface {
         ctx.encoder.draw_rect(canvas, colors.canvas, 0.0);
         if self.enabled {
             if let Some(frame) = &self.frame_image {
-                paint_checkerboard(ctx, canvas);
+                paint::paint_checkerboard(ctx, canvas);
                 ctx.encoder.draw_raster_image(
                     &frame.key,
                     canvas,
@@ -733,7 +733,7 @@ impl Widget for ViewerSurface {
                 );
             }
         }
-        paint_safe_guides(ctx, canvas, self.enabled);
+        paint::paint_safe_guides(ctx, canvas, self.enabled);
         ctx.pop_clip();
         ctx.pop_clip();
 
@@ -862,10 +862,10 @@ impl ViewerSurface {
         }
         match control {
             ViewerControl::MarkIn => {
-                paint_mark_in_icon(ctx, rect, icon);
+                paint::paint_mark_in_icon(ctx, rect, icon);
             }
             ViewerControl::MarkOut => {
-                paint_mark_out_icon(ctx, rect, icon);
+                paint::paint_mark_out_icon(ctx, rect, icon);
             }
             ViewerControl::JumpStart => {
                 ctx.encoder.draw_rect(
@@ -873,10 +873,10 @@ impl ViewerSurface {
                     color_with_alpha(icon, 0.9),
                     1.0,
                 );
-                paint_left_triangle(ctx, rect, 10.0, icon);
+                paint::paint_left_triangle(ctx, rect, 10.0, icon);
             }
             ViewerControl::StepBack => {
-                paint_left_triangle(ctx, rect, 8.0, icon);
+                paint::paint_left_triangle(ctx, rect, 8.0, icon);
             }
             ViewerControl::PlayPause if self.playing => {
                 ctx.encoder
@@ -895,10 +895,10 @@ impl ViewerSurface {
                 );
             }
             ViewerControl::StepForward => {
-                paint_right_triangle(ctx, rect, 8.0, icon);
+                paint::paint_right_triangle(ctx, rect, 8.0, icon);
             }
             ViewerControl::JumpEnd => {
-                paint_right_triangle(ctx, rect, 8.0, icon);
+                paint::paint_right_triangle(ctx, rect, 8.0, icon);
                 ctx.encoder.draw_rect(
                     Rect::new(rect.x + 17.0, rect.y + 7.0, 2.0, 12.0),
                     color_with_alpha(icon, 0.9),
@@ -1119,32 +1119,8 @@ fn default_viewer_control_action(control: ViewerControl) -> Action {
     }
 }
 
-fn paint_left_triangle(ctx: &mut PaintContext, rect: Rect, left: f32, color: Color) {
-    paint::paint_left_triangle(ctx, rect, left, color);
-}
-
-fn paint_right_triangle(ctx: &mut PaintContext, rect: Rect, left: f32, color: Color) {
-    paint::paint_right_triangle(ctx, rect, left, color);
-}
-
-fn paint_checkerboard(ctx: &mut PaintContext, canvas: Rect) {
-    paint::paint_checkerboard(ctx, canvas);
-}
-
-fn paint_mark_in_icon(ctx: &mut PaintContext, rect: Rect, color: Color) {
-    paint::paint_mark_in_icon(ctx, rect, color);
-}
-
-fn paint_mark_out_icon(ctx: &mut PaintContext, rect: Rect, color: Color) {
-    paint::paint_mark_out_icon(ctx, rect, color);
-}
-
 fn status_badge_colors(surface: &ViewerSurface, ctx: &PaintContext) -> (Color, Color) {
     paint::status_badge_colors(surface.enabled, surface.status_tone, ctx)
-}
-
-fn paint_safe_guides(ctx: &mut PaintContext, canvas: Rect, enabled: bool) {
-    paint::paint_safe_guides(ctx, canvas, enabled);
 }
 
 #[cfg(test)]

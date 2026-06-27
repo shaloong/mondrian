@@ -19,7 +19,7 @@ const WHEEL_EDGE_OVERDRAW: f32 = 1.5;
 pub(super) fn paint_panel_chrome(ctx: &mut PaintContext, bounds: Rect, eyedropper_active: bool) {
     let tokens = &ctx.theme.colors;
     let spacing = &ctx.theme.spacing;
-    paint_shadow(ctx, bounds, spacing.radius_lg);
+    crate::paint::paint_shadow(ctx, bounds, spacing.radius_lg);
     ctx.encoder.draw_rect(bounds, soft_border(tokens.border), spacing.radius_lg);
     ctx.encoder.draw_rect(
         bounds.inset(1.0, 1.0),
@@ -328,10 +328,4 @@ pub(super) fn paint_trigger(
             spacing.radius_sm,
         );
     }
-}
-
-// ── Shadow helper (re-exported for tests) ─────────────────────────────────────────
-
-fn paint_shadow(ctx: &mut PaintContext, bounds: Rect, corner_radius: f32) {
-    crate::paint::paint_shadow(ctx, bounds, corner_radius);
 }
