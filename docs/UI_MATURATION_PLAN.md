@@ -51,10 +51,10 @@ custom UI line can be considered production-grade.
          rounded/circular shapes.
 
 5. Event/platform release checks:
-   - [ ] Run keyboard-only traversal scripts across composite widgets and editor-scale widgets.
-   - [ ] Verify unmatched shortcut pass-through, IME switching chords, clipboard failures,
-         native file drag fallback diagnostics, cursor priority, overlay z-order, and pointer
-         capture release in one smoke matrix.
+    - [x] Run keyboard-only traversal scripts across composite widgets and editor-scale widgets.
+    - [x] Verify unmatched shortcut pass-through, IME switching chords, clipboard failures,
+          native file drag fallback diagnostics, cursor priority, overlay z-order, and pointer
+          capture release in one smoke matrix.
 
 6. Release-grade verification:
    - [ ] Run cross-backend/cross-GPU smoke tests and record the backend/device diagnostics.
