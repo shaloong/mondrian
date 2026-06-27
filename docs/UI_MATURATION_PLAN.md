@@ -43,9 +43,9 @@ custom UI line can be considered production-grade.
           component_extreme_tests).
 
 4. Renderer and primitive reliability hardening:
-   - [ ] Keep the offscreen primitive harness active for line/circle/triangle edge cases,
-         including subpixel positions, 45-degree thin lines, high-DPI scaling, clip nesting,
-         and zero/near-zero dimensions.
+    - [x] Keep the offscreen primitive harness active for line/circle/triangle edge cases,
+          including subpixel positions, 45-degree thin lines, high-DPI scaling, clip nesting,
+          and zero/near-zero dimensions.
    - [x] Add a policy for CPU rasterization versus GPU analytic rendering for vector
          primitives and icons, with tests that lock the chosen behavior for thin lines and
          rounded/circular shapes.
