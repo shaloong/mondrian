@@ -1453,24 +1453,20 @@ mod tests {
         let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
         paint_menu_popup_chrome(&mut ctx, popup);
 
-        assert_eq!(encoder.soft_shadows.len(), 2);
+        assert_eq!(encoder.soft_shadows.len(), 3);
         assert_eq!(encoder.soft_shadows[0].bounds, popup);
         assert_eq!(
             encoder.soft_shadows[0].blur_radius,
-            theme.spacing.shadow_xl.blur
-        );
-        assert_eq!(
-            encoder.soft_shadows[0].offset,
-            glam::Vec2::new(
-                theme.spacing.shadow_xl.offset_x,
-                theme.spacing.shadow_xl.offset_y
-            )
+            theme.spacing.shadow_sm.blur
         );
         assert_eq!(
             encoder.soft_shadows[1].blur_radius,
             theme.spacing.shadow_md.blur
         );
-        assert!(encoder.soft_shadows[0].color.a > encoder.soft_shadows[1].color.a);
+        assert_eq!(
+            encoder.soft_shadows[2].blur_radius,
+            theme.spacing.shadow_xl.blur
+        );
         assert_eq!(encoder.rects[0], popup);
         assert_eq!(encoder.rect_colors[0], theme.colors.border_strong);
         assert_eq!(

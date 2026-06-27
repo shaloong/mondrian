@@ -167,7 +167,8 @@ mod tests {
 
         assert!(fragment.contains("const RENDER_MODE_SOFT_SHADOW: u32 = 4u;"));
         assert!(fragment.contains("@location(5) @interpolate(flat) blur_radius_px: f32"));
-        assert!(fragment.contains("smoothstep(0.0, blur, outside)"));
+        assert!(fragment.contains("smoothstep(0.0, 1.0, t)"));
+        assert!(fragment.contains("let alpha = in.color.a * falloff * falloff * falloff;"));
     }
 
     #[test]

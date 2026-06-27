@@ -17,8 +17,10 @@ pub(crate) fn paint_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
 
 pub(crate) fn paint_popover_shadow(ctx: &mut PaintContext, bounds: Rect, radius: f32) {
     let spacing = &ctx.theme.spacing;
+    // Three-layer shadow stack: contact → mid → ambient
+    paint_shadow_token(ctx, bounds, &spacing.shadow_sm, 0.60, radius);
+    paint_shadow_token(ctx, bounds, &spacing.shadow_md, 0.55, radius);
     paint_shadow_token(ctx, bounds, &spacing.shadow_xl, 0.50, radius);
-    paint_shadow_token(ctx, bounds, &spacing.shadow_md, 0.32, radius);
 }
 
 fn paint_shadow_token(

@@ -63,9 +63,13 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
         let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
         let d = sd_rounded_box_px(in.tex_coord, in.rect_size, r);
         let blur = max(in.blur_radius_px, 0.001);
-        let outside = max(d, 0.0);
-        let falloff = 1.0 - smoothstep(0.0, blur, outside);
-        let alpha = in.color.a * falloff * falloff;
+        // d < 0 inside shadow_rect (includes spread zone), d > 0 outside
+        // Start fading from deep inside the shadow (d < 0) — the spread zone
+        // should already be partially transparent so no visible boundary forms
+        // at the caster edge. Cubic falloff for smooth transition.
+        let t = (d + blur * 0.5) / blur;
+        let falloff = 1.0 - smoothstep(0.0, 1.0, t);
+        let alpha = in.color.a * falloff * falloff * falloff;
         if alpha <= 0.001 { discard; }
         return vec4<f32>(in.color.rgb, alpha);
     }
