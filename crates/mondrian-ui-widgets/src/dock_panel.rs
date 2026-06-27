@@ -430,6 +430,19 @@ impl Widget for DockPanel {
         self.content.event(event, ctx)
     }
 
+    fn before_child_event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+        // Intercept PanelTab DragEnter before the tab bar steals it.
+        // Once dock_hover is set, subsequent DragOver/DragLeave flow
+        // through the normal event() path.
+        if matches!(
+            event,
+            UiEvent::DragEnter { payload: DragPayload::PanelTab(_), .. }
+        ) {
+            return EventResult::Handled;
+        }
+        EventResult::Ignored
+    }
+
     fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
         self.sync_active_tab();
         EventResult::Ignored
