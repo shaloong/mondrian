@@ -147,7 +147,7 @@ pub(crate) fn paint_menu_row(
     let text_x = rect.x + visual.row_padding_x + icon_lane_width;
     let shortcut_width = shortcut
         .filter(|shortcut| !shortcut.is_empty())
-        .map(|shortcut| measure_single_line(shortcut, font_size).0)
+        .map(|shortcut| measure_single_line(shortcut, visual.shortcut_font_size).0)
         .unwrap_or(0.0);
     let shortcut_x = rect.x + rect.width - visual.row_padding_x - shortcut_width;
     let text_right = if shortcut_width > 0.0 {

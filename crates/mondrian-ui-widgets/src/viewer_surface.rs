@@ -817,31 +817,27 @@ impl ViewerSurface {
         let colors = &ctx.theme.colors;
         let radius = ctx.theme.spacing.radius_sm;
         let rect = self.control_rect(control);
-        let pressed = self.pressed_control == Some(control);
         let hovered = self.hovered_control == Some(control);
         let active = control == ViewerControl::PlayPause && self.playing;
+        // Match timeline tool button style
         let bg = if !self.enabled {
-            color_with_alpha(colors.surface, 0.30)
-        } else if pressed {
-            color_with_alpha(colors.foreground, 0.11)
+            Color::TRANSPARENT
         } else if active {
-            color_with_alpha(colors.primary, 0.16)
+            color_with_alpha(colors.foreground, 0.085)
         } else if hovered {
-            color_with_alpha(colors.foreground, 0.07)
+            colors.surface_2
         } else {
-            Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+            Color::TRANSPARENT
         };
-        let icon = if self.enabled {
-            if hovered || active || control == ViewerControl::PlayPause {
-                colors.foreground
-            } else {
-                colors.text_secondary
-            }
+        let icon = if !self.enabled {
+            color_with_alpha(colors.muted_foreground, 0.44)
+        } else if active || hovered {
+            colors.foreground
         } else {
-            colors.text_disabled
+            colors.muted_foreground
         };
 
-        ctx.encoder.draw_rect(rect, bg, radius.max(7.0));
+        ctx.encoder.draw_rect(rect, bg, radius);
         let vector_icon = if control == ViewerControl::PlayPause && self.playing {
             self.playing_pause_icon.as_ref()
         } else if control == ViewerControl::PlayPause {
