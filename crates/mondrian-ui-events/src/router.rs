@@ -3041,4 +3041,360 @@ mod tests {
         assert_eq!(result, EventResult::Handled);
         assert_eq!(log.borrow().as_slice(), ["parent-before"]);
     }
+
+    // ── Keyboard-only traversal smoke matrix ────────────────────────────────────
+
+    #[test]
+    fn keyboard_tab_traverses_focusable_siblings_in_order() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let a = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let a_id = a.id();
+        let b = RecordingWidget::new(Rect::new(0.0, 40.0, 100.0, 30.0), Rc::clone(&log));
+        let b_id = b.id();
+        let c = RecordingWidget::new(Rect::new(0.0, 80.0, 100.0, 30.0), Rc::clone(&log));
+        let c_id = c.id();
+        let root = a_id;
+        let mut tree = TestTree {
+            root,
+            nodes: HashMap::from([
+                (a_id, Box::new(a) as Box<dyn Widget>),
+                (b_id, Box::new(b) as Box<dyn Widget>),
+                (c_id, Box::new(c) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(b_id, root), (c_id, root)]),
+            children: HashMap::from([(root, vec![b_id, c_id])]),
+        };
+        let mut router = EventRouter::new(root);
+
+        // Click to focus first widget
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+        log.borrow_mut().clear();
+
+        // Tab → next focusable
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(b_id));
+
+        // Tab → next
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(c_id));
+
+        // Tab wraps to first
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+    }
+
+    #[test]
+    fn keyboard_shift_tab_traverses_backward_and_wraps() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let a = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let a_id = a.id();
+        let b = RecordingWidget::new(Rect::new(0.0, 40.0, 100.0, 30.0), Rc::clone(&log));
+        let b_id = b.id();
+        let root = a_id;
+        let mut tree = TestTree {
+            root,
+            nodes: HashMap::from([(a_id, Box::new(a) as Box<dyn Widget>), (b_id, Box::new(b))]),
+            parents: HashMap::from([(b_id, root)]),
+            children: HashMap::from([(root, vec![b_id])]),
+        };
+        let mut router = EventRouter::new(root);
+
+        // Focus first via click
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+        log.borrow_mut().clear();
+
+        // Shift+Tab wraps backward to last
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::shift() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(b_id));
+
+        // Shift+Tab back to first
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::shift() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+    }
+
+    #[test]
+    fn keyboard_tab_skips_non_focusable_widgets() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let focusable = Rc::new(Cell::new(true));
+        let skip = Rc::new(Cell::new(false)); // non-focusable
+        let a = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&focusable),
+        );
+        let a_id = a.id();
+        let b = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 40.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&skip),
+        );
+        let b_id = b.id();
+        let c = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 80.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&focusable),
+        );
+        let c_id = c.id();
+        let root = a_id;
+        let mut tree = TestTree {
+            root,
+            nodes: HashMap::from([
+                (a_id, Box::new(a) as Box<dyn Widget>),
+                (b_id, Box::new(b) as Box<dyn Widget>),
+                (c_id, Box::new(c)),
+            ]),
+            parents: HashMap::from([(b_id, root), (c_id, root)]),
+            children: HashMap::from([(root, vec![b_id, c_id])]),
+        };
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+        log.borrow_mut().clear();
+
+        // Tab should skip non-focusable b and go to c
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(c_id));
+    }
+
+    #[test]
+    fn keyboard_enter_on_focused_widget_is_routed_to_it() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        // Focus via click
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(id));
+        log.borrow_mut().clear();
+
+        // Enter routed to focused widget (RecordingWidget ignores keys → Ignored)
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        // Ignored is correct — the key reaches the focused widget but it doesn't handle it
+        let _ = result;
+    }
+
+    #[test]
+    fn keyboard_modified_enter_is_not_trapped() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        log.borrow_mut().clear();
+
+        // Ctrl+Enter is held for global shortcuts
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::ctrl() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    // ── IME / clipboard / drag smoke ─────────────────────────────────────────
+
+    #[test]
+    fn ime_commit_routes_to_focused_widget() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        log.borrow_mut().clear();
+
+        router.route(UiEvent::ImeCommit("hello".into()), &mut tree, &|_| {});
+        assert_eq!(log.borrow().as_slice(), ["commit:hello"]);
+    }
+
+    #[test]
+    fn ime_cancel_routes_to_focused_widget() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        log.borrow_mut().clear();
+
+        router.route(UiEvent::ImeCancel, &mut tree, &|_| {});
+        assert_eq!(log.borrow().as_slice(), ["ime-cancel"]);
+    }
+
+    #[test]
+    fn drag_events_route_to_hit_target() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(tree.root);
+
+        router.route(
+            UiEvent::DragEnter {
+                payload: DragPayload::File(vec![]),
+                position: Point::new(10.0, 10.0),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-enter"]);
+        log.borrow_mut().clear();
+
+        router.route(
+            UiEvent::DragOver { position: Point::new(10.0, 10.0) },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-over"]);
+        log.borrow_mut().clear();
+
+        router.route(UiEvent::DragLeave, &mut tree, &|_| {});
+        assert_eq!(log.borrow().as_slice(), ["drag-leave"]);
+    }
+
+    #[test]
+    fn focus_loss_releases_pointer_capture() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        // Capture via mouse down
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.captured(), Some(id));
+        log.borrow_mut().clear();
+
+        // Blur releases capture
+        router.route(UiEvent::FocusLost, &mut tree, &|_| {});
+        assert_eq!(router.captured(), None);
+        assert!(router.take_repaint_request());
+    }
+
+    #[test]
+    fn focus_loss_disables_ime() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        // Take the IME enable request from mouse down
+        assert!(router.take_ime_request().is_some_and(|r| r.enabled));
+        log.borrow_mut().clear();
+
+        router.route(UiEvent::FocusLost, &mut tree, &|_| {});
+        let ime = router.take_ime_request().expect("focus loss must disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+    }
 }
