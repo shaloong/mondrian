@@ -119,13 +119,25 @@ impl Widget for TooltipWidget {
         let tokens = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
 
-        let font_size = ctx.theme.typography.body.font_size;
+        let font_size = ctx.theme.typography.small.font_size;
         let max_width = spacing.tooltip_max_width.min(ctx.clip_rect.width.max(1.0));
         let layout = self.text_layout(font_size, max_width);
         let bg = self.clamped_rect(font_size, max_width, spacing.tooltip_offset, ctx.clip_rect);
+
+        // Shadow
+        ctx.encoder.draw_soft_shadow(
+            bg,
+            mondrian_core::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 },
+            spacing.radius_md,
+            0.0,
+            0.0,
+            glam::Vec2::new(0.0, spacing.xs),
+        );
+        // Border (clamped to clip for edge cases)
         let border_rect = clamp_rect_to_clip(bg.inset(-1.0, -1.0), ctx.clip_rect);
-        ctx.encoder.draw_rect(border_rect, tokens.border, spacing.radius_sm + 1.0);
-        ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_sm);
+        ctx.encoder.draw_rect(border_rect, tokens.border, spacing.radius_md + 1.0);
+        // Background
+        ctx.encoder.draw_rect(bg, tokens.popover, spacing.radius_md);
 
         ctx.push_clip(bg);
         ctx.encoder.draw_text_box(
@@ -270,10 +282,10 @@ mod tests {
             widget.paint_overlay(&mut ctx);
         }
 
-        let fill = encoder.rects.get(1).expect("paint should draw border and fill");
+        let fill = encoder.rects.get(2).expect("paint should draw shadow, border and fill");
         assert!(fill.x + fill.width <= clip_rect.x + clip_rect.width + 0.1);
         assert!(fill.y + fill.height <= clip_rect.y + clip_rect.height + 0.1);
-        assert_eq!(encoder.rects.len(), 2);
+        assert_eq!(encoder.rects.len(), 3);
         assert_eq!(encoder.text_boxes.len(), 1);
     }
 
@@ -294,7 +306,7 @@ mod tests {
             widget.paint_overlay(&mut ctx);
         }
 
-        let border = encoder.rects.first().expect("paint should draw border");
+        let border = encoder.rects.get(1).expect("paint should draw border at index 1");
         assert!(border.x >= clip_rect.x);
         assert!(border.y >= clip_rect.y);
         assert!(border.x + border.width <= clip_rect.x + clip_rect.width + 0.1);
@@ -426,7 +438,7 @@ mod tests {
             widget.paint_overlay(&mut ctx);
         }
 
-        let fill = encoder.rects.get(1).expect("paint should draw border and fill");
+        let fill = encoder.rects.get(2).expect("paint should draw shadow, border and fill");
         assert!(fill.width <= clip_rect.width);
         assert_eq!(encoder.text_boxes.len(), 1);
         assert!(encoder.text_boxes[0].2 <= clip_rect.width - HORIZONTAL_PADDING * 2.0 + 0.1);
@@ -448,7 +460,7 @@ mod tests {
             widget.paint_overlay(&mut ctx);
         }
 
-        let fill = encoder.rects.get(1).expect("paint should draw border and fill");
+        let fill = encoder.rects.get(2).expect("paint should draw shadow, border and fill");
         let clip = encoder.clips.first().expect("text should be clipped to the fill rect");
         let (_, text_position, text_width) =
             encoder.text_boxes.first().expect("tooltip should draw a text box");
@@ -493,7 +505,7 @@ mod tests {
             };
             widget.paint_overlay(&mut ctx);
         }
-        assert_eq!(overlay_encoder.rects.len(), 2);
+        assert_eq!(overlay_encoder.rects.len(), 3);
         assert_eq!(overlay_encoder.text_boxes.len(), 1);
     }
 
@@ -534,10 +546,10 @@ mod tests {
 
         assert_eq!(
             overlay_encoder.rects.len(),
-            2,
-            "tooltip should paint border and fill as stable popover chrome"
+            3,
+            "tooltip should paint shadow, border and fill"
         );
-        let fill = overlay_encoder.rects[1];
+        let fill = overlay_encoder.rects[2];
         assert!(fill.x >= clip_rect.x);
         assert!(fill.y >= clip_rect.y);
         assert!(fill.x + fill.width <= clip_rect.x + clip_rect.width + 0.1);
