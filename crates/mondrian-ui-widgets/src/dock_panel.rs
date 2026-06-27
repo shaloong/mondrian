@@ -302,16 +302,14 @@ impl DockPanel {
         dragged: PanelKind,
         area: DockPanelDropArea,
     ) -> Option<PanelKind> {
-        // Center drop on own panel when dragging self → disabled
-        if area == DockPanelDropArea::Center {
-            let active = self.tab_bar.active_panel_kind().unwrap_or(self.kind);
-            if active == dragged {
-                return None;
-            }
+        let active = self.tab_bar.active_panel_kind().unwrap_or(self.kind);
+        if active != dragged {
             return Some(active);
         }
-        // Edge drops: always target the first OTHER tab in this panel
-        self.tab_bar.tab_panel_kinds().into_iter().find(|kind| *kind != dragged)
+        if area != DockPanelDropArea::Center {
+            return self.tab_bar.tab_panel_kinds().into_iter().find(|kind| *kind != dragged);
+        }
+        None
     }
 
     fn can_accept_panel_drop(&self, dragged: PanelKind) -> bool {
@@ -332,7 +330,7 @@ impl DockPanel {
         position: Point,
         ctx: &mut EventContext,
     ) -> EventResult {
-        if !self.bounds.contains(position) {
+        if !self.content_bounds().contains(position) {
             return EventResult::Ignored;
         }
         if !self.can_accept_panel_drop(dragged) {
