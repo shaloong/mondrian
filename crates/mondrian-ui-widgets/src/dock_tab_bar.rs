@@ -142,12 +142,6 @@ impl DockTabBar {
         self.drop_hover = None;
     }
 
-    /// Clear any active tab-drop hover. Called by the parent dock panel
-    /// when the five-zone panel guide is active instead.
-    pub fn clear_drop_hover(&mut self) {
-        self.drop_hover = None;
-    }
-
     pub fn set_tab_drop_action(&mut self, action: Option<Rc<DockTabDropAction>>) {
         self.on_tab_drop = action;
     }

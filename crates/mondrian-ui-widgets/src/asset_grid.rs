@@ -1532,14 +1532,23 @@ impl Widget for AssetGrid {
                     }
                 }
             }
-            UiEvent::DragEnter { position, .. } | UiEvent::DragOver { position, .. }
+            UiEvent::DragEnter { payload, position }
                 if (self.on_drop.is_some() || self.on_item_drop.is_some())
                     && self.bounds.contains(*position) =>
             {
+                // Only handle file/asset drags, not PanelTab drags
+                if matches!(payload, DragPayload::PanelTab(_)) {
+                    return EventResult::Ignored;
+                }
                 if !self.drop_hovered {
                     self.drop_hovered = true;
                     ctx.request_repaint();
                 }
+                return EventResult::Handled;
+            }
+            UiEvent::DragOver { position, .. }
+                if self.drop_hovered && self.bounds.contains(*position) =>
+            {
                 return EventResult::Handled;
             }
             UiEvent::Drop { payload, position }
