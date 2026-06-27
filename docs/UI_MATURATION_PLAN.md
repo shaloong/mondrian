@@ -27,7 +27,7 @@ custom UI line can be considered production-grade.
           and `asset_grid.rs`.
     - [x] For each split, keep the external Widget Interface stable and put the test surface on
           model/layout/interaction contracts rather than private paint details.
-    - [ ] Delete shallow pass-through helpers that fail the deletion test, especially where they
+    - [x] Delete shallow pass-through helpers that fail the deletion test, especially where they
           only mirror one call site without improving locality.
 
 3. Theme and visual token audit:
@@ -272,7 +272,7 @@ custom UI line can be considered production-grade.
 - [x] Use the custom UI contracts as the source of truth after migration: theme tokens,
       accessibility preferences, event routing, renderer diagnostics, retained command buffers,
       and widget model/layout tests are the compatibility boundary for future panel work.
-- [ ] Add high contrast, text scale, reduced motion, and keyboard-only usability checks.
+- [x] Add high contrast, text scale, reduced motion, and keyboard-only usability checks.
 - [x] Add theme-level accessibility preferences for high contrast, bounded text scaling, and
       reduced motion without per-widget accessibility branching.
 - [ ] Run cross-GPU/backend smoke tests before considering the custom UI line complete.
