@@ -33,9 +33,8 @@ custom UI line can be considered production-grade.
 3. Theme and visual token audit:
     - [x] Finish tokenizing shared widget chrome: PanelList, Dropdown/Menu, ContextMenu,
           Checkbox, Button, IconButton, Slider, DockSplitter, DockTabBar, ScrollView,
-          DialogSurface, FormLayout, PropertyPanel, and AssetGrid all use theme-derived
-          visual tokens. Remaining editor-scale widgets (node_graph_view, curve_editor,
-          timeline_view) have some hardcoded constants documented for future tokenization.
+          DialogSurface, FormLayout, PropertyPanel, AssetGrid, NodeGraphView, and
+          CurveEditor all use theme-derived visual tokens.
     - [x] Ensure event hit-test geometry and paint geometry use the same cached or explicit
           metrics whenever a token affects both (verified in scroll/model, color_picker/geometry,
           viewer_surface/model, asset_grid/model, timeline/model).
@@ -165,9 +164,8 @@ custom UI line can be considered production-grade.
 - [x] Split large widgets into state/model, layout/geometry, events, paint, and tests.
       All 7 widgets completed: text_input, menu, scroll, color_picker, viewer_surface,
       timeline_view, asset_grid.
-- [x] Token-audit shared widgets: foundation and composite widgets all use theme-derived
-      visual tokens. Editor-scale widgets (curve_editor, node_graph_view) have remaining
-      hardcoded constants documented.
+- [x] Token-audit shared widgets: all foundation, composite, and editor-scale widgets
+      use theme-derived visual tokens.
 - [x] Tokenize PanelList row chrome, badge sizing/radius, accent swatches, focus/drop rings, and
       scrollbar alpha against theme-derived visual tokens.
 - [x] Tokenize Dropdown/Menu trigger chrome, popup radius, row padding/radius, separator geometry,
