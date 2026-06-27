@@ -330,7 +330,7 @@ impl DockPanel {
         position: Point,
         ctx: &mut EventContext,
     ) -> EventResult {
-        if !self.content_bounds().contains(position) {
+        if !self.bounds.contains(position) {
             return EventResult::Ignored;
         }
         if !self.can_accept_panel_drop(dragged) {
@@ -375,6 +375,7 @@ impl DockPanel {
         };
 
         (ctx.dispatch)(action(dragged, target, area, None));
+        self.dock_hover = None;
         ctx.request_repaint();
         EventResult::Handled
     }
@@ -430,8 +431,30 @@ impl Widget for DockPanel {
         self.content.event(event, ctx)
     }
 
-    fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+    fn after_child_event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         self.sync_active_tab();
+        // When the tab bar has pointer capture, PanelTab drag events are
+        // dispatched to it first. The dock panel intercepts here so the
+        // five-zone guide can activate.
+        match event {
+            UiEvent::DragEnter { payload: DragPayload::PanelTab(panel), position } => {
+                let _ = self.update_panel_drop_hover(*panel, *position, ctx);
+            }
+            UiEvent::DragOver { position } => {
+                if let Some(hover) = self.dock_hover {
+                    let _ = self.update_panel_drop_hover(hover.dragged, *position, ctx);
+                }
+            }
+            UiEvent::Drop { payload: DragPayload::PanelTab(panel), position } => {
+                let _ = self.drop_panel_tab(*panel, *position, ctx);
+            }
+            UiEvent::DragLeave | UiEvent::Drop { .. } => {
+                if self.dock_hover.take().is_some() {
+                    ctx.request_repaint();
+                }
+            }
+            _ => {}
+        }
         EventResult::Ignored
     }
 
