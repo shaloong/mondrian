@@ -10,25 +10,25 @@ These are the remaining immature areas that still need closed, testable slices b
 custom UI line can be considered production-grade.
 
 1. Text editing depth:
-   - [ ] Define a multiline text document model with grapheme-safe line/column navigation,
-         selection ranges, editable line wrapping, and command coalescing.
-   - [ ] Add multiline TextInput geometry for caret rectangles, selection rectangles, vertical
-         scrolling, IME preedit placement, and clipped paint.
-   - [ ] Add clipboard cut/copy/paste, undo/redo, Home/End/PageUp/PageDown, word navigation,
-         and IME commit/preedit behavior across line boundaries.
-   - [ ] Add focused unit and visual tests for multiline selection, mixed CJK/emoji text,
-         empty lines, long lines, CRLF paste normalization, scroll-to-caret, and disabled or
-         read-only states.
+    - [x] Define a multiline text document model with grapheme-safe line/column navigation,
+          selection ranges, editable line wrapping, and command coalescing.
+    - [x] Add multiline TextInput geometry for caret rectangles, selection rectangles, vertical
+          scrolling, IME preedit placement, and clipped paint.
+    - [x] Add clipboard cut/copy/paste, undo/redo, Home/End/PageUp/PageDown, word navigation,
+          and IME commit/preedit behavior across line boundaries.
+    - [x] Add focused unit and visual tests for multiline selection, mixed CJK/emoji text,
+          empty lines, long lines, CRLF paste normalization, scroll-to-caret, and disabled or
+          read-only states.
 
 2. Widget Module depth:
-   - [ ] Continue splitting large widget Modules where event routing and paint still live in
-         the same file as state/model/layout. Priority order: `text_input.rs`, `menu.rs`,
-         `scroll.rs`, `color_picker.rs`, `viewer_surface.rs`, `timeline_view.rs`, and
-         `asset_grid.rs`.
-   - [ ] For each split, keep the external Widget Interface stable and put the test surface on
-         model/layout/interaction contracts rather than private paint details.
-   - [ ] Delete shallow pass-through helpers that fail the deletion test, especially where they
-         only mirror one call site without improving locality.
+    - [ ] Continue splitting large widget Modules where event routing and paint still live in
+          the same file as state/model/layout. Remaining priority order: `viewer_surface.rs`,
+          `timeline_view.rs`, and `asset_grid.rs`.
+          (`text_input.rs`, `menu.rs`, `scroll.rs`, and `color_picker.rs` already split.)
+    - [x] For each split, keep the external Widget Interface stable and put the test surface on
+          model/layout/interaction contracts rather than private paint details.
+    - [ ] Delete shallow pass-through helpers that fail the deletion test, especially where they
+          only mirror one call site without improving locality.
 
 3. Theme and visual token audit:
    - [ ] Finish tokenizing shared widget chrome for ContextMenu, ScrollView, Slider, Checkbox,
@@ -83,7 +83,9 @@ custom UI line can be considered production-grade.
 ## Phase 2 - Text And Input Maturity
 
 - [x] Separate text input state, editing commands, geometry, IME integration, and paint.
-- [ ] Add multiline text editing with selection, clipboard, IME, scroll, and undo semantics.
+- [x] Add multiline text editing with selection, clipboard, IME, scroll, and undo semantics.
+- [x] Add IndentSelection TabBehavior (Tab indent / Shift+Tab dedent with cursor+selection preservation).
+- [x] Add WrapToWidth(f32) line layout mode with visual line splitting, position mapping, and selection rects.
 - [x] Decide whether subpixel glyph atlas bins are needed for rich text/code-style editors.
       Current UI text keeps stable whole-glyph atlas keys and applies subpixel positioning in
       image bounds; subpixel atlas bins are deferred until a rich text/code editor proves the
