@@ -469,7 +469,7 @@ impl EventRouter {
         let old_target = self.active_drag.as_ref().and_then(|drag| drag.target);
         if old_target != target {
             if let Some(old) = old_target {
-                self.dispatch_bubbling_event(tree, old, &UiEvent::DragLeave, dispatch);
+                self.dispatch_direct_event(tree, old, &UiEvent::DragLeave, dispatch);
             }
             if let Some(new_target) = target {
                 self.dispatch_bubbling_event(
@@ -531,7 +531,7 @@ impl EventRouter {
     fn cancel_active_drag(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
         if let Some(active_drag) = self.active_drag.take() {
             if let Some(target) = active_drag.target {
-                self.dispatch_bubbling_event(tree, target, &UiEvent::DragLeave, dispatch);
+                self.dispatch_direct_event(tree, target, &UiEvent::DragLeave, dispatch);
             }
         }
         self.capture.clear();
