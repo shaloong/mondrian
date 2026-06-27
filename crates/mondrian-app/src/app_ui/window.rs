@@ -386,17 +386,19 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(diagnostic) = handling.diagnostic {
                             log_native_file_dnd_diagnostic(diagnostic);
                         }
-                        drain_actions_and_sync_window_session(
-                            &mut host,
-                            &pending_actions,
-                            &platform,
-                            elwt,
-                            &instance,
-                            &adapter,
-                            &device,
-                            &mut session,
-                        );
-                        session.window.request_redraw();
+                        // Defer tree rebuild while pointer capture is active
+                        if session.router.captured().is_none() {
+                            drain_actions_and_sync_window_session(
+                                &mut host,
+                                &pending_actions,
+                                &platform,
+                                elwt,
+                                &instance,
+                                &adapter,
+                                &device,
+                                &mut session,
+                            );
+                        }
                     }
 
                     WindowEvent::CursorMoved { position, .. } => {
@@ -417,16 +419,21 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             },
                             &dispatch_action,
                         );
-                        drain_actions_and_sync_window_session(
-                            &mut host,
-                            &pending_actions,
-                            &platform,
-                            elwt,
-                            &instance,
-                            &adapter,
-                            &device,
-                            &mut session,
-                        );
+                        // Skip tree rebuild while pointer capture is active (drag in progress)
+                        if session.router.captured().is_none() {
+                            drain_actions_and_sync_window_session(
+                                &mut host,
+                                &pending_actions,
+                                &platform,
+                                elwt,
+                                &instance,
+                                &adapter,
+                                &device,
+                                &mut session,
+                            );
+                        } else {
+                            session.window.request_redraw();
+                        }
                         update_window_cursor_icon(&host, &mut session);
                     }
 
