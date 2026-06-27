@@ -375,6 +375,7 @@ impl DockPanel {
         };
 
         (ctx.dispatch)(action(dragged, target, area, None));
+        self.dock_hover = None;
         ctx.request_repaint();
         EventResult::Handled
     }
@@ -442,9 +443,8 @@ impl Widget for DockPanel {
 
     fn after_child_event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         self.sync_active_tab();
-        // When the tab bar has pointer capture, DragEnter/DragOver is
-        // routed to it first. Intercept after the child to activate
-        // the dock-panel five-zone guide when the tab bar handles it.
+        // When the tab bar has pointer capture, drag events are routed to
+        // it first. Intercept after the child to manage dock_hover.
         match event {
             UiEvent::DragEnter { payload: DragPayload::PanelTab(panel), position } => {
                 let _ = self.update_panel_drop_hover(*panel, *position, ctx);
@@ -452,6 +452,14 @@ impl Widget for DockPanel {
             UiEvent::DragOver { position } => {
                 if let Some(hover) = self.dock_hover {
                     let _ = self.update_panel_drop_hover(hover.dragged, *position, ctx);
+                }
+            }
+            UiEvent::Drop { payload: DragPayload::PanelTab(panel), position } => {
+                let _ = self.drop_panel_tab(*panel, *position, ctx);
+            }
+            UiEvent::DragLeave | UiEvent::Drop { .. } => {
+                if self.dock_hover.take().is_some() {
+                    ctx.request_repaint();
                 }
             }
             _ => {}
