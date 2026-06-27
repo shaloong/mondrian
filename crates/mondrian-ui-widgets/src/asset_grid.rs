@@ -1242,9 +1242,9 @@ impl AssetGrid {
         let selected = self.selected_indices.contains(&index);
         let hovered = self.hovered == Some(index) && !item.disabled;
         let base_fill = if selected {
-            color_with_alpha(colors.foreground, 0.075)
+            color_with_alpha(colors.primary, 0.12)
         } else if hovered {
-            color_with_alpha(colors.foreground, 0.05)
+            color_with_alpha(colors.foreground, 0.04)
         } else {
             Color::TRANSPARENT
         };
@@ -1252,7 +1252,7 @@ impl AssetGrid {
             paint_focus_ring(ctx, rect, CARD_RADIUS);
         }
         let card_border = if selected {
-            color_with_alpha(colors.foreground, 0.22)
+            color_with_alpha(colors.primary, 0.45)
         } else if hovered {
             color_with_alpha(colors.foreground, 0.10)
         } else {

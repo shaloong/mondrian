@@ -441,17 +441,14 @@ impl Widget for DockTabBar {
                     visual.indicator_min_width,
                     inset.width.max(visual.indicator_min_width),
                 );
+                // Active tab: 2px underline at bottom
                 let indicator = Rect::new(
                     inset.x + (inset.width - indicator_width) * 0.5,
-                    bg.y + bg.height - visual.indicator_bottom_inset,
+                    bg.y + bg.height - 2.0,
                     indicator_width,
-                    visual.indicator_height,
+                    2.0,
                 );
-                ctx.encoder.draw_rect(
-                    indicator,
-                    color_with_alpha(tokens.foreground, visual.indicator_alpha),
-                    visual.indicator_height * 0.5,
-                );
+                ctx.encoder.draw_rect(indicator, tokens.foreground, 1.0);
             }
         }
 
@@ -988,11 +985,8 @@ mod tests {
         let active_indicator = encoder
             .rects
             .iter()
-            .find(|rect| rect.height == visual.indicator_height)
-            .expect("active tab should paint indicator");
-        assert_eq!(
-            active_indicator.y,
-            bar.bounds.y + bar.bounds.height - visual.indicator_bottom_inset
-        );
+            .find(|rect| rect.height == 2.0)
+            .expect("active tab should paint 2px underline indicator");
+        assert_eq!(active_indicator.y, bar.bounds.y + bar.bounds.height - 2.0);
     }
 }
