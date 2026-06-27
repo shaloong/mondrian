@@ -18,13 +18,14 @@ pub(crate) fn paint_menu_trigger(
     rect: Rect,
     label: &str,
     open: bool,
+    hovered: bool,
     style: DropdownTriggerStyle,
 ) {
     let tokens = &ctx.theme.colors;
     let visual = MenuVisualTokens::from_theme(ctx.theme);
     match style {
         DropdownTriggerStyle::Filled => {
-            let fill = if open {
+            let fill = if open || hovered {
                 tokens.surface_2
             } else {
                 tokens.surface
@@ -34,7 +35,7 @@ pub(crate) fn paint_menu_trigger(
             paint_menu_arrow(ctx, rect);
         }
         DropdownTriggerStyle::MenuBar => {
-            if open {
+            if open || hovered {
                 ctx.encoder.draw_rect(rect, tokens.surface_2, visual.trigger_radius(style));
             }
             paint_menu_trigger_label(ctx, rect, label, tokens.text_secondary, false, style);
@@ -121,7 +122,7 @@ pub(crate) fn paint_menu_row(
     if reserve_icon_lane {
         if state.active {
             let check_color = if state.enabled {
-                tokens.primary
+                tokens.popover_foreground
             } else {
                 tokens.text_disabled
             };

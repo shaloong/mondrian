@@ -53,6 +53,7 @@ pub struct Dropdown {
     suppress_next_release: bool,
     focused: bool,
     focus_visible: bool,
+    trigger_hovered: bool,
     overlay_viewport: Cell<Option<Rect>>,
     trigger_style: DropdownTriggerStyle,
 }
@@ -74,6 +75,7 @@ impl Dropdown {
             suppress_next_release: false,
             focused: false,
             focus_visible: false,
+            trigger_hovered: false,
             overlay_viewport: Cell::new(None),
             trigger_style: DropdownTriggerStyle::Filled,
         }
@@ -369,6 +371,7 @@ impl Widget for Dropdown {
                 UiEvent::MouseMove { position, .. } => {
                     self.hovered_index =
                         self.item_at(*position).filter(|i| self.items[*i].is_activatable());
+                    ctx.request_repaint();
                     return EventResult::Handled;
                 }
                 UiEvent::MouseWheel { delta, position, .. } => {
@@ -435,6 +438,14 @@ impl Widget for Dropdown {
                         return EventResult::Handled;
                     }
                 }
+                UiEvent::MouseMove { position, .. } => {
+                    let was_hovered = self.trigger_hovered;
+                    self.trigger_hovered = self.trigger_rect().contains(*position);
+                    if was_hovered != self.trigger_hovered {
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                }
                 _ => {}
             }
         }
@@ -448,6 +459,7 @@ impl Widget for Dropdown {
                 self.trigger_rect(),
                 &self.label,
                 self.open,
+                self.trigger_hovered,
                 self.trigger_style,
             );
         } else {

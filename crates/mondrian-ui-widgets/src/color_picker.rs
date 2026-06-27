@@ -934,6 +934,7 @@ impl Widget for ColorPicker {
             self.mode_trigger_rect(),
             self.mode.label(),
             self.mode_menu_open,
+            false,
             DropdownTriggerStyle::Filled,
         );
 

@@ -1266,11 +1266,6 @@ impl AssetGrid {
         );
 
         let preview = self.preview_rect_for_card(rect);
-        let accent = if item.disabled {
-            colors.muted_foreground
-        } else {
-            item.accent
-        };
         ctx.encoder.draw_rect(
             preview.inset(-1.0, -1.0),
             soft_border(colors.border),
@@ -1301,13 +1296,7 @@ impl AssetGrid {
             );
             ctx.pop_clip();
         } else {
-            let accent_line = Rect::new(
-                preview.x,
-                preview.y + preview.height - 2.0,
-                preview.width,
-                2.0,
-            );
-            ctx.encoder.draw_rect(accent_line, color_with_alpha(accent, 0.56), 0.0);
+            // No accent line — plain rounded card as requested
         }
         if item.thumbnail.is_none() {
             if let Some(icon) = &item.icon {

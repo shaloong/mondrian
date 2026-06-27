@@ -3771,7 +3771,6 @@ impl Widget for TimelineView {
                         });
                         self.horizontal_scrollbar_hovered = true;
                         self.request_timeline_pointer_capture(ctx);
-                        ctx.set_cursor(CursorRequest::EwResize);
                         ctx.request_repaint();
                         return EventResult::Handled;
                     }
@@ -3949,20 +3948,6 @@ impl Widget for TimelineView {
                     return EventResult::Handled;
                 }
                 if let Some(drag) = self.scrollbar_drag {
-                    match (drag.axis, drag.kind) {
-                        (TimelineScrollbarAxis::Horizontal, TimelineScrollbarDragKind::Thumb) => {
-                            ctx.set_cursor(CursorRequest::Grabbing);
-                        }
-                        (TimelineScrollbarAxis::Horizontal, _) => {
-                            ctx.set_cursor(CursorRequest::EwResize);
-                        }
-                        (TimelineScrollbarAxis::Vertical, TimelineScrollbarDragKind::Thumb) => {
-                            ctx.set_cursor(CursorRequest::Grabbing);
-                        }
-                        (TimelineScrollbarAxis::Vertical, _) => {
-                            ctx.set_cursor(CursorRequest::NsResize);
-                        }
-                    }
                     let changed = match (drag.axis, drag.kind) {
                         (TimelineScrollbarAxis::Horizontal, TimelineScrollbarDragKind::Thumb) => {
                             self.set_scroll_x(
@@ -3989,31 +3974,6 @@ impl Widget for TimelineView {
                         ctx.request_repaint();
                     }
                     return EventResult::Handled;
-                }
-                if let Some(kind) =
-                    self.scrollbar_hover_kind(TimelineScrollbarAxis::Horizontal, *position)
-                {
-                    match kind {
-                        TimelineScrollbarDragKind::Thumb => {
-                            ctx.set_cursor(CursorRequest::Grab);
-                        }
-                        TimelineScrollbarDragKind::LeadingHandle
-                        | TimelineScrollbarDragKind::TrailingHandle => {
-                            ctx.set_cursor(CursorRequest::EwResize);
-                        }
-                    }
-                } else if let Some(kind) =
-                    self.scrollbar_hover_kind(TimelineScrollbarAxis::Vertical, *position)
-                {
-                    match kind {
-                        TimelineScrollbarDragKind::Thumb => {
-                            ctx.set_cursor(CursorRequest::Grab);
-                        }
-                        TimelineScrollbarDragKind::LeadingHandle
-                        | TimelineScrollbarDragKind::TrailingHandle => {
-                            ctx.set_cursor(CursorRequest::NsResize);
-                        }
-                    }
                 }
                 if self.set_scrollbar_hovered(*position) {
                     ctx.request_repaint();
@@ -6514,7 +6474,6 @@ mod tests {
 
         assert!(view.pixels_per_frame() > intermediate_zoom);
         assert!(view.scrollbar_drag.is_some());
-        assert_eq!(ctx.requests.cursor, Some(CursorRequest::EwResize));
         assert!(ctx.requests.repaint);
     }
 
@@ -6637,7 +6596,6 @@ mod tests {
         );
 
         assert!(view.scroll_x() > 0.0);
-        assert_eq!(ctx.requests.cursor, Some(CursorRequest::Grabbing));
     }
 
     #[test]
