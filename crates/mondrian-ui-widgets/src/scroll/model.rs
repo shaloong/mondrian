@@ -1,7 +1,78 @@
 use glam::Vec2;
 use mondrian_ui_core::types::{Rect, Size};
+use mondrian_ui_theme::{Theme, ThemePreset};
 
-use super::{ScrollAxes, ScrollbarAxis};
+/// Axes that a [`ScrollView`] may scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ScrollAxes {
+    /// Vertical overflow only. This is the default for inspector/list panels.
+    Vertical,
+    /// Horizontal overflow only.
+    Horizontal,
+    /// Horizontal and vertical overflow.
+    Both,
+}
+
+impl ScrollAxes {
+    pub(super) fn horizontal(self) -> bool {
+        matches!(self, Self::Horizontal | Self::Both)
+    }
+
+    pub(super) fn vertical(self) -> bool {
+        matches!(self, Self::Vertical | Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScrollbarAxis {
+    Horizontal,
+    Vertical,
+}
+
+// ── Visual tokens ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ScrollViewVisualTokens {
+    pub scrollbar_metrics: ScrollbarMetrics,
+    pub min_scrollbar_width: f32,
+    pub hover_expand: f32,
+    pub track_idle_alpha: f32,
+    pub track_active_alpha: f32,
+    pub thumb_idle_alpha: f32,
+    pub thumb_hover_alpha: f32,
+    pub thumb_drag_alpha: f32,
+    pub scrollbar_radius: f32,
+}
+
+impl ScrollViewVisualTokens {
+    pub fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            scrollbar_metrics: ScrollbarMetrics::new(
+                spacing.timeline_scrollbar_size,
+                spacing.border_emphasis,
+                spacing.icon_size + spacing.border_emphasis,
+            ),
+            min_scrollbar_width: spacing.xs,
+            hover_expand: spacing.border_standard,
+            track_idle_alpha: 0.03,
+            track_active_alpha: 0.06,
+            thumb_idle_alpha: 0.18,
+            thumb_hover_alpha: 0.30,
+            thumb_drag_alpha: 0.42,
+            scrollbar_radius: spacing.radius_full,
+        }
+    }
+}
+
+impl Default for ScrollViewVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
+}
+
+// ── Functions ────────────────────────────────────────────────────────────────────
 
 pub(super) fn finite_nonnegative(value: f32) -> f32 {
     if value.is_finite() {

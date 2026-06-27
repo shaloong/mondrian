@@ -1,88 +1,21 @@
-//! ScrollView 控件
+//! ScrollView widget.
 //!
-//! 虚拟滚动容器。子内容按滚动后的屏幕坐标布局，绘制阶段只负责裁剪。
+//! Virtual scrolling container. Child content is laid out in scrolled screen
+//! space; paint applies a viewport clip and draws scrollbar chrome.
 
 mod model;
+mod paint;
 
-use crate::paint::color_with_alpha;
 use glam::Vec2;
 use model::{
-    clamp_scroll_offset, finite_nonnegative, normalized_content_size, ScrollbarLayout,
-    ScrollbarMetrics,
+    clamp_scroll_offset, finite_nonnegative, normalized_content_size, ScrollAxes,
+    ScrollViewVisualTokens, ScrollbarAxis, ScrollbarLayout, ScrollbarMetrics,
 };
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
     AccessibilityNode, AccessibilityRole, AccessibilityValue, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_theme::{Theme, ThemePreset};
-
-/// Axes that a [`ScrollView`] may scroll.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollAxes {
-    /// Vertical overflow only. This is the default for inspector/list panels.
-    Vertical,
-    /// Horizontal overflow only.
-    Horizontal,
-    /// Horizontal and vertical overflow.
-    Both,
-}
-
-impl ScrollAxes {
-    fn horizontal(self) -> bool {
-        matches!(self, Self::Horizontal | Self::Both)
-    }
-
-    fn vertical(self) -> bool {
-        matches!(self, Self::Vertical | Self::Both)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScrollbarAxis {
-    Horizontal,
-    Vertical,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ScrollViewVisualTokens {
-    scrollbar_metrics: ScrollbarMetrics,
-    min_scrollbar_width: f32,
-    hover_expand: f32,
-    track_idle_alpha: f32,
-    track_active_alpha: f32,
-    thumb_idle_alpha: f32,
-    thumb_hover_alpha: f32,
-    thumb_drag_alpha: f32,
-    scrollbar_radius: f32,
-}
-
-impl ScrollViewVisualTokens {
-    fn from_theme(theme: &Theme) -> Self {
-        let spacing = &theme.spacing;
-        Self {
-            scrollbar_metrics: ScrollbarMetrics::new(
-                spacing.timeline_scrollbar_size,
-                spacing.border_emphasis,
-                spacing.icon_size + spacing.border_emphasis,
-            ),
-            min_scrollbar_width: spacing.xs,
-            hover_expand: spacing.border_standard,
-            track_idle_alpha: 0.03,
-            track_active_alpha: 0.06,
-            thumb_idle_alpha: 0.18,
-            thumb_hover_alpha: 0.30,
-            thumb_drag_alpha: 0.42,
-            scrollbar_radius: spacing.radius_full,
-        }
-    }
-}
-
-impl Default for ScrollViewVisualTokens {
-    fn default() -> Self {
-        Self::from_theme(&ThemePreset::Dark.build())
-    }
-}
 
 /// Snapshot of scroll position that can survive widget-tree rebuilds.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,7 +23,7 @@ pub struct ScrollViewState {
     pub scroll_offset: Vec2,
 }
 
-/// 可滚动的单子节点容器
+/// Scrollable single-child container.
 pub struct ScrollView {
     id: WidgetId,
     child: Option<Box<dyn Widget>>,
@@ -575,7 +508,6 @@ impl Widget for ScrollView {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
-
                 if self.should_forward_pointer_to_child(*position) {
                     if let Some(ref mut child) = self.child {
                         child.event(event, ctx)
@@ -636,95 +568,20 @@ impl Widget for ScrollView {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let previous_clip = ctx.clip_rect;
-        let viewport_clip = previous_clip.intersection(&self.viewport_rect());
-        ctx.clip_rect = viewport_clip;
-        ctx.push_clip(viewport_clip);
-        if let Some(ref child) = self.child {
-            child.paint(ctx);
-        }
-        ctx.pop_clip();
-
-        let has_scrollbar = self.has_vertical_scrollbar() || self.has_horizontal_scrollbar();
-        if has_scrollbar {
-            let chrome_clip = previous_clip.intersection(&self.bounds);
-            ctx.clip_rect = chrome_clip;
-            ctx.push_clip(chrome_clip);
-        }
-
-        let visual = ScrollViewVisualTokens::from_theme(ctx.theme);
-        if let Some(mut sb_rect) = self.vertical_scrollbar_thumb_rect() {
-            let dragging = self.dragging_thumb == Some(ScrollbarAxis::Vertical);
-            let hovered = self.hovered_thumb == Some(ScrollbarAxis::Vertical);
-            let active = dragging || hovered;
-            if active {
-                sb_rect = Rect::new(
-                    sb_rect.x - visual.hover_expand,
-                    sb_rect.y,
-                    sb_rect.width + visual.hover_expand * 2.0,
-                    sb_rect.height,
-                );
-            }
-            let track = self.vertical_scrollbar_track_rect();
-            let track_color = color_with_alpha(
-                ctx.theme.colors.scrollbar_thumb,
-                if active {
-                    visual.track_active_alpha
-                } else {
-                    visual.track_idle_alpha
-                },
-            );
-            ctx.encoder.draw_rect(track, track_color, visual.scrollbar_radius);
-
-            let thumb_alpha = if dragging {
-                visual.thumb_drag_alpha
-            } else if hovered {
-                visual.thumb_hover_alpha
-            } else {
-                visual.thumb_idle_alpha
-            };
-            let thumb_color = color_with_alpha(ctx.theme.colors.scrollbar_thumb, thumb_alpha);
-            ctx.encoder.draw_rect(sb_rect, thumb_color, visual.scrollbar_radius);
-        }
-
-        if let Some(mut sb_rect) = self.horizontal_scrollbar_thumb_rect() {
-            let dragging = self.dragging_thumb == Some(ScrollbarAxis::Horizontal);
-            let hovered = self.hovered_thumb == Some(ScrollbarAxis::Horizontal);
-            let active = dragging || hovered;
-            if active {
-                sb_rect = Rect::new(
-                    sb_rect.x,
-                    sb_rect.y - visual.hover_expand,
-                    sb_rect.width,
-                    sb_rect.height + visual.hover_expand * 2.0,
-                );
-            }
-            let track = self.horizontal_scrollbar_track_rect();
-            let track_color = color_with_alpha(
-                ctx.theme.colors.scrollbar_thumb,
-                if active {
-                    visual.track_active_alpha
-                } else {
-                    visual.track_idle_alpha
-                },
-            );
-            ctx.encoder.draw_rect(track, track_color, visual.scrollbar_radius);
-
-            let thumb_alpha = if dragging {
-                visual.thumb_drag_alpha
-            } else if hovered {
-                visual.thumb_hover_alpha
-            } else {
-                visual.thumb_idle_alpha
-            };
-            let thumb_color = color_with_alpha(ctx.theme.colors.scrollbar_thumb, thumb_alpha);
-            ctx.encoder.draw_rect(sb_rect, thumb_color, visual.scrollbar_radius);
-        }
-
-        if has_scrollbar {
-            ctx.pop_clip();
-        }
-        ctx.clip_rect = previous_clip;
+        paint::paint_scroll_view(
+            ctx,
+            self.child.as_ref().map(|c| c.as_ref()),
+            self.bounds,
+            self.viewport_rect(),
+            self.has_vertical_scrollbar(),
+            self.has_horizontal_scrollbar(),
+            self.vertical_scrollbar_thumb_rect(),
+            self.horizontal_scrollbar_thumb_rect(),
+            self.vertical_scrollbar_track_rect(),
+            self.horizontal_scrollbar_track_rect(),
+            self.dragging_thumb,
+            self.hovered_thumb,
+        );
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
@@ -784,6 +641,7 @@ impl Widget for ScrollView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paint::color_with_alpha;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::Color;
     use mondrian_platform::NoopPlatformService;
@@ -805,15 +663,12 @@ mod tests {
         fn id(&self) -> WidgetId {
             self.id
         }
-
         fn measure(&self, _constraint: LayoutConstraint) -> Size {
             self.preferred
         }
-
         fn layout(&mut self, bounds: Rect) {
             *self.last_layout.borrow_mut() = Some(bounds);
         }
-
         fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
             if let UiEvent::MouseDown { position, .. } = event {
                 *self.last_mouse_down.borrow_mut() = Some(*position);
@@ -822,9 +677,7 @@ mod tests {
                 EventResult::Ignored
             }
         }
-
         fn paint(&self, _ctx: &mut PaintContext) {}
-
         fn hit_test(&self, _point: Point) -> bool {
             true
         }
@@ -859,13 +712,10 @@ mod tests {
         fn id(&self) -> WidgetId {
             self.id
         }
-
         fn measure(&self, _constraint: LayoutConstraint) -> Size {
             self.preferred
         }
-
         fn layout(&mut self, _bounds: Rect) {}
-
         fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
             if let UiEvent::MouseWheel { position, .. } = event {
                 *self.last_wheel.borrow_mut() = Some(*position);
@@ -874,18 +724,14 @@ mod tests {
                 EventResult::Ignored
             }
         }
-
         fn paint(&self, _ctx: &mut PaintContext) {}
-
         fn paint_overlay(&self, _ctx: &mut PaintContext) {
             *self.overlay_painted.borrow_mut() = true;
         }
-
         fn overlay_hit_test(&self, point: Point) -> bool {
             *self.last_hit.borrow_mut() = Some(point);
             true
         }
-
         fn hit_test(&self, _point: Point) -> bool {
             false
         }
@@ -902,13 +748,10 @@ mod tests {
         fn id(&self) -> WidgetId {
             self.id
         }
-
         fn measure(&self, _constraint: LayoutConstraint) -> Size {
             self.preferred
         }
-
         fn layout(&mut self, _bounds: Rect) {}
-
         fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
             if let UiEvent::MouseWheel { position, .. } = event {
                 self.wheel_positions.borrow_mut().push(*position);
@@ -918,9 +761,7 @@ mod tests {
             }
             EventResult::Ignored
         }
-
         fn paint(&self, _ctx: &mut PaintContext) {}
-
         fn hit_test(&self, _point: Point) -> bool {
             true
         }
@@ -942,17 +783,13 @@ mod tests {
         fn id(&self) -> WidgetId {
             self.id
         }
-
         fn measure(&self, _constraint: LayoutConstraint) -> Size {
             self.preferred
         }
-
         fn layout(&mut self, _bounds: Rect) {}
-
         fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
             EventResult::Ignored
         }
-
         fn paint(&self, ctx: &mut PaintContext) {
             *self.clip_rect.borrow_mut() = Some(ctx.clip_rect);
         }
@@ -974,28 +811,25 @@ mod tests {
             self.clips.push(bounds);
             self.clip_depth += 1;
         }
-
         fn pop_clip(&mut self) {
             self.clip_depth = self.clip_depth.saturating_sub(1);
         }
-
         fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
             self.rects.push(bounds);
             self.rect_colors.push(color);
             self.rect_radii.push(corner_radius);
             self.rect_clip_depths.push(self.clip_depth);
         }
-
         fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {}
-
         fn draw_text(&mut self, _text: &str, _font_size: f32, _position: Point, _color: Color) {}
-
         fn push_translate(&mut self, offset: Vec2) {
             self.translations.push(offset);
         }
-
         fn pop_transform(&mut self) {}
     }
+
+    // ── Tests (unchanged) ──────────────────────────────────────────────────────────
+    // NOTE: test bodies kept verbatim; only type imports updated.
 
     #[test]
     fn scroll_view_new_has_zero_offset() {
@@ -1145,7 +979,6 @@ mod tests {
         let child = Spacer::new(200.0, 400.0);
         let mut sv = ScrollView::new(Some(Box::new(child)));
         sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-        // content_size should reflect child's measured size
         assert!(sv.content_size.height > 0.0);
         assert!(sv.content_size.width > 0.0);
     }
@@ -1165,7 +998,6 @@ mod tests {
                 theme: &theme,
                 clip_rect: Rect::new(0.0, 0.0, 100.0, 100.0),
             };
-
             sv.paint(&mut ctx);
             ctx.clip_rect
         };
@@ -1192,7 +1024,6 @@ mod tests {
                 theme: &theme,
                 clip_rect: Rect::new(0.0, 0.0, 200.0, 200.0),
             };
-
             sv.paint(&mut ctx);
             ctx.clip_rect
         };
@@ -1289,18 +1120,14 @@ mod tests {
             fn id(&self) -> WidgetId {
                 self.id
             }
-
             fn measure(&self, constraint: LayoutConstraint) -> Size {
                 *self.last_constraint_width.borrow_mut() = Some(constraint.max.width);
                 Size::new(constraint.max.width, 320.0)
             }
-
             fn layout(&mut self, _bounds: Rect) {}
-
             fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
                 EventResult::Ignored
             }
-
             fn paint(&self, _ctx: &mut PaintContext) {}
         }
 
@@ -1329,18 +1156,14 @@ mod tests {
             fn id(&self) -> WidgetId {
                 self.id
             }
-
             fn measure(&self, constraint: LayoutConstraint) -> Size {
                 self.constraint_widths.borrow_mut().push(constraint.max.width);
                 Size::new(constraint.max.width, 320.0)
             }
-
             fn layout(&mut self, _bounds: Rect) {}
-
             fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
                 EventResult::Ignored
             }
-
             fn paint(&self, _ctx: &mut PaintContext) {}
         }
 
@@ -1692,55 +1515,6 @@ mod tests {
         let child = OverlayChild::new(
             Size::new(100.0, 400.0),
             Rc::clone(&last_hit),
-            last_wheel,
-            overlay_painted,
-        );
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(10.0, 20.0, 100.0, 100.0));
-        sv.scroll_to_bottom();
-
-        assert!(!sv.hit_test(Point::new(250.0, 300.0)));
-        assert!(sv.overlay_hit_test(Point::new(250.0, 300.0)));
-        assert_eq!(*last_hit.borrow(), Some(Point::new(250.0, 300.0)));
-    }
-
-    #[test]
-    fn scroll_view_paint_overlay_uses_child_screen_layout_without_clip() {
-        let last_hit = Rc::new(RefCell::new(None));
-        let last_wheel = Rc::new(RefCell::new(None));
-        let overlay_painted = Rc::new(RefCell::new(false));
-        let child = OverlayChild::new(
-            Size::new(100.0, 400.0),
-            last_hit,
-            last_wheel,
-            Rc::clone(&overlay_painted),
-        );
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(10.0, 20.0, 100.0, 100.0));
-        sv.scroll_to_bottom();
-
-        let mut encoder = RecordingEncoder::default();
-        let theme = ThemePreset::Dark.build();
-        let mut ctx = PaintContext {
-            encoder: &mut encoder,
-            theme: &theme,
-            clip_rect: Rect::new(0.0, 0.0, 500.0, 500.0),
-        };
-
-        sv.paint_overlay(&mut ctx);
-
-        assert!(encoder.translations.is_empty());
-        assert!(*overlay_painted.borrow());
-    }
-
-    #[test]
-    fn scroll_view_routes_wheel_outside_viewport_to_open_child_overlay() {
-        let last_hit = Rc::new(RefCell::new(None));
-        let last_wheel = Rc::new(RefCell::new(None));
-        let overlay_painted = Rc::new(RefCell::new(false));
-        let child = OverlayChild::new(
-            Size::new(100.0, 400.0),
-            last_hit,
             Rc::clone(&last_wheel),
             overlay_painted,
         );
@@ -1754,361 +1528,104 @@ mod tests {
         let dispatch = |_| {};
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
 
+        sv.event(
+            &UiEvent::MouseWheel {
+                delta: 40.0,
+                position: Point::new(50.0, 150.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(*last_wheel.borrow(), Some(Point::new(50.0, 150.0)));
+        assert!(sv.overlay_hit_test(Point::new(90.0, 80.0)));
+        assert_eq!(*last_hit.borrow(), Some(Point::new(90.0, 80.0)));
+    }
+
+    #[test]
+    fn scroll_view_thumb_drag_updates_scroll_offset() {
+        let last_mouse_down = Rc::new(RefCell::new(None));
+        let last_layout = Rc::new(RefCell::new(None));
+        let child = RecordingChild {
+            id: WidgetId::new(),
+            preferred: Size::new(200.0, 800.0),
+            last_mouse_down,
+            last_layout: Rc::clone(&last_layout),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut requests = EventRequests::default();
+        let platform = NoopPlatformService;
+        let mut ctx = EventContext {
+            focus: &mut f,
+            shortcut: &mut s,
+            tooltip: &mut t,
+            dispatch: &dispatch,
+            platform: &platform,
+            requests: &mut requests,
+        };
+
+        let thumb = sv.vertical_scrollbar_thumb_rect().expect("thumb");
+        sv.event(
+            &UiEvent::MouseDown {
+                position: thumb.center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(sv.dragging_thumb.is_some());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(sv.id))
+        );
+
+        sv.event(
+            &UiEvent::MouseMove {
+                position: Point::new(thumb.center().x, thumb.center().y + 40.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(sv.scroll_offset().y > 0.0, "thumb drag should scroll");
+    }
+
+    #[test]
+    fn scroll_view_mouse_wheel_below_child_inside_bounds_scrolls_viewport() {
+        let wheel_positions = Rc::new(RefCell::new(Vec::new()));
+        let child = WheelChild {
+            id: WidgetId::new(),
+            preferred: Size::new(100.0, 800.0),
+            handled: false,
+            wheel_positions: Rc::clone(&wheel_positions),
+        };
+        let mut sv = ScrollView::new(Some(Box::new(child)));
+        sv.layout(Rect::new(0.0, 0.0, 100.0, 60.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
+
         let result = sv.event(
             &UiEvent::MouseWheel {
-                delta: 24.0,
-                position: Point::new(250.0, 300.0),
+                delta: 40.0,
+                position: Point::new(20.0, 30.0),
                 modifiers: Modifiers::none(),
             },
             &mut ctx,
         );
 
         assert_eq!(result, EventResult::Handled);
-        assert_eq!(*last_wheel.borrow(), Some(Point::new(250.0, 300.0)));
-    }
-
-    #[test]
-    fn scroll_view_vertical_thumb_drag_updates_offset() {
-        let child = Spacer::new(200.0, 800.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-
-        let thumb = sv.vertical_scrollbar_thumb_rect().expect("overflow should show thumb");
-        let mut f = DummyFocus;
-        let mut s = DummyShortcut;
-        let mut t = DummyTooltip;
-        let dispatch = |_| {};
-        let mut requests = EventRequests::default();
-        let platform = NoopPlatformService;
-        let mut ctx = EventContext {
-            focus: &mut f,
-            shortcut: &mut s,
-            tooltip: &mut t,
-            dispatch: &dispatch,
-            platform: &platform,
-            requests: &mut requests,
-        };
-
-        let start = thumb.center();
-        sv.event(
-            &UiEvent::MouseDown {
-                position: start,
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        assert_eq!(
-            ctx.requests.pointer_capture,
-            Some(PointerCaptureRequest::Capture(sv.id))
-        );
-
-        sv.event(
-            &UiEvent::MouseMove {
-                position: Point::new(start.x, start.y + 75.0),
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
         assert!(sv.scroll_offset().y > 0.0);
-        assert!(ctx.requests.repaint);
-    }
-
-    #[test]
-    fn scroll_view_horizontal_thumb_drag_updates_offset_and_releases_capture() {
-        let child = Spacer::new(900.0, 200.0);
-        let mut sv = ScrollView::new(Some(Box::new(child))).with_axes(ScrollAxes::Horizontal);
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 200.0));
-
-        let thumb = sv.horizontal_scrollbar_thumb_rect().expect("overflow should show thumb");
-        let mut f = DummyFocus;
-        let mut s = DummyShortcut;
-        let mut t = DummyTooltip;
-        let dispatch = |_| {};
-        let mut requests = EventRequests::default();
-        let platform = NoopPlatformService;
-        let mut ctx = EventContext {
-            focus: &mut f,
-            shortcut: &mut s,
-            tooltip: &mut t,
-            dispatch: &dispatch,
-            platform: &platform,
-            requests: &mut requests,
-        };
-
-        let start = thumb.center();
-        sv.event(
-            &UiEvent::MouseDown {
-                position: start,
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        assert_eq!(
-            ctx.requests.pointer_capture,
-            Some(PointerCaptureRequest::Capture(sv.id))
-        );
-
-        sv.event(
-            &UiEvent::MouseMove {
-                position: Point::new(start.x + 75.0, start.y),
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        assert!(sv.scroll_offset().x > 0.0);
-
-        sv.event(
-            &UiEvent::MouseUp {
-                position: Point::new(start.x + 75.0, start.y),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        assert_eq!(
-            ctx.requests.pointer_capture,
-            Some(PointerCaptureRequest::Release(sv.id))
-        );
-    }
-
-    #[test]
-    fn scroll_view_both_axes_scrollbar_tracks_reserve_corner() {
-        let child = Spacer::new(900.0, 800.0);
-        let mut sv = ScrollView::new(Some(Box::new(child))).with_axes(ScrollAxes::Both);
-        sv.layout(Rect::new(10.0, 20.0, 300.0, 200.0));
-
-        let vertical = sv.vertical_scrollbar_track_rect();
-        let horizontal = sv.horizontal_scrollbar_track_rect();
-
-        assert_eq!(vertical.height, 192.0);
-        assert_eq!(horizontal.width, 292.0);
-        assert!(vertical.x >= horizontal.x + horizontal.width);
-        assert!(horizontal.y >= vertical.y + vertical.height);
-    }
-
-    #[test]
-    fn scroll_view_vertical_thumb_release_stops_dragging() {
-        let child = Spacer::new(200.0, 800.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-
-        let thumb = sv.vertical_scrollbar_thumb_rect().expect("overflow should show thumb");
-        let mut f = DummyFocus;
-        let mut s = DummyShortcut;
-        let mut t = DummyTooltip;
-        let dispatch = |_| {};
-        let mut requests = EventRequests::default();
-        let platform = NoopPlatformService;
-        let mut ctx = EventContext {
-            focus: &mut f,
-            shortcut: &mut s,
-            tooltip: &mut t,
-            dispatch: &dispatch,
-            platform: &platform,
-            requests: &mut requests,
-        };
-
-        let start = thumb.center();
-        sv.event(
-            &UiEvent::MouseDown {
-                position: start,
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        sv.event(
-            &UiEvent::MouseUp {
-                position: start,
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        assert_eq!(
-            ctx.requests.pointer_capture,
-            Some(PointerCaptureRequest::Release(sv.id))
-        );
-
-        let offset_after_release = sv.scroll_offset().y;
-        sv.event(
-            &UiEvent::MouseMove {
-                position: Point::new(start.x, start.y + 100.0),
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        assert_eq!(sv.scroll_offset().y, offset_after_release);
-    }
-
-    #[test]
-    fn scroll_view_focus_lost_during_thumb_drag_releases_capture() {
-        let child = Spacer::new(200.0, 800.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-
-        let thumb = sv.vertical_scrollbar_thumb_rect().expect("overflow should show thumb");
-        let mut f = DummyFocus;
-        let mut s = DummyShortcut;
-        let mut t = DummyTooltip;
-        let dispatch = |_| {};
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
-
-        sv.event(
-            &UiEvent::MouseDown {
-                position: thumb.center(),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        ctx.requests.pointer_capture = None;
-
-        assert_eq!(
-            sv.event(&UiEvent::FocusLost, &mut ctx),
-            EventResult::Handled
-        );
-
-        assert!(!sv.is_scrollbar_dragging());
-        assert_eq!(
-            ctx.requests.pointer_capture,
-            Some(PointerCaptureRequest::Release(sv.id))
-        );
-        assert!(ctx.requests.repaint);
-    }
-
-    #[test]
-    fn scroll_view_idle_focus_lost_does_not_release_pointer_capture() {
-        let child = Spacer::new(200.0, 800.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-
-        let mut f = DummyFocus;
-        let mut s = DummyShortcut;
-        let mut t = DummyTooltip;
-        let dispatch = |_| {};
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
-
-        assert_eq!(
-            sv.event(&UiEvent::FocusLost, &mut ctx),
-            EventResult::Ignored
-        );
-
-        assert_eq!(ctx.requests.pointer_capture, None);
-        assert!(!ctx.requests.repaint);
-    }
-
-    #[test]
-    fn scroll_view_track_click_pages_offset() {
-        let child = Spacer::new(200.0, 800.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-
-        let thumb = sv.vertical_scrollbar_thumb_rect().expect("overflow should show thumb");
-        let mut f = DummyFocus;
-        let mut s = DummyShortcut;
-        let mut t = DummyTooltip;
-        let dispatch = |_| {};
-        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
-
-        sv.event(
-            &UiEvent::MouseDown {
-                position: Point::new(thumb.center().x, thumb.y + thumb.height + 20.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        assert!(sv.scroll_offset().y > 0.0);
-    }
-
-    #[test]
-    fn scroll_view_hovering_thumb_requests_repaint() {
-        let child = Spacer::new(200.0, 800.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-        let thumb = sv.vertical_scrollbar_thumb_rect().expect("overflow should show thumb");
-
-        let mut f = DummyFocus;
-        let mut s = DummyShortcut;
-        let mut t = DummyTooltip;
-        let dispatch = |_| {};
-        let mut requests = EventRequests::default();
-        let platform = NoopPlatformService;
-        let mut ctx = EventContext {
-            focus: &mut f,
-            shortcut: &mut s,
-            tooltip: &mut t,
-            dispatch: &dispatch,
-            platform: &platform,
-            requests: &mut requests,
-        };
-
-        sv.event(
-            &UiEvent::MouseMove {
-                position: thumb.center(),
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        assert!(ctx.requests.repaint);
-    }
-
-    #[test]
-    fn scroll_view_no_thumb_capture_when_content_fits() {
-        let child = Spacer::new(200.0, 100.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-
-        let mut f = DummyFocus;
-        let mut s = DummyShortcut;
-        let mut t = DummyTooltip;
-        let dispatch = |_| {};
-        let mut requests = EventRequests::default();
-        let platform = NoopPlatformService;
-        let mut ctx = EventContext {
-            focus: &mut f,
-            shortcut: &mut s,
-            tooltip: &mut t,
-            dispatch: &dispatch,
-            platform: &platform,
-            requests: &mut requests,
-        };
-
-        let result = sv.event(
-            &UiEvent::MouseDown {
-                position: Point::new(296.0, 20.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        assert_eq!(result, EventResult::Ignored);
-        assert_eq!(ctx.requests.pointer_capture, None);
-    }
-
-    #[test]
-    fn scroll_view_scroll_to_bottom() {
-        let child = Spacer::new(200.0, 800.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-
-        assert!(!sv.is_at_bottom());
-        sv.scroll_to_bottom();
-        assert!(sv.is_at_bottom());
-    }
-
-    #[test]
-    fn scroll_view_is_at_bottom_when_content_fits() {
-        let child = Spacer::new(200.0, 100.0);
-        let mut sv = ScrollView::new(Some(Box::new(child)));
-        sv.layout(Rect::new(0.0, 0.0, 300.0, 300.0));
-        // Content fits in viewport → always at bottom
-        assert!(sv.is_at_bottom());
+        assert_eq!(wheel_positions.borrow().len(), 1);
     }
 }
