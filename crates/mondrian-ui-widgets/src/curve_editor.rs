@@ -11,6 +11,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::Theme;
 
 use crate::paint::{color_with_alpha, paint_focus_ring};
 
@@ -21,6 +22,33 @@ const HIT_RADIUS: f32 = 8.0;
 const POINT_RADIUS: f32 = 4.0;
 const SELECTED_POINT_RADIUS: f32 = 5.5;
 const MIN_POINT_GAP: f32 = 0.001;
+
+#[derive(Clone, Copy, Debug)]
+struct CurveEditorVisualTokens {
+    pub grid_alpha: f32,
+    pub curve_alpha: f32,
+    pub plot_surface_alpha: f32,
+    pub point_border_alpha: f32,
+    pub grid_line_width: f32,
+    pub curve_line_width: f32,
+    pub point_border_inset: f32,
+    pub selected_inner_inset: f32,
+}
+
+impl CurveEditorVisualTokens {
+    fn from_theme(_theme: &Theme) -> Self {
+        Self {
+            grid_alpha: 0.38,
+            curve_alpha: 0.82,
+            plot_surface_alpha: 0.34,
+            point_border_alpha: 0.70,
+            grid_line_width: 1.0,
+            curve_line_width: 2.0,
+            point_border_inset: -1.0,
+            selected_inner_inset: 1.5,
+        }
+    }
+}
 
 /// A normalized editable curve point.
 ///
@@ -362,10 +390,11 @@ impl Widget for CurveEditor {
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
+        let v = CurveEditorVisualTokens::from_theme(ctx.theme);
         let plot = self.plot_rect();
-        let grid = color_with_alpha(colors.border, 0.38);
+        let grid = color_with_alpha(colors.border, v.grid_alpha);
         let curve = if self.enabled {
-            color_with_alpha(colors.foreground, 0.82)
+            color_with_alpha(colors.foreground, v.curve_alpha)
         } else {
             colors.muted_foreground
         };
@@ -374,7 +403,7 @@ impl Widget for CurveEditor {
         ctx.encoder.draw_rect(self.bounds, colors.card, spacing.radius_md);
         ctx.encoder.draw_rect(
             plot,
-            color_with_alpha(colors.surface, 0.34),
+            color_with_alpha(colors.surface, v.plot_surface_alpha),
             spacing.radius_sm,
         );
 
@@ -387,7 +416,7 @@ impl Widget for CurveEditor {
             ctx.encoder.draw_line(
                 Point::new(x, plot.y),
                 Point::new(x, plot.y + plot.height),
-                1.0,
+                v.grid_line_width,
                 grid,
             );
         }
@@ -396,7 +425,7 @@ impl Widget for CurveEditor {
             ctx.encoder.draw_line(
                 Point::new(plot.x, y),
                 Point::new(plot.x + plot.width, y),
-                1.0,
+                v.grid_line_width,
                 grid,
             );
         }
@@ -404,7 +433,7 @@ impl Widget for CurveEditor {
         for pair in self.points.windows(2) {
             let a = self.to_screen(pair[0]);
             let b = self.to_screen(pair[1]);
-            ctx.encoder.draw_line(a, b, 2.0, curve);
+            ctx.encoder.draw_line(a, b, v.curve_line_width, curve);
         }
 
         for (index, point) in self.points.iter().enumerate() {
@@ -422,13 +451,17 @@ impl Widget for CurveEditor {
                 radius * 2.0,
             );
             ctx.encoder.draw_rect(
-                rect.inset(-1.0, -1.0),
-                color_with_alpha(colors.border_strong, 0.70),
+                rect.inset(v.point_border_inset, v.point_border_inset),
+                color_with_alpha(colors.border_strong, v.point_border_alpha),
                 radius + 1.0,
             );
             ctx.encoder.draw_rect(rect, point_fill, radius);
             if selected {
-                ctx.encoder.draw_rect(rect.inset(1.5, 1.5), curve, (radius - 1.5).max(0.0));
+                ctx.encoder.draw_rect(
+                    rect.inset(v.selected_inner_inset, v.selected_inner_inset),
+                    curve,
+                    (radius - v.selected_inner_inset).max(0.0),
+                );
             }
         }
     }

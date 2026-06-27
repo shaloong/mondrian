@@ -12,6 +12,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, MouseButton, UiEvent, Widget};
+use mondrian_ui_theme::Theme;
 
 use crate::paint::{color_with_alpha, mix_color, paint_focus_ring, soft_border};
 
@@ -26,6 +27,54 @@ const NODE_HEIGHT: f32 = 72.0;
 const NODE_GAP_X: f32 = 48.0;
 const NODE_GAP_Y: f32 = 34.0;
 const PORT_SIZE: f32 = 8.0;
+
+#[derive(Clone, Copy, Debug)]
+struct NodeGraphVisualTokens {
+    pub title_x: f32,
+    pub title_y: f32,
+    pub title_margin_x: f32,
+    pub subtitle_x: f32,
+    pub subtitle_y: f32,
+    pub subtitle_margin_x: f32,
+    pub accent_strip_width: f32,
+    pub node_text_x: f32,
+    pub node_title_y: f32,
+    pub node_subtitle_y: f32,
+    pub node_clip_inset_x: f32,
+    pub node_clip_inset_y: f32,
+    pub edge_alpha: f32,
+    pub disabled_node_alpha: f32,
+    pub graph_surface_mix: f32,
+    pub selected_fill_mix: f32,
+    pub normal_fill_mix: f32,
+    pub edge_width: f32,
+}
+
+impl NodeGraphVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let s = &theme.spacing;
+        Self {
+            title_x: s.md,
+            title_y: s.sm + s.border_standard,
+            title_margin_x: s.lg,
+            subtitle_x: s.interact_height * 4.5,
+            subtitle_y: s.sm + s.border_standard + s.border_emphasis,
+            subtitle_margin_x: s.interact_height * 5.0,
+            accent_strip_width: s.xs,
+            node_text_x: s.md + s.border_standard,
+            node_title_y: s.md + s.xs,
+            node_subtitle_y: s.interact_height + s.md,
+            node_clip_inset_x: s.md + s.border_standard,
+            node_clip_inset_y: s.sm + s.border_standard,
+            edge_alpha: 0.42,
+            disabled_node_alpha: 0.56,
+            graph_surface_mix: 0.35,
+            selected_fill_mix: 0.12,
+            normal_fill_mix: 0.08,
+            edge_width: 1.5,
+        }
+    }
+}
 
 /// A node shown by [`NodeGraphView`].
 #[derive(Debug, Clone, PartialEq)]
@@ -345,6 +394,7 @@ impl Widget for NodeGraphView {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let typography = &ctx.theme.typography;
+        let v = NodeGraphVisualTokens::from_theme(ctx.theme);
         let alpha = if self.enabled { 1.0 } else { 0.55 };
 
         ctx.encoder
@@ -355,16 +405,16 @@ impl Widget for NodeGraphView {
         ctx.encoder.draw_text_box(
             &self.title,
             typography.body.font_size,
-            Point::new(self.bounds.x + 14.0, self.bounds.y + 12.0),
-            (self.bounds.width - 28.0).max(32.0),
+            Point::new(self.bounds.x + v.title_x, self.bounds.y + v.title_y),
+            (self.bounds.width - v.title_margin_x).max(32.0),
             color_with_alpha(colors.foreground, alpha),
         );
         if !self.subtitle.is_empty() {
             ctx.encoder.draw_text_box(
                 &self.subtitle,
                 typography.small.font_size,
-                Point::new(self.bounds.x + 126.0, self.bounds.y + 13.0),
-                (self.bounds.width - 140.0).max(32.0),
+                Point::new(self.bounds.x + v.subtitle_x, self.bounds.y + v.subtitle_y),
+                (self.bounds.width - v.subtitle_margin_x).max(32.0),
                 color_with_alpha(colors.muted_foreground, alpha),
             );
         }
@@ -372,7 +422,10 @@ impl Widget for NodeGraphView {
         let graph_rect = self.graph_rect();
         ctx.encoder.draw_rect(
             graph_rect,
-            color_with_alpha(mix_color(colors.card, colors.background, 0.35), alpha),
+            color_with_alpha(
+                mix_color(colors.card, colors.background, v.graph_surface_mix),
+                alpha,
+            ),
             0.0,
         );
 
@@ -400,21 +453,26 @@ impl Widget for NodeGraphView {
             ) else {
                 continue;
             };
-            paint_edge(ctx, from, to);
+            paint_edge(ctx, from, to, v.edge_alpha, v.edge_width);
         }
 
         for (node, (_, rect)) in self.nodes.iter().zip(self.node_rects.iter()) {
             let selected = self.selected_node_id.as_deref() == Some(node.id.as_str());
-            let disabled_alpha = alpha * if node.disabled { 0.56 } else { 1.0 };
+            let disabled_alpha = alpha
+                * if node.disabled {
+                    v.disabled_node_alpha
+                } else {
+                    1.0
+                };
             let border = if selected {
                 colors.ring
             } else {
                 soft_border(colors.border)
             };
             let fill = if selected {
-                mix_color(colors.popover, colors.primary, 0.12)
+                mix_color(colors.popover, colors.primary, v.selected_fill_mix)
             } else {
-                mix_color(colors.popover, colors.background, 0.08)
+                mix_color(colors.popover, colors.background, v.normal_fill_mix)
             };
 
             ctx.encoder.draw_rect(
@@ -430,7 +488,12 @@ impl Widget for NodeGraphView {
 
             let accent = node.accent.unwrap_or(colors.primary);
             ctx.encoder.draw_rect(
-                Rect::new(rect.x + 1.0, rect.y + 1.0, 4.0, rect.height - 2.0),
+                Rect::new(
+                    rect.x + 1.0,
+                    rect.y + 1.0,
+                    v.accent_strip_width,
+                    rect.height - 2.0,
+                ),
                 color_with_alpha(accent, disabled_alpha),
                 (spacing.radius_md - 1.0).max(0.0),
             );
@@ -441,20 +504,20 @@ impl Widget for NodeGraphView {
             } else {
                 colors.foreground
             };
-            ctx.push_clip(rect.inset(12.0, 8.0));
+            ctx.push_clip(rect.inset(v.node_clip_inset_x, v.node_clip_inset_y));
             ctx.encoder.draw_text_box(
                 &node.title,
                 typography.body.font_size,
-                Point::new(rect.x + 16.0, rect.y + 14.0),
-                (rect.width - 32.0).max(24.0),
+                Point::new(rect.x + v.node_text_x, rect.y + v.node_title_y),
+                (rect.width - v.node_text_x * 2.0).max(24.0),
                 color_with_alpha(text_color, disabled_alpha),
             );
             if !node.subtitle.is_empty() {
                 ctx.encoder.draw_text_box(
                     &node.subtitle,
                     typography.small.font_size,
-                    Point::new(rect.x + 16.0, rect.y + 42.0),
-                    (rect.width - 32.0).max(24.0),
+                    Point::new(rect.x + v.node_text_x, rect.y + v.node_subtitle_y),
+                    (rect.width - v.node_text_x * 2.0).max(24.0),
                     color_with_alpha(colors.muted_foreground, disabled_alpha),
                 );
             }
@@ -471,12 +534,12 @@ impl Widget for NodeGraphView {
     }
 }
 
-fn paint_edge(ctx: &mut PaintContext, from: Rect, to: Rect) {
+fn paint_edge(ctx: &mut PaintContext, from: Rect, to: Rect, edge_alpha: f32, edge_width: f32) {
     let colors = &ctx.theme.colors;
-    let color = color_with_alpha(colors.muted_foreground, 0.42);
+    let color = color_with_alpha(colors.muted_foreground, edge_alpha);
 
     for (start, end) in graph_model::edge_segments(from, to) {
-        ctx.encoder.draw_line(start, end, 1.5, color);
+        ctx.encoder.draw_line(start, end, edge_width, color);
     }
 }
 
