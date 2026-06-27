@@ -448,10 +448,13 @@ impl Widget for DockPanel {
         match event {
             UiEvent::DragEnter { payload: DragPayload::PanelTab(panel), position } => {
                 let _ = self.update_panel_drop_hover(*panel, *position, ctx);
+                self.tab_bar.clear_drop_hover();
+                ctx.request_repaint();
             }
             UiEvent::DragOver { position } => {
                 if let Some(hover) = self.dock_hover {
                     let _ = self.update_panel_drop_hover(hover.dragged, *position, ctx);
+                    self.tab_bar.clear_drop_hover();
                 }
             }
             UiEvent::Drop { payload: DragPayload::PanelTab(panel), position } => {
