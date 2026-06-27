@@ -1672,4 +1672,85 @@ mod tests {
             }
         }
     }
+
+    // ── Edge-case primitive harness ─────────────────────────────────────────
+
+    #[test]
+    fn offscreen_renderer_handles_subpixel_rect_positions() {
+        let Some(mut harness) = OffscreenHarness::new(32, 32) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        // Rect at subpixel position; must still produce visible pixels
+        encoder.draw_rect(
+            Rect::new(8.3, 8.7, 16.0, 16.0),
+            Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            0.0,
+        );
+        let pixels = harness.render(encoder.finish());
+        let center = pixel(&pixels, 32, 16, 16);
+        assert!(
+            center[3] >= 120,
+            "subpixel rect center should have coverage, got {center:?}"
+        );
+        let stats = harness.last_stats.expect("render should record stats");
+        assert!(
+            stats.submitted_vertices > 0,
+            "subpixel rect must produce GPU vertices"
+        );
+    }
+
+    #[test]
+    fn offscreen_renderer_handles_deeply_nested_clips() {
+        let Some(mut harness) = OffscreenHarness::new(64, 64) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        // 4 levels of nested clips
+        encoder.push_clip(Rect::new(4.0, 4.0, 56.0, 56.0));
+        encoder.push_clip(Rect::new(12.0, 12.0, 40.0, 40.0));
+        encoder.push_clip(Rect::new(20.0, 20.0, 24.0, 24.0));
+        encoder.push_clip(Rect::new(26.0, 26.0, 12.0, 12.0));
+        encoder.draw_rect(
+            Rect::new(0.0, 0.0, 64.0, 64.0),
+            Color { r: 1.0, g: 0.0, b: 1.0, a: 1.0 },
+            0.0,
+        );
+        encoder.pop_clip();
+        encoder.pop_clip();
+        encoder.pop_clip();
+        encoder.pop_clip();
+
+        let pixels = harness.render(encoder.finish());
+        let inside = pixel(&pixels, 64, 32, 32);
+        assert!(
+            inside[3] >= 180,
+            "4-level nested clip interior should render, got {inside:?}"
+        );
+        let outside = pixel(&pixels, 64, 18, 32);
+        assert_eq!(
+            outside[3], 0,
+            "outside 3rd clip level should reject, got {outside:?}"
+        );
+    }
+
+    #[test]
+    fn offscreen_renderer_survives_one_by_one_viewport_rendering() {
+        let Some(mut harness) = OffscreenHarness::new(1, 1) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_rect(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            0.0,
+        );
+        let pixels = harness.render(encoder.finish());
+        assert_eq!(pixels.len(), 4);
+        let stats = harness.last_stats.expect("render should record stats");
+        assert!(
+            stats.submitted_vertices <= 6,
+            "1x1 viewport should produce at most one rect"
+        );
+    }
 }
