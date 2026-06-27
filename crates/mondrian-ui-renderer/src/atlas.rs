@@ -23,11 +23,13 @@ pub struct AtlasAllocation {
 impl AtlasAllocation {
     /// Convert this allocation to normalized atlas UV coordinates.
     pub fn uv_rect(self, atlas_width: u32, atlas_height: u32) -> Rect {
+        let aw = atlas_width.max(1) as f32;
+        let ah = atlas_height.max(1) as f32;
         Rect::new(
-            self.x as f32 / atlas_width as f32,
-            self.y as f32 / atlas_height as f32,
-            self.width as f32 / atlas_width as f32,
-            self.height as f32 / atlas_height as f32,
+            self.x as f32 / aw,
+            self.y as f32 / ah,
+            self.width as f32 / aw,
+            self.height as f32 / ah,
         )
     }
 }

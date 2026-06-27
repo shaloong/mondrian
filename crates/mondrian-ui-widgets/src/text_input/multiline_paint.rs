@@ -103,7 +103,9 @@ pub(super) fn paint_multiline(ctx: &mut PaintContext, snapshot: MultilinePaintSn
 
     // ── 3. Preedit text + underline (at composition anchor) ──
     if snapshot.enabled && !snapshot.read_only && snapshot.focused && snapshot.preedit.is_some() {
-        let preedit = snapshot.preedit.unwrap();
+        let Some(preedit) = snapshot.preedit else {
+            return;
+        };
         if !preedit.is_empty() {
             let origin = snapshot.geometry.preedit_origin;
             ctx.encoder.draw_text(preedit, metrics.font_size, origin, tokens.foreground);

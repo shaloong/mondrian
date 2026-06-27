@@ -376,7 +376,7 @@ impl MultilineTextInput {
             );
             self.geometry_cache.replace(Some(geo));
         }
-        self.geometry_cache.borrow().clone().unwrap()
+        self.geometry_cache.borrow().clone().expect("geometry must be cached")
     }
 
     fn content_left(&self) -> f32 {

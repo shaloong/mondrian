@@ -112,7 +112,14 @@ impl LineMeasureCache {
     }
 
     fn column_for_x(&self, x: f32) -> usize {
-        match self.grapheme_x.binary_search_by(|v| v.partial_cmp(&x).unwrap()) {
+        // Guard against NaN or non-finite coordinates
+        if !x.is_finite() {
+            return 0;
+        }
+        match self
+            .grapheme_x
+            .binary_search_by(|v| v.partial_cmp(&x).expect("x must be finite"))
+        {
             Ok(idx) => idx,
             Err(idx) => {
                 if idx == 0 {
@@ -536,7 +543,10 @@ fn compute_selection_rects(
         return rects;
     };
 
-    let sel_positions = state.selection().unwrap();
+    let sel_positions = match state.selection() {
+        Some(pos) => pos,
+        None => return rects,
+    };
     let sel_start_pos = sel_positions.start;
     let sel_end_pos = sel_positions.end;
 

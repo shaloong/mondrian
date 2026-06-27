@@ -66,12 +66,12 @@ fn ensure_initialized() -> &'static RwLock<Theme> {
 }
 
 pub fn current_theme() -> std::sync::RwLockReadGuard<'static, Theme> {
-    ensure_initialized().read().unwrap()
+    ensure_initialized().read().unwrap_or_else(|e| e.into_inner())
 }
 
 pub fn set_theme(theme: Theme) {
     if let Some(lock) = ACTIVE_THEME.get() {
-        *lock.write().unwrap() = theme;
+        *lock.write().unwrap_or_else(|e| e.into_inner()) = theme;
     } else {
         ACTIVE_THEME.get_or_init(|| RwLock::new(theme));
     }
