@@ -302,32 +302,26 @@ impl DockPanel {
         dragged: PanelKind,
         area: DockPanelDropArea,
     ) -> Option<PanelKind> {
-        // Center drop: merge into the tab row (any tab is fine, just not same-as-self
-        // when that would be a no-op)
-        if area == DockPanelDropArea::Center {
-            let other = self.tab_bar.tab_panel_kinds().into_iter().find(|kind| *kind != dragged);
-            if other.is_some() {
-                return other;
-            }
-            let active = self.tab_bar.active_panel_kind().unwrap_or(self.kind);
-            if active != dragged {
-                return Some(active);
-            }
-            return None;
+        let active = self.tab_bar.active_panel_kind().unwrap_or(self.kind);
+        if active != dragged {
+            return Some(active);
         }
-        // Edge drops: need a different tab as the split target
-        self.tab_bar
-            .tab_panel_kinds()
-            .into_iter()
-            .find(|kind| *kind != dragged)
-            .or_else(|| {
-                let active = self.tab_bar.active_panel_kind().unwrap_or(self.kind);
-                (active != dragged).then_some(active)
-            })
+        if area != DockPanelDropArea::Center {
+            return self.tab_bar.tab_panel_kinds().into_iter().find(|kind| *kind != dragged);
+        }
+        None
     }
 
     fn can_accept_panel_drop(&self, dragged: PanelKind) -> bool {
-        self.tab_bar.tab_panel_kinds().into_iter().any(|kind| kind != dragged)
+        [
+            DockPanelDropArea::Center,
+            DockPanelDropArea::Top,
+            DockPanelDropArea::Right,
+            DockPanelDropArea::Bottom,
+            DockPanelDropArea::Left,
+        ]
+        .into_iter()
+        .any(|area| self.target_panel_for_drop(dragged, area).is_some())
     }
 
     fn update_panel_drop_hover(
