@@ -5,9 +5,9 @@
 mod geometry;
 mod interaction;
 mod model;
+mod paint;
 
 use std::cell::Cell;
-use std::f32::consts::TAU;
 
 use geometry::ColorPickerGeometry;
 use interaction::{
@@ -15,7 +15,7 @@ use interaction::{
     ColorInteractionUpdate,
 };
 use model::{apply_field_texts, field_text, hue_for_color, ColorField};
-use mondrian_core::{Color, HsvColor};
+use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -28,9 +28,7 @@ use crate::menu::{
     paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, rect_has_paintable_area,
     DropdownTriggerStyle, MenuRowPaint,
 };
-use crate::paint::{
-    color_with_alpha, mix_color, paint_checkerboard, paint_focus_ring, paint_shadow, soft_border,
-};
+use crate::paint::paint_focus_ring;
 use crate::text_input::TextInput;
 use crate::vector_icon::VectorIcon;
 
@@ -54,9 +52,6 @@ const MODE_TRIGGER_WIDTH: f32 = 74.0;
 const ROW_HEIGHT: f32 = 28.0;
 const ROW_GAP: f32 = 6.0;
 const SWATCH_SIZE: f32 = 36.0;
-const HUE_SEGMENTS: usize = 6;
-const WHEEL_SEGMENTS: usize = 120;
-const WHEEL_EDGE_OVERDRAW: f32 = 1.5;
 
 /// Editable color model shown by [`ColorPicker`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -621,261 +616,59 @@ impl ColorPicker {
     }
 
     fn paint_panel_chrome(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
-        paint_shadow(ctx, self.bounds, spacing.radius_lg);
-        ctx.encoder
-            .draw_rect(self.bounds, soft_border(tokens.border), spacing.radius_lg);
-        ctx.encoder.draw_rect(
-            self.bounds.inset(1.0, 1.0),
-            mix_color(tokens.popover, tokens.foreground, 0.018),
-            spacing.radius_lg - 1.0,
-        );
-        if self.eyedropper_active {
-            ctx.encoder.draw_rect(
-                self.bounds.inset(2.0, 2.0),
-                color_with_alpha(tokens.primary, 0.26),
-                spacing.radius_lg - 2.0,
-            );
-        }
+        paint::paint_panel_chrome(ctx, self.bounds, self.eyedropper_active);
     }
 
     fn paint_swatch(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
-        let border = self.swatch_rect();
-        let swatch = border.inset(2.0, 2.0);
-        ctx.encoder.draw_rect(border, soft_border(tokens.border), spacing.radius_lg);
-        ctx.encoder.draw_rect(
-            border.inset(1.0, 1.0),
-            tokens.popover,
-            spacing.radius_lg - 1.0,
-        );
-        paint_checkerboard(ctx, swatch, 5.0, spacing.radius_md);
-        ctx.encoder.draw_rect(swatch, self.color, spacing.radius_md);
+        paint::paint_swatch(ctx, self.color, self.swatch_rect());
     }
 
     fn paint_eyedropper_button(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
-        let rect = self.eyedropper_rect();
-        let active = self.eyedropper_active;
-        let fill = if !self.enabled {
-            mix_color(tokens.popover, tokens.muted, 0.36)
-        } else if active {
-            mix_color(tokens.popover, tokens.primary, 0.18)
-        } else if self.eyedropper_pressed {
-            mix_color(tokens.popover, tokens.foreground, 0.08)
-        } else if self.eyedropper_hovered {
-            mix_color(tokens.popover, tokens.foreground, 0.055)
-        } else {
-            mix_color(tokens.popover, tokens.foreground, 0.025)
-        };
-        let icon = if !self.enabled {
-            tokens.muted_foreground
-        } else if active {
-            tokens.primary
-        } else {
-            tokens.popover_foreground
-        };
-
-        ctx.encoder.draw_rect(rect, soft_border(tokens.border), spacing.radius_md);
-        ctx.encoder.draw_rect(rect.inset(1.0, 1.0), fill, spacing.radius_md - 1.0);
-        if let Some(vector_icon) = &self.eyedropper_icon {
-            vector_icon.paint(ctx, rect.inset(7.0, 7.0), icon);
-            return;
-        }
-        ctx.encoder.draw_line(
-            Point::new(rect.x + 10.0, rect.y + 18.0),
-            Point::new(rect.x + 18.0, rect.y + 10.0),
-            2.0,
-            icon,
+        paint::paint_eyedropper_button(
+            ctx,
+            self.eyedropper_rect(),
+            self.enabled,
+            self.eyedropper_active,
+            self.eyedropper_pressed,
+            self.eyedropper_hovered,
+            self.eyedropper_icon.as_ref(),
         );
-        ctx.encoder.draw_line(
-            Point::new(rect.x + 15.0, rect.y + 8.0),
-            Point::new(rect.x + 20.0, rect.y + 13.0),
-            2.0,
-            icon,
-        );
-        ctx.encoder.draw_line(
-            Point::new(rect.x + 8.0, rect.y + 20.0),
-            Point::new(rect.x + 12.0, rect.y + 16.0),
-            2.0,
-            icon,
-        );
-        ctx.encoder
-            .draw_rect(Rect::new(rect.x + 7.0, rect.y + 21.0, 4.0, 2.0), icon, 1.0);
     }
 
     fn paint_color_area(&self, ctx: &mut PaintContext) {
         match self.area_mode {
-            ColorPickerAreaMode::Square => self.paint_square_color_area(ctx),
-            ColorPickerAreaMode::Wheel => self.paint_wheel_color_area(ctx),
+            ColorPickerAreaMode::Square => paint::paint_square_color_area(
+                ctx,
+                self.color_area_rect(),
+                self.hue,
+                self.color.to_hsv(),
+            ),
+            ColorPickerAreaMode::Wheel => paint::paint_wheel_color_area(
+                ctx,
+                self.color_area_rect(),
+                self.color_wheel_rect(),
+                self.hue,
+                self.color.to_hsv(),
+            ),
         }
-    }
-
-    fn paint_square_color_area(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
-        let outer = self.color_area_rect();
-        let area = outer.inset(1.0, 1.0);
-        ctx.encoder.draw_rect(outer, soft_border(tokens.border), spacing.radius_lg);
-        let hue = Color::from_hsv(HsvColor { h: self.hue, s: 1.0, v: 1.0, a: 1.0 });
-        ctx.encoder.draw_rect(area, hue, spacing.radius_lg - 1.0);
-        ctx.encoder.draw_gradient_rect(
-            area,
-            [
-                Color::WHITE,
-                Color::TRANSPARENT,
-                Color::WHITE,
-                Color::TRANSPARENT,
-            ],
-            spacing.radius_lg - 1.0,
-        );
-        ctx.encoder.draw_gradient_rect(
-            area,
-            [
-                Color::TRANSPARENT,
-                Color::TRANSPARENT,
-                Color::BLACK,
-                Color::BLACK,
-            ],
-            spacing.radius_lg - 1.0,
-        );
-
-        let hsv = self.color.to_hsv();
-        let x = area.x + area.width * hsv.s;
-        let y = area.y + area.height * (1.0 - hsv.v);
-        self.paint_crosshair(ctx, Point::new(x, y));
-    }
-
-    fn paint_wheel_color_area(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
-        let outer = self.color_area_rect();
-        ctx.encoder.draw_rect(
-            outer,
-            mix_color(tokens.popover, tokens.foreground, 0.025),
-            spacing.radius_lg,
-        );
-
-        let wheel = self.color_wheel_rect();
-        let center = wheel.center();
-        let radius = wheel.width.min(wheel.height) * 0.5;
-        let geometry_radius = radius + WHEEL_EDGE_OVERDRAW;
-        ctx.encoder.draw_rect(
-            wheel.inset(-2.0, -2.0),
-            soft_border(tokens.border),
-            radius + 2.0,
-        );
-        let hsv = self.color.to_hsv();
-        let center_color = Color::from_hsv(HsvColor { h: self.hue, s: 0.0, v: hsv.v, a: 1.0 });
-        let mut vertices = Vec::with_capacity(WHEEL_SEGMENTS * 3);
-        for segment in 0..WHEEL_SEGMENTS {
-            let a0 = segment as f32 / WHEEL_SEGMENTS as f32 * TAU;
-            let a1 = (segment + 1) as f32 / WHEEL_SEGMENTS as f32 * TAU;
-            let h0 = a0.to_degrees();
-            let h1 = a1.to_degrees();
-            let p0 = Point::new(
-                center.x + a0.cos() * geometry_radius,
-                center.y + a0.sin() * geometry_radius,
-            );
-            let p1 = Point::new(
-                center.x + a1.cos() * geometry_radius,
-                center.y + a1.sin() * geometry_radius,
-            );
-            let c0 = Color::from_hsv(HsvColor { h: h0, s: 1.0, v: hsv.v, a: 1.0 });
-            let c1 = Color::from_hsv(HsvColor { h: h1, s: 1.0, v: hsv.v, a: 1.0 });
-            vertices.push((center, center_color));
-            vertices.push((p0, c0));
-            vertices.push((p1, c1));
-        }
-        ctx.encoder.draw_colored_triangles_in_rect(&vertices, wheel, radius);
-
-        let angle = self.hue.to_radians();
-        let r = radius * hsv.s.clamp(0.0, 1.0);
-        self.paint_crosshair(
-            ctx,
-            Point::new(center.x + angle.cos() * r, center.y + angle.sin() * r),
-        );
     }
 
     fn paint_hue_bar(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let bar = self.hue_bar_rect();
-        ctx.encoder.draw_rect(bar.inset(-1.0, -1.0), soft_border(tokens.border), 7.0);
-
-        let segment_w = bar.width / HUE_SEGMENTS as f32;
-        for segment in 0..HUE_SEGMENTS {
-            let h0 = segment as f32 / HUE_SEGMENTS as f32 * 360.0;
-            let h1 = (segment + 1) as f32 / HUE_SEGMENTS as f32 * 360.0;
-            let c0 = Color::from_hsv(HsvColor { h: h0, s: 1.0, v: 1.0, a: 1.0 });
-            let c1 = Color::from_hsv(HsvColor { h: h1, s: 1.0, v: 1.0, a: 1.0 });
-            ctx.encoder.draw_gradient_rect(
-                Rect::new(
-                    bar.x + segment as f32 * segment_w,
-                    bar.y,
-                    segment_w + 0.5,
-                    bar.height,
-                ),
-                [c0, c1, c0, c1],
-                0.0,
-            );
-        }
-
-        let x = bar.x + bar.width * (self.hue / 360.0).clamp(0.0, 1.0);
-        self.paint_bar_handle(ctx, bar, x);
+        paint::paint_hue_bar(ctx, self.hue_bar_rect(), self.hue);
     }
 
     fn paint_alpha_bar(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let bar = self.alpha_bar_rect();
-        ctx.encoder.draw_rect(bar.inset(-1.0, -1.0), soft_border(tokens.border), 7.0);
-        paint_checkerboard(ctx, bar, 6.0, 7.0);
-
-        let mut transparent = self.color;
-        transparent.a = 0.0;
-        let mut opaque = self.color;
-        opaque.a = 1.0;
-        ctx.encoder
-            .draw_gradient_rect(bar, [transparent, opaque, transparent, opaque], 0.0);
-
-        let x = bar.x + bar.width * self.color.a.clamp(0.0, 1.0);
-        self.paint_bar_handle(ctx, bar, x);
+        paint::paint_alpha_bar(ctx, self.alpha_bar_rect(), self.color);
     }
 
-    fn paint_crosshair(&self, ctx: &mut PaintContext, point: Point) {
-        let tokens = &ctx.theme.colors;
-        ctx.encoder.draw_rect(
-            Rect::new(point.x - 7.0, point.y - 6.0, 14.0, 14.0),
-            tokens.color_handle_shadow,
-            7.0,
-        );
-        ctx.encoder.draw_rect(
-            Rect::new(point.x - 6.0, point.y - 6.0, 12.0, 12.0),
-            tokens.color_handle_outer,
-            6.0,
-        );
-        ctx.encoder.draw_rect(
-            Rect::new(point.x - 3.0, point.y - 3.0, 6.0, 6.0),
-            tokens.color_handle_inner,
-            3.0,
-        );
+    #[allow(dead_code)]
+    pub(crate) fn paint_crosshair(&self, ctx: &mut PaintContext, point: Point) {
+        paint::paint_crosshair(ctx, point);
     }
 
-    fn paint_bar_handle(&self, ctx: &mut PaintContext, bar: Rect, x: f32) {
-        let tokens = &ctx.theme.colors;
-        let x = x.clamp(bar.x, bar.x + bar.width);
-        ctx.encoder.draw_rect(
-            Rect::new(x - 2.0, bar.y - 3.0, 4.0, bar.height + 6.0),
-            tokens.color_handle_strong_shadow,
-            2.0,
-        );
-        ctx.encoder.draw_rect(
-            Rect::new(x - 1.0, bar.y - 2.0, 2.0, bar.height + 4.0),
-            tokens.color_handle_outer,
-            1.0,
-        );
+    #[allow(dead_code)]
+    pub(crate) fn paint_bar_handle(&self, ctx: &mut PaintContext, bar: Rect, x: f32) {
+        paint::paint_bar_handle(ctx, bar, x);
     }
 }
 
@@ -1521,36 +1314,15 @@ impl Widget for ColorPickerTrigger {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let tokens = &ctx.theme.colors;
-        let spacing = &ctx.theme.spacing;
-        let fill = if !self.enabled {
-            mix_color(tokens.popover, tokens.muted, 0.36)
-        } else if self.open {
-            mix_color(tokens.popover, tokens.primary, 0.08)
-        } else if self.pressed {
-            mix_color(tokens.popover, tokens.foreground, 0.06)
-        } else {
-            mix_color(tokens.popover, tokens.foreground, 0.025)
-        };
-        ctx.encoder
-            .draw_rect(self.bounds, soft_border(tokens.border), spacing.radius_md);
-        ctx.encoder
-            .draw_rect(self.bounds.inset(1.0, 1.0), fill, spacing.radius_md - 1.0);
-        let color_rect = self.color_rect();
-        ctx.encoder.draw_rect(
-            color_rect.inset(-1.0, -1.0),
-            soft_border(tokens.border),
-            spacing.radius_sm,
+        paint::paint_trigger(
+            ctx,
+            self.bounds,
+            self.color(),
+            self.color_rect(),
+            self.enabled,
+            self.open,
+            self.pressed,
         );
-        paint_checkerboard(ctx, color_rect, 6.0, 7.0);
-        ctx.encoder.draw_rect(color_rect, self.color(), spacing.radius_sm);
-        if !self.enabled {
-            ctx.encoder.draw_rect(
-                color_rect,
-                color_with_alpha(tokens.popover, 0.36),
-                spacing.radius_sm,
-            );
-        }
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
@@ -1604,9 +1376,11 @@ mod tests {
     use super::*;
     use crate::paint::shadow_color;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_core::{Color, HsvColor};
     use mondrian_ui_core::focus::FocusManager;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
+    use paint::WHEEL_SEGMENTS;
     use std::cell::RefCell;
     use std::rc::Rc;
 
