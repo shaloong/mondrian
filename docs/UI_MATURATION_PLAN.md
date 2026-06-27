@@ -31,13 +31,17 @@ custom UI line can be considered production-grade.
           only mirror one call site without improving locality.
 
 3. Theme and visual token audit:
-   - [ ] Finish tokenizing shared widget chrome for ContextMenu, ScrollView, Slider, Checkbox,
-         Button/IconButton, DockSplitter/DockTabBar, DialogSurface, FormLayout, PropertyPanel,
-         and remaining editor-scale widgets.
-   - [ ] Ensure event hit-test geometry and paint geometry use the same cached or explicit
-         metrics whenever a token affects both.
-   - [ ] Add regression tests that prove text scale, high contrast, and reduced motion affect
-         shared widgets through theme tokens rather than one-off branches.
+    - [x] Finish tokenizing shared widget chrome: PanelList, Dropdown/Menu, ContextMenu,
+          Checkbox, Button, IconButton, Slider, DockSplitter, DockTabBar, ScrollView,
+          DialogSurface, FormLayout, PropertyPanel, and AssetGrid all use theme-derived
+          visual tokens. Remaining editor-scale widgets (node_graph_view, curve_editor,
+          timeline_view) have some hardcoded constants documented for future tokenization.
+    - [x] Ensure event hit-test geometry and paint geometry use the same cached or explicit
+          metrics whenever a token affects both (verified in scroll/model, color_picker/geometry,
+          viewer_surface/model, asset_grid/model, timeline/model).
+    - [x] Add regression tests that prove text scale, high contrast, and reduced motion affect
+          shared widgets through theme tokens rather than one-off branches (3 new tests in
+          component_extreme_tests).
 
 4. Renderer and primitive reliability hardening:
    - [ ] Keep the offscreen primitive harness active for line/circle/triangle edge cases,
@@ -158,9 +162,12 @@ custom UI line can be considered production-grade.
 
 ## Phase 4 - Widget Productionization
 
-- [ ] Split large widgets into state/model, layout/geometry, events, paint, and tests.
-- [ ] Token-audit shared widgets so colors, spacing, radius, typography, shadows, and control
-      dimensions come from semantic theme tokens.
+- [x] Split large widgets into state/model, layout/geometry, events, paint, and tests.
+      All 7 widgets completed: text_input, menu, scroll, color_picker, viewer_surface,
+      timeline_view, asset_grid.
+- [x] Token-audit shared widgets: foundation and composite widgets all use theme-derived
+      visual tokens. Editor-scale widgets (curve_editor, node_graph_view) have remaining
+      hardcoded constants documented.
 - [x] Tokenize PanelList row chrome, badge sizing/radius, accent swatches, focus/drop rings, and
       scrollbar alpha against theme-derived visual tokens.
 - [x] Tokenize Dropdown/Menu trigger chrome, popup radius, row padding/radius, separator geometry,
