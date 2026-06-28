@@ -311,6 +311,7 @@ pub(crate) fn paint_open_menu_with_submenu(
     overlay_viewport: &std::cell::Cell<Option<Rect>>,
     open: bool,
     open_submenu_index: Option<usize>,
+    open_submenu_hovered: Option<usize>,
 ) {
     use super::geometry::{
         icon_lane_width, item_rect, menu_rect, rect_has_paintable_area, submenu_rect,
@@ -408,7 +409,7 @@ pub(crate) fn paint_open_menu_with_submenu(
                             MenuRowPaint {
                                 enabled: child.enabled,
                                 active: child.checked,
-                                hovered: false, // TODO: track submenu hover
+                                hovered: open_submenu_hovered == Some(ci),
                             },
                         );
                     }

@@ -56,6 +56,7 @@ pub struct Dropdown {
     focus_visible: bool,
     trigger_hovered: bool,
     open_submenu_index: Option<usize>,
+    open_submenu_hovered: Option<usize>,
     overlay_viewport: Cell<Option<Rect>>,
     trigger_style: DropdownTriggerStyle,
 }
@@ -79,6 +80,7 @@ impl Dropdown {
             focus_visible: false,
             trigger_hovered: false,
             open_submenu_index: None,
+            open_submenu_hovered: None,
             overlay_viewport: Cell::new(None),
             trigger_style: DropdownTriggerStyle::Filled,
         }
@@ -354,6 +356,7 @@ impl Dropdown {
     fn close(&mut self, ctx: &mut EventContext) {
         self.open = false;
         self.open_submenu_index = None;
+        self.open_submenu_hovered = None;
         self.hovered_index = None;
         self.pressed_index = None;
         self.suppress_next_release = false;
@@ -394,11 +397,26 @@ impl Widget for Dropdown {
                         self.close(ctx);
                         return EventResult::Handled;
                     }
+                    // Check submenu click first (outside parent menu rect but inside submenu).
+                    if let Some(sub_idx) = self.open_submenu_index {
+                        if let Some(sub_rect) = self.submenu_rect(sub_idx) {
+                            if sub_rect.contains(*position) {
+                                // Will be handled in MouseUp; just record the pressed state.
+                                self.pressed_index = None; // Not a parent-menu item
+                                return EventResult::Handled;
+                            }
+                        }
+                    }
                     if let Some(i) = self.item_at(*position) {
                         self.pressed_index = Some(i);
                         return EventResult::Handled;
                     }
-                    if !self.menu_rect().contains(*position) {
+                    // Close if clicked outside both the parent and submenu rects.
+                    let in_submenu = self
+                        .open_submenu_index
+                        .and_then(|idx| self.submenu_rect(idx))
+                        .is_some_and(|r| r.contains(*position));
+                    if !self.menu_rect().contains(*position) && !in_submenu {
                         self.close(ctx);
                         return EventResult::Handled;
                     }
@@ -458,14 +476,28 @@ impl Widget for Dropdown {
                     self.hovered_index =
                         self.item_at(*position).filter(|i| self.items[*i].is_activatable());
 
-                    // If there is an open submenu, check whether the mouse is still
-                    // inside the keep-alive zone: the parent item rect, the submenu
-                    // rect, or the bridge between them.  Only close the submenu when
-                    // the mouse has clearly left the zone.
+                    // If there is an open submenu, track hover inside it and check
+                    // whether the mouse is still in the keep-alive zone.
                     if let Some(sub_idx) = self.open_submenu_index {
-                        let keep_alive = self.is_in_submenu_keep_alive_zone(*position, sub_idx);
-                        if !keep_alive {
-                            self.open_submenu_index = None;
+                        if let Some(sub_rect) = self.submenu_rect(sub_idx) {
+                            if sub_rect.contains(*position) {
+                                let rel_y = position.y - sub_rect.y - MENU_POPUP_PADDING;
+                                let sub_hover =
+                                    (rel_y / self.item_height).floor().max(0.0) as usize;
+                                let child_count = match &self.items[sub_idx].kind {
+                                    MenuItemKind::Submenu { ref children } => children.len(),
+                                    _ => 0,
+                                };
+                                self.open_submenu_hovered =
+                                    (sub_hover < child_count).then_some(sub_hover);
+                            } else {
+                                self.open_submenu_hovered = None;
+                                let keep_alive =
+                                    self.is_in_submenu_keep_alive_zone(*position, sub_idx);
+                                if !keep_alive {
+                                    self.open_submenu_index = None;
+                                }
+                            }
                         }
                     }
 
@@ -597,6 +629,7 @@ impl Widget for Dropdown {
             &self.overlay_viewport,
             self.open,
             self.open_submenu_index,
+            self.open_submenu_hovered,
         );
     }
 
