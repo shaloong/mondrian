@@ -419,25 +419,25 @@ pub(crate) fn paint_open_menu_with_submenu(
     }
 }
 
-/// Paint a right-pointing arrow indicator on a submenu row.
+/// Paint a right-pointing chevron on a submenu row using an SVG vector icon.
 fn paint_submenu_arrow(ctx: &mut PaintContext, row_rect: Rect) {
     let visual = MenuVisualTokens::from_theme(ctx.theme);
     let tokens = &ctx.theme.colors;
-    let cx = row_rect.x + row_rect.width - visual.arrow_right_inset;
-    let cy = row_rect.y + row_rect.height * 0.5;
-    let hw = visual.arrow_half_width;
-    ctx.encoder.draw_line(
-        Point::new(cx - hw, cy - hw),
-        Point::new(cx + hw, cy),
-        1.5,
-        tokens.muted_foreground,
-    );
-    ctx.encoder.draw_line(
-        Point::new(cx + hw, cy),
-        Point::new(cx - hw, cy + hw),
-        1.5,
-        tokens.muted_foreground,
-    );
+    let size = (row_rect.height * 0.4).clamp(8.0, 14.0);
+    let x = row_rect.x + row_rect.width - visual.arrow_right_inset;
+    let y = row_rect.y + (row_rect.height - size) * 0.5;
+    let icon = submenu_arrow_icon();
+    icon.paint(ctx, Rect::new(x, y, size, size), tokens.muted_foreground);
+}
+
+fn submenu_arrow_icon() -> crate::vector_icon::VectorIcon {
+    use std::sync::OnceLock;
+    use crate::vector_icon::VectorIcon;
+
+    static ICON: OnceLock<VectorIcon> = OnceLock::new();
+    ICON
+        .get_or_init(|| VectorIcon::from_svg_str(include_str!("caret_right.svg")).unwrap())
+        .clone()
 }
 
 /// Paint disabled trigger (filled rect + muted label, no arrow, no focus ring).

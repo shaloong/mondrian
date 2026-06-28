@@ -11,6 +11,7 @@ mod paint;
 pub(crate) use geometry::{anchored_menu_rect, rect_has_paintable_area};
 pub use model::{DropdownTriggerStyle, MenuItem, MenuItemKind};
 pub(crate) use model::{MenuRowPaint, MenuVisualTokens};
+use model::MENU_POPUP_PADDING;
 pub(crate) use paint::{
     paint_disabled_trigger, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
     paint_menu_separator, paint_menu_trigger, paint_open_menu_with_submenu,
@@ -249,6 +250,41 @@ impl Dropdown {
         }
     }
 
+    /// Return `true` if `position` is inside the keep-alive zone of an
+    /// open submenu: the parent row, the submenu popup, or the bridge
+    /// rectangle connecting them.  This prevents the submenu from closing
+    /// when the mouse briefly crosses neighbouring rows on the way to
+    /// the submenu.
+    fn is_in_submenu_keep_alive_zone(&self, position: Point, submenu_index: usize) -> bool {
+        let parent_rect = item_rect(
+            self.menu_rect(),
+            submenu_index,
+            self.item_height,
+            self.scroll_offset,
+        );
+        let Some(sub_rect) = self.submenu_rect(submenu_index) else {
+            return false;
+        };
+        if sub_rect.contains(position) || parent_rect.contains(position) {
+            return true;
+        }
+        // Bridge rect: the bounding box between the parent row's right edge
+        // and the submenu, extended upward/downward to cover the neighbouring
+        // rows that the mouse might cross.
+        let parent_right = parent_rect.x + parent_rect.width;
+        let bridge_left = parent_right;
+        let bridge_right = sub_rect.x;
+        let bridge_top = parent_rect.y.min(sub_rect.y);
+        let bridge_bottom = (parent_rect.y + parent_rect.height).max(sub_rect.y + sub_rect.height);
+        let bridge = Rect::new(
+            bridge_left,
+            bridge_top,
+            (bridge_right - bridge_left).max(0.0),
+            (bridge_bottom - bridge_top).max(0.0),
+        );
+        bridge.contains(position)
+    }
+
     fn first_activatable_index(&self) -> Option<usize> {
         self.items.iter().position(|item| item.is_activatable())
     }
@@ -374,11 +410,36 @@ impl Widget for Dropdown {
                         self.suppress_next_release = false;
                         return EventResult::Handled;
                     }
+                    // Check submenu clicks first
+                    if let Some(sub_idx) = self.open_submenu_index {
+                        if let Some(sub_rect) = self.submenu_rect(sub_idx) {
+                            if sub_rect.contains(*position) {
+                                let rel_y = position.y - sub_rect.y - MENU_POPUP_PADDING;
+                                let sub_item = (rel_y / self.item_height).floor() as usize;
+                                if let Some(item) = self.items.get(sub_idx) {
+                                    if let MenuItemKind::Submenu { ref children } = item.kind {
+                                        if let Some(child) = children.get(sub_item) {
+                                            if child.is_activatable() {
+                                                (ctx.dispatch)(child.action.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                                self.close(ctx);
+                                return EventResult::Handled;
+                            }
+                        }
+                    }
                     let released_index = self.item_at(*position);
                     if let (Some(pressed), Some(released)) = (self.pressed_index, released_index) {
                         if pressed == released && self.items[released].is_activatable() {
-                            (ctx.dispatch)(self.items[released].action.clone());
-                            self.close(ctx);
+                            // Don't close if the clicked item is a submenu
+                            if self.items[released].is_submenu() {
+                                self.pressed_index = None;
+                            } else {
+                                (ctx.dispatch)(self.items[released].action.clone());
+                                self.close(ctx);
+                            }
                         } else {
                             self.pressed_index = None;
                         }
@@ -393,31 +454,28 @@ impl Widget for Dropdown {
                     return EventResult::Handled;
                 }
                 UiEvent::MouseMove { position, .. } => {
-                    let prev = self.hovered_index;
+                    let prev_hover = self.hovered_index;
                     self.hovered_index =
                         self.item_at(*position).filter(|i| self.items[*i].is_activatable());
-                    // If the hover moved to a different submenu item, close
-                    // the old submenu; if it moved to a submenu item, open it.
-                    if self.hovered_index != prev {
-                        if let Some(idx) = self.hovered_index {
-                            if self.items[idx].is_submenu() && self.open_submenu_index != Some(idx)
-                            {
-                                self.open_submenu_index = Some(idx);
-                            } else if !self.items[idx].is_submenu() {
-                                self.open_submenu_index = None;
-                            }
-                        } else {
+
+                    // If there is an open submenu, check whether the mouse is still
+                    // inside the keep-alive zone: the parent item rect, the submenu
+                    // rect, or the bridge between them.  Only close the submenu when
+                    // the mouse has clearly left the zone.
+                    if let Some(sub_idx) = self.open_submenu_index {
+                        let keep_alive = self.is_in_submenu_keep_alive_zone(*position, sub_idx);
+                        if !keep_alive {
                             self.open_submenu_index = None;
                         }
                     }
-                    // Check if mouse is in the open submenu rect — if so, keep it open.
-                    if let Some(sub_idx) = self.open_submenu_index {
-                        if let Some(sub_rect) = self.submenu_rect(sub_idx) {
-                            if sub_rect.contains(*position) {
-                                // Mouse is inside the submenu — keep it open and
-                                // update submenu hover.
-                            } else if self.item_at(*position).is_none() {
-                                self.open_submenu_index = None;
+
+                    // Open a new submenu on hover if the hovered item changed.
+                    if self.hovered_index != prev_hover {
+                        if let Some(idx) = self.hovered_index {
+                            if self.items[idx].is_submenu()
+                                && self.open_submenu_index != Some(idx)
+                            {
+                                self.open_submenu_index = Some(idx);
                             }
                         }
                     }
