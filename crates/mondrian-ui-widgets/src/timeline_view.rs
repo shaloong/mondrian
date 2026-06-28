@@ -304,6 +304,17 @@ pub type WaveformLookupFn = dyn Fn(
     u32, // pixel_width
 ) -> Option<Vec<f32>>;
 
+/// How audio waveforms are rendered on timeline clips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveformDisplay {
+    /// Top-half, bottom-aligned (Premiere-style). Only the positive
+    /// amplitude envelope is drawn, rising from the clip's bottom edge.
+    BottomAligned,
+    /// Full waveform from the clip's vertical centre line, mirrored
+    /// symmetrically above and below (DAW-style).
+    Centered,
+}
+
 /// Clip view model rendered by [`TimelineView`].
 #[derive(Debug, Clone)]
 pub struct TimelineClip {
@@ -543,6 +554,7 @@ pub struct TimelineView {
     track_control_icons: Vec<(TimelineTrackControlIconSlot, VectorIcon)>,
     empty_message: Option<String>,
     waveform_lookup: Option<Box<WaveformLookupFn>>,
+    waveform_display: WaveformDisplay,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -673,6 +685,7 @@ impl TimelineView {
             track_control_icons: Vec::new(),
             empty_message: None,
             waveform_lookup: None,
+            waveform_display: WaveformDisplay::BottomAligned,
         }
     }
 
@@ -856,6 +869,13 @@ impl TimelineView {
         lookup: impl Fn(mondrian_core::AssetId, f64, f64, u32) -> Option<Vec<f32>> + 'static,
     ) -> Self {
         self.waveform_lookup = Some(Box::new(lookup));
+        self
+    }
+
+    /// Set the waveform display mode.
+    /// [`WaveformDisplay::BottomAligned`] is the default (Premiere-style).
+    pub fn with_waveform_display(mut self, mode: WaveformDisplay) -> Self {
+        self.waveform_display = mode;
         self
     }
 
@@ -3437,23 +3457,6 @@ impl TimelineView {
             );
         }
         ctx.encoder.draw_rect(rect, fill, 5.0);
-        let accent_height = rect.height.clamp(2.0, 4.0);
-        ctx.encoder.draw_rect(
-            Rect::new(
-                rect.x + 1.0,
-                rect.y + 1.0,
-                (rect.width - 2.0).max(1.0),
-                accent_height,
-            ),
-            color_with_alpha(colors.foreground, 0.08),
-            4.0,
-        );
-        ctx.encoder.draw_line(
-            Point::new(rect.x + 1.0, rect.y + rect.height - 1.0),
-            Point::new(rect.x + rect.width - 1.0, rect.y + rect.height - 1.0),
-            1.0,
-            color_with_alpha(Color::BLACK, 0.10),
-        );
 
 
         if clip.kind == TimelineClipKind::Audio {
@@ -3473,29 +3476,6 @@ impl TimelineView {
             if let Some(ref peaks) = peaks {
                 self.paint_audio_waveform(ctx, rect, peaks, selected || hovered || dragging);
             }
-        }
-        if selected || hovered {
-            let handle = color_with_alpha(colors.foreground, if hovered { 0.35 } else { 0.22 });
-            ctx.encoder.draw_rect(
-                Rect::new(
-                    rect.x + 2.0,
-                    rect.y + 4.0,
-                    2.0,
-                    (rect.height - 8.0).max(4.0),
-                ),
-                handle,
-                1.0,
-            );
-            ctx.encoder.draw_rect(
-                Rect::new(
-                    rect.x + rect.width - 4.0,
-                    rect.y + 4.0,
-                    2.0,
-                    (rect.height - 8.0).max(4.0),
-                ),
-                handle,
-                1.0,
-            );
         }
         if clip.nested && rect.width >= 28.0 && rect.height >= 18.0 {
             let nested_color = color_with_alpha(colors.foreground, 0.64);
@@ -3530,28 +3510,56 @@ impl TimelineView {
         peaks: &[f32],
         emphasized: bool,
     ) {
-        let inner = rect.inset(6.0, (rect.height * 0.24).min(10.0));
+        let mode = self.waveform_display;
+        let vpad = match mode {
+            WaveformDisplay::BottomAligned => 2.0,
+            WaveformDisplay::Centered => (rect.height * 0.24).min(10.0),
+        };
+        let inner = rect.inset(6.0, vpad);
         if inner.width <= 2.0 || inner.height <= 4.0 || peaks.is_empty() {
             return;
         }
         let mut color = ctx.theme.colors.foreground;
         color.a = if emphasized { 0.46 } else { 0.30 };
-        let mid_y = inner.y + inner.height * 0.5;
         let column_count = inner.width.floor().max(1.0) as usize;
-        for column in 0..column_count {
-            let sample_index =
-                ((column as f32 / column_count as f32) * peaks.len() as f32)
-                    .floor()
-                    .min((peaks.len() - 1) as f32) as usize;
-            let peak = peaks[sample_index].clamp(0.0, 1.0);
-            let half_height = (peak * inner.height * 0.5).max(1.0);
-            let x = inner.x + column as f32 + 0.5;
-            ctx.encoder.draw_line(
-                Point::new(x, mid_y - half_height),
-                Point::new(x, mid_y + half_height),
-                1.0,
-                color,
-            );
+
+        match mode {
+            WaveformDisplay::BottomAligned => {
+                let baseline = inner.y + inner.height;
+                for column in 0..column_count {
+                    let sample_index = ((column as f32 / column_count as f32)
+                        * peaks.len() as f32)
+                        .floor()
+                        .min((peaks.len() - 1) as f32) as usize;
+                    let peak = peaks[sample_index].clamp(0.0, 1.0);
+                    let amplitude = (peak * inner.height).max(1.0);
+                    let x = inner.x + column as f32 + 0.5;
+                    ctx.encoder.draw_line(
+                        Point::new(x, baseline - amplitude),
+                        Point::new(x, baseline),
+                        1.0,
+                        color,
+                    );
+                }
+            }
+            WaveformDisplay::Centered => {
+                let mid_y = inner.y + inner.height * 0.5;
+                for column in 0..column_count {
+                    let sample_index = ((column as f32 / column_count as f32)
+                        * peaks.len() as f32)
+                        .floor()
+                        .min((peaks.len() - 1) as f32) as usize;
+                    let peak = peaks[sample_index].clamp(0.0, 1.0);
+                    let half_height = (peak * inner.height * 0.5).max(1.0);
+                    let x = inner.x + column as f32 + 0.5;
+                    ctx.encoder.draw_line(
+                        Point::new(x, mid_y - half_height),
+                        Point::new(x, mid_y + half_height),
+                        1.0,
+                        color,
+                    );
+                }
+            }
         }
     }
 
@@ -8277,7 +8285,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_clip_paints_tokenized_border_and_trim_handles() {
+    fn selected_clip_paints_tokenized_border() {
         let view = TimelineView::new(vec![TimelineTrack::video(
             "V1",
             vec![TimelineClip::new("Selected", 0, 20).selected(true)],
@@ -8306,22 +8314,10 @@ mod tests {
             .iter()
             .any(|(bounds, color, _)| *bounds == rect.inset(-1.0, -1.0)
                 && color_close(*color, selected_border)));
-
-        let handle = color_with_alpha(theme.colors.foreground, 0.22);
-        assert_eq!(
-            encoder
-                .rect_commands
-                .iter()
-                .filter(|(bounds, color, _)| bounds.width == 2.0
-                    && bounds.height >= 4.0
-                    && color_close(*color, handle))
-                .count(),
-            2
-        );
     }
 
     #[test]
-    fn hovered_clip_paints_hover_fill_and_stronger_trim_handles() {
+    fn hovered_clip_paints_hover_fill() {
         let mut view = TimelineView::new(vec![TimelineTrack::audio(
             "A1",
             vec![TimelineClip::new("Hover", 0, 20)],
@@ -8347,18 +8343,6 @@ mod tests {
         assert!(
             encoder.rect_commands.iter().any(|(bounds, color, _)| *bounds == rect
                 && color_close(*color, theme.colors.timeline_clip_audio_hover))
-        );
-
-        let handle = color_with_alpha(theme.colors.foreground, 0.35);
-        assert_eq!(
-            encoder
-                .rect_commands
-                .iter()
-                .filter(|(bounds, color, _)| bounds.width == 2.0
-                    && bounds.height >= 4.0
-                    && color_close(*color, handle))
-                .count(),
-            2
         );
     }
 
