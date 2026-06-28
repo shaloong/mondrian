@@ -122,6 +122,20 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
     }))
     .map_err(|_| "No suitable GPU adapter")?;
 
+    // Populate system info for the About dialog.
+    let adapter_info = adapter.get_info();
+    crate::app_ui::about_dialog::SYSTEM_INFO
+        .set(crate::app_ui::about_dialog::AboutSystemInfo {
+            pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
+            rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
+            os: if cfg!(windows) { "Windows" } else { std::env::consts::OS }.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            os_version: String::new(),
+            wgpu_backend: format!("{:?}", adapter_info.backend),
+            gpu_name: adapter_info.name,
+        })
+        .ok();
+
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
 

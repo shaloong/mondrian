@@ -48,14 +48,21 @@ impl AboutSystemInfo {
     pub fn build() -> Self {
         Self {
             pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
-            rust_version: option_env!("CARGO_PKG_RUST_VERSION")
-                .unwrap_or("nightly")
-                .to_owned(),
-            os: std::env::consts::OS.to_owned(),
+            rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
+            os: Self::os_display(),
             arch: std::env::consts::ARCH.to_owned(),
-            os_version: std::env::consts::OS.to_owned(), // placeholder, set externally
+            os_version: String::new(),
             wgpu_backend: "wgpu".to_owned(),
             gpu_name: String::new(),
+        }
+    }
+
+    fn os_display() -> String {
+        match std::env::consts::OS {
+            "windows" => "Windows".to_owned(),
+            "macos" => "macOS".to_owned(),
+            "linux" => "Linux".to_owned(),
+            other => other.to_owned(),
         }
     }
 
@@ -66,14 +73,16 @@ impl AboutSystemInfo {
              版本: {}\n\
              渲染器: {}\n\
              Rust: {}\n\
-             OS: {} {} {}",
+             OS: {} {}",
             self.pkg_version,
             self.wgpu_backend,
             self.rust_version,
             self.os,
             self.arch,
-            self.os_version,
         );
+        if !self.os_version.is_empty() {
+            s.push_str(&format!(" {}", self.os_version));
+        }
         if !self.gpu_name.is_empty() {
             s.push_str(&format!("\nGPU: {}", self.gpu_name));
         }
@@ -106,10 +115,7 @@ impl AboutDialog {
         let version_text = format!("版本 {}", info.pkg_version);
         let renderer_text = format!("渲染器: {}", info.wgpu_backend);
         let rust_text = format!("Rust: {}", info.rust_version);
-        let os_text = format!(
-            "OS: {} {} {}",
-            info.os, info.arch, info.os_version
-        );
+        let os_text = format!("OS: {} {} {}", info.os, info.arch, info.os_version);
         let gpu_text = if info.gpu_name.is_empty() {
             String::new()
         } else {
@@ -157,12 +163,9 @@ impl AboutDialog {
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
             info_rows,
-            copy_button: Button::new("复制")
-                .minimal()
-                .text_left()
-                .on_click(app_shell_copy_system_info_action(
-                    SYSTEM_INFO.get().cloned().unwrap_or_default().format(),
-                )),
+            copy_button: Button::new("复制").minimal().on_click(app_shell_copy_system_info_action(
+                SYSTEM_INFO.get().cloned().unwrap_or_default().format(),
+            )),
             close_button: Button::new("关闭").on_click(app_shell_close_modal_action()),
         }
     }
@@ -195,7 +198,12 @@ impl Widget for AboutDialog {
         ));
         let mut y = content.y + FIRST_ROW_Y;
         for label in &mut self.info_rows {
-            label.layout(Rect::new(content.x, y, content.width, LABEL_FONT_SIZE * 1.4));
+            label.layout(Rect::new(
+                content.x,
+                y,
+                content.width,
+                LABEL_FONT_SIZE * 1.4,
+            ));
             y += ROW_GAP;
         }
         let close_x = self.card.x + self.card.width - CONTENT_PADDING - BUTTON_WIDTH;
@@ -206,12 +214,8 @@ impl Widget for AboutDialog {
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
         ));
-        self.close_button.layout(Rect::new(
-            close_x,
-            button_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-        ));
+        self.close_button
+            .layout(Rect::new(close_x, button_y, BUTTON_WIDTH, BUTTON_HEIGHT));
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -343,7 +347,8 @@ mod tests {
         let mut dialog = AboutDialog::new();
         dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
         let close_x = dialog.card.x + dialog.card.width - CONTENT_PADDING - BUTTON_WIDTH * 0.5;
-        let button_y = dialog.card.y + dialog.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT * 0.5;
+        let button_y =
+            dialog.card.y + dialog.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT * 0.5;
         let button_center = Point::new(close_x, button_y);
         let actions = RefCell::new(Vec::new());
         let mut focus = DummyFocus;
@@ -390,18 +395,18 @@ mod tests {
         let info = AboutSystemInfo {
             pkg_version: "0.1.0".into(),
             rust_version: "1.92.0".into(),
-            os: "Windows_NT".into(),
+            os: "Windows".into(),
             arch: "x86_64".into(),
             os_version: "10.0".into(),
-            wgpu_backend: "wgpu".into(),
+            wgpu_backend: "DirectX 12".into(),
             gpu_name: "NVIDIA GeForce RTX 4090".into(),
         };
         let formatted = info.format();
         assert!(formatted.contains("Mondrian"));
         assert!(formatted.contains("0.1.0"));
-        assert!(formatted.contains("wgpu"));
+        assert!(formatted.contains("DirectX 12"));
         assert!(formatted.contains("1.92.0"));
-        assert!(formatted.contains("Windows_NT"));
+        assert!(formatted.contains("Windows"));
         assert!(formatted.contains("x86_64"));
         assert!(formatted.contains("RTX 4090"));
     }
