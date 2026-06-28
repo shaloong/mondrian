@@ -26,8 +26,8 @@ use crate::app_ui::window::{APP_UI_BACKGROUND_WORKERS, DEFAULT_APP_UI_LOG_FILTER
 
 const CARD_MIN_WIDTH: f32 = 480.0;
 const CARD_WIDTH: f32 = 680.0;
-const CARD_MIN_HEIGHT: f32 = 380.0;
-const CARD_HEIGHT: f32 = 520.0;
+const CARD_MIN_HEIGHT: f32 = 360.0;
+const CARD_HEIGHT: f32 = 480.0;
 const CONTENT_PADDING: f32 = 22.0;
 const TITLE_FONT_SIZE: f32 = 19.0;
 const BODY_FONT_SIZE: f32 = 13.0;
