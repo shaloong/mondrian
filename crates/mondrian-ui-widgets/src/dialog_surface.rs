@@ -99,9 +99,22 @@ impl DialogSurface {
 
     /// Paint the modal scrim, card, and subtle outline.
     pub fn paint(&self, bounds: Rect, card: Rect, ctx: &mut PaintContext) {
+        self.paint_chrome(bounds, card, ctx);
+        self.paint_card(card, ctx);
+    }
+
+    /// Paint scrim + shadow only (no card fill). Call [`paint_card`] after
+    /// any content that should sit between shadow and card surface.
+    pub fn paint_chrome(&self, bounds: Rect, card: Rect, ctx: &mut PaintContext) {
         let visual = DialogSurfaceVisualTokens::from_theme(ctx.theme);
         ctx.encoder.draw_rect(bounds, ctx.theme.colors.modal_scrim, visual.scrim_radius);
         paint_popover_shadow(ctx, card, visual.card_radius);
+    }
+
+    /// Paint the card fill with rounded corners on top of previously
+    /// painted content (sidebar, etc).
+    pub fn paint_card(&self, card: Rect, ctx: &mut PaintContext) {
+        let visual = DialogSurfaceVisualTokens::from_theme(ctx.theme);
         ctx.encoder.draw_rect(card, ctx.theme.colors.popover, visual.card_radius);
     }
 }
@@ -109,6 +122,7 @@ impl DialogSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::Color;
     use mondrian_ui_core::widget::DrawCommandEncoder;
     use mondrian_ui_theme::ThemePreset;
 

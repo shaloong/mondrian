@@ -30,15 +30,16 @@ const CARD_MIN_HEIGHT: f32 = 360.0;
 const CARD_HEIGHT: f32 = 480.0;
 const CONTENT_PADDING: f32 = 22.0;
 const BODY_FONT_SIZE: f32 = 13.0;
-const NAV_WIDTH: f32 = 152.0;
+const NAV_WIDTH: f32 = 144.0;
 const NAV_BUTTON_HEIGHT: f32 = 32.0;
 const NAV_BUTTON_GAP: f32 = 4.0;
-const CONTENT_GAP: f32 = 0.0;
+const SIDEBAR_WIDTH: f32 = 172.0;
+const SIDEBAR_PADDING: f32 = 14.0;
+const CONTENT_GAP: f32 = 16.0;
 const ROW_HEIGHT: f32 = 28.0;
 const BUTTON_WIDTH: f32 = 84.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
-const SIDEBAR_INSET: f32 = 10.0;
 const THEME_BUTTON_WIDTH: f32 = 76.0;
 const THEME_BUTTON_HEIGHT: f32 = 26.0;
 const THEME_BUTTON_GAP: f32 = 6.0;
@@ -247,6 +248,7 @@ impl PreferencesDialog {
             .map(|tab| {
                 Button::new(tab.label())
                     .minimal()
+                    .text_left()
                     .active(tab == active_tab)
                     .on_click(app_shell_preferences_tab_changed_action(tab.payload()))
             })
@@ -471,10 +473,9 @@ impl Widget for PreferencesDialog {
         self.card = self.surface.card_rect(bounds);
         let content = self.surface.content_rect(self.card);
 
-        // Sidebar starts at top of content area
         let body_top = content.y;
-        let nav_x = content.x;
-        let content_x = nav_x + NAV_WIDTH + CONTENT_GAP;
+        let nav_x = self.card.x + SIDEBAR_PADDING;
+        let content_x = self.card.x + SIDEBAR_WIDTH + CONTENT_GAP;
         let list_bottom =
             self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT - 18.0;
         self.shortcut_viewport = if self.active_tab == PreferencesDialogTab::Shortcuts {
@@ -641,27 +642,30 @@ impl Widget for PreferencesDialog {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        // Step 1: full card — scrim + shadow + rounded-corner popover fill
         self.surface.paint(self.bounds, self.card, ctx);
 
         let tokens = &ctx.theme.colors;
+
+        // Step 2: sidebar overlay — left corners rounded to match the card,
+        // right corners square where they meet the content area.
+        let sidebar = Rect::new(self.card.x, self.card.y, SIDEBAR_WIDTH, self.card.height);
+        let mut sidebar_bg = tokens.foreground;
+        sidebar_bg.a = 0.012;
+        let radius = ctx.theme.spacing.radius_lg;
+        ctx.encoder.draw_rect_radii(
+            sidebar,
+            sidebar_bg,
+            CornerRadii {
+                top_left: radius,
+                top_right: 0.0,
+                bottom_right: 0.0,
+                bottom_left: radius,
+            },
+        );
+
         let content = self.surface.content_rect(self.card);
         let body_top = content.y;
-
-        // Sidebar background — darker than main card for Notion-style separation
-        let sidebar = Rect::new(
-            content.x - SIDEBAR_INSET,
-            body_top - SIDEBAR_INSET,
-            NAV_WIDTH + SIDEBAR_INSET,
-            (self.card.y + self.card.height
-                - BUTTON_BOTTOM_INSET
-                - BUTTON_HEIGHT
-                - 20.0
-                - body_top)
-                + SIDEBAR_INSET * 2.0,
-        );
-        let mut sidebar_bg = tokens.foreground;
-        sidebar_bg.a = 0.025;
-        ctx.encoder.draw_rect(sidebar, sidebar_bg, ctx.theme.spacing.radius_sm);
 
         for button in &self.nav_buttons {
             button.paint(ctx);
@@ -1151,9 +1155,8 @@ mod tests {
                 + column as f32 * (SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP)
                 + SHORTCUT_BUTTON_WIDTH * 0.5;
             let y = content.y
-                + 82.0
                 + (row + SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
-                + ROW_HEIGHT * 0.5;
+                + (ROW_HEIGHT - SHORTCUT_BUTTON_HEIGHT) * 0.5;
             Point::new(x, y)
         };
         let save_disable = shortcut_button_center(save_index, 1);
@@ -1221,9 +1224,8 @@ mod tests {
         let rebind = Point::new(
             buttons_left + SHORTCUT_BUTTON_WIDTH * 0.5,
             content.y
-                + 82.0
                 + (save_index + SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
-                + ROW_HEIGHT * 0.5,
+                + (ROW_HEIGHT - SHORTCUT_BUTTON_HEIGHT) * 0.5,
         );
 
         click(&mut dialog, &mut ctx, rebind);
@@ -1373,8 +1375,8 @@ mod tests {
             &dispatch,
         );
         let content = dialog.surface.content_rect(dialog.card);
-        let body_top = content.y + 82.0;
-        let content_x = content.x + NAV_WIDTH + CONTENT_GAP;
+        let body_top = content.y;
+        let content_x = dialog.card.x + SIDEBAR_WIDTH + CONTENT_GAP;
         let light_bounds = Rect::new(
             content_x + 116.0 + THEME_BUTTON_WIDTH + THEME_BUTTON_GAP,
             body_top + ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
@@ -1437,9 +1439,10 @@ mod tests {
         );
         let media_button = dialog.nav_buttons.get(1).expect("media nav button should exist").id();
         let content = dialog.surface.content_rect(dialog.card);
-        let body_top = content.y + 82.0;
+        let body_top = content.y;
+        let nav_x = dialog.card.x + SIDEBAR_PADDING;
         let media_bounds = Rect::new(
-            content.x,
+            nav_x,
             body_top + NAV_BUTTON_HEIGHT + NAV_BUTTON_GAP,
             NAV_WIDTH,
             NAV_BUTTON_HEIGHT,

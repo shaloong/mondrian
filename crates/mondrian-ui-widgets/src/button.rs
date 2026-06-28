@@ -46,6 +46,7 @@ pub struct Button {
     visual: Cell<ButtonVisualTokens>,
     style: ButtonStyle,
     active: bool,
+    text_left: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +93,7 @@ impl Button {
             visual: Cell::new(ButtonVisualTokens::default()),
             style: ButtonStyle::Filled,
             active: false,
+            text_left: false,
         }
     }
 
@@ -141,6 +143,12 @@ impl Button {
     /// Update active state at runtime (e.g., when tab changes).
     pub fn set_active(&mut self, active: bool) {
         self.active = active;
+    }
+
+    /// Left-align the button text instead of centering.
+    pub fn text_left(mut self) -> Self {
+        self.text_left = true;
+        self
     }
 
     pub fn state(&self) -> ButtonState {
@@ -332,7 +340,11 @@ impl Widget for Button {
                 );
             }
         } else if !self.label.is_empty() {
-            let tx = centered_text_x(content.x, content.width, &self.label, font_size);
+            let tx = if self.text_left {
+                content.x
+            } else {
+                centered_text_x(content.x, content.width, &self.label, font_size)
+            };
             paint_button_label(ctx, &self.label, content, tx, font_size, icon_color);
         }
     }
