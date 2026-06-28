@@ -2,6 +2,7 @@
 //!
 //! 支持 Normal / Hovered / Pressed 三态 + 点击派发 Action。
 
+use mondrian_core::Color;
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -11,7 +12,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::{Theme, ThemePreset};
 use std::cell::Cell;
 
-use crate::paint::{centered_text_origin_y, paint_focus_ring};
+use crate::paint::{centered_text_origin_y, color_with_alpha, paint_focus_ring};
 use crate::text_metrics::{centered_text_x, measure_single_line};
 use crate::vector_icon::VectorIcon;
 
@@ -21,6 +22,15 @@ pub enum ButtonState {
     Normal,
     Hovered,
     Pressed,
+}
+
+/// Button visual style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonStyle {
+    /// Standard filled button with card background.
+    Filled,
+    /// Minimal transparent button for sidebar nav, toolbar items, etc.
+    Minimal,
 }
 
 /// Button Widget —— 可点击的标签按钮
@@ -34,6 +44,8 @@ pub struct Button {
     pub on_click: Option<Action>,
     focus_visible: bool,
     visual: Cell<ButtonVisualTokens>,
+    style: ButtonStyle,
+    active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,6 +90,8 @@ impl Button {
             on_click: None,
             focus_visible: false,
             visual: Cell::new(ButtonVisualTokens::default()),
+            style: ButtonStyle::Filled,
+            active: false,
         }
     }
 
@@ -110,6 +124,18 @@ impl Button {
     /// Whether the button is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Use minimal style (transparent bg, hover highlight, active state).
+    pub fn minimal(mut self) -> Self {
+        self.style = ButtonStyle::Minimal;
+        self
+    }
+
+    /// Set the active/selected state for minimal-style buttons.
+    pub fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
     }
 
     pub fn state(&self) -> ButtonState {
@@ -234,6 +260,16 @@ impl Widget for Button {
 
         let bg = if !self.enabled {
             tokens.muted
+        } else if self.style == ButtonStyle::Minimal {
+            if self.active {
+                color_with_alpha(tokens.foreground, 0.09)
+            } else {
+                match self.state {
+                    ButtonState::Normal => Color::TRANSPARENT,
+                    ButtonState::Hovered => color_with_alpha(tokens.foreground, 0.06),
+                    ButtonState::Pressed => color_with_alpha(tokens.foreground, 0.04),
+                }
+            }
         } else {
             match self.state {
                 ButtonState::Normal => tokens.card,

@@ -32,7 +32,7 @@ const CONTENT_PADDING: f32 = 22.0;
 const TITLE_FONT_SIZE: f32 = 19.0;
 const BODY_FONT_SIZE: f32 = 13.0;
 const NAV_WIDTH: f32 = 148.0;
-const NAV_BUTTON_HEIGHT: f32 = 30.0;
+const NAV_BUTTON_HEIGHT: f32 = 32.0;
 const NAV_BUTTON_GAP: f32 = 7.0;
 const CONTENT_GAP: f32 = 24.0;
 const ROW_HEIGHT: f32 = 28.0;
@@ -248,6 +248,8 @@ impl PreferencesDialog {
             .into_iter()
             .map(|tab| {
                 Button::new(tab.label())
+                    .minimal()
+                    .active(tab == active_tab)
                     .on_click(app_shell_preferences_tab_changed_action(tab.payload()))
             })
             .collect();
