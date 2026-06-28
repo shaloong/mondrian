@@ -3459,11 +3459,11 @@ impl TimelineView {
         }
         ctx.encoder.draw_rect(rect, fill, 5.0);
 
-
         if clip.kind == TimelineClipKind::Audio {
             let peaks: Option<Vec<f32>> = if !clip.waveform_peaks.is_empty() {
                 Some(clip.waveform_peaks.clone())
-            } else if let (Some(asset_id), Some(lookup)) = (clip.asset_id, self.waveform_lookup.as_ref())
+            } else if let (Some(asset_id), Some(lookup)) =
+                (clip.asset_id, self.waveform_lookup.as_ref())
             {
                 lookup(
                     asset_id,
@@ -3528,10 +3528,10 @@ impl TimelineView {
             WaveformDisplay::BottomAligned => {
                 let baseline = inner.y + inner.height;
                 for column in 0..column_count {
-                    let sample_index = ((column as f32 / column_count as f32)
-                        * peaks.len() as f32)
+                    let sample_index = ((column as f32 / column_count as f32) * peaks.len() as f32)
                         .floor()
-                        .min((peaks.len() - 1) as f32) as usize;
+                        .min((peaks.len() - 1) as f32)
+                        as usize;
                     let peak = peaks[sample_index].clamp(0.0, 1.0);
                     let amplitude = (peak * inner.height).max(1.0);
                     let x = inner.x + column as f32 + 0.5;
@@ -3546,10 +3546,10 @@ impl TimelineView {
             WaveformDisplay::Centered => {
                 let mid_y = inner.y + inner.height * 0.5;
                 for column in 0..column_count {
-                    let sample_index = ((column as f32 / column_count as f32)
-                        * peaks.len() as f32)
+                    let sample_index = ((column as f32 / column_count as f32) * peaks.len() as f32)
                         .floor()
-                        .min((peaks.len() - 1) as f32) as usize;
+                        .min((peaks.len() - 1) as f32)
+                        as usize;
                     let peak = peaks[sample_index].clamp(0.0, 1.0);
                     let half_height = (peak * inner.height * 0.5).max(1.0);
                     let x = inner.x + column as f32 + 0.5;

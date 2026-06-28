@@ -13,7 +13,7 @@ pub use model::{DropdownTriggerStyle, MenuItem, MenuItemKind};
 pub(crate) use model::{MenuRowPaint, MenuVisualTokens};
 pub(crate) use paint::{
     paint_disabled_trigger, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
-    paint_menu_separator, paint_menu_trigger, paint_open_menu,
+    paint_menu_separator, paint_menu_trigger, paint_open_menu_with_submenu,
 };
 
 use std::cell::Cell;
@@ -54,6 +54,7 @@ pub struct Dropdown {
     focused: bool,
     focus_visible: bool,
     trigger_hovered: bool,
+    open_submenu_index: Option<usize>,
     overlay_viewport: Cell<Option<Rect>>,
     trigger_style: DropdownTriggerStyle,
 }
@@ -76,6 +77,7 @@ impl Dropdown {
             focused: false,
             focus_visible: false,
             trigger_hovered: false,
+            open_submenu_index: None,
             overlay_viewport: Cell::new(None),
             trigger_style: DropdownTriggerStyle::Filled,
         }
@@ -217,13 +219,34 @@ impl Dropdown {
     }
 
     fn item_at(&self, position: Point) -> Option<usize> {
+        let visible = visible_item_count(self.items.len(), self.max_visible_items);
         item_at(
             self.menu_rect(),
-            self.items.len(),
+            visible,
             self.item_height,
             self.scroll_offset,
             position,
         )
+    }
+
+    fn submenu_rect(&self, parent_index: usize) -> Option<Rect> {
+        let parent_rect = item_rect(
+            self.menu_rect(),
+            parent_index,
+            self.item_height,
+            self.scroll_offset,
+        );
+        let item = self.items.get(parent_index)?;
+        if let MenuItemKind::Submenu { ref children } = item.kind {
+            Some(geometry::submenu_rect(
+                parent_rect,
+                children,
+                self.max_visible_items,
+                self.item_height,
+            ))
+        } else {
+            None
+        }
     }
 
     fn first_activatable_index(&self) -> Option<usize> {
@@ -294,6 +317,7 @@ impl Dropdown {
 
     fn close(&mut self, ctx: &mut EventContext) {
         self.open = false;
+        self.open_submenu_index = None;
         self.hovered_index = None;
         self.pressed_index = None;
         self.suppress_next_release = false;
@@ -369,8 +393,34 @@ impl Widget for Dropdown {
                     return EventResult::Handled;
                 }
                 UiEvent::MouseMove { position, .. } => {
+                    let prev = self.hovered_index;
                     self.hovered_index =
                         self.item_at(*position).filter(|i| self.items[*i].is_activatable());
+                    // If the hover moved to a different submenu item, close
+                    // the old submenu; if it moved to a submenu item, open it.
+                    if self.hovered_index != prev {
+                        if let Some(idx) = self.hovered_index {
+                            if self.items[idx].is_submenu() && self.open_submenu_index != Some(idx)
+                            {
+                                self.open_submenu_index = Some(idx);
+                            } else if !self.items[idx].is_submenu() {
+                                self.open_submenu_index = None;
+                            }
+                        } else {
+                            self.open_submenu_index = None;
+                        }
+                    }
+                    // Check if mouse is in the open submenu rect — if so, keep it open.
+                    if let Some(sub_idx) = self.open_submenu_index {
+                        if let Some(sub_rect) = self.submenu_rect(sub_idx) {
+                            if sub_rect.contains(*position) {
+                                // Mouse is inside the submenu — keep it open and
+                                // update submenu hover.
+                            } else if self.item_at(*position).is_none() {
+                                self.open_submenu_index = None;
+                            }
+                        }
+                    }
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
@@ -476,7 +526,7 @@ impl Widget for Dropdown {
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
-        paint_open_menu(
+        paint_open_menu_with_submenu(
             ctx,
             self.bounds,
             &self.items,
@@ -488,6 +538,7 @@ impl Widget for Dropdown {
             self.scroll_offset,
             &self.overlay_viewport,
             self.open,
+            self.open_submenu_index,
         );
     }
 

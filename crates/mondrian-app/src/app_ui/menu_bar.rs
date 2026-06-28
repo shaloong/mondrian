@@ -10,7 +10,7 @@ use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem};
+use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem, MenuItemKind};
 
 use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
@@ -45,11 +45,12 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     app_shell_save_project_as_dialog_action(),
                 )),
                 MenuItem::separator(),
-                menu_item_with_shortcut(MenuItem::new(
-                    "导入媒体...",
-                    app_shell_import_media_dialog_action(),
-                )),
-                menu_item_with_shortcut(MenuItem::new("导出", Action::NoOp)),
+                MenuItem::new("导入", Action::NoOp).with_submenu(vec![
+                    MenuItem::new("媒体...", app_shell_import_media_dialog_action()),
+                    MenuItem::new("文件夹...", Action::NoOp),
+                ]),
+                MenuItem::new("导出", Action::NoOp)
+                    .with_submenu(vec![MenuItem::new("导出设置...", Action::NoOp)]),
                 MenuItem::separator(),
                 MenuItem::new("项目设置...", Action::NoOp),
                 MenuItem::separator(),
@@ -81,12 +82,10 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         // ── View ────────────────────────────────────────────────────────
         (
             "视图",
-            vec![
-                menu_item_with_shortcut(MenuItem::new(
-                    "切换全屏",
-                    Action::ToggleFullscreen,
-                )),
-            ],
+            vec![menu_item_with_shortcut(MenuItem::new(
+                "切换全屏",
+                Action::ToggleFullscreen,
+            ))],
         ),
         // ── Window ──────────────────────────────────────────────────────
         (
@@ -121,37 +120,41 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     Action::TogglePanel(PanelKind::Export),
                 )),
                 MenuItem::separator(),
+                MenuItem::new("工作区", Action::NoOp).with_submenu(vec![
+                    menu_item_with_shortcut(MenuItem::new(
+                        "编辑",
+                        Action::SwitchWorkspace(WorkspacePreset::Editing),
+                    )),
+                    menu_item_with_shortcut(MenuItem::new(
+                        "调色",
+                        Action::SwitchWorkspace(WorkspacePreset::Color),
+                    )),
+                    menu_item_with_shortcut(MenuItem::new(
+                        "音频",
+                        Action::SwitchWorkspace(WorkspacePreset::Audio),
+                    )),
+                    menu_item_with_shortcut(MenuItem::new(
+                        "合成",
+                        Action::SwitchWorkspace(WorkspacePreset::Compositing),
+                    )),
+                    menu_item_with_shortcut(MenuItem::new(
+                        "导出",
+                        Action::SwitchWorkspace(WorkspacePreset::Export),
+                    )),
+                ]),
                 menu_item_with_shortcut(MenuItem::new(
-                    "编辑工作区",
-                    Action::SwitchWorkspace(WorkspacePreset::Editing),
-                )),
-                menu_item_with_shortcut(MenuItem::new(
-                    "调色工作区",
-                    Action::SwitchWorkspace(WorkspacePreset::Color),
-                )),
-                menu_item_with_shortcut(MenuItem::new(
-                    "音频工作区",
-                    Action::SwitchWorkspace(WorkspacePreset::Audio),
-                )),
-                menu_item_with_shortcut(MenuItem::new(
-                    "合成工作区",
-                    Action::SwitchWorkspace(WorkspacePreset::Compositing),
-                )),
-                menu_item_with_shortcut(MenuItem::new(
-                    "导出工作区",
-                    Action::SwitchWorkspace(WorkspacePreset::Export),
+                    PanelKind::NodeGraph.display_name(),
+                    Action::TogglePanel(PanelKind::NodeGraph),
                 )),
             ],
         ),
         // ── Help ────────────────────────────────────────────────────────
         (
             "帮助",
-            vec![
-                menu_item_with_shortcut(MenuItem::new(
-                    "关于 Mondrian",
-                    app_shell_about_action(),
-                )),
-            ],
+            vec![menu_item_with_shortcut(MenuItem::new(
+                "关于 Mondrian",
+                app_shell_about_action(),
+            ))],
         ),
     ]
 }
@@ -212,26 +215,48 @@ pub fn apply_shell_menu_checked_state(
 }
 
 fn apply_shell_menu_item_checked_state(
-    item: MenuItem,
+    mut item: MenuItem,
     workspace_preset: WorkspacePreset,
     workspace_layout: Option<&AppUiWorkspaceLayout>,
 ) -> MenuItem {
+    if let MenuItemKind::Submenu { children } = &item.kind {
+        let children = children
+            .iter()
+            .cloned()
+            .map(|child| {
+                apply_shell_menu_item_checked_state(child, workspace_preset, workspace_layout)
+            })
+            .collect();
+        item.kind = MenuItemKind::Submenu { children };
+    }
     let checked = match &item.action {
         Action::TogglePanel(panel) => {
-            workspace_layout.is_some_and(|layout| layout.contains_panel(*panel))
+            Some(workspace_layout.is_some_and(|layout| layout.contains_panel(*panel)))
         }
-        Action::SwitchWorkspace(preset) => workspace_preset == *preset,
-        _ => return item,
+        Action::SwitchWorkspace(preset) => Some(workspace_preset == *preset),
+        _ => None,
     };
-    item.checked(checked)
+    if let Some(checked) = checked {
+        return item.checked(checked);
+    }
+    item
 }
 
 fn apply_app_state_menu_availability(item: MenuItem, state: &AppState) -> MenuItem {
-    if item.is_separator() || app_state_action_enabled(&item.action, state) {
+    let mut item = if item.is_separator() || app_state_action_enabled(&item.action, state) {
         item
     } else {
         item.disabled()
+    };
+    if let MenuItemKind::Submenu { children } = &item.kind {
+        let children = children
+            .iter()
+            .cloned()
+            .map(|child| apply_app_state_menu_availability(child, state))
+            .collect();
+        item.kind = MenuItemKind::Submenu { children };
     }
+    item
 }
 
 fn menu_item_with_shortcut(item: MenuItem) -> MenuItem {
@@ -568,6 +593,58 @@ mod tests {
             .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
     }
 
+    fn menu_item_deep<'a>(
+        menu_items: &'a [(&'static str, Vec<MenuItem>)],
+        menu_label: &str,
+        item_label: &str,
+    ) -> &'a MenuItem {
+        fn search_deep<'a>(items: &'a [MenuItem], label: &str) -> Option<&'a MenuItem> {
+            for item in items {
+                if item.label == label {
+                    return Some(item);
+                }
+                if let MenuItemKind::Submenu { children } = &item.kind {
+                    if let Some(found) = search_deep(children, label) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        let items = menu_items
+            .iter()
+            .find(|(label, _)| *label == menu_label)
+            .map(|(_, items)| items)
+            .unwrap_or_else(|| panic!("missing menu {menu_label}"));
+        search_deep(items, item_label)
+            .unwrap_or_else(|| panic!("missing {menu_label}/{item_label} menu item"))
+    }
+
+    fn submenu_item<'a>(
+        menu_items: &'a [(&'static str, Vec<MenuItem>)],
+        menu_label: &str,
+        submenu_label: &str,
+        item_label: &str,
+    ) -> &'a MenuItem {
+        let items = menu_items
+            .iter()
+            .find(|(label, _)| *label == menu_label)
+            .map(|(_, items)| items)
+            .unwrap_or_else(|| panic!("missing menu {menu_label}"));
+        let submenu = items
+            .iter()
+            .find(|item| item.label == submenu_label)
+            .unwrap_or_else(|| panic!("missing submenu {menu_label}/{submenu_label}"));
+        match &submenu.kind {
+            MenuItemKind::Submenu { children } => {
+                children.iter().find(|item| item.label == item_label).unwrap_or_else(|| {
+                    panic!("missing {menu_label}/{submenu_label}/{item_label} menu item")
+                })
+            }
+            _ => panic!("{menu_label}/{submenu_label} is not a submenu"),
+        }
+    }
+
     fn state_with_selected_clip() -> AppState {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("编辑");
@@ -603,6 +680,17 @@ mod tests {
                 "missing panel menu item for {panel:?}"
             );
         }
+        fn any_deep(items: &[MenuItem], action: &Action) -> bool {
+            items.iter().any(|item| {
+                if item.action == *action {
+                    return true;
+                }
+                if let MenuItemKind::Submenu { children } = &item.kind {
+                    return any_deep(children, action);
+                }
+                false
+            })
+        }
         for preset in [
             WorkspacePreset::Editing,
             WorkspacePreset::Color,
@@ -611,7 +699,7 @@ mod tests {
             WorkspacePreset::Export,
         ] {
             assert!(
-                window_items.iter().any(|item| item.action == Action::SwitchWorkspace(preset)),
+                any_deep(window_items, &Action::SwitchWorkspace(preset)),
                 "missing window/workspace menu item for {preset:?}"
             );
         }
@@ -646,8 +734,8 @@ mod tests {
         assert!(menu_item(&menu_items, "窗口", "效果").checked);
         assert!(menu_item(&menu_items, "窗口", "预览").checked);
         assert!(!menu_item(&menu_items, "窗口", "时间线").checked);
-        assert!(menu_item(&menu_items, "窗口", "编辑工作区").checked);
-        assert!(!menu_item(&menu_items, "窗口", "调色工作区").checked);
+        assert!(submenu_item(&menu_items, "窗口", "工作区", "编辑").checked);
+        assert!(!submenu_item(&menu_items, "窗口", "工作区", "调色").checked);
     }
 
     #[test]
@@ -678,8 +766,8 @@ mod tests {
         assert!(menu_item(&menu_items, "窗口", "素材").checked);
         assert!(!menu_item(&menu_items, "窗口", "效果").checked);
         assert!(menu_item(&menu_items, "窗口", "预览").checked);
-        assert!(!menu_item(&menu_items, "窗口", "编辑工作区").checked);
-        assert!(!menu_item(&menu_items, "窗口", "导出工作区").checked);
+        assert!(!submenu_item(&menu_items, "窗口", "工作区", "编辑").checked);
+        assert!(!submenu_item(&menu_items, "窗口", "工作区", "导出").checked);
     }
 
     #[test]
@@ -788,16 +876,16 @@ mod tests {
         }
 
         for (workspace_label, shortcut) in [
-            ("编辑工作区", "Ctrl+Alt+1"),
-            ("调色工作区", "Ctrl+Alt+2"),
-            ("音频工作区", "Ctrl+Alt+3"),
-            ("合成工作区", "Ctrl+Alt+4"),
-            ("导出工作区", "Ctrl+Alt+5"),
+            ("编辑", "Ctrl+Alt+1"),
+            ("调色", "Ctrl+Alt+2"),
+            ("音频", "Ctrl+Alt+3"),
+            ("合成", "Ctrl+Alt+4"),
+            ("导出", "Ctrl+Alt+5"),
         ] {
             assert_eq!(
-                menu_item(&menu_items, "窗口", workspace_label).shortcut.as_deref(),
+                submenu_item(&menu_items, "窗口", "工作区", workspace_label).shortcut.as_deref(),
                 Some(shortcut),
-                "窗口/{workspace_label} should show {shortcut}"
+                "窗口/工作区/{workspace_label} should show {shortcut}"
             );
         }
     }
@@ -859,7 +947,7 @@ mod tests {
 
         assert!(menu_item(&menu_items, "文件", "新建项目...").enabled);
         assert!(menu_item(&menu_items, "文件", "打开项目...").enabled);
-        assert!(!menu_item(&menu_items, "文件", "导入媒体...").enabled);
+        assert!(!menu_item_deep(&menu_items, "文件", "媒体...").enabled);
         assert!(!menu_item(&menu_items, "文件", "保存").enabled);
         assert!(!menu_item(&menu_items, "文件", "另存为...").enabled);
         assert!(!menu_item(&menu_items, "文件", "关闭项目").enabled);
@@ -881,7 +969,7 @@ mod tests {
 
         let menu_items = default_menu_items_for_app_state(&state);
 
-        assert!(!menu_item(&menu_items, "文件", "导入媒体...").enabled);
+        assert!(!menu_item_deep(&menu_items, "文件", "媒体...").enabled);
         assert!(!menu_item(&menu_items, "文件", "保存").enabled);
         assert!(menu_item(&menu_items, "文件", "另存为...").enabled);
         assert!(menu_item(&menu_items, "文件", "关闭项目").enabled);

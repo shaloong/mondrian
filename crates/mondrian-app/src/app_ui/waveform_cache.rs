@@ -29,8 +29,6 @@ thread_local! {
     static CACHE: RefCell<*const AudioWaveformCache> = const { RefCell::new(std::ptr::null()) };
 }
 
-
-
 // ── Source cache ──────────────────────────────────────────────────────────
 
 /// Decoded source data for one audio asset.
@@ -91,10 +89,7 @@ impl AudioWaveformCache {
             .spawn(move || {
                 for job in job_receiver {
                     let source = Self::decode_source(&job.file_path);
-                    let _ = result_sender.send(SourceResult {
-                        key: job.key,
-                        source,
-                    });
+                    let _ = result_sender.send(SourceResult { key: job.key, source });
                 }
             })
             .expect("spawn waveform worker");
@@ -179,10 +174,8 @@ impl AudioWaveformCache {
         match source {
             Some(source) => {
                 let total_secs = source.total_samples as f64 / source.sample_rate as f64;
-                let start =
-                    (start_secs.max(0.0) / total_secs.max(0.001)).clamp(0.0, 1.0);
-                let end =
-                    (end_secs.min(total_secs) / total_secs.max(0.001)).clamp(start, 1.0);
+                let start = (start_secs.max(0.0) / total_secs.max(0.001)).clamp(0.0, 1.0);
+                let end = (end_secs.min(total_secs) / total_secs.max(0.001)).clamp(start, 1.0);
                 let env_len = source.envelope.len();
                 let start_idx = ((start * env_len as f64) as usize).min(env_len);
                 let end_idx =
@@ -204,11 +197,7 @@ impl AudioWaveformCache {
     /// Schedule a source decode job if not already pending/errored.
     ///
     /// Safe to call once per frame; duplicates are silently ignored.
-    pub fn request_source(
-        &self,
-        asset_id: AssetId,
-        revision: u64,
-    ) {
+    pub fn request_source(&self, asset_id: AssetId, revision: u64) {
         let key = (asset_id, revision);
 
         // Already cached, pending, or errored — skip.
@@ -238,13 +227,8 @@ impl AudioWaveformCache {
     /// Invalidate all source data for an asset (relink, replace, delete).
     pub fn evict_asset(&self, asset_id: AssetId) {
         // We can't efficiently remove by partial key, so collect keys first.
-        let keys: Vec<SourceKey> = self
-            .source_cache
-            .borrow()
-            .keys()
-            .filter(|k| k.0 == asset_id)
-            .copied()
-            .collect();
+        let keys: Vec<SourceKey> =
+            self.source_cache.borrow().keys().filter(|k| k.0 == asset_id).copied().collect();
         for key in keys {
             self.source_cache.borrow_mut().remove(&key);
         }
@@ -281,8 +265,7 @@ impl AudioWaveformCache {
     // ── internal ─────────────────────────────────────────────────────────
 
     fn decode_source(file_path: &std::path::Path) -> Option<WaveformSource> {
-        let buffer =
-            decode_audio_file_with_ffmpeg_cli(file_path, 48000, 1).ok()?;
+        let buffer = decode_audio_file_with_ffmpeg_cli(file_path, 48000, 1).ok()?;
         let total_samples = buffer.frame_count() as u64;
         let envelope = compute_waveform(&buffer, MAX_WAVEFORM_WIDTH).peaks;
         // Release the raw PCM — only the envelope is kept.

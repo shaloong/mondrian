@@ -25,9 +25,8 @@ use crate::app::ui_actions::{
     APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED,
-    APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
-    APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
-    ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
+    APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
+    APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
 use crate::app_ui::action_availability::app_state_action_enabled;
@@ -1001,10 +1000,7 @@ fn parse_preferences_update(
             if namespace == APP_SHELL_NAMESPACE
                 && name == APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED =>
         {
-            Some(
-                serde_json::from_value(payload.clone())
-                    .map(PreferencesUpdate::WaveformDisplay),
-            )
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::WaveformDisplay))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
@@ -1046,8 +1042,7 @@ mod tests {
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, ClipId, TrackId};
     use mondrian_editor_state::state::PanelKind;
-use mondrian_editor_state::Action;
-use mondrian_ui_widgets::WaveformDisplay;
+    use mondrian_editor_state::Action;
     use mondrian_platform::{ClipboardError, FileFilter, NoopPlatformService};
     use mondrian_timeline::Sequence;
     use mondrian_ui_core::tree::TreeWalker;
@@ -1055,6 +1050,7 @@ use mondrian_ui_widgets::WaveformDisplay;
     use mondrian_ui_core::widget::EventContext;
     use mondrian_ui_core::{EventRequests, EventResult, UiEvent, Widget};
     use mondrian_ui_theme::{current_theme, ThemePreset};
+    use mondrian_ui_widgets::WaveformDisplay;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};

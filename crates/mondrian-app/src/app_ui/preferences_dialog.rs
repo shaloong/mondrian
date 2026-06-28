@@ -16,8 +16,8 @@ use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_preferences_shortcut_disabled_action,
     app_shell_preferences_shortcut_rebound_action, app_shell_preferences_shortcut_reset_action,
     app_shell_preferences_tab_changed_action, app_shell_preferences_theme_changed_action,
-    app_shell_preferences_waveform_display_changed_action,
-    PreferencesShortcutReboundPayload, PreferencesTabPayload,
+    app_shell_preferences_waveform_display_changed_action, PreferencesShortcutReboundPayload,
+    PreferencesTabPayload,
 };
 use crate::app::AppState;
 use crate::app_ui::shortcuts::{
@@ -328,8 +328,10 @@ impl PreferencesDialog {
             return;
         }
         self.model = model;
-        self.waveform_buttons[0].set_active(self.model.waveform_display == WaveformDisplay::BottomAligned);
-        self.waveform_buttons[1].set_active(self.model.waveform_display == WaveformDisplay::Centered);
+        self.waveform_buttons[0]
+            .set_active(self.model.waveform_display == WaveformDisplay::BottomAligned);
+        self.waveform_buttons[1]
+            .set_active(self.model.waveform_display == WaveformDisplay::Centered);
         if self
             .capturing_shortcut
             .as_deref()

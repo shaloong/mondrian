@@ -248,3 +248,31 @@ pub(crate) fn scroll_to_visible(
     };
     clamp_scroll_offset(new, max_scroll_y(total_items, visible_items, item_height))
 }
+
+// ── Submenu ─────────────────────────────────────────────────────────────────────────
+
+/// Compute the bounding rect for a submenu that opens to the right of
+/// `parent_item_rect`.
+pub(crate) fn submenu_rect(
+    parent_item_rect: Rect,
+    children: &[MenuItem],
+    max_visible_items: usize,
+    item_height: f32,
+) -> Rect {
+    use super::model::menu_item_text_width;
+    let count = children.len().min(max_visible_items);
+    let height = count as f32 * item_height + MENU_POPUP_PADDING * 2.0;
+    let longest = children
+        .iter()
+        .filter(|c| !c.is_separator())
+        .map(menu_item_text_width)
+        .fold(0.0, f32::max);
+    let width = (longest + MENU_ROW_PADDING_X * 2.0 + MENU_ROW_ICON_SIZE + MENU_ROW_ICON_GAP)
+        .max(MENU_MIN_WIDTH);
+    Rect::new(
+        parent_item_rect.x + parent_item_rect.width,
+        parent_item_rect.y - MENU_POPUP_PADDING,
+        width,
+        height,
+    )
+}

@@ -129,12 +129,14 @@ pub enum DropdownTriggerStyle {
 // ── MenuItemKind ──────────────────────────────────────────────────────────────────
 
 /// Menu row behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum MenuItemKind {
     /// Clickable menu row that may dispatch an action when enabled.
     Action,
     /// Visual divider row that never dispatches an action.
     Separator,
+    /// Submenu trigger that opens a child menu to the right when hovered.
+    Submenu { children: Vec<MenuItem> },
 }
 
 // ── MenuItem ─────────────────────────────────────────────────────────────────────
@@ -209,6 +211,13 @@ impl MenuItem {
         self
     }
 
+    /// Make this item a submenu trigger with child items.
+    pub fn with_submenu(mut self, children: Vec<MenuItem>) -> Self {
+        self.kind = MenuItemKind::Submenu { children };
+        self.action = Action::NoOp;
+        self
+    }
+
     /// Mark this item as representing the current checked/selected state.
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
@@ -221,11 +230,15 @@ impl MenuItem {
     }
 
     pub fn is_separator(&self) -> bool {
-        self.kind == MenuItemKind::Separator
+        matches!(self.kind, MenuItemKind::Separator)
     }
 
     pub fn is_activatable(&self) -> bool {
         self.enabled && !self.is_separator()
+    }
+
+    pub fn is_submenu(&self) -> bool {
+        matches!(self.kind, MenuItemKind::Submenu { .. })
     }
 }
 
@@ -233,8 +246,16 @@ impl MenuItem {
 
 pub(crate) fn menu_item_text_width(item: &MenuItem) -> f32 {
     let label_width = measure_single_line(&item.label, MENU_MEASURE_FONT_SIZE).0;
-    let Some(shortcut) = item.shortcut.as_deref().filter(|shortcut| !shortcut.is_empty()) else {
-        return label_width;
+    let shortcut_width = item
+        .shortcut
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| MENU_ROW_SHORTCUT_GAP + measure_single_line(s, MENU_MEASURE_FONT_SIZE).0)
+        .unwrap_or(0.0);
+    let submenu_arrow = if item.is_submenu() {
+        MENU_ARROW_SPACE
+    } else {
+        0.0
     };
-    label_width + MENU_ROW_SHORTCUT_GAP + measure_single_line(shortcut, MENU_MEASURE_FONT_SIZE).0
+    label_width + shortcut_width + submenu_arrow
 }

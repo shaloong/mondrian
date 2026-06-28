@@ -79,7 +79,7 @@ pub use timeline_view::{
     TimelineClipMove, TimelineClipMoveAction, TimelineClipRef, TimelineClipTrim,
     TimelineClipTrimAction, TimelineEditCommand, TimelineEditCommandAction, TimelineInOutPoint,
     TimelineInOutPointAction, TimelineSeekAction, TimelineTool, TimelineToolbarIconSlot,
-    TimelineTrack,     TimelineTrackAction, TimelineTrackAddAction, TimelineTrackControl,
+    TimelineTrack, TimelineTrackAction, TimelineTrackAddAction, TimelineTrackControl,
     TimelineTrackControlAction, TimelineTrackControlIconSlot, TimelineTrackKind, TimelineTrackMove,
     TimelineTrackMoveAction, TimelineTrackRef, TimelineTrimEdge, TimelineView, TimelineViewState,
     WaveformDisplay,

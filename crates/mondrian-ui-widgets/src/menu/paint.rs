@@ -296,8 +296,9 @@ fn trigger_text_y(rect: Rect, font_size: f32, style: DropdownTriggerStyle) -> f3
 
 // ── Open menu paint ──────────────────────────────────────────────────────────────
 
-/// Paint the full open popup: chrome, rows, separators, scrollbar.
-pub(crate) fn paint_open_menu(
+/// Paint the full open popup: chrome, rows, separators, scrollbar, and
+/// optional open submenu at `open_submenu_index`.
+pub(crate) fn paint_open_menu_with_submenu(
     ctx: &mut PaintContext,
     bounds: Rect,
     items: &[crate::menu::model::MenuItem],
@@ -309,8 +310,11 @@ pub(crate) fn paint_open_menu(
     scroll_offset: f32,
     overlay_viewport: &std::cell::Cell<Option<Rect>>,
     open: bool,
+    open_submenu_index: Option<usize>,
 ) {
-    use super::geometry::{icon_lane_width, item_rect, menu_rect, rect_has_paintable_area};
+    use super::geometry::{
+        icon_lane_width, item_rect, menu_rect, rect_has_paintable_area, submenu_rect,
+    };
 
     if !open {
         return;
@@ -357,9 +361,14 @@ pub(crate) fn paint_open_menu(
             MenuRowPaint {
                 enabled: item.enabled,
                 active: item.checked,
-                hovered: hovered_index == Some(i),
+                hovered: hovered_index == Some(i) || open_submenu_index == Some(i),
             },
         );
+
+        // Submenu arrow indicator
+        if item.is_submenu() {
+            paint_submenu_arrow(ctx, ir);
+        }
     }
     ctx.pop_clip();
 
@@ -371,6 +380,63 @@ pub(crate) fn paint_open_menu(
         visible_content_height(visible_count, item_height),
         content_height(total_items, item_height),
         scroll_offset,
+    );
+
+    // Paint open submenu
+    if let Some(sub_idx) = open_submenu_index {
+        if let Some(item) = items.get(sub_idx) {
+            if let crate::menu::model::MenuItemKind::Submenu { ref children } = item.kind {
+                if !children.is_empty() {
+                    let parent_rect = item_rect(menu_bg, sub_idx, item_height, scroll_offset);
+                    let sub_bg =
+                        submenu_rect(parent_rect, children, max_visible_items, item_height);
+                    paint_menu_popup_chrome(ctx, sub_bg);
+                    ctx.push_clip(sub_bg.inset(1.0, 1.0));
+                    for (ci, child) in children.iter().enumerate() {
+                        let cir = item_rect(sub_bg, ci, item_height, 0.0);
+                        if child.is_separator() {
+                            paint_menu_separator(ctx, cir);
+                            continue;
+                        }
+                        paint_menu_row(
+                            ctx,
+                            cir,
+                            &child.label,
+                            child.shortcut.as_deref(),
+                            child.icon.as_ref(),
+                            false,
+                            MenuRowPaint {
+                                enabled: child.enabled,
+                                active: child.checked,
+                                hovered: false, // TODO: track submenu hover
+                            },
+                        );
+                    }
+                    ctx.pop_clip();
+                }
+            }
+        }
+    }
+}
+
+/// Paint a right-pointing arrow indicator on a submenu row.
+fn paint_submenu_arrow(ctx: &mut PaintContext, row_rect: Rect) {
+    let visual = MenuVisualTokens::from_theme(ctx.theme);
+    let tokens = &ctx.theme.colors;
+    let cx = row_rect.x + row_rect.width - visual.arrow_right_inset;
+    let cy = row_rect.y + row_rect.height * 0.5;
+    let hw = visual.arrow_half_width;
+    ctx.encoder.draw_line(
+        Point::new(cx - hw, cy - hw),
+        Point::new(cx + hw, cy),
+        1.5,
+        tokens.muted_foreground,
+    );
+    ctx.encoder.draw_line(
+        Point::new(cx + hw, cy),
+        Point::new(cx - hw, cy + hw),
+        1.5,
+        tokens.muted_foreground,
     );
 }
 

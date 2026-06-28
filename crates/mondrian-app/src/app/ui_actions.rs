@@ -210,7 +210,8 @@ pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
 /// App-shell request to switch the active app UI theme preset.
 pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed";
 /// App-shell request to switch the waveform display mode.
-pub const APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED: &str = "preferences_waveform_display_changed";
+pub const APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED: &str =
+    "preferences_waveform_display_changed";
 /// App-shell request to disable one app UI shortcut descriptor.
 pub const APP_SHELL_PREFERENCES_SHORTCUT_DISABLED: &str = "preferences_shortcut_disabled";
 /// App-shell request to restore one app UI shortcut descriptor to default.
