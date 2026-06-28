@@ -20,9 +20,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::paint::{
-    centered_text_origin_y, color_with_alpha, mix_color, paint_focus_ring, soft_border,
-};
+use crate::paint::{centered_text_origin_y, color_with_alpha, paint_focus_ring, soft_border};
+use crate::panel_header::PanelHeader;
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 use crate::ContextMenu;
@@ -35,9 +34,6 @@ use self::model as grid_model;
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
 const DRAG_START_DISTANCE: f32 = 6.0;
-const FILTER_INPUT_HEIGHT: f32 = 28.0;
-const HEADER_GAP: f32 = 10.0;
-const HEADER_PADDING_X: f32 = 8.0;
 const CONTENT_PADDING: f32 = 8.0;
 const CARD_GAP: f32 = 8.0;
 const CARD_TARGET_WIDTH: f32 = 172.0;
@@ -296,9 +292,7 @@ impl AssetGridItem {
 /// Searchable, selectable card grid for asset-library style panels.
 pub struct AssetGrid {
     id: WidgetId,
-    title: String,
-    subtitle: String,
-    show_header_text: bool,
+    header: PanelHeader,
     items: Vec<AssetGridItem>,
     filter_input: Option<Box<TextInput>>,
     filter_query: String,
@@ -353,9 +347,7 @@ impl AssetGrid {
         let visible_indices = (0..items.len()).collect();
         Self {
             id: WidgetId::new(),
-            title: title.into(),
-            subtitle: String::new(),
-            show_header_text: true,
+            header: PanelHeader::new(title),
             items,
             filter_input: None,
             filter_query: String::new(),
@@ -407,13 +399,13 @@ impl AssetGrid {
 
     /// Set a small explanatory subtitle below the title.
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
-        self.subtitle = subtitle.into();
+        self.header.subtitle = subtitle.into();
         self
     }
 
     /// Use compact embedded chrome when the host panel already supplies title text.
     pub fn with_embedded_panel_chrome(mut self) -> Self {
-        self.show_header_text = false;
+        self.header.set_embedded();
         self
     }
 
@@ -424,12 +416,13 @@ impl AssetGrid {
             input.set_text(self.filter_query.clone());
         }
         self.filter_input = Some(Box::new(input));
+        self.header.has_filter = true;
         self
     }
 
     /// Grid title used by host shells as a stable state key.
     pub fn title(&self) -> &str {
-        &self.title
+        self.header.title_text()
     }
 
     /// Current committed filter query.
@@ -600,11 +593,7 @@ impl AssetGrid {
     }
 
     fn header_height(&self) -> f32 {
-        grid_model::header_height(
-            self.show_header_text,
-            !self.subtitle.is_empty(),
-            self.filter_input.is_some(),
-        )
+        self.header.height()
     }
 
     fn content_height_for_width(width: f32, item_count: usize) -> f32 {
@@ -668,12 +657,7 @@ impl AssetGrid {
     }
 
     fn filter_input_rect(&self) -> Option<Rect> {
-        grid_model::filter_input_rect(
-            self.bounds,
-            self.show_header_text,
-            !self.subtitle.is_empty(),
-            self.filter_input.is_some(),
-        )
+        self.header.filter_input_rect(self.bounds)
     }
 
     fn sync_filter_query_from_input(&mut self) -> bool {
@@ -1719,47 +1703,10 @@ impl Widget for AssetGrid {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let colors = &ctx.theme.colors;
-        ctx.encoder.draw_rect(
-            self.bounds,
-            mix_color(colors.background, colors.card, 0.24),
-            0.0,
-        );
-
-        if self.show_header_text {
-            ctx.encoder.draw_text(
-                &self.title,
-                ctx.theme.typography.body.font_size,
-                snap_point(Point::new(
-                    self.bounds.x + HEADER_PADDING_X,
-                    self.bounds.y + 12.0,
-                )),
-                colors.foreground,
-            );
-            if !self.subtitle.is_empty() {
-                ctx.encoder.draw_text_box(
-                    &self.subtitle,
-                    ctx.theme.typography.small.font_size,
-                    snap_point(Point::new(
-                        self.bounds.x + HEADER_PADDING_X,
-                        self.bounds.y + 34.0,
-                    )),
-                    (self.bounds.width - HEADER_PADDING_X * 2.0).max(1.0),
-                    colors.muted_foreground,
-                );
-            }
-        }
+        self.header.paint_background(ctx, self.bounds);
+        self.header.paint(ctx, self.bounds);
         if let Some(input) = &self.filter_input {
             input.paint(ctx);
-        }
-        if self.show_header_text {
-            let divider_y = self.viewport.y - 1.0;
-            ctx.encoder.draw_line(
-                Point::new(self.bounds.x, divider_y),
-                Point::new(self.bounds.x + self.bounds.width, divider_y),
-                1.0,
-                color_with_alpha(colors.border, 0.72),
-            );
         }
 
         ctx.push_clip(self.viewport);
@@ -1779,6 +1726,7 @@ impl Widget for AssetGrid {
         }
         ctx.pop_clip();
 
+        let colors = &ctx.theme.colors;
         if self.drop_hovered {
             ctx.encoder.draw_rect(
                 self.bounds.inset(3.0, 3.0),
@@ -1858,7 +1806,7 @@ impl Widget for AssetGrid {
     fn accessibility(&self) -> Option<AccessibilityNode> {
         Some(
             AccessibilityNode::new(self.id, AccessibilityRole::Grid)
-                .with_name(self.title.clone())
+                .with_name(self.header.title.clone())
                 .with_state(AccessibilityState {
                     focusable: true,
                     focused: self.focused,
@@ -1937,6 +1885,7 @@ fn dispatch_drop_action(action: Action, ctx: &mut EventContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paint::mix_color;
     use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::types::AssetId;
     use mondrian_platform::NoopPlatformService;

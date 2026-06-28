@@ -21,6 +21,7 @@ pub mod menu;
 pub mod node_graph_view;
 pub mod number_input;
 mod paint;
+pub mod panel_header;
 pub mod panel_list;
 pub mod panel_slot;
 pub mod property_panel;

@@ -245,7 +245,7 @@ mod tests {
             )
         );
         assert_eq!(
-            recorder.commands[1],
+            recorder.commands[4],
             PaintCommand::Rect(
                 Rect::new(10.0, 20.0, 50.0, 40.0),
                 theme.colors.popover,

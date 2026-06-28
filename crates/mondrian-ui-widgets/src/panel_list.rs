@@ -14,7 +14,8 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::Theme;
 use std::time::{Duration, Instant};
 
-use crate::paint::{centered_text_origin_y, color_with_alpha, mix_color};
+use crate::paint::{centered_text_origin_y, color_with_alpha};
+use crate::panel_header::PanelHeader;
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 use crate::TextInput;
@@ -26,9 +27,6 @@ const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
 const DRAG_START_DISTANCE: f32 = 6.0;
 const ROW_ICON_GAP: f32 = 8.0;
 const ROW_ICON_SIZE: f32 = 16.0;
-const FILTER_INPUT_HEIGHT: f32 = 30.0;
-const FILTER_INPUT_GAP: f32 = 10.0;
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PanelListVisualTokens {
     panel_background_mix: f32,
@@ -283,9 +281,7 @@ impl PanelListItem {
 /// Scrollable, keyboard-navigable list for panel content.
 pub struct PanelList {
     id: WidgetId,
-    title: String,
-    subtitle: String,
-    show_header_text: bool,
+    header: PanelHeader,
     items: Vec<PanelListItem>,
     filter_input: Option<Box<TextInput>>,
     filter_query: String,
@@ -333,9 +329,7 @@ impl PanelList {
         let visible_indices = (0..items.len()).collect();
         Self {
             id: WidgetId::new(),
-            title: title.into(),
-            subtitle: String::new(),
-            show_header_text: true,
+            header: PanelHeader::new(title),
             items,
             filter_input: None,
             filter_query: String::new(),
@@ -366,13 +360,13 @@ impl PanelList {
 
     /// Set a small explanatory subtitle below the title.
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
-        self.subtitle = subtitle.into();
+        self.header.subtitle = subtitle.into();
         self
     }
 
     /// Use compact embedded chrome when the host panel already supplies title text.
     pub fn with_embedded_panel_chrome(mut self) -> Self {
-        self.show_header_text = false;
+        self.header.set_embedded();
         self
     }
 
@@ -384,7 +378,7 @@ impl PanelList {
 
     /// Panel title used by host shells as a stable local-state key.
     pub fn title(&self) -> &str {
-        &self.title
+        self.header.title_text()
     }
 
     /// Add a searchable filter field above the list rows.
@@ -394,6 +388,7 @@ impl PanelList {
             input.set_text(self.filter_query.clone());
         }
         self.filter_input = Some(Box::new(input));
+        self.header.has_filter = true;
         self
     }
 
@@ -529,11 +524,7 @@ impl PanelList {
     }
 
     fn header_height(&self) -> f32 {
-        panel_model::header_height(
-            self.show_header_text,
-            !self.subtitle.is_empty(),
-            self.filter_input.is_some(),
-        )
+        self.header.height()
     }
 
     fn content_height(&self) -> f32 {
@@ -667,12 +658,7 @@ impl PanelList {
     }
 
     fn filter_input_rect(&self) -> Option<Rect> {
-        panel_model::filter_input_rect(
-            self.bounds,
-            self.show_header_text,
-            !self.subtitle.is_empty(),
-            self.filter_input.is_some(),
-        )
+        self.header.filter_input_rect(self.bounds)
     }
 
     fn sync_filter_query_from_input(&mut self) -> bool {
@@ -1249,30 +1235,8 @@ impl Widget for PanelList {
     fn paint(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let visual = PanelListVisualTokens::from_theme(ctx.theme);
-        ctx.encoder.draw_rect(
-            self.bounds,
-            mix_color(colors.background, colors.card, visual.panel_background_mix),
-            0.0,
-        );
-
-        if self.show_header_text {
-            let title_pos = snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 12.0));
-            ctx.encoder.draw_text(
-                &self.title,
-                ctx.theme.typography.body.font_size,
-                title_pos,
-                colors.foreground,
-            );
-            if !self.subtitle.is_empty() {
-                ctx.encoder.draw_text_box(
-                    &self.subtitle,
-                    ctx.theme.typography.small.font_size,
-                    snap_point(Point::new(self.bounds.x + 12.0, self.bounds.y + 34.0)),
-                    (self.bounds.width - 24.0).max(0.0),
-                    colors.muted_foreground,
-                );
-            }
-        }
+        self.header.paint_background(ctx, self.bounds);
+        self.header.paint(ctx, self.bounds);
         if let Some(input) = &self.filter_input {
             input.paint(ctx);
         }
@@ -1385,6 +1349,7 @@ impl Widget for PanelList {
 mod tests {
     use super::*;
 
+    use crate::paint::mix_color;
     use std::cell::RefCell;
     use std::path::PathBuf;
 

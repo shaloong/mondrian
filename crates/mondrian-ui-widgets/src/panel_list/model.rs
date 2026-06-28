@@ -1,66 +1,13 @@
 use mondrian_ui_core::types::{Point, Rect};
 
-use super::{PanelListItem, FILTER_INPUT_GAP, FILTER_INPUT_HEIGHT};
+use super::PanelListItem;
 
 const CONTENT_PADDING: f32 = 8.0;
-const EMBEDDED_FILTER_TOP_PADDING: f32 = 8.0;
-const HEADER_ONLY_HEIGHT: f32 = 42.0;
-const HEADER_WITH_SUBTITLE_HEIGHT: f32 = 60.0;
 const SCROLLBAR_WIDTH: f32 = 4.0;
 const SCROLLBAR_RIGHT_INSET: f32 = 6.0;
 const SCROLLBAR_VERTICAL_INSET: f32 = 2.0;
 const MIN_SCROLLBAR_THUMB_HEIGHT: f32 = 24.0;
 const ROW_VERTICAL_INSET: f32 = 2.0;
-
-pub(super) fn title_block_height(show_header_text: bool, has_subtitle: bool) -> f32 {
-    if !show_header_text {
-        return 0.0;
-    }
-    if has_subtitle {
-        HEADER_WITH_SUBTITLE_HEIGHT
-    } else {
-        HEADER_ONLY_HEIGHT
-    }
-}
-
-pub(super) fn filter_top_padding(show_header_text: bool) -> f32 {
-    if show_header_text {
-        0.0
-    } else {
-        EMBEDDED_FILTER_TOP_PADDING
-    }
-}
-
-pub(super) fn header_height(show_header_text: bool, has_subtitle: bool, has_filter: bool) -> f32 {
-    let base = title_block_height(show_header_text, has_subtitle);
-    if has_filter {
-        base + filter_top_padding(show_header_text) + FILTER_INPUT_HEIGHT + FILTER_INPUT_GAP
-    } else {
-        base
-    }
-}
-
-pub(super) fn filter_input_rect(
-    bounds: Rect,
-    show_header_text: bool,
-    has_subtitle: bool,
-    has_filter: bool,
-) -> Option<Rect> {
-    if !has_filter {
-        return None;
-    }
-    let y = if show_header_text {
-        bounds.y + title_block_height(show_header_text, has_subtitle) - 4.0
-    } else {
-        bounds.y + EMBEDDED_FILTER_TOP_PADDING
-    };
-    Some(Rect::new(
-        bounds.x + CONTENT_PADDING,
-        y,
-        (bounds.width - CONTENT_PADDING * 2.0).max(0.0),
-        FILTER_INPUT_HEIGHT,
-    ))
-}
 
 pub(super) fn viewport_rect(bounds: Rect, header_height: f32) -> Rect {
     Rect::new(
@@ -329,6 +276,7 @@ pub(super) fn scroll_y_with_selected_visible(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panel_header::PanelHeader;
     use mondrian_core::Color;
 
     fn item(title: &str) -> PanelListItem {
@@ -337,9 +285,15 @@ mod tests {
 
     #[test]
     fn chrome_height_accounts_for_header_subtitle_and_embedded_filter() {
-        assert_eq!(header_height(true, false, false), 42.0);
-        assert_eq!(header_height(true, true, true), 100.0);
-        assert_eq!(header_height(false, false, true), 48.0);
+        assert_eq!(PanelHeader::new("Test").height(), 42.0);
+        assert_eq!(
+            PanelHeader::new("Test").with_subtitle("Sub").with_filter(true).height(),
+            100.0
+        );
+        assert_eq!(
+            PanelHeader::new("Test").with_embedded().with_filter(true).height(),
+            48.0
+        );
     }
 
     #[test]
@@ -347,11 +301,14 @@ mod tests {
         let bounds = Rect::new(10.0, 20.0, 120.0, 80.0);
 
         assert_eq!(
-            filter_input_rect(bounds, true, false, true),
+            PanelHeader::new("Test").with_filter(true).filter_input_rect(bounds),
             Some(Rect::new(18.0, 58.0, 104.0, 30.0))
         );
         assert_eq!(
-            viewport_rect(bounds, header_height(false, false, true)),
+            viewport_rect(
+                bounds,
+                PanelHeader::new("Test").with_embedded().with_filter(true).height()
+            ),
             Rect::new(18.0, 68.0, 104.0, 24.0)
         );
         assert_eq!(

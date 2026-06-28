@@ -2,12 +2,9 @@ use mondrian_ui_core::types::{Point, Rect};
 use std::collections::BTreeSet;
 
 use super::{
-    AssetGridItem, CARD_GAP, CARD_HEIGHT, CARD_TARGET_WIDTH, CONTENT_PADDING, FILTER_INPUT_HEIGHT,
-    HEADER_GAP, HEADER_PADDING_X, PREVIEW_ASPECT_RATIO,
+    AssetGridItem, CARD_GAP, CARD_HEIGHT, CARD_TARGET_WIDTH, CONTENT_PADDING, PREVIEW_ASPECT_RATIO,
 };
 
-const HEADER_ONLY_HEIGHT: f32 = 42.0;
-const HEADER_WITH_SUBTITLE_HEIGHT: f32 = 60.0;
 const PREVIEW_PADDING: f32 = 6.0;
 const FOOTER_PADDING_X: f32 = 8.0;
 const FOOTER_TOP_GAP: f32 = 7.0;
@@ -18,34 +15,6 @@ pub(super) struct GridLayout {
     pub columns: usize,
     pub card_width: f32,
     pub viewport: Rect,
-}
-
-pub(super) fn title_block_height(show_header_text: bool, has_subtitle: bool) -> f32 {
-    if !show_header_text {
-        return 0.0;
-    }
-    if has_subtitle {
-        HEADER_WITH_SUBTITLE_HEIGHT
-    } else {
-        HEADER_ONLY_HEIGHT
-    }
-}
-
-pub(super) fn filter_top_padding(show_header_text: bool) -> f32 {
-    if show_header_text {
-        0.0
-    } else {
-        CONTENT_PADDING
-    }
-}
-
-pub(super) fn header_height(show_header_text: bool, has_subtitle: bool, has_filter: bool) -> f32 {
-    let base = title_block_height(show_header_text, has_subtitle);
-    if has_filter {
-        base + filter_top_padding(show_header_text) + FILTER_INPUT_HEIGHT + HEADER_GAP
-    } else {
-        base
-    }
 }
 
 pub(super) fn grid_columns_for_width(width: f32) -> usize {
@@ -65,28 +34,6 @@ pub(super) fn content_height_for_width(width: f32, item_count: usize) -> f32 {
 pub(super) fn content_height(item_count: usize, columns: usize) -> f32 {
     let rows = item_count.div_ceil(columns.max(1));
     CONTENT_PADDING * 2.0 + rows as f32 * CARD_HEIGHT + rows.saturating_sub(1) as f32 * CARD_GAP
-}
-
-pub(super) fn filter_input_rect(
-    bounds: Rect,
-    show_header_text: bool,
-    has_subtitle: bool,
-    has_filter: bool,
-) -> Option<Rect> {
-    if !has_filter {
-        return None;
-    }
-    let y = if show_header_text {
-        bounds.y + title_block_height(show_header_text, has_subtitle) - 4.0
-    } else {
-        bounds.y + CONTENT_PADDING
-    };
-    Some(Rect::new(
-        bounds.x + HEADER_PADDING_X,
-        y,
-        (bounds.width - HEADER_PADDING_X * 2.0).max(0.0),
-        FILTER_INPUT_HEIGHT,
-    ))
 }
 
 pub(super) fn layout_for_bounds(bounds: Rect, header_height: f32, item_count: usize) -> GridLayout {
@@ -273,13 +220,6 @@ mod tests {
 
     fn item(id: &str, title: &str) -> AssetGridItem {
         AssetGridItem::new(id, title, Color::from_hex(0x6688CC))
-    }
-
-    #[test]
-    fn chrome_height_accounts_for_header_subtitle_and_embedded_filter() {
-        assert_eq!(header_height(true, false, false), 42.0);
-        assert_eq!(header_height(true, true, true), 98.0);
-        assert_eq!(header_height(false, false, true), 46.0);
     }
 
     #[test]
