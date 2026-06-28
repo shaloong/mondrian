@@ -220,6 +220,8 @@ pub const APP_SHELL_PREFERENCES_SHORTCUT_RESET: &str = "preferences_shortcut_res
 pub const APP_SHELL_PREFERENCES_SHORTCUT_REBOUND: &str = "preferences_shortcut_rebound";
 /// App-shell request to close the current shell-local modal.
 pub const APP_SHELL_CLOSE_MODAL: &str = "close_modal";
+/// App-shell request to copy system info to the native clipboard.
+pub const APP_SHELL_COPY_SYSTEM_INFO: &str = "copy_system_info";
 /// App-shell request to save before continuing a pending close/quit flow.
 pub const APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE: &str = "pending_close_save_continue";
 /// App-shell request to continue a pending close/quit flow without saving.
@@ -244,6 +246,12 @@ pub enum PreferencesTabPayload {
     Media,
     Shortcuts,
     Developer,
+}
+
+/// Shell request to copy system info text to the native clipboard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellCopySystemInfoPayload {
+    pub text: String,
 }
 
 /// Theme preset selected by the app UI preferences UI.
@@ -1359,6 +1367,14 @@ pub fn app_shell_preferences_shortcut_rebound_action(
 /// Build an app-shell request for closing the current shell-local modal.
 pub fn app_shell_close_modal_action() -> Action {
     custom_app_shell_action(APP_SHELL_CLOSE_MODAL)
+}
+
+/// Build an app-shell request to copy system info text to the clipboard.
+pub fn app_shell_copy_system_info_action(text: impl Into<String>) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_COPY_SYSTEM_INFO,
+        AppShellCopySystemInfoPayload { text: text.into() },
+    )
 }
 
 /// Build an app-shell request to save before continuing a pending close/quit flow.

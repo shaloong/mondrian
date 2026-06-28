@@ -76,7 +76,7 @@ impl Dropdown {
             open: false,
             pressed_index: None,
             item_height: 28.0,
-            max_visible_items: 8,
+            max_visible_items: 40,
             scroll_offset: 0.0,
             suppress_next_release: false,
             focused: false,

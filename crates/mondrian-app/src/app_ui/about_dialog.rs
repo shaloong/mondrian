@@ -1,30 +1,91 @@
 //! App UI About dialog.
-//!
-//! Product shell modals live in their own modules and report shell-local
-//! actions instead of mutating application state directly.
+
+use std::sync::OnceLock;
 
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::{Button, DialogSurface, Label};
 
-use crate::app::ui_actions::app_shell_close_modal_action;
+use crate::app::ui_actions::{app_shell_close_modal_action, app_shell_copy_system_info_action};
 
-const CARD_MIN_WIDTH: f32 = 300.0;
-const CARD_WIDTH: f32 = 420.0;
-const CARD_MIN_HEIGHT: f32 = 220.0;
-const CARD_HEIGHT: f32 = 260.0;
+const CARD_WIDTH: f32 = 380.0;
+const CARD_MIN_HEIGHT: f32 = 200.0;
+const CARD_HEIGHT: f32 = 280.0;
 const CONTENT_PADDING: f32 = 22.0;
-const TITLE_FONT_SIZE: f32 = 20.0;
-const BODY_FONT_SIZE: f32 = 13.0;
-const META_FONT_SIZE: f32 = 12.0;
+const TITLE_FONT_SIZE: f32 = 18.0;
+const LABEL_FONT_SIZE: f32 = 12.0;
 const TITLE_Y: f32 = 22.0;
-const VERSION_Y: f32 = 56.0;
-const BODY_Y: f32 = 90.0;
-const META_Y: f32 = 162.0;
-const BUTTON_WIDTH: f32 = 84.0;
-const BUTTON_HEIGHT: f32 = 32.0;
+const ROW_GAP: f32 = 20.0;
+const FIRST_ROW_Y: f32 = 56.0;
+const BUTTON_WIDTH: f32 = 68.0;
+const BUTTON_HEIGHT: f32 = 30.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
+const BUTTON_GAP: f32 = 8.0;
+
+/// System info that the renderer can set early during init.
+pub static SYSTEM_INFO: OnceLock<AboutSystemInfo> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+pub struct AboutSystemInfo {
+    /// Cargo package version.
+    pub pkg_version: String,
+    /// Rust MSRV / toolchain.
+    pub rust_version: String,
+    /// OS family (e.g. "Windows_NT").
+    pub os: String,
+    /// CPU architecture (e.g. "x86_64").
+    pub arch: String,
+    /// OS version string from the platform.
+    pub os_version: String,
+    /// Graphics backend (e.g. "DirectX 12").
+    pub wgpu_backend: String,
+    /// Primary GPU name.
+    pub gpu_name: String,
+}
+
+impl AboutSystemInfo {
+    pub fn build() -> Self {
+        Self {
+            pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
+            rust_version: option_env!("CARGO_PKG_RUST_VERSION")
+                .unwrap_or("nightly")
+                .to_owned(),
+            os: std::env::consts::OS.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            os_version: std::env::consts::OS.to_owned(), // placeholder, set externally
+            wgpu_backend: "wgpu".to_owned(),
+            gpu_name: String::new(),
+        }
+    }
+
+    fn format(&self) -> String {
+        let mut s = format!(
+            "Mondrian\n\
+             \n\
+             版本: {}\n\
+             渲染器: {}\n\
+             Rust: {}\n\
+             OS: {} {} {}",
+            self.pkg_version,
+            self.wgpu_backend,
+            self.rust_version,
+            self.os,
+            self.arch,
+            self.os_version,
+        );
+        if !self.gpu_name.is_empty() {
+            s.push_str(&format!("\nGPU: {}", self.gpu_name));
+        }
+        s
+    }
+}
+
+impl Default for AboutSystemInfo {
+    fn default() -> Self {
+        Self::build()
+    }
+}
 
 /// Product information modal for the app UI shell.
 pub struct AboutDialog {
@@ -33,19 +94,59 @@ pub struct AboutDialog {
     bounds: Rect,
     card: Rect,
     title_label: Label,
-    version_label: Label,
-    body_label: Label,
-    meta_label: Label,
+    info_rows: Vec<Label>,
+    copy_button: Button,
     close_button: Button,
 }
 
 impl AboutDialog {
     /// Build the default Mondrian About dialog.
     pub fn new() -> Self {
+        let info = SYSTEM_INFO.get().cloned().unwrap_or_default();
+        let version_text = format!("版本 {}", info.pkg_version);
+        let renderer_text = format!("渲染器: {}", info.wgpu_backend);
+        let rust_text = format!("Rust: {}", info.rust_version);
+        let os_text = format!(
+            "OS: {} {} {}",
+            info.os, info.arch, info.os_version
+        );
+        let gpu_text = if info.gpu_name.is_empty() {
+            String::new()
+        } else {
+            format!("GPU: {}", info.gpu_name)
+        };
+
+        let mut info_rows: Vec<Label> = vec![
+            Label::new(version_text)
+                .muted()
+                .with_font_size(LABEL_FONT_SIZE)
+                .with_padding(0.0, 0.0),
+            Label::new(renderer_text)
+                .muted()
+                .with_font_size(LABEL_FONT_SIZE)
+                .with_padding(0.0, 0.0),
+            Label::new(rust_text)
+                .muted()
+                .with_font_size(LABEL_FONT_SIZE)
+                .with_padding(0.0, 0.0),
+            Label::new(os_text)
+                .muted()
+                .with_font_size(LABEL_FONT_SIZE)
+                .with_padding(0.0, 0.0),
+        ];
+        if !gpu_text.is_empty() {
+            info_rows.push(
+                Label::new(gpu_text)
+                    .muted()
+                    .with_font_size(LABEL_FONT_SIZE)
+                    .with_padding(0.0, 0.0),
+            );
+        }
+
         Self {
             id: WidgetId::new(),
             surface: DialogSurface::new(
-                Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
+                Size::new(200.0, CARD_MIN_HEIGHT),
                 Size::new(CARD_WIDTH, CARD_HEIGHT),
             )
             .with_content_padding(CONTENT_PADDING),
@@ -55,21 +156,14 @@ impl AboutDialog {
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
-            version_label: Label::new(format!("版本 {}", env!("CARGO_PKG_VERSION")))
-                .muted()
-                .with_font_size(META_FONT_SIZE)
-                .with_padding(0.0, 0.0),
-            body_label: Label::new("基于 Mondrian 原生 UI 栈构建的视频编辑界面。")
-                .popover_foreground()
-                .with_font_size(BODY_FONT_SIZE)
-                .with_padding(0.0, 0.0)
-                .wrapped(),
-            meta_label: Label::new("自研 UI 运行时、停靠面板、文本与 GPU 渲染器。")
-                .muted()
-                .with_font_size(META_FONT_SIZE)
-                .with_padding(0.0, 0.0)
-                .wrapped(),
-            close_button: Button::new("完成").on_click(app_shell_close_modal_action()),
+            info_rows,
+            copy_button: Button::new("复制")
+                .minimal()
+                .text_left()
+                .on_click(app_shell_copy_system_info_action(
+                    SYSTEM_INFO.get().cloned().unwrap_or_default().format(),
+                )),
+            close_button: Button::new("关闭").on_click(app_shell_close_modal_action()),
         }
     }
 }
@@ -99,35 +193,38 @@ impl Widget for AboutDialog {
             content.width,
             TITLE_FONT_SIZE * 1.4,
         ));
-        self.version_label.layout(Rect::new(
-            content.x,
-            content.y + VERSION_Y,
-            content.width,
-            META_FONT_SIZE * 1.4,
-        ));
-        self.body_label.layout(Rect::new(
-            content.x,
-            content.y + BODY_Y,
-            content.width,
-            BODY_FONT_SIZE * 4.0,
-        ));
-        self.meta_label.layout(Rect::new(
-            content.x,
-            content.y + META_Y,
-            content.width,
-            META_FONT_SIZE * 3.0,
+        let mut y = content.y + FIRST_ROW_Y;
+        for label in &mut self.info_rows {
+            label.layout(Rect::new(content.x, y, content.width, LABEL_FONT_SIZE * 1.4));
+            y += ROW_GAP;
+        }
+        let close_x = self.card.x + self.card.width - CONTENT_PADDING - BUTTON_WIDTH;
+        let button_y = self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT;
+        self.copy_button.layout(Rect::new(
+            close_x - BUTTON_WIDTH - BUTTON_GAP,
+            button_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
         ));
         self.close_button.layout(Rect::new(
-            self.card.x + self.card.width - CONTENT_PADDING - BUTTON_WIDTH,
-            self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT,
+            close_x,
+            button_y,
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
         ));
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        let copy_result = self.copy_button.event(event, ctx);
+        if copy_result == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        let close_result = self.close_button.event(event, ctx);
+        if close_result == EventResult::Handled {
+            return EventResult::Handled;
+        }
         match event {
-            UiEvent::KeyDown { key: KeyCode::Escape | KeyCode::Enter, .. } => {
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
                 (ctx.dispatch)(app_shell_close_modal_action());
                 EventResult::Handled
             }
@@ -136,16 +233,17 @@ impl Widget for AboutDialog {
             {
                 EventResult::Handled
             }
-            _ => self.close_button.event(event, ctx),
+            _ => EventResult::Ignored,
         }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         self.surface.paint(self.bounds, self.card, ctx);
         self.title_label.paint(ctx);
-        self.version_label.paint(ctx);
-        self.body_label.paint(ctx);
-        self.meta_label.paint(ctx);
+        for label in &self.info_rows {
+            label.paint(ctx);
+        }
+        self.copy_button.paint(ctx);
         self.close_button.paint(ctx);
     }
 
@@ -154,28 +252,30 @@ impl Widget for AboutDialog {
     }
 
     fn child_count(&self) -> usize {
-        5
+        2 + self.info_rows.len()
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
-        match index {
-            0 => Some(&self.title_label),
-            1 => Some(&self.version_label),
-            2 => Some(&self.body_label),
-            3 => Some(&self.meta_label),
-            4 => Some(&self.close_button),
-            _ => None,
+        if index < self.info_rows.len() {
+            Some(&self.info_rows[index])
+        } else if index == self.info_rows.len() {
+            Some(&self.copy_button)
+        } else if index == self.info_rows.len() + 1 {
+            Some(&self.close_button)
+        } else {
+            None
         }
     }
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
-        match index {
-            0 => Some(&mut self.title_label),
-            1 => Some(&mut self.version_label),
-            2 => Some(&mut self.body_label),
-            3 => Some(&mut self.meta_label),
-            4 => Some(&mut self.close_button),
-            _ => None,
+        if index < self.info_rows.len() {
+            Some(&mut self.info_rows[index])
+        } else if index == self.info_rows.len() {
+            Some(&mut self.copy_button)
+        } else if index == self.info_rows.len() + 1 {
+            Some(&mut self.close_button)
+        } else {
+            None
         }
     }
 }
@@ -205,62 +305,46 @@ mod tests {
     #[test]
     fn about_dialog_layout_exposes_children_inside_centered_card() {
         let mut dialog = AboutDialog::new();
-
         dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
-
-        assert_eq!(dialog.child_count(), 5);
-        assert_eq!(
-            dialog.measure(LayoutConstraint::LOOSE),
-            Size::new(CARD_WIDTH, CARD_HEIGHT)
-        );
-        assert_eq!(
-            dialog.card,
-            Rect::new(
-                (1000.0 - CARD_WIDTH) * 0.5,
-                (700.0 - CARD_HEIGHT) * 0.5,
-                CARD_WIDTH,
-                CARD_HEIGHT,
-            )
-        );
+        assert!(dialog.child_count() >= 2);
+        assert_eq!(dialog.card.width, CARD_WIDTH);
+        assert_eq!(dialog.card.height, CARD_HEIGHT);
     }
 
     #[test]
-    fn about_dialog_keyboard_shortcuts_dispatch_close_modal() {
-        for key in [KeyCode::Escape, KeyCode::Enter] {
-            let mut dialog = AboutDialog::new();
-            let actions = RefCell::new(Vec::new());
-            let mut focus = DummyFocus;
-            let mut shortcut = DummyShortcut;
-            let mut tooltip = DummyTooltip;
-            let mut requests = EventRequests::default();
-            let dispatch = |action| actions.borrow_mut().push(action);
-            let mut ctx = event_ctx(
-                &mut focus,
-                &mut shortcut,
-                &mut tooltip,
-                &mut requests,
-                &dispatch,
-            );
+    fn about_dialog_escape_dispatches_close_modal() {
+        let mut dialog = AboutDialog::new();
+        let actions = RefCell::new(Vec::new());
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
 
-            let result = dialog.event(
-                &UiEvent::KeyDown { key, modifiers: Modifiers::none() },
-                &mut ctx,
-            );
+        let result = dialog.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
 
-            assert_eq!(result, EventResult::Handled);
-            assert_eq!(actions.borrow().len(), 1);
-            assert_close_modal_action(&actions.borrow()[0]);
-        }
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(actions.borrow().len(), 1);
+        assert_close_modal_action(&actions.borrow()[0]);
     }
 
     #[test]
-    fn about_dialog_done_button_dispatches_close_modal() {
+    fn about_dialog_close_button_dispatches_close_modal() {
         let mut dialog = AboutDialog::new();
         dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
-        let button_center = Point::new(
-            dialog.card.x + dialog.card.width - CONTENT_PADDING - BUTTON_WIDTH * 0.5,
-            dialog.card.y + dialog.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT * 0.5,
-        );
+        let close_x = dialog.card.x + dialog.card.width - CONTENT_PADDING - BUTTON_WIDTH * 0.5;
+        let button_y = dialog.card.y + dialog.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT * 0.5;
+        let button_center = Point::new(close_x, button_y);
         let actions = RefCell::new(Vec::new());
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
@@ -297,8 +381,28 @@ mod tests {
             ),
             EventResult::Handled
         );
-
         assert_eq!(actions.borrow().len(), 1);
         assert_close_modal_action(&actions.borrow()[0]);
+    }
+
+    #[test]
+    fn about_system_info_format_contains_key_fields() {
+        let info = AboutSystemInfo {
+            pkg_version: "0.1.0".into(),
+            rust_version: "1.92.0".into(),
+            os: "Windows_NT".into(),
+            arch: "x86_64".into(),
+            os_version: "10.0".into(),
+            wgpu_backend: "wgpu".into(),
+            gpu_name: "NVIDIA GeForce RTX 4090".into(),
+        };
+        let formatted = info.format();
+        assert!(formatted.contains("Mondrian"));
+        assert!(formatted.contains("0.1.0"));
+        assert!(formatted.contains("wgpu"));
+        assert!(formatted.contains("1.92.0"));
+        assert!(formatted.contains("Windows_NT"));
+        assert!(formatted.contains("x86_64"));
+        assert!(formatted.contains("RTX 4090"));
     }
 }

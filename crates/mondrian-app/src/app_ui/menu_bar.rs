@@ -152,7 +152,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         (
             "帮助",
             vec![menu_item_with_shortcut(MenuItem::new(
-                "关于 Mondrian",
+                    "关于",
                 app_shell_about_action(),
             ))],
         ),

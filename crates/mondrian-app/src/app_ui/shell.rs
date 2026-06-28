@@ -23,13 +23,14 @@ use crate::app::ui_actions::{
     assets_import_files_action, assets_relink_asset_action, export_set_draft_action,
     project_create_with_settings_action, project_recover_from_autosave_action,
     sequence_update_settings_action, AppShellOpenRecentProjectPayload,
-    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
+    AppShellRelinkAssetDialogPayload,     AppShellRelocatePanelPayload, AppShellCopySystemInfoPayload,
     AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
     DockDropAreaPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
     ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
     ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
     SequenceSettingsTabPayload, ViewerSetZoomScalePayload, APP_SHELL_ABOUT,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_COPY_SYSTEM_INFO,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
     APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
     APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
@@ -1263,6 +1264,14 @@ impl AppUiAppRoot {
                     if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                         self.layout(self.bounds);
                     }
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_COPY_SYSTEM_INFO =>
+            {
+                if let Ok(p) = serde_json::from_value::<AppShellCopySystemInfoPayload>(payload) {
+                    let _ = platform.clipboard_copy(&p.text);
                 }
                 Ok(None)
             }
