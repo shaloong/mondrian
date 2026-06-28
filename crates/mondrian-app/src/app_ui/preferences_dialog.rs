@@ -29,16 +29,16 @@ const CARD_WIDTH: f32 = 680.0;
 const CARD_MIN_HEIGHT: f32 = 360.0;
 const CARD_HEIGHT: f32 = 480.0;
 const CONTENT_PADDING: f32 = 22.0;
-const TITLE_FONT_SIZE: f32 = 19.0;
 const BODY_FONT_SIZE: f32 = 13.0;
-const NAV_WIDTH: f32 = 148.0;
+const NAV_WIDTH: f32 = 152.0;
 const NAV_BUTTON_HEIGHT: f32 = 32.0;
-const NAV_BUTTON_GAP: f32 = 7.0;
-const CONTENT_GAP: f32 = 24.0;
+const NAV_BUTTON_GAP: f32 = 4.0;
+const CONTENT_GAP: f32 = 0.0;
 const ROW_HEIGHT: f32 = 28.0;
 const BUTTON_WIDTH: f32 = 84.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
+const SIDEBAR_INSET: f32 = 10.0;
 const THEME_BUTTON_WIDTH: f32 = 76.0;
 const THEME_BUTTON_HEIGHT: f32 = 26.0;
 const THEME_BUTTON_GAP: f32 = 6.0;
@@ -211,8 +211,6 @@ pub struct PreferencesDialog {
     shortcut_viewport: Rect,
     shortcut_scroll_offset: f32,
     capturing_shortcut: Option<String>,
-    title_label: Label,
-    description_label: Label,
     nav_buttons: Vec<Button>,
     theme_buttons: Vec<Button>,
     content_labels: Vec<Label>,
@@ -274,15 +272,6 @@ impl PreferencesDialog {
             shortcut_viewport: Rect::ZERO,
             shortcut_scroll_offset: 0.0,
             capturing_shortcut: None,
-            title_label: Label::new("偏好设置")
-                .popover_foreground()
-                .with_font_size(TITLE_FONT_SIZE)
-                .with_padding(0.0, 0.0),
-            description_label: Label::new("自研 UI 设置按编辑界面和运行时行为归类。")
-                .muted()
-                .with_font_size(BODY_FONT_SIZE)
-                .with_padding(0.0, 0.0)
-                .wrapped(),
             nav_buttons,
             theme_buttons,
             content_labels: Vec::new(),
@@ -481,20 +470,9 @@ impl Widget for PreferencesDialog {
         self.bounds = bounds;
         self.card = self.surface.card_rect(bounds);
         let content = self.surface.content_rect(self.card);
-        self.title_label.layout(Rect::new(
-            content.x,
-            content.y + 2.0,
-            content.width,
-            TITLE_FONT_SIZE * 1.4,
-        ));
-        self.description_label.layout(Rect::new(
-            content.x,
-            content.y + 34.0,
-            content.width,
-            BODY_FONT_SIZE * 2.2,
-        ));
 
-        let body_top = content.y + 82.0;
+        // Sidebar starts at top of content area
+        let body_top = content.y;
         let nav_x = content.x;
         let content_x = nav_x + NAV_WIDTH + CONTENT_GAP;
         let list_bottom =
@@ -664,34 +642,27 @@ impl Widget for PreferencesDialog {
 
     fn paint(&self, ctx: &mut PaintContext) {
         self.surface.paint(self.bounds, self.card, ctx);
-        self.title_label.paint(ctx);
-        self.description_label.paint(ctx);
 
-        let theme = &ctx.theme.colors;
+        let tokens = &ctx.theme.colors;
         let content = self.surface.content_rect(self.card);
-        let body_top = content.y + 82.0;
-        let divider_x = content.x + NAV_WIDTH + CONTENT_GAP * 0.5;
-        ctx.encoder.draw_line(
-            Point::new(divider_x, body_top - 4.0),
-            Point::new(
-                divider_x,
-                self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT - 18.0,
-            ),
-            1.0,
-            theme.border,
-        );
+        let body_top = content.y;
 
-        for (index, tab) in PreferencesDialogTab::ALL.into_iter().enumerate() {
-            if tab == self.active_tab {
-                let selected_bounds = Rect::new(
-                    content.x,
-                    body_top + index as f32 * (NAV_BUTTON_HEIGHT + NAV_BUTTON_GAP),
-                    NAV_WIDTH,
-                    NAV_BUTTON_HEIGHT,
-                );
-                ctx.encoder.draw_rect(selected_bounds, theme.muted, 6.0);
-            }
-        }
+        // Sidebar background — darker than main card for Notion-style separation
+        let sidebar = Rect::new(
+            content.x - SIDEBAR_INSET,
+            body_top - SIDEBAR_INSET,
+            NAV_WIDTH + SIDEBAR_INSET,
+            (self.card.y + self.card.height
+                - BUTTON_BOTTOM_INSET
+                - BUTTON_HEIGHT
+                - 20.0
+                - body_top)
+                + SIDEBAR_INSET * 2.0,
+        );
+        let mut sidebar_bg = tokens.foreground;
+        sidebar_bg.a = 0.025;
+        ctx.encoder.draw_rect(sidebar, sidebar_bg, ctx.theme.spacing.radius_sm);
+
         for button in &self.nav_buttons {
             button.paint(ctx);
         }
@@ -750,20 +721,14 @@ impl Widget for PreferencesDialog {
     }
 
     fn child_count(&self) -> usize {
-        3 + self.nav_buttons.len()
+        1 + self.nav_buttons.len()
             + self.theme_buttons.len()
             + self.content_labels.len()
             + self.shortcut_buttons.len() * 3
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
-        if index == 0 {
-            return Some(&self.title_label);
-        }
-        if index == 1 {
-            return Some(&self.description_label);
-        }
-        let nav_start = 2;
+        let nav_start = 0;
         let nav_end = nav_start + self.nav_buttons.len();
         if (nav_start..nav_end).contains(&index) {
             return self.nav_buttons.get(index - nav_start).map(|button| button as &dyn Widget);
@@ -796,13 +761,7 @@ impl Widget for PreferencesDialog {
     }
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
-        if index == 0 {
-            return Some(&mut self.title_label);
-        }
-        if index == 1 {
-            return Some(&mut self.description_label);
-        }
-        let nav_start = 2;
+        let nav_start = 0;
         let nav_end = nav_start + self.nav_buttons.len();
         if (nav_start..nav_end).contains(&index) {
             return self

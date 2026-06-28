@@ -3,12 +3,11 @@
 //! This module keeps dialog chrome, centering, and outside-hit handling
 //! consistent without taking ownership of each dialog's child layout.
 
-use mondrian_core::Color;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::PaintContext;
 use mondrian_ui_theme::{Theme, ThemePreset};
 
-use crate::paint::{horizontal_stroke_rect, paint_popover_shadow, vertical_stroke_rect};
+use crate::paint::paint_popover_shadow;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct DialogSurfaceVisualTokens {
@@ -104,40 +103,7 @@ impl DialogSurface {
         ctx.encoder.draw_rect(bounds, ctx.theme.colors.modal_scrim, visual.scrim_radius);
         paint_popover_shadow(ctx, card, visual.card_radius);
         ctx.encoder.draw_rect(card, ctx.theme.colors.popover, visual.card_radius);
-        if self.border_width <= 0.0 {
-            return;
-        }
-        paint_rect_outline(
-            ctx,
-            card,
-            self.border_width,
-            ctx.theme.colors.border,
-            visual.outline_radius,
-        );
     }
-}
-
-fn paint_rect_outline(ctx: &mut PaintContext, rect: Rect, width: f32, color: Color, radius: f32) {
-    ctx.encoder.draw_rect(
-        horizontal_stroke_rect(rect.y, rect.x, rect.width, width),
-        color,
-        radius,
-    );
-    ctx.encoder.draw_rect(
-        horizontal_stroke_rect(rect.y + rect.height, rect.x, rect.width, width),
-        color,
-        radius,
-    );
-    ctx.encoder.draw_rect(
-        vertical_stroke_rect(rect.x, rect.y, rect.height, width),
-        color,
-        radius,
-    );
-    ctx.encoder.draw_rect(
-        vertical_stroke_rect(rect.x + rect.width, rect.y, rect.height, width),
-        color,
-        radius,
-    );
 }
 
 #[cfg(test)]
@@ -272,6 +238,6 @@ mod tests {
                 visual.card_radius,
             )
         );
-        assert_eq!(recorder.commands.len(), 9);
+        assert_eq!(recorder.commands.len(), 5);
     }
 }
