@@ -112,7 +112,7 @@ impl AboutDialog {
     /// Build the default Mondrian About dialog.
     pub fn new() -> Self {
         let info = SYSTEM_INFO.get().cloned().unwrap_or_default();
-        let version_text = format!("版本 {}", info.pkg_version);
+        let version_text = format!("版本: {}", info.pkg_version);
         let renderer_text = format!("渲染器: {}", info.wgpu_backend);
         let rust_text = format!("Rust: {}", info.rust_version);
         let os_text = format!("OS: {} {} {}", info.os, info.arch, info.os_version);

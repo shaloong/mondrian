@@ -4014,6 +4014,15 @@ impl Widget for TimelineView {
                     if self.active_tool == TimelineTool::Blade {
                         return self.split_at_pointer_frame(*position, ctx);
                     }
+                    // If the click is on the playhead line itself, start
+                    // a playhead drag instead of a body seek.
+                    let playhead_x = self.frame_to_x(self.playhead_frame);
+                    if (position.x - playhead_x).abs() <= 4.0 {
+                        self.playhead_dragging = true;
+                        self.request_timeline_pointer_capture(ctx);
+                        self.seek_from_drag_input(self.x_to_frame(position.x), ctx);
+                        return EventResult::Handled;
+                    }
                     self.seek_from_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
                 }

@@ -438,13 +438,6 @@ impl Widget for AppUiStartupScreen {
         ctx.push_clip(self.panel_rect);
         paint_startup_banner(ctx, self.left_rect);
         ctx.pop_clip();
-        let divider_x = self.left_rect.x + self.left_rect.width;
-        ctx.encoder.draw_line(
-            Point::new(divider_x, self.panel_rect.y),
-            Point::new(divider_x, self.panel_rect.y + self.panel_rect.height),
-            1.0,
-            startup_alpha(colors.border, 0.44),
-        );
 
         let content_x = self.right_rect.x + CONTENT_PAD_X;
         let content_y = self.right_rect.y + CONTENT_PAD_Y;
