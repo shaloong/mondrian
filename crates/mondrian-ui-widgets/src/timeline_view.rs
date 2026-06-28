@@ -280,9 +280,23 @@ pub struct TimelineViewState {
     pub track_height: f32,
 }
 
+/// Which semantic kind of timeline content a clip represents.
+///
+/// Used to select the correct theme token for body fill, hover, and
+/// selected border without guessing from the track kind alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineClipKind {
+    Video,
+    Audio,
+    Adjustment,
+    NestedSequence,
+    SolidColor,
+}
+
 /// Clip view model rendered by [`TimelineView`].
 #[derive(Debug, Clone)]
 pub struct TimelineClip {
+    pub kind: TimelineClipKind,
     pub label: String,
     pub start_frame: i64,
     pub duration_frames: i64,
@@ -298,6 +312,7 @@ impl TimelineClip {
     /// Create a clip view model in frame space.
     pub fn new(label: impl Into<String>, start_frame: i64, duration_frames: i64) -> Self {
         Self {
+            kind: TimelineClipKind::Video,
             label: label.into(),
             start_frame,
             duration_frames: duration_frames.max(1),
@@ -313,6 +328,12 @@ impl TimelineClip {
     /// Set the clip tint.
     pub fn with_color(mut self, color: Color) -> Self {
         self.color = Some(color);
+        self
+    }
+
+    /// Set the semantic clip kind for theme-driven color selection.
+    pub fn kind(mut self, kind: TimelineClipKind) -> Self {
+        self.kind = kind;
         self
     }
 
@@ -3166,7 +3187,7 @@ impl TimelineView {
             &track.label,
             font_size,
             snap_point(Point::new(rect.x + horizontal_padding, text_y)),
-            Color::from_hex(0xDDEEFF),
+            colors.foreground,
         );
         rect
     }
@@ -3299,6 +3320,41 @@ impl TimelineView {
         }
     }
 
+    /// Resolve base fill, hover fill, and selected-border colors for a
+    /// [`TimelineClip`] from its [`TimelineClipKind`] and the active theme.
+    fn clip_color_tokens(
+        colors: &mondrian_ui_theme::colors::ColorTokens,
+        clip: &TimelineClip,
+    ) -> (Color, Color, Color) {
+        match clip.kind {
+            TimelineClipKind::Video => (
+                clip.color.unwrap_or(colors.timeline_clip_video),
+                colors.timeline_clip_video_hover,
+                colors.timeline_clip_selected_border,
+            ),
+            TimelineClipKind::Audio => (
+                clip.color.unwrap_or(colors.timeline_clip_audio),
+                colors.timeline_clip_audio_hover,
+                colors.timeline_clip_audio_selected_border,
+            ),
+            TimelineClipKind::Adjustment => (
+                clip.color.unwrap_or(colors.timeline_clip_adjustment),
+                colors.timeline_clip_adjustment_hover,
+                colors.timeline_clip_adjustment_selected_border,
+            ),
+            TimelineClipKind::NestedSequence => (
+                clip.color.unwrap_or(colors.timeline_clip_nested),
+                colors.timeline_clip_nested_hover,
+                colors.timeline_clip_nested_selected_border,
+            ),
+            TimelineClipKind::SolidColor => (
+                clip.color.unwrap_or(colors.timeline_clip_solid),
+                colors.timeline_clip_solid_hover,
+                colors.timeline_clip_selected_border,
+            ),
+        }
+    }
+
     fn paint_clip(
         &self,
         ctx: &mut PaintContext,
@@ -3308,22 +3364,9 @@ impl TimelineView {
         dragging: bool,
     ) {
         let colors = &ctx.theme.colors;
-        let track_kind = self
-            .tracks
-            .get(clip_ref.track_index)
-            .map(|track| track.kind)
-            .unwrap_or(TimelineTrackKind::Video);
         let selected = clip.selected || self.selected_clip == Some(clip_ref) || dragging;
         let hovered = self.hovered_clip == Some(clip_ref);
-        let base_fill = clip.color.unwrap_or(match track_kind {
-            TimelineTrackKind::Video => colors.timeline_clip_video,
-            TimelineTrackKind::Audio => colors.timeline_clip_audio,
-        });
-        let hover_fill = match (clip.color, track_kind) {
-            (None, TimelineTrackKind::Video) => colors.timeline_clip_video_hover,
-            (None, TimelineTrackKind::Audio) => colors.timeline_clip_audio_hover,
-            (Some(color), _) => color.lerp(colors.foreground, 0.10),
-        };
+        let (base_fill, hover_fill, selected_border) = Self::clip_color_tokens(colors, clip);
         let mut fill = base_fill;
         if clip.disabled {
             fill.a *= 0.45;
@@ -3334,10 +3377,7 @@ impl TimelineView {
             fill = hover_fill;
         }
         if selected {
-            let mut ring = match track_kind {
-                TimelineTrackKind::Video => colors.timeline_clip_selected_border,
-                TimelineTrackKind::Audio => colors.timeline_clip_audio_selected_border,
-            };
+            let mut ring = selected_border;
             ring.a = if dragging { 0.72 } else { 0.62 };
             ctx.encoder.draw_rect(rect.inset(-1.0, -1.0), ring, 6.0);
         } else {
@@ -3365,7 +3405,7 @@ impl TimelineView {
             1.0,
             color_with_alpha(Color::BLACK, 0.10),
         );
-        if track_kind == TimelineTrackKind::Audio && !clip.waveform_peaks.is_empty() {
+        if clip.kind == TimelineClipKind::Audio && !clip.waveform_peaks.is_empty() {
             self.paint_audio_waveform(ctx, rect, clip, selected || hovered || dragging);
         }
         if selected || hovered {

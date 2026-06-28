@@ -37,8 +37,8 @@ use mondrian_ui_widgets::{
     ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, DockPanelDropArea, Dropdown, FlexChild,
     FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList,
     PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage,
-    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipMove,
-    TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
+    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipKind,
+    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
     TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
     TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl,
     ViewerFrameImage, ViewerStatusTone, ViewerSurface,
@@ -1818,15 +1818,28 @@ fn timeline_clip_from_sequence_clip(
 ) -> TimelineClip {
     let selected = selected_clips.iter().any(|selection| selection.clip_id == clip.id);
     let label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
+    let is_video = is_video_track;
+    let kind = if clip.is_adjustment_layer() {
+        TimelineClipKind::Adjustment
+    } else if clip.is_nested_sequence() {
+        TimelineClipKind::NestedSequence
+    } else if clip.is_solid_color() {
+        TimelineClipKind::SolidColor
+    } else if is_video {
+        TimelineClipKind::Video
+    } else {
+        TimelineClipKind::Audio
+    };
     let mut view = TimelineClip::new(
         label,
         clip.position.frame.max(0),
         clip.duration.frame.max(1),
     )
+    .kind(kind)
     .selected(selected)
     .disabled(clip.is_disabled)
     .nested(clip.is_nested_sequence());
-    if let Some(color) = timeline_clip_color(clip, is_video_track) {
+    if let Some(color) = timeline_clip_color(clip, is_video) {
         view = view.with_color(color);
     }
     view
@@ -1850,9 +1863,9 @@ fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
     }
     let colors = current_theme().colors.clone();
     if clip.is_adjustment_layer() {
-        Some(colors.media_adjustment)
+        Some(colors.timeline_clip_adjustment)
     } else if clip.is_nested_sequence() {
-        Some(colors.media_video)
+        Some(colors.timeline_clip_nested)
     } else if is_video_track {
         Some(colors.timeline_clip_video)
     } else {
@@ -7927,7 +7940,7 @@ mod tests {
         );
         assert_eq!(
             model.tracks[video_track].clips[1].color,
-            Some(colors.media_adjustment)
+            Some(colors.timeline_clip_adjustment)
         );
         assert_eq!(
             model.tracks[first_audio_track].clips[0].color,

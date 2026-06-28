@@ -75,13 +75,13 @@ pub use scroll::{ScrollView, ScrollViewState};
 pub use slider::Slider;
 pub use text_input::{MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction};
 pub use timeline_view::{
-    TimelineAssetDrop, TimelineAssetDropAction, TimelineClip, TimelineClipAction, TimelineClipMove,
-    TimelineClipMoveAction, TimelineClipRef, TimelineClipTrim, TimelineClipTrimAction,
-    TimelineEditCommand, TimelineEditCommandAction, TimelineInOutPoint, TimelineInOutPointAction,
-    TimelineSeekAction, TimelineTool, TimelineToolbarIconSlot, TimelineTrack, TimelineTrackAction,
-    TimelineTrackAddAction, TimelineTrackControl, TimelineTrackControlAction,
-    TimelineTrackControlIconSlot, TimelineTrackKind, TimelineTrackMove, TimelineTrackMoveAction,
-    TimelineTrackRef, TimelineTrimEdge, TimelineView, TimelineViewState,
+    TimelineAssetDrop, TimelineAssetDropAction, TimelineClip, TimelineClipAction, TimelineClipKind,
+    TimelineClipMove, TimelineClipMoveAction, TimelineClipRef, TimelineClipTrim,
+    TimelineClipTrimAction, TimelineEditCommand, TimelineEditCommandAction, TimelineInOutPoint,
+    TimelineInOutPointAction, TimelineSeekAction, TimelineTool, TimelineToolbarIconSlot,
+    TimelineTrack, TimelineTrackAction, TimelineTrackAddAction, TimelineTrackControl,
+    TimelineTrackControlAction, TimelineTrackControlIconSlot, TimelineTrackKind, TimelineTrackMove,
+    TimelineTrackMoveAction, TimelineTrackRef, TimelineTrimEdge, TimelineView, TimelineViewState,
 };
 pub use vector_icon::{VectorIcon, VectorIconError};
 pub use viewer_surface::{
