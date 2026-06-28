@@ -25,8 +25,6 @@ use mondrian_export::queue::JobStatus;
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
-
-use crate::app_ui::waveform_cache::AudioWaveformCache;
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
@@ -47,6 +45,7 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
+use crate::app_ui::waveform_cache::AudioWaveformCache;
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
     app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
@@ -1875,13 +1874,11 @@ fn timeline_clip_from_sequence_clip(
     if kind == TimelineClipKind::Audio {
         if let Some(lib) = library {
             if let Ok(Some(record)) = lib.get_asset(clip.asset_id) {
-                let peaks = AudioWaveformCache::try_with(|cache| {
-                    cache.get(record.id, &record.path, 4096).map(|data| data.peaks)
-                })
-                .flatten();
-                if let Some(peaks) = peaks {
-                    view = view.with_waveform_peaks(peaks);
-                }
+                view = view.with_source_identity(
+                    record.id,
+                    clip.source_in.to_secs(),
+                    clip.source_out.to_secs(),
+                );
             }
         }
     }
@@ -2781,7 +2778,13 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 frame: frame.max(0),
             })
         })
-        .on_seek(timeline_seek_action);
+        .on_seek(timeline_seek_action)
+        .with_waveform_lookup(|asset_id, start_secs, end_secs, pixel_width| {
+            AudioWaveformCache::try_with(|cache| {
+                cache.lookup(asset_id, 0, start_secs, end_secs, pixel_width)
+            })
+            .flatten()
+        });
     let timeline = if let Some(message) = model.empty_message.clone() {
         timeline.with_empty_message(message)
     } else {

@@ -304,6 +304,15 @@ pub struct TimelineClip {
     pub selected: bool,
     pub disabled: bool,
     pub nested: bool,
+    /// Audio source identity for paint-time waveform lookup.
+    /// `None` for non-audio or unlinked clips.
+    pub asset_id: Option<AssetId>,
+    /// Source time range (seconds) covered by this clip.
+    /// Used to extract the correct portion of the waveform envelope.
+    pub source_start_secs: f64,
+    pub source_end_secs: f64,
+    /// Pre-computed waveform peaks (populated at paint time from the cache).
+    /// Kept for backward-compatible test paths.
     pub waveform_peaks: Vec<f32>,
     pub select_action: Option<Action>,
 }
@@ -320,6 +329,9 @@ impl TimelineClip {
             selected: false,
             disabled: false,
             nested: false,
+            asset_id: None,
+            source_start_secs: 0.0,
+            source_end_secs: 1.0,
             waveform_peaks: Vec::new(),
             select_action: None,
         }
@@ -358,6 +370,19 @@ impl TimelineClip {
     /// Attach precomputed normalized audio waveform peaks to this clip.
     pub fn with_waveform_peaks(mut self, peaks: impl Into<Vec<f32>>) -> Self {
         self.waveform_peaks = peaks.into().into_iter().map(|peak| peak.clamp(0.0, 1.0)).collect();
+        self
+    }
+
+    /// Set audio source identity for paint-time waveform lookup.
+    pub fn with_source_identity(
+        mut self,
+        asset_id: AssetId,
+        source_start_secs: f64,
+        source_end_secs: f64,
+    ) -> Self {
+        self.asset_id = Some(asset_id);
+        self.source_start_secs = source_start_secs;
+        self.source_end_secs = source_end_secs;
         self
     }
 
@@ -506,6 +531,7 @@ pub struct TimelineView {
     toolbar_icons: Vec<(TimelineToolbarIconSlot, VectorIcon)>,
     track_control_icons: Vec<(TimelineTrackControlIconSlot, VectorIcon)>,
     empty_message: Option<String>,
+    waveform_lookup: Option<Box<dyn Fn(mondrian_core::AssetId, f64, f64, u32) -> Option<Vec<f32>>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -635,6 +661,7 @@ impl TimelineView {
             toolbar_icons: Vec::new(),
             track_control_icons: Vec::new(),
             empty_message: None,
+            waveform_lookup: None,
         }
     }
 
@@ -809,6 +836,15 @@ impl TimelineView {
     /// Set the message shown in the timeline body when there are no tracks.
     pub fn with_empty_message(mut self, message: impl Into<String>) -> Self {
         self.empty_message = Some(message.into());
+        self
+    }
+
+    /// Set a paint-time waveform lookup callback for rendering audio clip peaks.
+    pub fn with_waveform_lookup(
+        mut self,
+        lookup: impl Fn(mondrian_core::AssetId, f64, f64, u32) -> Option<Vec<f32>> + 'static,
+    ) -> Self {
+        self.waveform_lookup = Some(Box::new(lookup));
         self
     }
 
@@ -3357,6 +3393,21 @@ impl TimelineView {
         }
     }
 
+    /// Look up waveform peaks for an audio clip from the global waveform
+    /// cache.  Returns `None` if the cache isn't ready yet (first frame or
+    /// decode pending).
+    fn lookup_waveform_peaks(
+        asset_id: mondrian_core::AssetId,
+        source_start_secs: f64,
+        source_end_secs: f64,
+        pixel_width: u32,
+    ) -> Option<&'static [f32]> {
+        // Avoid the borrow checker by using the thread_local directly.
+        // We can't return a reference into the cache from try_with, so we
+        // return a static slice and caller must use immediately.
+        None // TODO
+    }
+
     fn paint_clip(
         &self,
         ctx: &mut PaintContext,
@@ -3407,8 +3458,34 @@ impl TimelineView {
             1.0,
             color_with_alpha(Color::BLACK, 0.10),
         );
-        if clip.kind == TimelineClipKind::Audio && !clip.waveform_peaks.is_empty() {
-            self.paint_audio_waveform(ctx, rect, clip, selected || hovered || dragging);
+/// Callback for paint-time waveform peak lookup.
+///
+/// The app wires this to [`AudioWaveformCache::lookup`] so the widget
+/// layer stays decoupled from the audio infrastructure.
+pub type WaveformLookupFn = dyn Fn(
+    mondrian_core::AssetId,
+    f64,  // source_start_secs
+    f64,  // source_end_secs
+    u32,  // pixel_width
+) -> Option<Vec<f32>>;
+
+        if clip.kind == TimelineClipKind::Audio {
+            let peaks: Option<Vec<f32>> = if !clip.waveform_peaks.is_empty() {
+                Some(clip.waveform_peaks.clone())
+            } else if let (Some(asset_id), Some(lookup)) = (clip.asset_id, self.waveform_lookup.as_ref())
+            {
+                lookup(
+                    asset_id,
+                    clip.source_start_secs,
+                    clip.source_end_secs,
+                    rect.width as u32,
+                )
+            } else {
+                None
+            };
+            if let Some(ref peaks) = peaks {
+                self.paint_audio_waveform(ctx, rect, peaks, selected || hovered || dragging);
+            }
         }
         if selected || hovered {
             let handle = color_with_alpha(colors.foreground, if hovered { 0.35 } else { 0.22 });
@@ -3463,11 +3540,11 @@ impl TimelineView {
         &self,
         ctx: &mut PaintContext,
         rect: Rect,
-        clip: &TimelineClip,
+        peaks: &[f32],
         emphasized: bool,
     ) {
         let inner = rect.inset(6.0, (rect.height * 0.24).min(10.0));
-        if inner.width <= 2.0 || inner.height <= 4.0 {
+        if inner.width <= 2.0 || inner.height <= 4.0 || peaks.is_empty() {
             return;
         }
         let mut color = ctx.theme.colors.foreground;
@@ -3476,10 +3553,10 @@ impl TimelineView {
         let column_count = inner.width.floor().max(1.0) as usize;
         for column in 0..column_count {
             let sample_index =
-                ((column as f32 / column_count as f32) * clip.waveform_peaks.len() as f32)
+                ((column as f32 / column_count as f32) * peaks.len() as f32)
                     .floor()
-                    .min((clip.waveform_peaks.len() - 1) as f32) as usize;
-            let peak = clip.waveform_peaks[sample_index].clamp(0.0, 1.0);
+                    .min((peaks.len() - 1) as f32) as usize;
+            let peak = peaks[sample_index].clamp(0.0, 1.0);
             let half_height = (peak * inner.height * 0.5).max(1.0);
             let x = inner.x + column as f32 + 0.5;
             ctx.encoder.draw_line(
@@ -8384,7 +8461,7 @@ mod tests {
             clip_rect: Rect::new(0.0, 0.0, 80.0, 80.0),
         };
 
-        view.paint_audio_waveform(&mut ctx, rect, &clip, false);
+        view.paint_audio_waveform(&mut ctx, rect, &clip.waveform_peaks, false);
 
         assert_eq!(encoder.line_commands.len(), inner.width.floor() as usize);
         assert!(

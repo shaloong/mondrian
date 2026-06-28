@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, Ref, RefCell};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mondrian_editor_state::state::WorkspacePreset;
@@ -108,6 +109,9 @@ impl AppUiHost {
         let asset_thumbnails = AssetThumbnailCache::new();
         let waveform_cache = AudioWaveformCache::new();
         waveform_cache.register();
+        if let Some(ref library) = app_state.asset_library {
+            waveform_cache.set_library(Arc::clone(library));
+        }
         let preview_service = AppUiPreviewService::new();
         let root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
