@@ -125,6 +125,13 @@ pub(crate) fn preferred_menu_width(
         .max(longest_item + MENU_ROW_PADDING_X * 2.0 + icon_lane_width(items) + scrollbar)
 }
 
+/// Maximum menu popup height in pixels.
+const MAX_MENU_POPUP_HEIGHT: f32 = 720.0;
+
+/// Extra viewport margin beyond `MENU_VIEWPORT_MARGIN` to keep the popup
+/// from filling the entire viewport edge-to-edge.
+const MENU_POPUP_VIEWPORT_PAD: f32 = 24.0;
+
 pub(crate) fn menu_rect(
     bounds: Rect,
     items: &[MenuItem],
@@ -134,7 +141,12 @@ pub(crate) fn menu_rect(
     item_height: f32,
     overlay_viewport: Option<Rect>,
 ) -> Rect {
-    let count = items.len().min(max_visible_items.max(1));
+    let avail_height = overlay_viewport
+        .map(|vp| (vp.height - MENU_POPUP_VIEWPORT_PAD).max(0.0))
+        .unwrap_or(f32::MAX);
+    let popup_max = MAX_MENU_POPUP_HEIGHT.min(avail_height);
+    let viewport_capped = (popup_max / item_height).floor().max(1.0) as usize;
+    let count = items.len().min(max_visible_items.max(1)).min(viewport_capped);
     let visible_height = count as f32 * item_height;
     let width = bounds.width.max(preferred_menu_width(
         items,

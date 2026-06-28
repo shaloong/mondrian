@@ -15,8 +15,7 @@ use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem};
 use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_preferences_action, app_shell_quit_action, app_shell_save_project_as_dialog_action,
-    timeline_clear_in_out_points_action,
+    app_shell_preferences_action, app_shell_save_project_as_dialog_action,
 };
 use crate::app::AppState;
 use crate::app_ui::action_availability::app_state_action_enabled;
@@ -33,57 +32,45 @@ const MENU_BAR_TRIGGER_GAP: f32 = 2.0;
 /// Default Mondrian menu structure for app UI shells.
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
     vec![
+        // ── File ────────────────────────────────────────────────────────
         (
             "文件",
             vec![
-                menu_item_with_shortcut(MenuItem::new(
-                    "新建项目...",
-                    app_shell_new_project_dialog_action(),
-                )),
-                menu_item_with_shortcut(MenuItem::new(
-                    "打开项目...",
-                    app_shell_open_project_dialog_action(),
-                )),
-                menu_item_with_shortcut(MenuItem::new(
-                    "导入媒体...",
-                    app_shell_import_media_dialog_action(),
-                )),
+                MenuItem::new("新建项目...", app_shell_new_project_dialog_action()),
+                MenuItem::new("打开项目...", app_shell_open_project_dialog_action()),
+                MenuItem::separator(),
                 menu_item_with_shortcut(MenuItem::new("保存", Action::SaveProject)),
                 menu_item_with_shortcut(MenuItem::new(
                     "另存为...",
                     app_shell_save_project_as_dialog_action(),
                 )),
                 MenuItem::separator(),
+                menu_item_with_shortcut(MenuItem::new(
+                    "导入媒体...",
+                    app_shell_import_media_dialog_action(),
+                )),
+                menu_item_with_shortcut(MenuItem::new("导出", Action::NoOp)),
+                MenuItem::separator(),
+                MenuItem::new("项目设置...", Action::NoOp),
+                MenuItem::separator(),
                 menu_item_with_shortcut(MenuItem::new("关闭项目", Action::CloseProject)),
-                menu_item_with_shortcut(MenuItem::new("退出", app_shell_quit_action())),
             ],
         ),
+        // ── Edit ────────────────────────────────────────────────────────
         (
             "编辑",
             vec![
                 menu_item_with_shortcut(MenuItem::new("撤销", Action::Undo)),
                 menu_item_with_shortcut(MenuItem::new("重做", Action::Redo)),
+                MenuItem::separator(),
                 menu_item_with_shortcut(MenuItem::new("剪切", Action::Cut)),
                 menu_item_with_shortcut(MenuItem::new("复制", Action::Copy)),
                 menu_item_with_shortcut(MenuItem::new("粘贴", Action::Paste)),
                 menu_item_with_shortcut(MenuItem::new("创建副本", Action::Duplicate)),
+                menu_item_with_shortcut(MenuItem::new("删除所选", Action::DeleteSelection)),
                 MenuItem::separator(),
                 menu_item_with_shortcut(MenuItem::new("全选", Action::SelectAll)),
                 menu_item_with_shortcut(MenuItem::new("取消选择", Action::DeselectAll)),
-                MenuItem::separator(),
-                menu_item_with_shortcut(MenuItem::new("删除所选", Action::DeleteSelection)),
-                menu_item_with_shortcut(MenuItem::new("波纹删除", Action::RippleDeleteSelection)),
-                menu_item_with_shortcut(MenuItem::new(
-                    "在播放头处分割",
-                    Action::SplitClipAtPlayhead,
-                )),
-                MenuItem::separator(),
-                menu_item_with_shortcut(MenuItem::new("标记入点", Action::MarkInAtPlayhead)),
-                menu_item_with_shortcut(MenuItem::new("标记出点", Action::MarkOutAtPlayhead)),
-                menu_item_with_shortcut(MenuItem::new(
-                    "清除入点/出点",
-                    timeline_clear_in_out_points_action(),
-                )),
                 MenuItem::separator(),
                 menu_item_with_shortcut(MenuItem::new(
                     "偏好设置...",
@@ -91,16 +78,24 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 )),
             ],
         ),
+        // ── View ────────────────────────────────────────────────────────
         (
             "视图",
-            vec![menu_item_with_shortcut(MenuItem::new(
-                "切换全屏",
-                Action::ToggleFullscreen,
-            ))],
+            vec![
+                menu_item_with_shortcut(MenuItem::new(
+                    "切换全屏",
+                    Action::ToggleFullscreen,
+                )),
+            ],
         ),
+        // ── Window ──────────────────────────────────────────────────────
         (
             "窗口",
             vec![
+                menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Assets.display_name(),
+                    Action::TogglePanel(PanelKind::Assets),
+                )),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Viewer.display_name(),
                     Action::TogglePanel(PanelKind::Viewer),
@@ -112,11 +107,6 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Inspector.display_name(),
                     Action::TogglePanel(PanelKind::Inspector),
-                )),
-                MenuItem::separator(),
-                menu_item_with_shortcut(MenuItem::new(
-                    PanelKind::Assets.display_name(),
-                    Action::TogglePanel(PanelKind::Assets),
                 )),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Effects.display_name(),
@@ -153,12 +143,15 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 )),
             ],
         ),
+        // ── Help ────────────────────────────────────────────────────────
         (
             "帮助",
-            vec![menu_item_with_shortcut(MenuItem::new(
-                "关于 Mondrian",
-                app_shell_about_action(),
-            ))],
+            vec![
+                menu_item_with_shortcut(MenuItem::new(
+                    "关于 Mondrian",
+                    app_shell_about_action(),
+                )),
+            ],
         ),
     ]
 }
@@ -498,10 +491,7 @@ impl Widget for MenuBar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ui_actions::{
-        APP_SHELL_ABOUT, APP_SHELL_NAMESPACE, APP_SHELL_QUIT, TIMELINE_CLEAR_IN_OUT_POINTS,
-        TIMELINE_NAMESPACE,
-    };
+    use crate::app::ui_actions::{APP_SHELL_ABOUT, APP_SHELL_NAMESPACE};
     use crate::app::SelectedClipRef;
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue};
@@ -744,7 +734,7 @@ mod tests {
             ("文件", "保存"),
             ("编辑", "撤销"),
             ("编辑", "重做"),
-            ("编辑", "在播放头处分割"),
+            ("编辑", "剪切"),
             ("窗口", "时间线"),
             ("窗口", "效果"),
             ("帮助", "关于 Mondrian"),
@@ -761,8 +751,6 @@ mod tests {
         let menu_items = default_menu_items();
 
         for (menu_label, item_label, shortcut) in [
-            ("文件", "新建项目...", "Ctrl+N"),
-            ("文件", "打开项目...", "Ctrl+O"),
             ("文件", "保存", "Ctrl+S"),
             ("文件", "关闭项目", "Ctrl+W"),
             ("编辑", "撤销", "Ctrl+Z"),
@@ -774,10 +762,6 @@ mod tests {
             ("编辑", "全选", "Ctrl+A"),
             ("编辑", "取消选择", "Esc"),
             ("编辑", "删除所选", "Delete"),
-            ("编辑", "波纹删除", "Shift+Delete"),
-            ("编辑", "在播放头处分割", "Ctrl+K"),
-            ("编辑", "标记入点", "I"),
-            ("编辑", "标记出点", "O"),
             ("视图", "切换全屏", "F11"),
         ] {
             assert_eq!(
@@ -879,7 +863,6 @@ mod tests {
         assert!(!menu_item(&menu_items, "文件", "保存").enabled);
         assert!(!menu_item(&menu_items, "文件", "另存为...").enabled);
         assert!(!menu_item(&menu_items, "文件", "关闭项目").enabled);
-        assert!(menu_item(&menu_items, "文件", "退出").enabled);
         assert!(!menu_item(&menu_items, "编辑", "撤销").enabled);
         assert!(!menu_item(&menu_items, "编辑", "重做").enabled);
         assert!(!menu_item(&menu_items, "编辑", "剪切").enabled);
@@ -889,11 +872,6 @@ mod tests {
         assert!(!menu_item(&menu_items, "编辑", "全选").enabled);
         assert!(!menu_item(&menu_items, "编辑", "取消选择").enabled);
         assert!(!menu_item(&menu_items, "编辑", "删除所选").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "波纹删除").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "在播放头处分割").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "标记入点").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "标记出点").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "清除入点/出点").enabled);
     }
 
     #[test]
@@ -964,36 +942,6 @@ mod tests {
         assert!(menu_item(&menu_items, "编辑", "全选").enabled);
         assert!(menu_item(&menu_items, "编辑", "取消选择").enabled);
         assert!(menu_item(&menu_items, "编辑", "删除所选").enabled);
-        assert!(menu_item(&menu_items, "编辑", "波纹删除").enabled);
-        assert!(menu_item(&menu_items, "编辑", "在播放头处分割").enabled);
-        assert!(menu_item(&menu_items, "编辑", "标记入点").enabled);
-        assert!(menu_item(&menu_items, "编辑", "标记出点").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "清除入点/出点").enabled);
-    }
-
-    #[test]
-    fn app_state_menu_items_enable_clear_in_out_only_for_active_range() {
-        let mut state = state_with_selected_clip();
-
-        let menu_items = default_menu_items_for_app_state(&state);
-        assert!(!menu_item(&menu_items, "编辑", "清除入点/出点").enabled);
-
-        state.sequence.as_mut().expect("sequence").mark_in(12);
-        let menu_items = default_menu_items_for_app_state(&state);
-        let clear = menu_item(&menu_items, "编辑", "清除入点/出点");
-        assert!(clear.enabled);
-        match &clear.action {
-            Action::Custom { namespace, name, .. } => {
-                assert_eq!(namespace, TIMELINE_NAMESPACE);
-                assert_eq!(name, TIMELINE_CLEAR_IN_OUT_POINTS);
-            }
-            other => panic!("expected timeline clear in/out action, got {other:?}"),
-        }
-
-        state.sequence.as_mut().expect("sequence").clear_in_out();
-        state.sequence.as_mut().expect("sequence").mark_out(18);
-        let menu_items = default_menu_items_for_app_state(&state);
-        assert!(menu_item(&menu_items, "编辑", "清除入点/出点").enabled);
     }
 
     #[test]
@@ -1007,7 +955,6 @@ mod tests {
         assert!(menu_item(&menu_items, "编辑", "复制").enabled);
         assert!(!menu_item(&menu_items, "编辑", "创建副本").enabled);
         assert!(!menu_item(&menu_items, "编辑", "删除所选").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "波纹删除").enabled);
     }
 
     #[test]
@@ -1024,7 +971,6 @@ mod tests {
             &state
         ));
         assert!(!menu_item(&menu_items, "编辑", "删除所选").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "波纹删除").enabled);
     }
 
     #[test]
@@ -1044,7 +990,6 @@ mod tests {
             &state
         ));
         assert!(!menu_item(&menu_items, "编辑", "删除所选").enabled);
-        assert!(!menu_item(&menu_items, "编辑", "波纹删除").enabled);
     }
 
     #[test]
@@ -1063,7 +1008,6 @@ mod tests {
             &state
         ));
         assert!(menu_item(&menu_items, "编辑", "删除所选").enabled);
-        assert!(menu_item(&menu_items, "编辑", "波纹删除").enabled);
     }
 
     #[test]
@@ -1279,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn default_menu_items_separate_close_project_from_quit() {
+    fn default_menu_items_include_close_project() {
         let menu_items = default_menu_items();
         let file_items = menu_items
             .iter()
@@ -1289,17 +1233,8 @@ mod tests {
             .iter()
             .find(|item| item.label == "关闭项目")
             .expect("close project item");
-        let quit = file_items.iter().find(|item| item.label == "退出").expect("quit item");
 
         assert_eq!(close_project.action, Action::CloseProject);
-        match &quit.action {
-            Action::Custom { namespace, name, payload } => {
-                assert_eq!(namespace, APP_SHELL_NAMESPACE);
-                assert_eq!(name, APP_SHELL_QUIT);
-                assert!(payload.is_null());
-            }
-            other => panic!("expected app-shell quit action, got {other:?}"),
-        }
     }
 
     #[test]
