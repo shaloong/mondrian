@@ -42,6 +42,7 @@ use crate::app_ui::shortcuts::{
     AppUiShortcutOverride,
 };
 use crate::app_ui::startup::{AppUiStartupScreen, StartupRecentProject, StartupRecoveryProject};
+use crate::app_ui::waveform_cache::AudioWaveformCache;
 use mondrian_editor_state::Action;
 
 /// Window-host commands produced while draining app UI actions.
@@ -80,6 +81,7 @@ pub struct AppUiHost {
     preferences_path: PathBuf,
     recovery_candidates: Vec<CrashRecoveryCandidate>,
     asset_thumbnails: AssetThumbnailCache,
+    waveform_cache: AudioWaveformCache,
     preview_service: AppUiPreviewService,
     mode: AppUiMode,
     ui_dirty: Cell<bool>,
@@ -104,6 +106,8 @@ impl AppUiHost {
     ) -> Self {
         set_theme_preset(preferences.theme_preset);
         let asset_thumbnails = AssetThumbnailCache::new();
+        let waveform_cache = AudioWaveformCache::new();
+        waveform_cache.register();
         let preview_service = AppUiPreviewService::new();
         let root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
@@ -130,6 +134,7 @@ impl AppUiHost {
             preferences_path,
             recovery_candidates,
             asset_thumbnails,
+            waveform_cache,
             preview_service,
             mode,
             ui_dirty: Cell::new(false),
@@ -210,7 +215,8 @@ impl AppUiHost {
     pub fn poll_background_tasks(&mut self, bounds: Rect) -> bool {
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_changed = self.preview_service.poll_finished();
-        if !thumbnails_changed && !preview_changed {
+        let waveform_changed = self.waveform_cache.poll_finished();
+        if !thumbnails_changed && !preview_changed && !waveform_changed {
             return false;
         }
         self.mark_dirty();

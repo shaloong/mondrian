@@ -28,6 +28,7 @@ pub mod startup;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod title_bar;
+pub mod waveform_cache;
 pub mod window;
 pub mod window_controls;
 pub mod workspace_layout;

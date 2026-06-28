@@ -388,11 +388,13 @@ pub struct TimelineTrack {
 impl TimelineTrack {
     /// Create a video track.
     pub fn video(label: impl Into<String>, clips: Vec<TimelineClip>) -> Self {
+        let clips = clips.into_iter().map(|c| c.kind(TimelineClipKind::Video)).collect();
         Self::new(label, TimelineTrackKind::Video, clips)
     }
 
     /// Create an audio track.
     pub fn audio(label: impl Into<String>, clips: Vec<TimelineClip>) -> Self {
+        let clips = clips.into_iter().map(|c| c.kind(TimelineClipKind::Audio)).collect();
         Self::new(label, TimelineTrackKind::Audio, clips)
     }
 

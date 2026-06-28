@@ -504,7 +504,7 @@ fn build_f32_stream(
     )
 }
 
-fn decode_audio_file_with_ffmpeg_cli(
+pub fn decode_audio_file_with_ffmpeg_cli(
     path: &Path,
     sample_rate: u32,
     channels: u8,

@@ -25,6 +25,8 @@ use mondrian_export::queue::JobStatus;
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
+
+use crate::app_ui::waveform_cache::AudioWaveformCache;
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
@@ -739,9 +741,14 @@ impl TimelinePanelModel {
     /// Snapshot the app timeline with app-level command availability.
     pub fn from_app_state(state: &AppState) -> Self {
         state.sequence.as_ref().map_or_else(Self::empty, |sequence| {
-            Self::from_sequence(sequence, state.selected_clips(), state.selected_tracks())
-                .with_playhead_frame(state.current_frame())
-                .with_app_edit_availability(state)
+            Self::from_sequence_with_library(
+                sequence,
+                state.selected_clips(),
+                state.selected_tracks(),
+                state.asset_library.as_deref(),
+            )
+            .with_playhead_frame(state.current_frame())
+            .with_app_edit_availability(state)
         })
     }
 
@@ -755,10 +762,26 @@ impl TimelinePanelModel {
         selected_clips: &[SelectedClipRef],
         selected_tracks: &[TrackId],
     ) -> Self {
+        Self::from_sequence_with_library(sequence, selected_clips, selected_tracks, None)
+    }
+
+    /// Same as [`from_sequence`] but attaches audio waveform peaks for
+    /// clips whose backing assets exist in `library`.
+    fn from_sequence_with_library(
+        sequence: &Sequence,
+        selected_clips: &[SelectedClipRef],
+        selected_tracks: &[TrackId],
+        library: Option<&AssetLibrary>,
+    ) -> Self {
         let video_tracks = sequence.video_tracks.iter().enumerate().rev().map(|(index, track)| {
             let label = format!("V{}", index + 1);
-            let mut view_track =
-                timeline_track_from_sequence_track(track, true, selected_clips, selected_tracks);
+            let mut view_track = timeline_track_from_sequence_track(
+                track,
+                true,
+                selected_clips,
+                selected_tracks,
+                library,
+            );
             view_track.label = label;
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: true },
@@ -768,8 +791,13 @@ impl TimelinePanelModel {
             )
         });
         let audio_tracks = sequence.audio_tracks.iter().enumerate().map(|(index, track)| {
-            let mut view_track =
-                timeline_track_from_sequence_track(track, false, selected_clips, selected_tracks);
+            let mut view_track = timeline_track_from_sequence_track(
+                track,
+                false,
+                selected_clips,
+                selected_tracks,
+                library,
+            );
             view_track.label = format!("A{}", index + 1);
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: false },
@@ -1792,6 +1820,7 @@ fn timeline_track_from_sequence_track(
     is_video_track: bool,
     selected_clips: &[SelectedClipRef],
     selected_tracks: &[TrackId],
+    library: Option<&AssetLibrary>,
 ) -> TimelineTrack {
     let muted = track.is_muted;
     let locked = track.is_locked;
@@ -1800,7 +1829,7 @@ fn timeline_track_from_sequence_track(
     let clips = track
         .clips
         .iter()
-        .map(|clip| timeline_clip_from_sequence_clip(is_video_track, clip, selected_clips))
+        .map(|clip| timeline_clip_from_sequence_clip(is_video_track, clip, selected_clips, library))
         .collect();
 
     let track = if is_video_track {
@@ -1815,6 +1844,7 @@ fn timeline_clip_from_sequence_clip(
     is_video_track: bool,
     clip: &Clip,
     selected_clips: &[SelectedClipRef],
+    library: Option<&AssetLibrary>,
 ) -> TimelineClip {
     let selected = selected_clips.iter().any(|selection| selection.clip_id == clip.id);
     let label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
@@ -1841,6 +1871,19 @@ fn timeline_clip_from_sequence_clip(
     .nested(clip.is_nested_sequence());
     if let Some(color) = timeline_clip_color(clip, is_video) {
         view = view.with_color(color);
+    }
+    if kind == TimelineClipKind::Audio {
+        if let Some(lib) = library {
+            if let Ok(Some(record)) = lib.get_asset(clip.asset_id) {
+                let peaks = AudioWaveformCache::try_with(|cache| {
+                    cache.get(record.id, &record.path, 4096).map(|data| data.peaks)
+                })
+                .flatten();
+                if let Some(peaks) = peaks {
+                    view = view.with_waveform_peaks(peaks);
+                }
+            }
+        }
     }
     view
 }
