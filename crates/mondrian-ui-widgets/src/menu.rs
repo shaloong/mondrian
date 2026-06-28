@@ -123,19 +123,24 @@ impl Dropdown {
 
     /// Update checked state for all rows matching an app action.
     pub fn set_checked_for_action(&mut self, action: &Action, checked: bool) {
-        for item in &mut self.items {
-            if !item.is_separator() && item.action == *action {
-                item.checked = checked;
-            }
-        }
+        set_checked_recursive(&mut self.items, action, checked);
     }
 
     /// Return checked state for the first row matching an app action.
     pub fn checked_for_action(&self, action: &Action) -> Option<bool> {
-        self.items
-            .iter()
-            .find(|item| !item.is_separator() && item.action == *action)
-            .map(|item| item.checked)
+        let mut items_to_check: Vec<&MenuItem> = self.items.iter().collect();
+        let mut i = 0;
+        while i < items_to_check.len() {
+            let item = items_to_check[i];
+            if !item.is_separator() && item.action == *action {
+                return Some(item.checked);
+            }
+            if let MenuItemKind::Submenu { ref children } = item.kind {
+                items_to_check.extend(children);
+            }
+            i += 1;
+        }
+        None
     }
 
     /// Whether a point is inside the closed trigger chrome.
@@ -361,6 +366,18 @@ impl Dropdown {
         self.pressed_index = None;
         self.suppress_next_release = false;
         ctx.release_pointer_capture(self.id);
+    }
+}
+
+/// Recursively set checked state, including submenus.
+fn set_checked_recursive(items: &mut [MenuItem], action: &Action, checked: bool) {
+    for item in items.iter_mut() {
+        if !item.is_separator() && item.action == *action {
+            item.checked = checked;
+        }
+        if let MenuItemKind::Submenu { ref mut children } = item.kind {
+            set_checked_recursive(children, action, checked);
+        }
     }
 }
 
