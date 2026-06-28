@@ -138,6 +138,11 @@ impl Button {
         self
     }
 
+    /// Update active state at runtime (e.g., when tab changes).
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
+
     pub fn state(&self) -> ButtonState {
         self.state
     }

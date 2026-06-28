@@ -329,6 +329,9 @@ impl PreferencesDialog {
             return;
         }
         self.active_tab = tab;
+        for (i, button) in self.nav_buttons.iter_mut().enumerate() {
+            button.set_active(PreferencesDialogTab::ALL[i] == tab);
+        }
         if self.active_tab != PreferencesDialogTab::Shortcuts {
             self.capturing_shortcut = None;
         }
