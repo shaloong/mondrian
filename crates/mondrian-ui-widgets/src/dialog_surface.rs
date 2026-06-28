@@ -8,7 +8,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::PaintContext;
 use mondrian_ui_theme::{Theme, ThemePreset};
 
-use crate::paint::{horizontal_stroke_rect, vertical_stroke_rect};
+use crate::paint::{horizontal_stroke_rect, paint_popover_shadow, vertical_stroke_rect};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct DialogSurfaceVisualTokens {
@@ -26,7 +26,7 @@ impl DialogSurfaceVisualTokens {
             content_padding: spacing.md * 2.0,
             border_width: spacing.border_standard,
             scrim_radius: spacing.radius_none,
-            card_radius: spacing.radius_md,
+            card_radius: spacing.radius_lg,
             outline_radius: spacing.radius_none,
         }
     }
@@ -102,6 +102,7 @@ impl DialogSurface {
     pub fn paint(&self, bounds: Rect, card: Rect, ctx: &mut PaintContext) {
         let visual = DialogSurfaceVisualTokens::from_theme(ctx.theme);
         ctx.encoder.draw_rect(bounds, ctx.theme.colors.modal_scrim, visual.scrim_radius);
+        paint_popover_shadow(ctx, card, visual.card_radius);
         ctx.encoder.draw_rect(card, ctx.theme.colors.popover, visual.card_radius);
         if self.border_width <= 0.0 {
             return;
@@ -221,7 +222,7 @@ mod tests {
         theme.spacing.md = 13.0;
         theme.spacing.border_standard = 2.0;
         theme.spacing.radius_none = 0.5;
-        theme.spacing.radius_md = 9.0;
+        theme.spacing.radius_lg = 9.0;
 
         let visual = DialogSurfaceVisualTokens::from_theme(&theme);
         let surface = DialogSurface::new(Size::new(1.0, 1.0), Size::new(10.0, 10.0));
@@ -271,6 +272,6 @@ mod tests {
                 visual.card_radius,
             )
         );
-        assert_eq!(recorder.commands.len(), 6);
+        assert_eq!(recorder.commands.len(), 9);
     }
 }
