@@ -140,7 +140,14 @@ impl AudioWaveformCache {
 
     /// Drain completed source decodes.  Returns `true` if any new envelope
     /// data arrived (caller should request a repaint).
+    ///
+    /// On the very first call the cache self-registers via the thread-local
+    /// pointer so paint-time lookups can find it.
     pub fn poll_finished(&self) -> bool {
+        // Lazy registration — must happen AFTER the cache has been moved
+        // into its final memory location (the host struct field), not
+        // before the constructor returns.
+        self.ensure_registered();
         let mut changed = false;
         let receiver = &mut *self.result_receiver.borrow_mut();
         while let Ok(result) = receiver.try_recv() {
@@ -257,10 +264,13 @@ impl AudioWaveformCache {
 
     // ── register ─────────────────────────────────────────────────────────
 
-    /// Register this instance so that [`Self::try_with`] can access it
-    /// from the current thread during paint.
-    pub fn register(&self) {
-        CACHE.with(|c| *c.borrow_mut() = self as *const _);
+    /// Register this instance so that [`Self::try_with`] can access it.
+    fn ensure_registered(&self) {
+        CACHE.with(|c| {
+            if c.borrow().is_null() {
+                *c.borrow_mut() = self as *const _;
+            }
+        });
     }
 
     /// Access the registered instance from the current thread.

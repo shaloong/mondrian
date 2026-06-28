@@ -108,7 +108,6 @@ impl AppUiHost {
         set_theme_preset(preferences.theme_preset);
         let asset_thumbnails = AssetThumbnailCache::new();
         let waveform_cache = AudioWaveformCache::new();
-        waveform_cache.register();
         if let Some(ref library) = app_state.asset_library {
             waveform_cache.set_library(Arc::clone(library));
         }
