@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_ui_theme::ThemePreset;
+use mondrian_ui_widgets::WaveformDisplay;
 use serde::{Deserialize, Serialize};
 
 use crate::app::app_data_dir;
@@ -37,6 +38,9 @@ pub struct AppUiPreferences {
     /// Persisted custom dock layout for the app UI workspace.
     #[serde(default)]
     pub custom_workspace_layout: Option<AppUiWorkspaceLayout>,
+    /// Waveform display mode for audio clips on the timeline.
+    #[serde(default)]
+    pub waveform_display: WaveformDisplay,
 }
 
 impl Default for AppUiPreferences {
@@ -48,6 +52,7 @@ impl Default for AppUiPreferences {
             recent_projects: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: None,
+            waveform_display: WaveformDisplay::BottomAligned,
         }
     }
 }
@@ -190,6 +195,7 @@ mod tests {
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
+                waveform_display: WaveformDisplay::BottomAligned,
             })
             .expect("serialize preferences"),
         )
@@ -214,6 +220,7 @@ mod tests {
                 id: "panel.inspector".to_owned(),
                 binding: None,
             }],
+            waveform_display: WaveformDisplay::BottomAligned,
             custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.37,
@@ -255,6 +262,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
+                waveform_display: WaveformDisplay::BottomAligned,
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                     direction: SplitDirection::Vertical,
                     ratio: 12.0,
@@ -314,6 +322,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
+                waveform_display: WaveformDisplay::BottomAligned,
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Panel {
                     kind: mondrian_editor_state::state::PanelKind::Assets,
                     active_index: 0,
@@ -380,6 +389,7 @@ mod tests {
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
+                waveform_display: WaveformDisplay::BottomAligned,
             })
             .expect("serialize preferences"),
         )
@@ -408,6 +418,7 @@ mod tests {
                     AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
                 ],
                 custom_workspace_layout: None,
+                waveform_display: WaveformDisplay::BottomAligned,
             })
             .expect("serialize preferences"),
         )

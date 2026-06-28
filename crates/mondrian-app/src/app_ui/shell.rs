@@ -15,7 +15,7 @@ use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridState, PanelList, PanelListState, ScrollView, ScrollViewState,
-    TimelineView, TimelineViewState,
+    TimelineView, TimelineViewState, WaveformDisplay,
 };
 use std::path::Path;
 
@@ -597,6 +597,7 @@ impl AppUiAppRoot {
         let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             state, None, thumbnails, preview,
         );
+        models.timeline.waveform_display = preferences.waveform_display;
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
         let mut root = Self::new_with_preferences(
             TitleBar::new(
@@ -612,6 +613,7 @@ impl AppUiAppRoot {
                 preferences.workspace_preset,
                 preferences.theme_preset,
                 &preferences.shortcut_overrides,
+                preferences.waveform_display,
             ),
             preferences.workspace_preset,
             preferences.custom_workspace_layout.clone(),
@@ -834,6 +836,7 @@ impl AppUiAppRoot {
             recent_projects: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: self.custom_workspace_layout.clone(),
+            waveform_display: WaveformDisplay::BottomAligned,
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
@@ -885,6 +888,7 @@ impl AppUiAppRoot {
             thumbnails,
             preview,
         );
+        models.timeline.waveform_display = preferences.waveform_display;
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
         let preferences_model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
@@ -892,6 +896,7 @@ impl AppUiAppRoot {
             self.workspace_preset,
             preferences.theme_preset,
             &preferences.shortcut_overrides,
+            preferences.waveform_display,
         );
         self.preferences_model = preferences_model.clone();
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {

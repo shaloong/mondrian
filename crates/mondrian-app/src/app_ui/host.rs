@@ -17,13 +17,15 @@ use mondrian_ui_theme::set_theme_preset;
 
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
-    PreferencesThemePayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    PreferencesThemePayload, PreferencesWaveformDisplayPayload,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL, APP_SHELL_PENDING_CLOSE_DISCARD,
     APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
-    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
+    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED,
+    APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
     APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
     ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
@@ -503,6 +505,9 @@ impl AppUiHost {
                         self.preferences.theme_preset = payload.preset;
                         set_theme_preset(payload.preset);
                     }
+                    PreferencesUpdate::WaveformDisplay(payload) => {
+                        self.preferences.waveform_display = payload.mode;
+                    }
                     PreferencesUpdate::ShortcutDisabled(payload) => {
                         if !is_known_shortcut_id(&payload.id) {
                             self.app_state
@@ -977,6 +982,7 @@ fn apply_shortcut_rebind(
 
 enum PreferencesUpdate {
     Theme(PreferencesThemePayload),
+    WaveformDisplay(PreferencesWaveformDisplayPayload),
     ShortcutDisabled(PreferencesShortcutPayload),
     ShortcutReset(PreferencesShortcutPayload),
     ShortcutRebound(PreferencesShortcutReboundPayload),
@@ -990,6 +996,15 @@ fn parse_preferences_update(
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_THEME_CHANGED =>
         {
             Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::Theme))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED =>
+        {
+            Some(
+                serde_json::from_value(payload.clone())
+                    .map(PreferencesUpdate::WaveformDisplay),
+            )
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
@@ -1031,7 +1046,8 @@ mod tests {
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, ClipId, TrackId};
     use mondrian_editor_state::state::PanelKind;
-    use mondrian_editor_state::Action;
+use mondrian_editor_state::Action;
+use mondrian_ui_widgets::WaveformDisplay;
     use mondrian_platform::{ClipboardError, FileFilter, NoopPlatformService};
     use mondrian_timeline::Sequence;
     use mondrian_ui_core::tree::TreeWalker;
@@ -1692,6 +1708,7 @@ mod tests {
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
+                waveform_display: WaveformDisplay::BottomAligned,
             },
             temp_preferences_path("initial-workspace"),
         );
@@ -1730,6 +1747,7 @@ mod tests {
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: Some(layout.clone()),
+                waveform_display: WaveformDisplay::BottomAligned,
             },
             temp_preferences_path("initial-custom-workspace"),
         );
@@ -2068,6 +2086,7 @@ mod tests {
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
+                waveform_display: WaveformDisplay::BottomAligned,
             },
             path.clone(),
         );
@@ -2167,6 +2186,7 @@ mod tests {
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
+                waveform_display: WaveformDisplay::BottomAligned,
             },
             path.clone(),
         );

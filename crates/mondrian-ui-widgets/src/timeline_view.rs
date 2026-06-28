@@ -305,10 +305,11 @@ pub type WaveformLookupFn = dyn Fn(
 ) -> Option<Vec<f32>>;
 
 /// How audio waveforms are rendered on timeline clips.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum WaveformDisplay {
     /// Top-half, bottom-aligned (Premiere-style). Only the positive
     /// amplitude envelope is drawn, rising from the clip's bottom edge.
+    #[default]
     BottomAligned,
     /// Full waveform from the clip's vertical centre line, mirrored
     /// symmetrically above and below (DAW-style).

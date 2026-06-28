@@ -41,7 +41,7 @@ use mondrian_ui_widgets::{
     TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
     TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
     TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl,
-    ViewerFrameImage, ViewerStatusTone, ViewerSurface,
+    ViewerFrameImage, ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -629,6 +629,7 @@ pub struct TimelinePanelModel {
     track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
     nested_sequence_refs: Vec<Vec<Option<SequenceId>>>,
+    pub waveform_display: WaveformDisplay,
 }
 
 impl Default for TimelinePanelModel {
@@ -645,6 +646,7 @@ impl Default for TimelinePanelModel {
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
             nested_sequence_refs: Vec::new(),
+            waveform_display: WaveformDisplay::BottomAligned,
         }
     }
 }
@@ -831,6 +833,7 @@ impl TimelinePanelModel {
             track_refs,
             clip_refs,
             nested_sequence_refs,
+            waveform_display: WaveformDisplay::BottomAligned,
         }
     }
 
@@ -848,6 +851,7 @@ impl TimelinePanelModel {
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
             nested_sequence_refs: Vec::new(),
+            waveform_display: WaveformDisplay::BottomAligned,
         }
     }
 
@@ -2784,7 +2788,8 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 cache.lookup(asset_id, 0, start_secs, end_secs, pixel_width)
             })
             .flatten()
-        });
+        })
+        .with_waveform_display(model.waveform_display);
     let timeline = if let Some(message) = model.empty_message.clone() {
         timeline.with_empty_message(message)
     } else {

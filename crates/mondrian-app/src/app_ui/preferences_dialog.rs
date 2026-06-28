@@ -10,12 +10,13 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_theme::ThemePreset;
-use mondrian_ui_widgets::{Button, DialogSurface, Label};
+use mondrian_ui_widgets::{Button, DialogSurface, Label, WaveformDisplay};
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_preferences_shortcut_disabled_action,
     app_shell_preferences_shortcut_rebound_action, app_shell_preferences_shortcut_reset_action,
     app_shell_preferences_tab_changed_action, app_shell_preferences_theme_changed_action,
+    app_shell_preferences_waveform_display_changed_action,
     PreferencesShortcutReboundPayload, PreferencesTabPayload,
 };
 use crate::app::AppState;
@@ -65,6 +66,8 @@ pub struct AppUiPreferencesModel {
     pub log_filter: String,
     pub background_workers: String,
     pub shortcut_rows: Vec<ShortcutPreferenceRow>,
+    pub waveform_display: WaveformDisplay,
+    pub waveform_display_label: String,
 }
 
 /// One shortcut row shown in the app UI preferences UI.
@@ -87,7 +90,13 @@ impl AppUiPreferencesModel {
         workspace: WorkspacePreset,
         theme_preset: ThemePreset,
     ) -> Self {
-        Self::from_app_state_with_shortcut_overrides(state, workspace, theme_preset, &[])
+        Self::from_app_state_with_shortcut_overrides(
+            state,
+            workspace,
+            theme_preset,
+            &[],
+            WaveformDisplay::BottomAligned,
+        )
     }
 
     /// Build the preferences model using the active app UI shortcut table.
@@ -96,6 +105,7 @@ impl AppUiPreferencesModel {
         workspace: WorkspacePreset,
         theme_preset: ThemePreset,
         shortcut_overrides: &[AppUiShortcutOverride],
+        waveform_display: WaveformDisplay,
     ) -> Self {
         let project_status = state
             .current_project_path
@@ -134,6 +144,8 @@ impl AppUiPreferencesModel {
             log_filter: format!("RUST_LOG / {DEFAULT_APP_UI_LOG_FILTER}"),
             background_workers: APP_UI_BACKGROUND_WORKERS.to_string(),
             shortcut_rows: shortcut_preference_rows(shortcut_overrides),
+            waveform_display,
+            waveform_display_label: waveform_display_label(waveform_display).to_owned(),
         }
     }
 }
@@ -155,6 +167,8 @@ impl Default for AppUiPreferencesModel {
             log_filter: format!("RUST_LOG / {DEFAULT_APP_UI_LOG_FILTER}"),
             background_workers: APP_UI_BACKGROUND_WORKERS.to_string(),
             shortcut_rows: shortcut_preference_rows(&[]),
+            waveform_display: WaveformDisplay::BottomAligned,
+            waveform_display_label: "整流".to_owned(),
         }
     }
 }
@@ -214,6 +228,7 @@ pub struct PreferencesDialog {
     capturing_shortcut: Option<String>,
     nav_buttons: Vec<Button>,
     theme_buttons: Vec<Button>,
+    waveform_buttons: Vec<Button>,
     content_labels: Vec<Label>,
     shortcut_buttons: Vec<ShortcutPreferenceButtons>,
     close_button: Button,
@@ -260,6 +275,18 @@ impl PreferencesDialog {
                     .on_click(app_shell_preferences_theme_changed_action(preset))
             })
             .collect();
+        let waveform_buttons = vec![
+            Button::new("整流")
+                .active(model.waveform_display == WaveformDisplay::BottomAligned)
+                .on_click(app_shell_preferences_waveform_display_changed_action(
+                    WaveformDisplay::BottomAligned,
+                )),
+            Button::new("完整")
+                .active(model.waveform_display == WaveformDisplay::Centered)
+                .on_click(app_shell_preferences_waveform_display_changed_action(
+                    WaveformDisplay::Centered,
+                )),
+        ];
         let mut dialog = Self {
             id: WidgetId::new(),
             active_tab,
@@ -276,6 +303,7 @@ impl PreferencesDialog {
             capturing_shortcut: None,
             nav_buttons,
             theme_buttons,
+            waveform_buttons,
             content_labels: Vec::new(),
             shortcut_buttons: Vec::new(),
             close_button: Button::new("完成").on_click(app_shell_close_modal_action()),
@@ -300,6 +328,8 @@ impl PreferencesDialog {
             return;
         }
         self.model = model;
+        self.waveform_buttons[0].set_active(self.model.waveform_display == WaveformDisplay::BottomAligned);
+        self.waveform_buttons[1].set_active(self.model.waveform_display == WaveformDisplay::Centered);
         if self
             .capturing_shortcut
             .as_deref()
@@ -509,6 +539,18 @@ impl Widget for PreferencesDialog {
                 button.layout(Rect::ZERO);
             }
         }
+        for (index, button) in self.waveform_buttons.iter_mut().enumerate() {
+            if self.active_tab == PreferencesDialogTab::General {
+                button.layout(Rect::new(
+                    content_x + 116.0 + index as f32 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
+                    body_top + 2.0 * ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
+                    THEME_BUTTON_WIDTH,
+                    THEME_BUTTON_HEIGHT,
+                ));
+            } else {
+                button.layout(Rect::ZERO);
+            }
+        }
         let mut content_width = content.x + content.width - content_x;
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             content_width =
@@ -605,6 +647,11 @@ impl Widget for PreferencesDialog {
                     return EventResult::Handled;
                 }
             }
+            for button in &mut self.waveform_buttons {
+                if button.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            }
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             let pointer_position = pointer_position(event);
@@ -691,6 +738,29 @@ impl Widget for PreferencesDialog {
                     );
                 }
             }
+            for button in &self.waveform_buttons {
+                button.paint(ctx);
+            }
+            for (index, mode) in [WaveformDisplay::BottomAligned, WaveformDisplay::Centered]
+                .into_iter()
+                .enumerate()
+            {
+                if mode == self.model.waveform_display {
+                    paint_theme_button_outline(
+                        ctx,
+                        Rect::new(
+                            content.x
+                                + NAV_WIDTH
+                                + CONTENT_GAP
+                                + 116.0
+                                + index as f32 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
+                            body_top + 2.0 * ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
+                            THEME_BUTTON_WIDTH,
+                            THEME_BUTTON_HEIGHT,
+                        ),
+                    );
+                }
+            }
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             for label in self.content_labels.iter().take(SHORTCUT_HEADER_ROW_COUNT) {
@@ -727,6 +797,7 @@ impl Widget for PreferencesDialog {
     fn child_count(&self) -> usize {
         1 + self.nav_buttons.len()
             + self.theme_buttons.len()
+            + self.waveform_buttons.len()
             + self.content_labels.len()
             + self.shortcut_buttons.len() * 3
     }
@@ -742,7 +813,15 @@ impl Widget for PreferencesDialog {
         if (theme_start..theme_end).contains(&index) {
             return self.theme_buttons.get(index - theme_start).map(|button| button as &dyn Widget);
         }
-        let content_start = theme_end;
+        let waveform_start = theme_end;
+        let waveform_end = waveform_start + self.waveform_buttons.len();
+        if (waveform_start..waveform_end).contains(&index) {
+            return self
+                .waveform_buttons
+                .get(index - waveform_start)
+                .map(|button| button as &dyn Widget);
+        }
+        let content_start = waveform_end;
         let content_end = content_start + self.content_labels.len();
         if (content_start..content_end).contains(&index) {
             return self
@@ -781,7 +860,15 @@ impl Widget for PreferencesDialog {
                 .get_mut(index - theme_start)
                 .map(|button| button as &mut dyn Widget);
         }
-        let content_start = theme_end;
+        let waveform_start = theme_end;
+        let waveform_end = waveform_start + self.waveform_buttons.len();
+        if (waveform_start..waveform_end).contains(&index) {
+            return self
+                .waveform_buttons
+                .get_mut(index - waveform_start)
+                .map(|button| button as &mut dyn Widget);
+        }
+        let content_start = waveform_end;
         let content_end = content_start + self.content_labels.len();
         if (content_start..content_end).contains(&index) {
             return self
@@ -924,6 +1011,7 @@ fn content_rows_for_tab(
         PreferencesDialogTab::General => vec![
             heading("外观"),
             detail(format!("主题：{}", model.theme_label)),
+            detail(format!("波形显示：{}", model.waveform_display_label)),
             heading("工作区"),
             detail(format!("当前工作区：{}", model.workspace)),
             heading("项目"),
@@ -964,6 +1052,13 @@ fn content_rows_for_tab(
 
 fn enabled_label(enabled: bool) -> String {
     if enabled { "已启用" } else { "已禁用" }.to_owned()
+}
+
+fn waveform_display_label(mode: WaveformDisplay) -> &'static str {
+    match mode {
+        WaveformDisplay::BottomAligned => "整流",
+        WaveformDisplay::Centered => "完整",
+    }
 }
 
 fn export_range_label(range: TimelineExportRange) -> &'static str {
@@ -1048,6 +1143,7 @@ mod tests {
             WorkspacePreset::Editing,
             ThemePreset::Dark,
             &overrides,
+            WaveformDisplay::BottomAligned,
         );
 
         let inspector = model
@@ -1082,6 +1178,7 @@ mod tests {
             WorkspacePreset::Editing,
             ThemePreset::Dark,
             &overrides,
+            WaveformDisplay::BottomAligned,
         );
 
         let save = model
@@ -1121,6 +1218,7 @@ mod tests {
             WorkspacePreset::Editing,
             ThemePreset::Dark,
             &overrides,
+            WaveformDisplay::BottomAligned,
         );
         let mut dialog =
             PreferencesDialog::with_model_and_tab(model, PreferencesDialogTab::Shortcuts);

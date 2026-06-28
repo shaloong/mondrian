@@ -2960,6 +2960,7 @@ dependencies = [
  "mondrian-ui-theme",
  "pollster",
  "resvg",
+ "serde",
  "tiny-skia",
  "tiny-skia-path",
  "unicode-segmentation",
