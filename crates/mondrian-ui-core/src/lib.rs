@@ -12,6 +12,7 @@
 //! * **绘制分离** — `paint()` 是纯读操作，不产生副作用
 //! * **无具体实现** — 此 crate 只定义 trait，不实现具体 Widget
 
+pub mod corner_radii;
 pub mod focus;
 pub mod shortcut;
 pub mod tooltip;
@@ -20,6 +21,7 @@ pub mod types;
 pub mod widget;
 pub mod widgets;
 
+pub use corner_radii::CornerRadii;
 pub use focus::FocusManager;
 pub use shortcut::{ShortcutBinding, ShortcutContext, ShortcutManager, ShortcutScope};
 pub use tooltip::{TooltipManager, TooltipState};

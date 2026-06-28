@@ -19,4 +19,5 @@ pub mod shape;
 pub use atlas::TextureAtlas;
 pub use command::{DrawCommand, DrawEncoder, RetainedDrawCommandError, RetainedDrawCommands};
 pub use context::{GlyphUpload, GlyphUploadStats, UiRenderFrameStats, UiRenderer};
+pub use mondrian_ui_core::CornerRadii;
 pub use shape::{generate_rect_vertices, RectVertex};

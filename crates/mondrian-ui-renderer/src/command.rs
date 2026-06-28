@@ -10,6 +10,8 @@ use mondrian_ui_core::widget::DrawCommandEncoder;
 use mondrian_ui_theme::typography::TextStyle;
 use std::sync::Arc;
 
+use crate::CornerRadii;
+
 fn floor_if_finite(value: f32) -> f32 {
     if value.is_finite() {
         value.floor()
@@ -50,11 +52,11 @@ pub struct ShapeMask {
 /// 命令序列由 DrawEncoder 收集，由 UiRenderer 批次化后提交。
 #[derive(Debug, Clone)]
 pub enum DrawCommand {
-    /// 填充矩形（可带圆角）。corner_radius in pixels; shader clamps automatically.
+    /// 填充矩形（可带圆角）。`corner_radii` in pixels; shader clamps automatically.
     Rect {
         bounds: Rect,
         color: Color,
-        corner_radius: f32, // px; 0 = sharp
+        corner_radii: CornerRadii,
     },
 
     /// Analytic soft shadow cast by a rounded rectangle.
@@ -390,7 +392,16 @@ impl DrawEncoder {
     }
 
     pub fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
-        self.commands.push(DrawCommand::Rect { bounds, color, corner_radius });
+        self.commands.push(DrawCommand::Rect {
+            bounds,
+            color,
+            corner_radii: CornerRadii::all(corner_radius),
+        });
+    }
+
+    /// Draw a filled rectangle with per-corner radii.
+    pub fn draw_rect_radii(&mut self, bounds: Rect, color: Color, radii: CornerRadii) {
+        self.commands.push(DrawCommand::Rect { bounds, color, corner_radii: radii });
     }
 
     pub fn draw_soft_shadow(
@@ -559,6 +570,10 @@ impl DrawCommandEncoder for DrawEncoder {
 
     fn draw_rect(&mut self, bounds: Rect, color: Color, corner_radius: f32) {
         self.draw_rect(bounds, color, corner_radius);
+    }
+
+    fn draw_rect_radii(&mut self, bounds: Rect, color: Color, radii: CornerRadii) {
+        self.draw_rect_radii(bounds, color, radii);
     }
 
     fn draw_soft_shadow(
@@ -876,7 +891,11 @@ mod tests {
         let commands = vec![
             DrawCommand::PushClip { bounds: rect() },
             DrawCommand::PushTranslate { offset: Vec2::new(2.0, 3.0) },
-            DrawCommand::Rect { bounds: rect(), color: color(), corner_radius: 0.0 },
+            DrawCommand::Rect {
+                bounds: rect(),
+                color: color(),
+                corner_radii: CornerRadii::all(0.0),
+            },
             DrawCommand::PopTransform,
             DrawCommand::PopClip,
         ];

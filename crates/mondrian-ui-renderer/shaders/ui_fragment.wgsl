@@ -13,7 +13,7 @@ struct VertexOutput {
     @location(0) tex_coord: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) rect_size: vec2<f32>,
-    @location(3) @interpolate(flat) corner_radius_px: f32,
+    @location(3) @interpolate(flat) corner_radius_px: vec4<f32>,
     @location(4) @interpolate(flat) render_mode: u32,
     @location(5) @interpolate(flat) blur_radius_px: f32,
 };
@@ -21,8 +21,35 @@ struct VertexOutput {
 @group(1) @binding(0) var glyph_sampler: sampler;
 @group(1) @binding(1) var glyph_texture: texture_2d<f32>;
 
+/// Uniform corner radius (original path for shadows & lines).
 fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
     let half = size * 0.5;
+    let q = abs(p - half) - half + r;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+/// Per-corner radius variant. Uses the quadrant of `p` relative to the
+/// rectangle centre to select the appropriate radius.
+///
+/// Packing:  radii.x = top-left,  y = top-right,  z = bottom-right,  w = bottom-left
+fn sd_rounded_box_per_corner(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -> f32 {
+    let half = size * 0.5;
+
+    var r: f32;
+    if p.x < half.x {
+        if p.y < half.y {
+            r = radii.x;   // top-left
+        } else {
+            r = radii.w;   // bottom-left
+        }
+    } else {
+        if p.y < half.y {
+            r = radii.y;   // top-right
+        } else {
+            r = radii.z;   // bottom-right
+        }
+    }
+
     let q = abs(p - half) - half + r;
     return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
@@ -47,7 +74,7 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     if in.render_mode == RENDER_MODE_LINE {
-        let radius = max(in.corner_radius_px, 0.0);
+        let radius = max(in.corner_radius_px.x, 0.0);
         let center_y = in.rect_size.y * 0.5;
         let axis_padding = center_y;
         let a = vec2<f32>(axis_padding, center_y);
@@ -60,7 +87,7 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     if in.render_mode == RENDER_MODE_SOFT_SHADOW {
-        let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
+        let r = clamp(in.corner_radius_px.x, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
         let d = sd_rounded_box_px(in.tex_coord, in.rect_size, r);
         let blur = max(in.blur_radius_px, 0.001);
         let outside = max(d, 0.0);
@@ -71,11 +98,14 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(in.color.rgb, alpha);
     }
 
-    let r = clamp(in.corner_radius_px, 0.0, min(in.rect_size.x, in.rect_size.y) * 0.5);
-    if r <= 0.0 { return in.color; }
+    // RENDER_MODE_SHAPE
+    let clamp_half = min(in.rect_size.x, in.rect_size.y) * 0.5;
+    let r = clamp(in.corner_radius_px, vec4(0.0), vec4(clamp_half));
+    let all_zero = r.x <= 0.0 && r.y <= 0.0 && r.z <= 0.0 && r.w <= 0.0;
+    if all_zero { return in.color; }
 
     let p = in.tex_coord * in.rect_size;
-    let d = sd_rounded_box_px(p, in.rect_size, r);
+    let d = sd_rounded_box_per_corner(p, in.rect_size, r);
     let aa = clamp(fwidth(d), 0.75, 1.5);
     let alpha = smoothstep(aa * 0.5, -aa * 0.5, d);
     if alpha <= 0.001 { discard; }

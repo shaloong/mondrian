@@ -15,6 +15,7 @@ use crate::focus::FocusManager;
 use crate::shortcut::ShortcutManager;
 use crate::tooltip::TooltipManager;
 use crate::types::*;
+use crate::CornerRadii;
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_platform::PlatformService;
@@ -351,6 +352,14 @@ pub trait DrawCommandEncoder {
     fn push_clip(&mut self, bounds: Rect);
     fn pop_clip(&mut self);
     fn draw_rect(&mut self, bounds: Rect, color: mondrian_core::Color, corner_radius: f32);
+
+    /// Draw a filled rectangle with per-corner radii.
+    ///
+    /// The default implementation falls back to [`draw_rect`] with the
+    /// maximum corner radius.
+    fn draw_rect_radii(&mut self, bounds: Rect, color: mondrian_core::Color, radii: CornerRadii) {
+        self.draw_rect(bounds, color, radii.max_radius());
+    }
     /// Draw a soft rounded-rectangle shadow.
     ///
     /// Production renderers should implement this as an analytic or blurred

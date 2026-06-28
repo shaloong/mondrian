@@ -5,7 +5,7 @@ struct VertexInput {
     @location(1) tex_coord: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) rect_size: vec2<f32>,
-    @location(4) corner_radius_px: f32,
+    @location(4) corner_radius_px: vec4<f32>,
     @location(5) render_mode: u32,
     @location(6) blur_radius_px: f32,
 };
@@ -15,7 +15,7 @@ struct VertexOutput {
     @location(0) tex_coord: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) rect_size: vec2<f32>,
-    @location(3) @interpolate(flat) corner_radius_px: f32,
+    @location(3) @interpolate(flat) corner_radius_px: vec4<f32>,
     @location(4) @interpolate(flat) render_mode: u32,
     @location(5) @interpolate(flat) blur_radius_px: f32,
 };

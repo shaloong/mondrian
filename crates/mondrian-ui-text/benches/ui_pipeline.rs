@@ -10,7 +10,7 @@ use mondrian_core::Color;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_renderer::atlas::TextureAtlas;
 use mondrian_ui_renderer::batch::build_batches;
-use mondrian_ui_renderer::DrawCommand;
+use mondrian_ui_renderer::{CornerRadii, DrawCommand};
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use mondrian_ui_theme::typography::{FontWeight, TextStyle};
 
@@ -40,7 +40,7 @@ fn rect_command(index: usize) -> DrawCommand {
     DrawCommand::Rect {
         bounds: Rect::new(8.0 + col as f32 * 46.0, 8.0 + row as f32 * 28.0, 38.0, 18.0),
         color: color(index),
-        corner_radius: (index % 8) as f32,
+        corner_radii: CornerRadii::all((index % 8) as f32),
     }
 }
 
@@ -63,7 +63,7 @@ fn timeline_style_commands(track_count: usize, clips_per_track: usize) -> Vec<Dr
             } else {
                 Color::from_rgba8(42, 45, 55, 255)
             },
-            corner_radius: 0.0,
+            corner_radii: CornerRadii::all(0.0),
         });
         commands.push(DrawCommand::Line {
             start: Point::new(0.0, y + 26.0),
@@ -83,7 +83,7 @@ fn timeline_style_commands(track_count: usize, clips_per_track: usize) -> Vec<Dr
                 } else {
                     Color::from_rgba8(75, 160, 148, 255)
                 },
-                corner_radius: 4.0,
+                corner_radii: CornerRadii::all(4.0),
             });
             commands.push(DrawCommand::RasterAtlasImage {
                 bounds: Rect::new(x + 4.0, y + 6.0, 14.0, 14.0),

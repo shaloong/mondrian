@@ -16,9 +16,9 @@ pub enum RenderMode {
     SoftShadow = 4,
 }
 
-/// UI 渲染的顶点格式 (52 bytes, packed).
+/// UI 渲染的顶点格式 (64 bytes, packed).
 ///
-/// The shader clamps `corner_radius_px` automatically — callers do not need
+/// The shader clamps `corner_radii_px` automatically — callers do not need
 /// to pre-clamp to half-size.
 ///
 /// Shader locations:
@@ -26,19 +26,19 @@ pub enum RenderMode {
 ///   1: tex_coord
 ///   2: color
 ///   3: rect_size (pixels, for pixel-space rounded-rect SDF)
-///   4: corner_radius_px (0 = sharp rect)
+///   4: corner_radii_px (vec4: tl, tr, br, bl; 0 = sharp rect)
 ///   5: render_mode (0 = shape, 1 = glyph, 2 = analytic line, 3 = full-color image, 4 = analytic shadow)
 ///   6: blur_radius_px (only used by analytic shadow)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct RectVertex {
-    pub position: [f32; 2],    // 8 bytes,  offset 0
-    pub tex_coord: [f32; 2],   // 8 bytes,  offset 8
-    pub color: [f32; 4],       // 16 bytes, offset 16
-    pub rect_size: [f32; 2],   // 8 bytes,  offset 32
-    pub corner_radius_px: f32, // 4 bytes,  offset 40
-    pub render_mode: u32,      // 4 bytes,  offset 44
-    pub blur_radius_px: f32,   // 4 bytes,  offset 48
+    pub position: [f32; 2],        // 8 bytes,  offset 0
+    pub tex_coord: [f32; 2],       // 8 bytes,  offset 8
+    pub color: [f32; 4],           // 16 bytes, offset 16
+    pub rect_size: [f32; 2],       // 8 bytes,  offset 32
+    pub corner_radii_px: [f32; 4], // 16 bytes, offset 40
+    pub render_mode: u32,          // 4 bytes,  offset 56
+    pub blur_radius_px: f32,       // 4 bytes,  offset 60
 }
 
 impl RectVertex {
@@ -54,7 +54,7 @@ impl RectVertex {
         a: f32,
         rect_w: f32,
         rect_h: f32,
-        corner_radius_px: f32,
+        corner_radii_px: [f32; 4],
         render_mode: RenderMode,
     ) -> Self {
         Self::new_with_blur(
@@ -68,7 +68,7 @@ impl RectVertex {
             a,
             rect_w,
             rect_h,
-            corner_radius_px,
+            corner_radii_px,
             render_mode,
             0.0,
         )
@@ -86,7 +86,7 @@ impl RectVertex {
         a: f32,
         rect_w: f32,
         rect_h: f32,
-        corner_radius_px: f32,
+        corner_radii_px: [f32; 4],
         render_mode: RenderMode,
         blur_radius_px: f32,
     ) -> Self {
@@ -95,7 +95,7 @@ impl RectVertex {
             tex_coord: [u, v],
             color: [r, g, b, a],
             rect_size: [rect_w, rect_h],
-            corner_radius_px,
+            corner_radii_px,
             render_mode: render_mode as u32,
             blur_radius_px,
         }
@@ -127,18 +127,18 @@ impl RectVertex {
                     shader_location: 3,
                 },
                 wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
+                    format: wgpu::VertexFormat::Float32x4,
                     offset: 40,
                     shader_location: 4,
                 },
                 wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Uint32,
-                    offset: 44,
+                    offset: 56,
                     shader_location: 5,
                 },
                 wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Float32,
-                    offset: 48,
+                    offset: 60,
                     shader_location: 6,
                 },
             ],
@@ -155,7 +155,7 @@ pub fn generate_rect_vertices(
     a: f32,
     pixel_w: f32,
     pixel_h: f32,
-    corner_radius_px: f32,
+    corner_radii_px: [f32; 4],
     render_mode: RenderMode,
 ) -> [RectVertex; 6] {
     let x0 = rect.x;
@@ -175,7 +175,7 @@ pub fn generate_rect_vertices(
             a,
             pixel_w,
             pixel_h,
-            corner_radius_px,
+            corner_radii_px,
             render_mode,
         )
     };
@@ -254,6 +254,7 @@ pub fn generate_soft_shadow_vertices(
     let rect_w = shadow_rect.width.max(1.0);
     let rect_h = shadow_rect.height.max(1.0);
     let radius = (corner_radius_px + spread).max(0.0);
+    let radii = [radius, radius, radius, radius];
     let v = |x: f32, y: f32, u: f32, v: f32| {
         RectVertex::new_with_blur(
             x,
@@ -266,7 +267,7 @@ pub fn generate_soft_shadow_vertices(
             color.a,
             rect_w,
             rect_h,
-            radius,
+            radii,
             RenderMode::SoftShadow,
             blur,
         )
@@ -290,7 +291,7 @@ pub fn generate_gradient_rect_vertices(
     colors: &[mondrian_core::Color; 4],
     pixel_w: f32,
     pixel_h: f32,
-    corner_radius_px: f32,
+    corner_radii_px: [f32; 4],
     render_mode: RenderMode,
 ) -> [RectVertex; 6] {
     let x0 = rect.x;
@@ -311,7 +312,7 @@ pub fn generate_gradient_rect_vertices(
             color.a,
             pixel_w,
             pixel_h,
-            corner_radius_px,
+            corner_radii_px,
             render_mode,
         )
     };
@@ -354,8 +355,8 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn vertex_size_is_52_bytes() {
-        assert_eq!(std::mem::size_of::<RectVertex>(), 52);
+    fn vertex_size_is_64_bytes() {
+        assert_eq!(std::mem::size_of::<RectVertex>(), 64);
     }
 
     #[test]
@@ -392,14 +393,14 @@ mod tests {
             0.8,
             100.0,
             50.0,
-            8.0,
+            [8.0; 4],
             RenderMode::Shape,
         );
         assert_eq!(v.position, [1.0, 2.0]);
         assert_eq!(v.tex_coord, [0.5, 0.5]);
         assert_eq!(v.color, [0.1, 0.2, 0.3, 0.8]);
         assert_eq!(v.rect_size, [100.0, 50.0]);
-        assert_eq!(v.corner_radius_px, 8.0);
+        assert_eq!(v.corner_radii_px, [8.0; 4]);
         assert_eq!(v.render_mode, RenderMode::Shape as u32);
         assert_eq!(v.blur_radius_px, 0.0);
     }
@@ -423,7 +424,7 @@ mod tests {
         assert_eq!(vertices[0].render_mode, RenderMode::SoftShadow as u32);
         assert_eq!(vertices[0].blur_radius_px, 24.0);
         assert_eq!(vertices[0].rect_size, [104.0, 44.0]);
-        assert_eq!(vertices[0].corner_radius_px, 10.0);
+        assert_eq!(vertices[0].corner_radii_px, [10.0; 4]);
         assert_eq!(vertices[0].tex_coord, [-24.0, 68.0]);
         assert_eq!(vertices[5].tex_coord, [128.0, -24.0]);
     }
@@ -442,7 +443,7 @@ mod tests {
             1.0,
             100.0,
             50.0,
-            0.0,
+            [0.0; 4],
             RenderMode::Shape,
         );
         assert_eq!(verts.len(), 6);
@@ -459,7 +460,7 @@ mod tests {
             1.0,
             100.0,
             50.0,
-            0.0,
+            [0.0; 4],
             RenderMode::Shape,
         );
         for v in &verts {
@@ -480,7 +481,7 @@ mod tests {
             0.5,
             100.0,
             50.0,
-            0.0,
+            [0.0; 4],
             RenderMode::Shape,
         );
         for v in &verts {
@@ -498,7 +499,7 @@ mod tests {
             1.0,
             200.0,
             80.0,
-            0.0,
+            [0.0; 4],
             RenderMode::Shape,
         );
         for v in &verts {
@@ -516,11 +517,11 @@ mod tests {
             1.0,
             100.0,
             50.0,
-            8.0,
+            [8.0; 4],
             RenderMode::Shape,
         );
         for v in &verts {
-            assert!((v.corner_radius_px - 8.0).abs() < 0.001);
+            assert!((v.corner_radii_px[0] - 8.0).abs() < 0.001);
         }
     }
 
@@ -534,7 +535,7 @@ mod tests {
             1.0,
             32.0,
             32.0,
-            -1.0,
+            [-1.0; 4],
             RenderMode::Glyph,
         );
         for v in &verts {
@@ -553,12 +554,12 @@ mod tests {
             1.0,
             100.0,
             50.0,
-            5000.0,
+            [5000.0; 4],
             RenderMode::Shape,
         );
         assert_eq!(verts.len(), 6);
         for v in &verts {
-            assert_eq!(v.corner_radius_px, 5000.0);
+            assert_eq!(v.corner_radii_px, [5000.0; 4]);
         }
     }
     // ═══════════════════════════════════════════════════════════════════════
@@ -742,7 +743,7 @@ mod tests {
             1.0,
             100.0,
             100.0,
-            50.0,
+            [50.0; 4],
             RenderMode::Shape,
         );
         let min_u = verts.iter().map(|v| v.tex_coord[0]).reduce(f32::min).unwrap();
@@ -765,7 +766,7 @@ mod tests {
             1.0,
             100.0,
             100.0,
-            50.0,
+            [50.0; 4],
             RenderMode::Shape,
         );
         for v in &verts {
@@ -775,9 +776,9 @@ mod tests {
                 "rect_size should be pixel dims"
             );
             assert!(
-                (v.corner_radius_px - 50.0).abs() < 0.001,
+                (v.corner_radii_px[0] - 50.0).abs() < 0.001,
                 "corner_radius_px={} should be 50",
-                v.corner_radius_px
+                v.corner_radii_px[0]
             );
         }
     }
@@ -793,7 +794,7 @@ mod tests {
             1.0,
             100.0,
             100.0,
-            0.0,
+            [0.0; 4],
             RenderMode::Shape,
         );
         for v in &verts {

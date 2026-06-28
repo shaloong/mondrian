@@ -13,6 +13,7 @@ use crate::batch::build_batches;
 use crate::command::{diagnose_draw_commands, raster_image_payload_len, DrawCommand};
 use crate::pipeline::UiPipeline;
 use crate::shape::RectVertex;
+use crate::CornerRadii;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, bytemuck::Zeroable)]
@@ -230,7 +231,11 @@ fn raster_image_failure_fallback(
     let mut color = tint;
     color.a = (color.a * 0.18).clamp(0.08, 0.24);
     let radius = bounds.width.min(bounds.height).min(8.0) * 0.25;
-    DrawCommand::Rect { bounds, color, corner_radius: radius }
+    DrawCommand::Rect {
+        bounds,
+        color,
+        corner_radii: CornerRadii::all(radius),
+    }
 }
 
 impl UiRenderer {
@@ -803,11 +808,11 @@ mod tests {
         );
 
         match fallback {
-            DrawCommand::Rect { bounds, color, corner_radius } => {
+            DrawCommand::Rect { bounds, color, corner_radii } => {
                 assert_eq!(bounds, Rect::new(10.0, 20.0, 30.0, 40.0));
                 assert_eq!((color.r, color.g, color.b), (0.4, 0.5, 0.6));
                 assert!((0.08..=0.24).contains(&color.a));
-                assert!(corner_radius > 0.0);
+                assert!(corner_radii.max_radius() > 0.0);
             }
             other => panic!("expected rect fallback, got {other:?}"),
         }

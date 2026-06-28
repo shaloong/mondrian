@@ -92,10 +92,13 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
             DrawCommand::PopTransform => {
                 transform_stack.pop();
             }
-            DrawCommand::Rect { bounds, color, corner_radius } => {
+            DrawCommand::Rect { bounds, color, corner_radii } => {
                 if !rect_is_visible(*bounds)
                     || !color_is_finite(*color)
-                    || !corner_radius.is_finite()
+                    || !corner_radii.top_left.is_finite()
+                    || !corner_radii.top_right.is_finite()
+                    || !corner_radii.bottom_right.is_finite()
+                    || !corner_radii.bottom_left.is_finite()
                 {
                     continue;
                 }
@@ -121,7 +124,7 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     color[3],
                     pixel_w,
                     pixel_h,
-                    *corner_radius,
+                    corner_radii.as_array(),
                     RenderMode::Shape,
                 );
                 current_batch.vertices.extend(vertices);
@@ -186,7 +189,7 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     &colors,
                     pixel_w,
                     pixel_h,
-                    *corner_radius,
+                    [*corner_radius; 4],
                     RenderMode::Shape,
                 );
                 current_batch.vertices.extend(vertices);
@@ -231,12 +234,90 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let bw = bounds.width.max(1.0);
                 let bh = bounds.height.max(1.0);
                 let vertices = vec![
-                    RectVertex::new(x0, y0, u0, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
-                    RectVertex::new(x1, y1, u1, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Glyph),
+                    RectVertex::new(
+                        x0,
+                        y0,
+                        u0,
+                        v1,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Glyph,
+                    ),
+                    RectVertex::new(
+                        x1,
+                        y0,
+                        u1,
+                        v1,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Glyph,
+                    ),
+                    RectVertex::new(
+                        x0,
+                        y1,
+                        u0,
+                        v0,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Glyph,
+                    ),
+                    RectVertex::new(
+                        x0,
+                        y1,
+                        u0,
+                        v0,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Glyph,
+                    ),
+                    RectVertex::new(
+                        x1,
+                        y0,
+                        u1,
+                        v1,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Glyph,
+                    ),
+                    RectVertex::new(
+                        x1,
+                        y1,
+                        u1,
+                        v0,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Glyph,
+                    ),
                 ];
                 current_batch.vertices.extend(vertices);
             }
@@ -276,12 +357,90 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let bw = bounds.width.max(1.0);
                 let bh = bounds.height.max(1.0);
                 let vertices = vec![
-                    RectVertex::new(x0, y0, u0, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
-                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
-                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
-                    RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
-                    RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
-                    RectVertex::new(x1, y1, u1, v0, r, g, b, a, bw, bh, 0.0, RenderMode::Image),
+                    RectVertex::new(
+                        x0,
+                        y0,
+                        u0,
+                        v1,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Image,
+                    ),
+                    RectVertex::new(
+                        x1,
+                        y0,
+                        u1,
+                        v1,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Image,
+                    ),
+                    RectVertex::new(
+                        x0,
+                        y1,
+                        u0,
+                        v0,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Image,
+                    ),
+                    RectVertex::new(
+                        x0,
+                        y1,
+                        u0,
+                        v0,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Image,
+                    ),
+                    RectVertex::new(
+                        x1,
+                        y0,
+                        u1,
+                        v1,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Image,
+                    ),
+                    RectVertex::new(
+                        x1,
+                        y1,
+                        u1,
+                        v0,
+                        r,
+                        g,
+                        b,
+                        a,
+                        bw,
+                        bh,
+                        [0.0; 4],
+                        RenderMode::Image,
+                    ),
                 ];
                 current_batch.vertices.extend(vertices);
             }
@@ -494,7 +653,7 @@ fn line_vertices(
             a,
             geometry_len,
             geometry_width,
-            radius,
+            [radius; 4],
             RenderMode::Line,
         )
     }))
@@ -520,7 +679,20 @@ fn triangle_vertices(points: [Point; 3], color: &mondrian_core::Color) -> Option
     let [r, g, b, a] = color_to_gpu_linear(*color);
 
     Some(points.map(|(x, y)| {
-        RectVertex::new(x, y, 0.0, 0.0, r, g, b, a, 1.0, 1.0, 0.0, RenderMode::Shape)
+        RectVertex::new(
+            x,
+            y,
+            0.0,
+            0.0,
+            r,
+            g,
+            b,
+            a,
+            1.0,
+            1.0,
+            [0.0; 4],
+            RenderMode::Shape,
+        )
     }))
 }
 
@@ -566,7 +738,7 @@ fn colored_triangle_vertices(
             a,
             rect_size[0],
             rect_size[1],
-            corner_radius,
+            [corner_radius; 4],
             RenderMode::Shape,
         )
     }))
@@ -801,7 +973,7 @@ fn sample_line_alpha_from_vertices(
                     + tri[1].tex_coord[1] * weights[1]
                     + tri[2].tex_coord[1] * weights[2],
             ];
-            let d = line_signed_distance_px(local, tri[0].rect_size, tri[0].corner_radius_px);
+            let d = line_signed_distance_px(local, tri[0].rect_size, tri[0].corner_radii_px[0]);
             Some(line_alpha_from_signed_distance(d))
         })
         .fold(0.0, f32::max)
@@ -844,7 +1016,7 @@ fn sample_shape_signed_distance_from_vertices(
         Some(rounded_rect_signed_distance_px(
             local,
             tri[0].rect_size,
-            tri[0].corner_radius_px,
+            tri[0].corner_radii_px[0],
         ))
     })
 }
@@ -972,6 +1144,7 @@ fn strongest_line_alpha_around(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CornerRadii;
     use mondrian_core::Color;
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -989,7 +1162,7 @@ mod tests {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
             color: Color::WHITE,
-            corner_radius: 0.0,
+            corner_radii: CornerRadii::all(0.0),
         }];
 
         assert!(build_batches(&cmds, (0, 100)).is_empty());
@@ -1001,7 +1174,7 @@ mod tests {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
             color: Color::from_hex(0x101319),
-            corner_radius: 0.0,
+            corner_radii: CornerRadii::all(0.0),
         }];
 
         let batches = build_batches(&cmds, (100, 100));
@@ -1023,7 +1196,7 @@ mod tests {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
             color: Color::WHITE,
-            corner_radius: 0.0,
+            corner_radii: CornerRadii::all(0.0),
         }];
         let batches = build_batches(&cmds, (1920, 1080));
         assert_eq!(batches.len(), 1);
@@ -1036,22 +1209,22 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::Rect {
                 bounds: Rect::new(f32::NAN, 0.0, 20.0, 20.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 0.0, 20.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
                 color: Color { r: 1.0, g: 1.0, b: f32::INFINITY, a: 1.0 },
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
         ];
 
@@ -1145,7 +1318,7 @@ mod tests {
         assert!(vertices.iter().all(|vertex| {
             vertex.render_mode == RenderMode::SoftShadow as u32
                 && (vertex.blur_radius_px - 24.0).abs() < 0.001
-                && (vertex.corner_radius_px - 10.0).abs() < 0.001
+                && (vertex.corner_radii_px[0] - 10.0).abs() < 0.001
         }));
     }
 
@@ -1235,7 +1408,7 @@ mod tests {
                 "line quad must include AA padding beyond the requested stroke width"
             );
             assert!(
-                vertex.corner_radius_px >= 0.5,
+                vertex.corner_radii_px[0] >= 0.5,
                 "line shader must receive the stroke radius for round caps"
             );
         }
@@ -1497,7 +1670,7 @@ mod tests {
                     (vertex.rect_size[1] - (1.0 + LINE_AA_PADDING_PX * 2.0)).abs() < 0.001,
                     "angle {angle} should keep 1px stroke plus conservative AA padding per side"
                 );
-                assert!((vertex.corner_radius_px - 0.5).abs() < 0.001);
+                assert!((vertex.corner_radii_px[0] - 0.5).abs() < 0.001);
             }
         }
     }
@@ -1534,7 +1707,7 @@ mod tests {
         assert_eq!(vertices.len(), 3);
         for vertex in vertices {
             assert_eq!(vertex.rect_size, [80.0, 80.0]);
-            assert_eq!(vertex.corner_radius_px, 40.0);
+            assert_eq!(vertex.corner_radii_px, [40.0; 4]);
             assert!(vertex.tex_coord[0] >= 0.0 && vertex.tex_coord[0] <= 1.0);
             assert!(vertex.tex_coord[1] >= 0.0 && vertex.tex_coord[1] <= 1.0);
         }
@@ -1635,12 +1808,12 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 50.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::Rect {
                 bounds: Rect::new(10.0, 10.0, 200.0, 30.0),
                 color: Color::BLACK,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
         ];
         let batches = build_batches(&cmds, (1920, 1080));
@@ -1659,7 +1832,7 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             // No PopClip — clip stays active when batch is finalized
         ];
@@ -1675,13 +1848,13 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PopClip,
             DrawCommand::Rect {
                 bounds: Rect::new(200.0, 200.0, 100.0, 100.0),
                 color: Color::BLACK,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
         ];
         let batches = build_batches(&cmds, (1920, 1080));
@@ -1696,13 +1869,13 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PushClip { bounds: Rect::new(0.0, 0.0, 50.0, 50.0) },
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::BLACK,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PopClip,
         ];
@@ -1744,7 +1917,7 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PopClip,
             DrawCommand::PopClip,
@@ -1763,7 +1936,7 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PopClip,
         ];
@@ -1789,7 +1962,7 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PopTransform,
         ];
@@ -1807,13 +1980,13 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PopTransform,
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::BLACK,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PopTransform,
         ];
@@ -1833,21 +2006,21 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PushTranslate { offset: glam::Vec2::new(40.0, 30.0) },
             DrawCommand::PushClip { bounds: Rect::new(5.0, 7.0, 20.0, 11.0) },
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 color: Color::BLACK,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
             DrawCommand::PopClip,
             DrawCommand::PopTransform,
             DrawCommand::Rect {
                 bounds: Rect::new(70.0, 80.0, 10.0, 10.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             },
         ];
 
@@ -1876,7 +2049,7 @@ mod tests {
             cmds.push(DrawCommand::Rect {
                 bounds: Rect::new(i as f32, 0.0, 1.0, 1.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             });
         }
         let batches = build_batches(&cmds, (1920, 1080));
@@ -1896,7 +2069,7 @@ mod tests {
             cmds.push(DrawCommand::Rect {
                 bounds: Rect::new(i as f32, 0.0, 1.0, 1.0),
                 color: Color::WHITE,
-                corner_radius: 0.0,
+                corner_radii: CornerRadii::all(0.0),
             });
         }
         let batches = build_batches(&cmds, (1920, 1080));
@@ -2009,7 +2182,7 @@ mod tests {
         for vertex in vertices {
             assert!((vertex.rect_size[0] - (4.0 + LINE_AA_PADDING_PX * 2.0)).abs() < 0.001);
             assert!((vertex.rect_size[1] - (4.0 + LINE_AA_PADDING_PX * 2.0)).abs() < 0.001);
-            assert!((vertex.corner_radius_px - 2.0).abs() < 0.001);
+            assert!((vertex.corner_radii_px[0] - 2.0).abs() < 0.001);
         }
     }
 
@@ -2102,7 +2275,7 @@ mod tests {
         for vertex in tri {
             assert_eq!(vertex.render_mode, RenderMode::Shape as u32);
             assert_eq!(vertex.rect_size, [1.0, 1.0]);
-            assert_eq!(vertex.corner_radius_px, 0.0);
+            assert_eq!(vertex.corner_radii_px, [0.0; 4]);
             assert_eq!(vertex.tex_coord, [0.0, 0.0]);
             let expected = color_to_gpu_linear(Color::from_rgba8(51, 102, 153, 204));
             for (actual, expected) in vertex.color.iter().zip(expected) {
@@ -2305,7 +2478,7 @@ mod tests {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(0.0, 0.0, 1920.0, 1080.0),
             color: Color::WHITE,
-            corner_radius: 0.0,
+            corner_radii: CornerRadii::all(0.0),
         }];
         let batches = build_batches(&cmds, (1920, 1080));
         let verts = &batches[0].vertices;
@@ -2333,7 +2506,7 @@ mod tests {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(100.0, 100.0, 200.0, 100.0),
             color: Color::WHITE,
-            corner_radius: 0.0,
+            corner_radii: CornerRadii::all(0.0),
         }];
         let batches = build_batches(&cmds, (1920, 1080));
         for v in &batches[0].vertices {
@@ -2347,7 +2520,7 @@ mod tests {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(960.0, 540.0, 100.0, 100.0), // centered
             color: Color::WHITE,
-            corner_radius: 0.0,
+            corner_radii: CornerRadii::all(0.0),
         }];
         let b1080 = build_batches(&cmds, (1920, 1080));
         let b4k = build_batches(&cmds, (3840, 2160));
@@ -2413,7 +2586,7 @@ mod tests {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(100.0, 100.0, 100.0, 100.0),
             color: Color::WHITE,
-            corner_radius: 50.0,
+            corner_radii: CornerRadii::all(50.0),
         }];
         let batches = build_batches(&cmds, (1920, 1080));
         assert_eq!(batches.len(), 1);
@@ -2426,9 +2599,9 @@ mod tests {
                 "rect_size should be pixel dims of original rect"
             );
             assert!(
-                (v.corner_radius_px - 50.0).abs() < 0.001,
+                (v.corner_radii_px[0] - 50.0).abs() < 0.001,
                 "corner_radius_px={} should be 50",
-                v.corner_radius_px
+                v.corner_radii_px[0]
             );
             assert!(
                 v.tex_coord[0] >= 0.0 && v.tex_coord[0] <= 1.0,
@@ -2448,7 +2621,7 @@ mod tests {
         let cmds = [DrawCommand::Rect {
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             color: Color::WHITE,
-            corner_radius: 50.0,
+            corner_radii: CornerRadii::all(50.0),
         }];
         let batches = build_batches(&cmds, (1920, 1080));
         for v in &batches[0].vertices {
@@ -2488,7 +2661,7 @@ mod tests {
             let cmds = [DrawCommand::Rect {
                 bounds: rect,
                 color: Color::WHITE,
-                corner_radius: radius,
+                corner_radii: CornerRadii::all(radius),
             }];
             let batches = build_batches(&cmds, screen_size);
 
@@ -2498,7 +2671,7 @@ mod tests {
             for vertex in vertices {
                 assert_eq!(vertex.render_mode, RenderMode::Shape as u32);
                 assert_eq!(vertex.rect_size, [rect.width, rect.height]);
-                assert!((vertex.corner_radius_px - radius).abs() < 0.001);
+                assert!((vertex.corner_radii_px[0] - radius).abs() < 0.001);
             }
 
             let center_distance =
@@ -2566,7 +2739,7 @@ mod tests {
             DrawCommand::Rect {
                 bounds: Rect::new(0.0, 0.0, 50.0, 80.0),
                 color: Color::WHITE,
-                corner_radius: 25.0,
+                corner_radii: CornerRadii::all(25.0),
             },
             DrawCommand::PopTransform,
         ];
@@ -2577,7 +2750,7 @@ mod tests {
                 [50.0, 80.0],
                 "rect_size must remain original pixel dims"
             );
-            assert!((v.corner_radius_px - 25.0).abs() < 0.001);
+            assert!((v.corner_radii_px[0] - 25.0).abs() < 0.001);
         }
     }
 }

@@ -7,6 +7,8 @@ use mondrian_core::{AssetId, ClipId, EffectId, TrackId};
 use mondrian_editor_state::state::PanelKind;
 use uuid::Uuid;
 
+pub use crate::corner_radii::CornerRadii;
+
 // ═══════════════════════════════════════════════════════════════════════════════════
 // Widget ID（手动实现，不依赖 define_id! 宏）
 // ═══════════════════════════════════════════════════════════════════════════════════
