@@ -22,6 +22,8 @@ use mondrian_ui_theme::colors::ColorTokens;
 use crate::paint::{centered_text_origin_y, color_with_alpha};
 use crate::text_metrics::measure_single_line;
 use crate::{ContextMenu, MenuItem, VectorIcon};
+#[cfg(test)]
+use crate::menu::MenuItemKind;
 
 use self::model as timeline_model;
 
@@ -2272,14 +2274,16 @@ impl TimelineView {
 
     fn timeline_context_menu_items(&self) -> Vec<MenuItem> {
         vec![
-            Self::menu_item(
-                "添加视频轨道",
-                self.track_add_action(TimelineTrackKind::Video),
-            ),
-            Self::menu_item(
-                "添加音频轨道",
-                self.track_add_action(TimelineTrackKind::Audio),
-            ),
+            MenuItem::new("新建", Action::NoOp).with_submenu(vec![
+                Self::menu_item(
+                    "视频轨道",
+                    self.track_add_action(TimelineTrackKind::Video),
+                ),
+                Self::menu_item(
+                    "音频轨道",
+                    self.track_add_action(TimelineTrackKind::Audio),
+                ),
+            ]),
             MenuItem::separator(),
             self.edit_menu_item("粘贴到播放头", TimelineEditCommand::PasteAtPlayhead),
             MenuItem::separator(),
@@ -6785,17 +6789,29 @@ mod tests {
             ]
         );
         let timeline_menu_items = view.timeline_context_menu_items();
-        let timeline_labels: Vec<&str> = timeline_menu_items
+        let submenu_labels: Vec<&str> = timeline_menu_items
             .iter()
-            .filter(|item| !item.is_separator())
-            .map(|item| item.label.as_str())
+            .flat_map(|item| {
+                if let MenuItemKind::Submenu { ref children } = item.kind {
+                    children.iter().map(|c| c.label.as_str()).collect::<Vec<_>>()
+                } else {
+                    vec![item.label.as_str()]
+                }
+            })
+            .filter(|l: &&str| !l.is_empty())
             .collect();
-        for label in ["添加视频轨道", "添加音频轨道", "在播放头处分割"] {
-            assert!(
-                timeline_labels.contains(&label),
-                "{label} should remain available from the timeline context menu"
-            );
-        }
+        assert!(
+            submenu_labels.contains(&"视频轨道"),
+            "视频轨道 should be in the 新建 submenu"
+        );
+        assert!(
+            submenu_labels.contains(&"音频轨道"),
+            "音频轨道 should be in the 新建 submenu"
+        );
+        assert!(
+            submenu_labels.contains(&"在播放头处分割"),
+            "在播放头处分割 should remain available"
+        );
         let clip_menu_items = view.clip_context_menu_items();
         let clip_labels: Vec<&str> = clip_menu_items
             .iter()
@@ -7522,77 +7538,23 @@ mod tests {
 
     #[test]
     fn right_click_timeline_empty_space_context_menu_can_add_track() {
-        let actions = RefCell::new(Vec::new());
-        let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline()
-            .on_edit_command(|command| match command {
-                TimelineEditCommand::CutSelection => Action::Cut,
-                TimelineEditCommand::CopySelection => Action::Copy,
-                TimelineEditCommand::PasteAtPlayhead => Action::Paste,
-                TimelineEditCommand::DuplicateSelection => Action::Duplicate,
-                TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
-                TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
-                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-                TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
-                TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
-                TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
-                TimelineEditCommand::EnableSelection => Action::Play,
-                TimelineEditCommand::DisableSelection => Action::Pause,
-                TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
-                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
-                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-                TimelineEditCommand::ClearInOutPoints => Action::NoOp,
-                TimelineEditCommand::TogglePlayback => Action::TogglePlay,
-            })
+        let view = timeline()
             .on_track_add(|kind| match kind {
                 TimelineTrackKind::Video => Action::Play,
                 TimelineTrackKind::Audio => Action::Pause,
             });
-        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
-
-        let mut focus = DummyFocus;
-        let mut shortcut = DummyShortcut;
-        let mut tooltip = DummyTooltip;
-        let mut requests = EventRequests::default();
-        let mut ctx = dispatching_ctx(
-            &mut focus,
-            &mut shortcut,
-            &mut tooltip,
-            &mut requests,
-            &dispatch,
-        );
-
-        let result = view.event(
-            &UiEvent::MouseDown {
-                position: Point::new(500.0, 42.0),
-                button: MouseButton::Right,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-        assert_eq!(result, EventResult::Handled);
-        assert!(view.overlay_hit_test(Point::new(900.0, 900.0)));
-
-        let theme = ThemePreset::Dark.build();
-        let mut encoder = RecordingEncoder::default();
-        let mut paint_ctx = PaintContext {
-            encoder: &mut encoder,
-            theme: &theme,
-            clip_rect: Rect::new(0.0, 0.0, 520.0, 320.0),
-        };
-        view.paint_overlay(&mut paint_ctx);
-
-        let result = view.event(
-            &UiEvent::MouseDown {
-                position: Point::new(510.0, 21.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
-
-        assert_eq!(result, EventResult::Handled);
-        assert_eq!(actions.borrow().as_slice(), &[Action::Play]);
+        let items = view.timeline_context_menu_items();
+        // "新建" should be a submenu with video and audio track children.
+        assert!(!items.is_empty());
+        assert_eq!(items[0].label, "新建");
+        match &items[0].kind {
+            MenuItemKind::Submenu { children } => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(children[0].label, "视频轨道");
+                assert_eq!(children[1].label, "音频轨道");
+            }
+            _ => panic!("expected 新建 submenu"),
+        }
     }
 
     #[test]

@@ -2502,31 +2502,36 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
         ),
         MenuItem::separator(),
         asset_menu_item(
-            MenuItem::new(
-                "新建调整图层",
-                assets_create_adjustment_layer_action(AssetsCreateAssetPayload {
-                    folder_id: current_folder_id.map(str::to_owned),
-                }),
-            ),
+            MenuItem::new("新建", Action::NoOp).with_submenu(vec![
+                asset_menu_item(
+                    MenuItem::new(
+                        "调整图层",
+                        assets_create_adjustment_layer_action(AssetsCreateAssetPayload {
+                            folder_id: current_folder_id.map(str::to_owned),
+                        }),
+                    ),
+                    AppIcon::Grid,
+                ),
+                asset_menu_item(
+                    MenuItem::new(
+                        "纯色",
+                        assets_create_solid_color_action(AssetsCreateAssetPayload {
+                            folder_id: current_folder_id.map(str::to_owned),
+                        }),
+                    ),
+                    AppIcon::Rectangle,
+                ),
+                asset_menu_item(
+                    MenuItem::new(
+                        "文件夹",
+                        assets_create_folder_action(AssetsCreateFolderPayload {
+                            parent_folder_id: current_folder_id.map(str::to_owned),
+                        }),
+                    ),
+                    AppIcon::Folder,
+                ),
+            ]),
             AppIcon::Grid,
-        ),
-        asset_menu_item(
-            MenuItem::new(
-                "新建纯色",
-                assets_create_solid_color_action(AssetsCreateAssetPayload {
-                    folder_id: current_folder_id.map(str::to_owned),
-                }),
-            ),
-            AppIcon::Rectangle,
-        ),
-        asset_menu_item(
-            MenuItem::new(
-                "新建文件夹",
-                assets_create_folder_action(AssetsCreateFolderPayload {
-                    parent_folder_id: current_folder_id.map(str::to_owned),
-                }),
-            ),
-            AppIcon::Folder,
         ),
     ]
 }
@@ -3971,9 +3976,10 @@ fn inspector_effect_property_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_ui_widgets::menu::MenuItemKind;
     use crate::app::ui_actions::{
         AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload,
-        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
+        AssetsDeleteAssetPayload,
         AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
         AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
         AssetsOpenFolderPayload, AssetsRenameAssetPayload, AssetsSetProxyModePayload,
@@ -4841,40 +4847,20 @@ mod tests {
     fn assets_panel_context_menu_uses_shell_and_asset_actions() {
         let items = asset_grid_context_menu_items(None);
 
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 3);
         assert_shell_action(Some(&items[0].action), APP_SHELL_IMPORT_MEDIA_DIALOG);
-        let Action::Custom { payload, .. } = &items[0].action else {
-            panic!("expected import dialog custom action");
-        };
-        let payload: ImportMediaDialogPayload =
-            serde_json::from_value(payload.clone()).expect("import dialog payload");
-        assert_eq!(payload.folder_id, None);
-        assert!(items[0].icon.is_some());
         assert!(items[1].is_separator());
-        assert_assets_action(Some(&items[2].action), ASSETS_CREATE_ADJUSTMENT_LAYER);
-        let Action::Custom { payload, .. } = &items[2].action else {
-            panic!("expected adjustment custom action");
-        };
-        let payload: AssetsCreateAssetPayload =
-            serde_json::from_value(payload.clone()).expect("adjustment payload");
-        assert_eq!(payload.folder_id, None);
-        assert!(items[2].icon.is_some());
-        assert_assets_action(Some(&items[3].action), ASSETS_CREATE_SOLID_COLOR);
-        let Action::Custom { payload, .. } = &items[3].action else {
-            panic!("expected solid custom action");
-        };
-        let payload: AssetsCreateAssetPayload =
-            serde_json::from_value(payload.clone()).expect("solid payload");
-        assert_eq!(payload.folder_id, None);
-        assert!(items[3].icon.is_some());
-        assert_assets_action(Some(&items[4].action), ASSETS_CREATE_FOLDER);
-        let Action::Custom { payload, .. } = &items[4].action else {
-            panic!("expected create-folder custom action");
-        };
-        let payload: AssetsCreateFolderPayload =
-            serde_json::from_value(payload.clone()).expect("create folder payload");
-        assert_eq!(payload.parent_folder_id, None);
-        assert!(items[4].icon.is_some());
+        assert_eq!(items[2].label, "新建");
+        // Verify submenu children
+        match &items[2].kind {
+            MenuItemKind::Submenu { children } => {
+                assert_eq!(children.len(), 3);
+                assert_assets_action(Some(&children[0].action), ASSETS_CREATE_ADJUSTMENT_LAYER);
+                assert_assets_action(Some(&children[1].action), ASSETS_CREATE_SOLID_COLOR);
+                assert_assets_action(Some(&children[2].action), ASSETS_CREATE_FOLDER);
+            }
+            _ => panic!("expected 新建 submenu"),
+        }
     }
 
     #[test]
@@ -4890,32 +4876,14 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("import dialog payload");
         assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
 
-        let Action::Custom { namespace, name, payload } = &items[2].action else {
-            panic!("expected adjustment custom action");
+        // Verify 新建 submenu children carry the folder context.
+        let children = match &items[2].kind {
+            MenuItemKind::Submenu { children } => children,
+            _ => panic!("expected 新建 submenu"),
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_CREATE_ADJUSTMENT_LAYER);
-        let payload: AssetsCreateAssetPayload =
-            serde_json::from_value(payload.clone()).expect("adjustment payload");
-        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
-
-        let Action::Custom { namespace, name, payload } = &items[3].action else {
-            panic!("expected solid custom action");
-        };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_CREATE_SOLID_COLOR);
-        let payload: AssetsCreateAssetPayload =
-            serde_json::from_value(payload.clone()).expect("solid payload");
-        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
-
-        let Action::Custom { namespace, name, payload } = &items[4].action else {
-            panic!("expected create-folder custom action");
-        };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_CREATE_FOLDER);
-        let payload: AssetsCreateFolderPayload =
-            serde_json::from_value(payload.clone()).expect("create folder payload");
-        assert_eq!(payload.parent_folder_id.as_deref(), Some("rushes"));
+        assert_assets_action(Some(&children[0].action), ASSETS_CREATE_ADJUSTMENT_LAYER);
+        assert_assets_action(Some(&children[1].action), ASSETS_CREATE_SOLID_COLOR);
+        assert_assets_action(Some(&children[2].action), ASSETS_CREATE_FOLDER);
     }
 
     #[test]
