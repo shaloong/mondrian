@@ -216,6 +216,11 @@ impl AppUiHost {
     /// Poll background host tasks. Returns true when a repaint was requested by
     /// refreshed model data.
     pub fn poll_background_tasks(&mut self, bounds: Rect) -> bool {
+        // Keep the waveform cache's library reference in sync with the
+        // current app state (e.g. when a new project opens).
+        if let Some(ref library) = self.app_state.borrow().asset_library {
+            self.waveform_cache.set_library(Arc::clone(library));
+        }
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_changed = self.preview_service.poll_finished();
         let waveform_changed = self.waveform_cache.poll_finished();

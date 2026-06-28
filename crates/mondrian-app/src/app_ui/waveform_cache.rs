@@ -23,33 +23,13 @@ use std::sync::{mpsc, Arc};
 use mondrian_assets::AssetLibrary;
 use mondrian_core::AssetId;
 use mondrian_media::audio::decode_audio_file_with_ffmpeg_cli;
-use mondrian_media::waveform::{compute_waveform, WaveformData, MAX_WAVEFORM_WIDTH};
+use mondrian_media::waveform::{compute_waveform, MAX_WAVEFORM_WIDTH};
 
 thread_local! {
     static CACHE: RefCell<*const AudioWaveformCache> = const { RefCell::new(std::ptr::null()) };
 }
 
-/// Priority bucket used by the render path to decide which resolution to
-/// request first and whether an approx result is acceptable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WaveformResolution {
-    /// ~128 px — quick preview shown while higher-res is pending.
-    Low,
-    /// ~512 px — standard timeline zoom.
-    Medium,
-    /// ~4096 px — high-detail zoom; the canonical source envelope resolution.
-    High,
-}
 
-impl WaveformResolution {
-    fn pixel_width(self) -> u32 {
-        match self {
-            Self::Low => 128,
-            Self::Medium => 512,
-            Self::High => MAX_WAVEFORM_WIDTH,
-        }
-    }
-}
 
 // ── Source cache ──────────────────────────────────────────────────────────
 
@@ -101,6 +81,7 @@ pub struct AudioWaveformCache {
 }
 
 impl AudioWaveformCache {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let (job_sender, job_receiver) = mpsc::channel::<SourceJob>();
         let (result_sender, result_receiver) = mpsc::channel::<SourceResult>();
@@ -191,24 +172,33 @@ impl AudioWaveformCache {
         }
 
         // Check source cache.
-        let cache = self.source_cache.borrow();
-        let source = cache.get(&key)?;
-        let total_secs = source.total_samples as f64 / source.sample_rate as f64;
-
-        // Clamp to valid range.
-        let start = (start_secs.max(0.0) / total_secs.max(0.001)).clamp(0.0, 1.0);
-        let end = (end_secs.min(total_secs) / total_secs.max(0.001)).clamp(start, 1.0);
-
-        let envelope = &source.envelope;
-        let env_len = envelope.len();
-
-        // Slice the relevant portion of the full-file envelope.
-        let start_idx = ((start * env_len as f64) as usize).min(env_len);
-        let end_idx = ((end * env_len as f64).ceil() as usize).min(env_len).max(start_idx + 1);
-
-        // Re-sample to pixel_width.
-        let slice = &envelope[start_idx..end_idx];
-        Some(resample_peaks(slice, pixel_width))
+        let source = {
+            let cache = self.source_cache.borrow();
+            cache.get(&key).cloned()
+        };
+        match source {
+            Some(source) => {
+                let total_secs = source.total_samples as f64 / source.sample_rate as f64;
+                let start =
+                    (start_secs.max(0.0) / total_secs.max(0.001)).clamp(0.0, 1.0);
+                let end =
+                    (end_secs.min(total_secs) / total_secs.max(0.001)).clamp(start, 1.0);
+                let env_len = source.envelope.len();
+                let start_idx = ((start * env_len as f64) as usize).min(env_len);
+                let end_idx =
+                    ((end * env_len as f64).ceil() as usize).min(env_len).max(start_idx + 1);
+                let slice = &source.envelope[start_idx..end_idx];
+                Some(resample_peaks(slice, pixel_width))
+            }
+            None => {
+                // Auto-request decode if not already pending/errored.
+                if !self.source_pending.borrow().contains(&key) {
+                    drop(self.source_pending.borrow()); // release before request_source re-borrows
+                    self.request_source(asset_id, revision);
+                }
+                None
+            }
+        }
     }
 
     /// Schedule a source decode job if not already pending/errored.

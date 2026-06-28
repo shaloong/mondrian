@@ -293,6 +293,17 @@ pub enum TimelineClipKind {
     SolidColor,
 }
 
+/// Callback for paint-time waveform peak lookup.
+///
+/// The app wires this to [`AudioWaveformCache::lookup`] so the widget
+/// layer stays decoupled from the audio infrastructure.
+pub type WaveformLookupFn = dyn Fn(
+    mondrian_core::AssetId,
+    f64, // source_start_secs
+    f64, // source_end_secs
+    u32, // pixel_width
+) -> Option<Vec<f32>>;
+
 /// Clip view model rendered by [`TimelineView`].
 #[derive(Debug, Clone)]
 pub struct TimelineClip {
@@ -531,7 +542,7 @@ pub struct TimelineView {
     toolbar_icons: Vec<(TimelineToolbarIconSlot, VectorIcon)>,
     track_control_icons: Vec<(TimelineTrackControlIconSlot, VectorIcon)>,
     empty_message: Option<String>,
-    waveform_lookup: Option<Box<dyn Fn(mondrian_core::AssetId, f64, f64, u32) -> Option<Vec<f32>>>>,
+    waveform_lookup: Option<Box<WaveformLookupFn>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3393,21 +3404,6 @@ impl TimelineView {
         }
     }
 
-    /// Look up waveform peaks for an audio clip from the global waveform
-    /// cache.  Returns `None` if the cache isn't ready yet (first frame or
-    /// decode pending).
-    fn lookup_waveform_peaks(
-        asset_id: mondrian_core::AssetId,
-        source_start_secs: f64,
-        source_end_secs: f64,
-        pixel_width: u32,
-    ) -> Option<&'static [f32]> {
-        // Avoid the borrow checker by using the thread_local directly.
-        // We can't return a reference into the cache from try_with, so we
-        // return a static slice and caller must use immediately.
-        None // TODO
-    }
-
     fn paint_clip(
         &self,
         ctx: &mut PaintContext,
@@ -3458,16 +3454,7 @@ impl TimelineView {
             1.0,
             color_with_alpha(Color::BLACK, 0.10),
         );
-/// Callback for paint-time waveform peak lookup.
-///
-/// The app wires this to [`AudioWaveformCache::lookup`] so the widget
-/// layer stays decoupled from the audio infrastructure.
-pub type WaveformLookupFn = dyn Fn(
-    mondrian_core::AssetId,
-    f64,  // source_start_secs
-    f64,  // source_end_secs
-    u32,  // pixel_width
-) -> Option<Vec<f32>>;
+
 
         if clip.kind == TimelineClipKind::Audio {
             let peaks: Option<Vec<f32>> = if !clip.waveform_peaks.is_empty() {
