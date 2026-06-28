@@ -8,13 +8,16 @@ mod geometry;
 mod model;
 mod paint;
 
-pub(crate) use geometry::{anchored_menu_rect, rect_has_paintable_area};
+pub(crate) use geometry::{
+    anchored_menu_rect, item_at as geometry_item_at, item_rect as geometry_item_rect,
+    rect_has_paintable_area, submenu_rect,
+};
 use model::MENU_POPUP_PADDING;
 pub use model::{DropdownTriggerStyle, MenuItem, MenuItemKind};
 pub(crate) use model::{MenuRowPaint, MenuVisualTokens};
 pub(crate) use paint::{
     paint_disabled_trigger, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
-    paint_menu_separator, paint_menu_trigger, paint_open_menu_with_submenu,
+    paint_menu_separator, paint_menu_trigger, paint_open_menu_with_submenu, paint_submenu_arrow,
 };
 
 use std::cell::Cell;

@@ -128,7 +128,12 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         .set(crate::app_ui::about_dialog::AboutSystemInfo {
             pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
             rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
-            os: if cfg!(windows) { "Windows" } else { std::env::consts::OS }.to_owned(),
+            os: if cfg!(windows) {
+                "Windows"
+            } else {
+                std::env::consts::OS
+            }
+            .to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
             os_version: String::new(),
             wgpu_backend: format!("{:?}", adapter_info.backend),

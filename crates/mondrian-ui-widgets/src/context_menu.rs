@@ -1,6 +1,7 @@
 //! 右键菜单控件
 //!
 //! 在指定位置弹出菜单项列表。点击选项或外部区域关闭。
+//! 支持嵌套子菜单，与 Dropdown 共享相同的深度链架构。
 
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -11,10 +12,13 @@ use mondrian_ui_theme::{Theme, ThemePreset};
 use std::cell::Cell;
 
 use crate::menu::{
-    anchored_menu_rect, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
-    paint_menu_separator, rect_has_paintable_area, MenuItem, MenuRowPaint,
+    anchored_menu_rect, geometry_item_at, geometry_item_rect, paint_menu_popup_chrome,
+    paint_menu_row, paint_menu_scrollbar, paint_menu_separator, paint_submenu_arrow,
+    rect_has_paintable_area, submenu_rect, MenuItem, MenuItemKind, MenuRowPaint,
 };
 use crate::text_metrics::measure_single_line;
+
+const MAX_VISIBLE_ITEMS: usize = 40;
 
 /// 右键弹出菜单
 ///
@@ -25,7 +29,11 @@ pub struct ContextMenu {
     anchor: Point,
     bounds: Rect,
     visible: bool,
-    hovered: Option<usize>,
+    /// 打开的子菜单深度链。chain[0] = 父菜单中被悬停的子菜单项索引。
+    submenu_chain: Vec<usize>,
+    /// (depth, item_index) — 当前悬停的层级和项索引。
+    /// depth 0 = 父菜单, depth 1 = 第一级子菜单, 等等。
+    hover_depth: Option<(usize, usize)>,
     local_command: Option<String>,
     overlay_viewport: Cell<Option<Rect>>,
     scroll_offset: Cell<f32>,
@@ -80,7 +88,8 @@ impl ContextMenu {
             anchor,
             bounds: Rect::ZERO,
             visible: true,
-            hovered: None,
+            submenu_chain: Vec::new(),
+            hover_depth: None,
             local_command: None,
             overlay_viewport: Cell::new(None),
             scroll_offset: Cell::new(0.0),
@@ -197,6 +206,114 @@ impl ContextMenu {
         }
     }
 
+    // ── Submenu navigation ──────────────────────────────────────────────────────
+
+    fn children_at(&self, chain_path: &[usize]) -> Option<&[MenuItem]> {
+        let mut items: &[MenuItem] = &self.items;
+        for idx in chain_path {
+            let item = items.get(*idx)?;
+            match &item.kind {
+                MenuItemKind::Submenu { children } => items = children,
+                _ => return None,
+            }
+        }
+        Some(items)
+    }
+
+    fn submenu_rect_at(&self, chain_path: &[usize]) -> Option<Rect> {
+        if chain_path.is_empty() {
+            return None;
+        }
+        let parent_rect = self.item_rect(chain_path[0]);
+        let children = self.children_at(&chain_path[..1])?;
+        let mut bg = submenu_rect(parent_rect, children, MAX_VISIBLE_ITEMS, self.item_height());
+        let mut scroll = 0.0f32;
+        let mut current_items = children;
+
+        for d in 1..chain_path.len() {
+            let idx = chain_path[d];
+            let item = current_items.get(idx)?;
+            match &item.kind {
+                MenuItemKind::Submenu { children: new_children } => {
+                    let parent_rect = geometry_item_rect(bg, idx, self.item_height(), scroll);
+                    let sub = submenu_rect(
+                        parent_rect,
+                        new_children,
+                        MAX_VISIBLE_ITEMS,
+                        self.item_height(),
+                    );
+                    if d == chain_path.len() - 1 {
+                        return Some(sub);
+                    }
+                    bg = sub;
+                    scroll = 0.0;
+                    current_items = new_children;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn menu_rect_at_depth(&self, depth: usize) -> Option<Rect> {
+        if depth == 0 {
+            Some(self.bounds_rect())
+        } else {
+            self.submenu_rect_at(&self.submenu_chain[..depth])
+        }
+    }
+
+    fn item_at_depth(&self, position: Point, depth: usize) -> Option<usize> {
+        let menu_rect = self.menu_rect_at_depth(depth)?;
+        let children = self.children_at(&self.submenu_chain[..depth])?;
+        geometry_item_at(menu_rect, children.len(), self.item_height(), 0.0, position)
+            .filter(|i| children[*i].is_activatable())
+    }
+
+    fn is_in_submenu_keep_alive_zone(&self, position: Point, depth: usize) -> bool {
+        if depth == 0 || depth > self.submenu_chain.len() {
+            return false;
+        }
+        let menu_bg = if depth == 1 {
+            self.bounds_rect()
+        } else {
+            let Some(bg) = self.submenu_rect_at(&self.submenu_chain[..depth - 1]) else {
+                return false;
+            };
+            bg
+        };
+        let parent_idx = self.submenu_chain[depth - 1];
+        let parent_rect = if depth == 1 {
+            self.item_rect(parent_idx)
+        } else {
+            geometry_item_rect(menu_bg, parent_idx, self.item_height(), 0.0)
+        };
+        let Some(sub_rect) = self.menu_rect_at_depth(depth) else {
+            return false;
+        };
+        if sub_rect.contains(position) || parent_rect.contains(position) {
+            return true;
+        }
+        let parent_right = parent_rect.x + parent_rect.width;
+        let bridge_left = parent_right;
+        let bridge_right = sub_rect.x;
+        let bridge_top = parent_rect.y.min(sub_rect.y);
+        let bridge_bottom = (parent_rect.y + parent_rect.height).max(sub_rect.y + sub_rect.height);
+        let bridge = Rect::new(
+            bridge_left,
+            bridge_top,
+            (bridge_right - bridge_left).max(0.0),
+            (bridge_bottom - bridge_top).max(0.0),
+        );
+        bridge.contains(position)
+    }
+
+    // ── Activation ───────────────────────────────────────────────────────────────
+
+    fn hovered_index(&self) -> Option<usize> {
+        self.hover_depth.filter(|(d, _)| *d == 0).map(|(_, i)| i)
+    }
+
     fn first_activatable_index(&self) -> Option<usize> {
         self.items.iter().position(MenuItem::is_activatable)
     }
@@ -212,7 +329,7 @@ impl ContextMenu {
             return None;
         }
         let current = self
-            .hovered
+            .hovered_index()
             .and_then(|index| activatable.iter().position(|candidate| *candidate == index));
         let next = match (current, direction) {
             (Some(index), d) if d < 0 => (index + activatable.len() - 1) % activatable.len(),
@@ -233,18 +350,19 @@ impl ContextMenu {
             (ctx.dispatch)(self.items[index].action.clone());
         }
         self.visible = false;
+        self.submenu_chain.clear();
         true
     }
 
     fn activate_hovered(&mut self, ctx: &mut EventContext) -> bool {
-        let Some(index) = self.hovered.or_else(|| self.first_activatable_index()) else {
+        let Some(index) = self.hovered_index().or_else(|| self.first_activatable_index()) else {
             return false;
         };
         self.activate_index(index, ctx)
     }
 
     fn ensure_hover_visible(&self) {
-        let Some(index) = self.hovered else {
+        let Some(index) = self.hovered_index() else {
             return;
         };
         let row_top = index as f32 * self.item_height();
@@ -257,6 +375,12 @@ impl ContextMenu {
             self.scroll_offset.set(row_bottom - self.visible_content_height());
         }
         self.clamp_scroll_offset();
+    }
+
+    fn close(&mut self) {
+        self.visible = false;
+        self.submenu_chain.clear();
+        self.hover_depth = None;
     }
 }
 
@@ -286,19 +410,104 @@ impl Widget for ContextMenu {
 
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                // Check submenu clicks first (deepest first).
+                let chain_len = self.submenu_chain.len();
+                for depth in (1..=chain_len).rev() {
+                    if let Some(sub_rect) = self.menu_rect_at_depth(depth) {
+                        if sub_rect.contains(*position) {
+                            if let Some(children) = self.children_at(&self.submenu_chain[..depth]) {
+                                if let Some(sub_idx) = geometry_item_at(
+                                    sub_rect,
+                                    children.len(),
+                                    self.item_height(),
+                                    0.0,
+                                    *position,
+                                ) {
+                                    if let Some(child) = children.get(sub_idx) {
+                                        if child.is_activatable() {
+                                            if let Some(command) = child.local_command.clone() {
+                                                self.local_command = Some(command);
+                                            } else {
+                                                (ctx.dispatch)(child.action.clone());
+                                            }
+                                            self.close();
+                                            return EventResult::Handled;
+                                        }
+                                    }
+                                }
+                            }
+                            self.close();
+                            return EventResult::Handled;
+                        }
+                    }
+                }
+
+                // Parent menu click.
                 if let Some(index) = self.item_at(*position) {
                     if self.items[index].is_activatable() {
                         self.activate_index(index, ctx);
                     }
                     return EventResult::Handled;
                 }
+
+                // Clicked outside — close if not inside any submenu.
                 if !self.bounds_rect().contains(*position) {
-                    self.visible = false;
+                    let in_submenu = (1..=chain_len)
+                        .any(|d| self.menu_rect_at_depth(d).is_some_and(|r| r.contains(*position)));
+                    if !in_submenu {
+                        self.close();
+                    }
                 }
                 EventResult::Handled
             }
             UiEvent::MouseMove { position, .. } => {
-                self.hovered = self.item_at(*position).filter(|i| self.items[*i].is_activatable());
+                let mut new_hover_depth: Option<(usize, usize)> = None;
+                let mut handled = false;
+
+                // Check from deepest submenu upward
+                for check_depth in (1..=self.submenu_chain.len()).rev() {
+                    if let Some(sub_rect) = self.menu_rect_at_depth(check_depth) {
+                        if sub_rect.contains(*position) {
+                            if let Some(hovered_idx) = self.item_at_depth(*position, check_depth) {
+                                new_hover_depth = Some((check_depth, hovered_idx));
+                                let children =
+                                    self.children_at(&self.submenu_chain[..check_depth]).unwrap();
+                                if children[hovered_idx].is_submenu()
+                                    && self.submenu_chain.len() <= check_depth
+                                {
+                                    self.submenu_chain.push(hovered_idx);
+                                }
+                            }
+                            handled = true;
+                            break;
+                        }
+                    }
+
+                    if self.is_in_submenu_keep_alive_zone(*position, check_depth) {
+                        new_hover_depth =
+                            Some((check_depth - 1, self.submenu_chain[check_depth - 1]));
+                        self.submenu_chain.truncate(check_depth);
+                        handled = true;
+                        break;
+                    }
+
+                    self.submenu_chain.truncate(check_depth - 1);
+                }
+
+                if !handled {
+                    new_hover_depth = self
+                        .item_at(*position)
+                        .filter(|i| self.items[*i].is_activatable())
+                        .map(|i| (0, i));
+
+                    if let Some((0, idx)) = new_hover_depth {
+                        if self.items[idx].is_submenu() && !self.submenu_chain.contains(&idx) {
+                            self.submenu_chain.push(idx);
+                        }
+                    }
+                }
+
+                self.hover_depth = new_hover_depth;
                 EventResult::Handled
             }
             UiEvent::MouseWheel { delta, position, .. } => {
@@ -313,22 +522,22 @@ impl Widget for ContextMenu {
                 EventResult::Handled
             }
             UiEvent::MouseDown { button: MouseButton::Right, .. } => {
-                self.visible = false;
+                self.close();
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
-                self.visible = false;
+                self.close();
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Down, modifiers }
                 if *modifiers == Modifiers::none() =>
             {
-                self.hovered = self.next_activatable_index(1);
+                self.hover_depth = self.next_activatable_index(1).map(|i| (0, i));
                 self.ensure_hover_visible();
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Up, modifiers } if *modifiers == Modifiers::none() => {
-                self.hovered = self.next_activatable_index(-1);
+                self.hover_depth = self.next_activatable_index(-1).map(|i| (0, i));
                 self.ensure_hover_visible();
                 EventResult::Handled
             }
@@ -382,9 +591,14 @@ impl Widget for ContextMenu {
                 MenuRowPaint {
                     enabled: item.enabled,
                     active: item.checked,
-                    hovered: self.hovered == Some(i),
+                    hovered: self.hover_depth.is_some_and(|(d, idx)| d == 0 && idx == i)
+                        || self.submenu_chain.first() == Some(&i),
                 },
             );
+
+            if item.is_submenu() {
+                paint_submenu_arrow(ctx, r);
+            }
         }
         ctx.pop_clip();
         paint_menu_scrollbar(
@@ -394,6 +608,65 @@ impl Widget for ContextMenu {
             self.content_height(),
             self.scroll_offset.get(),
         );
+
+        // Paint open submenus recursively
+        let mut current_bg = bg;
+        let mut current_items: &[MenuItem] = &self.items;
+        let mut current_scroll = self.scroll_offset.get();
+
+        for depth in 0..self.submenu_chain.len() {
+            let sub_idx = self.submenu_chain[depth];
+            let item = match current_items.get(sub_idx) {
+                Some(item) => item,
+                None => break,
+            };
+            let children = match &item.kind {
+                MenuItemKind::Submenu { children } => children,
+                _ => break,
+            };
+            if children.is_empty() {
+                break;
+            }
+            let parent_rect = if depth == 0 {
+                self.item_rect(sub_idx)
+            } else {
+                geometry_item_rect(current_bg, sub_idx, self.item_height(), current_scroll)
+            };
+            let sub_bg = submenu_rect(parent_rect, children, MAX_VISIBLE_ITEMS, self.item_height());
+
+            paint_menu_popup_chrome(ctx, sub_bg);
+            ctx.push_clip(sub_bg.inset(1.0, 1.0));
+            for (ci, child) in children.iter().enumerate() {
+                let cir = geometry_item_rect(sub_bg, ci, self.item_height(), 0.0);
+                if child.is_separator() {
+                    paint_menu_separator(ctx, cir);
+                    continue;
+                }
+                let hovered = self.hover_depth.is_some_and(|(d, idx)| d == depth + 1 && idx == ci)
+                    || self.submenu_chain.get(depth + 1) == Some(&ci);
+                paint_menu_row(
+                    ctx,
+                    cir,
+                    &child.label,
+                    child.shortcut.as_deref(),
+                    child.icon.as_ref(),
+                    false,
+                    MenuRowPaint {
+                        enabled: child.enabled,
+                        active: child.checked,
+                        hovered,
+                    },
+                );
+                if child.is_submenu() {
+                    paint_submenu_arrow(ctx, cir);
+                }
+            }
+            ctx.pop_clip();
+
+            current_bg = sub_bg;
+            current_items = children;
+            current_scroll = 0.0;
+        }
     }
 
     fn overlay_hit_test(&self, _point: Point) -> bool {
@@ -410,7 +683,7 @@ impl Widget for ContextMenu {
                 .with_name("Context menu")
                 .with_state(AccessibilityState {
                     expanded: Some(true),
-                    selected: Some(self.hovered.is_some()),
+                    selected: Some(self.hover_depth.is_some()),
                     ..AccessibilityState::default()
                 })
         })
@@ -534,7 +807,7 @@ mod tests {
             Point::new(100.0, 100.0),
             vec![MenuItem::new("Cut", Action::Cut)],
         );
-        menu.hovered = Some(0);
+        menu.hover_depth = Some((0, 0));
 
         let node = menu.accessibility().expect("visible context menu should expose accessibility");
 
@@ -660,7 +933,7 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(menu.hovered, Some(1));
+        assert_eq!(menu.hover_depth, Some((0, 1)));
 
         menu.event(
             &UiEvent::MouseMove {
@@ -669,7 +942,7 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(menu.hovered, None);
+        assert_eq!(menu.hover_depth, None);
     }
 
     #[test]
@@ -697,12 +970,12 @@ mod tests {
             &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
             &mut ctx,
         );
-        assert_eq!(menu.hovered, Some(0));
+        assert_eq!(menu.hover_depth, Some((0, 0)));
         menu.event(
             &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
             &mut ctx,
         );
-        assert_eq!(menu.hovered, Some(3));
+        assert_eq!(menu.hover_depth, Some((0, 3)));
         menu.event(
             &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
             &mut ctx,
@@ -722,7 +995,7 @@ mod tests {
             ],
         );
         menu.layout(Rect::ZERO);
-        menu.hovered = Some(1);
+        menu.hover_depth = Some((0, 1));
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
@@ -743,7 +1016,7 @@ mod tests {
                 EventResult::Ignored
             );
             assert!(menu.visible);
-            assert_eq!(menu.hovered, Some(1));
+            assert_eq!(menu.hover_depth, Some((0, 1)));
         }
         assert!(cell.borrow().is_empty());
     }

@@ -19,11 +19,11 @@ use mondrian_ui_core::widget::{
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::colors::ColorTokens;
 
+#[cfg(test)]
+use crate::menu::MenuItemKind;
 use crate::paint::{centered_text_origin_y, color_with_alpha};
 use crate::text_metrics::measure_single_line;
 use crate::{ContextMenu, MenuItem, VectorIcon};
-#[cfg(test)]
-use crate::menu::MenuItemKind;
 
 use self::model as timeline_model;
 
@@ -2273,18 +2273,20 @@ impl TimelineView {
     }
 
     fn timeline_context_menu_items(&self) -> Vec<MenuItem> {
-        vec![
-            MenuItem::new("新建", Action::NoOp).with_submenu(vec![
-                Self::menu_item(
-                    "视频轨道",
-                    self.track_add_action(TimelineTrackKind::Video),
-                ),
-                Self::menu_item(
-                    "音频轨道",
-                    self.track_add_action(TimelineTrackKind::Audio),
-                ),
-            ]),
-            MenuItem::separator(),
+        let mut items = Vec::new();
+
+        // Only include "新建" submenu when track-add callback is registered.
+        if self.on_track_add.is_some() {
+            items.push(
+                MenuItem::new("新建", Action::NoOp).with_submenu(vec![
+                    Self::menu_item("视频轨道", self.track_add_action(TimelineTrackKind::Video)),
+                    Self::menu_item("音频轨道", self.track_add_action(TimelineTrackKind::Audio)),
+                ]),
+            );
+            items.push(MenuItem::separator());
+        }
+
+        items.extend_from_slice(&[
             self.edit_menu_item("粘贴到播放头", TimelineEditCommand::PasteAtPlayhead),
             MenuItem::separator(),
             self.edit_menu_item("剪切所选", TimelineEditCommand::CutSelection),
@@ -2311,7 +2313,8 @@ impl TimelineView {
             self.edit_menu_item("标记入点", TimelineEditCommand::MarkInAtPlayhead),
             self.edit_menu_item("标记出点", TimelineEditCommand::MarkOutAtPlayhead),
             self.edit_menu_item("清除入点/出点", TimelineEditCommand::ClearInOutPoints),
-        ]
+        ]);
+        items
     }
 
     fn open_context_menu(
@@ -7538,11 +7541,10 @@ mod tests {
 
     #[test]
     fn right_click_timeline_empty_space_context_menu_can_add_track() {
-        let view = timeline()
-            .on_track_add(|kind| match kind {
-                TimelineTrackKind::Video => Action::Play,
-                TimelineTrackKind::Audio => Action::Pause,
-            });
+        let view = timeline().on_track_add(|kind| match kind {
+            TimelineTrackKind::Video => Action::Play,
+            TimelineTrackKind::Audio => Action::Pause,
+        });
         let items = view.timeline_context_menu_items();
         // "新建" should be a submenu with video and audio track children.
         assert!(!items.is_empty());

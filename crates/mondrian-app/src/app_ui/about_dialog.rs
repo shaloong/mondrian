@@ -74,11 +74,7 @@ impl AboutSystemInfo {
              渲染器: {}\n\
              Rust: {}\n\
              OS: {} {}",
-            self.pkg_version,
-            self.wgpu_backend,
-            self.rust_version,
-            self.os,
-            self.arch,
+            self.pkg_version, self.wgpu_backend, self.rust_version, self.os, self.arch,
         );
         if !self.os_version.is_empty() {
             s.push_str(&format!(" {}", self.os_version));

@@ -441,7 +441,7 @@ pub(crate) fn paint_open_menu_with_submenu(
 }
 
 /// Paint a right-pointing chevron on a submenu row using an SVG vector icon.
-fn paint_submenu_arrow(ctx: &mut PaintContext, row_rect: Rect) {
+pub(crate) fn paint_submenu_arrow(ctx: &mut PaintContext, row_rect: Rect) {
     let visual = MenuVisualTokens::from_theme(ctx.theme);
     let tokens = &ctx.theme.colors;
     let size = (row_rect.height * 0.4).clamp(8.0, 14.0);

@@ -3976,15 +3976,13 @@ fn inspector_effect_property_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_ui_widgets::menu::MenuItemKind;
     use crate::app::ui_actions::{
         AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload,
-        AssetsDeleteAssetPayload,
-        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
-        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-        AssetsOpenFolderPayload, AssetsRenameAssetPayload, AssetsSetProxyModePayload,
-        ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-        APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
+        AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+        AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsRenameAssetPayload,
+        AssetsSetProxyModePayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
+        APP_SHELL_NAMESPACE, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
         ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
         ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
@@ -4008,6 +4006,7 @@ mod tests {
     use mondrian_ui_core::widget::{EventContext, EventRequests, PaintContext};
     use mondrian_ui_core::UiEvent;
     use mondrian_ui_events::EventRouter;
+    use mondrian_ui_widgets::menu::MenuItemKind;
     use std::cell::RefCell;
     use std::path::PathBuf;
 
