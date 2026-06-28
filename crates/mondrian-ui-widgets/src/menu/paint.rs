@@ -297,7 +297,7 @@ fn trigger_text_y(rect: Rect, font_size: f32, style: DropdownTriggerStyle) -> f3
 // ── Open menu paint ──────────────────────────────────────────────────────────────
 
 /// Paint the full open popup: chrome, rows, separators, scrollbar, and
-/// optional open submenu at `open_submenu_index`.
+/// submenu levels defined by `submenu_chain`.
 pub(crate) fn paint_open_menu_with_submenu(
     ctx: &mut PaintContext,
     bounds: Rect,
@@ -306,12 +306,11 @@ pub(crate) fn paint_open_menu_with_submenu(
     trigger_style: DropdownTriggerStyle,
     max_visible_items: usize,
     item_height: f32,
-    hovered_index: Option<usize>,
+    hover_depth: Option<(usize, usize)>,
     scroll_offset: f32,
     overlay_viewport: &std::cell::Cell<Option<Rect>>,
     open: bool,
-    open_submenu_index: Option<usize>,
-    open_submenu_hovered: Option<usize>,
+    submenu_chain: &[usize],
 ) {
     use super::geometry::{
         icon_lane_width, item_rect, menu_rect, rect_has_paintable_area, submenu_rect,
@@ -362,7 +361,8 @@ pub(crate) fn paint_open_menu_with_submenu(
             MenuRowPaint {
                 enabled: item.enabled,
                 active: item.checked,
-                hovered: hovered_index == Some(i) || open_submenu_index == Some(i),
+                hovered: hover_depth.is_some_and(|(d, idx)| d == 0 && idx == i)
+                    || submenu_chain.first() == Some(&i),
             },
         );
 
@@ -383,40 +383,60 @@ pub(crate) fn paint_open_menu_with_submenu(
         scroll_offset,
     );
 
-    // Paint open submenu
-    if let Some(sub_idx) = open_submenu_index {
-        if let Some(item) = items.get(sub_idx) {
-            if let crate::menu::model::MenuItemKind::Submenu { ref children } = item.kind {
-                if !children.is_empty() {
-                    let parent_rect = item_rect(menu_bg, sub_idx, item_height, scroll_offset);
-                    let sub_bg =
-                        submenu_rect(parent_rect, children, max_visible_items, item_height);
-                    paint_menu_popup_chrome(ctx, sub_bg);
-                    ctx.push_clip(sub_bg.inset(1.0, 1.0));
-                    for (ci, child) in children.iter().enumerate() {
-                        let cir = item_rect(sub_bg, ci, item_height, 0.0);
-                        if child.is_separator() {
-                            paint_menu_separator(ctx, cir);
-                            continue;
-                        }
-                        paint_menu_row(
-                            ctx,
-                            cir,
-                            &child.label,
-                            child.shortcut.as_deref(),
-                            child.icon.as_ref(),
-                            false,
-                            MenuRowPaint {
-                                enabled: child.enabled,
-                                active: child.checked,
-                                hovered: open_submenu_hovered == Some(ci),
-                            },
-                        );
-                    }
-                    ctx.pop_clip();
-                }
+    // Paint submenu levels
+    let mut current_bg = menu_bg;
+    let mut current_items: &[crate::menu::model::MenuItem] = items;
+    let mut current_scroll = scroll_offset;
+
+    for depth in 0..submenu_chain.len() {
+        let sub_idx = submenu_chain[depth];
+        let item = match current_items.get(sub_idx) {
+            Some(item) => item,
+            None => break,
+        };
+        let children = match &item.kind {
+            crate::menu::model::MenuItemKind::Submenu { children } => children,
+            _ => break,
+        };
+        if children.is_empty() {
+            break;
+        }
+        let parent_rect = item_rect(current_bg, sub_idx, item_height, current_scroll);
+        let sub_bg = submenu_rect(parent_rect, children, max_visible_items, item_height);
+
+        paint_menu_popup_chrome(ctx, sub_bg);
+        ctx.push_clip(sub_bg.inset(1.0, 1.0));
+        for (ci, child) in children.iter().enumerate() {
+            let cir = item_rect(sub_bg, ci, item_height, 0.0);
+            if child.is_separator() {
+                paint_menu_separator(ctx, cir);
+                continue;
+            }
+            let hovered = hover_depth.is_some_and(|(d, idx)| d == depth + 1 && idx == ci)
+                || submenu_chain.get(depth + 1) == Some(&ci);
+            paint_menu_row(
+                ctx,
+                cir,
+                &child.label,
+                child.shortcut.as_deref(),
+                child.icon.as_ref(),
+                false,
+                MenuRowPaint {
+                    enabled: child.enabled,
+                    active: child.checked,
+                    hovered,
+                },
+            );
+            if child.is_submenu() {
+                paint_submenu_arrow(ctx, cir);
             }
         }
+        ctx.pop_clip();
+
+        // Advance for next iteration
+        current_bg = sub_bg;
+        current_items = children;
+        current_scroll = 0.0;
     }
 }
 
@@ -432,12 +452,11 @@ fn paint_submenu_arrow(ctx: &mut PaintContext, row_rect: Rect) {
 }
 
 fn submenu_arrow_icon() -> crate::vector_icon::VectorIcon {
-    use std::sync::OnceLock;
     use crate::vector_icon::VectorIcon;
+    use std::sync::OnceLock;
 
     static ICON: OnceLock<VectorIcon> = OnceLock::new();
-    ICON
-        .get_or_init(|| VectorIcon::from_svg_str(include_str!("caret_right.svg")).unwrap())
+    ICON.get_or_init(|| VectorIcon::from_svg_str(include_str!("caret_right.svg")).unwrap())
         .clone()
 }
 

@@ -9,9 +9,9 @@ mod model;
 mod paint;
 
 pub(crate) use geometry::{anchored_menu_rect, rect_has_paintable_area};
+use model::MENU_POPUP_PADDING;
 pub use model::{DropdownTriggerStyle, MenuItem, MenuItemKind};
 pub(crate) use model::{MenuRowPaint, MenuVisualTokens};
-use model::MENU_POPUP_PADDING;
 pub(crate) use paint::{
     paint_disabled_trigger, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
     paint_menu_separator, paint_menu_trigger, paint_open_menu_with_submenu,
@@ -46,7 +46,6 @@ pub struct Dropdown {
     bounds: Rect,
     enabled: bool,
     open: bool,
-    hovered_index: Option<usize>,
     pressed_index: Option<usize>,
     item_height: f32,
     max_visible_items: usize,
@@ -55,8 +54,13 @@ pub struct Dropdown {
     focused: bool,
     focus_visible: bool,
     trigger_hovered: bool,
-    open_submenu_index: Option<usize>,
-    open_submenu_hovered: Option<usize>,
+    /// Stack of open submenu indices forming a path through nested submenus.
+    /// chain[0] = index in parent menu → first submenu is open
+    /// chain[1] = index inside chain[0]'s children → second submenu is open, etc.
+    submenu_chain: Vec<usize>,
+    /// (depth, item_index) — which item at which depth is hovered.
+    /// depth 0 = parent menu, depth 1 = first submenu, etc.
+    hover_depth: Option<(usize, usize)>,
     overlay_viewport: Cell<Option<Rect>>,
     trigger_style: DropdownTriggerStyle,
 }
@@ -70,7 +74,6 @@ impl Dropdown {
             bounds: Rect::ZERO,
             enabled: true,
             open: false,
-            hovered_index: None,
             pressed_index: None,
             item_height: 28.0,
             max_visible_items: 8,
@@ -79,8 +82,8 @@ impl Dropdown {
             focused: false,
             focus_visible: false,
             trigger_hovered: false,
-            open_submenu_index: None,
-            open_submenu_hovered: None,
+            submenu_chain: Vec::new(),
+            hover_depth: None,
             overlay_viewport: Cell::new(None),
             trigger_style: DropdownTriggerStyle::Filled,
         }
@@ -91,7 +94,7 @@ impl Dropdown {
         self.enabled = enabled;
         if !enabled {
             self.open = false;
-            self.hovered_index = None;
+            self.hover_depth = None;
             self.pressed_index = None;
             self.suppress_next_release = false;
             self.focused = false;
@@ -237,47 +240,86 @@ impl Dropdown {
         )
     }
 
-    fn submenu_rect(&self, parent_index: usize) -> Option<Rect> {
-        let parent_rect = item_rect(
-            self.menu_rect(),
-            parent_index,
-            self.item_height,
-            self.scroll_offset,
-        );
-        let item = self.items.get(parent_index)?;
-        if let MenuItemKind::Submenu { ref children } = item.kind {
-            Some(geometry::submenu_rect(
-                parent_rect,
-                children,
-                self.max_visible_items,
-                self.item_height,
-            ))
+    fn submenu_rect_at(&self, chain_path: &[usize]) -> Option<Rect> {
+        if chain_path.is_empty() {
+            return None;
+        }
+        let mut bg = self.menu_rect();
+        let mut scroll = self.scroll_offset;
+        let mut current_items: &[MenuItem] = &self.items;
+        for d in 0..chain_path.len() {
+            let idx = chain_path[d];
+            let item = current_items.get(idx)?;
+            match &item.kind {
+                MenuItemKind::Submenu { children } => {
+                    let parent_rect = item_rect(bg, idx, self.item_height, scroll);
+                    let sub = geometry::submenu_rect(
+                        parent_rect,
+                        children,
+                        self.max_visible_items,
+                        self.item_height,
+                    );
+                    if d == chain_path.len() - 1 {
+                        return Some(sub);
+                    }
+                    bg = sub;
+                    scroll = 0.0;
+                    current_items = children;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn children_at(&self, chain_path: &[usize]) -> Option<&[MenuItem]> {
+        let mut items: &[MenuItem] = &self.items;
+        for idx in chain_path {
+            let item = items.get(*idx)?;
+            match &item.kind {
+                MenuItemKind::Submenu { children } => items = children,
+                _ => return None,
+            }
+        }
+        Some(items)
+    }
+
+    fn menu_rect_at_depth(&self, depth: usize) -> Option<Rect> {
+        if depth == 0 {
+            Some(self.menu_rect())
         } else {
-            None
+            self.submenu_rect_at(&self.submenu_chain[..depth])
         }
     }
 
-    /// Return `true` if `position` is inside the keep-alive zone of an
-    /// open submenu: the parent row, the submenu popup, or the bridge
-    /// rectangle connecting them.  This prevents the submenu from closing
-    /// when the mouse briefly crosses neighbouring rows on the way to
-    /// the submenu.
-    fn is_in_submenu_keep_alive_zone(&self, position: Point, submenu_index: usize) -> bool {
-        let parent_rect = item_rect(
-            self.menu_rect(),
-            submenu_index,
-            self.item_height,
-            self.scroll_offset,
-        );
-        let Some(sub_rect) = self.submenu_rect(submenu_index) else {
+    fn item_at_depth(&self, position: Point, depth: usize) -> Option<usize> {
+        let menu_rect = self.menu_rect_at_depth(depth)?;
+        let children = self.children_at(&self.submenu_chain[..depth])?;
+        item_at(menu_rect, children.len(), self.item_height, 0.0, position)
+            .filter(|i| children[*i].is_activatable())
+    }
+
+    fn is_in_submenu_keep_alive_zone(&self, position: Point, depth: usize) -> bool {
+        if depth == 0 || depth > self.submenu_chain.len() {
+            return false;
+        }
+        let menu_bg = if depth == 1 {
+            self.menu_rect()
+        } else {
+            let Some(bg) = self.submenu_rect_at(&self.submenu_chain[..depth - 1]) else {
+                return false;
+            };
+            bg
+        };
+        let parent_idx = self.submenu_chain[depth - 1];
+        let parent_scroll = if depth == 1 { self.scroll_offset } else { 0.0 };
+        let parent_rect = item_rect(menu_bg, parent_idx, self.item_height, parent_scroll);
+        let Some(sub_rect) = self.menu_rect_at_depth(depth) else {
             return false;
         };
         if sub_rect.contains(position) || parent_rect.contains(position) {
             return true;
         }
-        // Bridge rect: the bounding box between the parent row's right edge
-        // and the submenu, extended upward/downward to cover the neighbouring
-        // rows that the mouse might cross.
         let parent_right = parent_rect.x + parent_rect.width;
         let bridge_left = parent_right;
         let bridge_right = sub_rect.x;
@@ -296,6 +338,10 @@ impl Dropdown {
         self.items.iter().position(|item| item.is_activatable())
     }
 
+    fn hovered_index(&self) -> Option<usize> {
+        self.hover_depth.filter(|(d, _)| *d == 0).map(|(_, i)| i)
+    }
+
     fn next_activatable_index(&self, direction: i32) -> Option<usize> {
         let activatable: Vec<usize> = self
             .items
@@ -307,7 +353,7 @@ impl Dropdown {
             return None;
         }
         let current = self
-            .hovered_index
+            .hovered_index()
             .and_then(|index| activatable.iter().position(|candidate| *candidate == index));
         let next = match (current, direction) {
             (Some(index), d) if d < 0 => (index + activatable.len() - 1) % activatable.len(),
@@ -320,7 +366,7 @@ impl Dropdown {
 
     fn ensure_hover_visible(&mut self) {
         self.scroll_offset = scroll_to_visible(
-            self.hovered_index,
+            self.hovered_index(),
             self.scroll_offset,
             self.visible_item_count(),
             self.items.len(),
@@ -329,7 +375,7 @@ impl Dropdown {
     }
 
     fn activate_hovered(&mut self, ctx: &mut EventContext) -> bool {
-        let Some(index) = self.hovered_index else {
+        let Some(index) = self.hovered_index() else {
             return false;
         };
         if !self.items[index].is_activatable() {
@@ -350,7 +396,7 @@ impl Dropdown {
         suppress_next_release: bool,
     ) {
         self.open = true;
-        self.hovered_index = self.first_activatable_index();
+        self.hover_depth = self.first_activatable_index().map(|i| (0, i));
         self.pressed_index = None;
         self.suppress_next_release = suppress_next_release;
         self.clamp_scroll_offset();
@@ -360,9 +406,8 @@ impl Dropdown {
 
     fn close(&mut self, ctx: &mut EventContext) {
         self.open = false;
-        self.open_submenu_index = None;
-        self.open_submenu_hovered = None;
-        self.hovered_index = None;
+        self.submenu_chain.clear();
+        self.hover_depth = None;
         self.pressed_index = None;
         self.suppress_next_release = false;
         ctx.release_pointer_capture(self.id);
@@ -414,12 +459,13 @@ impl Widget for Dropdown {
                         self.close(ctx);
                         return EventResult::Handled;
                     }
-                    // Check submenu click first (outside parent menu rect but inside submenu).
-                    if let Some(sub_idx) = self.open_submenu_index {
-                        if let Some(sub_rect) = self.submenu_rect(sub_idx) {
+                    // Check submenu clicks first (outside parent menu rect but inside submenu).
+                    let chain_len = self.submenu_chain.len();
+                    for depth in (1..=chain_len).rev() {
+                        if let Some(sub_rect) = self.menu_rect_at_depth(depth) {
                             if sub_rect.contains(*position) {
                                 // Will be handled in MouseUp; just record the pressed state.
-                                self.pressed_index = None; // Not a parent-menu item
+                                self.pressed_index = None;
                                 return EventResult::Handled;
                             }
                         }
@@ -429,10 +475,8 @@ impl Widget for Dropdown {
                         return EventResult::Handled;
                     }
                     // Close if clicked outside both the parent and submenu rects.
-                    let in_submenu = self
-                        .open_submenu_index
-                        .and_then(|idx| self.submenu_rect(idx))
-                        .is_some_and(|r| r.contains(*position));
+                    let in_submenu = (1..=chain_len)
+                        .any(|d| self.menu_rect_at_depth(d).is_some_and(|r| r.contains(*position)));
                     if !self.menu_rect().contains(*position) && !in_submenu {
                         self.close(ctx);
                         return EventResult::Handled;
@@ -445,18 +489,19 @@ impl Widget for Dropdown {
                         self.suppress_next_release = false;
                         return EventResult::Handled;
                     }
-                    // Check submenu clicks first
-                    if let Some(sub_idx) = self.open_submenu_index {
-                        if let Some(sub_rect) = self.submenu_rect(sub_idx) {
+                    // Check submenu clicks from deepest
+                    let chain_len = self.submenu_chain.len();
+                    for depth in (1..=chain_len).rev() {
+                        if let Some(sub_rect) = self.menu_rect_at_depth(depth) {
                             if sub_rect.contains(*position) {
                                 let rel_y = position.y - sub_rect.y - MENU_POPUP_PADDING;
-                                let sub_item = (rel_y / self.item_height).floor() as usize;
-                                if let Some(item) = self.items.get(sub_idx) {
-                                    if let MenuItemKind::Submenu { ref children } = item.kind {
-                                        if let Some(child) = children.get(sub_item) {
-                                            if child.is_activatable() {
-                                                (ctx.dispatch)(child.action.clone());
-                                            }
+                                let sub_item = (rel_y / self.item_height).floor().max(0.0) as usize;
+                                if let Some(children) =
+                                    self.children_at(&self.submenu_chain[..depth])
+                                {
+                                    if let Some(child) = children.get(sub_item) {
+                                        if child.is_activatable() {
+                                            (ctx.dispatch)(child.action.clone());
                                         }
                                     }
                                 }
@@ -489,45 +534,61 @@ impl Widget for Dropdown {
                     return EventResult::Handled;
                 }
                 UiEvent::MouseMove { position, .. } => {
-                    let prev_hover = self.hovered_index;
-                    self.hovered_index =
-                        self.item_at(*position).filter(|i| self.items[*i].is_activatable());
+                    let mut new_hover_depth: Option<(usize, usize)> = None;
 
-                    // If there is an open submenu, track hover inside it and check
-                    // whether the mouse is still in the keep-alive zone.
-                    if let Some(sub_idx) = self.open_submenu_index {
-                        if let Some(sub_rect) = self.submenu_rect(sub_idx) {
+                    // Check from deepest submenu upward
+                    let mut handled = false;
+                    for check_depth in (1..=self.submenu_chain.len()).rev() {
+                        // Check if in this submenu
+                        if let Some(sub_rect) = self.menu_rect_at_depth(check_depth) {
                             if sub_rect.contains(*position) {
-                                let rel_y = position.y - sub_rect.y - MENU_POPUP_PADDING;
-                                let sub_hover =
-                                    (rel_y / self.item_height).floor().max(0.0) as usize;
-                                let child_count = match &self.items[sub_idx].kind {
-                                    MenuItemKind::Submenu { ref children } => children.len(),
-                                    _ => 0,
-                                };
-                                self.open_submenu_hovered =
-                                    (sub_hover < child_count).then_some(sub_hover);
-                            } else {
-                                self.open_submenu_hovered = None;
-                                let keep_alive =
-                                    self.is_in_submenu_keep_alive_zone(*position, sub_idx);
-                                if !keep_alive {
-                                    self.open_submenu_index = None;
+                                if let Some(hovered_idx) =
+                                    self.item_at_depth(*position, check_depth)
+                                {
+                                    new_hover_depth = Some((check_depth, hovered_idx));
+                                    let children = self
+                                        .children_at(&self.submenu_chain[..check_depth])
+                                        .unwrap();
+                                    if children[hovered_idx].is_submenu()
+                                        && self.submenu_chain.len() <= check_depth
+                                    {
+                                        self.submenu_chain.push(hovered_idx);
+                                    }
                                 }
+                                handled = true;
+                                break;
+                            }
+                        }
+
+                        // Check keep-alive for this depth
+                        if self.is_in_submenu_keep_alive_zone(*position, check_depth) {
+                            new_hover_depth =
+                                Some((check_depth - 1, self.submenu_chain[check_depth - 1]));
+                            self.submenu_chain.truncate(check_depth);
+                            handled = true;
+                            break;
+                        }
+
+                        // Not in submenu and not in keep-alive → close this level
+                        self.submenu_chain.truncate(check_depth - 1);
+                    }
+
+                    if !handled {
+                        // Default: hover at parent menu level
+                        new_hover_depth = self
+                            .item_at(*position)
+                            .filter(|i| self.items[*i].is_activatable())
+                            .map(|i| (0, i));
+
+                        // Auto-open submenu on hover
+                        if let Some((0, idx)) = new_hover_depth {
+                            if self.items[idx].is_submenu() && !self.submenu_chain.contains(&idx) {
+                                self.submenu_chain.push(idx);
                             }
                         }
                     }
 
-                    // Open a new submenu on hover if the hovered item changed.
-                    if self.hovered_index != prev_hover {
-                        if let Some(idx) = self.hovered_index {
-                            if self.items[idx].is_submenu()
-                                && self.open_submenu_index != Some(idx)
-                            {
-                                self.open_submenu_index = Some(idx);
-                            }
-                        }
-                    }
+                    self.hover_depth = new_hover_depth;
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
@@ -549,14 +610,14 @@ impl Widget for Dropdown {
                 UiEvent::KeyDown { key: KeyCode::Down, modifiers }
                     if *modifiers == Modifiers::none() =>
                 {
-                    self.hovered_index = self.next_activatable_index(1);
+                    self.hover_depth = self.next_activatable_index(1).map(|i| (0, i));
                     self.ensure_hover_visible();
                     return EventResult::Handled;
                 }
                 UiEvent::KeyDown { key: KeyCode::Up, modifiers }
                     if *modifiers == Modifiers::none() =>
                 {
-                    self.hovered_index = self.next_activatable_index(-1);
+                    self.hover_depth = self.next_activatable_index(-1).map(|i| (0, i));
                     self.ensure_hover_visible();
                     return EventResult::Handled;
                 }
@@ -641,12 +702,11 @@ impl Widget for Dropdown {
             self.trigger_style,
             self.max_visible_items,
             self.item_height,
-            self.hovered_index,
+            self.hover_depth,
             self.scroll_offset,
             &self.overlay_viewport,
             self.open,
-            self.open_submenu_index,
-            self.open_submenu_hovered,
+            &self.submenu_chain,
         );
     }
 
@@ -1215,13 +1275,13 @@ mod tests {
             },
             &mut ctx,
         );
-        assert_eq!(d.hovered_index, Some(0));
+        assert_eq!(d.hovered_index(), Some(0));
 
         d.event(
             &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
             &mut ctx,
         );
-        assert_eq!(d.hovered_index, Some(3));
+        assert_eq!(d.hovered_index(), Some(3));
 
         d.event(
             &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
@@ -1248,13 +1308,13 @@ mod tests {
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
         d.open(&mut ctx);
-        assert_eq!(d.hovered_index, Some(0));
+        assert_eq!(d.hovered_index(), Some(0));
         d.event(
             &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
             &mut ctx,
         );
 
-        assert_eq!(d.hovered_index, Some(1));
+        assert_eq!(d.hovered_index(), Some(1));
     }
 
     #[test]
@@ -1277,7 +1337,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
 
         d.open(&mut ctx);
-        d.hovered_index = Some(1);
+        d.hover_depth = Some((0, 1));
         for (key, modifiers) in [
             (KeyCode::Down, Modifiers::ctrl()),
             (KeyCode::Up, Modifiers::shift()),
@@ -1289,7 +1349,7 @@ mod tests {
                 EventResult::Ignored
             );
             assert!(d.open);
-            assert_eq!(d.hovered_index, Some(1));
+            assert_eq!(d.hovered_index(), Some(1));
         }
         assert!(cell.borrow().is_empty());
     }
