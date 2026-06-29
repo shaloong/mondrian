@@ -12,11 +12,12 @@ use mondrian_ui_theme::{Theme, ThemePreset};
 use std::cell::Cell;
 
 use crate::menu::{
-    anchored_menu_rect, geometry_item_at, geometry_item_rect, paint_menu_popup_chrome,
-    paint_menu_row, paint_menu_scrollbar, paint_menu_separator, paint_submenu_arrow,
-    rect_has_paintable_area, submenu_rect, MenuItem, MenuItemKind, MenuRowPaint,
+    anchored_menu_rect, geometry_item_at, geometry_item_rect, menu_item_activation,
+    menu_item_text_width_with_metrics, paint_menu_popup_chrome, paint_menu_row,
+    paint_menu_scrollbar, paint_menu_separator, paint_submenu_arrow, popup_first_activatable_index,
+    popup_next_activatable_index, rect_has_paintable_area, root_hovered_index, submenu_rect,
+    MenuItem, MenuItemCommand, MenuItemKind, MenuMetrics, MenuRowPaint,
 };
-use crate::text_metrics::measure_single_line;
 
 const MAX_VISIBLE_ITEMS: usize = 40;
 
@@ -42,30 +43,22 @@ pub struct ContextMenu {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ContextMenuVisualTokens {
+    metrics: MenuMetrics,
     outer_padding: f32,
-    row_padding_x: f32,
     icon_lane_width: f32,
-    item_height: f32,
-    min_width: f32,
-    row_font_size: f32,
-    shortcut_gap: f32,
     viewport_vertical_margin: f32,
     anchor_gap: f32,
 }
 
 impl ContextMenuVisualTokens {
     fn from_theme(theme: &Theme) -> Self {
-        let spacing = &theme.spacing;
+        let metrics = MenuMetrics::from_theme(theme);
         Self {
-            outer_padding: spacing.sm + spacing.border_emphasis,
-            row_padding_x: spacing.md + spacing.sm,
-            icon_lane_width: spacing.icon_size + spacing.md,
-            item_height: (spacing.interact_height - spacing.border_emphasis).max(1.0),
-            min_width: spacing.inspector_group_header_height * 5.0,
-            row_font_size: theme.typography.small.font_size,
-            shortcut_gap: spacing.icon_size + spacing.md,
-            viewport_vertical_margin: spacing.sm + spacing.border_emphasis,
-            anchor_gap: spacing.radius_none,
+            metrics,
+            outer_padding: metrics.popup_padding * 2.0,
+            icon_lane_width: metrics.row_icon_size + metrics.row_icon_gap,
+            viewport_vertical_margin: metrics.popup_viewport_pad,
+            anchor_gap: metrics.popup_gap,
         }
     }
 
@@ -162,22 +155,17 @@ impl ContextMenu {
             .fold(0.0, f32::max);
         let visual = self.visual.get();
         visual
+            .metrics
             .min_width
-            .max(longest_item + visual.row_padding_x * 2.0 + self.icon_lane_width())
+            .max(longest_item + visual.metrics.row_padding_x * 2.0 + self.icon_lane_width())
     }
 
     fn item_height(&self) -> f32 {
-        self.visual.get().item_height
+        self.visual.get().metrics.item_height
     }
 
     fn menu_item_text_width(&self, item: &MenuItem) -> f32 {
-        let visual = self.visual.get();
-        let label_width = measure_single_line(&item.label, visual.row_font_size).0;
-        let Some(shortcut) = item.shortcut.as_deref().filter(|shortcut| !shortcut.is_empty())
-        else {
-            return label_width;
-        };
-        label_width + visual.shortcut_gap + measure_single_line(shortcut, visual.row_font_size).0
+        menu_item_text_width_with_metrics(item, self.visual.get().metrics)
     }
 
     fn icon_lane_width(&self) -> f32 {
@@ -311,47 +299,33 @@ impl ContextMenu {
     // ── Activation ───────────────────────────────────────────────────────────────
 
     fn hovered_index(&self) -> Option<usize> {
-        self.hover_depth.filter(|(d, _)| *d == 0).map(|(_, i)| i)
+        root_hovered_index(self.hover_depth)
     }
 
     fn first_activatable_index(&self) -> Option<usize> {
-        self.items.iter().position(MenuItem::is_activatable)
+        popup_first_activatable_index(&self.items)
     }
 
     fn next_activatable_index(&self, direction: i32) -> Option<usize> {
-        let activatable: Vec<usize> = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| item.is_activatable().then_some(index))
-            .collect();
-        if activatable.is_empty() {
-            return None;
-        }
-        let current = self
-            .hovered_index()
-            .and_then(|index| activatable.iter().position(|candidate| *candidate == index));
-        let next = match (current, direction) {
-            (Some(index), d) if d < 0 => (index + activatable.len() - 1) % activatable.len(),
-            (Some(index), _) => (index + 1) % activatable.len(),
-            (None, d) if d < 0 => activatable.len() - 1,
-            (None, _) => 0,
-        };
-        activatable.get(next).copied()
+        popup_next_activatable_index(&self.items, self.hovered_index(), direction)
     }
 
     fn activate_index(&mut self, index: usize, ctx: &mut EventContext) -> bool {
-        if !self.items[index].is_activatable() {
+        let Some(activation) = menu_item_activation(&self.items[index]) else {
             return false;
-        }
-        if let Some(command) = self.items[index].local_command.clone() {
-            self.local_command = Some(command);
-        } else {
-            (ctx.dispatch)(self.items[index].action.clone());
-        }
+        };
+        self.apply_activation(activation, ctx);
         self.visible = false;
         self.submenu_chain.clear();
         true
+    }
+
+    fn apply_activation(&mut self, activation: MenuItemCommand, ctx: &mut EventContext) {
+        match activation {
+            MenuItemCommand::Action(action) => (ctx.dispatch)(action),
+            MenuItemCommand::Local(command) => self.local_command = Some(command),
+            MenuItemCommand::None => {}
+        }
     }
 
     fn activate_hovered(&mut self, ctx: &mut EventContext) -> bool {
@@ -424,12 +398,8 @@ impl Widget for ContextMenu {
                                     *position,
                                 ) {
                                     if let Some(child) = children.get(sub_idx) {
-                                        if child.is_activatable() {
-                                            if let Some(command) = child.local_command.clone() {
-                                                self.local_command = Some(command);
-                                            } else {
-                                                (ctx.dispatch)(child.action.clone());
-                                            }
+                                        if let Some(activation) = menu_item_activation(child) {
+                                            self.apply_activation(activation, ctx);
                                             self.close();
                                             return EventResult::Handled;
                                         }
@@ -985,6 +955,40 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_keyboard_activation_enters_first_submenu_child() {
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::submenu(
+                "New",
+                vec![
+                    MenuItem::new("Video Track", Action::Cut),
+                    MenuItem::new("Audio Track", Action::Paste),
+                ],
+            )],
+        );
+        menu.layout(Rect::ZERO);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        assert_eq!(
+            menu.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert!(!menu.visible);
+        assert_eq!(cell.into_inner(), vec![Action::Cut]);
+    }
+
+    #[test]
     fn context_menu_keyboard_navigation_ignores_modified_keys() {
         let mut menu = ContextMenu::new(
             Point::new(100.0, 100.0),
@@ -1213,7 +1217,11 @@ mod tests {
             )],
         );
 
-        assert_eq!(short.measure(LayoutConstraint::LOOSE).width, 148.0);
+        let visual = ContextMenuVisualTokens::default();
+        assert_eq!(
+            short.measure(LayoutConstraint::LOOSE).width,
+            visual.metrics.min_width + visual.outer_padding
+        );
         assert!(
             long.measure(LayoutConstraint::LOOSE).width
                 > short.measure(LayoutConstraint::LOOSE).width
@@ -1231,12 +1239,13 @@ mod tests {
             vec![MenuItem::new("Open", Action::OpenProject("".into()))],
         );
         let mut theme = mondrian_ui_theme::ThemePreset::Dark.build();
-        theme.spacing.sm = 8.0;
-        theme.spacing.md = 12.0;
-        theme.spacing.icon_size = 16.0;
-        theme.spacing.interact_height = 34.0;
-        theme.spacing.border_emphasis = 2.0;
-        theme.spacing.inspector_group_header_height = 32.0;
+        theme.spacing.menu_popup_padding = 8.0;
+        theme.spacing.menu_item_height = 34.0;
+        theme.spacing.menu_min_width = 192.0;
+        theme.spacing.menu_row_icon_size = 16.0;
+        theme.spacing.menu_row_icon_gap = 12.0;
+        theme.spacing.menu_row_padding_x = 18.0;
+        theme.spacing.menu_row_shortcut_gap = 32.0;
         theme.typography.small.font_size = 13.0;
         let clip_rect = Rect::new(0.0, 0.0, 300.0, 200.0);
         let mut encoder = RecordingEncoder::default();
@@ -1245,14 +1254,14 @@ mod tests {
         menu.paint_overlay(&mut ctx);
 
         let visual = ContextMenuVisualTokens::from_theme(&theme);
-        assert_eq!(menu.item_rect(0).height, visual.item_height);
+        assert_eq!(menu.item_rect(0).height, visual.metrics.item_height);
         assert_eq!(
             menu.measure(LayoutConstraint::LOOSE).height,
-            visual.outer_padding + visual.item_height
+            visual.outer_padding + visual.metrics.item_height
         );
         assert_eq!(
             menu.measure(LayoutConstraint::LOOSE).width,
-            visual.min_width + visual.outer_padding
+            visual.metrics.min_width + visual.outer_padding
         );
     }
 

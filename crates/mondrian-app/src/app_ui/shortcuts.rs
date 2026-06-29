@@ -3,18 +3,13 @@
 //! The router resolves these only after the focused widget ignores a `KeyDown`,
 //! so text inputs and panel-specific key handling keep priority.
 
-use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::shortcut::ShortcutBinding;
 use mondrian_ui_core::types::{KeyCode, Modifiers};
 use mondrian_ui_events::EventRouter;
 use serde::{Deserialize, Serialize};
 
-use crate::app::ui_actions::{
-    app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
-    app_shell_open_project_dialog_action, app_shell_quit_action,
-    app_shell_save_project_as_dialog_action,
-};
+use crate::app_ui::commands::default_commands;
 
 /// A app UI shell shortcut together with its menu-facing display label.
 #[derive(Debug, Clone)]
@@ -456,181 +451,15 @@ impl AppUiShortcutKey {
 
 /// Default shortcut descriptors used by both the router and menu hints.
 pub fn default_shortcuts() -> Vec<AppUiShortcut> {
-    vec![
-        shortcut(
-            "file.new_project",
-            ShortcutBinding::ctrl(KeyCode::N),
-            app_shell_new_project_dialog_action(),
-        ),
-        shortcut(
-            "file.open_project",
-            ShortcutBinding::ctrl(KeyCode::O),
-            app_shell_open_project_dialog_action(),
-        ),
-        shortcut(
-            "file.import_media",
-            ShortcutBinding::ctrl(KeyCode::I),
-            app_shell_import_media_dialog_action(),
-        ),
-        shortcut(
-            "file.save_project",
-            ShortcutBinding::ctrl(KeyCode::S),
-            Action::SaveProject,
-        ),
-        shortcut(
-            "file.save_project_as",
-            ShortcutBinding::ctrl_shift(KeyCode::S),
-            app_shell_save_project_as_dialog_action(),
-        ),
-        shortcut(
-            "app.quit",
-            ShortcutBinding::ctrl(KeyCode::Q),
-            app_shell_quit_action(),
-        ),
-        shortcut(
-            "file.close_project",
-            ShortcutBinding::ctrl(KeyCode::W),
-            Action::CloseProject,
-        ),
-        shortcut(
-            "view.toggle_fullscreen",
-            ShortcutBinding::new(KeyCode::F11, Modifiers::none()),
-            Action::ToggleFullscreen,
-        ),
-        shortcut("edit.undo", ShortcutBinding::ctrl(KeyCode::Z), Action::Undo),
-        shortcut(
-            "edit.redo",
-            ShortcutBinding::ctrl_shift(KeyCode::Z),
-            Action::Redo,
-        ),
-        shortcut("edit.cut", ShortcutBinding::ctrl(KeyCode::X), Action::Cut),
-        shortcut("edit.copy", ShortcutBinding::ctrl(KeyCode::C), Action::Copy),
-        shortcut(
-            "edit.paste",
-            ShortcutBinding::ctrl(KeyCode::V),
-            Action::Paste,
-        ),
-        shortcut(
-            "edit.duplicate",
-            ShortcutBinding::ctrl(KeyCode::D),
-            Action::Duplicate,
-        ),
-        shortcut(
-            "edit.select_all",
-            ShortcutBinding::ctrl(KeyCode::A),
-            Action::SelectAll,
-        ),
-        shortcut(
-            "edit.deselect_all",
-            ShortcutBinding::new(KeyCode::Escape, Modifiers::none()),
-            Action::DeselectAll,
-        ),
-        shortcut(
-            "edit.delete_selection",
-            ShortcutBinding::new(KeyCode::Delete, Modifiers::none()),
-            Action::DeleteSelection,
-        ),
-        shortcut(
-            "edit.ripple_delete_selection",
-            ShortcutBinding::new(KeyCode::Delete, Modifiers::shift()),
-            Action::RippleDeleteSelection,
-        ),
-        shortcut(
-            "timeline.split_at_playhead",
-            ShortcutBinding::ctrl(KeyCode::K),
-            Action::SplitClipAtPlayhead,
-        ),
-        shortcut(
-            "timeline.mark_in",
-            ShortcutBinding::new(KeyCode::I, Modifiers::none()),
-            Action::MarkInAtPlayhead,
-        ),
-        shortcut(
-            "timeline.mark_out",
-            ShortcutBinding::new(KeyCode::O, Modifiers::none()),
-            Action::MarkOutAtPlayhead,
-        ),
-        shortcut(
-            "transport.go_to_start",
-            ShortcutBinding::new(KeyCode::Home, Modifiers::none()),
-            Action::GoToStart,
-        ),
-        shortcut(
-            "transport.go_to_end",
-            ShortcutBinding::new(KeyCode::End, Modifiers::none()),
-            Action::GoToEnd,
-        ),
-        shortcut(
-            "transport.step_back",
-            ShortcutBinding::new(KeyCode::Left, Modifiers::none()),
-            Action::StepBack,
-        ),
-        shortcut(
-            "transport.step_forward",
-            ShortcutBinding::new(KeyCode::Right, Modifiers::none()),
-            Action::StepForward,
-        ),
-        shortcut(
-            "workspace.editing",
-            ShortcutBinding::new(KeyCode::Digit1, ctrl_alt()),
-            Action::SwitchWorkspace(WorkspacePreset::Editing),
-        ),
-        shortcut(
-            "workspace.color",
-            ShortcutBinding::new(KeyCode::Digit2, ctrl_alt()),
-            Action::SwitchWorkspace(WorkspacePreset::Color),
-        ),
-        shortcut(
-            "workspace.audio",
-            ShortcutBinding::new(KeyCode::Digit3, ctrl_alt()),
-            Action::SwitchWorkspace(WorkspacePreset::Audio),
-        ),
-        shortcut(
-            "workspace.compositing",
-            ShortcutBinding::new(KeyCode::Digit4, ctrl_alt()),
-            Action::SwitchWorkspace(WorkspacePreset::Compositing),
-        ),
-        shortcut(
-            "workspace.export",
-            ShortcutBinding::new(KeyCode::Digit5, ctrl_alt()),
-            Action::SwitchWorkspace(WorkspacePreset::Export),
-        ),
-        shortcut(
-            "panel.viewer",
-            ShortcutBinding::new(KeyCode::V, ctrl_alt()),
-            Action::FocusPanel(PanelKind::Viewer),
-        ),
-        shortcut(
-            "panel.timeline",
-            ShortcutBinding::new(KeyCode::T, ctrl_alt()),
-            Action::FocusPanel(PanelKind::Timeline),
-        ),
-        shortcut(
-            "panel.inspector",
-            ShortcutBinding::new(KeyCode::I, ctrl_alt()),
-            Action::FocusPanel(PanelKind::Inspector),
-        ),
-        shortcut(
-            "panel.assets",
-            ShortcutBinding::new(KeyCode::A, ctrl_alt()),
-            Action::FocusPanel(PanelKind::Assets),
-        ),
-        shortcut(
-            "panel.effects",
-            ShortcutBinding::new(KeyCode::E, ctrl_alt()),
-            Action::FocusPanel(PanelKind::Effects),
-        ),
-        shortcut(
-            "panel.node_graph",
-            ShortcutBinding::new(KeyCode::G, ctrl_alt()),
-            Action::FocusPanel(PanelKind::NodeGraph),
-        ),
-        shortcut(
-            "panel.export",
-            ShortcutBinding::new(KeyCode::X, ctrl_alt()),
-            Action::FocusPanel(PanelKind::Export),
-        ),
-    ]
+    default_commands()
+        .into_iter()
+        .filter_map(|command| {
+            command
+                .default_shortcut
+                .clone()
+                .map(|binding| shortcut(command.id, binding, command.action()))
+        })
+        .collect()
 }
 
 /// Resolve the active shortcut table after applying user overrides.
@@ -715,6 +544,7 @@ fn register(router: &mut EventRouter, binding: ShortcutBinding, action: Action) 
     router.shortcut_manager_mut().register_global(binding, action);
 }
 
+#[cfg(test)]
 fn ctrl_alt() -> Modifiers {
     Modifiers { ctrl: true, alt: true, ..Modifiers::none() }
 }
@@ -722,6 +552,8 @@ fn ctrl_alt() -> Modifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ui_actions::app_shell_open_project_dialog_action;
+    use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
     use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
 
     #[test]

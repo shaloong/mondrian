@@ -1,10 +1,9 @@
 use mondrian_ui_core::types::{KeyCode, Modifiers, Point, Rect};
 
 use super::{
-    ViewerControl, ViewerDropdown, BASIC_VIEWER_CONTROLS, FULL_VIEWER_CONTROLS,
-    JUMP_VIEWER_CONTROLS, MINIMAL_VIEWER_CONTROLS, TRANSPORT_BUTTON_GAP, TRANSPORT_BUTTON_SIZE,
-    VIEWER_DROPDOWN_PAD_X, VIEWER_DROPDOWN_PAD_Y, VIEWER_DROPDOWN_ROW_HEIGHT,
-    VIEWER_PREVIEW_QUALITY_OPTIONS, VIEWER_ZOOM_OPTIONS,
+    ViewerControl, ViewerDropdown, ViewerMetrics, BASIC_VIEWER_CONTROLS, FULL_VIEWER_CONTROLS,
+    JUMP_VIEWER_CONTROLS, MINIMAL_VIEWER_CONTROLS, VIEWER_PREVIEW_QUALITY_OPTIONS,
+    VIEWER_ZOOM_OPTIONS,
 };
 
 const CHROME_TOP: f32 = 14.0;
@@ -91,30 +90,32 @@ pub(super) fn visible_controls(bounds_width: f32) -> &'static [ViewerControl] {
 }
 
 pub(super) fn control_width(_control: ViewerControl) -> f32 {
-    TRANSPORT_BUTTON_SIZE
+    ViewerMetrics::current().transport_button_size
 }
 
 pub(super) fn control_strip_rect(bounds: Rect) -> Rect {
     let controls = visible_controls(bounds.width);
+    let metrics = ViewerMetrics::current();
     let width = controls.iter().map(|control| control_width(*control)).sum::<f32>()
-        + TRANSPORT_BUTTON_GAP * (controls.len().saturating_sub(1) as f32);
+        + metrics.transport_button_gap * (controls.len().saturating_sub(1) as f32);
     Rect::new(
         bounds.x + (bounds.width - width) * 0.5,
         bounds.y + bounds.height - 34.0,
         width,
-        TRANSPORT_BUTTON_SIZE,
+        metrics.transport_button_size,
     )
 }
 
 pub(super) fn control_rect(bounds: Rect, control: ViewerControl) -> Rect {
     let strip = control_strip_rect(bounds);
     let mut x = strip.x;
+    let metrics = ViewerMetrics::current();
     for &candidate in visible_controls(bounds.width) {
         let width = control_width(candidate);
         if candidate == control {
-            return Rect::new(x, strip.y, width, TRANSPORT_BUTTON_SIZE);
+            return Rect::new(x, strip.y, width, metrics.transport_button_size);
         }
-        x += width + TRANSPORT_BUTTON_GAP;
+        x += width + metrics.transport_button_gap;
     }
     Rect::ZERO
 }
@@ -196,7 +197,8 @@ pub(super) fn dropdown_rect(
         ViewerDropdown::Zoom => 92.0,
         ViewerDropdown::PreviewQuality => 74.0,
     };
-    let height = row_count * VIEWER_DROPDOWN_ROW_HEIGHT + VIEWER_DROPDOWN_PAD_Y * 2.0;
+    let metrics = ViewerMetrics::current();
+    let height = row_count * metrics.dropdown_row_height + metrics.dropdown_padding_y * 2.0;
     let min_x = bounds.x + 8.0;
     let max_x = (bounds.x + bounds.width - width - 8.0).max(min_x);
     let x = (anchor.x + anchor.width - width).clamp(min_x, max_x);
@@ -212,11 +214,12 @@ pub(super) fn dropdown_row_rect(
     index: usize,
 ) -> Rect {
     let menu = dropdown_rect(bounds, dropdown, zoom_label, preview_quality_label);
+    let metrics = ViewerMetrics::current();
     Rect::new(
-        menu.x + VIEWER_DROPDOWN_PAD_X,
-        menu.y + VIEWER_DROPDOWN_PAD_Y + index as f32 * VIEWER_DROPDOWN_ROW_HEIGHT,
-        (menu.width - VIEWER_DROPDOWN_PAD_X * 2.0).max(0.0),
-        VIEWER_DROPDOWN_ROW_HEIGHT,
+        menu.x + metrics.dropdown_padding_x,
+        menu.y + metrics.dropdown_padding_y + index as f32 * metrics.dropdown_row_height,
+        (menu.width - metrics.dropdown_padding_x * 2.0).max(0.0),
+        metrics.dropdown_row_height,
     )
 }
 

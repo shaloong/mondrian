@@ -13,7 +13,7 @@ use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
-use mondrian_ui_theme::set_theme_preset;
+use mondrian_ui_theme::{set_theme_preset, ThemePreset};
 
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
@@ -86,6 +86,7 @@ pub struct AppUiHost {
     waveform_cache: AudioWaveformCache,
     preview_service: AppUiPreviewService,
     mode: AppUiMode,
+    system_theme_preset: ThemePreset,
     ui_dirty: Cell<bool>,
     pending_close_action: Option<PendingCloseAction>,
 }
@@ -106,7 +107,8 @@ impl AppUiHost {
         preferences: AppUiPreferences,
         preferences_path: PathBuf,
     ) -> Self {
-        set_theme_preset(preferences.theme_preset);
+        let system_theme_preset = ThemePreset::Dark;
+        set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
         let asset_thumbnails = AssetThumbnailCache::new();
         let waveform_cache = AudioWaveformCache::new();
         if let Some(ref library) = app_state.asset_library {
@@ -141,6 +143,7 @@ impl AppUiHost {
             waveform_cache,
             preview_service,
             mode,
+            system_theme_preset,
             ui_dirty: Cell::new(false),
             pending_close_action: None,
         }
@@ -190,6 +193,24 @@ impl AppUiHost {
     /// Mark the root as needing a model refresh from `AppState`.
     pub fn mark_dirty(&self) {
         self.ui_dirty.set(true);
+    }
+
+    /// Update the desktop system theme used by `ThemePreference::System`.
+    ///
+    /// Returns true when the effective concrete theme changed.
+    pub fn set_system_theme_preset(&mut self, preset: ThemePreset) -> bool {
+        if self.system_theme_preset == preset {
+            return false;
+        }
+        let previous = self.preferences.theme_preference.resolve(self.system_theme_preset);
+        self.system_theme_preset = preset;
+        let next = self.preferences.theme_preference.resolve(self.system_theme_preset);
+        if previous == next {
+            return false;
+        }
+        set_theme_preset(next);
+        self.mark_dirty();
+        true
     }
 
     /// Refresh the root widget models when editor state changed.
@@ -501,8 +522,10 @@ impl AppUiHost {
             Ok(update) => {
                 match update {
                     PreferencesUpdate::Theme(payload) => {
-                        self.preferences.theme_preset = payload.preset;
-                        set_theme_preset(payload.preset);
+                        self.preferences.theme_preference = payload.preference;
+                        set_theme_preset(
+                            self.preferences.theme_preference.resolve(self.system_theme_preset),
+                        );
                     }
                     PreferencesUpdate::WaveformDisplay(payload) => {
                         self.preferences.waveform_display = payload.mode;
@@ -1049,7 +1072,7 @@ mod tests {
     use mondrian_ui_core::types::{Modifiers, MouseButton, Point, Rect, SplitDirection};
     use mondrian_ui_core::widget::EventContext;
     use mondrian_ui_core::{EventRequests, EventResult, UiEvent, Widget};
-    use mondrian_ui_theme::{current_theme, ThemePreset};
+    use mondrian_ui_theme::{current_theme, ThemePreference, ThemePreset};
     use mondrian_ui_widgets::WaveformDisplay;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1699,7 +1722,7 @@ mod tests {
             AppState::new(),
             AppUiPreferences {
                 version: 1,
-                theme_preset: ThemePreset::Dark,
+                theme_preference: ThemePreference::Dark,
                 workspace_preset: WorkspacePreset::Compositing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -1738,7 +1761,7 @@ mod tests {
             workspace_app_state(),
             AppUiPreferences {
                 version: 1,
-                theme_preset: ThemePreset::Dark,
+                theme_preference: ThemePreference::Dark,
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -1987,7 +2010,9 @@ mod tests {
         let pending = PendingUiActions::default();
 
         pending.push(
-            crate::app::ui_actions::app_shell_preferences_theme_changed_action(ThemePreset::Light),
+            crate::app::ui_actions::app_shell_preferences_theme_changed_action(
+                ThemePreference::Light,
+            ),
         );
         let commands = host.drain_pending_actions(
             &pending,
@@ -1996,14 +2021,45 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
-        assert_eq!(host.preferences().theme_preset, ThemePreset::Light);
+        assert_eq!(host.preferences().theme_preference, ThemePreference::Light);
         assert_eq!(current_theme().name, "Light");
         assert_eq!(
-            load_app_ui_preferences_from(&path).theme_preset,
-            ThemePreset::Light
+            load_app_ui_preferences_from(&path).theme_preference,
+            ThemePreference::Light
         );
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn host_resolves_system_theme_preference_from_desktop_theme() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            temp_preferences_path("system-theme-preferences"),
+        );
+
+        assert_eq!(host.preferences().theme_preference, ThemePreference::System);
+        assert_eq!(current_theme().name, "Dark");
+
+        assert!(host.set_system_theme_preset(ThemePreset::Light));
+        assert_eq!(current_theme().name, "Light");
+        assert!(host.set_system_theme_preset(ThemePreset::Dark));
+        assert_eq!(current_theme().name, "Dark");
+
+        let explicit = AppUiPreferences {
+            theme_preference: ThemePreference::Dark,
+            ..Default::default()
+        };
+        let mut explicit_host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            explicit,
+            temp_preferences_path("explicit-theme-preferences"),
+        );
+
+        assert!(!explicit_host.set_system_theme_preset(ThemePreset::Light));
+        assert_eq!(current_theme().name, "Dark");
     }
 
     #[test]
@@ -2077,7 +2133,7 @@ mod tests {
             AppState::new(),
             AppUiPreferences {
                 version: 1,
-                theme_preset: ThemePreset::Dark,
+                theme_preference: ThemePreference::Dark,
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -2100,7 +2156,7 @@ mod tests {
         assert_eq!(host.preferences().workspace_preset, WorkspacePreset::Export);
         let loaded = load_app_ui_preferences_from(&path);
         assert_eq!(loaded.workspace_preset, WorkspacePreset::Export);
-        assert_eq!(loaded.theme_preset, ThemePreset::Dark);
+        assert_eq!(loaded.theme_preference, ThemePreference::Dark);
 
         std::fs::remove_file(path).ok();
     }
@@ -2177,7 +2233,7 @@ mod tests {
             AppState::new(),
             AppUiPreferences {
                 version: 1,
-                theme_preset: ThemePreset::Dark,
+                theme_preference: ThemePreference::Dark,
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),

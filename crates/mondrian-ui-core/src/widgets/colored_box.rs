@@ -87,7 +87,7 @@ mod tests {
     use glam::Vec2;
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_theme::Theme;
 
     struct MockEncoder {

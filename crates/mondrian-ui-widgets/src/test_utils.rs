@@ -3,7 +3,7 @@
 use glam::Vec2;
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
-use mondrian_platform::NoopPlatformService;
+use mondrian_platform_core::NoopPlatformService;
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{
     ShortcutBinding, ShortcutContext, ShortcutManager, ShortcutScope,

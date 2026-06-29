@@ -4,8 +4,10 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use mondrian_ui_core::types::{Point, Rect, Size};
 
+use mondrian_ui_theme::Theme;
+
+use super::measure_text_width;
 use super::multiline::{MultilineTextEditState, TextPosition};
-use super::{measure_text_width, HORIZONTAL_PADDING, VERTICAL_PADDING};
 
 // ── TextMetrics ────────────────────────────────────────────────────────────────
 
@@ -13,10 +15,13 @@ use super::{measure_text_width, HORIZONTAL_PADDING, VERTICAL_PADDING};
 ///
 /// v1 derives these from `font_size`; when the text renderer exposes real
 /// `ascent`/`descent`/`line_gap`, update the constructor.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct TextMetrics {
     pub font_size: f32,
     pub line_height: f32,
+    pub padding_x: f32,
+    pub padding_y: f32,
+    pub caret_width: f32,
     /// Baseline offset from line top.
     pub ascent: f32,
     /// Descent below baseline (reserved for future font-aware metrics).
@@ -31,6 +36,24 @@ impl TextMetrics {
         Self {
             font_size,
             line_height,
+            padding_x: 8.0,
+            padding_y: 4.0,
+            caret_width: 2.0,
+            ascent,
+            descent: line_height - ascent,
+        }
+    }
+
+    pub fn from_theme(theme: &Theme) -> Self {
+        let font_size = theme.typography.body.font_size;
+        let line_height = font_size * 1.3;
+        let ascent = font_size;
+        Self {
+            font_size,
+            line_height,
+            padding_x: theme.spacing.text_input_padding_x,
+            padding_y: theme.spacing.text_input_padding_y,
+            caret_width: theme.spacing.text_input_caret_width,
             ascent,
             descent: line_height - ascent,
         }
@@ -453,13 +476,13 @@ pub(super) fn compute_multiline_geometry(
     measure_cache: &mut HashMap<usize, LineMeasureCache>,
     mode: LineLayoutMode,
 ) -> MultilineTextGeometry {
-    let content_left = bounds.x + HORIZONTAL_PADDING;
-    let _content_right = (bounds.x + bounds.width - HORIZONTAL_PADDING).max(content_left);
-    let visible_width = (bounds.width - HORIZONTAL_PADDING * 2.0).max(1.0);
-    let viewport_height = bounds.height - VERTICAL_PADDING * 2.0;
+    let content_left = bounds.x + metrics.padding_x;
+    let _content_right = (bounds.x + bounds.width - metrics.padding_x).max(content_left);
+    let visible_width = (bounds.width - metrics.padding_x * 2.0).max(1.0);
+    let viewport_height = bounds.height - metrics.padding_y * 2.0;
     let clip = Rect::new(
         content_left,
-        bounds.y + VERTICAL_PADDING,
+        bounds.y + metrics.padding_y,
         visible_width,
         viewport_height.max(1.0),
     );
@@ -476,8 +499,8 @@ pub(super) fn compute_multiline_geometry(
     let preedit_w = preedit.map_or(0.0, |t| measure_text_width(t, metrics.font_size));
     let caret_x = content_left + cursor_point.x + preedit_w - scroll_x;
     let caret_y = clip.y + cursor_point.y - scroll_y;
-    let caret_w = 2.0;
-    let caret_h = (metrics.line_height - VERTICAL_PADDING * 2.0).max(1.0);
+    let caret_w = metrics.caret_width;
+    let caret_h = (metrics.line_height - metrics.padding_y * 2.0).max(1.0);
     let caret = Rect::new(caret_x, caret_y, caret_w, caret_h);
 
     // Preedit: anchored at cursor (composition start)

@@ -5,7 +5,7 @@
 
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
-use mondrian_platform::{NoopPlatformService, PlatformService};
+use mondrian_platform_core::{NoopPlatformService, PlatformService};
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};

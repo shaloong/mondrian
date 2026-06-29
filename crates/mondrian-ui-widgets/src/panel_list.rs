@@ -1354,7 +1354,7 @@ mod tests {
     use std::path::PathBuf;
 
     use mondrian_core::types::AssetId;
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_core::widget::{
         DragRequest, DrawCommandEncoder, EventRequests, PointerCaptureRequest,
     };

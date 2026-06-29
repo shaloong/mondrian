@@ -9,7 +9,7 @@ use mondrian_export::preset::TimelineExportRange;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
-use mondrian_ui_theme::ThemePreset;
+use mondrian_ui_theme::{ThemePreference, ThemePreset};
 use mondrian_ui_widgets::{Button, DialogSurface, Label, WaveformDisplay};
 
 use crate::app::ui_actions::{
@@ -52,7 +52,8 @@ const SHORTCUT_HEADER_ROW_COUNT: usize = 2;
 /// Read-only settings/status snapshot shown by the app UI preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppUiPreferencesModel {
-    pub theme_preset: ThemePreset,
+    pub theme_preference: ThemePreference,
+    pub resolved_theme_preset: ThemePreset,
     pub theme_label: String,
     pub project_status: String,
     pub workspace: String,
@@ -88,12 +89,14 @@ impl AppUiPreferencesModel {
     pub fn from_app_state(
         state: &AppState,
         workspace: WorkspacePreset,
-        theme_preset: ThemePreset,
+        theme_preference: ThemePreference,
+        resolved_theme_preset: ThemePreset,
     ) -> Self {
         Self::from_app_state_with_shortcut_overrides(
             state,
             workspace,
-            theme_preset,
+            theme_preference,
+            resolved_theme_preset,
             &[],
             WaveformDisplay::BottomAligned,
         )
@@ -103,7 +106,8 @@ impl AppUiPreferencesModel {
     pub fn from_app_state_with_shortcut_overrides(
         state: &AppState,
         workspace: WorkspacePreset,
-        theme_preset: ThemePreset,
+        theme_preference: ThemePreference,
+        resolved_theme_preset: ThemePreset,
         shortcut_overrides: &[AppUiShortcutOverride],
         waveform_display: WaveformDisplay,
     ) -> Self {
@@ -126,8 +130,9 @@ impl AppUiPreferencesModel {
             })
             .unwrap_or_else(|| "没有活动序列".to_owned());
         Self {
-            theme_preset,
-            theme_label: theme_preset.display_name().to_owned(),
+            theme_preference,
+            resolved_theme_preset,
+            theme_label: theme_preference.display_name().to_owned(),
             project_status,
             workspace: workspace.display_name().to_owned(),
             sequence_summary,
@@ -153,8 +158,9 @@ impl AppUiPreferencesModel {
 impl Default for AppUiPreferencesModel {
     fn default() -> Self {
         Self {
-            theme_preset: ThemePreset::Dark,
-            theme_label: ThemePreset::Dark.display_name().to_owned(),
+            theme_preference: ThemePreference::System,
+            resolved_theme_preset: ThemePreset::Dark,
+            theme_label: ThemePreference::System.display_name().to_owned(),
             project_status: "未打开项目".to_owned(),
             workspace: WorkspacePreset::Editing.display_name().to_owned(),
             sequence_summary: "没有活动序列".to_owned(),
@@ -268,11 +274,11 @@ impl PreferencesDialog {
                     .on_click(app_shell_preferences_tab_changed_action(tab.payload()))
             })
             .collect();
-        let theme_buttons = ThemePreset::ALL
+        let theme_buttons = ThemePreference::ALL
             .into_iter()
-            .map(|preset| {
-                Button::new(preset.display_name())
-                    .on_click(app_shell_preferences_theme_changed_action(preset))
+            .map(|preference| {
+                Button::new(preference.display_name())
+                    .on_click(app_shell_preferences_theme_changed_action(preference))
             })
             .collect();
         let waveform_buttons = vec![
@@ -723,8 +729,8 @@ impl Widget for PreferencesDialog {
             for button in &self.theme_buttons {
                 button.paint(ctx);
             }
-            for (index, preset) in ThemePreset::ALL.into_iter().enumerate() {
-                if preset == self.model.theme_preset {
+            for (index, preference) in ThemePreference::ALL.into_iter().enumerate() {
+                if preference == self.model.theme_preference {
                     paint_theme_button_outline(
                         ctx,
                         Rect::new(
@@ -1143,6 +1149,7 @@ mod tests {
         let model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
             &AppState::new(),
             WorkspacePreset::Editing,
+            ThemePreference::Dark,
             ThemePreset::Dark,
             &overrides,
             WaveformDisplay::BottomAligned,
@@ -1178,6 +1185,7 @@ mod tests {
         let model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
             &AppState::new(),
             WorkspacePreset::Editing,
+            ThemePreference::Dark,
             ThemePreset::Dark,
             &overrides,
             WaveformDisplay::BottomAligned,
@@ -1218,6 +1226,7 @@ mod tests {
         let model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
             &AppState::new(),
             WorkspacePreset::Editing,
+            ThemePreference::Dark,
             ThemePreset::Dark,
             &overrides,
             WaveformDisplay::BottomAligned,
@@ -1444,12 +1453,14 @@ mod tests {
         let model = AppUiPreferencesModel::from_app_state(
             &state,
             WorkspacePreset::Color,
+            ThemePreference::Light,
             ThemePreset::Light,
         );
 
         assert_eq!(model.workspace, WorkspacePreset::Color.display_name());
-        assert_eq!(model.theme_preset, ThemePreset::Light);
-        assert_eq!(model.theme_label, ThemePreset::Light.display_name());
+        assert_eq!(model.theme_preference, ThemePreference::Light);
+        assert_eq!(model.resolved_theme_preset, ThemePreset::Light);
+        assert_eq!(model.theme_label, ThemePreference::Light.display_name());
         assert!(model.project_status.contains("edit.mdp"));
         assert!(model.sequence_summary.contains("Cut"));
         assert_eq!(model.proxy_mode, "已启用");
@@ -1478,7 +1489,7 @@ mod tests {
         let body_top = content.y;
         let content_x = dialog.card.x + SIDEBAR_WIDTH + CONTENT_GAP;
         let light_bounds = Rect::new(
-            content_x + 116.0 + THEME_BUTTON_WIDTH + THEME_BUTTON_GAP,
+            content_x + 116.0 + 2.0 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
             body_top + ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
             THEME_BUTTON_WIDTH,
             THEME_BUTTON_HEIGHT,
@@ -1512,8 +1523,8 @@ mod tests {
                         payload.clone()
                     )
                     .unwrap()
-                    .preset,
-                    ThemePreset::Light
+                    .preference,
+                    ThemePreference::Light
                 );
             }
             other => panic!("expected preferences theme action, got {other:?}"),

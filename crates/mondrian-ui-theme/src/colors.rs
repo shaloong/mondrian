@@ -88,6 +88,12 @@ pub struct ColorTokens {
     pub window_close_pressed: Color,
     /// Native-window close icon color on hover/press.
     pub window_close_foreground: Color,
+    /// macOS-style close traffic-light fill.
+    pub window_macos_close: Color,
+    /// macOS-style minimize traffic-light fill.
+    pub window_macos_minimize: Color,
+    /// macOS-style maximize traffic-light fill.
+    pub window_macos_maximize: Color,
 
     // ── 边框 & 输入 (Borders & Inputs) ────────────────────────────────────
     /// 默认边框
@@ -235,6 +241,9 @@ impl ColorTokens {
             window_close_hover: Color::from_hex(0xE81123),
             window_close_pressed: Color::from_hex(0xC50F1F),
             window_close_foreground: Color::WHITE,
+            window_macos_close: Color::from_hex(0xFF5F57),
+            window_macos_minimize: Color::from_hex(0xFFBD2E),
+            window_macos_maximize: Color::from_hex(0x28C840),
 
             border: Color { r: 1.0, g: 1.0, b: 1.0, a: 0.075 },
             border_strong: Color { r: 1.0, g: 1.0, b: 1.0, a: 0.12 },
@@ -338,6 +347,9 @@ impl ColorTokens {
             window_close_hover: Color::from_hex(0xE81123),
             window_close_pressed: Color::from_hex(0xC50F1F),
             window_close_foreground: Color::WHITE,
+            window_macos_close: Color::from_hex(0xFF5F57),
+            window_macos_minimize: Color::from_hex(0xFFBD2E),
+            window_macos_maximize: Color::from_hex(0x28C840),
 
             border: Color::from_hex(0xE4E4E7),
             border_strong: Color::from_hex(0xCBD5E1),

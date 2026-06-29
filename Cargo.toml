@@ -13,6 +13,7 @@ members = [
     "crates/mondrian-editor-state",
     "crates/mondrian-ui-core",
     "crates/mondrian-ui-theme",
+    "crates/mondrian-platform-core",
     "crates/mondrian-platform",
     "crates/mondrian-editor-ui",
     "crates/mondrian-ui-renderer",
@@ -47,6 +48,7 @@ mondrian-export   = { path = "crates/mondrian-export" }
 mondrian-editor-state = { path = "crates/mondrian-editor-state" }
 mondrian-ui-core      = { path = "crates/mondrian-ui-core" }
 mondrian-ui-theme     = { path = "crates/mondrian-ui-theme" }
+mondrian-platform-core = { path = "crates/mondrian-platform-core" }
 mondrian-platform     = { path = "crates/mondrian-platform" }
 mondrian-editor-ui    = { path = "crates/mondrian-editor-ui" }
 mondrian-ui-renderer  = { path = "crates/mondrian-ui-renderer" }

@@ -1,6 +1,6 @@
 use mondrian_ui_core::types::{Point, Rect};
 
-use super::{measure_text_width, HORIZONTAL_PADDING, VERTICAL_PADDING};
+use super::{measure_text_width, TextInputMetrics};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct TextInputGeometry {
@@ -21,15 +21,16 @@ pub(super) fn compute_text_geometry(
     scroll_x: f32,
     cursor_text_x: f32,
     preedit: Option<&str>,
-    font_size: f32,
+    metrics: TextInputMetrics,
 ) -> TextInputGeometry {
-    let content_left = bounds.x + HORIZONTAL_PADDING;
-    let content_right = (bounds.x + bounds.width - HORIZONTAL_PADDING).max(content_left);
-    let visible_width = (bounds.width - HORIZONTAL_PADDING * 2.0).max(1.0);
+    let font_size = metrics.font_size;
+    let content_left = bounds.x + metrics.padding_x;
+    let content_right = (bounds.x + bounds.width - metrics.padding_x).max(content_left);
+    let visible_width = (bounds.width - metrics.padding_x * 2.0).max(1.0);
     let text_x = content_left - scroll_x;
     let text_y = bounds.y + (bounds.height - line_height(font_size)).max(0.0) * 0.5;
     let preedit_w = preedit.map_or(0.0, |text| measure_text_width(text, font_size));
-    let caret_width = 2.0;
+    let caret_width = metrics.caret_width;
     let max_caret_x = (content_right - caret_width).max(content_left);
     let caret_x = (text_x + cursor_text_x + preedit_w).clamp(content_left, max_caret_x);
 
@@ -41,9 +42,9 @@ pub(super) fn compute_text_geometry(
         visible_width,
         caret: Rect::new(
             caret_x,
-            bounds.y + VERTICAL_PADDING,
+            bounds.y + metrics.padding_y,
             caret_width,
-            (bounds.height - VERTICAL_PADDING * 2.0).max(1.0),
+            (bounds.height - metrics.padding_y * 2.0).max(1.0),
         ),
     }
 }
@@ -90,7 +91,7 @@ mod tests {
             0.0,
             1_000.0,
             Some("preedit"),
-            14.0,
+            TextInputMetrics::default(),
         );
 
         assert_eq!(geometry.content_left, 18.0);

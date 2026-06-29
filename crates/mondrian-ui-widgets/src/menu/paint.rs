@@ -9,7 +9,7 @@ use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 
 use super::geometry::{content_height, visible_content_height};
-use super::model::{DropdownTriggerStyle, MenuRowPaint, MenuVisualTokens, MENU_ARROW_SPACE};
+use super::model::{DropdownTriggerStyle, MenuMetrics, MenuRowPaint, MenuVisualTokens};
 
 // ── Trigger paint ────────────────────────────────────────────────────────────────
 
@@ -54,7 +54,11 @@ pub(crate) fn paint_menu_trigger_label(
     if label.is_empty() {
         return;
     }
-    let reserved_right = if reserve_arrow { MENU_ARROW_SPACE } else { 0.0 };
+    let reserved_right = if reserve_arrow {
+        MenuMetrics::current().arrow_space
+    } else {
+        0.0
+    };
     let visual = MenuVisualTokens::from_theme(ctx.theme);
     let padding_x = visual.trigger_padding_x(style);
     let text_width = rect.width - padding_x * 2.0 - reserved_right;

@@ -18,7 +18,7 @@ use crate::types::*;
 use crate::CornerRadii;
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
-use mondrian_platform::PlatformService;
+use mondrian_platform_core::PlatformService;
 use mondrian_ui_theme::Theme;
 use std::sync::Arc;
 

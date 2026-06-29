@@ -1,26 +1,81 @@
 //! Menu data model: items, tokens, constants, trigger style.
 
 use mondrian_editor_state::Action;
-use mondrian_ui_theme::Theme;
+use mondrian_ui_theme::{current_theme, Theme};
 
 use crate::text_metrics::measure_single_line;
 use crate::vector_icon::VectorIcon;
 
 // ── Constants ────────────────────────────────────────────────────────────────────
 
-pub(crate) const MENU_MEASURE_FONT_SIZE: f32 = 13.0;
-pub(crate) const MENU_MIN_WIDTH: f32 = 160.0;
-pub(crate) const MENU_TRIGGER_HEIGHT: f32 = 28.0;
-pub(crate) const MENU_BAR_TRIGGER_HEIGHT: f32 = 22.0;
-pub(crate) const MENU_TRIGGER_PADDING_X: f32 = 8.0;
-pub(crate) const MENU_ARROW_SPACE: f32 = 24.0;
-pub(crate) const MENU_POPUP_PADDING: f32 = 6.0;
-pub(crate) const MENU_ROW_PADDING_X: f32 = 10.0;
-pub(crate) const MENU_ROW_ICON_SIZE: f32 = 15.0;
-pub(crate) const MENU_ROW_ICON_GAP: f32 = 8.0;
-pub(crate) const MENU_ROW_SHORTCUT_GAP: f32 = 24.0;
-pub(crate) const MENU_SCROLLBAR_SPACE: f32 = 8.0;
-pub(crate) const MENU_VIEWPORT_MARGIN: f32 = 4.0;
+// ── MenuMetrics ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MenuMetrics {
+    pub measure_font_size: f32,
+    pub min_width: f32,
+    pub item_height: f32,
+    pub trigger_height: f32,
+    pub menu_bar_trigger_height: f32,
+    pub trigger_padding_x: f32,
+    pub menu_bar_trigger_padding_x: f32,
+    pub arrow_space: f32,
+    pub popup_padding: f32,
+    pub popup_gap: f32,
+    pub row_padding_x: f32,
+    pub row_icon_size: f32,
+    pub row_icon_gap: f32,
+    pub row_shortcut_gap: f32,
+    pub scrollbar_space: f32,
+    pub viewport_margin: f32,
+    pub popup_max_height: f32,
+    pub popup_viewport_pad: f32,
+}
+
+impl MenuMetrics {
+    pub fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            measure_font_size: theme.typography.small.font_size,
+            min_width: spacing.menu_min_width,
+            item_height: spacing.menu_item_height,
+            trigger_height: spacing.menu_trigger_height,
+            menu_bar_trigger_height: spacing.menu_bar_trigger_height,
+            trigger_padding_x: spacing.menu_trigger_padding_x,
+            menu_bar_trigger_padding_x: spacing.menu_bar_trigger_padding_x,
+            arrow_space: spacing.menu_arrow_space,
+            popup_padding: spacing.menu_popup_padding,
+            popup_gap: spacing.menu_popup_gap,
+            row_padding_x: spacing.menu_row_padding_x,
+            row_icon_size: spacing.menu_row_icon_size,
+            row_icon_gap: spacing.menu_row_icon_gap,
+            row_shortcut_gap: spacing.menu_row_shortcut_gap,
+            scrollbar_space: spacing.menu_scrollbar_space,
+            viewport_margin: spacing.menu_viewport_margin,
+            popup_max_height: spacing.menu_popup_max_height,
+            popup_viewport_pad: spacing.menu_popup_viewport_pad,
+        }
+    }
+
+    pub fn current() -> Self {
+        let theme = current_theme();
+        Self::from_theme(&theme)
+    }
+
+    pub fn trigger_height(self, style: DropdownTriggerStyle) -> f32 {
+        match style {
+            DropdownTriggerStyle::Filled => self.trigger_height,
+            DropdownTriggerStyle::MenuBar => self.menu_bar_trigger_height,
+        }
+    }
+
+    pub fn trigger_padding_x(self, style: DropdownTriggerStyle) -> f32 {
+        match style {
+            DropdownTriggerStyle::Filled => self.trigger_padding_x,
+            DropdownTriggerStyle::MenuBar => self.menu_bar_trigger_padding_x,
+        }
+    }
+}
 
 // ── MenuRowPaint ──────────────────────────────────────────────────────────────────
 
@@ -79,10 +134,10 @@ impl MenuVisualTokens {
             row_radius: spacing.radius_sm,
             row_font_size: theme.typography.small.font_size,
             row_hover_alpha: 0.72,
-            row_padding_x: spacing.md,
-            row_icon_size: spacing.icon_size + spacing.border_standard,
-            row_icon_gap: spacing.sm + spacing.border_emphasis,
-            row_shortcut_gap: spacing.icon_size + spacing.md,
+            row_padding_x: spacing.menu_row_padding_x,
+            row_icon_size: spacing.menu_row_icon_size,
+            row_icon_gap: spacing.menu_row_icon_gap,
+            row_shortcut_gap: spacing.menu_row_shortcut_gap,
             shortcut_font_size: theme.typography.metadata.font_size,
             separator_inset_x: spacing.sm,
             separator_width: spacing.border_standard,
@@ -139,16 +194,24 @@ pub enum MenuItemKind {
     Submenu { children: Vec<MenuItem> },
 }
 
+/// Command carried by an activatable menu row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MenuItemCommand {
+    /// Dispatch an editor/app action.
+    Action(Action),
+    /// Report a widget-local command to the owning control.
+    Local(String),
+    /// No executable command. Used by separators and submenu parents.
+    None,
+}
+
 // ── MenuItem ─────────────────────────────────────────────────────────────────────
 
-/// Menu item with label, action, optional icon, shortcut, and checked state.
+/// Menu item with label, command, optional icon, shortcut, and checked state.
 #[derive(Debug, Clone)]
 pub struct MenuItem {
     pub label: String,
-    pub action: Action,
-    /// Component-local command emitted by popups that should not dispatch an
-    /// editor action.
-    pub local_command: Option<String>,
+    pub command: MenuItemCommand,
     pub enabled: bool,
     pub kind: MenuItemKind,
     pub icon: Option<VectorIcon>,
@@ -160,8 +223,7 @@ impl MenuItem {
     pub fn new(label: impl Into<String>, action: Action) -> Self {
         Self {
             label: label.into(),
-            action,
-            local_command: None,
+            command: MenuItemCommand::Action(action),
             enabled: true,
             kind: MenuItemKind::Action,
             icon: None,
@@ -175,9 +237,37 @@ impl MenuItem {
     pub fn local(label: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            action: Action::NoOp,
-            local_command: Some(command.into()),
+            command: MenuItemCommand::Local(command.into()),
             enabled: true,
+            kind: MenuItemKind::Action,
+            icon: None,
+            shortcut: None,
+            checked: false,
+        }
+    }
+
+    /// Create a submenu trigger row.
+    pub fn submenu(label: impl Into<String>, children: Vec<MenuItem>) -> Self {
+        Self {
+            label: label.into(),
+            command: MenuItemCommand::None,
+            enabled: true,
+            kind: MenuItemKind::Submenu { children },
+            icon: None,
+            shortcut: None,
+            checked: false,
+        }
+    }
+
+    /// Create a disabled action row without an editor command.
+    ///
+    /// Use this for not-yet-implemented product entries instead of routing a
+    /// placeholder action through the command system.
+    pub fn inert(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            command: MenuItemCommand::None,
+            enabled: false,
             kind: MenuItemKind::Action,
             icon: None,
             shortcut: None,
@@ -189,8 +279,7 @@ impl MenuItem {
     pub fn separator() -> Self {
         Self {
             label: String::new(),
-            action: Action::DeselectAll,
-            local_command: None,
+            command: MenuItemCommand::None,
             enabled: false,
             kind: MenuItemKind::Separator,
             icon: None,
@@ -214,7 +303,7 @@ impl MenuItem {
     /// Make this item a submenu trigger with child items.
     pub fn with_submenu(mut self, children: Vec<MenuItem>) -> Self {
         self.kind = MenuItemKind::Submenu { children };
-        self.action = Action::NoOp;
+        self.command = MenuItemCommand::None;
         self
     }
 
@@ -240,22 +329,51 @@ impl MenuItem {
     pub fn is_submenu(&self) -> bool {
         matches!(self.kind, MenuItemKind::Submenu { .. })
     }
+
+    pub fn action(&self) -> Option<&Action> {
+        match &self.command {
+            MenuItemCommand::Action(action) => Some(action),
+            MenuItemCommand::Local(_) | MenuItemCommand::None => None,
+        }
+    }
+
+    pub fn local_command(&self) -> Option<&str> {
+        match &self.command {
+            MenuItemCommand::Local(command) => Some(command),
+            MenuItemCommand::Action(_) | MenuItemCommand::None => None,
+        }
+    }
+
+    pub fn has_command(&self) -> bool {
+        !matches!(self.command, MenuItemCommand::None)
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────────
 
-pub(crate) fn menu_item_text_width(item: &MenuItem) -> f32 {
-    let label_width = measure_single_line(&item.label, MENU_MEASURE_FONT_SIZE).0;
+pub(crate) fn menu_item_text_width_with_metrics(item: &MenuItem, metrics: MenuMetrics) -> f32 {
+    let label_width = measure_single_line(&item.label, metrics.measure_font_size).0;
     let shortcut_width = item
         .shortcut
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|s| MENU_ROW_SHORTCUT_GAP + measure_single_line(s, MENU_MEASURE_FONT_SIZE).0)
+        .map(|s| metrics.row_shortcut_gap + measure_single_line(s, metrics.measure_font_size).0)
         .unwrap_or(0.0);
     let submenu_arrow = if item.is_submenu() {
-        MENU_ARROW_SPACE
+        metrics.arrow_space
     } else {
         0.0
     };
     label_width + shortcut_width + submenu_arrow
+}
+
+pub(crate) fn menu_item_activation(item: &MenuItem) -> Option<MenuItemCommand> {
+    if !item.is_activatable() {
+        return None;
+    }
+    match &item.kind {
+        MenuItemKind::Action => item.has_command().then(|| item.command.clone()),
+        MenuItemKind::Submenu { children } => children.iter().find_map(menu_item_activation),
+        MenuItemKind::Separator => None,
+    }
 }

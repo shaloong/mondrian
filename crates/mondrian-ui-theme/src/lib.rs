@@ -58,6 +58,46 @@ impl ThemePreset {
     }
 }
 
+/// User-facing theme preference.
+///
+/// `System` is a resolver mode, not a third theme. It resolves to one of the
+/// concrete built-in presets supplied by the desktop shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemePreference {
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemePreference {
+    pub const ALL: [Self; 3] = [Self::System, Self::Dark, Self::Light];
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::System => "跟随系统",
+            Self::Dark => ThemePreset::Dark.display_name(),
+            Self::Light => ThemePreset::Light.display_name(),
+        }
+    }
+
+    pub fn resolve(self, system_preset: ThemePreset) -> ThemePreset {
+        match self {
+            Self::System => system_preset,
+            Self::Dark => ThemePreset::Dark,
+            Self::Light => ThemePreset::Light,
+        }
+    }
+}
+
+impl From<ThemePreset> for ThemePreference {
+    fn from(value: ThemePreset) -> Self {
+        match value {
+            ThemePreset::Dark => Self::Dark,
+            ThemePreset::Light => Self::Light,
+        }
+    }
+}
+
 /// 活跃主题的全局存储
 static ACTIVE_THEME: std::sync::OnceLock<RwLock<Theme>> = std::sync::OnceLock::new();
 
@@ -97,6 +137,20 @@ mod tests {
             let theme = preset.build();
             assert!(!theme.name.is_empty());
         }
+    }
+
+    #[test]
+    fn theme_preference_system_resolves_without_creating_a_third_preset() {
+        assert_eq!(
+            ThemePreference::System.resolve(ThemePreset::Dark),
+            ThemePreset::Dark
+        );
+        assert_eq!(
+            ThemePreference::System.resolve(ThemePreset::Light),
+            ThemePreset::Light
+        );
+        assert_eq!(ThemePreset::ALL.len(), 2);
+        assert_eq!(ThemePreference::ALL.len(), 3);
     }
 
     #[test]

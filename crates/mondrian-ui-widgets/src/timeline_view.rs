@@ -17,7 +17,7 @@ use mondrian_ui_core::widget::{
     EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_theme::colors::ColorTokens;
+use mondrian_ui_theme::{colors::ColorTokens, current_theme, Theme};
 
 #[cfg(test)]
 use crate::menu::MenuItemKind;
@@ -27,25 +27,67 @@ use crate::{ContextMenu, MenuItem, VectorIcon};
 
 use self::model as timeline_model;
 
-const SCROLLBAR_THICKNESS: f32 = 12.0;
-const SCROLLBAR_MIN_THUMB: f32 = 28.0;
-const SCROLLBAR_HANDLE_SIZE: f32 = 12.0;
-const SCROLLBAR_HANDLE_VISUAL_SIZE: f32 = 8.0;
-const SCROLLBAR_TRACK_VISUAL_THICKNESS: f32 = 6.0;
-const SCROLLBAR_BODY_VISUAL_THICKNESS: f32 = 5.0;
-const TIMELINE_SCROLLBAR_GUTTER: f32 = SCROLLBAR_THICKNESS;
-const TIMELINE_TOOL_BUTTON_SIZE: f32 = 26.0;
-const TIMELINE_TOOL_BUTTON_GAP: f32 = 4.0;
-const TIMELINE_TOOLBAR_HEIGHT: f32 = 34.0;
-const TIMELINE_TOOLBAR_GROUP_GAP: f32 = 10.0;
 const TIMELINE_SNAP_THRESHOLD_PX: f32 = 8.0;
 const TIMELINE_IN_OUT_MARKER_HIT_RADIUS: f32 = 5.0;
 const TIMELINE_MIN_PIXELS_PER_FRAME: f32 = 0.25;
 const TIMELINE_MAX_PIXELS_PER_FRAME: f32 = 64.0;
-const TIMELINE_CONTENT_TRAILING_PADDING: f32 = 160.0;
-const TIMELINE_MIN_TRACK_HEIGHT: f32 = 30.0;
-const TIMELINE_MAX_TRACK_HEIGHT: f32 = 96.0;
-const TIMELINE_TRACK_HEADER_MIN_WIDTH: f32 = 132.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TimelineMetrics {
+    scrollbar_thickness: f32,
+    scrollbar_min_thumb: f32,
+    scrollbar_handle_size: f32,
+    scrollbar_handle_visual_size: f32,
+    scrollbar_track_visual_thickness: f32,
+    scrollbar_body_visual_thickness: f32,
+    scrollbar_gutter: f32,
+    tool_button_size: f32,
+    tool_button_gap: f32,
+    toolbar_height: f32,
+    toolbar_group_gap: f32,
+    content_trailing_padding: f32,
+    min_track_height: f32,
+    max_track_height: f32,
+    track_header_min_width: f32,
+    default_track_height: f32,
+    default_header_width: f32,
+    default_ruler_height: f32,
+    default_pixels_per_frame: f32,
+}
+
+impl TimelineMetrics {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            scrollbar_thickness: spacing.timeline_scrollbar_size,
+            scrollbar_min_thumb: spacing.timeline_scrollbar_min_thumb,
+            scrollbar_handle_size: spacing.timeline_scrollbar_handle_size,
+            scrollbar_handle_visual_size: spacing.timeline_scrollbar_handle_visual_size,
+            scrollbar_track_visual_thickness: spacing.timeline_scrollbar_track_visual_thickness,
+            scrollbar_body_visual_thickness: spacing.timeline_scrollbar_body_visual_thickness,
+            scrollbar_gutter: spacing.timeline_scrollbar_size,
+            tool_button_size: spacing.timeline_tool_button_size,
+            tool_button_gap: spacing.timeline_tool_button_gap,
+            toolbar_height: spacing.timeline_toolbar_height,
+            toolbar_group_gap: spacing.timeline_toolbar_group_gap,
+            content_trailing_padding: spacing.timeline_content_trailing_padding,
+            min_track_height: spacing.timeline_min_track_height,
+            max_track_height: spacing.timeline_max_track_height,
+            track_header_min_width: spacing.timeline_track_header_min_width,
+            default_track_height: spacing.timeline_track_height,
+            default_header_width: spacing
+                .timeline_track_label_width
+                .max(spacing.timeline_track_header_min_width),
+            default_ruler_height: spacing.timeline_ruler_height,
+            default_pixels_per_frame: spacing.timeline_default_pixels_per_frame,
+        }
+    }
+
+    fn current() -> Self {
+        let theme = current_theme();
+        Self::from_theme(&theme)
+    }
+}
 
 /// Action factory for clip selection.
 pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
@@ -629,6 +671,7 @@ struct TimelineScrollbarDrag {
 impl TimelineView {
     /// Create a timeline view with the provided tracks.
     pub fn new(tracks: Vec<TimelineTrack>) -> Self {
+        let metrics = TimelineMetrics::current();
         Self {
             id: WidgetId::new(),
             tracks,
@@ -649,15 +692,15 @@ impl TimelineView {
             frame_rate: Rational::FPS_30,
             snapping_enabled: true,
             active_snap: None,
-            pixels_per_frame: 4.0,
+            pixels_per_frame: metrics.default_pixels_per_frame,
             scroll_x: 0.0,
             scroll_y: 0.0,
             focused: false,
             focus_visible: false,
             enabled: true,
-            track_height: 42.0,
-            header_width: TIMELINE_TRACK_HEADER_MIN_WIDTH,
-            ruler_height: 28.0,
+            track_height: metrics.default_track_height,
+            header_width: metrics.default_header_width,
+            ruler_height: metrics.default_ruler_height,
             playhead_dragging: false,
             in_out_drag: None,
             asset_drop_hover: None,
@@ -724,14 +767,14 @@ impl TimelineView {
 
     /// Set initial track height in logical pixels.
     pub fn with_track_height(mut self, track_height: f32) -> Self {
-        self.track_height =
-            track_height.clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
+        let metrics = TimelineMetrics::current();
+        self.track_height = track_height.clamp(metrics.min_track_height, metrics.max_track_height);
         self
     }
 
     /// Set the track header width.
     pub fn with_header_width(mut self, width: f32) -> Self {
-        self.header_width = width.max(TIMELINE_TRACK_HEADER_MIN_WIDTH);
+        self.header_width = width.max(TimelineMetrics::current().track_header_min_width);
         self
     }
 
@@ -1025,8 +1068,9 @@ impl TimelineView {
             .pixels_per_frame
             .clamp(TIMELINE_MIN_PIXELS_PER_FRAME, TIMELINE_MAX_PIXELS_PER_FRAME);
         self.snapping_enabled = state.snapping_enabled;
+        let metrics = TimelineMetrics::current();
         self.track_height =
-            state.track_height.clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
+            state.track_height.clamp(metrics.min_track_height, metrics.max_track_height);
         self.scroll_x = state.scroll_x.max(0.0);
         self.scroll_y = state.scroll_y.max(0.0);
         if self.body_rect.width > 0.0 || self.body_rect.height > 0.0 {
@@ -1035,7 +1079,8 @@ impl TimelineView {
     }
 
     fn content_width(&self) -> f32 {
-        self.max_content_frame() as f32 * self.pixels_per_frame + TIMELINE_CONTENT_TRAILING_PADDING
+        self.max_content_frame() as f32 * self.pixels_per_frame
+            + TimelineMetrics::current().content_trailing_padding
     }
 
     fn max_content_frame(&self) -> i64 {
@@ -1093,8 +1138,9 @@ impl TimelineView {
     fn horizontal_scrollbar_thumb_rect(&self) -> Option<Rect> {
         let track = self.horizontal_scrollbar_track_rect()?;
         let content_width = self.content_width();
+        let metrics = TimelineMetrics::current();
         let thumb_width = (self.body_rect.width / content_width * track.width)
-            .max(SCROLLBAR_MIN_THUMB)
+            .max(metrics.scrollbar_min_thumb)
             .min(track.width);
         let travel = (track.width - thumb_width).max(0.0);
         let offset_ratio = if self.max_scroll_x() > 0.0 {
@@ -1117,30 +1163,33 @@ impl TimelineView {
             TimelineScrollbarDragKind::TrailingHandle => thumb.x + thumb.width,
             TimelineScrollbarDragKind::Thumb => return None,
         };
+        let metrics = TimelineMetrics::current();
         Some(Rect::new(
-            center_x - SCROLLBAR_HANDLE_SIZE * 0.5,
-            thumb.center().y - SCROLLBAR_HANDLE_SIZE * 0.5,
-            SCROLLBAR_HANDLE_SIZE,
-            SCROLLBAR_HANDLE_SIZE,
+            center_x - metrics.scrollbar_handle_size * 0.5,
+            thumb.center().y - metrics.scrollbar_handle_size * 0.5,
+            metrics.scrollbar_handle_size,
+            metrics.scrollbar_handle_size,
         ))
     }
 
     fn horizontal_scrollbar_body_rect(&self) -> Option<Rect> {
         let thumb = self.horizontal_scrollbar_thumb_rect()?;
+        let metrics = TimelineMetrics::current();
         Some(Rect::new(
             thumb.x,
-            thumb.center().y - SCROLLBAR_BODY_VISUAL_THICKNESS * 0.5,
+            thumb.center().y - metrics.scrollbar_body_visual_thickness * 0.5,
             thumb.width,
-            SCROLLBAR_BODY_VISUAL_THICKNESS,
+            metrics.scrollbar_body_visual_thickness,
         ))
     }
 
     fn vertical_scrollbar_body_rect(&self) -> Option<Rect> {
         let thumb = self.vertical_scrollbar_thumb_rect()?;
+        let metrics = TimelineMetrics::current();
         Some(Rect::new(
-            thumb.center().x - SCROLLBAR_BODY_VISUAL_THICKNESS * 0.5,
+            thumb.center().x - metrics.scrollbar_body_visual_thickness * 0.5,
             thumb.y,
-            SCROLLBAR_BODY_VISUAL_THICKNESS,
+            metrics.scrollbar_body_visual_thickness,
             thumb.height,
         ))
     }
@@ -1148,8 +1197,9 @@ impl TimelineView {
     fn vertical_scrollbar_thumb_rect(&self) -> Option<Rect> {
         let track = self.vertical_scrollbar_track_rect()?;
         let content_height = self.content_height();
+        let metrics = TimelineMetrics::current();
         let thumb_height = (self.body_rect.height / content_height * track.height)
-            .max(SCROLLBAR_MIN_THUMB)
+            .max(metrics.scrollbar_min_thumb)
             .min(track.height);
         let travel = (track.height - thumb_height).max(0.0);
         let offset_ratio = if self.max_scroll_y() > 0.0 {
@@ -1172,11 +1222,12 @@ impl TimelineView {
             TimelineScrollbarDragKind::TrailingHandle => thumb.y + thumb.height,
             TimelineScrollbarDragKind::Thumb => return None,
         };
+        let metrics = TimelineMetrics::current();
         Some(Rect::new(
-            thumb.center().x - SCROLLBAR_HANDLE_SIZE * 0.5,
-            center_y - SCROLLBAR_HANDLE_SIZE * 0.5,
-            SCROLLBAR_HANDLE_SIZE,
-            SCROLLBAR_HANDLE_SIZE,
+            thumb.center().x - metrics.scrollbar_handle_size * 0.5,
+            center_y - metrics.scrollbar_handle_size * 0.5,
+            metrics.scrollbar_handle_size,
+            metrics.scrollbar_handle_size,
         ))
     }
 
@@ -1482,7 +1533,7 @@ impl TimelineView {
     fn timeline_corner_rect(&self) -> Rect {
         Rect::new(
             self.bounds.x,
-            self.bounds.y + TIMELINE_TOOLBAR_HEIGHT,
+            self.bounds.y + TimelineMetrics::current().toolbar_height,
             self.header_width,
             self.ruler_height,
         )
@@ -1509,19 +1560,20 @@ impl TimelineView {
     }
 
     fn toolbar_button_rect(&self, button: TimelineToolbarButton) -> Option<Rect> {
-        let size = TIMELINE_TOOL_BUTTON_SIZE;
+        let metrics = TimelineMetrics::current();
+        let size = metrics.tool_button_size;
         let y = self.toolbar_rect.y + (self.toolbar_rect.height - size) * 0.5;
         let limit = self.toolbar_left_limit();
         let mut x = self.toolbar_rect.x + 8.0;
         for (index, candidate) in Self::toolbar_left_buttons().into_iter().enumerate() {
             if index == 3 {
-                x += TIMELINE_TOOLBAR_GROUP_GAP;
+                x += metrics.toolbar_group_gap;
             }
             let rect = Rect::new(x, y, size, size);
             if candidate == button {
                 return (rect.x + rect.width <= limit).then_some(rect);
             }
-            x += size + TIMELINE_TOOL_BUTTON_GAP;
+            x += size + metrics.tool_button_gap;
         }
         None
     }
@@ -2277,12 +2329,13 @@ impl TimelineView {
 
         // Only include "新建" submenu when track-add callback is registered.
         if self.on_track_add.is_some() {
-            items.push(
-                MenuItem::new("新建", Action::NoOp).with_submenu(vec![
+            items.push(MenuItem::submenu(
+                "新建",
+                vec![
                     Self::menu_item("视频轨道", self.track_add_action(TimelineTrackKind::Video)),
                     Self::menu_item("音频轨道", self.track_add_action(TimelineTrackKind::Audio)),
-                ]),
-            );
+                ],
+            ));
             items.push(MenuItem::separator());
         }
 
@@ -3618,12 +3671,13 @@ impl TimelineView {
 
     fn paint_scrollbars(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
+        let metrics = TimelineMetrics::from_theme(ctx.theme);
         let track_color = colors.timeline_navigator_track;
         let corner = Rect::new(
             self.body_rect.x + self.body_rect.width,
             self.body_rect.y + self.body_rect.height,
-            TIMELINE_SCROLLBAR_GUTTER,
-            TIMELINE_SCROLLBAR_GUTTER,
+            metrics.scrollbar_gutter,
+            metrics.scrollbar_gutter,
         );
         ctx.encoder.draw_rect(corner, track_color, 0.0);
         if let (Some(track), Some(_thumb)) = (
@@ -3638,14 +3692,14 @@ impl TimelineView {
                 self.horizontal_scrollbar_hover_kind == Some(TimelineScrollbarDragKind::Thumb);
             let track_visual = Rect::new(
                 track.x,
-                track.center().y - SCROLLBAR_TRACK_VISUAL_THICKNESS * 0.5,
+                track.center().y - metrics.scrollbar_track_visual_thickness * 0.5,
                 track.width,
-                SCROLLBAR_TRACK_VISUAL_THICKNESS,
+                metrics.scrollbar_track_visual_thickness,
             );
             ctx.encoder.draw_rect(
                 track_visual,
                 track_color,
-                SCROLLBAR_TRACK_VISUAL_THICKNESS * 0.5,
+                metrics.scrollbar_track_visual_thickness * 0.5,
             );
 
             if let Some(body) =
@@ -3654,7 +3708,7 @@ impl TimelineView {
                 ctx.encoder.draw_rect(
                     body,
                     navigator_body_color(colors, body_hovered, body_dragging),
-                    SCROLLBAR_BODY_VISUAL_THICKNESS * 0.5,
+                    metrics.scrollbar_body_visual_thickness * 0.5,
                 );
             }
             self.paint_scrollbar_handle(
@@ -3684,15 +3738,15 @@ impl TimelineView {
             let body_hovered =
                 self.vertical_scrollbar_hover_kind == Some(TimelineScrollbarDragKind::Thumb);
             let track_visual = Rect::new(
-                track.center().x - SCROLLBAR_TRACK_VISUAL_THICKNESS * 0.5,
+                track.center().x - metrics.scrollbar_track_visual_thickness * 0.5,
                 track.y,
-                SCROLLBAR_TRACK_VISUAL_THICKNESS,
+                metrics.scrollbar_track_visual_thickness,
                 track.height,
             );
             ctx.encoder.draw_rect(
                 track_visual,
                 track_color,
-                SCROLLBAR_TRACK_VISUAL_THICKNESS * 0.5,
+                metrics.scrollbar_track_visual_thickness * 0.5,
             );
 
             if let Some(body) = self.vertical_scrollbar_body_rect().filter(|body| body.height > 0.0)
@@ -3700,7 +3754,7 @@ impl TimelineView {
                 ctx.encoder.draw_rect(
                     body,
                     navigator_body_color(colors, body_hovered, body_dragging),
-                    SCROLLBAR_BODY_VISUAL_THICKNESS * 0.5,
+                    metrics.scrollbar_body_visual_thickness * 0.5,
                 );
             }
             self.paint_scrollbar_handle(
@@ -3737,21 +3791,22 @@ impl TimelineView {
         let dragging =
             self.scrollbar_drag.is_some_and(|drag| drag.axis == axis && drag.kind == kind);
         let center = rect.center();
+        let metrics = TimelineMetrics::from_theme(ctx.theme);
         let visual = Rect::new(
-            center.x - SCROLLBAR_HANDLE_VISUAL_SIZE * 0.5,
-            center.y - SCROLLBAR_HANDLE_VISUAL_SIZE * 0.5,
-            SCROLLBAR_HANDLE_VISUAL_SIZE,
-            SCROLLBAR_HANDLE_VISUAL_SIZE,
+            center.x - metrics.scrollbar_handle_visual_size * 0.5,
+            center.y - metrics.scrollbar_handle_visual_size * 0.5,
+            metrics.scrollbar_handle_visual_size,
+            metrics.scrollbar_handle_visual_size,
         );
         ctx.encoder.draw_rect(
             visual.inset(-1.0, -1.0),
             ctx.theme.colors.timeline_navigator_handle_border,
-            (SCROLLBAR_HANDLE_VISUAL_SIZE + 2.0) * 0.5,
+            (metrics.scrollbar_handle_visual_size + 2.0) * 0.5,
         );
         ctx.encoder.draw_rect(
             visual,
             navigator_handle_color(&ctx.theme.colors, hovered, dragging),
-            SCROLLBAR_HANDLE_VISUAL_SIZE * 0.5,
+            metrics.scrollbar_handle_visual_size * 0.5,
         );
     }
 }
@@ -3772,7 +3827,7 @@ impl Widget for TimelineView {
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         constraint.constrain(Size::new(
             560.0,
-            TIMELINE_TOOLBAR_HEIGHT + self.ruler_height + self.content_height(),
+            TimelineMetrics::current().toolbar_height + self.ruler_height + self.content_height(),
         ))
     }
 
@@ -4349,7 +4404,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use mondrian_ui_theme::ThemePreset;
@@ -4371,13 +4426,13 @@ mod tests {
     }
 
     fn old_timeline_point(x: f32, y: f32) -> Point {
-        Point::new(x, y + TIMELINE_TOOLBAR_HEIGHT)
+        Point::new(x, y + TimelineMetrics::current().toolbar_height)
     }
 
     fn timeline_content_point(x: f32, y: f32) -> Point {
         const LEGACY_TIMELINE_HEADER_WIDTH: f32 = 96.0;
         old_timeline_point(
-            x + TIMELINE_TRACK_HEADER_MIN_WIDTH - LEGACY_TIMELINE_HEADER_WIDTH,
+            x + TimelineMetrics::current().track_header_min_width - LEGACY_TIMELINE_HEADER_WIDTH,
             y,
         )
     }
@@ -6674,7 +6729,10 @@ mod tests {
 
         assert_eq!(view.active_tool(), TimelineTool::Blade);
         assert_eq!(view.pixels_per_frame(), TIMELINE_MAX_PIXELS_PER_FRAME);
-        assert_eq!(view.track_height(), TIMELINE_MAX_TRACK_HEIGHT);
+        assert_eq!(
+            view.track_height(),
+            TimelineMetrics::current().max_track_height
+        );
         assert_eq!(view.scroll_x(), view.max_scroll_x());
         assert_eq!(view.scroll_y(), view.max_scroll_y());
         assert!(!view.snapping_enabled());
@@ -7498,7 +7556,7 @@ mod tests {
             .find(|item| item.label == "清除入点/出点")
             .expect("clear in/out item");
 
-        assert_eq!(clear.action, Action::SaveProject);
+        assert_eq!(clear.action(), Some(&Action::SaveProject));
         assert!(commands.borrow().contains(&TimelineEditCommand::ClearInOutPoints));
     }
 
@@ -8397,7 +8455,7 @@ mod tests {
         let view = TimelineView::new(vec![TimelineTrack::audio("A1", Vec::new())]);
         let clip = TimelineClip::new("Wave", 0, 20).with_waveform_peaks(vec![-1.0, 0.5, 2.0]);
         let rect = Rect::new(20.0, 30.0, 26.0, 32.0);
-        let inner = rect.inset(6.0, (rect.height * 0.24).min(10.0));
+        let inner = rect.inset(6.0, 2.0);
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {

@@ -16,6 +16,7 @@ use mondrian_ui_core::widget::{
     PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{current_theme, Theme};
 use std::cell::Cell;
 use std::sync::Arc;
 
@@ -29,13 +30,36 @@ use crate::{RasterImage, VectorIcon};
 
 use self::model as viewer_model;
 
-const DEFAULT_WIDTH: f32 = 480.0;
-const DEFAULT_HEIGHT: f32 = 270.0;
-const TRANSPORT_BUTTON_SIZE: f32 = 28.0;
-const TRANSPORT_BUTTON_GAP: f32 = 6.0;
-const VIEWER_DROPDOWN_ROW_HEIGHT: f32 = 24.0;
-const VIEWER_DROPDOWN_PAD_X: f32 = 5.0;
-const VIEWER_DROPDOWN_PAD_Y: f32 = 5.0;
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ViewerMetrics {
+    default_width: f32,
+    default_height: f32,
+    transport_button_size: f32,
+    transport_button_gap: f32,
+    dropdown_row_height: f32,
+    dropdown_padding_x: f32,
+    dropdown_padding_y: f32,
+}
+
+impl ViewerMetrics {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            default_width: spacing.viewer_default_width,
+            default_height: spacing.viewer_default_height,
+            transport_button_size: spacing.viewer_transport_button_size,
+            transport_button_gap: spacing.viewer_transport_button_gap,
+            dropdown_row_height: spacing.viewer_dropdown_row_height,
+            dropdown_padding_x: spacing.viewer_dropdown_padding_x,
+            dropdown_padding_y: spacing.viewer_dropdown_padding_y,
+        }
+    }
+
+    fn current() -> Self {
+        let theme = current_theme();
+        Self::from_theme(&theme)
+    }
+}
 
 /// RGBA preview image presented by [`ViewerSurface`].
 pub type ViewerFrameImage = RasterImage;
@@ -483,7 +507,8 @@ impl Widget for ViewerSurface {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        constraint.constrain(Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
+        let metrics = ViewerMetrics::current();
+        constraint.constrain(Size::new(metrics.default_width, metrics.default_height))
     }
 
     fn layout(&mut self, bounds: Rect) {

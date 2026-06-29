@@ -1,14 +1,47 @@
 use mondrian_ui_core::types::{Point, Rect};
+use mondrian_ui_theme::spacing::SpacingTokens;
 use std::collections::BTreeSet;
 
-use super::{
-    AssetGridItem, CARD_GAP, CARD_HEIGHT, CARD_TARGET_WIDTH, CONTENT_PADDING, PREVIEW_ASPECT_RATIO,
-};
+use super::AssetGridItem;
 
-const PREVIEW_PADDING: f32 = 6.0;
-const FOOTER_PADDING_X: f32 = 8.0;
-const FOOTER_TOP_GAP: f32 = 7.0;
-const FOOTER_HEIGHT: f32 = 18.0;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct AssetGridMetrics {
+    pub content_padding: f32,
+    pub card_gap: f32,
+    pub card_width: f32,
+    pub card_height: f32,
+    pub preview_aspect_ratio: f32,
+    pub card_radius: f32,
+    pub icon_size: f32,
+    pub preview_padding: f32,
+    pub footer_padding_x: f32,
+    pub footer_top_gap: f32,
+    pub footer_height: f32,
+}
+
+impl AssetGridMetrics {
+    pub fn from_spacing(spacing: &SpacingTokens) -> Self {
+        Self {
+            content_padding: spacing.asset_grid_content_padding,
+            card_gap: spacing.asset_grid_card_gap,
+            card_width: spacing.asset_grid_card_width,
+            card_height: spacing.asset_grid_card_height,
+            preview_aspect_ratio: spacing.asset_grid_preview_aspect_ratio,
+            card_radius: spacing.asset_grid_card_radius,
+            icon_size: spacing.asset_grid_icon_size,
+            preview_padding: spacing.asset_grid_preview_padding,
+            footer_padding_x: spacing.asset_grid_footer_padding_x,
+            footer_top_gap: spacing.asset_grid_footer_top_gap,
+            footer_height: spacing.asset_grid_footer_height,
+        }
+    }
+}
+
+impl Default for AssetGridMetrics {
+    fn default() -> Self {
+        Self::from_spacing(&SpacingTokens::default())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct GridLayout {
@@ -17,71 +50,86 @@ pub(super) struct GridLayout {
     pub viewport: Rect,
 }
 
-pub(super) fn grid_columns_for_width(width: f32) -> usize {
-    if width <= CARD_TARGET_WIDTH {
+pub(super) fn grid_columns_for_width(width: f32, metrics: AssetGridMetrics) -> usize {
+    if width <= metrics.card_width {
         return 1;
     }
-    let columns = ((width + CARD_GAP) / (CARD_TARGET_WIDTH + CARD_GAP)).floor() as usize;
+    let columns =
+        ((width + metrics.card_gap) / (metrics.card_width + metrics.card_gap)).floor() as usize;
     columns.max(1)
 }
 
-pub(super) fn content_height_for_width(width: f32, item_count: usize) -> f32 {
-    let viewport_width = (width - CONTENT_PADDING * 2.0).max(0.0);
-    let columns = grid_columns_for_width(viewport_width);
-    content_height(item_count, columns)
+pub(super) fn content_height_for_width(
+    width: f32,
+    item_count: usize,
+    metrics: AssetGridMetrics,
+) -> f32 {
+    let viewport_width = (width - metrics.content_padding * 2.0).max(0.0);
+    let columns = grid_columns_for_width(viewport_width, metrics);
+    content_height(item_count, columns, metrics)
 }
 
-pub(super) fn content_height(item_count: usize, columns: usize) -> f32 {
+pub(super) fn content_height(item_count: usize, columns: usize, metrics: AssetGridMetrics) -> f32 {
     let rows = item_count.div_ceil(columns.max(1));
-    CONTENT_PADDING * 2.0 + rows as f32 * CARD_HEIGHT + rows.saturating_sub(1) as f32 * CARD_GAP
+    metrics.content_padding * 2.0
+        + rows as f32 * metrics.card_height
+        + rows.saturating_sub(1) as f32 * metrics.card_gap
 }
 
-pub(super) fn layout_for_bounds(bounds: Rect, header_height: f32, item_count: usize) -> GridLayout {
-    let viewport_width = (bounds.width - CONTENT_PADDING * 2.0).max(0.0);
-    let columns = grid_columns_for_width(viewport_width);
+pub(super) fn layout_for_bounds(
+    bounds: Rect,
+    header_height: f32,
+    item_count: usize,
+    metrics: AssetGridMetrics,
+) -> GridLayout {
+    let viewport_width = (bounds.width - metrics.content_padding * 2.0).max(0.0);
+    let columns = grid_columns_for_width(viewport_width, metrics);
     let viewport = Rect::new(
         bounds.x,
         bounds.y + header_height,
         bounds.width.max(0.0),
-        content_height(item_count, columns).max((bounds.height - header_height).max(0.0)),
+        content_height(item_count, columns, metrics).max((bounds.height - header_height).max(0.0)),
     );
-    GridLayout { columns, card_width: CARD_TARGET_WIDTH, viewport }
+    GridLayout { columns, card_width: metrics.card_width, viewport }
 }
 
-pub(super) fn card_rect_at_visible_position(
+pub(super) fn card_rect_at_visible_position_with_metrics(
     viewport: Rect,
     columns: usize,
     card_width: f32,
     visible_position: usize,
+    metrics: AssetGridMetrics,
 ) -> Rect {
     let columns = columns.max(1);
     let col = visible_position % columns;
     let row = visible_position / columns;
     Rect::new(
-        viewport.x + CONTENT_PADDING + col as f32 * (card_width + CARD_GAP),
-        viewport.y + CONTENT_PADDING + row as f32 * (CARD_HEIGHT + CARD_GAP),
+        viewport.x + metrics.content_padding + col as f32 * (card_width + metrics.card_gap),
+        viewport.y
+            + metrics.content_padding
+            + row as f32 * (metrics.card_height + metrics.card_gap),
         card_width,
-        CARD_HEIGHT,
+        metrics.card_height,
     )
 }
 
-pub(super) fn preview_rect_for_card(card: Rect) -> Rect {
-    let width = (card.width - PREVIEW_PADDING * 2.0).max(0.0);
+pub(super) fn preview_rect_for_card(card: Rect, metrics: AssetGridMetrics) -> Rect {
+    let width = (card.width - metrics.preview_padding * 2.0).max(0.0);
     Rect::new(
-        card.x + PREVIEW_PADDING,
-        card.y + PREVIEW_PADDING,
+        card.x + metrics.preview_padding,
+        card.y + metrics.preview_padding,
         width,
-        width / PREVIEW_ASPECT_RATIO,
+        width / metrics.preview_aspect_ratio,
     )
 }
 
-pub(super) fn footer_rect_for_card(card: Rect) -> Rect {
-    let preview = preview_rect_for_card(card);
+pub(super) fn footer_rect_for_card(card: Rect, metrics: AssetGridMetrics) -> Rect {
+    let preview = preview_rect_for_card(card, metrics);
     Rect::new(
-        card.x + FOOTER_PADDING_X,
-        preview.y + preview.height + FOOTER_TOP_GAP,
-        (card.width - FOOTER_PADDING_X * 2.0).max(0.0),
-        FOOTER_HEIGHT,
+        card.x + metrics.footer_padding_x,
+        preview.y + preview.height + metrics.footer_top_gap,
+        (card.width - metrics.footer_padding_x * 2.0).max(0.0),
+        metrics.footer_height,
     )
 }
 
@@ -95,6 +143,7 @@ pub(super) fn index_at(
     columns: usize,
     card_width: f32,
     point: Point,
+    metrics: AssetGridMetrics,
 ) -> Option<usize> {
     if !viewport.contains(point) {
         return None;
@@ -104,9 +153,15 @@ pub(super) fn index_at(
         .copied()
         .enumerate()
         .find_map(|(visible_position, index)| {
-            card_rect_at_visible_position(viewport, columns, card_width, visible_position)
-                .contains(point)
-                .then_some(index)
+            card_rect_at_visible_position_with_metrics(
+                viewport,
+                columns,
+                card_width,
+                visible_position,
+                metrics,
+            )
+            .contains(point)
+            .then_some(index)
         })
 }
 
@@ -224,21 +279,23 @@ mod tests {
 
     #[test]
     fn grid_columns_and_content_height_use_target_card_width_and_gap() {
-        assert_eq!(grid_columns_for_width(171.0), 1);
-        assert_eq!(grid_columns_for_width(352.0), 2);
+        let metrics = AssetGridMetrics::default();
+        assert_eq!(grid_columns_for_width(171.0, metrics), 1);
+        assert_eq!(grid_columns_for_width(352.0, metrics), 2);
         assert_eq!(
-            content_height(5, 2),
-            CONTENT_PADDING * 2.0 + 3.0 * CARD_HEIGHT + 2.0 * CARD_GAP
+            content_height(5, 2, metrics),
+            metrics.content_padding * 2.0 + 3.0 * metrics.card_height + 2.0 * metrics.card_gap
         );
     }
 
     #[test]
     fn layout_for_bounds_keeps_viewport_at_content_height_when_content_overflows() {
         let bounds = Rect::new(10.0, 20.0, 380.0, 200.0);
-        let layout = layout_for_bounds(bounds, 42.0, 5);
+        let metrics = AssetGridMetrics::default();
+        let layout = layout_for_bounds(bounds, 42.0, 5, metrics);
 
         assert_eq!(layout.columns, 2);
-        assert_eq!(layout.card_width, CARD_TARGET_WIDTH);
+        assert_eq!(layout.card_width, metrics.card_width);
         assert_eq!(layout.viewport.x, 10.0);
         assert_eq!(layout.viewport.y, 62.0);
         assert!(layout.viewport.height > bounds.height - 42.0);
@@ -247,8 +304,9 @@ mod tests {
     #[test]
     fn card_preview_footer_and_fit_rects_are_stable() {
         let card = Rect::new(20.0, 30.0, 172.0, 126.0);
-        let preview = preview_rect_for_card(card);
-        let footer = footer_rect_for_card(card);
+        let metrics = AssetGridMetrics::default();
+        let preview = preview_rect_for_card(card, metrics);
+        let footer = footer_rect_for_card(card, metrics);
         let fitted = fit_rect_into(4.0, 2.0, preview);
 
         assert_eq!(preview, Rect::new(26.0, 36.0, 160.0, 90.0));
@@ -262,15 +320,18 @@ mod tests {
     fn hit_testing_maps_visible_positions_back_to_model_indices() {
         let viewport = Rect::new(0.0, 40.0, 380.0, 300.0);
         let visible = vec![2, 4, 8];
-        let second_card = card_rect_at_visible_position(viewport, 2, CARD_TARGET_WIDTH, 1);
+        let metrics = AssetGridMetrics::default();
+        let second_card =
+            card_rect_at_visible_position_with_metrics(viewport, 2, metrics.card_width, 1, metrics);
 
         assert_eq!(
             index_at(
                 &visible,
                 viewport,
                 2,
-                CARD_TARGET_WIDTH,
-                second_card.center()
+                metrics.card_width,
+                second_card.center(),
+                metrics
             ),
             Some(4)
         );
@@ -279,8 +340,9 @@ mod tests {
                 &visible,
                 viewport,
                 2,
-                CARD_TARGET_WIDTH,
-                Point::new(-1.0, 80.0)
+                metrics.card_width,
+                Point::new(-1.0, 80.0),
+                metrics
             ),
             None
         );

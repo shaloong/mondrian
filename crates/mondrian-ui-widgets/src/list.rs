@@ -389,7 +389,7 @@ mod tests {
 
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;

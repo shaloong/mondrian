@@ -34,13 +34,6 @@ use self::model as grid_model;
 const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
 const DRAG_START_DISTANCE: f32 = 6.0;
-const CONTENT_PADDING: f32 = 8.0;
-const CARD_GAP: f32 = 8.0;
-const CARD_TARGET_WIDTH: f32 = 172.0;
-const CARD_HEIGHT: f32 = 126.0;
-const PREVIEW_ASPECT_RATIO: f32 = 16.0 / 9.0;
-const CARD_RADIUS: f32 = 7.0;
-const ICON_SIZE: f32 = 22.0;
 const RENAME_MENU_COMMAND: &str = "asset_grid.rename";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -364,7 +357,7 @@ impl AssetGrid {
             last_click: None,
             drag_candidate: None,
             columns: 1,
-            card_width: CARD_TARGET_WIDTH,
+            card_width: grid_model::AssetGridMetrics::default().card_width,
             context_menu_items: Vec::new(),
             selection_context_menu: None,
             context_menu: None,
@@ -597,15 +590,28 @@ impl AssetGrid {
     }
 
     fn content_height_for_width(width: f32, item_count: usize) -> f32 {
-        grid_model::content_height_for_width(width, item_count)
+        let theme = current_theme();
+        grid_model::content_height_for_width(
+            width,
+            item_count,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
+        )
     }
 
     fn preview_rect_for_card(&self, card: Rect) -> Rect {
-        grid_model::preview_rect_for_card(card)
+        let theme = current_theme();
+        grid_model::preview_rect_for_card(
+            card,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
+        )
     }
 
     fn footer_rect_for_card(&self, card: Rect) -> Rect {
-        grid_model::footer_rect_for_card(card)
+        let theme = current_theme();
+        grid_model::footer_rect_for_card(
+            card,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
+        )
     }
 
     fn is_enabled_index(&self, index: usize) -> bool {
@@ -868,11 +874,11 @@ impl AssetGrid {
 
     fn dispatch_selection_menu_action(&self, ctx: &mut EventContext) -> EventResult {
         for item in self.selection_context_menu_items() {
-            if item.is_activatable()
-                && item.local_command.is_none()
-                && !matches!(item.action, Action::NoOp)
-            {
-                (ctx.dispatch)(item.action);
+            if !item.enabled {
+                continue;
+            }
+            if let Some(action) = item.action().cloned().filter(|action| *action != Action::NoOp) {
+                (ctx.dispatch)(action);
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
@@ -980,21 +986,25 @@ impl AssetGrid {
     }
 
     fn card_rect_at_visible_position(&self, visible_position: usize) -> Rect {
-        grid_model::card_rect_at_visible_position(
+        let theme = current_theme();
+        grid_model::card_rect_at_visible_position_with_metrics(
             self.viewport,
             self.columns,
             self.card_width,
             visible_position,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
         )
     }
 
     fn index_at(&self, point: Point) -> Option<usize> {
+        let theme = current_theme();
         grid_model::index_at(
             &self.visible_indices,
             self.viewport,
             self.columns,
             self.card_width,
             point,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
         )
     }
 
@@ -1221,6 +1231,7 @@ impl AssetGrid {
         let item = &self.items[index];
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
+        let metrics = grid_model::AssetGridMetrics::from_spacing(spacing);
         let visual = AssetGridVisualTokens::from_theme(ctx.theme);
         let primary_selected = self.selected == Some(index);
         let selected = self.selected_indices.contains(&index);
@@ -1233,7 +1244,7 @@ impl AssetGrid {
             Color::TRANSPARENT
         };
         if primary_selected && (self.focus_visible || self.focused) {
-            paint_focus_ring(ctx, rect, CARD_RADIUS);
+            paint_focus_ring(ctx, rect, metrics.card_radius);
         }
         let card_border = if selected {
             color_with_alpha(colors.primary, 0.45)
@@ -1242,11 +1253,11 @@ impl AssetGrid {
         } else {
             Color::TRANSPARENT
         };
-        ctx.encoder.draw_rect(rect, card_border, CARD_RADIUS);
+        ctx.encoder.draw_rect(rect, card_border, metrics.card_radius);
         ctx.encoder.draw_rect(
             rect.inset(1.0, 1.0),
             base_fill,
-            (CARD_RADIUS - 1.0).max(0.0),
+            (metrics.card_radius - 1.0).max(0.0),
         );
 
         let preview = self.preview_rect_for_card(rect);
@@ -1285,10 +1296,10 @@ impl AssetGrid {
         if item.thumbnail.is_none() {
             if let Some(icon) = &item.icon {
                 let icon_rect = Rect::new(
-                    preview.x + (preview.width - ICON_SIZE) * 0.5,
-                    preview.y + (preview.height - ICON_SIZE) * 0.5,
-                    ICON_SIZE,
-                    ICON_SIZE,
+                    preview.x + (preview.width - metrics.icon_size) * 0.5,
+                    preview.y + (preview.height - metrics.icon_size) * 0.5,
+                    metrics.icon_size,
+                    metrics.icon_size,
                 );
                 icon.paint(ctx, icon_rect, text_color);
             }
@@ -1357,7 +1368,11 @@ impl Widget for AssetGrid {
         let width = if constraint.max.width.is_finite() {
             constraint.max.width.max(constraint.min.width)
         } else {
-            CARD_TARGET_WIDTH * 2.0 + CONTENT_PADDING * 2.0
+            let metrics = {
+                let theme = current_theme();
+                grid_model::AssetGridMetrics::from_spacing(&theme.spacing)
+            };
+            metrics.card_width * 2.0 + metrics.content_padding * 2.0
         };
         constraint.constrain(Size::new(
             width,
@@ -1377,7 +1392,12 @@ impl Widget for AssetGrid {
             menu.layout(bounds);
         }
         let header = self.header_height();
-        let layout = grid_model::layout_for_bounds(bounds, header, self.visible_indices.len());
+        let metrics = {
+            let theme = current_theme();
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing)
+        };
+        let layout =
+            grid_model::layout_for_bounds(bounds, header, self.visible_indices.len(), metrics);
         self.columns = layout.columns;
         self.card_width = layout.card_width;
         self.viewport = layout.viewport;
@@ -1888,7 +1908,7 @@ mod tests {
     use crate::paint::mix_color;
     use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::types::AssetId;
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_core::focus::FocusManager;
     use mondrian_ui_core::widget::{
         DrawCommandEncoder, EventContext, EventRequests, PointerCaptureRequest,
@@ -2410,13 +2430,14 @@ mod tests {
             vec![item("clip-a", "Clip A").with_thumbnail(thumbnail)],
         );
         let theme = ThemePreset::Dark.build();
+        let metrics = grid_model::AssetGridMetrics::from_spacing(&theme.spacing);
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
         };
-        let card = Rect::new(20.0, 30.0, CARD_TARGET_WIDTH, CARD_HEIGHT);
+        let card = Rect::new(20.0, 30.0, metrics.card_width, metrics.card_height);
         let preview = grid.preview_rect_for_card(card);
         let image_rect = fit_rect_into(2.0, 2.0, preview);
 
@@ -2555,13 +2576,14 @@ mod tests {
         assert!(AssetGrid::item_matches_query(&grid.items[0], "offline"));
 
         let theme = ThemePreset::Dark.build();
+        let metrics = grid_model::AssetGridMetrics::from_spacing(&theme.spacing);
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
         };
-        let card = Rect::new(20.0, 30.0, CARD_TARGET_WIDTH, CARD_HEIGHT);
+        let card = Rect::new(20.0, 30.0, metrics.card_width, metrics.card_height);
         let preview = grid.preview_rect_for_card(card);
 
         grid.paint_card(&mut ctx, 0, card);
@@ -2600,6 +2622,7 @@ mod tests {
             vec![item("clip-a", "Clip A").with_subtitle("0:12").with_badge("VID")],
         );
         let theme = ThemePreset::Dark.build();
+        let metrics = grid_model::AssetGridMetrics::from_spacing(&theme.spacing);
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
             encoder: &mut encoder,
@@ -2610,7 +2633,7 @@ mod tests {
         grid.paint_card(
             &mut ctx,
             0,
-            Rect::new(20.0, 30.0, CARD_TARGET_WIDTH, CARD_HEIGHT),
+            Rect::new(20.0, 30.0, metrics.card_width, metrics.card_height),
         );
 
         assert!(encoder.texts.iter().any(|text| text == "Clip A"));

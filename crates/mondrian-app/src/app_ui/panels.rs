@@ -2502,35 +2502,38 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
         ),
         MenuItem::separator(),
         asset_menu_item(
-            MenuItem::new("新建", Action::NoOp).with_submenu(vec![
-                asset_menu_item(
-                    MenuItem::new(
-                        "调整图层",
-                        assets_create_adjustment_layer_action(AssetsCreateAssetPayload {
-                            folder_id: current_folder_id.map(str::to_owned),
-                        }),
+            MenuItem::submenu(
+                "新建",
+                vec![
+                    asset_menu_item(
+                        MenuItem::new(
+                            "调整图层",
+                            assets_create_adjustment_layer_action(AssetsCreateAssetPayload {
+                                folder_id: current_folder_id.map(str::to_owned),
+                            }),
+                        ),
+                        AppIcon::Grid,
                     ),
-                    AppIcon::Grid,
-                ),
-                asset_menu_item(
-                    MenuItem::new(
-                        "纯色",
-                        assets_create_solid_color_action(AssetsCreateAssetPayload {
-                            folder_id: current_folder_id.map(str::to_owned),
-                        }),
+                    asset_menu_item(
+                        MenuItem::new(
+                            "纯色",
+                            assets_create_solid_color_action(AssetsCreateAssetPayload {
+                                folder_id: current_folder_id.map(str::to_owned),
+                            }),
+                        ),
+                        AppIcon::Rectangle,
                     ),
-                    AppIcon::Rectangle,
-                ),
-                asset_menu_item(
-                    MenuItem::new(
-                        "文件夹",
-                        assets_create_folder_action(AssetsCreateFolderPayload {
-                            parent_folder_id: current_folder_id.map(str::to_owned),
-                        }),
+                    asset_menu_item(
+                        MenuItem::new(
+                            "文件夹",
+                            assets_create_folder_action(AssetsCreateFolderPayload {
+                                parent_folder_id: current_folder_id.map(str::to_owned),
+                            }),
+                        ),
+                        AppIcon::Folder,
                     ),
-                    AppIcon::Folder,
-                ),
-            ]),
+                ],
+            ),
             AppIcon::Grid,
         ),
     ]
@@ -4847,16 +4850,16 @@ mod tests {
         let items = asset_grid_context_menu_items(None);
 
         assert_eq!(items.len(), 3);
-        assert_shell_action(Some(&items[0].action), APP_SHELL_IMPORT_MEDIA_DIALOG);
+        assert_shell_action(items[0].action(), APP_SHELL_IMPORT_MEDIA_DIALOG);
         assert!(items[1].is_separator());
         assert_eq!(items[2].label, "新建");
         // Verify submenu children
         match &items[2].kind {
             MenuItemKind::Submenu { children } => {
                 assert_eq!(children.len(), 3);
-                assert_assets_action(Some(&children[0].action), ASSETS_CREATE_ADJUSTMENT_LAYER);
-                assert_assets_action(Some(&children[1].action), ASSETS_CREATE_SOLID_COLOR);
-                assert_assets_action(Some(&children[2].action), ASSETS_CREATE_FOLDER);
+                assert_assets_action(children[0].action(), ASSETS_CREATE_ADJUSTMENT_LAYER);
+                assert_assets_action(children[1].action(), ASSETS_CREATE_SOLID_COLOR);
+                assert_assets_action(children[2].action(), ASSETS_CREATE_FOLDER);
             }
             _ => panic!("expected 新建 submenu"),
         }
@@ -4866,7 +4869,9 @@ mod tests {
     fn assets_panel_context_menu_creates_folders_inside_current_folder() {
         let items = asset_grid_context_menu_items(Some("rushes"));
 
-        let Action::Custom { namespace, name, payload } = &items[0].action else {
+        let Action::Custom { namespace, name, payload } =
+            items[0].action().expect("import dialog action")
+        else {
             panic!("expected import dialog custom action");
         };
         assert_eq!(namespace, APP_SHELL_NAMESPACE);
@@ -4880,9 +4885,9 @@ mod tests {
             MenuItemKind::Submenu { children } => children,
             _ => panic!("expected 新建 submenu"),
         };
-        assert_assets_action(Some(&children[0].action), ASSETS_CREATE_ADJUSTMENT_LAYER);
-        assert_assets_action(Some(&children[1].action), ASSETS_CREATE_SOLID_COLOR);
-        assert_assets_action(Some(&children[2].action), ASSETS_CREATE_FOLDER);
+        assert_assets_action(children[0].action(), ASSETS_CREATE_ADJUSTMENT_LAYER);
+        assert_assets_action(children[1].action(), ASSETS_CREATE_SOLID_COLOR);
+        assert_assets_action(children[2].action(), ASSETS_CREATE_FOLDER);
     }
 
     #[test]
@@ -5145,7 +5150,9 @@ mod tests {
         assert_eq!(item.context_menu_items[1].label, "重新链接媒体...");
         assert!(item.context_menu_items[2].is_separator());
         assert_eq!(item.context_menu_items[3].label, "删除素材");
-        let Action::Custom { namespace, name, payload } = &item.context_menu_items[1].action else {
+        let Action::Custom { namespace, name, payload } =
+            item.context_menu_items[1].action().expect("relink shell action")
+        else {
             panic!("expected relink shell action");
         };
         assert_eq!(namespace, APP_SHELL_NAMESPACE);
@@ -5170,7 +5177,9 @@ mod tests {
         assert_eq!(item.context_menu_items[0].label, "在文件管理器中显示");
         assert_eq!(item.context_menu_items[1].label, "启用代理模式");
         assert!(item.context_menu_items[2].is_separator());
-        let Action::Custom { namespace, name, payload } = &item.context_menu_items[1].action else {
+        let Action::Custom { namespace, name, payload } =
+            item.context_menu_items[1].action().expect("proxy mode action")
+        else {
             panic!("expected proxy mode custom action");
         };
         assert_eq!(namespace, ASSETS_NAMESPACE);
@@ -5185,7 +5194,9 @@ mod tests {
         assert_eq!(badge_labels(&proxied), ["视频", "代理"]);
         assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
         assert_eq!(proxied.context_menu_items[1].label, "关闭代理模式");
-        let Action::Custom { payload, .. } = &proxied.context_menu_items[1].action else {
+        let Action::Custom { payload, .. } =
+            proxied.context_menu_items[1].action().expect("proxy mode action")
+        else {
             panic!("expected proxy mode custom action");
         };
         let payload: AssetsSetProxyModePayload =
@@ -6694,7 +6705,9 @@ mod tests {
         assert_eq!(item.context_menu_items.len(), 1);
         assert_eq!(item.context_menu_items[0].label, "删除素材");
         assert!(item.context_menu_items[0].icon.is_some());
-        let Action::Custom { namespace, name, payload } = &item.context_menu_items[0].action else {
+        let Action::Custom { namespace, name, payload } =
+            item.context_menu_items[0].action().expect("asset delete action")
+        else {
             panic!("expected asset delete custom action");
         };
         assert_eq!(namespace, ASSETS_NAMESPACE);
@@ -6821,7 +6834,8 @@ mod tests {
         assert_eq!(folder.context_menu_items.len(), 1);
         assert_eq!(folder.context_menu_items[0].label, "删除文件夹");
         assert!(folder.context_menu_items[0].icon.is_some());
-        let Action::Custom { namespace, name, payload } = &folder.context_menu_items[0].action
+        let Action::Custom { namespace, name, payload } =
+            folder.context_menu_items[0].action().expect("asset folder delete action")
         else {
             panic!("expected asset folder delete custom action");
         };
@@ -6918,7 +6932,8 @@ mod tests {
             Some(DragPayload::AssetFolder(nested_id.clone()))
         );
         assert_eq!(nested.context_menu_items.len(), 1);
-        let Action::Custom { namespace, name, payload } = &nested.context_menu_items[0].action
+        let Action::Custom { namespace, name, payload } =
+            nested.context_menu_items[0].action().expect("nested folder delete action")
         else {
             panic!("expected nested folder delete custom action");
         };

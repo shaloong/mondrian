@@ -644,7 +644,7 @@ mod tests {
     use crate::paint::color_with_alpha;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::Color;
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;

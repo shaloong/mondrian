@@ -17,7 +17,7 @@ use mondrian_timeline::{
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
     PreviewRenderFormat, SequenceSettings, VideoDisplayFormat,
 };
-use mondrian_ui_theme::ThemePreset;
+use mondrian_ui_theme::ThemePreference;
 use mondrian_ui_widgets::WaveformDisplay;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -254,11 +254,11 @@ pub struct AppShellCopySystemInfoPayload {
     pub text: String,
 }
 
-/// Theme preset selected by the app UI preferences UI.
+/// Theme preference selected by the app UI preferences UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferencesThemePayload {
-    /// Theme preset to apply and persist.
-    pub preset: ThemePreset,
+    /// Theme preference to apply and persist.
+    pub preference: ThemePreference,
 }
 
 /// Waveform display mode selected by the app UI preferences UI.
@@ -1325,11 +1325,11 @@ pub fn app_shell_preferences_tab_changed_action(payload: PreferencesTabPayload) 
     custom_app_shell_action_with_payload(APP_SHELL_PREFERENCES_TAB_CHANGED, payload)
 }
 
-/// Build an app-shell request for switching the app UI theme preset.
-pub fn app_shell_preferences_theme_changed_action(preset: ThemePreset) -> Action {
+/// Build an app-shell request for switching the app UI theme preference.
+pub fn app_shell_preferences_theme_changed_action(preference: ThemePreference) -> Action {
     custom_app_shell_action_with_payload(
         APP_SHELL_PREFERENCES_THEME_CHANGED,
-        PreferencesThemePayload { preset },
+        PreferencesThemePayload { preference },
     )
 }
 

@@ -298,9 +298,9 @@ impl WindowControls {
         let pressed = pressed_control == Some(control);
         let center = rect.center();
         let mut fill = match control {
-            WindowControl::Close => Color { r: 1.0, g: 0.37, b: 0.34, a: 1.0 },
-            WindowControl::Minimize => Color { r: 1.0, g: 0.76, b: 0.25, a: 1.0 },
-            WindowControl::ToggleMaximize => Color { r: 0.18, g: 0.78, b: 0.31, a: 1.0 },
+            WindowControl::Close => colors.window_macos_close,
+            WindowControl::Minimize => colors.window_macos_minimize,
+            WindowControl::ToggleMaximize => colors.window_macos_maximize,
         };
         if pressed {
             fill = fill.lerp(colors.background, 0.28);

@@ -2,12 +2,10 @@ use mondrian_core::types::{Rational, TimeCode};
 use mondrian_ui_core::types::{KeyCode, Modifiers, Point, Rect};
 
 use super::{
-    TimelineClipRef, TimelineEditCommand, TimelineInOutPoint, TimelineScrollbarDragKind,
-    TimelineTrackControl, TimelineTrackKind, TimelineTrackRef, TimelineTrimEdge,
-    SCROLLBAR_HANDLE_SIZE, SCROLLBAR_MIN_THUMB, SCROLLBAR_THICKNESS,
-    TIMELINE_CONTENT_TRAILING_PADDING, TIMELINE_IN_OUT_MARKER_HIT_RADIUS,
-    TIMELINE_MAX_PIXELS_PER_FRAME, TIMELINE_MAX_TRACK_HEIGHT, TIMELINE_MIN_PIXELS_PER_FRAME,
-    TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_SCROLLBAR_GUTTER, TIMELINE_TOOLBAR_HEIGHT,
+    TimelineClipRef, TimelineEditCommand, TimelineInOutPoint, TimelineMetrics,
+    TimelineScrollbarDragKind, TimelineTrackControl, TimelineTrackKind, TimelineTrackRef,
+    TimelineTrimEdge, TIMELINE_IN_OUT_MARKER_HIT_RADIUS, TIMELINE_MAX_PIXELS_PER_FRAME,
+    TIMELINE_MIN_PIXELS_PER_FRAME,
 };
 
 const CLIP_VERTICAL_INSET: f32 = 4.0;
@@ -88,12 +86,13 @@ pub(super) fn layout_rects(
     header_width: f32,
     ruler_height: f32,
 ) -> TimelineLayoutRects {
-    let top_chrome = TIMELINE_TOOLBAR_HEIGHT + ruler_height.max(0.0);
+    let metrics = TimelineMetrics::current();
+    let top_chrome = metrics.toolbar_height + ruler_height.max(0.0);
     let header_width = header_width.max(0.0).min(bounds.width.max(0.0));
     let available_content_width = (bounds.width - header_width).max(0.0);
     let available_content_height = (bounds.height - top_chrome).max(0.0);
-    let vertical_gutter = TIMELINE_SCROLLBAR_GUTTER.min(available_content_width);
-    let horizontal_gutter = TIMELINE_SCROLLBAR_GUTTER.min(available_content_height);
+    let vertical_gutter = metrics.scrollbar_gutter.min(available_content_width);
+    let horizontal_gutter = metrics.scrollbar_gutter.min(available_content_height);
     let viewport_width = (available_content_width - vertical_gutter).max(0.0);
     let viewport_height = (available_content_height - horizontal_gutter).max(0.0);
 
@@ -102,7 +101,7 @@ pub(super) fn layout_rects(
             bounds.x,
             bounds.y,
             bounds.width.max(0.0),
-            TIMELINE_TOOLBAR_HEIGHT,
+            metrics.toolbar_height,
         ),
         header: Rect::new(
             bounds.x,
@@ -112,7 +111,7 @@ pub(super) fn layout_rects(
         ),
         ruler: Rect::new(
             bounds.x + header_width,
-            bounds.y + TIMELINE_TOOLBAR_HEIGHT,
+            bounds.y + metrics.toolbar_height,
             viewport_width,
             ruler_height.max(0.0),
         ),
@@ -126,29 +125,32 @@ pub(super) fn layout_rects(
 }
 
 pub(super) fn horizontal_scrollbar_track_rect(body: Rect) -> Option<Rect> {
-    (body.width > SCROLLBAR_MIN_THUMB).then_some(Rect::new(
-        body.x + SCROLLBAR_HANDLE_SIZE * 0.5,
+    let metrics = TimelineMetrics::current();
+    (body.width > metrics.scrollbar_min_thumb).then_some(Rect::new(
+        body.x + metrics.scrollbar_handle_size * 0.5,
         body.y + body.height,
-        (body.width - SCROLLBAR_HANDLE_SIZE).max(0.0),
-        SCROLLBAR_THICKNESS,
+        (body.width - metrics.scrollbar_handle_size).max(0.0),
+        metrics.scrollbar_thickness,
     ))
 }
 
 pub(super) fn vertical_scrollbar_track_rect(body: Rect) -> Option<Rect> {
-    (body.height > SCROLLBAR_MIN_THUMB).then_some(Rect::new(
+    let metrics = TimelineMetrics::current();
+    (body.height > metrics.scrollbar_min_thumb).then_some(Rect::new(
         body.x + body.width,
-        body.y + SCROLLBAR_HANDLE_SIZE * 0.5,
-        SCROLLBAR_THICKNESS,
-        (body.height - SCROLLBAR_HANDLE_SIZE).max(0.0),
+        body.y + metrics.scrollbar_handle_size * 0.5,
+        metrics.scrollbar_thickness,
+        (body.height - metrics.scrollbar_handle_size).max(0.0),
     ))
 }
 
 pub(super) fn scrollbar_clip_rect(body: Rect) -> Rect {
+    let metrics = TimelineMetrics::current();
     Rect::new(
         body.x,
         body.y,
-        body.width + TIMELINE_SCROLLBAR_GUTTER,
-        body.height + TIMELINE_SCROLLBAR_GUTTER,
+        body.width + metrics.scrollbar_gutter,
+        body.height + metrics.scrollbar_gutter,
     )
 }
 
@@ -535,8 +537,9 @@ pub(super) fn horizontal_zoom_for_handle_delta(
     let delta_x = finite_or(delta_x, 0.0);
     let start_scroll = finite_or(start_scroll, 0.0);
     let track_width = finite_or(track_width, 1.0);
-    let total_frames =
-        (content_frames.max(0.0) + TIMELINE_CONTENT_TRAILING_PADDING / start_pixels).max(1.0);
+    let total_frames = (content_frames.max(0.0)
+        + TimelineMetrics::current().content_trailing_padding / start_pixels)
+        .max(1.0);
     let start_left = (start_scroll.max(0.0) / start_pixels).clamp(0.0, total_frames);
     let start_visible = (body_width / start_pixels).max(1.0);
     let start_right = (start_left + start_visible).clamp(start_left, total_frames);
@@ -583,8 +586,9 @@ pub(super) fn track_resize_for_handle_delta(
     if body_height <= 1.0 || !body_height.is_finite() {
         return None;
     }
-    let start_height = finite_or(start_track_height, TIMELINE_MIN_TRACK_HEIGHT)
-        .clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
+    let metrics = TimelineMetrics::current();
+    let start_height = finite_or(start_track_height, metrics.min_track_height)
+        .clamp(metrics.min_track_height, metrics.max_track_height);
     let start_scroll = finite_or(start_scroll, 0.0);
     let track_height_extent = finite_or(track_height_extent, 1.0);
     let delta_y = finite_or(delta_y, 0.0);
@@ -593,8 +597,8 @@ pub(super) fn track_resize_for_handle_delta(
     let start_visible = (body_height / start_height).max(1.0);
     let start_bottom = (start_top + start_visible).clamp(start_top, total_rows);
     let delta_rows = delta_y / track_height_extent.max(1.0) * total_rows;
-    let min_visible_rows = (body_height / TIMELINE_MAX_TRACK_HEIGHT).max(1.0);
-    let max_visible_rows = (body_height / TIMELINE_MIN_TRACK_HEIGHT).max(1.0);
+    let min_visible_rows = (body_height / metrics.max_track_height).max(1.0);
+    let max_visible_rows = (body_height / metrics.min_track_height).max(1.0);
     let (top_row, proposed_visible_rows) = match kind {
         TimelineScrollbarDragKind::LeadingHandle => {
             let top = clamp_unordered(start_top + delta_rows, 0.0, start_bottom - min_visible_rows);
@@ -612,7 +616,7 @@ pub(super) fn track_resize_for_handle_delta(
     };
     let visible_rows = proposed_visible_rows.clamp(min_visible_rows, max_visible_rows);
     let track_height =
-        (body_height / visible_rows).clamp(TIMELINE_MIN_TRACK_HEIGHT, TIMELINE_MAX_TRACK_HEIGHT);
+        (body_height / visible_rows).clamp(metrics.min_track_height, metrics.max_track_height);
     Some(TimelineTrackResizeUpdate {
         track_height,
         scroll_y: top_row.max(0.0) * track_height,
@@ -834,11 +838,36 @@ mod tests {
     #[test]
     fn layout_rects_reserve_toolbar_ruler_and_scrollbar_gutters() {
         let rects = layout_rects(Rect::new(10.0, 20.0, 400.0, 240.0), 100.0, 24.0);
+        let metrics = TimelineMetrics::current();
+        let body_width = 400.0 - 100.0 - metrics.scrollbar_gutter;
+        let body_height = 240.0 - metrics.toolbar_height - 24.0 - metrics.scrollbar_gutter;
 
-        assert_rect_eq(rects.toolbar, Rect::new(10.0, 20.0, 400.0, 34.0));
-        assert_rect_eq(rects.ruler, Rect::new(110.0, 54.0, 288.0, 24.0));
-        assert_rect_eq(rects.header, Rect::new(10.0, 78.0, 100.0, 170.0));
-        assert_rect_eq(rects.body, Rect::new(110.0, 78.0, 288.0, 170.0));
+        assert_rect_eq(
+            rects.toolbar,
+            Rect::new(10.0, 20.0, 400.0, metrics.toolbar_height),
+        );
+        assert_rect_eq(
+            rects.ruler,
+            Rect::new(110.0, 20.0 + metrics.toolbar_height, body_width, 24.0),
+        );
+        assert_rect_eq(
+            rects.header,
+            Rect::new(
+                10.0,
+                20.0 + metrics.toolbar_height + 24.0,
+                100.0,
+                body_height,
+            ),
+        );
+        assert_rect_eq(
+            rects.body,
+            Rect::new(
+                110.0,
+                20.0 + metrics.toolbar_height + 24.0,
+                body_width,
+                body_height,
+            ),
+        );
     }
 
     #[test]
@@ -1512,18 +1541,34 @@ mod tests {
     #[test]
     fn scrollbar_tracks_and_clip_rect_follow_body_geometry() {
         let body = Rect::new(10.0, 20.0, 100.0, 80.0);
+        let metrics = TimelineMetrics::current();
 
         assert_rect_eq(
             horizontal_scrollbar_track_rect(body).unwrap(),
-            Rect::new(16.0, 100.0, 88.0, 12.0),
+            Rect::new(
+                10.0 + metrics.scrollbar_handle_size * 0.5,
+                100.0,
+                100.0 - metrics.scrollbar_handle_size,
+                metrics.scrollbar_thickness,
+            ),
         );
         assert_rect_eq(
             vertical_scrollbar_track_rect(body).unwrap(),
-            Rect::new(110.0, 26.0, 12.0, 68.0),
+            Rect::new(
+                110.0,
+                20.0 + metrics.scrollbar_handle_size * 0.5,
+                metrics.scrollbar_thickness,
+                80.0 - metrics.scrollbar_handle_size,
+            ),
         );
         assert_rect_eq(
             scrollbar_clip_rect(body),
-            Rect::new(10.0, 20.0, 112.0, 92.0),
+            Rect::new(
+                10.0,
+                20.0,
+                100.0 + metrics.scrollbar_gutter,
+                80.0 + metrics.scrollbar_gutter,
+            ),
         );
         assert_eq!(
             horizontal_scrollbar_track_rect(Rect::new(0.0, 0.0, 28.0, 80.0)),

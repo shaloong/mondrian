@@ -28,6 +28,7 @@ use mondrian_ui_core::types::*;
 use mondrian_ui_core::TreeWalker;
 use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::command::DrawEncoder;
+use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
@@ -153,6 +154,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         &device,
         &mut host,
     )?;
+    let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
     let pending_actions = PendingUiActions::default();
     let platform = SystemPlatformService;
 
@@ -190,6 +192,13 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
 
                     WindowEvent::ModifiersChanged(modifiers) => {
                         session.modifiers_state = winit_modifiers_to_ui_modifiers(modifiers);
+                    }
+
+                    WindowEvent::ThemeChanged(theme) => {
+                        if host.set_system_theme_preset(winit_theme_to_theme_preset(Some(theme))) {
+                            host.refresh_if_dirty(session.current_bounds.get());
+                        }
+                        session.window.request_redraw();
                     }
 
                     WindowEvent::Focused(false) => {
@@ -1007,6 +1016,13 @@ fn window_chrome_for_role(role: AppUiWindowRole) -> WindowChrome {
 
 fn logical_size(width: f32, height: f32) -> winit::dpi::LogicalSize<f64> {
     winit::dpi::LogicalSize::new(width as f64, height as f64)
+}
+
+fn winit_theme_to_theme_preset(theme: Option<winit::window::Theme>) -> ThemePreset {
+    match theme {
+        Some(winit::window::Theme::Light) => ThemePreset::Light,
+        Some(winit::window::Theme::Dark) | None => ThemePreset::Dark,
+    }
 }
 
 fn window_attributes_for_role(role: AppUiWindowRole) -> winit::window::WindowAttributes {

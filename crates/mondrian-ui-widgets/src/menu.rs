@@ -7,17 +7,24 @@
 mod geometry;
 mod model;
 mod paint;
+mod popup;
 
 pub(crate) use geometry::{
     anchored_menu_rect, item_at as geometry_item_at, item_rect as geometry_item_rect,
     rect_has_paintable_area, submenu_rect,
 };
-use model::MENU_POPUP_PADDING;
-pub use model::{DropdownTriggerStyle, MenuItem, MenuItemKind};
-pub(crate) use model::{MenuRowPaint, MenuVisualTokens};
+pub(crate) use model::{
+    menu_item_activation, menu_item_text_width_with_metrics, MenuMetrics, MenuRowPaint,
+    MenuVisualTokens,
+};
+pub use model::{DropdownTriggerStyle, MenuItem, MenuItemCommand, MenuItemKind};
 pub(crate) use paint::{
     paint_disabled_trigger, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
     paint_menu_separator, paint_menu_trigger, paint_open_menu_with_submenu, paint_submenu_arrow,
+};
+pub(crate) use popup::{
+    first_activatable_index as popup_first_activatable_index,
+    next_activatable_index as popup_next_activatable_index, root_hovered_index,
 };
 
 use std::cell::Cell;
@@ -50,7 +57,6 @@ pub struct Dropdown {
     enabled: bool,
     open: bool,
     pressed_index: Option<usize>,
-    item_height: f32,
     max_visible_items: usize,
     scroll_offset: f32,
     suppress_next_release: bool,
@@ -78,7 +84,6 @@ impl Dropdown {
             enabled: true,
             open: false,
             pressed_index: None,
-            item_height: 28.0,
             max_visible_items: 40,
             scroll_offset: 0.0,
             suppress_next_release: false,
@@ -138,7 +143,7 @@ impl Dropdown {
         let mut i = 0;
         while i < items_to_check.len() {
             let item = items_to_check[i];
-            if !item.is_separator() && item.action == *action {
+            if item.action().is_some_and(|candidate| candidate == action) {
                 return Some(item.checked);
             }
             if let MenuItemKind::Submenu { ref children } = item.kind {
@@ -178,7 +183,7 @@ impl Dropdown {
             max_scroll_y(
                 self.items.len(),
                 visible_item_count(self.items.len(), self.max_visible_items),
-                self.item_height,
+                self.item_height(),
             ),
         );
         self
@@ -198,11 +203,15 @@ impl Dropdown {
         visible_item_count(self.items.len(), self.max_visible_items)
     }
 
+    fn item_height(&self) -> f32 {
+        MenuMetrics::current().item_height
+    }
+
     fn max_scroll_y(&self) -> f32 {
         max_scroll_y(
             self.items.len(),
             self.visible_item_count(),
-            self.item_height,
+            self.item_height(),
         )
     }
 
@@ -217,7 +226,7 @@ impl Dropdown {
             &self.label,
             self.trigger_style,
             self.max_visible_items,
-            self.item_height,
+            self.item_height(),
             self.overlay_viewport.get(),
         )
     }
@@ -227,7 +236,7 @@ impl Dropdown {
         item_rect(
             self.menu_rect(),
             index,
-            self.item_height,
+            self.item_height(),
             self.scroll_offset,
         )
     }
@@ -237,7 +246,7 @@ impl Dropdown {
         item_at(
             self.menu_rect(),
             visible,
-            self.item_height,
+            self.item_height(),
             self.scroll_offset,
             position,
         )
@@ -255,12 +264,12 @@ impl Dropdown {
             let item = current_items.get(idx)?;
             match &item.kind {
                 MenuItemKind::Submenu { children } => {
-                    let parent_rect = item_rect(bg, idx, self.item_height, scroll);
+                    let parent_rect = item_rect(bg, idx, self.item_height(), scroll);
                     let sub = geometry::submenu_rect(
                         parent_rect,
                         children,
                         self.max_visible_items,
-                        self.item_height,
+                        self.item_height(),
                     );
                     if d == chain_path.len() - 1 {
                         return Some(sub);
@@ -298,7 +307,7 @@ impl Dropdown {
     fn item_at_depth(&self, position: Point, depth: usize) -> Option<usize> {
         let menu_rect = self.menu_rect_at_depth(depth)?;
         let children = self.children_at(&self.submenu_chain[..depth])?;
-        item_at(menu_rect, children.len(), self.item_height, 0.0, position)
+        item_at(menu_rect, children.len(), self.item_height(), 0.0, position)
             .filter(|i| children[*i].is_activatable())
     }
 
@@ -316,7 +325,7 @@ impl Dropdown {
         };
         let parent_idx = self.submenu_chain[depth - 1];
         let parent_scroll = if depth == 1 { self.scroll_offset } else { 0.0 };
-        let parent_rect = item_rect(menu_bg, parent_idx, self.item_height, parent_scroll);
+        let parent_rect = item_rect(menu_bg, parent_idx, self.item_height(), parent_scroll);
         let Some(sub_rect) = self.menu_rect_at_depth(depth) else {
             return false;
         };
@@ -338,33 +347,15 @@ impl Dropdown {
     }
 
     fn first_activatable_index(&self) -> Option<usize> {
-        self.items.iter().position(|item| item.is_activatable())
+        popup_first_activatable_index(&self.items)
     }
 
     fn hovered_index(&self) -> Option<usize> {
-        self.hover_depth.filter(|(d, _)| *d == 0).map(|(_, i)| i)
+        root_hovered_index(self.hover_depth)
     }
 
     fn next_activatable_index(&self, direction: i32) -> Option<usize> {
-        let activatable: Vec<usize> = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| item.is_activatable().then_some(index))
-            .collect();
-        if activatable.is_empty() {
-            return None;
-        }
-        let current = self
-            .hovered_index()
-            .and_then(|index| activatable.iter().position(|candidate| *candidate == index));
-        let next = match (current, direction) {
-            (Some(index), d) if d < 0 => (index + activatable.len() - 1) % activatable.len(),
-            (Some(index), _) => (index + 1) % activatable.len(),
-            (None, d) if d < 0 => activatable.len() - 1,
-            (None, _) => 0,
-        };
-        activatable.get(next).copied()
+        popup_next_activatable_index(&self.items, self.hovered_index(), direction)
     }
 
     fn ensure_hover_visible(&mut self) {
@@ -373,7 +364,7 @@ impl Dropdown {
             self.scroll_offset,
             self.visible_item_count(),
             self.items.len(),
-            self.item_height,
+            self.item_height(),
         );
     }
 
@@ -381,10 +372,10 @@ impl Dropdown {
         let Some(index) = self.hovered_index() else {
             return false;
         };
-        if !self.items[index].is_activatable() {
+        let Some(activation) = menu_item_activation(&self.items[index]) else {
             return false;
-        }
-        (ctx.dispatch)(self.items[index].action.clone());
+        };
+        apply_menu_activation(activation, ctx);
         self.close(ctx);
         true
     }
@@ -420,12 +411,19 @@ impl Dropdown {
 /// Recursively set checked state, including submenus.
 fn set_checked_recursive(items: &mut [MenuItem], action: &Action, checked: bool) {
     for item in items.iter_mut() {
-        if !item.is_separator() && item.action == *action {
+        if item.action().is_some_and(|candidate| candidate == action) {
             item.checked = checked;
         }
         if let MenuItemKind::Submenu { ref mut children } = item.kind {
             set_checked_recursive(children, action, checked);
         }
+    }
+}
+
+fn apply_menu_activation(activation: MenuItemCommand, ctx: &mut EventContext) {
+    match activation {
+        MenuItemCommand::Action(action) => (ctx.dispatch)(action),
+        MenuItemCommand::Local(_) | MenuItemCommand::None => {}
     }
 }
 
@@ -497,14 +495,16 @@ impl Widget for Dropdown {
                     for depth in (1..=chain_len).rev() {
                         if let Some(sub_rect) = self.menu_rect_at_depth(depth) {
                             if sub_rect.contains(*position) {
-                                let rel_y = position.y - sub_rect.y - MENU_POPUP_PADDING;
-                                let sub_item = (rel_y / self.item_height).floor().max(0.0) as usize;
+                                let metrics = MenuMetrics::current();
+                                let rel_y = position.y - sub_rect.y - metrics.popup_padding;
+                                let sub_item =
+                                    (rel_y / self.item_height()).floor().max(0.0) as usize;
                                 if let Some(children) =
                                     self.children_at(&self.submenu_chain[..depth])
                                 {
                                     if let Some(child) = children.get(sub_item) {
-                                        if child.is_activatable() {
-                                            (ctx.dispatch)(child.action.clone());
+                                        if let Some(activation) = menu_item_activation(child) {
+                                            apply_menu_activation(activation, ctx);
                                         }
                                     }
                                 }
@@ -519,9 +519,13 @@ impl Widget for Dropdown {
                             // Don't close if the clicked item is a submenu
                             if self.items[released].is_submenu() {
                                 self.pressed_index = None;
-                            } else {
-                                (ctx.dispatch)(self.items[released].action.clone());
+                            } else if let Some(activation) =
+                                menu_item_activation(&self.items[released])
+                            {
+                                apply_menu_activation(activation, ctx);
                                 self.close(ctx);
+                            } else {
+                                self.pressed_index = None;
                             }
                         } else {
                             self.pressed_index = None;
@@ -704,7 +708,7 @@ impl Widget for Dropdown {
             &self.label,
             self.trigger_style,
             self.max_visible_items,
-            self.item_height,
+            self.item_height(),
             self.hover_depth,
             self.scroll_offset,
             &self.overlay_viewport,
@@ -748,7 +752,7 @@ mod tests {
     use glam;
     use mondrian_core::Color;
     use mondrian_editor_state::state::PanelKind;
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use std::cell::RefCell;
 
@@ -1427,11 +1431,12 @@ mod tests {
 
         let menu_bar_size = menu_bar_dropdown.measure(LayoutConstraint::LOOSE);
         let filled_size = filled_dropdown.measure(LayoutConstraint::LOOSE);
+        let metrics = MenuMetrics::current();
 
-        assert_eq!(menu_bar_size.height, model::MENU_BAR_TRIGGER_HEIGHT);
+        assert_eq!(menu_bar_size.height, metrics.menu_bar_trigger_height);
         assert!(menu_bar_size.width < 48.0);
-        assert_eq!(filled_size.height, model::MENU_TRIGGER_HEIGHT);
-        assert!(filled_size.width >= model::MENU_MIN_WIDTH);
+        assert_eq!(filled_size.height, metrics.trigger_height);
+        assert!(filled_size.width >= metrics.min_width);
     }
 
     #[test]
@@ -1861,7 +1866,7 @@ mod tests {
     fn menu_item_shortcut_builder_preserves_action_semantics() {
         let item = MenuItem::new("Save", Action::SaveProject).with_shortcut("Ctrl+S");
 
-        assert_eq!(item.action, Action::SaveProject);
+        assert_eq!(item.action(), Some(&Action::SaveProject));
         assert_eq!(item.shortcut.as_deref(), Some("Ctrl+S"));
         assert!(item.is_activatable());
     }

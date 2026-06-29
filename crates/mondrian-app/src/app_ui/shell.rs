@@ -11,6 +11,7 @@ use mondrian_timeline::Sequence;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::{
@@ -611,7 +612,8 @@ impl AppUiAppRoot {
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
                 state,
                 preferences.workspace_preset,
-                preferences.theme_preset,
+                preferences.theme_preference,
+                preferences.theme_preference.resolve(ThemePreset::Dark),
                 &preferences.shortcut_overrides,
                 preferences.waveform_display,
             ),
@@ -831,7 +833,7 @@ impl AppUiAppRoot {
     pub fn refresh_from_app_state(&mut self, state: &AppState) {
         let preferences = AppUiPreferences {
             version: 1,
-            theme_preset: self.preferences_model.theme_preset,
+            theme_preference: self.preferences_model.theme_preference,
             workspace_preset: self.workspace_preset,
             recent_projects: Vec::new(),
             shortcut_overrides: Vec::new(),
@@ -894,7 +896,8 @@ impl AppUiAppRoot {
         let preferences_model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
             state,
             self.workspace_preset,
-            preferences.theme_preset,
+            preferences.theme_preference,
+            preferences.theme_preference.resolve(ThemePreset::Dark),
             &preferences.shortcut_overrides,
             preferences.waveform_display,
         );

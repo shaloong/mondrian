@@ -2815,10 +2815,15 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "mondrian-core",
+ "mondrian-platform-core",
  "rfd",
  "windows-sys 0.61.2",
  "xcap",
 ]
+
+[[package]]
+name = "mondrian-platform-core"
+version = "0.1.0"
 
 [[package]]
 name = "mondrian-renderer"
@@ -2867,7 +2872,7 @@ dependencies = [
  "glam",
  "mondrian-core",
  "mondrian-editor-state",
- "mondrian-platform",
+ "mondrian-platform-core",
  "mondrian-ui-theme",
  "serde",
  "uuid",
@@ -2880,7 +2885,7 @@ dependencies = [
  "glam",
  "mondrian-core",
  "mondrian-editor-state",
- "mondrian-platform",
+ "mondrian-platform-core",
  "mondrian-ui-core",
 ]
 
@@ -2952,7 +2957,7 @@ dependencies = [
  "lyon",
  "mondrian-core",
  "mondrian-editor-state",
- "mondrian-platform",
+ "mondrian-platform-core",
  "mondrian-ui-core",
  "mondrian-ui-layout",
  "mondrian-ui-renderer",

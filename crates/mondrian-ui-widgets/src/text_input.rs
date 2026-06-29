@@ -28,6 +28,7 @@ use mondrian_ui_core::widget::{
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_text::TextRenderer;
+use mondrian_ui_theme::{current_theme, Theme};
 
 mod commands;
 mod composition;
@@ -55,8 +56,41 @@ pub use multiline_widget::MultilineTextInput;
 use paint::{paint_text_input, TextInputPaintSnapshot};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
-const HORIZONTAL_PADDING: f32 = 8.0;
-const VERTICAL_PADDING: f32 = 4.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TextInputMetrics {
+    font_size: f32,
+    padding_x: f32,
+    padding_y: f32,
+    caret_width: f32,
+}
+
+impl TextInputMetrics {
+    fn from_theme(theme: &Theme) -> Self {
+        Self {
+            font_size: theme.typography.body.font_size,
+            padding_x: theme.spacing.text_input_padding_x,
+            padding_y: theme.spacing.text_input_padding_y,
+            caret_width: theme.spacing.text_input_caret_width,
+        }
+    }
+
+    fn current() -> Self {
+        let theme = current_theme();
+        Self::from_theme(&theme)
+    }
+}
+
+impl Default for TextInputMetrics {
+    fn default() -> Self {
+        Self {
+            font_size: DEFAULT_FONT_SIZE,
+            padding_x: 8.0,
+            padding_y: 4.0,
+            caret_width: 2.0,
+        }
+    }
+}
 
 thread_local! {
     static TEXT_METRICS: RefCell<TextRenderer> = RefCell::new(TextRenderer::new());
@@ -199,13 +233,13 @@ impl TextInput {
 
     pub fn set_text(&mut self, text: String) {
         self.edit.set_text(text);
-        self.update_scroll(DEFAULT_FONT_SIZE);
+        self.update_scroll(TextInputMetrics::current());
     }
 
     /// Select the whole committed text.
     pub fn select_all(&mut self) {
         self.edit.select_all();
-        self.update_scroll(DEFAULT_FONT_SIZE);
+        self.update_scroll(TextInputMetrics::current());
     }
 
     /// Dispatch an action whenever user input changes the committed text.
@@ -216,7 +250,7 @@ impl TextInput {
 
     pub fn clear(&mut self) {
         self.edit.clear();
-        self.update_scroll(DEFAULT_FONT_SIZE);
+        self.update_scroll(TextInputMetrics::current());
     }
 
     // ── Grapheme helpers ──────────────────────────────────────────────────
@@ -251,73 +285,74 @@ impl TextInput {
     fn delete_selection(&mut self) -> bool {
         let deleted = self.edit.delete_selection();
         if deleted {
-            self.update_scroll(DEFAULT_FONT_SIZE);
+            self.update_scroll(TextInputMetrics::current());
         }
         deleted
     }
 
     /// Set cursor from a pixel x-coordinate relative to text start.
-    fn set_cursor_from_text_x(&mut self, pixel_x: f32, font_size: f32) {
-        self.edit.set_cursor_from_text_x(pixel_x, font_size);
-        self.update_scroll(font_size);
+    fn set_cursor_from_text_x(&mut self, pixel_x: f32, metrics: TextInputMetrics) {
+        self.edit.set_cursor_from_text_x(pixel_x, metrics.font_size);
+        self.update_scroll(metrics);
     }
 
-    fn text_geometry(&self, font_size: f32) -> TextInputGeometry {
+    fn text_geometry(&self, metrics: TextInputMetrics) -> TextInputGeometry {
         compute_text_geometry(
             self.bounds,
             self.scroll_x.get(),
-            self.cursor_text_x(font_size),
+            self.cursor_text_x(metrics),
             self.composition.is_active().then(|| self.composition.preedit()),
-            font_size,
+            metrics,
         )
     }
 
     fn visible_width(&self) -> f32 {
-        self.text_geometry(DEFAULT_FONT_SIZE).visible_width
+        self.text_geometry(TextInputMetrics::current()).visible_width
     }
 
     fn content_left(&self) -> f32 {
-        self.text_geometry(DEFAULT_FONT_SIZE).content_left
+        self.text_geometry(TextInputMetrics::current()).content_left
     }
 
     fn content_right(&self) -> f32 {
-        self.text_geometry(DEFAULT_FONT_SIZE).content_right
+        self.text_geometry(TextInputMetrics::current()).content_right
     }
 
-    fn cursor_text_x(&self, font_size: f32) -> f32 {
-        self.edit.cursor_text_x(font_size)
+    fn cursor_text_x(&self, metrics: TextInputMetrics) -> f32 {
+        self.edit.cursor_text_x(metrics.font_size)
     }
 
-    fn cursor_area(&self, font_size: f32) -> Rect {
-        self.text_geometry(font_size).caret
+    fn cursor_area(&self, metrics: TextInputMetrics) -> Rect {
+        self.text_geometry(metrics).caret
     }
 
     fn refresh_ime_area(&self, ctx: &mut EventContext) {
         request_enabled_ime(
             ctx.requests,
             self.focused,
-            self.cursor_area(DEFAULT_FONT_SIZE),
+            self.cursor_area(TextInputMetrics::current()),
         );
     }
 
     fn text_x_from_pointer(&self, position: Point) -> f32 {
+        let metrics = TextInputMetrics::current();
         pointer_text_x_from_geometry(
             position,
             self.content_left(),
             self.content_right(),
             self.scroll_x.get(),
-            measure_text_width(self.edit.text(), DEFAULT_FONT_SIZE),
+            measure_text_width(self.edit.text(), metrics.font_size),
         )
     }
 
-    fn update_scroll(&self, font_size: f32) {
+    fn update_scroll(&self, metrics: TextInputMetrics) {
         let text_w = if self.edit.text().is_empty() {
             0.0
         } else {
-            measure_text_width(self.edit.text(), font_size)
+            measure_text_width(self.edit.text(), metrics.font_size)
         };
         let visible_w = self.visible_width();
-        let cursor_x = self.cursor_text_x(font_size);
+        let cursor_x = self.cursor_text_x(metrics);
         self.scroll_x.set(scroll_offset_after_cursor(
             self.scroll_x.get(),
             text_w,
@@ -338,7 +373,7 @@ impl TextInput {
 
     fn insert_normalized_at_cursor(&mut self, s: &str) {
         self.edit.insert_normalized_at_cursor(s);
-        self.update_scroll(DEFAULT_FONT_SIZE);
+        self.update_scroll(TextInputMetrics::current());
     }
 
     fn commit_text_at_cursor(&mut self, input: &str, empty_policy: EmptyTextCommitPolicy) -> bool {
@@ -358,12 +393,12 @@ impl TextInput {
     /// Move cursor and keep it visible.
     fn move_cursor_to(&mut self, pos: usize) {
         self.edit.move_cursor_to(pos);
-        self.update_scroll(DEFAULT_FONT_SIZE);
+        self.update_scroll(TextInputMetrics::current());
     }
 
     fn move_cursor_with_selection(&mut self, pos: usize, extend_selection: bool) {
         self.edit.move_cursor_with_selection(pos, extend_selection);
-        self.update_scroll(DEFAULT_FONT_SIZE);
+        self.update_scroll(TextInputMetrics::current());
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
@@ -447,14 +482,14 @@ impl TextInput {
                 if !self.delete_selection() {
                     self.delete_grapheme_before();
                 }
-                self.update_scroll(DEFAULT_FONT_SIZE);
+                self.update_scroll(TextInputMetrics::current());
                 EventResult::Handled
             }
             TextInputKeyCommand::DeleteForward => {
                 if !self.delete_selection() {
                     self.delete_grapheme_at();
                 }
-                self.update_scroll(DEFAULT_FONT_SIZE);
+                self.update_scroll(TextInputMetrics::current());
                 EventResult::Handled
             }
         }
@@ -472,7 +507,7 @@ impl Widget for TextInput {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        self.update_scroll(DEFAULT_FONT_SIZE);
+        self.update_scroll(TextInputMetrics::current());
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
@@ -492,6 +527,7 @@ impl Widget for TextInput {
             self.composition.clear();
             return EventResult::Ignored;
         }
+        let metrics = TextInputMetrics::current();
         match event {
             // ── Mouse ──────────────────────────────────────────────────
             UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
@@ -503,9 +539,9 @@ impl Widget for TextInput {
                         if self.edit.selection_start.is_none() {
                             self.edit.selection_start = Some(self.edit.cursor);
                         }
-                        self.set_cursor_from_text_x(text_x, DEFAULT_FONT_SIZE);
+                        self.set_cursor_from_text_x(text_x, metrics);
                     } else {
-                        self.set_cursor_from_text_x(text_x, DEFAULT_FONT_SIZE);
+                        self.set_cursor_from_text_x(text_x, metrics);
                         self.clear_selection();
                     }
                     self.mouse_down = true;
@@ -543,7 +579,7 @@ impl Widget for TextInput {
                     }
                     // Allow drag beyond bounds — clamp to valid range
                     let text_x = self.text_x_from_pointer(*position);
-                    self.set_cursor_from_text_x(text_x, DEFAULT_FONT_SIZE);
+                    self.set_cursor_from_text_x(text_x, metrics);
                     self.refresh_ime_area(ctx);
                     ctx.request_repaint();
                     EventResult::Handled
@@ -565,7 +601,7 @@ impl Widget for TextInput {
                 self.focused = true;
                 self.cursor_visible.set(true);
                 self.last_blink.set(Instant::now());
-                self.update_scroll(DEFAULT_FONT_SIZE);
+                self.update_scroll(metrics);
                 self.refresh_ime_area(ctx);
                 ctx.request_repaint();
                 EventResult::Handled
@@ -657,8 +693,8 @@ impl Widget for TextInput {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let font_size = ctx.theme.typography.body.font_size;
-        let geometry = self.text_geometry(font_size);
+        let metrics = TextInputMetrics::from_theme(ctx.theme);
+        let geometry = self.text_geometry(metrics);
         let mut cursor_visible = self.cursor_visible.get();
         if self.enabled && self.focused {
             let now = Instant::now();
@@ -728,7 +764,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
-    use mondrian_platform::{ClipboardError, FileFilter, PlatformService};
+    use mondrian_platform_core::{ClipboardError, FileFilter, PlatformService};
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
@@ -1320,9 +1356,10 @@ mod tests {
             .expect("preedit should update IME cursor area")
             .cursor_area
             .expect("preedit should keep IME cursor visible");
+        let metrics = TextInputMetrics::default();
         let expected_x = ti.content_left()
-            + measure_text_width("ab", DEFAULT_FONT_SIZE)
-            + measure_text_width("ni", DEFAULT_FONT_SIZE);
+            + measure_text_width("ab", metrics.font_size)
+            + measure_text_width("ni", metrics.font_size);
         assert!((area.x - expected_x).abs() <= 0.1);
     }
 
@@ -1499,7 +1536,7 @@ mod tests {
             .expect("handled key navigation should update IME")
             .cursor_area
             .expect("IME should receive a caret rect");
-        let expected = ti.cursor_area(DEFAULT_FONT_SIZE);
+        let expected = ti.cursor_area(TextInputMetrics::default());
         assert!((area.x - expected.x).abs() <= 0.1);
         assert!(ctx.requests.repaint);
     }
@@ -2035,7 +2072,7 @@ mod tests {
         ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
 
         assert!(ti.scroll_x.get() > 0.0);
-        let caret = ti.cursor_area(DEFAULT_FONT_SIZE);
+        let caret = ti.cursor_area(TextInputMetrics::default());
         assert!(caret.x >= ti.content_left() - 0.1);
         assert!(caret.x <= ti.content_right() + 0.1);
     }
@@ -2046,8 +2083,9 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text(text);
         ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
 
+        let metrics = TextInputMetrics::default();
         let expected_scroll =
-            (measure_text_width(text, DEFAULT_FONT_SIZE) - ti.visible_width()).max(0.0);
+            (measure_text_width(text, metrics.font_size) - ti.visible_width()).max(0.0);
         assert!((ti.scroll_x.get() - expected_scroll).abs() <= 0.1);
     }
 
@@ -2056,7 +2094,7 @@ mod tests {
         let mut ti = TextInput::new("ph").with_text("abcdefghijklmnopqrstuvwxyz");
         ti.layout(Rect::new(0.0, 0.0, 80.0, 28.0));
 
-        let caret = ti.cursor_area(DEFAULT_FONT_SIZE);
+        let caret = ti.cursor_area(TextInputMetrics::default());
         assert!(caret.x >= ti.content_left());
         assert!(caret.x + caret.width <= ti.content_right() + 0.1);
     }
@@ -2068,12 +2106,13 @@ mod tests {
         ti.composition.set_preedit("ni".into());
         ti.layout(Rect::new(10.0, 20.0, 160.0, 32.0));
 
-        let geometry = ti.text_geometry(DEFAULT_FONT_SIZE);
+        let metrics = TextInputMetrics::default();
+        let geometry = ti.text_geometry(metrics);
         let expected_left = 18.0;
         let expected_width = 144.0;
         let expected_caret_x = expected_left
-            + measure_text_width("ab", DEFAULT_FONT_SIZE)
-            + measure_text_width("ni", DEFAULT_FONT_SIZE);
+            + measure_text_width("ab", metrics.font_size)
+            + measure_text_width("ni", metrics.font_size);
 
         assert_eq!(
             geometry.clip,

@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use mondrian_editor_state::state::WorkspacePreset;
-use mondrian_ui_theme::ThemePreset;
+use mondrian_ui_theme::ThemePreference;
 use mondrian_ui_widgets::WaveformDisplay;
 use serde::{Deserialize, Serialize};
 
@@ -26,8 +26,9 @@ pub const MAX_RECENT_PROJECTS: usize = 12;
 pub struct AppUiPreferences {
     /// Schema version for future non-compatible alpha migrations.
     pub version: u32,
-    /// Active product theme preset.
-    pub theme_preset: ThemePreset,
+    /// Active product theme preference. `System` resolves to a concrete preset
+    /// at runtime and is not persisted as a third theme token set.
+    pub theme_preference: ThemePreference,
     /// Built-in workspace preset restored when the app UI shell opens.
     pub workspace_preset: WorkspacePreset,
     /// Most recently opened project files for the startup surface.
@@ -47,7 +48,7 @@ impl Default for AppUiPreferences {
     fn default() -> Self {
         Self {
             version: APP_UI_PREFERENCES_VERSION,
-            theme_preset: ThemePreset::Dark,
+            theme_preference: ThemePreference::System,
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
             shortcut_overrides: Vec::new(),
@@ -190,7 +191,7 @@ mod tests {
             &path,
             serde_json::to_vec(&AppUiPreferences {
                 version: APP_UI_PREFERENCES_VERSION + 1,
-                theme_preset: ThemePreset::Light,
+                theme_preference: ThemePreference::Light,
                 workspace_preset: WorkspacePreset::Export,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -213,7 +214,7 @@ mod tests {
         let project_path = temp_preferences_path("round-trip-project").with_extension("mdp");
         let preferences = AppUiPreferences {
             version: 1,
-            theme_preset: ThemePreset::Light,
+            theme_preference: ThemePreference::Light,
             workspace_preset: WorkspacePreset::Compositing,
             recent_projects: vec![project_path.clone()],
             shortcut_overrides: vec![AppUiShortcutOverride {
@@ -258,7 +259,7 @@ mod tests {
             &path,
             serde_json::to_vec(&AppUiPreferences {
                 version: 1,
-                theme_preset: ThemePreset::Dark,
+                theme_preference: ThemePreference::Dark,
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -318,7 +319,7 @@ mod tests {
             &path,
             serde_json::to_vec(&AppUiPreferences {
                 version: APP_UI_PREFERENCES_VERSION,
-                theme_preset: ThemePreset::Dark,
+                theme_preference: ThemePreference::Dark,
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -347,7 +348,7 @@ mod tests {
     #[test]
     fn partial_preferences_file_uses_clean_defaults() {
         let path = temp_preferences_path("partial-preferences");
-        fs::write(&path, br#"{"version":1,"theme_preset":"Light"}"#)
+        fs::write(&path, br#"{"version":1,"theme_preference":"Light"}"#)
             .expect("write partial fixture");
 
         let preferences = load_app_ui_preferences_from(&path);
@@ -384,7 +385,7 @@ mod tests {
             &path,
             serde_json::to_vec(&AppUiPreferences {
                 version: 1,
-                theme_preset: ThemePreset::Dark,
+                theme_preference: ThemePreference::Dark,
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
                 shortcut_overrides: Vec::new(),
@@ -409,7 +410,7 @@ mod tests {
             &path,
             serde_json::to_vec(&AppUiPreferences {
                 version: 1,
-                theme_preset: ThemePreset::Dark,
+                theme_preference: ThemePreference::Dark,
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: vec![

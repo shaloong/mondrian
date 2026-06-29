@@ -11,6 +11,7 @@ use mondrian_ui_core::widget::{
     EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::current_theme;
 
 use super::composition::TextCompositionState;
 use super::ime::{classify_ime_key, request_disabled_ime, request_enabled_ime, ImeKeyDisposition};
@@ -23,7 +24,7 @@ use super::multiline_geometry::{
     MultilineTextGeometry, TextMetrics,
 };
 use super::multiline_paint::{paint_multiline, MultilinePaintSnapshot};
-use super::{TextInputChangeAction, HORIZONTAL_PADDING, VERTICAL_PADDING};
+use super::TextInputChangeAction;
 
 const DEFAULT_MIN_LINES: usize = 3;
 
@@ -360,6 +361,16 @@ impl MultilineTextInput {
         self.measure_cache.borrow_mut().clear();
     }
 
+    fn sync_metrics_from_current_theme(&mut self) {
+        let theme = current_theme();
+        let metrics = TextMetrics::from_theme(&theme);
+        if self.metrics != metrics {
+            self.metrics = metrics;
+            self.invalidate_cache();
+            self.scroll_to_cursor();
+        }
+    }
+
     fn get_geometry(&self) -> MultilineTextGeometry {
         if self.geometry_cache.borrow().is_none() {
             let preedit = self.composition.is_active().then(|| self.composition.preedit());
@@ -380,11 +391,11 @@ impl MultilineTextInput {
     }
 
     fn content_left(&self) -> f32 {
-        self.bounds.x + HORIZONTAL_PADDING
+        self.bounds.x + self.metrics.padding_x
     }
 
     fn viewport_height(&self) -> f32 {
-        self.bounds.height - VERTICAL_PADDING * 2.0
+        self.bounds.height - self.metrics.padding_y * 2.0
     }
 
     fn scroll_to_cursor(&self) {
@@ -926,11 +937,16 @@ impl Widget for MultilineTextInput {
     }
 
     fn measure(&self, constraint: LayoutConstraint) -> Size {
-        let height = self.min_lines as f32 * self.metrics.line_height + VERTICAL_PADDING * 2.0;
+        let metrics = {
+            let theme = current_theme();
+            TextMetrics::from_theme(&theme)
+        };
+        let height = self.min_lines as f32 * metrics.line_height + metrics.padding_y * 2.0;
         constraint.constrain(Size::new(200.0, height))
     }
 
     fn layout(&mut self, bounds: Rect) {
+        self.sync_metrics_from_current_theme();
         self.bounds = bounds;
         self.invalidate_cache();
         self.scroll_to_cursor();
@@ -1207,7 +1223,7 @@ impl Widget for MultilineTextInput {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let _font_size = ctx.theme.typography.body.font_size;
+        let metrics = TextMetrics::from_theme(ctx.theme);
 
         let mut cursor_visible = self.cursor_visible.get();
         if self.enabled && self.focused {
@@ -1220,7 +1236,22 @@ impl Widget for MultilineTextInput {
             }
         }
 
-        let geo = self.get_geometry();
+        let geo = if self.metrics == metrics {
+            self.get_geometry()
+        } else {
+            let preedit = self.composition.is_active().then(|| self.composition.preedit());
+            compute_multiline_geometry(
+                self.bounds,
+                &self.edit,
+                self.edit.cursor(),
+                preedit,
+                self.scroll_x.get(),
+                self.scroll_y.get(),
+                metrics,
+                &mut HashMap::new(),
+                self.wrap_mode,
+            )
+        };
         let has_selection = self.edit.selection().is_some();
 
         paint_multiline(
@@ -1282,7 +1313,7 @@ impl Widget for MultilineTextInput {
 mod tests {
     use super::*;
     use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip};
-    use mondrian_platform::NoopPlatformService;
+    use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_core::widget::EventRequests;
     use std::cell::RefCell;
 
@@ -2046,12 +2077,11 @@ mod tests {
         };
 
         // Click at the beginning
+        let padding_x = widget.metrics.padding_x;
+        let padding_y = widget.metrics.padding_y;
         widget.event(
             &UiEvent::MouseDown {
-                position: Point::new(
-                    bounds.x + HORIZONTAL_PADDING + 1.0,
-                    bounds.y + VERTICAL_PADDING + 1.0,
-                ),
+                position: Point::new(bounds.x + padding_x + 1.0, bounds.y + padding_y + 1.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -2152,7 +2182,7 @@ mod tests {
     fn measure_respects_min_lines() {
         let widget = MultilineTextInput::new("").min_lines(5);
         let size = widget.measure(LayoutConstraint::LOOSE);
-        let expected_height = 5.0 * widget.metrics.line_height + VERTICAL_PADDING * 2.0;
+        let expected_height = 5.0 * widget.metrics.line_height + widget.metrics.padding_y * 2.0;
         assert_eq!(size.height, expected_height);
         assert_eq!(size.width, 200.0);
     }
@@ -2534,12 +2564,11 @@ mod tests {
         };
 
         // First click
+        let padding_x = widget.metrics.padding_x;
+        let padding_y = widget.metrics.padding_y;
         widget.event(
             &UiEvent::MouseDown {
-                position: Point::new(
-                    bounds.x + HORIZONTAL_PADDING + 2.0,
-                    bounds.y + VERTICAL_PADDING + 2.0,
-                ),
+                position: Point::new(bounds.x + padding_x + 2.0, bounds.y + padding_y + 2.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -2558,10 +2587,7 @@ mod tests {
         // Second click (should be within 400ms for double-click detection)
         widget.event(
             &UiEvent::MouseDown {
-                position: Point::new(
-                    bounds.x + HORIZONTAL_PADDING + 2.0,
-                    bounds.y + VERTICAL_PADDING + 2.0,
-                ),
+                position: Point::new(bounds.x + padding_x + 2.0, bounds.y + padding_y + 2.0),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
