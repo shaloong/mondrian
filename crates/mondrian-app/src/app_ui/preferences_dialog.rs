@@ -59,6 +59,7 @@ const SHORTCUT_KEYCAP_PADDING_X: f32 = 8.0;
 const SHORTCUT_KEYCAP_MIN_WIDTH: f32 = 24.0;
 const SHORTCUT_KEYCAP_ACTION_GAP: f32 = 14.0;
 const SHORTCUT_CHEVRON_SIZE: f32 = 12.0;
+const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 4;
 
 const CHEVRON_RIGHT_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 const CHEVRON_DOWN_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
@@ -1070,7 +1071,7 @@ impl Widget for PreferencesDialog {
     }
 
     fn child_count(&self) -> usize {
-        self.nav_buttons.len() + 2 + self.content_labels.len() + 2
+        PREFERENCES_INTERACTIVE_CHILD_COUNT
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -1081,23 +1082,18 @@ impl Widget for PreferencesDialog {
         }
         let theme_index = nav_end;
         if index == theme_index {
-            return Some(&self.theme_group as &dyn Widget);
+            return (self.active_tab == PreferencesDialogTab::General)
+                .then_some(&self.theme_group as &dyn Widget);
         }
         let waveform_index = theme_index + 1;
         if index == waveform_index {
-            return Some(&self.waveform_group as &dyn Widget);
+            return (self.active_tab == PreferencesDialogTab::General)
+                .then_some(&self.waveform_group as &dyn Widget);
         }
-        let content_start = waveform_index + 1;
-        let content_end = content_start + self.content_labels.len();
-        if (content_start..content_end).contains(&index) {
-            return self
-                .content_labels
-                .get(index - content_start)
-                .map(|label| label as &dyn Widget);
-        }
-        let search_index = content_end;
+        let search_index = waveform_index + 1;
         if index == search_index {
-            return Some(&self.shortcut_search as &dyn Widget);
+            return (self.active_tab == PreferencesDialogTab::Shortcuts)
+                .then_some(&self.shortcut_search as &dyn Widget);
         }
         (index == search_index + 1).then_some(&self.close_button as &dyn Widget)
     }
@@ -1113,23 +1109,18 @@ impl Widget for PreferencesDialog {
         }
         let theme_index = nav_end;
         if index == theme_index {
-            return Some(&mut self.theme_group as &mut dyn Widget);
+            return (self.active_tab == PreferencesDialogTab::General)
+                .then_some(&mut self.theme_group as &mut dyn Widget);
         }
         let waveform_index = theme_index + 1;
         if index == waveform_index {
-            return Some(&mut self.waveform_group as &mut dyn Widget);
+            return (self.active_tab == PreferencesDialogTab::General)
+                .then_some(&mut self.waveform_group as &mut dyn Widget);
         }
-        let content_start = waveform_index + 1;
-        let content_end = content_start + self.content_labels.len();
-        if (content_start..content_end).contains(&index) {
-            return self
-                .content_labels
-                .get_mut(index - content_start)
-                .map(|label| label as &mut dyn Widget);
-        }
-        let search_index = content_end;
+        let search_index = waveform_index + 1;
         if index == search_index {
-            return Some(&mut self.shortcut_search as &mut dyn Widget);
+            return (self.active_tab == PreferencesDialogTab::Shortcuts)
+                .then_some(&mut self.shortcut_search as &mut dyn Widget);
         }
         (index == search_index + 1).then_some(&mut self.close_button as &mut dyn Widget)
     }
@@ -1675,6 +1666,38 @@ mod tests {
             dialog.measure(LayoutConstraint::LOOSE),
             Size::new(CARD_WIDTH, CARD_HEIGHT)
         );
+    }
+
+    #[test]
+    fn preferences_interactive_child_slots_stay_stable_across_tabs() {
+        let mut dialog = PreferencesDialog::new();
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+
+        let theme_index = PreferencesDialogTab::ALL.len();
+        let waveform_index = theme_index + 1;
+        let search_index = waveform_index + 1;
+        let close_index = search_index + 1;
+        let close_id = dialog.close_button.id();
+
+        assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
+        assert!(dialog.child(theme_index).is_some());
+        assert!(dialog.child(waveform_index).is_some());
+        assert!(dialog.child(search_index).is_none());
+        assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
+
+        dialog.set_active_tab(PreferencesDialogTab::Media);
+        assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
+        assert!(dialog.child(theme_index).is_none());
+        assert!(dialog.child(waveform_index).is_none());
+        assert!(dialog.child(search_index).is_none());
+        assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
+
+        dialog.set_active_tab(PreferencesDialogTab::Shortcuts);
+        assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
+        assert!(dialog.child(theme_index).is_none());
+        assert!(dialog.child(waveform_index).is_none());
+        assert!(dialog.child(search_index).is_some());
+        assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
     }
 
     #[test]
