@@ -265,7 +265,7 @@ pub(crate) fn menu_row_text_y(rect: Rect, font_size: f32) -> f32 {
     rect.y + ((rect.height - font_size * 1.3) * 0.5).max(0.0)
 }
 
-fn paint_menu_checkmark(ctx: &mut PaintContext, rect: Rect, color: Color) {
+pub(crate) fn paint_menu_checkmark(ctx: &mut PaintContext, rect: Rect, color: Color) {
     let visual = MenuVisualTokens::from_theme(ctx.theme);
     let x = rect.x + visual.row_padding_x + visual.check_start_offset_x;
     let y = rect.y + rect.height * 0.5;

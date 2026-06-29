@@ -20,6 +20,7 @@ use mondrian_ui_theme::{current_theme, Theme};
 use std::cell::Cell;
 use std::sync::Arc;
 
+use crate::menu::paint_menu_checkmark;
 #[allow(unused_imports)]
 use crate::paint::{
     centered_text_origin_y, color_with_alpha, horizontal_stroke_rect, mix_color, paint_focus_ring,
@@ -1049,12 +1050,7 @@ impl ViewerSurface {
             };
             let check_lane = 16.0;
             if selected {
-                ctx.encoder.draw_text(
-                    "✓",
-                    style.font_size,
-                    Point::new(row.x + 5.0, centered_text_origin_y(row, style.line_height)),
-                    text_color,
-                );
+                paint_menu_checkmark(ctx, row, text_color);
             }
             ctx.encoder.draw_text(
                 label,
@@ -1669,6 +1665,31 @@ mod tests {
         );
 
         assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn viewer_dropdown_uses_menu_checkmark_geometry() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_zoom_label("适合");
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        viewer.open_dropdown = Some(ViewerDropdown::Zoom);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 800.0, 600.0),
+        };
+
+        viewer.paint_overlay(&mut ctx);
+
+        assert!(
+            encoder.lines >= 2,
+            "selected viewer dropdown option should paint the shared menu checkmark lines"
+        );
+        assert!(
+            !encoder.texts.iter().any(|text| text == "✓"),
+            "viewer dropdown should not use a text glyph checkmark"
+        );
     }
 
     #[test]

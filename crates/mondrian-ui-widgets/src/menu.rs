@@ -19,8 +19,9 @@ pub(crate) use model::{
 };
 pub use model::{DropdownTriggerStyle, MenuItem, MenuItemCommand, MenuItemKind};
 pub(crate) use paint::{
-    paint_disabled_trigger, paint_menu_popup_chrome, paint_menu_row, paint_menu_scrollbar,
-    paint_menu_separator, paint_menu_trigger, paint_open_menu_with_submenu, paint_submenu_arrow,
+    paint_disabled_trigger, paint_menu_checkmark, paint_menu_popup_chrome, paint_menu_row,
+    paint_menu_scrollbar, paint_menu_separator, paint_menu_trigger, paint_open_menu_with_submenu,
+    paint_submenu_arrow,
 };
 pub(crate) use popup::{
     first_activatable_index as popup_first_activatable_index,
