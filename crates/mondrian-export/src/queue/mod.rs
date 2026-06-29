@@ -19,9 +19,10 @@ use mondrian_media::audio::{
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
-    build_timeline_render_plan, composite_timeline_elements_float_linear, TimelineAdjustmentLayer,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    composite_timeline_elements_float_linear, evaluate_timeline_render_plan,
+    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, ExportBitDepth, SequenceSettings, VideoRange};
 use parking_lot::{Condvar, Mutex};
@@ -939,7 +940,8 @@ fn render_sequence_frame_into(
         canvas.resize(required_len, 0);
     }
 
-    let render_plan = build_timeline_render_plan(sequence, timeline_frame.max(0));
+    let render_plan =
+        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame));
     if render_plan.is_empty() {
         clear_canvas_black_opaque(canvas);
         return Ok(());
@@ -955,7 +957,7 @@ fn render_sequence_frame_into(
     let mut nested_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
 
-    for (index, element) in render_plan.iter().enumerate() {
+    for (index, element) in render_plan.elements.iter().enumerate() {
         let TimelineRenderPlanElement::Media(media) = element else {
             continue;
         };
@@ -1006,7 +1008,7 @@ fn render_sequence_frame_into(
         decoded_media[index] = Some(decoded);
     }
 
-    for (index, element) in render_plan.iter().enumerate() {
+    for (index, element) in render_plan.elements.iter().enumerate() {
         let TimelineRenderPlanElement::NestedSequence(nested) = element else {
             continue;
         };
@@ -1038,7 +1040,7 @@ fn render_sequence_frame_into(
     }
 
     let mut composite_elements = Vec::with_capacity(render_plan.len());
-    for (index, element) in render_plan.iter().enumerate() {
+    for (index, element) in render_plan.elements.iter().enumerate() {
         match element {
             TimelineRenderPlanElement::Adjustment(adjustment) => {
                 composite_elements.push(TimelineCompositeElement::Adjustment(

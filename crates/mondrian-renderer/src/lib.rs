@@ -32,7 +32,9 @@ pub use timeline_composite::{
     TimelineCompositeScratch, TimelineMediaLayer, TimelineSolidColorLayer,
 };
 pub use timeline_render_plan::{
-    build_timeline_render_plan, collect_timeline_color_diagnostics, mat3_to_affine,
-    TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineMediaPlan, TimelineNestedSequencePlan,
-    TimelineRenderPlanElement, TimelineSolidColorPlan,
+    build_timeline_render_plan, collect_timeline_color_diagnostics, evaluate_timeline_render_plan,
+    mat3_to_affine, TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineEvaluationDiagnostics,
+    TimelineEvaluationRequest, TimelineMediaPlan, TimelineNestedSequencePlan,
+    TimelineRenderColorTarget, TimelineRenderIntent, TimelineRenderPlan, TimelineRenderPlanElement,
+    TimelineRenderQuality, TimelineRenderSettings, TimelineSolidColorPlan,
 };
