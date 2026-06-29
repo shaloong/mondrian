@@ -490,8 +490,6 @@ impl Widget for ContextMenu {
                         handled = true;
                         break;
                     }
-
-                    self.submenu_chain.truncate(check_depth - 1);
                 }
 
                 if !handled {

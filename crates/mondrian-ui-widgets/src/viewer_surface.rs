@@ -16,6 +16,7 @@ use mondrian_ui_core::widget::{
     PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use std::cell::Cell;
 use std::sync::Arc;
 
 #[allow(unused_imports)]
@@ -140,6 +141,7 @@ pub struct ViewerSurface {
     on_control: Option<Box<ViewerControlAction>>,
     on_zoom: Option<Box<ViewerZoomAction>>,
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
+    root_clip_rect: Cell<Option<Rect>>,
     control_icons: Vec<(ViewerControl, VectorIcon)>,
     play_pause_icon: Option<VectorIcon>,
     playing_pause_icon: Option<VectorIcon>,
@@ -181,6 +183,7 @@ impl ViewerSurface {
             on_control: None,
             on_zoom: None,
             on_preview_quality: None,
+            root_clip_rect: Cell::new(None),
             control_icons: Vec::new(),
             play_pause_icon: None,
             playing_pause_icon: None,
@@ -381,8 +384,9 @@ impl ViewerSurface {
     }
 
     fn dropdown_rect(&self, dropdown: ViewerDropdown) -> Rect {
+        let root = self.root_clip_rect.get().unwrap_or(self.bounds);
         viewer_model::dropdown_rect(
-            self.bounds,
+            root,
             dropdown,
             &self.zoom_label,
             &self.preview_quality_label,
@@ -656,6 +660,7 @@ impl Widget for ViewerSurface {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        self.root_clip_rect.set(Some(ctx.clip_rect));
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let typography = &ctx.theme.typography;
@@ -917,23 +922,14 @@ impl ViewerSurface {
             return;
         }
         let colors = &ctx.theme.colors;
-        let fill = if pressed {
-            colors.muted
-        } else if hovered || open {
+        let fill = if pressed || open {
             colors.surface_2
+        } else if hovered {
+            color_with_alpha(colors.foreground, 0.06)
         } else {
-            colors.surface
+            Color::TRANSPARENT
         };
-        ctx.encoder.draw_rect(
-            rect,
-            soft_border(colors.border),
-            ctx.theme.spacing.radius_sm,
-        );
-        ctx.encoder.draw_rect(
-            rect.inset(1.0, 1.0),
-            fill,
-            ctx.theme.spacing.radius_sm - 1.0,
-        );
+        ctx.encoder.draw_rect(rect, fill, ctx.theme.spacing.radius_sm);
         let style = &ctx.theme.typography.small;
         let label_width = measure_single_line(label, style.font_size).0;
         let caret_width = 6.0;
