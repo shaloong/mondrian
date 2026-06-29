@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
@@ -97,6 +98,7 @@ struct AppUiWindowSession {
     current_bounds: std::cell::Cell<Rect>,
     modifiers_state: Modifiers,
     pending_initial_redraw: bool,
+    last_playback_tick: Instant,
 }
 
 /// Run the app UI Mondrian editor window.
@@ -561,6 +563,24 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
+                let playback_now = Instant::now();
+                let playback_elapsed =
+                    playback_now.saturating_duration_since(session.last_playback_tick);
+                session.last_playback_tick = playback_now;
+                if host.advance_playback_clock(playback_elapsed, session.current_bounds.get()) {
+                    sync_window_session_role(
+                        &mut host,
+                        elwt,
+                        &instance,
+                        &adapter,
+                        &device,
+                        &mut session,
+                    );
+                    session.window.request_redraw();
+                }
+                if let Some(delay) = host.playback_next_frame_delay() {
+                    elwt.set_control_flow(ControlFlow::WaitUntil(Instant::now() + delay));
+                }
                 if session.pending_initial_redraw {
                     session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
@@ -895,6 +915,7 @@ impl AppUiWindowSession {
             current_bounds: std::cell::Cell::new(bounds),
             modifiers_state: Modifiers::none(),
             pending_initial_redraw: true,
+            last_playback_tick: Instant::now(),
         })
     }
 }

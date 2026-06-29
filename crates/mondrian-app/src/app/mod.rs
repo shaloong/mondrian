@@ -241,6 +241,7 @@ pub struct AppState {
     pub playback_reached_end: bool,
     /// 播放时由 Viewer 面板上报：当前是否处于短暂停留缓冲状态。
     pub playback_buffering: bool,
+    playback_frame_accumulator: f64,
 
     // 素材库
     pub asset_library: Option<Arc<AssetLibrary>>,
@@ -343,6 +344,7 @@ impl AppState {
             playback: PlaybackState::default(),
             playback_reached_end: false,
             playback_buffering: false,
+            playback_frame_accumulator: 0.0,
             asset_library: None,
             dragging_asset: None,
             selection: SelectionState::default(),

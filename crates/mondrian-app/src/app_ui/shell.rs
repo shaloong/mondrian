@@ -843,6 +843,14 @@ impl AppUiAppRoot {
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
 
+    /// Refresh only playback-frame dependent UI state.
+    pub fn refresh_playback_frame_from_app_state(&mut self, state: &AppState) {
+        let frame = state.current_frame().max(0);
+        self.status_bar.set_model(status_bar_model(state));
+        self.models.timeline.playhead_frame = frame;
+        update_timeline_playhead_widgets(&mut self.dock, frame);
+    }
+
     /// Refresh panel contents and preferences from a full app UI state
     /// snapshot.
     pub fn refresh_from_app_state_with_preferences(
@@ -1372,6 +1380,21 @@ fn activate_panel_in_widget(
         }
     }
     false
+}
+
+fn update_timeline_playhead_widgets(widget: &mut dyn Widget, frame: i64) -> bool {
+    if let Some(timeline) = widget.as_any_mut().and_then(|any| any.downcast_mut::<TimelineView>()) {
+        timeline.set_playhead_frame(frame);
+        return true;
+    }
+
+    let mut updated = false;
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            updated |= update_timeline_playhead_widgets(child, frame);
+        }
+    }
+    updated
 }
 
 fn collect_dock_panel_state(widget: &dyn Widget) -> Vec<DockPanelState> {
@@ -3112,6 +3135,19 @@ mod tests {
         assert_eq!(model.message, "预览缓冲中...");
         assert!(!model.is_error);
         assert!(model.is_busy);
+    }
+
+    #[test]
+    fn app_root_playback_frame_refresh_updates_timeline_without_full_model_rebuild() {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        state.set_playback_frame_running(12);
+        let mut root = AppUiAppRoot::from_app_state(&state);
+
+        state.set_playback_frame_running(48);
+        root.refresh_playback_frame_from_app_state(&state);
+
+        assert_eq!(root.models.timeline.playhead_frame, 48);
     }
 
     #[test]
