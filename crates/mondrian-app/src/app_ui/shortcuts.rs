@@ -74,21 +74,29 @@ impl AppUiShortcutBinding {
 
     /// User-facing shortcut hint.
     pub fn label(self) -> String {
+        self.label_for_platform(cfg!(target_os = "macos"))
+    }
+
+    fn label_for_platform(self, macos: bool) -> String {
         let mut parts = Vec::new();
         if self.ctrl {
-            parts.push("Ctrl");
+            parts.push(if macos { "⌃" } else { "Ctrl" });
         }
         if self.alt {
-            parts.push("Alt");
+            parts.push(if macos { "⌥" } else { "Alt" });
         }
         if self.shift {
-            parts.push("Shift");
+            parts.push(if macos { "⇧" } else { "Shift" });
         }
         if self.meta {
-            parts.push("Meta");
+            parts.push(if macos { "⌘" } else { "Meta" });
         }
-        parts.push(self.key.label());
-        parts.join("+")
+        parts.push(self.key.label_for_platform(macos));
+        if macos {
+            parts.join("")
+        } else {
+            parts.join("+")
+        }
     }
 }
 
@@ -380,7 +388,7 @@ impl AppUiShortcutKey {
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label_for_platform(self, macos: bool) -> &'static str {
         match self {
             Self::A => "A",
             Self::B => "B",
@@ -430,10 +438,14 @@ impl AppUiShortcutKey {
             Self::F10 => "F10",
             Self::F11 => "F11",
             Self::F12 => "F12",
+            Self::Escape if macos => "⎋",
             Self::Escape => "Esc",
+            Self::Tab if macos => "⇥",
             Self::Tab => "Tab",
+            Self::Enter if macos => "⏎",
             Self::Enter => "Enter",
             Self::Space => "Space",
+            Self::Backspace if macos => "⌫",
             Self::Backspace => "Backspace",
             Self::Delete => "Delete",
             Self::Insert => "Insert",
@@ -441,9 +453,13 @@ impl AppUiShortcutKey {
             Self::End => "End",
             Self::PageUp => "Page Up",
             Self::PageDown => "Page Down",
+            Self::Left if macos => "◀",
             Self::Left => "Left",
+            Self::Right if macos => "▶",
             Self::Right => "Right",
+            Self::Up if macos => "▲",
             Self::Up => "Up",
+            Self::Down if macos => "▼",
             Self::Down => "Down",
         }
     }
@@ -796,6 +812,30 @@ mod tests {
             shortcut_label_for_action_with_overrides(&Action::SaveProject, &overrides),
             Some("Ctrl+Alt+S".to_owned())
         );
+    }
+
+    #[test]
+    fn shortcut_binding_labels_use_platform_conventions() {
+        let binding = AppUiShortcutBinding {
+            key: AppUiShortcutKey::Enter,
+            ctrl: true,
+            alt: true,
+            shift: true,
+            meta: true,
+        };
+
+        assert_eq!(
+            binding.label_for_platform(false),
+            "Ctrl+Alt+Shift+Meta+Enter"
+        );
+        assert_eq!(binding.label_for_platform(true), "⌃⌥⇧⌘⏎");
+        assert_eq!(AppUiShortcutKey::Escape.label_for_platform(true), "⎋");
+        assert_eq!(AppUiShortcutKey::Tab.label_for_platform(true), "⇥");
+        assert_eq!(AppUiShortcutKey::Backspace.label_for_platform(true), "⌫");
+        assert_eq!(AppUiShortcutKey::Up.label_for_platform(true), "▲");
+        assert_eq!(AppUiShortcutKey::Down.label_for_platform(true), "▼");
+        assert_eq!(AppUiShortcutKey::Left.label_for_platform(true), "◀");
+        assert_eq!(AppUiShortcutKey::Right.label_for_platform(true), "▶");
     }
 
     #[test]

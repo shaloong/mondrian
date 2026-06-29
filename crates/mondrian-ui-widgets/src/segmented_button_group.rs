@@ -251,17 +251,20 @@ impl Widget for SegmentedButtonGroup {
             .draw_rect(self.bounds, color_with_alpha(colors.border, 0.50), radius);
         ctx.encoder.draw_rect(
             self.bounds.inset(visual.border_width, visual.border_width),
-            color_with_alpha(colors.foreground, 0.045),
+            color_with_alpha(colors.popover, 0.94),
             (radius - visual.border_width).max(0.0),
         );
 
         if !self.items.is_empty() {
             let selected = self.segment_rect(self.selected_index).inset(2.0, 2.0);
-            ctx.encoder
-                .draw_rect(selected, color_with_alpha(colors.ring, 0.45), radius - 2.0);
+            ctx.encoder.draw_rect(
+                selected,
+                color_with_alpha(colors.primary, 0.86),
+                radius - 2.0,
+            );
             ctx.encoder.draw_rect(
                 selected.inset(visual.border_width, visual.border_width),
-                color_with_alpha(colors.primary, 0.20),
+                color_with_alpha(colors.primary, 0.72),
                 (radius - 2.0 - visual.border_width).max(0.0),
             );
         }
@@ -290,7 +293,7 @@ impl Widget for SegmentedButtonGroup {
             let rect = self.segment_rect(index).inset(visual.padding_x, 0.0);
             let text_color = if self.enabled {
                 if index == self.selected_index {
-                    colors.foreground
+                    colors.primary_foreground
                 } else {
                     colors.text_secondary
                 }

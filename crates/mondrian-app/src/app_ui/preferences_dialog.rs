@@ -12,8 +12,8 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_theme::{ThemePreference, ThemePreset};
 use mondrian_ui_widgets::{
-    Button, DialogSurface, Label, SegmentedButtonGroup, SegmentedButtonItem, TextInput,
-    WaveformDisplay,
+    Button, ContextMenu, DialogSurface, Label, MenuItem, SegmentedButtonGroup, SegmentedButtonItem,
+    TextInput, VectorIcon, WaveformDisplay,
 };
 
 use crate::app::ui_actions::{
@@ -52,8 +52,16 @@ const SHORTCUT_SEARCH_HEIGHT: f32 = 32.0;
 const SHORTCUT_SECTION_HEIGHT: f32 = 30.0;
 const SHORTCUT_ROW_HEIGHT: f32 = 38.0;
 const SHORTCUT_ACTION_MENU_WIDTH: f32 = 116.0;
-const SHORTCUT_ACTION_MENU_ROW_HEIGHT: f32 = 28.0;
 const SHORTCUT_SCROLLBAR_GAP: f32 = 10.0;
+const SHORTCUT_KEYCAP_HEIGHT: f32 = 24.0;
+const SHORTCUT_KEYCAP_GAP: f32 = 5.0;
+const SHORTCUT_KEYCAP_PADDING_X: f32 = 8.0;
+const SHORTCUT_KEYCAP_MIN_WIDTH: f32 = 24.0;
+const SHORTCUT_KEYCAP_ACTION_GAP: f32 = 14.0;
+const SHORTCUT_CHEVRON_SIZE: f32 = 12.0;
+
+const CHEVRON_RIGHT_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+const CHEVRON_DOWN_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 
 /// Read-only settings/status snapshot shown by the app UI preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,8 +252,10 @@ pub struct PreferencesDialog {
     shortcut_sections: Vec<ShortcutSectionState>,
     shortcut_layout_rows: Vec<ShortcutLayoutRow>,
     hovered_shortcut_id: Option<String>,
-    shortcut_actions_menu: Option<String>,
+    shortcut_actions_menu: Option<ShortcutActionMenuState>,
     shortcut_capture: Option<ShortcutCaptureState>,
+    collapsed_chevron: Option<VectorIcon>,
+    expanded_chevron: Option<VectorIcon>,
     nav_buttons: Vec<Button>,
     theme_group: SegmentedButtonGroup,
     waveform_group: SegmentedButtonGroup,
@@ -270,7 +280,6 @@ enum ShortcutLayoutRowKind {
     Section {
         category: AppUiCommandCategory,
         title: &'static str,
-        count: usize,
         collapsed: bool,
     },
     Command {
@@ -283,6 +292,11 @@ struct ShortcutCaptureState {
     id: String,
     pending: Option<AppUiShortcutBinding>,
     conflict_owner: Option<String>,
+}
+
+struct ShortcutActionMenuState {
+    id: String,
+    menu: ContextMenu,
 }
 
 impl PreferencesDialog {
@@ -368,6 +382,8 @@ impl PreferencesDialog {
             hovered_shortcut_id: None,
             shortcut_actions_menu: None,
             shortcut_capture: None,
+            collapsed_chevron: VectorIcon::from_svg_str(CHEVRON_RIGHT_SVG).ok(),
+            expanded_chevron: VectorIcon::from_svg_str(CHEVRON_DOWN_SVG).ok(),
             nav_buttons,
             theme_group,
             waveform_group,
@@ -417,7 +433,7 @@ impl PreferencesDialog {
         self.shortcut_actions_menu = self
             .shortcut_actions_menu
             .take()
-            .filter(|id| self.model.shortcut_rows.iter().any(|row| row.id == *id));
+            .filter(|state| self.model.shortcut_rows.iter().any(|row| row.id == state.id));
         self.clamp_shortcut_scroll();
         self.rebuild_content();
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -508,7 +524,6 @@ impl PreferencesDialog {
                 kind: ShortcutLayoutRowKind::Section {
                     category: section.category,
                     title: shortcut_category_label(section.category),
-                    count: rows.len(),
                     collapsed,
                 },
                 rect: Rect::ZERO,
@@ -546,52 +561,56 @@ impl PreferencesDialog {
         }
     }
 
-    fn row_keycap_rect(&self, rect: Rect) -> Rect {
-        Rect::new(rect.x + rect.width - 176.0, rect.y + 7.0, 116.0, 24.0)
+    fn row_keycap_rect(&self, rect: Rect, label: &str, disabled: bool) -> Rect {
+        let action = self.row_action_rect(rect);
+        let width = keycap_group_width(label, disabled);
+        Rect::new(
+            (action.x - SHORTCUT_KEYCAP_ACTION_GAP - width).max(rect.x + 240.0),
+            rect.y + (rect.height - SHORTCUT_KEYCAP_HEIGHT) * 0.5,
+            width,
+            SHORTCUT_KEYCAP_HEIGHT,
+        )
     }
 
     fn row_action_rect(&self, rect: Rect) -> Rect {
         Rect::new(rect.x + rect.width - 42.0, rect.y + 7.0, 28.0, 24.0)
     }
 
-    fn action_menu_rect_for(&self, id: &str) -> Option<Rect> {
+    fn action_menu_anchor_for(&self, id: &str) -> Option<Point> {
         let row = self.shortcut_layout_rows.iter().find(|row| {
             matches!(&row.kind, ShortcutLayoutRowKind::Command { id: row_id } if row_id == id)
         })?;
         let action = self.row_action_rect(row.rect);
-        Some(Rect::new(
+        Some(Point::new(
             action.x + action.width - SHORTCUT_ACTION_MENU_WIDTH,
-            action.y + action.height + 4.0,
-            SHORTCUT_ACTION_MENU_WIDTH,
-            SHORTCUT_ACTION_MENU_ROW_HEIGHT * 2.0 + 8.0,
+            action.y,
         ))
     }
 
-    fn action_menu_item_at(&self, position: Point) -> Option<(String, ShortcutActionMenuItem)> {
-        let id = self.shortcut_actions_menu.as_ref()?;
-        let menu = self.action_menu_rect_for(id)?;
-        if !menu.contains(position) {
-            return None;
-        }
-        let reset = Rect::new(
-            menu.x + 4.0,
-            menu.y + 4.0,
-            menu.width - 8.0,
-            SHORTCUT_ACTION_MENU_ROW_HEIGHT,
+    fn shortcut_action_menu_for(&self, id: &str, anchor: Point) -> Option<ShortcutActionMenuState> {
+        let row = self.find_shortcut_row(id)?;
+        let reset = MenuItem::new(
+            "重置",
+            app_shell_preferences_shortcut_reset_action(row.id.clone()),
         );
-        let disable = Rect::new(
-            menu.x + 4.0,
-            reset.y + SHORTCUT_ACTION_MENU_ROW_HEIGHT,
-            menu.width - 8.0,
-            SHORTCUT_ACTION_MENU_ROW_HEIGHT,
-        );
-        if reset.contains(position) {
-            Some((id.clone(), ShortcutActionMenuItem::Reset))
-        } else if disable.contains(position) {
-            Some((id.clone(), ShortcutActionMenuItem::Disable))
+        let reset = if row.overridden {
+            reset
         } else {
-            None
-        }
+            reset.disabled()
+        };
+        let disable = MenuItem::new(
+            "禁用",
+            app_shell_preferences_shortcut_disabled_action(row.id.clone()),
+        );
+        let disable = if row.disabled {
+            disable.disabled()
+        } else {
+            disable
+        };
+        Some(ShortcutActionMenuState {
+            id: row.id.clone(),
+            menu: ContextMenu::new(anchor, vec![reset, disable]),
+        })
     }
 
     fn shortcut_row_at(&self, position: Point) -> Option<&ShortcutLayoutRow> {
@@ -686,12 +705,6 @@ impl PreferencesDialog {
         ctx.request_repaint();
         EventResult::Handled
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShortcutActionMenuItem {
-    Reset,
-    Disable,
 }
 
 impl Default for PreferencesDialog {
@@ -840,6 +853,16 @@ impl Widget for PreferencesDialog {
             }
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
+            if let Some(menu_state) = &mut self.shortcut_actions_menu {
+                let result = menu_state.menu.event(event, ctx);
+                if !menu_state.menu.is_visible() {
+                    self.shortcut_actions_menu = None;
+                }
+                if result == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            }
+
             let before_query = self.shortcut_search.text().to_owned();
             if self.shortcut_search.event(event, ctx) == EventResult::Handled {
                 let next_query = self.shortcut_search.text().to_owned();
@@ -868,25 +891,6 @@ impl Widget for PreferencesDialog {
                     }
                 }
                 UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
-                    if let Some((id, item)) = self.action_menu_item_at(*position) {
-                        let row = self.find_shortcut_row(&id);
-                        match item {
-                            ShortcutActionMenuItem::Reset
-                                if row.is_some_and(|row| row.overridden) =>
-                            {
-                                (ctx.dispatch)(app_shell_preferences_shortcut_reset_action(id));
-                            }
-                            ShortcutActionMenuItem::Disable
-                                if row.is_some_and(|row| !row.disabled) =>
-                            {
-                                (ctx.dispatch)(app_shell_preferences_shortcut_disabled_action(id));
-                            }
-                            _ => {}
-                        }
-                        self.shortcut_actions_menu = None;
-                        ctx.request_repaint();
-                        return EventResult::Handled;
-                    }
                     if let Some(capture) = &self.shortcut_capture {
                         let confirm = shortcut_capture_confirm_rect(self.shortcut_viewport);
                         let replace = Rect::new(
@@ -919,16 +923,29 @@ impl Widget for PreferencesDialog {
                             return EventResult::Handled;
                         }
                         ShortcutLayoutRowKind::Command { id } => {
-                            if self.row_keycap_rect(row.rect).contains(*position) {
+                            let Some(shortcut) = self.find_shortcut_row(id) else {
+                                return EventResult::Ignored;
+                            };
+                            if self
+                                .row_keycap_rect(
+                                    row.rect,
+                                    &shortcut.binding_label,
+                                    shortcut.disabled,
+                                )
+                                .contains(*position)
+                            {
                                 self.begin_shortcut_capture(id.clone(), ctx);
                                 return EventResult::Handled;
                             }
                             if self.row_action_rect(row.rect).contains(*position)
                                 && self.hovered_shortcut_id.as_deref() == Some(id)
                             {
-                                self.shortcut_actions_menu = Some(id.clone());
-                                ctx.request_repaint();
-                                return EventResult::Handled;
+                                if let Some(anchor) = self.action_menu_anchor_for(id) {
+                                    self.shortcut_actions_menu =
+                                        self.shortcut_action_menu_for(id, anchor);
+                                    ctx.request_repaint();
+                                    return EventResult::Handled;
+                                }
                             }
                         }
                     }
@@ -981,8 +998,13 @@ impl Widget for PreferencesDialog {
                     continue;
                 }
                 match &row.kind {
-                    ShortcutLayoutRowKind::Section { title, count, collapsed, .. } => {
-                        paint_shortcut_section(ctx, row.rect, title, *count, *collapsed);
+                    ShortcutLayoutRowKind::Section { title, collapsed, .. } => {
+                        let icon = if *collapsed {
+                            self.collapsed_chevron.as_ref()
+                        } else {
+                            self.expanded_chevron.as_ref()
+                        };
+                        paint_shortcut_section(ctx, row.rect, title, icon);
                     }
                     ShortcutLayoutRowKind::Command { id } => {
                         if let Some(command) = self.find_shortcut_row(id) {
@@ -993,7 +1015,15 @@ impl Widget for PreferencesDialog {
                                 ctx,
                                 row.rect,
                                 command,
-                                self.row_keycap_rect(row.rect),
+                                self.row_keycap_rect(
+                                    row.rect,
+                                    &capture
+                                        .and_then(|capture| {
+                                            capture.pending.map(AppUiShortcutBinding::label)
+                                        })
+                                        .unwrap_or_else(|| command.binding_label.clone()),
+                                    command.disabled,
+                                ),
                                 self.row_action_rect(row.rect),
                                 hovered,
                                 capture,
@@ -1006,10 +1036,8 @@ impl Widget for PreferencesDialog {
             if let Some(capture) = &self.shortcut_capture {
                 paint_shortcut_capture_prompt(ctx, self.shortcut_viewport, capture, &self.model);
             }
-            if let Some(id) = &self.shortcut_actions_menu {
-                if let Some(menu) = self.action_menu_rect_for(id) {
-                    paint_shortcut_action_menu(ctx, menu, self.find_shortcut_row(id));
-                }
+            if let Some(menu_state) = &self.shortcut_actions_menu {
+                menu_state.menu.paint_overlay(ctx);
             }
             paint_shortcut_scrollbar(
                 ctx,
@@ -1219,29 +1247,27 @@ fn paint_shortcut_section(
     ctx: &mut PaintContext,
     rect: Rect,
     title: &str,
-    count: usize,
-    collapsed: bool,
+    icon: Option<&VectorIcon>,
 ) {
     let colors = &ctx.theme.colors;
     let font_size = ctx.theme.typography.metadata.font_size;
-    let arrow = if collapsed { ">" } else { "v" };
-    ctx.encoder.draw_text(
-        arrow,
-        font_size,
-        Point::new(rect.x + 2.0, rect.y + 9.0),
-        colors.text_tertiary,
-    );
+    if let Some(icon) = icon {
+        icon.paint(
+            ctx,
+            Rect::new(
+                rect.x + 1.0,
+                rect.y + (rect.height - SHORTCUT_CHEVRON_SIZE) * 0.5,
+                SHORTCUT_CHEVRON_SIZE,
+                SHORTCUT_CHEVRON_SIZE,
+            ),
+            colors.text_tertiary,
+        );
+    }
     ctx.encoder.draw_text(
         title,
         font_size,
         Point::new(rect.x + 20.0, rect.y + 9.0),
         colors.text_secondary,
-    );
-    ctx.encoder.draw_text(
-        &count.to_string(),
-        font_size,
-        Point::new(rect.x + 104.0, rect.y + 9.0),
-        colors.text_tertiary,
     );
 }
 
@@ -1331,7 +1357,7 @@ fn paint_keycap_label(
         ctx.encoder.draw_text(
             text,
             ctx.theme.typography.metadata.font_size,
-            Point::new(rect.x + 9.0, rect.y + 7.0),
+            Point::new(rect.x + SHORTCUT_KEYCAP_PADDING_X, keycap_text_y(ctx, rect)),
             colors.foreground,
         );
         return;
@@ -1340,7 +1366,7 @@ fn paint_keycap_label(
         ctx.encoder.draw_text(
             "未绑定",
             ctx.theme.typography.metadata.font_size,
-            Point::new(rect.x + 48.0, rect.y + 7.0),
+            Point::new(rect.x + SHORTCUT_KEYCAP_PADDING_X, keycap_text_y(ctx, rect)),
             colors.text_tertiary,
         );
         return;
@@ -1351,12 +1377,12 @@ fn paint_keycap_label(
             ctx.encoder.draw_text(
                 "+",
                 ctx.theme.typography.metadata.font_size,
-                Point::new(x + 3.0, rect.y + 7.0),
+                Point::new(x + 2.0, keycap_text_y(ctx, rect)),
                 colors.text_tertiary,
             );
-            x += 14.0;
+            x += SHORTCUT_KEYCAP_GAP + 8.0;
         }
-        let width = (part.chars().count() as f32 * 7.0 + 14.0).clamp(24.0, 54.0);
+        let width = keycap_part_width(part);
         let key = Rect::new(x, rect.y + 1.0, width, rect.height - 2.0);
         ctx.encoder.draw_rect(key, with_alpha(colors.foreground, 0.06), radius);
         ctx.encoder
@@ -1364,11 +1390,31 @@ fn paint_keycap_label(
         ctx.encoder.draw_text(
             part,
             ctx.theme.typography.metadata.font_size,
-            Point::new(key.x + 7.0, key.y + 6.0),
+            Point::new(key.x + SHORTCUT_KEYCAP_PADDING_X, keycap_text_y(ctx, key)),
             colors.text_secondary,
         );
-        x += width;
+        x += width + SHORTCUT_KEYCAP_GAP;
     }
+}
+
+fn keycap_text_y(ctx: &PaintContext, rect: Rect) -> f32 {
+    let font_size = ctx.theme.typography.metadata.font_size;
+    rect.y + ((rect.height - font_size * 1.3) * 0.5).max(0.0)
+}
+
+fn keycap_part_width(part: &str) -> f32 {
+    (part.chars().count() as f32 * 7.0 + SHORTCUT_KEYCAP_PADDING_X * 2.0)
+        .max(SHORTCUT_KEYCAP_MIN_WIDTH)
+}
+
+fn keycap_group_width(label: &str, disabled: bool) -> f32 {
+    if disabled || label == "已禁用" || label.is_empty() {
+        return keycap_part_width("未绑定");
+    }
+    let parts: Vec<&str> = label.split('+').collect();
+    let keys_width: f32 = parts.iter().map(|part| keycap_part_width(part)).sum();
+    let separators = parts.len().saturating_sub(1) as f32 * (SHORTCUT_KEYCAP_GAP + 8.0);
+    keys_width + separators
 }
 
 fn shortcut_capture_confirm_rect(viewport: Rect) -> Rect {
@@ -1429,42 +1475,6 @@ fn paint_shortcut_capture_prompt(
             ctx.theme.typography.button.font_size,
             Point::new(button.x + 16.0, button.y + 6.0),
             colors.foreground,
-        );
-    }
-}
-
-fn paint_shortcut_action_menu(
-    ctx: &mut PaintContext,
-    rect: Rect,
-    row: Option<&ShortcutPreferenceRow>,
-) {
-    let colors = &ctx.theme.colors;
-    ctx.encoder.draw_rect(rect, colors.popover, ctx.theme.spacing.radius_md);
-    ctx.encoder.draw_rect(
-        rect.inset(0.75, 0.75),
-        with_alpha(colors.border, 0.70),
-        ctx.theme.spacing.radius_md,
-    );
-    let reset_enabled = row.is_some_and(|row| row.overridden);
-    let disable_enabled = row.is_some_and(|row| !row.disabled);
-    for (index, (label, enabled)) in
-        [("重置", reset_enabled), ("禁用", disable_enabled)].into_iter().enumerate()
-    {
-        let item = Rect::new(
-            rect.x + 4.0,
-            rect.y + 4.0 + index as f32 * SHORTCUT_ACTION_MENU_ROW_HEIGHT,
-            rect.width - 8.0,
-            SHORTCUT_ACTION_MENU_ROW_HEIGHT,
-        );
-        ctx.encoder.draw_text(
-            label,
-            ctx.theme.typography.button.font_size,
-            Point::new(item.x + 10.0, item.y + 8.0),
-            if enabled {
-                colors.foreground
-            } else {
-                colors.text_tertiary
-            },
         );
     }
 }
@@ -1603,11 +1613,27 @@ mod tests {
     }
 
     fn shortcut_keycap_center(dialog: &PreferencesDialog, id: &str) -> Point {
-        dialog.row_keycap_rect(command_row_rect(dialog, id)).center()
+        let row = dialog.find_shortcut_row(id).expect("shortcut row");
+        dialog
+            .row_keycap_rect(
+                command_row_rect(dialog, id),
+                &row.binding_label,
+                row.disabled,
+            )
+            .center()
     }
 
     fn shortcut_action_center(dialog: &PreferencesDialog, id: &str) -> Point {
         dialog.row_action_rect(command_row_rect(dialog, id)).center()
+    }
+
+    fn shortcut_action_menu_item_point(
+        dialog: &PreferencesDialog,
+        id: &str,
+        index: usize,
+    ) -> Point {
+        let anchor = dialog.action_menu_anchor_for(id).expect("action menu anchor");
+        Point::new(anchor.x + 20.0, anchor.y + 10.0 + index as f32 * 28.0)
     }
 
     fn hover(dialog: &mut PreferencesDialog, ctx: &mut EventContext<'_>, position: Point) {
@@ -1772,24 +1798,13 @@ mod tests {
         let action = shortcut_action_center(&dialog, "file.save_project");
         hover(&mut dialog, &mut ctx, action);
         click(&mut dialog, &mut ctx, action);
-        let menu = dialog.action_menu_rect_for("file.save_project").expect("action menu");
-        click(
-            &mut dialog,
-            &mut ctx,
-            Point::new(
-                menu.x + 20.0,
-                menu.y + 4.0 + SHORTCUT_ACTION_MENU_ROW_HEIGHT + 12.0,
-            ),
-        );
+        let disable_point = shortcut_action_menu_item_point(&dialog, "file.save_project", 1);
+        click(&mut dialog, &mut ctx, disable_point);
 
         hover(&mut dialog, &mut ctx, action);
         click(&mut dialog, &mut ctx, action);
-        let menu = dialog.action_menu_rect_for("file.save_project").expect("action menu");
-        click(
-            &mut dialog,
-            &mut ctx,
-            Point::new(menu.x + 20.0, menu.y + 16.0),
-        );
+        let reset_point = shortcut_action_menu_item_point(&dialog, "file.save_project", 0);
+        click(&mut dialog, &mut ctx, reset_point);
 
         let recorded = actions.borrow();
         assert_eq!(recorded.len(), 2);
@@ -1916,15 +1931,8 @@ mod tests {
         assert!(dialog.shortcut_viewport.contains(export_action));
         hover(&mut dialog, &mut ctx, export_action);
         click(&mut dialog, &mut ctx, export_action);
-        let menu = dialog.action_menu_rect_for("panel.export").expect("action menu");
-        click(
-            &mut dialog,
-            &mut ctx,
-            Point::new(
-                menu.x + 20.0,
-                menu.y + 4.0 + SHORTCUT_ACTION_MENU_ROW_HEIGHT + 12.0,
-            ),
-        );
+        let disable_point = shortcut_action_menu_item_point(&dialog, "panel.export", 1);
+        click(&mut dialog, &mut ctx, disable_point);
 
         let recorded = actions.borrow();
         assert_eq!(recorded.len(), 1);
