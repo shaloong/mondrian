@@ -389,7 +389,7 @@ impl PreferencesDialog {
             theme_group,
             waveform_group,
             content_labels: Vec::new(),
-            close_button: Button::new("完成").on_click(app_shell_close_modal_action()),
+            close_button: Button::new("关闭").on_click(app_shell_close_modal_action()),
         };
         dialog.rebuild_content();
         dialog
@@ -845,6 +845,11 @@ impl Widget for PreferencesDialog {
             return EventResult::Handled;
         }
         for button in &mut self.nav_buttons {
+            if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
+                if button.hit_test(*position) && button.can_focus() {
+                    ctx.focus.request_focus(button.id());
+                }
+            }
             if button.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
@@ -1684,6 +1689,12 @@ mod tests {
         assert!(dialog.child(waveform_index).is_some());
         assert!(dialog.child(search_index).is_none());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
+        let close = dialog.child(close_index).expect("close child");
+        assert!(close.can_focus());
+        assert_eq!(
+            close.accessibility().and_then(|node| node.name),
+            Some("关闭".to_owned())
+        );
 
         dialog.set_active_tab(PreferencesDialogTab::Media);
         assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
@@ -1691,6 +1702,7 @@ mod tests {
         assert!(dialog.child(waveform_index).is_none());
         assert!(dialog.child(search_index).is_none());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
+        assert!(dialog.child(close_index).expect("close child").can_focus());
 
         dialog.set_active_tab(PreferencesDialogTab::Shortcuts);
         assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
@@ -1698,6 +1710,80 @@ mod tests {
         assert!(dialog.child(waveform_index).is_none());
         assert!(dialog.child(search_index).is_some());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
+        assert!(dialog.child(close_index).expect("close child").can_focus());
+    }
+
+    #[test]
+    fn preferences_tab_click_moves_focus_to_clicked_tab_button() {
+        struct RecordingFocus {
+            focused: Option<WidgetId>,
+        }
+
+        impl mondrian_ui_core::FocusManager for RecordingFocus {
+            fn focused_widget(&self) -> Option<WidgetId> {
+                self.focused
+            }
+
+            fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> {
+                None
+            }
+
+            fn request_focus(&mut self, widget: WidgetId) {
+                self.focused = Some(widget);
+            }
+
+            fn release_focus(&mut self, widget: WidgetId) {
+                if self.focused == Some(widget) {
+                    self.focused = None;
+                }
+            }
+
+            fn clear_focus(&mut self) {
+                self.focused = None;
+            }
+        }
+
+        let mut dialog = PreferencesDialog::new();
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+        let media_button_id = dialog.nav_buttons[1].id();
+        let close_button_id = dialog.close_button.id();
+        let content = dialog.surface.content_rect(dialog.card);
+        let media_point = Rect::new(
+            dialog.card.x + SIDEBAR_PADDING,
+            content.y + NAV_BUTTON_HEIGHT + NAV_BUTTON_GAP,
+            NAV_WIDTH,
+            NAV_BUTTON_HEIGHT,
+        )
+        .center();
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = RecordingFocus { focused: Some(dialog.theme_group.id()) };
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = EventContext {
+            focus: &mut focus,
+            shortcut: &mut shortcut,
+            tooltip: &mut tooltip,
+            dispatch: &dispatch,
+            platform: &mondrian_platform::NoopPlatformService,
+            requests: &mut requests,
+        };
+
+        assert_eq!(
+            dialog.event(
+                &UiEvent::MouseDown {
+                    position: media_point,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(ctx.focus.focused_widget(), Some(media_button_id));
+        assert_ne!(ctx.focus.focused_widget(), Some(close_button_id));
     }
 
     #[test]
