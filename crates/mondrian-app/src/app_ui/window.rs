@@ -1034,6 +1034,9 @@ fn window_attributes_for_role(role: AppUiWindowRole) -> winit::window::WindowAtt
         .with_decorations(chrome.decorations)
         .with_resizable(chrome.resizable)
         .with_visible(false);
+    if let Some(icon) = app_window_icon() {
+        attrs = attrs.with_window_icon(Some(icon));
+    }
     if let Some((w, h)) = chrome.min_size {
         attrs = attrs.with_min_inner_size(logical_size(w, h));
     }
@@ -1041,6 +1044,16 @@ fn window_attributes_for_role(role: AppUiWindowRole) -> winit::window::WindowAtt
         attrs = attrs.with_max_inner_size(logical_size(w, h));
     }
     attrs
+}
+
+fn app_window_icon() -> Option<winit::window::Icon> {
+    const ICON_SIZE: u32 = 64;
+    let rgba = crate::product_assets::rasterize_svg_rgba(
+        include_str!("../../assets/favicon.svg"),
+        ICON_SIZE,
+        ICON_SIZE,
+    )?;
+    winit::window::Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE).ok()
 }
 
 fn window_corner_preference_for_role(role: AppUiWindowRole) -> WindowCornerPreference {
@@ -1611,6 +1624,11 @@ mod tests {
             Some((WORKSPACE_MIN_WIDTH, WORKSPACE_MIN_HEIGHT))
         );
         assert_eq!(chrome.max_size, None);
+    }
+
+    #[test]
+    fn app_window_icon_decodes_embedded_favicon() {
+        assert!(app_window_icon().is_some());
     }
 
     #[test]

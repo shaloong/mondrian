@@ -563,9 +563,11 @@ impl PreferencesDialog {
 
     fn row_keycap_rect(&self, rect: Rect, label: &str, disabled: bool) -> Rect {
         let action = self.row_action_rect(rect);
-        let width = keycap_group_width(label, disabled);
+        let right = action.x - SHORTCUT_KEYCAP_ACTION_GAP;
+        let min_left = rect.x + 240.0;
+        let width = keycap_group_width(label, disabled).min((right - min_left).max(0.0));
         Rect::new(
-            (action.x - SHORTCUT_KEYCAP_ACTION_GAP - width).max(rect.x + 240.0),
+            right - width,
             rect.y + (rect.height - SHORTCUT_KEYCAP_HEIGHT) * 0.5,
             width,
             SHORTCUT_KEYCAP_HEIGHT,
@@ -816,7 +818,9 @@ impl Widget for PreferencesDialog {
             }
         }
         match event {
-            UiEvent::KeyDown { key: KeyCode::Escape | KeyCode::Enter, .. } => {
+            UiEvent::KeyDown { key: KeyCode::Escape | KeyCode::Enter, .. }
+                if !self.accepts_text_input() =>
+            {
                 (ctx.dispatch)(app_shell_close_modal_action());
                 return EventResult::Handled;
             }
@@ -1055,6 +1059,14 @@ impl Widget for PreferencesDialog {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn accepts_text_input(&self) -> bool {
+        self.active_tab == PreferencesDialogTab::Shortcuts && self.shortcut_search.is_focused()
     }
 
     fn child_count(&self) -> usize {
@@ -1627,6 +1639,15 @@ mod tests {
         dialog.row_action_rect(command_row_rect(dialog, id)).center()
     }
 
+    fn shortcut_keycap_rect(dialog: &PreferencesDialog, id: &str) -> Rect {
+        let row = dialog.find_shortcut_row(id).expect("shortcut row");
+        dialog.row_keycap_rect(
+            command_row_rect(dialog, id),
+            &row.binding_label,
+            row.disabled,
+        )
+    }
+
     fn shortcut_action_menu_item_point(
         dialog: &PreferencesDialog,
         id: &str,
@@ -1892,6 +1913,102 @@ mod tests {
             }
             other => panic!("expected shortcut rebound action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn preferences_shortcut_search_accepts_text_after_click() {
+        let mut dialog = PreferencesDialog::with_model_and_tab(
+            AppUiPreferencesModel::default(),
+            PreferencesDialogTab::Shortcuts,
+        );
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let search_rect = Rect::new(
+            dialog.shortcut_viewport.x,
+            dialog.shortcut_viewport.y - SHORTCUT_SEARCH_HEIGHT - 14.0,
+            dialog.shortcut_viewport.width,
+            SHORTCUT_SEARCH_HEIGHT,
+        );
+        click(&mut dialog, &mut ctx, search_rect.center());
+        assert!(dialog.shortcut_search.is_focused());
+        assert!(dialog.accepts_text_input());
+        assert_eq!(
+            dialog.event(&UiEvent::TextInput("save".into()), &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(dialog.shortcut_search_query, "save");
+        assert!(dialog.shortcut_layout_rows.iter().any(
+            |row| matches!(&row.kind, ShortcutLayoutRowKind::Command { id } if id == "file.save_project")
+        ));
+    }
+
+    #[test]
+    fn preferences_shortcut_keycaps_share_right_edge() {
+        let model = AppUiPreferencesModel {
+            shortcut_rows: vec![
+                ShortcutPreferenceRow {
+                    id: "test.one".into(),
+                    command_title: "One".into(),
+                    category: AppUiCommandCategory::File,
+                    binding_label: "S".into(),
+                    default_binding_label: "S".into(),
+                    disabled: false,
+                    overridden: false,
+                    conflict_owner: None,
+                    search_text: "one s".into(),
+                },
+                ShortcutPreferenceRow {
+                    id: "test.two".into(),
+                    command_title: "Two".into(),
+                    category: AppUiCommandCategory::File,
+                    binding_label: "Ctrl+S".into(),
+                    default_binding_label: "Ctrl+S".into(),
+                    disabled: false,
+                    overridden: false,
+                    conflict_owner: None,
+                    search_text: "two ctrl s".into(),
+                },
+                ShortcutPreferenceRow {
+                    id: "test.three".into(),
+                    command_title: "Three".into(),
+                    category: AppUiCommandCategory::File,
+                    binding_label: "Ctrl+Shift+S".into(),
+                    default_binding_label: "Ctrl+Shift+S".into(),
+                    disabled: false,
+                    overridden: false,
+                    conflict_owner: None,
+                    search_text: "three ctrl shift s".into(),
+                },
+            ],
+            ..AppUiPreferencesModel::default()
+        };
+        let mut dialog =
+            PreferencesDialog::with_model_and_tab(model, PreferencesDialogTab::Shortcuts);
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+
+        let one = shortcut_keycap_rect(&dialog, "test.one");
+        let two = shortcut_keycap_rect(&dialog, "test.two");
+        let three = shortcut_keycap_rect(&dialog, "test.three");
+        let right_one = one.x + one.width;
+        let right_two = two.x + two.width;
+        let right_three = three.x + three.width;
+
+        assert!((right_one - right_two).abs() < 0.001);
+        assert!((right_two - right_three).abs() < 0.001);
     }
 
     #[test]

@@ -186,6 +186,26 @@ impl Widget for ShellModal {
         self.hit_test(point)
     }
 
+    fn can_focus(&self) -> bool {
+        match self {
+            Self::About(dialog) => dialog.can_focus(),
+            Self::NewProject(dialog) => dialog.can_focus(),
+            Self::PendingClose(dialog) => dialog.can_focus(),
+            Self::Preferences(dialog) => dialog.can_focus(),
+            Self::SequenceSettings(dialog) => dialog.can_focus(),
+        }
+    }
+
+    fn accepts_text_input(&self) -> bool {
+        match self {
+            Self::About(dialog) => dialog.accepts_text_input(),
+            Self::NewProject(dialog) => dialog.accepts_text_input(),
+            Self::PendingClose(dialog) => dialog.accepts_text_input(),
+            Self::Preferences(dialog) => dialog.accepts_text_input(),
+            Self::SequenceSettings(dialog) => dialog.accepts_text_input(),
+        }
+    }
+
     fn child_count(&self) -> usize {
         match self {
             Self::About(dialog) => dialog.child_count(),
@@ -214,5 +234,20 @@ impl Widget for ShellModal {
             Self::Preferences(dialog) => dialog.child_mut(index),
             Self::SequenceSettings(dialog) => dialog.child_mut(index),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferences_modal_exposes_dialog_keyboard_focus() {
+        let modal = ShellModal::preferences_with_tab(
+            AppUiPreferencesModel::default(),
+            PreferencesDialogTab::Shortcuts,
+        );
+
+        assert!(modal.can_focus());
     }
 }

@@ -20,7 +20,7 @@ use mondrian_ui_theme::{current_theme, Theme};
 use std::cell::Cell;
 use std::sync::Arc;
 
-use crate::menu::paint_menu_checkmark;
+use crate::menu::{paint_menu_checkmark, MenuVisualTokens};
 #[allow(unused_imports)]
 use crate::paint::{
     centered_text_origin_y, color_with_alpha, horizontal_stroke_rect, mix_color, paint_focus_ring,
@@ -1048,7 +1048,8 @@ impl ViewerSurface {
             } else {
                 colors.popover_foreground
             };
-            let check_lane = 16.0;
+            let visual = MenuVisualTokens::from_theme(ctx.theme);
+            let check_lane = visual.row_padding_x + visual.row_icon_size + visual.row_icon_gap;
             if selected {
                 paint_menu_checkmark(ctx, row, text_color);
             }
@@ -1160,6 +1161,7 @@ mod tests {
         lines: usize,
         triangles: usize,
         texts: Vec<String>,
+        text_positions: Vec<Point>,
         raster_images: Vec<(String, Rect, u32, u32)>,
         clips: Vec<Rect>,
         clip_pops: usize,
@@ -1183,18 +1185,20 @@ mod tests {
         fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
             self.triangles += vertices.len();
         }
-        fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
+        fn draw_text(&mut self, text: &str, _font_size: f32, position: Point, _color: Color) {
             self.texts.push(text.into());
+            self.text_positions.push(position);
         }
         fn draw_text_box(
             &mut self,
             text: &str,
             _font_size: f32,
-            _position: Point,
+            position: Point,
             _max_width: f32,
             _color: Color,
         ) {
             self.texts.push(text.into());
+            self.text_positions.push(position);
         }
         fn draw_raster_image(
             &mut self,
@@ -1690,6 +1694,32 @@ mod tests {
             !encoder.texts.iter().any(|text| text == "✓"),
             "viewer dropdown should not use a text glyph checkmark"
         );
+    }
+
+    #[test]
+    fn viewer_dropdown_label_starts_after_reserved_check_lane() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_zoom_label("适合");
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        viewer.open_dropdown = Some(ViewerDropdown::Zoom);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 800.0, 600.0),
+        };
+
+        viewer.paint_overlay(&mut ctx);
+
+        let visual = MenuVisualTokens::from_theme(&theme);
+        let row = viewer.dropdown_row_rect(ViewerDropdown::Zoom, 0);
+        let expected_x = row.x + visual.row_padding_x + visual.row_icon_size + visual.row_icon_gap;
+        let index = encoder
+            .texts
+            .iter()
+            .position(|text| text == VIEWER_ZOOM_OPTIONS[0].label)
+            .expect("zoom option label should be painted");
+        assert!(encoder.text_positions[index].x >= expected_x);
     }
 
     #[test]

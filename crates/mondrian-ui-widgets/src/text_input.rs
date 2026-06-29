@@ -227,6 +227,11 @@ impl TextInput {
         self.enabled
     }
 
+    /// Whether this input currently owns keyboard text entry.
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
     pub fn text(&self) -> &str {
         self.edit.text()
     }
