@@ -265,7 +265,8 @@ impl AppUiHost {
         }
         {
             let state = self.app_state.borrow();
-            self.root.refresh_playback_frame_from_app_state(&state);
+            self.root
+                .refresh_playback_frame_from_app_state(&state, Some(&self.preview_service));
         }
         TreeWalker::layout(self.active_root_mut(), bounds);
         true
