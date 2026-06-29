@@ -639,9 +639,9 @@ impl Widget for Dropdown {
             }
         } else {
             match event {
-                UiEvent::FocusGained => {
+                UiEvent::FocusGained { source } => {
                     self.focused = true;
-                    self.focus_visible = true;
+                    self.focus_visible = source.is_focus_visible();
                     return EventResult::Handled;
                 }
                 UiEvent::FocusLost => {
@@ -1375,7 +1375,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
         assert_eq!(
-            d.event(&UiEvent::FocusGained, &mut ctx),
+            d.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         for (key, modifiers) in [

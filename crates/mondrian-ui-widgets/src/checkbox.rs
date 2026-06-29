@@ -11,7 +11,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::{Theme, ThemePreset};
 use std::cell::Cell;
 
-use crate::paint::centered_text_origin_y;
+use crate::paint::{centered_text_origin_y, paint_focus_ring};
 use crate::text_metrics::measure_single_line;
 
 /// Adapter that maps the current checkbox state to an editor [`Action`].
@@ -24,6 +24,8 @@ pub struct Checkbox {
     checked: bool,
     bounds: Rect,
     enabled: bool,
+    focused: bool,
+    focus_visible: bool,
     hovered: bool,
     pressed: bool,
     pub on_toggle: Option<Action>,
@@ -74,6 +76,8 @@ impl Checkbox {
             checked,
             bounds: Rect::ZERO,
             enabled: true,
+            focused: false,
+            focus_visible: false,
             hovered: false,
             pressed: false,
             on_toggle: None,
@@ -98,6 +102,8 @@ impl Checkbox {
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         if !enabled {
+            self.focused = false;
+            self.focus_visible = false;
             self.hovered = false;
             self.pressed = false;
         }
@@ -154,6 +160,8 @@ impl Widget for Checkbox {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if !self.enabled {
+            self.focused = false;
+            self.focus_visible = false;
             self.hovered = false;
             self.pressed = false;
             return EventResult::Ignored;
@@ -163,6 +171,7 @@ impl Widget for Checkbox {
                 if self.bounds.contains(*position) =>
             {
                 self.pressed = true;
+                self.focus_visible = false;
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
@@ -176,11 +185,14 @@ impl Widget for Checkbox {
                 self.hovered = self.bounds.contains(*position);
                 EventResult::Ignored
             }
-            UiEvent::FocusGained => {
-                self.hovered = true;
+            UiEvent::FocusGained { source } => {
+                self.focused = true;
+                self.focus_visible = source.is_focus_visible();
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
+                self.focused = false;
+                self.focus_visible = false;
                 self.hovered = false;
                 self.pressed = false;
                 EventResult::Handled
@@ -254,6 +266,9 @@ impl Widget for Checkbox {
             };
             ctx.encoder.draw_triangles(&vertices, check_color);
         }
+        if self.focus_visible {
+            paint_focus_ring(ctx, border_rect, spacing.radius_sm + border_inset);
+        }
 
         // Label text
         if !self.label.is_empty() {
@@ -294,6 +309,7 @@ impl Widget for Checkbox {
                 .with_name(self.label.clone())
                 .with_state(AccessibilityState {
                     focusable: self.enabled,
+                    focused: self.focused,
                     disabled: !self.enabled,
                     checked: Some(self.checked),
                     ..AccessibilityState::default()
@@ -548,6 +564,44 @@ mod tests {
         assert!(!cb.is_checked());
         assert!(!cb.can_focus());
         assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn checkbox_pointer_focus_is_accessible_without_focus_ring() {
+        let mut cb = Checkbox::new("Opt", false);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            cb.event(&UiEvent::focus_gained_pointer(), &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(cb.focused);
+        assert!(!cb.focus_visible);
+        assert!(cb.accessibility().unwrap().state.focused);
+    }
+
+    #[test]
+    fn checkbox_keyboard_focus_shows_focus_ring() {
+        let mut cb = Checkbox::new("Opt", false);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            cb.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(cb.focused);
+        assert!(cb.focus_visible);
+        assert!(cb.accessibility().unwrap().state.focused);
     }
 
     #[test]

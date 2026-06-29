@@ -42,6 +42,7 @@ pub struct Button {
     state: ButtonState,
     enabled: bool,
     pub on_click: Option<Action>,
+    focused: bool,
     focus_visible: bool,
     visual: Cell<ButtonVisualTokens>,
     style: ButtonStyle,
@@ -89,6 +90,7 @@ impl Button {
             state: ButtonState::Normal,
             enabled: true,
             on_click: None,
+            focused: false,
             focus_visible: false,
             visual: Cell::new(ButtonVisualTokens::default()),
             style: ButtonStyle::Filled,
@@ -113,6 +115,7 @@ impl Button {
         self.enabled = enabled;
         if !enabled {
             self.state = ButtonState::Normal;
+            self.focused = false;
             self.focus_visible = false;
         }
         self
@@ -162,8 +165,9 @@ impl Button {
     }
 
     fn clear_visual_state(&mut self) -> bool {
-        let changed = self.state != ButtonState::Normal || self.focus_visible;
+        let changed = self.state != ButtonState::Normal || self.focused || self.focus_visible;
         self.state = ButtonState::Normal;
+        self.focused = false;
         self.focus_visible = false;
         changed
     }
@@ -233,9 +237,10 @@ impl Widget for Button {
                 }
                 EventResult::Ignored
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.state = ButtonState::Hovered;
-                self.focus_visible = true;
+                self.focused = true;
+                self.focus_visible = source.is_focus_visible();
                 ctx.request_repaint();
                 EventResult::Handled
             }
@@ -363,7 +368,7 @@ impl Widget for Button {
                 .with_name(self.label.clone())
                 .with_state(AccessibilityState {
                     focusable: self.enabled,
-                    focused: self.focus_visible,
+                    focused: self.focused,
                     disabled: !self.enabled,
                     pressed: Some(self.state == ButtonState::Pressed),
                     ..AccessibilityState::default()
@@ -716,6 +721,7 @@ mod tests {
         let mut b = Button::new("OK");
         b.layout(Rect::new(0.0, 0.0, 100.0, 30.0));
         b.state = ButtonState::Pressed;
+        b.focused = true;
         b.focus_visible = true;
         b.enabled = false;
         let mut f = DummyFocus;
@@ -733,6 +739,7 @@ mod tests {
 
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(b.state(), ButtonState::Normal);
+        assert!(!b.focused);
         assert!(!b.focus_visible);
         assert!(ctx.requests.repaint);
     }
@@ -782,9 +789,32 @@ mod tests {
         };
         let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
 
-        b.event(&UiEvent::FocusGained, &mut ctx);
+        b.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(b.state(), ButtonState::Hovered);
+        assert!(b.focused);
         assert!(b.focus_visible);
+        assert!(b.accessibility().unwrap().state.focused);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn button_pointer_focus_is_accessible_without_focus_ring() {
+        let mut b = Button::new("OK");
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = event_ctx_with_capture(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        b.event(&UiEvent::focus_gained_pointer(), &mut ctx);
+
+        assert_eq!(b.state(), ButtonState::Hovered);
+        assert!(b.focused);
+        assert!(!b.focus_visible);
+        assert!(b.accessibility().unwrap().state.focused);
         assert!(ctx.requests.repaint);
     }
 

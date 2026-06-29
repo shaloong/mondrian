@@ -5100,7 +5100,7 @@ mod tests {
             &dispatch,
         );
 
-        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         grid.event(
             &UiEvent::MouseDown {
                 position: grid.card_rect_for_index(0).expect("asset card").center(),
@@ -5380,7 +5380,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
@@ -5986,7 +5986,7 @@ mod tests {
             &dispatch,
         );
 
-        panel.event(&UiEvent::FocusGained, &mut ctx);
+        panel.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let result = panel.event(
             &UiEvent::KeyDown {
                 key: KeyCode::Backspace,
@@ -6019,7 +6019,7 @@ mod tests {
             &dispatch,
         );
 
-        panel.event(&UiEvent::FocusGained, &mut ctx);
+        panel.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let result = panel.event(
             &UiEvent::KeyDown {
                 key: KeyCode::Delete,
@@ -6055,7 +6055,7 @@ mod tests {
             &dispatch,
         );
 
-        panel.event(&UiEvent::FocusGained, &mut ctx);
+        panel.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         for key in [KeyCode::X, KeyCode::C, KeyCode::V, KeyCode::D, KeyCode::K] {
             assert_eq!(
                 panel.event(
@@ -6098,7 +6098,7 @@ mod tests {
             &dispatch,
         );
 
-        panel.event(&UiEvent::FocusGained, &mut ctx);
+        panel.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let result = panel.event(
             &UiEvent::KeyDown { key: KeyCode::B, modifiers: Modifiers::ctrl() },
             &mut ctx,
@@ -6128,7 +6128,7 @@ mod tests {
             &dispatch,
         );
 
-        panel.event(&UiEvent::FocusGained, &mut ctx);
+        panel.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let in_result = panel.event(
             &UiEvent::KeyDown { key: KeyCode::I, modifiers: Modifiers::none() },
             &mut ctx,
@@ -8369,7 +8369,7 @@ mod tests {
         );
 
         assert_eq!(
-            panel.event(&UiEvent::FocusGained, &mut ctx),
+            panel.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(
@@ -8615,7 +8615,7 @@ mod tests {
         );
 
         assert_eq!(
-            panel.event(&UiEvent::FocusGained, &mut ctx),
+            panel.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(

@@ -231,9 +231,9 @@ impl Widget for Slider {
                 ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
@@ -683,7 +683,7 @@ mod tests {
         let mut ctx = event_ctx();
 
         assert_eq!(
-            s.event(&UiEvent::FocusGained, &mut ctx),
+            s.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(s.event(&UiEvent::FocusLost, &mut ctx), EventResult::Handled);
@@ -735,7 +735,7 @@ mod tests {
         let mut s = Slider::new(50.0, 0.0, 100.0);
         let mut ctx = event_ctx();
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         s.event(
             &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
             &mut ctx,
@@ -754,7 +754,7 @@ mod tests {
         let mut s = Slider::new(0.2, 0.0, 1.0).with_step(0.25);
         let mut ctx = event_ctx();
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         s.event(
             &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
             &mut ctx,
@@ -773,7 +773,7 @@ mod tests {
         let mut s = Slider::new(50.0, 0.0, 100.0);
         let mut ctx = event_ctx();
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         s.event(
             &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
             &mut ctx,
@@ -787,7 +787,7 @@ mod tests {
         let mut s = Slider::new(10.0, 0.0, 100.0).with_step(2.0);
         let mut ctx = event_ctx();
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         s.event(
             &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::shift() },
             &mut ctx,
@@ -801,7 +801,7 @@ mod tests {
         let mut s = Slider::new(50.0, 0.0, 100.0);
         let mut ctx = event_ctx();
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         for (key, modifiers) in [
             (KeyCode::Right, Modifiers::ctrl()),
             (
@@ -834,7 +834,7 @@ mod tests {
         let mut s = Slider::new(50.0, 0.0, 100.0).with_step(0.0);
         let mut ctx = event_ctx();
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         s.event(
             &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
             &mut ctx,
@@ -853,7 +853,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
         let mut s = Slider::new(50.0, 0.0, 100.0).on_change(value_action);
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         s.event(
             &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
             &mut ctx,
@@ -873,7 +873,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
         let mut s = Slider::new(0.0, 0.0, 100.0).on_change(value_action);
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let result = s.event(
             &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
             &mut ctx,
@@ -889,7 +889,7 @@ mod tests {
         let mut s = Slider::new(50.0, 0.0, 100.0);
         let mut ctx = event_ctx();
 
-        s.event(&UiEvent::FocusGained, &mut ctx);
+        s.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         s.event(
             &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
             &mut ctx,

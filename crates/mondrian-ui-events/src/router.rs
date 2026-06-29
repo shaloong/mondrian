@@ -10,7 +10,8 @@ use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
 use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
 use mondrian_ui_core::types::{
-    DragPayload, EventResult, KeyCode, Modifiers, MouseButton, Point, UiEvent, WidgetId,
+    DragPayload, EventResult, FocusSource, KeyCode, Modifiers, MouseButton, Point, UiEvent,
+    WidgetId,
 };
 use mondrian_ui_core::widget::{
     CursorRequest, DragRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
@@ -336,7 +337,7 @@ impl EventRouter {
                             return EventResult::Handled;
                         }
                         if let Some(next_id) = next {
-                            self.move_focus_to(tree, next_id, dispatch);
+                            self.move_focus_to(tree, next_id, FocusSource::Keyboard, dispatch);
                         }
                         return EventResult::Handled;
                     }
@@ -380,7 +381,12 @@ impl EventRouter {
                                 // delivering MouseDown so widgets can set their
                                 // internal focused state while MouseDown can
                                 // still suppress keyboard-only focus rings.
-                                self.move_focus_to(tree, clicked_id, dispatch);
+                                self.move_focus_to(
+                                    tree,
+                                    clicked_id,
+                                    FocusSource::Pointer,
+                                    dispatch,
+                                );
                             } else if let Some(old) = current_focused {
                                 let clicked_inside_focus =
                                     self.is_ancestor_or_self(tree, old, clicked_id);
@@ -658,6 +664,7 @@ impl EventRouter {
         &mut self,
         tree: &mut dyn WidgetTree,
         next: WidgetId,
+        source: FocusSource,
         dispatch: &dyn Fn(Action),
     ) {
         if self.focus_mgr.focused_widget() == Some(next) {
@@ -667,7 +674,7 @@ impl EventRouter {
         if let Some(current) = self.focus_mgr.focused_widget() {
             self.send_focus_lost(tree, current, dispatch);
         }
-        self.send_focus_gained(tree, next, dispatch);
+        self.send_focus_gained(tree, next, source, dispatch);
         let panel = panel_kind_for_widget(tree, next).or_else(|| self.focus_mgr.focused_panel());
         self.focus_mgr.set_focused_widget(Some(next), panel);
         self.sync_focus_from_manager();
@@ -737,13 +744,14 @@ impl EventRouter {
         &mut self,
         tree: &mut dyn WidgetTree,
         widget_id: WidgetId,
+        source: FocusSource,
         dispatch: &dyn Fn(Action),
     ) {
         if let Some(widget) = tree.get_mut(widget_id) {
             let mut requests = EventRequests::default();
             {
                 let mut ctx = self.make_event_context(dispatch, &mut requests);
-                widget.event(&UiEvent::FocusGained, &mut ctx);
+                widget.event(&UiEvent::FocusGained { source }, &mut ctx);
             }
             self.apply_event_requests(requests);
         }
@@ -2725,7 +2733,9 @@ mod tests {
 
         fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
             match event {
-                UiEvent::FocusGained => self.log.borrow_mut().push("focus-gained".into()),
+                UiEvent::FocusGained { source } => {
+                    self.log.borrow_mut().push(format!("focus-gained:{source:?}"))
+                }
                 UiEvent::FocusLost => self.log.borrow_mut().push("focus-lost".into()),
                 _ => {}
             }
@@ -2805,7 +2815,7 @@ mod tests {
         );
 
         assert_eq!(router.focused(), Some(root));
-        assert_eq!(log.borrow().as_slice(), ["focus-gained"]);
+        assert_eq!(log.borrow().as_slice(), ["focus-gained:Pointer"]);
     }
 
     #[test]
@@ -2835,7 +2845,10 @@ mod tests {
 
         assert_eq!(result, EventResult::Handled);
         assert_eq!(router.focused(), Some(second_id));
-        assert_eq!(log.borrow().as_slice(), ["focus-lost", "focus-gained"]);
+        assert_eq!(
+            log.borrow().as_slice(),
+            ["focus-lost", "focus-gained:Keyboard"]
+        );
     }
 
     struct ParentPostWidget {

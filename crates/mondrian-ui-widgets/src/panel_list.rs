@@ -1154,9 +1154,9 @@ impl Widget for PanelList {
                 }
                 return EventResult::Handled;
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 return EventResult::Handled;
             }
             UiEvent::FocusLost => {
@@ -1960,7 +1960,7 @@ mod tests {
             &dispatch,
         );
 
-        list.event(&UiEvent::FocusGained, &mut ctx);
+        list.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         list.event(
             &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
             &mut ctx,
@@ -1997,7 +1997,7 @@ mod tests {
             &dispatch,
         );
 
-        list.event(&UiEvent::FocusGained, &mut ctx);
+        list.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         for (key, modifiers) in [
             (KeyCode::Down, Modifiers::ctrl()),
             (KeyCode::Up, Modifiers::shift()),
@@ -2035,7 +2035,7 @@ mod tests {
             &dispatch,
         );
 
-        list.event(&UiEvent::FocusGained, &mut ctx);
+        list.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             list.event(
                 &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
@@ -2068,7 +2068,7 @@ mod tests {
             &dispatch,
         );
 
-        list.event(&UiEvent::FocusGained, &mut ctx);
+        list.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             list.event(
                 &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
@@ -2519,7 +2519,7 @@ mod tests {
         );
 
         assert_eq!(
-            list.event(&UiEvent::FocusGained, &mut ctx),
+            list.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(

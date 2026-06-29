@@ -602,7 +602,7 @@ impl Widget for TextInput {
                 EventResult::Handled
             }
             // ── Focus ──────────────────────────────────────────────────
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { .. } => {
                 self.focused = true;
                 self.cursor_visible.set(true);
                 self.last_blink.set(Instant::now());

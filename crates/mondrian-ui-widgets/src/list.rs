@@ -163,9 +163,9 @@ impl Widget for List {
                     return EventResult::Handled;
                 }
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 return EventResult::Handled;
             }
             UiEvent::FocusLost => {
@@ -567,7 +567,7 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = event_ctx(&mut f, &mut s, &mut t, &|_| {});
 
-        list.event(&UiEvent::FocusGained, &mut ctx);
+        list.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let down = list.event(
             &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
             &mut ctx,
@@ -598,7 +598,7 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = event_ctx(&mut f, &mut s, &mut t, &dispatch);
 
-        list.event(&UiEvent::FocusGained, &mut ctx);
+        list.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         for (key, modifiers) in [
             (KeyCode::Down, Modifiers::ctrl()),
             (KeyCode::Up, Modifiers::shift()),

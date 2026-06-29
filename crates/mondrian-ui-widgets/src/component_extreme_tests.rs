@@ -177,7 +177,7 @@ impl FocusHandoffStressWidget {
         }
         self.focused = target;
         if let Some(next) = target {
-            self.event_for_target(next, &UiEvent::FocusGained, ctx)
+            self.event_for_target(next, &UiEvent::focus_gained_keyboard(), ctx)
         } else {
             result
         }
@@ -511,7 +511,7 @@ fn panel_surfaces_extreme_scroll_keyboard_and_paint_remain_stable() {
     );
     assert!(list.scroll_offset_y() > 0.0);
 
-    list.event(&UiEvent::FocusGained, &mut ctx);
+    list.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
     assert_eq!(
         list.event(
             &UiEvent::KeyDown { key: KeyCode::End, modifiers: Modifiers::none() },

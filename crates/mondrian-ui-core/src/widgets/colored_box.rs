@@ -49,7 +49,7 @@ impl Widget for ColoredBox {
 
     fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
         match event {
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { .. } => {
                 self.hovered = true;
                 EventResult::Handled
             }
@@ -213,7 +213,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        let result = w.event(&UiEvent::FocusGained, &mut ctx);
+        let result = w.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(result, EventResult::Handled);
         assert!(w.hovered);
     }

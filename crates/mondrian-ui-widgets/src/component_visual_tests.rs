@@ -116,7 +116,7 @@ fn text_input_visual_scenarios_cover_small_bounds_selection_caret_and_ime() {
     let mut mixed_input = TextInput::new("Search media").with_text("A你🙂B");
     mixed_input.layout(Rect::new(8.0, 8.0, 128.0, 24.0));
     assert_eq!(
-        mixed_input.event(&UiEvent::FocusGained, &mut ctx),
+        mixed_input.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
         EventResult::Handled
     );
     assert_eq!(

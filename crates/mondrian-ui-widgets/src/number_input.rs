@@ -182,7 +182,10 @@ impl Widget for NumberInput {
                 ctx.request_repaint();
             }
         } else if result == EventResult::Handled
-            && matches!(event, UiEvent::FocusGained | UiEvent::MouseDown { .. })
+            && matches!(
+                event,
+                UiEvent::FocusGained { .. } | UiEvent::MouseDown { .. }
+            )
         {
             self.focused = true;
         }

@@ -354,9 +354,9 @@ impl Widget for CurveEditor {
                 ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
@@ -1004,7 +1004,7 @@ mod tests {
         let mut ctx = event_ctx();
 
         assert_eq!(
-            editor.event(&UiEvent::FocusGained, &mut ctx),
+            editor.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(

@@ -4234,9 +4234,9 @@ impl Widget for TimelineView {
                 ctx.request_repaint();
                 return EventResult::Handled;
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 return EventResult::Handled;
             }
             UiEvent::FocusLost => {
@@ -5164,7 +5164,7 @@ mod tests {
         );
 
         assert_eq!(
-            view.event(&UiEvent::FocusGained, &mut ctx),
+            view.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert!(ctx.requests.pointer_capture.is_none());
@@ -7308,7 +7308,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let result = view.event(
             &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
             &mut ctx,
@@ -7364,7 +7364,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let result = view.event(
             &UiEvent::KeyDown {
                 key: KeyCode::Delete,
@@ -7415,7 +7415,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         for key in [KeyCode::X, KeyCode::C, KeyCode::V, KeyCode::D, KeyCode::K] {
             assert_eq!(
                 view.event(
@@ -7774,7 +7774,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let result = view.event(
             &UiEvent::KeyDown { key: KeyCode::B, modifiers: Modifiers::ctrl() },
             &mut ctx,
@@ -7821,7 +7821,7 @@ mod tests {
         );
         assert_eq!(view.active_tool(), TimelineTool::Blade);
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             view.event(
                 &UiEvent::KeyDown { key: KeyCode::V, modifiers: Modifiers::none() },
@@ -7890,7 +7890,7 @@ mod tests {
         );
         assert!(!view.snapping_enabled());
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             view.event(
                 &UiEvent::KeyDown { key: KeyCode::S, modifiers: Modifiers::none() },
@@ -7998,7 +7998,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             view.event(
                 &UiEvent::KeyDown { key: KeyCode::I, modifiers: Modifiers::none() },
@@ -8054,7 +8054,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             view.event(
                 &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
@@ -8322,7 +8322,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let result = view.event(
             &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
             &mut ctx,
@@ -8375,7 +8375,7 @@ mod tests {
             &dispatch,
         );
 
-        view.event(&UiEvent::FocusGained, &mut ctx);
+        view.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         for (key, modifiers) in [
             (KeyCode::Left, Modifiers::ctrl()),
             (

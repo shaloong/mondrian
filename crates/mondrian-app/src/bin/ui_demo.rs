@@ -343,7 +343,7 @@ impl GalleryWidget {
 
         self.focused = next;
         if let Some(current) = self.focused {
-            let _ = self.child_event(current, &UiEvent::FocusGained, ctx);
+            let _ = self.child_event(current, &UiEvent::focus_gained_keyboard(), ctx);
         }
     }
 

@@ -2,7 +2,9 @@
 
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::{Theme, ThemePreset};
 use std::cell::Cell;
@@ -20,6 +22,7 @@ pub struct IconButton {
     state: ButtonState,
     enabled: bool,
     on_click: Option<Action>,
+    focused: bool,
     focus_visible: bool,
     visual: Cell<IconButtonVisualTokens>,
 }
@@ -61,6 +64,7 @@ impl IconButton {
             state: ButtonState::Normal,
             enabled: true,
             on_click: None,
+            focused: false,
             focus_visible: false,
             visual: Cell::new(IconButtonVisualTokens::default()),
         }
@@ -88,6 +92,7 @@ impl IconButton {
         self.enabled = enabled;
         if !enabled {
             self.state = ButtonState::Normal;
+            self.focused = false;
             self.focus_visible = false;
         }
         self
@@ -115,8 +120,9 @@ impl IconButton {
     }
 
     fn clear_visual_state(&mut self) -> bool {
-        let changed = self.state != ButtonState::Normal || self.focus_visible;
+        let changed = self.state != ButtonState::Normal || self.focused || self.focus_visible;
         self.state = ButtonState::Normal;
+        self.focused = false;
         self.focus_visible = false;
         changed
     }
@@ -189,8 +195,9 @@ impl Widget for IconButton {
                     EventResult::Ignored
                 }
             }
-            UiEvent::FocusGained => {
-                self.focus_visible = true;
+            UiEvent::FocusGained { source } => {
+                self.focused = true;
+                self.focus_visible = source.is_focus_visible();
                 self.state = ButtonState::Hovered;
                 if let Some(tooltip) = &self.tooltip {
                     ctx.tooltip.show(
@@ -268,6 +275,20 @@ impl Widget for IconButton {
 
     fn can_focus(&self) -> bool {
         self.enabled
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Button)
+                .with_name(self.tooltip.clone().unwrap_or_default())
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused,
+                    disabled: !self.enabled,
+                    pressed: Some(self.state == ButtonState::Pressed),
+                    ..AccessibilityState::default()
+                }),
+        )
     }
 }
 
@@ -493,7 +514,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         assert_eq!(
-            button.event(&UiEvent::FocusGained, &mut ctx),
+            button.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Ignored
         );
         assert_eq!(
@@ -516,6 +537,7 @@ mod tests {
         let mut button = IconButton::new(test_icon()).on_click(Action::Play);
         button.layout(Rect::new(0.0, 0.0, 28.0, 28.0));
         button.state = ButtonState::Pressed;
+        button.focused = true;
         button.focus_visible = true;
         button.enabled = false;
         let actions = RefCell::new(Vec::<Action>::new());
@@ -537,6 +559,7 @@ mod tests {
         );
 
         assert_eq!(button.state(), ButtonState::Normal);
+        assert!(!button.focused);
         assert!(!button.focus_visible);
         assert!(actions.borrow().is_empty());
         assert!(ctx.requests.repaint);
@@ -553,11 +576,15 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         assert_eq!(
-            button.event(&UiEvent::FocusGained, &mut ctx),
+            button.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(button.state(), ButtonState::Hovered);
+        assert!(button.focused);
         assert!(button.focus_visible);
+        let node = button.accessibility().unwrap();
+        assert_eq!(node.name.as_deref(), Some("Remove effect"));
+        assert!(node.state.focused);
         assert!(ctx.tooltip.current().is_some());
         assert!(ctx.requests.repaint);
 
@@ -567,9 +594,34 @@ mod tests {
             EventResult::Handled
         );
         assert_eq!(button.state(), ButtonState::Normal);
+        assert!(!button.focused);
         assert!(!button.focus_visible);
         assert!(ctx.tooltip.current().is_none());
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn icon_button_pointer_focus_is_accessible_without_focus_ring() {
+        let mut button = IconButton::new(test_icon()).with_tooltip("Remove effect");
+        button.layout(Rect::new(10.0, 20.0, 28.0, 28.0));
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = TooltipRecorder::default();
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            button.event(&UiEvent::focus_gained_pointer(), &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(button.state(), ButtonState::Hovered);
+        assert!(button.focused);
+        assert!(!button.focus_visible);
+        let node = button.accessibility().unwrap();
+        assert_eq!(node.name.as_deref(), Some("Remove effect"));
+        assert!(node.state.focused);
+        assert!(ctx.tooltip.current().is_some());
     }
 
     #[test]

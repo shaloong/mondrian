@@ -44,6 +44,7 @@ pub struct SegmentedButtonGroup {
     pressed_index: Option<usize>,
     bounds: Rect,
     enabled: bool,
+    focused: bool,
     focus_visible: bool,
     visual: Cell<SegmentedButtonVisualTokens>,
 }
@@ -87,6 +88,7 @@ impl SegmentedButtonGroup {
             pressed_index: None,
             bounds: Rect::ZERO,
             enabled: true,
+            focused: false,
             focus_visible: false,
             visual: Cell::new(SegmentedButtonVisualTokens::default()),
         }
@@ -122,6 +124,7 @@ impl SegmentedButtonGroup {
         if !enabled {
             self.hovered_index = None;
             self.pressed_index = None;
+            self.focused = false;
             self.focus_visible = false;
         }
         self
@@ -137,10 +140,13 @@ impl SegmentedButtonGroup {
     }
 
     fn clear_visual_state(&mut self) -> bool {
-        let changed =
-            self.hovered_index.is_some() || self.pressed_index.is_some() || self.focus_visible;
+        let changed = self.hovered_index.is_some()
+            || self.pressed_index.is_some()
+            || self.focused
+            || self.focus_visible;
         self.hovered_index = None;
         self.pressed_index = None;
+        self.focused = false;
         self.focus_visible = false;
         changed
     }
@@ -206,8 +212,9 @@ impl Widget for SegmentedButtonGroup {
                 }
                 EventResult::Ignored
             }
-            UiEvent::FocusGained => {
-                self.focus_visible = true;
+            UiEvent::FocusGained { source } => {
+                self.focused = true;
+                self.focus_visible = source.is_focus_visible();
                 ctx.request_repaint();
                 EventResult::Handled
             }
@@ -336,7 +343,7 @@ impl Widget for SegmentedButtonGroup {
                 .with_name(name)
                 .with_state(AccessibilityState {
                     focusable: self.enabled && !self.items.is_empty(),
-                    focused: self.focus_visible,
+                    focused: self.focused,
                     disabled: !self.enabled,
                     selected: Some(self.enabled),
                     ..AccessibilityState::default()
@@ -455,5 +462,55 @@ mod tests {
         assert!(encoder.texts.contains(&"A".to_owned()));
         assert!(encoder.texts.contains(&"B".to_owned()));
         assert!(encoder.radii.iter().any(|radius| *radius > 2.0));
+    }
+
+    #[test]
+    fn segmented_group_pointer_focus_is_accessible_without_focus_ring() {
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut group = SegmentedButtonGroup::new(
+            vec![
+                SegmentedButtonItem::new("System", Action::NoOp),
+                SegmentedButtonItem::new("Dark", Action::SaveProject),
+            ],
+            0,
+        );
+
+        assert_eq!(
+            group.event(&UiEvent::focus_gained_pointer(), &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(group.focused);
+        assert!(!group.focus_visible);
+        assert!(group.accessibility().unwrap().state.focused);
+    }
+
+    #[test]
+    fn segmented_group_keyboard_focus_shows_focus_ring() {
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut group = SegmentedButtonGroup::new(
+            vec![
+                SegmentedButtonItem::new("System", Action::NoOp),
+                SegmentedButtonItem::new("Dark", Action::SaveProject),
+            ],
+            0,
+        );
+
+        assert_eq!(
+            group.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(group.focused);
+        assert!(group.focus_visible);
+        assert!(group.accessibility().unwrap().state.focused);
     }
 }

@@ -608,9 +608,9 @@ impl Widget for ViewerSurface {
                 }
                 EventResult::Handled
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
@@ -1881,7 +1881,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         assert_eq!(
-            viewer.event(&UiEvent::FocusGained, &mut ctx),
+            viewer.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         for key in [
@@ -1935,7 +1935,7 @@ mod tests {
             EventResult::Ignored
         );
         assert_eq!(
-            viewer.event(&UiEvent::FocusGained, &mut ctx),
+            viewer.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(
@@ -2118,7 +2118,7 @@ mod tests {
 
         assert!(!viewer.can_focus());
         assert_eq!(
-            viewer.event(&UiEvent::FocusGained, &mut ctx),
+            viewer.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Ignored
         );
 

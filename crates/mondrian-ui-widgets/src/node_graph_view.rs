@@ -376,9 +376,9 @@ impl Widget for NodeGraphView {
                 let index = self.selected_index().unwrap_or(0);
                 self.select_index_from_input(index, ctx)
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
@@ -783,7 +783,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         assert_eq!(
-            graph.event(&UiEvent::FocusGained, &mut ctx),
+            graph.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(
@@ -841,7 +841,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         assert_eq!(
-            graph.event(&UiEvent::FocusGained, &mut ctx),
+            graph.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(
@@ -897,7 +897,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         assert_eq!(
-            graph.event(&UiEvent::FocusGained, &mut ctx),
+            graph.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         for (key, modifiers) in [

@@ -370,6 +370,29 @@ pub enum EventResult {
     Ignored,
 }
 
+/// Source of a focus ownership change.
+///
+/// Focus ownership and visible focus indication are separate concerns:
+/// pointer focus routes subsequent keyboard input to the clicked widget, but
+/// only keyboard-style traversal should show focus rings by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusSource {
+    /// Focus moved through keyboard traversal such as Tab / Shift+Tab.
+    Keyboard,
+    /// Focus moved because the user clicked or otherwise pointed at a widget.
+    Pointer,
+    /// Focus moved by app code, state repair, or other non-pointer/non-keyboard
+    /// orchestration. This keeps ownership without implying a keyboard ring.
+    Programmatic,
+}
+
+impl FocusSource {
+    /// Whether widgets should show a keyboard focus affordance for this source.
+    pub fn is_focus_visible(self) -> bool {
+        matches!(self, Self::Keyboard)
+    }
+}
+
 /// 用户输入事件
 #[derive(Debug, Clone)]
 pub enum UiEvent {
@@ -407,7 +430,9 @@ pub enum UiEvent {
     ImeCommit(String),
     /// IME composition cancelled without committing text.
     ImeCancel,
-    FocusGained,
+    FocusGained {
+        source: FocusSource,
+    },
     FocusLost,
     DragEnter {
         payload: DragPayload,
@@ -428,6 +453,23 @@ pub enum UiEvent {
     },
     /// Eyedropper cancelled by the platform (e.g. user pressed Escape at the OS level).
     EyedropperCancel,
+}
+
+impl UiEvent {
+    /// Build a keyboard-visible focus gained event.
+    pub fn focus_gained_keyboard() -> Self {
+        Self::FocusGained { source: FocusSource::Keyboard }
+    }
+
+    /// Build a pointer-originated focus gained event.
+    pub fn focus_gained_pointer() -> Self {
+        Self::FocusGained { source: FocusSource::Pointer }
+    }
+
+    /// Build a programmatic focus gained event.
+    pub fn focus_gained_programmatic() -> Self {
+        Self::FocusGained { source: FocusSource::Programmatic }
+    }
 }
 
 #[cfg(test)]

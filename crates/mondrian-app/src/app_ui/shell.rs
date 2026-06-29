@@ -3633,7 +3633,7 @@ mod tests {
             root.dock_mut(),
             "Assets",
             &mut |grid| {
-                grid.event(&UiEvent::FocusGained, &mut ctx);
+                grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
                 grid.event(
                     &UiEvent::MouseDown {
                         position: grid.card_rect_for_index(0).expect("first asset").center(),

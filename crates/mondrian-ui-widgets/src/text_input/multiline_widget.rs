@@ -1083,7 +1083,7 @@ impl Widget for MultilineTextInput {
             }
 
             // ── Focus ──
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { .. } => {
                 self.focused = true;
                 self.cursor_visible.set(true);
                 self.last_blink.set(Instant::now());
@@ -2142,7 +2142,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        widget.event(&UiEvent::FocusGained, &mut ctx);
+        widget.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert!(widget.focused);
         assert!(widget.cursor_visible.get());
         assert!(ctx.requests.repaint);

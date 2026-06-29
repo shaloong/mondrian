@@ -869,9 +869,9 @@ impl Widget for ColorPicker {
                 self.close_mode_menu();
                 return EventResult::Handled;
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 return EventResult::Handled;
             }
             UiEvent::FocusLost => {
@@ -1291,7 +1291,7 @@ impl Widget for ColorPickerTrigger {
                 self.close_popup(ctx, false);
                 EventResult::Handled
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { .. } => {
                 self.focused = true;
                 EventResult::Handled
             }
@@ -1788,7 +1788,7 @@ mod tests {
         let mut ctx = event_ctx();
 
         assert_eq!(
-            trigger.event(&UiEvent::FocusGained, &mut ctx),
+            trigger.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(
@@ -2151,7 +2151,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
 
         assert_eq!(
-            picker.event(&UiEvent::FocusGained, &mut ctx),
+            picker.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
             EventResult::Handled
         );
         assert_eq!(

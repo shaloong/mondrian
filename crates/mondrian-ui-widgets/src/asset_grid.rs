@@ -1091,7 +1091,7 @@ impl AssetGrid {
         self.context_menu_target = None;
         ctx.focus.request_focus(input_id);
         if let Some(editor) = &mut self.rename_editor {
-            let _ = editor.input.event(&UiEvent::FocusGained, ctx);
+            let _ = editor.input.event(&UiEvent::focus_gained_programmatic(), ctx);
         }
         ctx.request_repaint();
         EventResult::Handled
@@ -1571,9 +1571,9 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Handled;
             }
-            UiEvent::FocusGained => {
+            UiEvent::FocusGained { source } => {
                 self.focused = true;
-                self.focus_visible = true;
+                self.focus_visible = source.is_focus_visible();
                 return EventResult::Handled;
             }
             UiEvent::FocusLost => {
@@ -2113,7 +2113,7 @@ mod tests {
         let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
             .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
         grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
-        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         grid.event(
             &UiEvent::MouseDown {
                 position: grid.card_rect_for_index(0).expect("card").center(),
@@ -2170,7 +2170,7 @@ mod tests {
         let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
             .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
         grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
-        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         grid.event(
             &UiEvent::MouseDown {
                 position: grid.card_rect_for_index(0).expect("card").center(),
@@ -2221,7 +2221,7 @@ mod tests {
         )
         .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
         grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
-        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         grid.event(
             &UiEvent::MouseDown {
                 position: grid.card_rect_for_index(0).expect("card").center(),
@@ -2270,7 +2270,7 @@ mod tests {
             .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
         let grid_id = grid.id();
         grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
-        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         grid.event(
             &UiEvent::MouseDown {
                 position: grid.card_rect_for_index(0).expect("card").center(),
@@ -2322,7 +2322,7 @@ mod tests {
             .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
         let grid_id = grid.id();
         grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
-        grid.event(&UiEvent::FocusGained, &mut ctx);
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         grid.event(
             &UiEvent::MouseDown {
                 position: grid.card_rect_for_index(0).expect("card").center(),
@@ -2966,7 +2966,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
@@ -3001,7 +3001,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
@@ -3040,7 +3040,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         for (key, modifiers) in [
             (KeyCode::Right, Modifiers::ctrl()),
             (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
@@ -3089,7 +3089,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
@@ -3120,7 +3120,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
@@ -3153,7 +3153,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
@@ -3815,7 +3815,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
@@ -3854,7 +3854,7 @@ mod tests {
             &dispatch,
         );
 
-        let _ = grid.event(&UiEvent::FocusGained, &mut ctx);
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
                 &UiEvent::KeyDown {
