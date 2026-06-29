@@ -4,7 +4,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 use std::{fs, path::Path, path::PathBuf};
-use std::{io::Read, io::Write};
 use std::{sync::mpsc, thread};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
@@ -18,7 +17,7 @@ use mondrian_core::{
         AssetId, ClipId, Color, EffectId, KeyframeId, Rational, Resolution, SequenceId, TimeCode,
         TrackId,
     },
-    ProjectSettings,
+    ProjectId, ProjectMeta, ProjectSettings,
 };
 use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
@@ -176,23 +175,10 @@ pub enum ClipOverlapMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectFile {
-    pub name: String,
-    pub sequences: SequenceCollection,
-    #[serde(default)]
-    pub project_settings: ProjectSettings,
-    pub proxy_mode_assets: Vec<AssetId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AutosaveManifest {
     project_file: PathBuf,
     #[serde(default)]
     snapshots: Vec<AutosaveSnapshotEntry>,
-    #[serde(default)]
-    autosave_file: Option<PathBuf>,
-    #[serde(default)]
-    saved_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,27 +188,10 @@ struct AutosaveSnapshotEntry {
 }
 
 impl AutosaveManifest {
-    fn normalize_legacy_fields(&mut self) {
-        if self.snapshots.is_empty() {
-            if let Some(file) = self.autosave_file.clone() {
-                self.snapshots.push(AutosaveSnapshotEntry {
-                    file,
-                    saved_at_unix_ms: self.saved_at_unix_ms.unwrap_or(0),
-                });
-            }
-        }
-
+    fn normalize(&mut self) {
         self.snapshots.retain(|s| s.file.exists());
         self.snapshots.sort_by_key(|s| std::cmp::Reverse(s.saved_at_unix_ms));
         self.snapshots.dedup_by_key(|s| s.file.clone());
-
-        if let Some(latest) = self.snapshots.first() {
-            self.autosave_file = Some(latest.file.clone());
-            self.saved_at_unix_ms = Some(latest.saved_at_unix_ms);
-        } else {
-            self.autosave_file = None;
-            self.saved_at_unix_ms = None;
-        }
     }
 }
 
@@ -248,6 +217,9 @@ pub struct AppState {
     pub active_sequence_id: Option<SequenceId>,
     pub default_sequence_id: Option<SequenceId>,
     pub sequence_navigation_stack: Vec<SequenceId>,
+    pub project_id: Option<ProjectId>,
+    pub project_meta: Option<ProjectMeta>,
+    pub project_document_revision: u64,
 
     // 当前打开的项目文件
     pub current_project_path: Option<PathBuf>,
@@ -361,6 +333,9 @@ impl AppState {
             active_sequence_id: None,
             default_sequence_id: None,
             sequence_navigation_stack: Vec::new(),
+            project_id: None,
+            project_meta: None,
+            project_document_revision: 0,
             current_project_path: None,
             project_runtime_dir: None,
             project_settings: ProjectSettings::default(),
@@ -629,11 +604,6 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()>
     Ok(())
 }
 
-fn project_data_fingerprint(mut data: ProjectFile) -> anyhow::Result<Vec<u8>> {
-    data.proxy_mode_assets.sort_by_key(|id| id.to_string());
-    Ok(serde_json::to_vec(&data)?)
-}
-
 fn unix_now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     match SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -647,7 +617,7 @@ fn apply_autosave_retention(
     max_recovery_points: usize,
     retention_days: u32,
 ) {
-    manifest.normalize_legacy_fields();
+    manifest.normalize();
     let now_ms = unix_now_ms();
     let retention_ms = (retention_days as u64)
         .saturating_mul(24)
@@ -678,7 +648,7 @@ fn apply_autosave_retention(
     }
 
     manifest.snapshots = retained;
-    manifest.normalize_legacy_fields();
+    manifest.normalize();
 }
 
 pub(crate) fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate> {
@@ -705,7 +675,7 @@ pub(crate) fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate
             Ok(v) => v,
             Err(_) => continue,
         };
-        manifest.normalize_legacy_fields();
+        manifest.normalize();
         let total = manifest.snapshots.len();
         if total == 0 {
             continue;

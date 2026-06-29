@@ -2646,6 +2646,7 @@ dependencies = [
  "mondrian-export",
  "mondrian-media",
  "mondrian-platform",
+ "mondrian-project",
  "mondrian-renderer",
  "mondrian-timeline",
  "mondrian-ui-core",
@@ -2674,7 +2675,6 @@ dependencies = [
  "windows-sys 0.61.2",
  "winit",
  "winres",
- "zip",
 ]
 
 [[package]]
@@ -2824,6 +2824,18 @@ dependencies = [
 [[package]]
 name = "mondrian-platform-core"
 version = "0.1.0"
+
+[[package]]
+name = "mondrian-project"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mondrian-core",
+ "mondrian-timeline",
+ "serde",
+ "serde_json",
+ "zip",
+]
 
 [[package]]
 name = "mondrian-renderer"

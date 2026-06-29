@@ -33,8 +33,6 @@ fn autosave_retention_trims_by_count() {
                 saved_at_unix_ms: now.saturating_sub(1),
             },
         ],
-        autosave_file: None,
-        saved_at_unix_ms: None,
     };
 
     apply_autosave_retention(&mut manifest, 2, 365);
@@ -74,8 +72,6 @@ fn autosave_retention_trims_by_age() {
                 saved_at_unix_ms: now.saturating_sub(one_day_ms * 3),
             },
         ],
-        autosave_file: None,
-        saved_at_unix_ms: None,
     };
 
     apply_autosave_retention(&mut manifest, 10, 1);

@@ -6,10 +6,14 @@ Persistence is currently handled by `mondrian-app::app::project_lifecycle`.
 
 `.mdp` is a ZIP container containing:
 
+- `manifest.json`
 - `project.json`
 - `library/index.db`
 
-`project.json` stores the app-level `ProjectFile`. The SQLite library is streamed into the archive during save and extracted into the runtime directory during open.
+`manifest.json` declares the current archive contract and document layout.
+`project.json` stores `mondrian-project::ProjectDocument`. The SQLite library is
+streamed into the archive during save and extracted into the runtime directory
+during open.
 
 ## Atomic Save
 
@@ -34,7 +38,7 @@ autosave/manifest.json
 autosave/project-<unix_ms>.autosave.mdp
 ```
 
-The manifest is normalized to support older single-file autosave fields. Retention keeps a bounded number of recovery points and removes stale entries.
+Retention keeps a bounded number of recovery points and removes stale entries.
 
 ## Recovery
 
