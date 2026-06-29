@@ -257,8 +257,8 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
             playback_threshold_ms,
             || {
                 for frame in 0..playback_frames {
-                    state.seek(frame as i64);
-                    root.refresh_from_app_state(&state);
+                    state.set_playback_frame_running(frame as i64);
+                    root.refresh_playback_frame_from_app_state(&state);
                     TreeWalker::layout(&mut root, bounds);
                     if frame % 12 == 0 {
                         playback_paint_commands_max = playback_paint_commands_max

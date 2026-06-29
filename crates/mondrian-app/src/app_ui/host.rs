@@ -7,7 +7,7 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_platform::PlatformService;
@@ -252,6 +252,28 @@ impl AppUiHost {
         self.mark_dirty();
         self.refresh_if_dirty(bounds);
         true
+    }
+
+    /// Advance active playback and refresh UI models when the visible frame changes.
+    pub fn advance_playback_clock(&mut self, elapsed: Duration, bounds: Rect) -> bool {
+        let playback_changed = {
+            let mut state = self.app_state.borrow_mut();
+            state.advance_playback_clock(elapsed).requires_refresh()
+        };
+        if !playback_changed {
+            return false;
+        }
+        {
+            let state = self.app_state.borrow();
+            self.root.refresh_playback_frame_from_app_state(&state);
+        }
+        TreeWalker::layout(self.active_root_mut(), bounds);
+        true
+    }
+
+    /// Delay until the next playback frame should be polled, if playback is running.
+    pub fn playback_next_frame_delay(&self) -> Option<Duration> {
+        self.app_state.borrow().playback_next_frame_delay()
     }
 
     /// Drain queued widget actions through shell-local handling and `AppState`.

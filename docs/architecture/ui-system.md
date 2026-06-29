@@ -41,3 +41,22 @@ Dropdowns, context menus, popovers, and tooltips should render through overlay p
 ## Commands
 
 Menus, shortcut preferences, command palette, and future plugins should consume `app_ui::commands` descriptors. Menus are command presentation, not business logic owners.
+
+## Playback Tick Ownership
+
+The winit host may wake the application while playback is running, but playback
+state transitions belong to `AppState`. Window code passes elapsed time into
+`AppState::advance_playback_clock(...)` and only reacts to the returned refresh
+contract.
+
+Playback frame advancement must:
+
+- keep sub-frame elapsed time in an app-owned accumulator
+- use the configured clock role for frame targeting
+- pause on the last content frame and mark natural end-of-playback separately
+  from user pause/seek
+- expose a bounded next-frame wakeup delay so the UI loop does not busy-poll
+
+Viewer preview rendering remains an adapter concern. It consumes the current
+playback frame from `AppState`; it must not own playback state or mutate the
+timeline to request frames.

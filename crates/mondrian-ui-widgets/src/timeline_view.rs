@@ -741,6 +741,11 @@ impl TimelineView {
         self
     }
 
+    /// Update the current playhead frame without rebuilding the timeline model.
+    pub fn set_playhead_frame(&mut self, frame: i64) {
+        self.playhead_frame = frame.max(0);
+    }
+
     /// Set optional sequence in/out points in frame space.
     pub fn with_in_out_points(mut self, in_point_frame: i64, out_point_frame: Option<i64>) -> Self {
         self.in_point_frame = in_point_frame.max(0);

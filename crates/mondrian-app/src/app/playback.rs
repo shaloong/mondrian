@@ -1,5 +1,44 @@
 use super::*;
 
+const MIN_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(1);
+const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
+
+/// Result category for one playback clock advance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackAdvanceStatus {
+    /// Playback is not currently running.
+    Idle,
+    /// Playback is running, but elapsed time has not crossed a frame boundary.
+    WaitingForFrame,
+    /// Playback advanced to another timeline frame.
+    Advanced,
+    /// Playback reached the final content frame and paused there.
+    ReachedEnd,
+}
+
+/// Observable result of advancing the playback clock once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackAdvance {
+    /// Frame before the clock tick.
+    pub previous_frame: i64,
+    /// Frame after the clock tick.
+    pub current_frame: i64,
+    /// Number of timeline frames crossed by this tick.
+    pub frames_advanced: i64,
+    /// High-level outcome.
+    pub status: PlaybackAdvanceStatus,
+}
+
+impl PlaybackAdvance {
+    /// Return whether UI models should refresh for this playback tick.
+    pub fn requires_refresh(self) -> bool {
+        matches!(
+            self.status,
+            PlaybackAdvanceStatus::Advanced | PlaybackAdvanceStatus::ReachedEnd
+        )
+    }
+}
+
 impl AppState {
     pub fn play(&mut self) {
         let end_frame = self.last_content_frame();
@@ -20,6 +59,7 @@ impl AppState {
         }
         self.playback_reached_end = false;
         self.playback_buffering = false;
+        self.playback_frame_accumulator = 0.0;
 
         self.playback = PlaybackState::Playing { timecode_frames: frames };
         self.sync_audio_clock_to_frame(frames);
@@ -32,6 +72,7 @@ impl AppState {
     pub fn pause(&mut self) {
         let frames = self.current_frame();
         self.playback_buffering = false;
+        self.playback_frame_accumulator = 0.0;
         self.playback = PlaybackState::Paused { timecode_frames: frames };
         self.sync_audio_clock_to_frame(frames);
         self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
@@ -45,6 +86,7 @@ impl AppState {
         self.playback = PlaybackState::Stopped;
         self.playback_reached_end = false;
         self.playback_buffering = false;
+        self.playback_frame_accumulator = 0.0;
         self.av_drift_ms = 0.0;
         self.reset_audio_render_pipeline(0.0);
         if let Some(output) = &self.audio_output {
@@ -58,6 +100,7 @@ impl AppState {
         // 这样下一次 play() 不会误跳回 in_point。
         self.playback_reached_end = false;
         self.playback_buffering = false;
+        self.playback_frame_accumulator = 0.0;
         self.playback = match &self.playback {
             PlaybackState::Playing { .. } => PlaybackState::Playing { timecode_frames: frame },
             _ => PlaybackState::Paused { timecode_frames: frame },
@@ -71,6 +114,7 @@ impl AppState {
     }
 
     pub fn set_playback_frame_running(&mut self, frame: i64) {
+        self.playback_frame_accumulator = 0.0;
         self.playback = PlaybackState::Playing { timecode_frames: frame.max(0) };
     }
 
@@ -232,6 +276,108 @@ impl AppState {
         correction.playback_rate
     }
 
+    /// Advance playback using the active clock source.
+    pub fn advance_playback_clock(&mut self, elapsed: Duration) -> PlaybackAdvance {
+        let previous_frame = self.current_frame().max(0);
+        if !self.is_playing() {
+            return PlaybackAdvance {
+                previous_frame,
+                current_frame: previous_frame,
+                frames_advanced: 0,
+                status: PlaybackAdvanceStatus::Idle,
+            };
+        }
+
+        let fps = self.fps();
+        let target_frame = match self.audio_sync.role {
+            ClockRole::AudioMaster => {
+                let audio_frame = (self.audio_clock.now_seconds().max(0.0) * fps).floor() as i64;
+                audio_frame.max(previous_frame)
+            }
+            ClockRole::VideoMaster => {
+                let playback_rate = self.update_av_sync();
+                let elapsed_frames = elapsed.as_secs_f64() * fps * playback_rate;
+                if !elapsed_frames.is_finite() || elapsed_frames <= 0.0 {
+                    return PlaybackAdvance {
+                        previous_frame,
+                        current_frame: previous_frame,
+                        frames_advanced: 0,
+                        status: PlaybackAdvanceStatus::WaitingForFrame,
+                    };
+                }
+                self.playback_frame_accumulator += elapsed_frames;
+                let whole_frames = self.playback_frame_accumulator.floor() as i64;
+                if whole_frames <= 0 {
+                    return PlaybackAdvance {
+                        previous_frame,
+                        current_frame: previous_frame,
+                        frames_advanced: 0,
+                        status: PlaybackAdvanceStatus::WaitingForFrame,
+                    };
+                }
+                self.playback_frame_accumulator -= whole_frames as f64;
+                previous_frame.saturating_add(whole_frames)
+            }
+        };
+
+        if target_frame <= previous_frame {
+            return PlaybackAdvance {
+                previous_frame,
+                current_frame: previous_frame,
+                frames_advanced: 0,
+                status: PlaybackAdvanceStatus::WaitingForFrame,
+            };
+        }
+
+        let end_frame = self.last_content_frame().max(0);
+        if target_frame >= end_frame {
+            self.playback = PlaybackState::Paused { timecode_frames: end_frame };
+            self.playback_reached_end = true;
+            self.playback_buffering = false;
+            self.playback_frame_accumulator = 0.0;
+            self.sync_audio_clock_to_frame(end_frame);
+            self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
+            if let Some(output) = &self.audio_output {
+                output.set_muted(false);
+                output.clear();
+            }
+            return PlaybackAdvance {
+                previous_frame,
+                current_frame: end_frame,
+                frames_advanced: (end_frame - previous_frame).max(0),
+                status: PlaybackAdvanceStatus::ReachedEnd,
+            };
+        }
+
+        self.playback = PlaybackState::Playing { timecode_frames: target_frame };
+        self.playback_reached_end = false;
+        PlaybackAdvance {
+            previous_frame,
+            current_frame: target_frame,
+            frames_advanced: target_frame - previous_frame,
+            status: PlaybackAdvanceStatus::Advanced,
+        }
+    }
+
+    /// Estimate how long the UI loop can wait before polling playback again.
+    pub fn playback_next_frame_delay(&self) -> Option<Duration> {
+        if !self.is_playing() {
+            return None;
+        }
+
+        let fps = self.fps();
+        let secs = match self.audio_sync.role {
+            ClockRole::AudioMaster => {
+                let next_frame = self.current_frame().saturating_add(1).max(0) as f64;
+                (next_frame / fps - self.audio_clock.now_seconds()).max(0.0)
+            }
+            ClockRole::VideoMaster => ((1.0 - self.playback_frame_accumulator).max(0.0)) / fps,
+        };
+        Some(clamp_playback_wake_delay(Duration::from_secs_f64(
+            secs.max(0.0),
+        )))
+    }
+
     pub fn current_frame(&self) -> i64 {
         match &self.playback {
             PlaybackState::Stopped => 0,
@@ -255,5 +401,104 @@ impl AppState {
 
     pub fn out_point_frame(&self) -> Option<i64> {
         self.sequence.as_ref().and_then(|sequence| sequence.out_point_frame())
+    }
+}
+
+fn clamp_playback_wake_delay(delay: Duration) -> Duration {
+    delay.clamp(MIN_PLAYBACK_WAKE_DELAY, MAX_PLAYBACK_WAKE_DELAY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_sequence(duration_frames: i64) -> AppState {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("playback");
+        let tb = sequence.time_base();
+        let clip = Clip::new_solid_color(
+            AssetId::new(),
+            Color::from_rgba8(255, 0, 0, 255),
+            TimeCode::new(0, tb),
+            TimeCode::new(duration_frames, tb),
+        );
+        sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        state.active_sequence_id = Some(sequence.id);
+        state.default_sequence_id = Some(sequence.id);
+        state.sequences = vec![sequence.clone()];
+        state.sequence = Some(sequence);
+        state.audio_sync.role = ClockRole::VideoMaster;
+        state
+    }
+
+    #[test]
+    fn advance_playback_clock_accumulates_subframe_ticks() {
+        let mut state = state_with_sequence(20);
+        state.play();
+
+        let waiting = state.advance_playback_clock(Duration::from_millis(10));
+        assert_eq!(waiting.status, PlaybackAdvanceStatus::WaitingForFrame);
+        assert_eq!(state.current_frame(), 0);
+
+        for _ in 0..3 {
+            state.advance_playback_clock(Duration::from_millis(10));
+        }
+
+        assert_eq!(state.current_frame(), 1);
+        assert!(state.is_playing());
+        assert!(!state.playback_reached_end);
+    }
+
+    #[test]
+    fn advance_playback_clock_reaches_end_and_pauses() {
+        let mut state = state_with_sequence(5);
+        state.play();
+
+        let outcome = state.advance_playback_clock(Duration::from_secs(1));
+
+        assert_eq!(outcome.status, PlaybackAdvanceStatus::ReachedEnd);
+        assert_eq!(outcome.current_frame, 4);
+        assert_eq!(state.current_frame(), 4);
+        assert!(!state.is_playing());
+        assert!(state.playback_reached_end);
+    }
+
+    #[test]
+    fn play_after_reaching_end_restarts_from_zero() {
+        let mut state = state_with_sequence(5);
+        state.play();
+        state.advance_playback_clock(Duration::from_secs(1));
+
+        state.play();
+
+        assert_eq!(state.current_frame(), 0);
+        assert!(state.is_playing());
+        assert!(!state.playback_reached_end);
+    }
+
+    #[test]
+    fn seek_clears_reached_end_and_frame_accumulator() {
+        let mut state = state_with_sequence(30);
+        state.play();
+        state.advance_playback_clock(Duration::from_millis(20));
+        state.playback_reached_end = true;
+
+        state.seek(10);
+        let outcome = state.advance_playback_clock(Duration::from_millis(20));
+
+        assert_eq!(outcome.status, PlaybackAdvanceStatus::WaitingForFrame);
+        assert_eq!(state.current_frame(), 10);
+        assert!(!state.playback_reached_end);
+    }
+
+    #[test]
+    fn playback_next_frame_delay_is_bounded_while_playing() {
+        let mut state = state_with_sequence(30);
+        state.play();
+
+        let delay = state.playback_next_frame_delay().expect("next frame delay");
+
+        assert!(delay >= MIN_PLAYBACK_WAKE_DELAY);
+        assert!(delay <= MAX_PLAYBACK_WAKE_DELAY);
     }
 }
