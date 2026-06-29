@@ -1,0 +1,44 @@
+# Timeline Model
+
+`mondrian-timeline` owns editorial time, tracks, clips, and timeline commands.
+
+## Sequence
+
+A `Sequence` contains:
+
+- `id`, `name`, `role`
+- `settings`
+- ordered video and audio tracks
+- playhead
+- optional in/out frame range
+
+Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
+
+## Track
+
+`Track` owns an ordered `Vec<Clip>` and track-level state:
+
+- `track_type`: Video, Audio, Subtitle
+- `height`
+- `is_muted`, `is_locked`, `is_solo`, `is_visible`
+- `blend_mode`
+- animatable `track.opacity`
+
+Video tracks use visibility and opacity. Audio tracks use mute/solo semantics. UI must not show speaker controls for video tracks or visibility controls for audio tracks unless a future explicit domain feature is added.
+
+## Clip
+
+`Clip` is the timeline instance, not the asset itself. It references `asset_id`, carries timeline/source ranges, transform, speed, effects, masks, linked clip, blend mode, and kind-specific data.
+
+Supported `ClipKind`:
+
+- `Media`
+- `AdjustmentLayer`
+- `NestedSequence`
+- `SolidColor`
+
+Transform, speed, blend mode, solid color, masks, and effects are exposed through the shared `PropertyHost`/`PropertyBag` system.
+
+## Render Projection
+
+Timeline internals are projected into `FlatActiveClip` through `RenderPlanSource`. `mondrian-renderer` consumes that trait and must not depend on `Sequence`, `Track`, or `Clip` internals.
