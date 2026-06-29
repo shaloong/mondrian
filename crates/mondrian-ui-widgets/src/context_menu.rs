@@ -444,7 +444,7 @@ impl Widget for ContextMenu {
 
                 // Parent menu click.
                 if let Some(index) = self.item_at(*position) {
-                    if self.items[index].is_activatable() {
+                    if self.items[index].is_activatable() && !self.items[index].is_submenu() {
                         self.activate_index(index, ctx);
                     }
                     return EventResult::Handled;
@@ -508,6 +508,7 @@ impl Widget for ContextMenu {
                 }
 
                 self.hover_depth = new_hover_depth;
+                ctx.request_repaint();
                 EventResult::Handled
             }
             UiEvent::MouseWheel { delta, position, .. } => {
