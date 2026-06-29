@@ -1,18 +1,25 @@
 # Project Model
 
-The project model is split between lightweight project metadata/settings and runtime/editor state.
+Mondrian uses a Premiere-style lightweight project document. The project file
+stores editing decisions, project settings, sequence structure, and asset-library
+metadata. Rebuildable caches, proxies, waveforms, thumbnails, and preview renders
+must live outside `.mdp`.
 
-## Persistent Project Container
+## Persistent Project Document
 
-`mondrian-app::app::ProjectFile` is currently the saved project payload inside `.mdp`:
+`mondrian-project::ProjectDocument` is the canonical saved project payload inside
+`.mdp`:
 
-- `name`
+- `schema_version`
+- `project_id`
+- `document_revision`
+- `meta: ProjectMeta`
+- `settings: ProjectSettings`
 - `sequences: SequenceCollection`
-- `project_settings: ProjectSettings`
 - `proxy_mode_assets: Vec<AssetId>`
-- embedded `library/index.db`
 
-`mondrian-core::Project` contains top-level metadata and settings, but the active app save path currently serializes `ProjectFile` from `AppState`.
+`mondrian-core` keeps only shared project metadata and settings types. It does
+not define a second top-level project container.
 
 ## Runtime State
 
@@ -20,6 +27,7 @@ The project model is split between lightweight project metadata/settings and run
 
 - active sequence and sequence collection
 - active/default sequence IDs and navigation stack
+- project id, metadata, and current document revision
 - project path and runtime directory
 - project settings
 - asset library handle
@@ -42,3 +50,17 @@ Selection/navigation updates that follow a user command may be immediate UI stat
 The project runtime directory contains a SQLite asset library. On save, `library/index.db` is streamed into the `.mdp`; on open it is extracted into the runtime directory. Timeline clips reference assets by `AssetId`.
 
 Generated assets such as adjustment layers and solid colors are represented as library records with synthetic `mondrian://...` paths.
+
+## Format Evolution
+
+The current document layout intentionally stays single-document:
+
+```text
+manifest.json
+project.json
+library/index.db
+```
+
+Future split-entry layouts must be introduced by a new `format_version` in
+`manifest.json`. The existing alpha loader rejects unsupported layouts instead of
+silently guessing.

@@ -1,4 +1,8 @@
 use super::*;
+use mondrian_project::{
+    load_project_archive, project_document_fingerprint, read_project_document_from_archive,
+    save_project_archive, ProjectDocument, PROJECT_DOCUMENT_SCHEMA_VERSION,
+};
 
 impl AppState {
     pub(super) fn project_file_path(&self) -> anyhow::Result<&Path> {
@@ -24,85 +28,21 @@ impl AppState {
         Ok(root.join("library"))
     }
 
-    fn load_project_container(
-        project_file: &Path,
-        runtime_root: &Path,
-    ) -> anyhow::Result<ProjectFile> {
-        fs::create_dir_all(runtime_root.join("library"))?;
-
-        let saved = Self::read_project_data_from_archive(project_file)?;
-
-        let file = fs::File::open(project_file)?;
-        let mut archive = zip::ZipArchive::new(file)?;
-
-        let mut db_entry = archive.by_name("library/index.db")?;
-        let mut db_file = fs::File::create(runtime_root.join("library").join("index.db"))?;
-        std::io::copy(&mut db_entry, &mut db_file)?;
-        db_file.flush()?;
-
-        Ok(saved)
-    }
-
-    pub(super) fn read_project_data_from_archive(
-        project_file: &Path,
-    ) -> anyhow::Result<ProjectFile> {
-        let file = fs::File::open(project_file)?;
-        let mut archive = zip::ZipArchive::new(file)?;
-        let mut project_json = String::new();
-        archive.by_name("project.json")?.read_to_string(&mut project_json)?;
-        let saved = serde_json::from_str::<ProjectFile>(&project_json)?;
-        Ok(saved)
-    }
-
-    fn save_project_container(&self, project_data: &ProjectFile) -> anyhow::Result<()> {
+    fn save_project_container(&self, project_data: &ProjectDocument) -> anyhow::Result<()> {
         let project_file = self.project_file_path()?.to_path_buf();
         self.save_project_container_to(project_data, project_file.as_path())
     }
 
     fn save_project_container_to(
         &self,
-        project_data: &ProjectFile,
+        project_data: &ProjectDocument,
         target_file: &Path,
     ) -> anyhow::Result<()> {
         let started_at = std::time::Instant::now();
         let runtime_library_root = self.runtime_library_root()?;
         let db_path = runtime_library_root.join("index.db");
 
-        if !db_path.exists() {
-            anyhow::bail!("素材库数据库不存在：{}", db_path.display());
-        }
-
-        if let Some(parent) = target_file.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let tmp_extension = target_file
-            .extension()
-            .and_then(|v| v.to_str())
-            .map(|ext| format!("{ext}.tmp"))
-            .unwrap_or_else(|| "tmp".to_string());
-        let tmp_path = target_file.with_extension(tmp_extension);
-
-        let tmp_file = fs::File::create(&tmp_path)?;
-        let mut writer = zip::ZipWriter::new(tmp_file);
-        let options = zip::write::FileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated)
-            .unix_permissions(0o644);
-
-        writer.start_file("project.json", options)?;
-        let json = serde_json::to_vec_pretty(project_data)?;
-        writer.write_all(&json)?;
-
-        writer.start_file("library/index.db", options)?;
-        let mut db_file = fs::File::open(db_path)?;
-        std::io::copy(&mut db_file, &mut writer)?;
-
-        writer.finish()?;
-
-        if target_file.exists() {
-            fs::remove_file(target_file)?;
-        }
-        fs::rename(&tmp_path, target_file)?;
+        save_project_archive(project_data, db_path.as_path(), target_file)?;
 
         if ui_diag_enabled() {
             let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -113,8 +53,9 @@ impl AppState {
         Ok(())
     }
 
-    pub(super) fn current_project_data(&self) -> Option<ProjectFile> {
+    pub(super) fn current_project_data(&self) -> Option<ProjectDocument> {
         let sequence = self.sequence.as_ref()?;
+        let project_id = self.project_id?;
         let mut proxy_mode_assets: Vec<AssetId> = self.proxy_mode_assets.iter().copied().collect();
         proxy_mode_assets.sort_by_key(|id| id.to_string());
         let active_sequence_id = self.active_sequence_id.unwrap_or(sequence.id);
@@ -127,10 +68,20 @@ impl AppState {
         }
         sequences.sort_by_key(|seq| seq.name.clone());
         let collection = SequenceCollection { sequences, default_sequence_id, active_sequence_id };
-        Some(ProjectFile {
-            name: sequence.name.clone(),
+        let mut meta = self
+            .project_meta
+            .clone()
+            .unwrap_or_else(|| ProjectMeta::new(sequence.name.clone()));
+        if meta.name.trim().is_empty() {
+            meta.name = sequence.name.clone();
+        }
+        Some(ProjectDocument {
+            schema_version: PROJECT_DOCUMENT_SCHEMA_VERSION,
+            project_id,
+            document_revision: self.project_document_revision.max(1),
+            meta,
             sequences: collection,
-            project_settings: self.project_settings.clone(),
+            settings: self.project_settings.clone(),
             proxy_mode_assets,
         })
     }
@@ -143,10 +94,6 @@ impl AppState {
         Ok(runtime_root.join("autosave"))
     }
 
-    fn legacy_autosave_archive_path(runtime_root: &Path) -> PathBuf {
-        runtime_root.join("autosave").join("project.autosave.mdp")
-    }
-
     pub(super) fn autosave_manifest_path(runtime_root: &Path) -> PathBuf {
         runtime_root.join("autosave").join("manifest.json")
     }
@@ -157,18 +104,11 @@ impl AppState {
     ) -> anyhow::Result<AutosaveManifest> {
         let manifest_path = Self::autosave_manifest_path(runtime_root);
         if !manifest_path.exists() {
-            let legacy_file = Self::legacy_autosave_archive_path(runtime_root);
             let mut manifest = AutosaveManifest {
                 project_file: project_file.to_path_buf(),
                 snapshots: Vec::new(),
-                autosave_file: if legacy_file.exists() {
-                    Some(legacy_file)
-                } else {
-                    None
-                },
-                saved_at_unix_ms: Some(0),
             };
-            manifest.normalize_legacy_fields();
+            manifest.normalize();
             return Ok(manifest);
         }
 
@@ -177,7 +117,7 @@ impl AppState {
         if manifest.project_file.as_os_str().is_empty() {
             manifest.project_file = project_file.to_path_buf();
         }
-        manifest.normalize_legacy_fields();
+        manifest.normalize();
         Ok(manifest)
     }
 
@@ -202,8 +142,6 @@ impl AppState {
             .unwrap_or(AutosaveManifest {
                 project_file: project_file.clone(),
                 snapshots: Vec::new(),
-                autosave_file: None,
-                saved_at_unix_ms: None,
             });
 
         let saved_at = unix_now_ms();
@@ -220,7 +158,7 @@ impl AppState {
             max_recovery_points.max(1),
             retention_days.max(1),
         );
-        manifest.normalize_legacy_fields();
+        manifest.normalize();
 
         write_json_atomic(
             Self::autosave_manifest_path(runtime_root).as_path(),
@@ -262,7 +200,7 @@ impl AppState {
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "未找到自动保存文件：{}",
-                    Self::legacy_autosave_archive_path(
+                    Self::autosave_manifest_path(
                         Self::project_runtime_root(project_file.as_path()).as_path()
                     )
                     .display()
@@ -285,7 +223,7 @@ impl AppState {
             return false;
         };
 
-        let current_fingerprint = match project_data_fingerprint(current) {
+        let current_fingerprint = match project_document_fingerprint(current) {
             Ok(data) => data,
             Err(err) => {
                 tracing::warn!("计算当前项目指纹失败，按未保存处理: {err}");
@@ -301,7 +239,7 @@ impl AppState {
             }
         };
 
-        let saved = match AppState::read_project_data_from_archive(project_file) {
+        let saved = match read_project_document_from_archive(project_file) {
             Ok(data) => data,
             Err(err) => {
                 tracing::warn!("读取磁盘项目数据失败，按未保存处理: {err}");
@@ -309,7 +247,7 @@ impl AppState {
             }
         };
 
-        let saved_fingerprint = match project_data_fingerprint(saved) {
+        let saved_fingerprint = match project_document_fingerprint(saved) {
             Ok(data) => data,
             Err(err) => {
                 tracing::warn!("计算磁盘项目指纹失败，按未保存处理: {err}");
@@ -334,7 +272,8 @@ impl AppState {
             let _ = fs::remove_dir_all(&runtime_root);
         }
 
-        let saved = Self::load_project_container(archive_file, &runtime_root)?;
+        let library_root = runtime_root.join("library");
+        let saved = load_project_archive(archive_file, library_root.as_path())?;
 
         let project_sequences = saved.sequences;
         project_sequences.validate_nested_sequences()?;
@@ -348,16 +287,18 @@ impl AppState {
         self.active_sequence_id = Some(project_sequences.active_sequence_id);
         self.default_sequence_id = Some(project_sequences.default_sequence_id);
         self.sequence_navigation_stack.clear();
+        self.project_id = Some(saved.project_id);
+        self.project_meta = Some(saved.meta);
+        self.project_document_revision = saved.document_revision.max(1);
         self.current_project_path = Some(project_file.clone());
         self.project_runtime_dir = Some(runtime_root.clone());
         self.proxy_mode_assets = saved.proxy_mode_assets.into_iter().collect();
-        self.project_settings = saved.project_settings;
+        self.project_settings = saved.settings;
         self.playback = PlaybackState::Stopped;
         self.dragging_asset = None;
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         self.ensure_minimum_tracks();
 
-        let library_root = runtime_root.join("library");
         self.asset_library = Some(AssetLibrary::open(library_root)?);
         Ok(())
     }
@@ -377,12 +318,18 @@ impl AppState {
         Ok(())
     }
 
-    pub fn save_project_file(&self) -> anyhow::Result<()> {
-        let Some(data) = self.current_project_data() else {
+    pub fn save_project_file(&mut self) -> anyhow::Result<()> {
+        let next_revision = self.project_document_revision.saturating_add(1).max(1);
+        let Some(mut data) = self.current_project_data() else {
             return Ok(());
         };
+        data.document_revision = next_revision;
+        data.meta.touch();
 
         self.save_project_container(&data)?;
+        self.project_id = Some(data.project_id);
+        self.project_meta = Some(data.meta);
+        self.project_document_revision = data.document_revision;
         Ok(())
     }
 
@@ -450,6 +397,9 @@ impl AppState {
         self.active_sequence_id = self.sequence.as_ref().map(|seq| seq.id);
         self.default_sequence_id = self.active_sequence_id;
         self.sequence_navigation_stack.clear();
+        self.project_id = Some(ProjectId::new());
+        self.project_meta = Some(ProjectMeta::new(name));
+        self.project_document_revision = 0;
         self.current_project_path = Some(project_file.clone());
         self.project_runtime_dir = Some(runtime_root.clone());
         self.project_settings = project_settings;
@@ -466,7 +416,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn save_project(&self) -> anyhow::Result<()> {
+    pub fn save_project(&mut self) -> anyhow::Result<()> {
         self.save_project_file()
     }
 }

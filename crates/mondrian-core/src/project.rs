@@ -1,6 +1,7 @@
-//! 项目数据模型
+//! 项目共享数据模型
 //!
-//! `Project` 是最顶层的容器，包含多个 `Sequence`（时间线）和全局项目设置。
+//! 持久化项目文档由 `mondrian-project` 定义；这里保留跨 crate 共享的
+//! 项目元数据和项目级设置。
 
 use crate::types::*;
 use chrono::{DateTime, Utc};
@@ -8,40 +9,35 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// 项目元数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectMeta {
-    pub id: ProjectId,
+    /// User-facing project name.
     pub name: String,
+    /// Optional user-facing project description.
     pub description: String,
+    /// Optional user-facing project author.
     pub author: String,
+    /// UTC timestamp when the project document was created.
     pub created_at: DateTime<Utc>,
+    /// UTC timestamp when the project metadata was last touched.
     pub updated_at: DateTime<Utc>,
-    pub version: u32, // 保存版本，用于迁移
 }
 
 impl ProjectMeta {
     pub fn new(name: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
-            id: ProjectId::new(),
             name: name.into(),
             description: String::new(),
             author: String::new(),
             created_at: now,
             updated_at: now,
-            version: 1,
         }
     }
-}
 
-/// 项目（顶层容器）
-///
-/// 一个 `.mondrian` 文件对应一个 `Project`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Project {
-    pub meta: ProjectMeta,
-    pub settings: ProjectSettings,
-    pub save_path: Option<PathBuf>,
+    pub fn touch(&mut self) {
+        self.updated_at = Utc::now();
+    }
 }
 
 /// 项目色彩管理设置
@@ -56,11 +52,15 @@ pub struct ProjectColorManagement {
 }
 
 /// 项目全局设置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectSettings {
+    /// Whether automatic proxy generation and proxy-aware workflows are enabled.
     pub proxy_enabled: bool,
+    /// Default proxy resolution for generated proxy media.
     pub proxy_resolution: Resolution,
+    /// Optional project cache directory override.
     pub cache_dir: Option<PathBuf>,
+    /// Autosave interval in seconds.
     pub auto_save_interval: u32,
     /// 项目级色彩管理（所有序列默认继承）。
     #[serde(default)]
@@ -76,20 +76,5 @@ impl Default for ProjectSettings {
             auto_save_interval: 300,
             color_management: ProjectColorManagement::default(),
         }
-    }
-}
-
-impl Project {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            meta: ProjectMeta::new(name),
-            settings: ProjectSettings::default(),
-            save_path: None,
-        }
-    }
-
-    pub fn touch(&mut self) {
-        self.meta.updated_at = Utc::now();
-        self.meta.version += 1;
     }
 }

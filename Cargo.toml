@@ -9,6 +9,7 @@ members = [
     "crates/mondrian-ai",
     "crates/mondrian-effects",
     "crates/mondrian-export",
+    "crates/mondrian-project",
     "crates/mondrian-app",
     "crates/mondrian-editor-state",
     "crates/mondrian-ui-core",
@@ -43,6 +44,7 @@ mondrian-assets   = { path = "crates/mondrian-assets" }
 mondrian-ai       = { path = "crates/mondrian-ai" }
 mondrian-effects  = { path = "crates/mondrian-effects" }
 mondrian-export   = { path = "crates/mondrian-export" }
+mondrian-project  = { path = "crates/mondrian-project" }
 
 # ---- 新 UI 架构 ----
 mondrian-editor-state = { path = "crates/mondrian-editor-state" }
@@ -120,6 +122,7 @@ ocio-rs          = "0.1.1"
 
 # ---- 图像 ----
 image            = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+zip              = "0.6"
 
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验

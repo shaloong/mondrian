@@ -694,7 +694,7 @@ impl AppUiHost {
                     self.root.close_pending_close_dialog();
                     return true;
                 };
-                if let Err(err) = self.app_state.borrow().save_project() {
+                if let Err(err) = self.app_state.borrow_mut().save_project() {
                     tracing::warn!("closing project after save failed: {err}");
                     self.app_state
                         .borrow_mut()
@@ -1212,6 +1212,9 @@ mod tests {
     fn workspace_app_state() -> AppState {
         let mut state = AppState::new();
         state.sequence = Some(Sequence::new("Edit"));
+        state.project_id = Some(mondrian_core::ProjectId::new());
+        state.project_meta = Some(mondrian_core::ProjectMeta::new("Edit"));
+        state.project_document_revision = 1;
         state.current_project_path = Some(PathBuf::from("E:/projects/edit.mdp"));
         state
     }
