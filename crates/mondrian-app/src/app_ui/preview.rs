@@ -15,9 +15,10 @@ use mondrian_assets::AssetKind;
 use mondrian_core::types::{AssetId, BlendMode};
 use mondrian_effects::CompiledEffectGraph;
 use mondrian_renderer::{
-    build_timeline_render_plan, composite_timeline_elements, TimelineAdjustmentLayer,
+    composite_timeline_elements, evaluate_timeline_render_plan, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::Sequence;
 use mondrian_ui_widgets::ViewerFrameImage;
@@ -128,13 +129,19 @@ impl AppUiPreviewService {
         height: u32,
         depth: usize,
     ) -> Option<Vec<ResolvedPreviewElement>> {
-        let plan = build_timeline_render_plan(sequence, frame);
-        if plan.is_empty() {
+        let evaluation = evaluate_timeline_render_plan(
+            sequence,
+            TimelineEvaluationRequest::preview(
+                frame,
+                normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
+            ),
+        );
+        if evaluation.is_empty() {
             return None;
         }
 
-        let mut resolved = Vec::with_capacity(plan.len());
-        for element in plan {
+        let mut resolved = Vec::with_capacity(evaluation.len());
+        for element in evaluation.elements {
             match element {
                 TimelineRenderPlanElement::SolidColor(solid) => {
                     resolved.push(ResolvedPreviewElement::SolidColor(

@@ -8,6 +8,168 @@ use mondrian_core::{
 use mondrian_effects::CompiledEffectGraph;
 use std::sync::Arc;
 
+/// Why a sequence is being evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineRenderIntent {
+    /// Interactive viewer preview.
+    Preview,
+    /// Final timeline export.
+    Export,
+    /// Thumbnail or low-cost still generation.
+    Thumbnail,
+    /// Non-presentational analysis such as diagnostics or media collection.
+    Analysis,
+}
+
+/// Quality target for a sequence evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineRenderQuality {
+    /// Favor responsiveness; frame dropping and lower-resolution work are allowed.
+    Interactive,
+    /// Favor approximate visual fidelity at reduced cost.
+    Draft,
+    /// Favor final-quality correctness.
+    Final,
+}
+
+/// Color target expected by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineRenderColorTarget {
+    /// Output is intended for display/viewer presentation.
+    Display,
+    /// Output is intended for encoded export.
+    Export,
+    /// Output stays in timeline working space for downstream processing.
+    Working,
+}
+
+/// Render settings that alter execution without changing timeline semantics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimelineRenderSettings {
+    /// Resolution scale relative to the sequence frame size.
+    pub resolution_scale: f32,
+    /// Requested quality level.
+    pub quality: TimelineRenderQuality,
+    /// Expected color target.
+    pub color_target: TimelineRenderColorTarget,
+    /// Whether a scheduler may skip late frames for this request.
+    pub allow_frame_drop: bool,
+}
+
+impl TimelineRenderSettings {
+    /// Settings for an interactive preview request.
+    pub fn preview(resolution_scale: f32) -> Self {
+        Self {
+            resolution_scale: normalize_resolution_scale(resolution_scale),
+            quality: TimelineRenderQuality::Interactive,
+            color_target: TimelineRenderColorTarget::Display,
+            allow_frame_drop: true,
+        }
+    }
+
+    /// Settings for final export.
+    pub fn export() -> Self {
+        Self {
+            resolution_scale: 1.0,
+            quality: TimelineRenderQuality::Final,
+            color_target: TimelineRenderColorTarget::Export,
+            allow_frame_drop: false,
+        }
+    }
+
+    /// Settings for timeline diagnostics and non-presentational analysis.
+    pub fn analysis() -> Self {
+        Self {
+            resolution_scale: 1.0,
+            quality: TimelineRenderQuality::Final,
+            color_target: TimelineRenderColorTarget::Working,
+            allow_frame_drop: false,
+        }
+    }
+}
+
+/// A request to evaluate one sequence frame into a render plan.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimelineEvaluationRequest {
+    /// Timeline frame in the source sequence time base.
+    pub timeline_frame: i64,
+    /// Caller intent.
+    pub intent: TimelineRenderIntent,
+    /// Execution settings for the request.
+    pub settings: TimelineRenderSettings,
+}
+
+impl TimelineEvaluationRequest {
+    /// Build a preview evaluation request.
+    pub fn preview(timeline_frame: i64, resolution_scale: f32) -> Self {
+        Self {
+            timeline_frame,
+            intent: TimelineRenderIntent::Preview,
+            settings: TimelineRenderSettings::preview(resolution_scale),
+        }
+    }
+
+    /// Build an export evaluation request.
+    pub fn export(timeline_frame: i64) -> Self {
+        Self {
+            timeline_frame,
+            intent: TimelineRenderIntent::Export,
+            settings: TimelineRenderSettings::export(),
+        }
+    }
+
+    /// Build an analysis evaluation request.
+    pub fn analysis(timeline_frame: i64) -> Self {
+        Self {
+            timeline_frame,
+            intent: TimelineRenderIntent::Analysis,
+            settings: TimelineRenderSettings::analysis(),
+        }
+    }
+}
+
+/// Diagnostics captured while evaluating a timeline frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimelineEvaluationDiagnostics {
+    /// Active clips returned by the source at the requested time.
+    pub active_clips: usize,
+    /// Render-plan elements emitted after filtering.
+    pub emitted_elements: usize,
+    /// Active clips skipped because effective opacity was zero.
+    pub skipped_zero_opacity: usize,
+    /// Active clips skipped because required render data was incomplete.
+    pub skipped_unrenderable: usize,
+}
+
+/// A complete evaluation result for one sequence frame.
+#[derive(Debug, Clone)]
+pub struct TimelineRenderPlan {
+    /// Frame requested by the caller, clamped only where execution requires it.
+    pub timeline_frame: i64,
+    /// Source sequence time base.
+    pub time_base: Rational,
+    /// Caller intent.
+    pub intent: TimelineRenderIntent,
+    /// Execution settings.
+    pub settings: TimelineRenderSettings,
+    /// Ordered render elements from bottom to top.
+    pub elements: Vec<TimelineRenderPlanElement>,
+    /// Evaluation diagnostics.
+    pub diagnostics: TimelineEvaluationDiagnostics,
+}
+
+impl TimelineRenderPlan {
+    /// Return whether the plan contains no renderable elements.
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    /// Return the number of renderable elements.
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TimelineMediaPlan {
     pub asset_id: AssetId,
@@ -86,7 +248,8 @@ pub fn collect_timeline_color_diagnostics(
     working_color_space: ColorSpace,
     output_color_space: ColorSpace,
 ) -> Vec<TimelineColorDiagnostic> {
-    build_timeline_render_plan(source, timeline_frame)
+    evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))
+        .elements
         .into_iter()
         .filter_map(|element| match element {
             TimelineRenderPlanElement::Media(media) => Some(TimelineColorDiagnostic {
@@ -110,14 +273,27 @@ pub fn build_timeline_render_plan(
     source: &dyn RenderPlanSource,
     timeline_frame: i64,
 ) -> Vec<TimelineRenderPlanElement> {
+    evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))
+        .elements
+}
+
+/// Evaluate one timeline frame into a typed render plan and diagnostics.
+pub fn evaluate_timeline_render_plan(
+    source: &dyn RenderPlanSource,
+    request: TimelineEvaluationRequest,
+) -> TimelineRenderPlan {
     let time_base = source.source_time_base();
+    let timeline_frame = request.timeline_frame.max(0);
     let current = TimeCode::new(timeline_frame, time_base);
     let active = source.flat_active_clips_at(current);
+    let mut diagnostics =
+        TimelineEvaluationDiagnostics { active_clips: active.len(), ..Default::default() };
     let mut elements = Vec::with_capacity(active.len());
 
     for ac in active {
         let opacity = ac.opacity.clamp(0.0, 1.0);
         if opacity <= 0.0 {
+            diagnostics.skipped_zero_opacity += 1;
             continue;
         }
 
@@ -127,9 +303,13 @@ pub fn build_timeline_render_plan(
         match ac.kind {
             ClipKind::NestedSequence => {
                 let Some(sequence_id) = ac.nested_sequence_id else {
+                    diagnostics.skipped_unrenderable += 1;
                     continue;
                 };
-                let Some(eg) = effect_graph else { continue };
+                let Some(eg) = effect_graph else {
+                    diagnostics.skipped_unrenderable += 1;
+                    continue;
+                };
                 elements.push(TimelineRenderPlanElement::NestedSequence(
                     TimelineNestedSequencePlan {
                         sequence_id,
@@ -145,7 +325,10 @@ pub fn build_timeline_render_plan(
                 ));
             }
             ClipKind::AdjustmentLayer => {
-                let Some(eg) = effect_graph else { continue };
+                let Some(eg) = effect_graph else {
+                    diagnostics.skipped_unrenderable += 1;
+                    continue;
+                };
                 elements.push(TimelineRenderPlanElement::Adjustment(
                     TimelineAdjustmentPlan {
                         effect_graph: eg,
@@ -156,7 +339,10 @@ pub fn build_timeline_render_plan(
                 ));
             }
             ClipKind::SolidColor => {
-                let Some(eg) = effect_graph else { continue };
+                let Some(eg) = effect_graph else {
+                    diagnostics.skipped_unrenderable += 1;
+                    continue;
+                };
                 let color = ac.solid_color.unwrap_or(Color::BLACK);
                 elements.push(TimelineRenderPlanElement::SolidColor(
                     TimelineSolidColorPlan {
@@ -170,7 +356,10 @@ pub fn build_timeline_render_plan(
                 ));
             }
             ClipKind::Media => {
-                let Some(eg) = effect_graph else { continue };
+                let Some(eg) = effect_graph else {
+                    diagnostics.skipped_unrenderable += 1;
+                    continue;
+                };
                 let source_frame = ac.source_time.frame.max(0);
                 let source_time_base = ac
                     .interpretation
@@ -201,7 +390,16 @@ pub fn build_timeline_render_plan(
         }
     }
 
-    elements
+    diagnostics.emitted_elements = elements.len();
+
+    TimelineRenderPlan {
+        timeline_frame,
+        time_base,
+        intent: request.intent,
+        settings: request.settings,
+        elements,
+        diagnostics,
+    }
 }
 
 pub fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
@@ -223,12 +421,49 @@ fn apply_pixel_aspect_to_affine(
     transform
 }
 
+fn normalize_resolution_scale(scale: f32) -> f32 {
+    if !scale.is_finite() {
+        return 1.0;
+    }
+    scale.clamp(0.125, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::automation::{PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, Resolution};
-    use mondrian_timeline::clip::Clip;
+    use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
+
+    #[test]
+    fn evaluation_request_preview_carries_interactive_contract() {
+        let request = TimelineEvaluationRequest::preview(42, 0.5);
+
+        assert_eq!(request.timeline_frame, 42);
+        assert_eq!(request.intent, TimelineRenderIntent::Preview);
+        assert_eq!(request.settings.quality, TimelineRenderQuality::Interactive);
+        assert_eq!(
+            request.settings.color_target,
+            TimelineRenderColorTarget::Display
+        );
+        assert!(request.settings.allow_frame_drop);
+        assert_eq!(request.settings.resolution_scale, 0.5);
+    }
+
+    #[test]
+    fn evaluation_request_export_disallows_frame_drop() {
+        let request = TimelineEvaluationRequest::export(12);
+
+        assert_eq!(request.intent, TimelineRenderIntent::Export);
+        assert_eq!(request.settings.quality, TimelineRenderQuality::Final);
+        assert_eq!(
+            request.settings.color_target,
+            TimelineRenderColorTarget::Export
+        );
+        assert!(!request.settings.allow_frame_drop);
+        assert_eq!(request.settings.resolution_scale, 1.0);
+    }
 
     #[test]
     fn render_plan_uses_track_blend_mode_for_media_and_adjustment() {
@@ -396,5 +631,37 @@ mod tests {
             nested.nested_processing,
             NestedColorProcessing::BakeChildOutputTransform
         );
+    }
+
+    #[test]
+    fn evaluate_timeline_render_plan_reports_filtering_diagnostics() {
+        let mut seq = Sequence::new("render-plan-diagnostics");
+        let tb = seq.time_base();
+        let mut hidden = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        hidden
+            .transform
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: Transform2D::OPACITY_PATH.to_string(),
+                value: PropertyValue::Float(0.0),
+            })
+            .expect("set clip opacity");
+        seq.video_tracks[0].add_clip(hidden).expect("add hidden");
+
+        let visible = Clip::new_solid_color(
+            AssetId::new(),
+            Color::from_rgba8(255, 0, 0, 255),
+            TimeCode::new(0, tb),
+            TimeCode::new(20, tb),
+        );
+        seq.video_tracks[1].add_clip(visible).expect("add visible");
+
+        let plan = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(4, 0.5));
+
+        assert_eq!(plan.timeline_frame, 4);
+        assert_eq!(plan.intent, TimelineRenderIntent::Preview);
+        assert_eq!(plan.diagnostics.active_clips, 2);
+        assert_eq!(plan.diagnostics.emitted_elements, 1);
+        assert_eq!(plan.diagnostics.skipped_zero_opacity, 1);
+        assert_eq!(plan.len(), 1);
     }
 }

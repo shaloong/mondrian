@@ -3,8 +3,10 @@
 The intended render path is shared by preview and export:
 
 ```text
-Timeline Evaluation
+TimelineEvaluationRequest
+  -> Timeline Evaluation
   -> FlatActiveClip
+  -> TimelineRenderPlan
   -> TimelineRenderPlanElement
   -> Clip Sampling / Generated Source
   -> Effect Graph Evaluation
@@ -15,7 +17,23 @@ Timeline Evaluation
 
 ## Current Implementation
 
-`mondrian-renderer::timeline_render_plan` builds `TimelineRenderPlanElement` values from `RenderPlanSource`:
+`mondrian-renderer::timeline_render_plan` evaluates one sequence frame through
+`evaluate_timeline_render_plan(source, request)`. The request carries:
+
+- render intent: preview, export, thumbnail, or analysis
+- render quality: interactive, draft, or final
+- color target: display, export, or working space
+- scheduler policy: whether frame dropping is allowed
+- preview/export resolution scale
+
+The result is a `TimelineRenderPlan` with ordered `TimelineRenderPlanElement`
+values plus diagnostics for active clips, emitted elements, zero-opacity skips,
+and unrenderable skips.
+
+The legacy `build_timeline_render_plan` helper delegates to the evaluation API
+and exists only for compatibility with code that needs the element list.
+
+`TimelineRenderPlanElement` variants are:
 
 - `Media`
 - `Adjustment`
@@ -38,3 +56,8 @@ Each element carries opacity, blend mode, transforms where applicable, effect gr
 ## Preview vs Export
 
 Preview and export may use different scheduling, cache lifetime, and readback strategy. They must share timeline interpretation, clip ordering, effect evaluation, blend semantics, and color-management decisions.
+
+Preview callers must use `TimelineEvaluationRequest::preview(...)`. Export
+callers must use `TimelineEvaluationRequest::export(...)`. Any future thumbnail,
+analysis, AI, or cache-warm path should add an explicit intent instead of
+reinterpreting sequence state directly.
