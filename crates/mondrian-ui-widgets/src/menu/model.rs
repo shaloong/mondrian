@@ -353,6 +353,7 @@ impl MenuItem {
 
 pub(crate) fn menu_item_text_width_with_metrics(item: &MenuItem, metrics: MenuMetrics) -> f32 {
     let label_width = measure_single_line(&item.label, metrics.measure_font_size).0;
+    let label_clip_safety = metrics.row_icon_gap;
     let shortcut_width = item
         .shortcut
         .as_deref()
@@ -364,7 +365,7 @@ pub(crate) fn menu_item_text_width_with_metrics(item: &MenuItem, metrics: MenuMe
     } else {
         0.0
     };
-    label_width + shortcut_width + submenu_arrow
+    label_width + label_clip_safety + shortcut_width + submenu_arrow
 }
 
 pub(crate) fn menu_item_activation(item: &MenuItem) -> Option<MenuItemCommand> {

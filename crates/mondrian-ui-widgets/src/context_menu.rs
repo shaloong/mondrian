@@ -1366,6 +1366,32 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_checked_shortcut_items_keep_cjk_label_clip_room() {
+        let label = "时间线";
+        let menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::new(label, Action::Copy).checked(true).with_shortcut("Ctrl+Alt+T")],
+        );
+        let metrics = MenuMetrics::current();
+        let width = menu.measure(LayoutConstraint::LOOSE).width;
+        let icon_lane = metrics.row_icon_size + metrics.row_icon_gap;
+        let shortcut_width =
+            crate::text_metrics::measure_single_line("Ctrl+Alt+T", metrics.measure_font_size).0;
+        let label_clip_width = width
+            - metrics.row_padding_x * 2.0
+            - icon_lane
+            - metrics.row_shortcut_gap
+            - shortcut_width;
+        let label_width =
+            crate::text_metrics::measure_single_line(label, metrics.measure_font_size).0;
+
+        assert!(
+            label_clip_width >= label_width + metrics.row_icon_gap,
+            "checked menu label clip should keep safety room for CJK glyph edges"
+        );
+    }
+
+    #[test]
     fn context_menu_disabled_item_paints_text_without_strikethrough() {
         let menu = ContextMenu::new(
             Point::new(100.0, 100.0),

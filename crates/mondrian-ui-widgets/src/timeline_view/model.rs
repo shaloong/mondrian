@@ -14,8 +14,12 @@ const CLIP_EDGE_MIN_WIDTH: f32 = 3.0;
 const CLIP_EDGE_MAX_WIDTH: f32 = 6.0;
 const CLIP_EDGE_WIDTH_RATIO: f32 = 0.35;
 const TRACK_CONTROL_SIZE: f32 = 18.0;
-const TRACK_CONTROL_GAP: f32 = 8.0;
+const TRACK_CONTROL_GAP: f32 = 4.0;
 const TRACK_CONTROL_RIGHT_PADDING: f32 = 8.0;
+const VIDEO_TRACK_CONTROLS: [TimelineTrackControl; 2] =
+    [TimelineTrackControl::Visibility, TimelineTrackControl::Lock];
+const AUDIO_TRACK_CONTROLS: [TimelineTrackControl; 2] =
+    [TimelineTrackControl::Mute, TimelineTrackControl::Lock];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct TimelineLayoutRects {
@@ -245,23 +249,33 @@ pub(super) fn track_header_rect(
     )
 }
 
-pub(super) fn track_control_rect(header: Rect, control: TimelineTrackControl) -> Rect {
-    let group_width = TRACK_CONTROL_SIZE * 3.0 + TRACK_CONTROL_GAP * 2.0;
+pub(super) fn track_controls_for_kind(kind: TimelineTrackKind) -> &'static [TimelineTrackControl] {
+    match kind {
+        TimelineTrackKind::Video => &VIDEO_TRACK_CONTROLS,
+        TimelineTrackKind::Audio => &AUDIO_TRACK_CONTROLS,
+    }
+}
+
+pub(super) fn track_control_rect(
+    header: Rect,
+    controls: &[TimelineTrackControl],
+    control: TimelineTrackControl,
+) -> Option<Rect> {
+    let index = controls.iter().position(|candidate| *candidate == control)? as f32;
+    let count = controls.len() as f32;
+    let gap_count = controls.len().saturating_sub(1) as f32;
+    let group_width = TRACK_CONTROL_SIZE * count + TRACK_CONTROL_GAP * gap_count;
     let start_x = header.x + header.width - TRACK_CONTROL_RIGHT_PADDING - group_width;
     let y = header.y + (header.height - TRACK_CONTROL_SIZE) * 0.5;
-    let index = match control {
-        TimelineTrackControl::Visibility => 0.0,
-        TimelineTrackControl::Mute => 1.0,
-        TimelineTrackControl::Lock => 2.0,
-    };
-    Rect::new(
+    Some(Rect::new(
         start_x + index * (TRACK_CONTROL_SIZE + TRACK_CONTROL_GAP),
         y,
         TRACK_CONTROL_SIZE,
         TRACK_CONTROL_SIZE,
-    )
+    ))
 }
 
+#[cfg(test)]
 pub(super) fn track_control_at(
     header_rect: Rect,
     body_rect: Rect,
@@ -291,7 +305,18 @@ pub(super) fn track_control_at(
         TimelineTrackControl::Lock,
     ]
     .into_iter()
-    .find(|control| track_control_rect(header, *control).contains(point))
+    .find(|control| {
+        track_control_rect(
+            header,
+            &[
+                TimelineTrackControl::Visibility,
+                TimelineTrackControl::Mute,
+                TimelineTrackControl::Lock,
+            ],
+            *control,
+        )
+        .is_some_and(|rect| rect.contains(point))
+    })
     .map(|control| (track_ref, control))
 }
 
@@ -941,9 +966,17 @@ mod tests {
         let body = Rect::new(100.0, 50.0, 300.0, 120.0);
         let header = Rect::new(0.0, 50.0, 120.0, 120.0);
         let row = track_header_rect(header, body, 40.0, 20.0, 1);
-        let visibility = track_control_rect(row, TimelineTrackControl::Visibility);
-        let mute = track_control_rect(row, TimelineTrackControl::Mute);
-        let lock = track_control_rect(row, TimelineTrackControl::Lock);
+        let all_controls = [
+            TimelineTrackControl::Visibility,
+            TimelineTrackControl::Mute,
+            TimelineTrackControl::Lock,
+        ];
+        let visibility = track_control_rect(row, &all_controls, TimelineTrackControl::Visibility)
+            .expect("visibility slot");
+        let mute =
+            track_control_rect(row, &all_controls, TimelineTrackControl::Mute).expect("mute slot");
+        let lock =
+            track_control_rect(row, &all_controls, TimelineTrackControl::Lock).expect("lock slot");
 
         assert!(visibility.x < mute.x && mute.x < lock.x);
         assert_eq!(
@@ -953,6 +986,31 @@ mod tests {
                 TimelineTrackControl::Lock
             ))
         );
+    }
+
+    #[test]
+    fn track_control_slots_follow_track_kind() {
+        let header = Rect::new(0.0, 0.0, 120.0, 40.0);
+        let video_controls = track_controls_for_kind(TimelineTrackKind::Video);
+        let audio_controls = track_controls_for_kind(TimelineTrackKind::Audio);
+
+        assert_eq!(
+            video_controls,
+            [TimelineTrackControl::Visibility, TimelineTrackControl::Lock]
+        );
+        assert_eq!(
+            audio_controls,
+            [TimelineTrackControl::Mute, TimelineTrackControl::Lock]
+        );
+        assert!(track_control_rect(header, video_controls, TimelineTrackControl::Mute).is_none());
+        assert!(
+            track_control_rect(header, audio_controls, TimelineTrackControl::Visibility).is_none()
+        );
+        let video_lock =
+            track_control_rect(header, video_controls, TimelineTrackControl::Lock).unwrap();
+        let audio_lock =
+            track_control_rect(header, audio_controls, TimelineTrackControl::Lock).unwrap();
+        assert_eq!(video_lock.x, audio_lock.x);
     }
 
     #[test]

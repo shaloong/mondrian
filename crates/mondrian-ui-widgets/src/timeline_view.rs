@@ -1503,19 +1503,44 @@ impl TimelineView {
         )
     }
 
-    fn track_control_rect(&self, header: Rect, control: TimelineTrackControl) -> Rect {
-        timeline_model::track_control_rect(header, control)
+    fn track_control_rect(
+        &self,
+        header: Rect,
+        kind: TimelineTrackKind,
+        control: TimelineTrackControl,
+    ) -> Option<Rect> {
+        timeline_model::track_control_rect(
+            header,
+            timeline_model::track_controls_for_kind(kind),
+            control,
+        )
     }
 
     fn track_control_at(&self, point: Point) -> Option<(TimelineTrackRef, TimelineTrackControl)> {
-        timeline_model::track_control_at(
+        let track_ref = timeline_model::track_header_at(
             self.header_rect,
             self.body_rect,
             self.track_height,
             self.scroll_y,
             self.tracks.len(),
             point,
-        )
+        )?;
+        let track = self.tracks.get(track_ref.track_index)?;
+        let header = timeline_model::track_header_rect(
+            self.header_rect,
+            self.body_rect,
+            self.track_height,
+            self.scroll_y,
+            track_ref.track_index,
+        );
+        timeline_model::track_controls_for_kind(track.kind)
+            .iter()
+            .copied()
+            .find(|control| {
+                self.track_control_rect(header, track.kind, *control)
+                    .is_some_and(|rect| rect.contains(point))
+            })
+            .map(|control| (track_ref, control))
     }
 
     fn in_out_marker_at(&self, point: Point) -> Option<TimelineInOutPoint> {
@@ -2900,15 +2925,9 @@ impl TimelineView {
                 color_with_alpha(colors.border, 0.72),
             );
             self.paint_track_kind_badge(ctx, header, track, track_selected);
-            self.paint_track_control(
-                ctx,
-                header,
-                track_ref,
-                track,
-                TimelineTrackControl::Visibility,
-            );
-            self.paint_track_control(ctx, header, track_ref, track, TimelineTrackControl::Mute);
-            self.paint_track_control(ctx, header, track_ref, track, TimelineTrackControl::Lock);
+            for control in timeline_model::track_controls_for_kind(track.kind) {
+                self.paint_track_control(ctx, header, track_ref, track, *control);
+            }
 
             let row = Rect::new(self.body_rect.x, y, self.body_rect.width, self.track_height);
             let row_fill = if track_index % 2 == 0 {
@@ -3206,7 +3225,9 @@ impl TimelineView {
         control: TimelineTrackControl,
     ) {
         let colors = &ctx.theme.colors;
-        let rect = self.track_control_rect(header, control);
+        let Some(rect) = self.track_control_rect(header, track.kind, control) else {
+            return;
+        };
         let hovered = self.hovered_track_control == Some((track_ref, control));
         let toggled = match control {
             TimelineTrackControl::Visibility => !track.visible,
@@ -4897,7 +4918,7 @@ mod tests {
             timeline()
                 .with_header_width(128.0)
                 .on_track_control(|control, track_ref, _track| {
-                    if control == TimelineTrackControl::Mute && track_ref.track_index == 0 {
+                    if control == TimelineTrackControl::Mute && track_ref.track_index == 1 {
                         Action::Pause
                     } else {
                         Action::NoOp
@@ -4917,9 +4938,23 @@ mod tests {
             &dispatch,
         );
 
+        let audio_header = timeline_model::track_header_rect(
+            view.header_rect,
+            view.body_rect,
+            view.track_height,
+            view.scroll_y,
+            1,
+        );
+        let audio_mute = view
+            .track_control_rect(
+                audio_header,
+                view.tracks[1].kind,
+                TimelineTrackControl::Mute,
+            )
+            .expect("audio tracks expose mute");
         let result = view.event(
             &UiEvent::MouseDown {
-                position: old_timeline_point(88.0, 55.0),
+                position: audio_mute.center(),
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -4931,6 +4966,71 @@ mod tests {
         assert_eq!(view.selected_clip(), None);
         assert_eq!(actions.borrow().as_slice(), &[Action::Pause]);
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn track_controls_are_kind_specific() {
+        let mut view = timeline().with_header_width(128.0);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let video_header = timeline_model::track_header_rect(
+            view.header_rect,
+            view.body_rect,
+            view.track_height,
+            view.scroll_y,
+            0,
+        );
+        let audio_header = timeline_model::track_header_rect(
+            view.header_rect,
+            view.body_rect,
+            view.track_height,
+            view.scroll_y,
+            1,
+        );
+
+        assert!(view
+            .track_control_rect(
+                video_header,
+                view.tracks[0].kind,
+                TimelineTrackControl::Mute
+            )
+            .is_none());
+        assert!(view
+            .track_control_rect(
+                audio_header,
+                view.tracks[1].kind,
+                TimelineTrackControl::Visibility
+            )
+            .is_none());
+        let video_visibility = view
+            .track_control_rect(
+                video_header,
+                view.tracks[0].kind,
+                TimelineTrackControl::Visibility,
+            )
+            .expect("video tracks expose visibility");
+        let audio_mute = view
+            .track_control_rect(
+                audio_header,
+                view.tracks[1].kind,
+                TimelineTrackControl::Mute,
+            )
+            .expect("audio tracks expose mute");
+
+        assert_eq!(
+            view.track_control_at(video_visibility.center()),
+            Some((
+                TimelineTrackRef { track_index: 0 },
+                TimelineTrackControl::Visibility
+            ))
+        );
+        assert_eq!(
+            view.track_control_at(audio_mute.center()),
+            Some((
+                TimelineTrackRef { track_index: 1 },
+                TimelineTrackControl::Mute
+            ))
+        );
     }
 
     #[test]
