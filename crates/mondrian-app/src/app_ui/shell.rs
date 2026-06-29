@@ -16,7 +16,7 @@ use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridState, PanelList, PanelListState, ScrollView, ScrollViewState,
-    TimelineView, TimelineViewState, WaveformDisplay,
+    TimelineView, TimelineViewState, ViewerSurface, WaveformDisplay,
 };
 use std::path::Path;
 
@@ -47,7 +47,7 @@ use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
 use crate::app_ui::panels::{
     build_dock_tree_for_preset, build_dock_tree_from_layout, AppUiPanelModels,
-    AssetThumbnailSource, ViewerPreviewSource,
+    AssetThumbnailSource, ViewerPanelModel, ViewerPreviewSource,
 };
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::preferences_dialog::{AppUiPreferencesModel, PreferencesDialogTab};
@@ -535,8 +535,12 @@ impl ViewerZoomMode {
 }
 
 fn apply_viewer_zoom_mode(models: &mut AppUiPanelModels, mode: ViewerZoomMode) {
-    models.viewer.zoom_label = mode.label();
-    models.viewer.zoom_scale = mode.scale();
+    apply_viewer_zoom_mode_to_model(&mut models.viewer, mode);
+}
+
+fn apply_viewer_zoom_mode_to_model(model: &mut ViewerPanelModel, mode: ViewerZoomMode) {
+    model.zoom_label = mode.label();
+    model.zoom_scale = mode.scale();
 }
 
 /// Root widget for the app UI editor window.
@@ -844,10 +848,18 @@ impl AppUiAppRoot {
     }
 
     /// Refresh only playback-frame dependent UI state.
-    pub fn refresh_playback_frame_from_app_state(&mut self, state: &AppState) {
+    pub fn refresh_playback_frame_from_app_state(
+        &mut self,
+        state: &AppState,
+        preview: Option<&dyn ViewerPreviewSource>,
+    ) {
         let frame = state.current_frame().max(0);
         self.status_bar.set_model(status_bar_model(state));
+        let mut viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
+        apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
+        self.models.viewer = viewer;
         self.models.timeline.playhead_frame = frame;
+        update_viewer_widgets(&mut self.dock, &self.models.viewer);
         update_timeline_playhead_widgets(&mut self.dock, frame);
     }
 
@@ -1392,6 +1404,28 @@ fn update_timeline_playhead_widgets(widget: &mut dyn Widget, frame: i64) -> bool
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
             updated |= update_timeline_playhead_widgets(child, frame);
+        }
+    }
+    updated
+}
+
+fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> bool {
+    if let Some(viewer) = widget.as_any_mut().and_then(|any| any.downcast_mut::<ViewerSurface>()) {
+        viewer.set_playback_frame_state(
+            model.status.clone(),
+            model.status_tone,
+            model.timecode_label.clone(),
+            model.frame_label.clone(),
+            model.playing,
+            model.frame_image.clone(),
+        );
+        return true;
+    }
+
+    let mut updated = false;
+    for index in 0..widget.child_count() {
+        if let Some(child) = widget.child_mut(index) {
+            updated |= update_viewer_widgets(child, model);
         }
     }
     updated
@@ -3145,9 +3179,11 @@ mod tests {
         let mut root = AppUiAppRoot::from_app_state(&state);
 
         state.set_playback_frame_running(48);
-        root.refresh_playback_frame_from_app_state(&state);
+        root.refresh_playback_frame_from_app_state(&state, None);
 
         assert_eq!(root.models.timeline.playhead_frame, 48);
+        assert_eq!(root.models.viewer.frame_label, "F48");
+        assert!(root.models.viewer.playing);
     }
 
     #[test]

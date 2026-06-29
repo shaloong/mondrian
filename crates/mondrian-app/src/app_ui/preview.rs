@@ -3,12 +3,12 @@
 //! The service owns render-plan interpretation and preview-frame cache keys.
 //! Panels stay read-only and only consume `ViewerFrameImage` payloads.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use mondrian_assets::AssetKind;
@@ -39,8 +39,9 @@ pub struct AppUiPreviewService {
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     media_cache: RefCell<HashMap<MediaPreviewKey, MediaPreviewFrame>>,
     media_failures: RefCell<HashSet<MediaPreviewKey>>,
-    media_pending: RefCell<HashSet<MediaPreviewKey>>,
+    scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
+    current_generation: Cell<u64>,
 }
 
 impl AppUiPreviewService {
@@ -48,9 +49,11 @@ impl AppUiPreviewService {
     pub fn new() -> Self {
         let (job_tx, job_rx) = mpsc::channel::<MediaPreviewJob>();
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
+        let scheduler = MediaPreviewScheduler::default();
+        let worker_scheduler = scheduler.clone();
         if let Err(err) = std::thread::Builder::new()
             .name("mondrian-ui-viewer-preview".to_owned())
-            .spawn(move || media_preview_worker(job_rx, result_tx))
+            .spawn(move || media_preview_worker(job_rx, result_tx, worker_scheduler))
         {
             tracing::warn!("failed to start app UI viewer preview worker: {err}");
         }
@@ -60,8 +63,9 @@ impl AppUiPreviewService {
             results: RefCell::new(result_rx),
             media_cache: RefCell::new(HashMap::new()),
             media_failures: RefCell::new(HashSet::new()),
-            media_pending: RefCell::new(HashSet::new()),
+            scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
+            current_generation: Cell::new(0),
         }
     }
 
@@ -69,12 +73,12 @@ impl AppUiPreviewService {
     pub fn poll_finished(&self) -> bool {
         let mut changed = false;
         while let Ok(result) = self.results.borrow().try_recv() {
-            self.media_pending.borrow_mut().remove(&result.key);
+            let is_current = self.scheduler.complete(&result.key, result.generation);
             match result.frame {
                 Some(frame) => {
                     self.media_cache.borrow_mut().insert(result.key.clone(), frame);
                     self.media_failures.borrow_mut().remove(&result.key);
-                    changed = true;
+                    changed |= is_current;
                 }
                 None => {
                     if let Some(error) = result.error {
@@ -85,6 +89,7 @@ impl AppUiPreviewService {
                         );
                     }
                     self.media_failures.borrow_mut().insert(result.key);
+                    changed |= is_current;
                 }
             }
         }
@@ -92,6 +97,8 @@ impl AppUiPreviewService {
     }
 
     fn render_preview(&self, state: &AppState) -> Option<ViewerFrameImage> {
+        let generation = self.scheduler.begin_generation();
+        self.current_generation.set(generation);
         let sequence = state.sequence.as_ref()?;
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
@@ -256,10 +263,65 @@ struct MediaPreviewFrame {
     rgba: Vec<u8>,
 }
 
+#[derive(Clone, Default)]
+struct MediaPreviewScheduler {
+    state: Arc<Mutex<MediaPreviewSchedulerState>>,
+}
+
+#[derive(Default)]
+struct MediaPreviewSchedulerState {
+    latest_generation: u64,
+    pending: HashMap<MediaPreviewKey, u64>,
+}
+
+impl MediaPreviewScheduler {
+    fn begin_generation(&self) -> u64 {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        state.latest_generation = state.latest_generation.saturating_add(1);
+        state.latest_generation
+    }
+
+    fn request(&self, key: MediaPreviewKey, generation: u64) -> bool {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let is_new = !state.pending.contains_key(&key);
+        state.pending.insert(key, generation);
+        is_new
+    }
+
+    fn should_decode(&self, key: &MediaPreviewKey) -> bool {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let Some(generation) = state.pending.get(key).copied() else {
+            return false;
+        };
+        if generation >= state.latest_generation {
+            return true;
+        }
+        state.pending.remove(key);
+        false
+    }
+
+    fn complete(&self, key: &MediaPreviewKey, result_generation: u64) -> bool {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let pending_generation = state.pending.remove(key).unwrap_or(result_generation);
+        pending_generation >= state.latest_generation
+            || result_generation >= state.latest_generation
+    }
+
+    fn cancel(&self, key: &MediaPreviewKey) {
+        self.state.lock().expect("media preview scheduler poisoned").pending.remove(key);
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.state.lock().expect("media preview scheduler poisoned").pending.len()
+    }
+}
+
 #[derive(Debug)]
 struct MediaPreviewJob {
     key: MediaPreviewKey,
     source_secs: f64,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -267,6 +329,7 @@ struct MediaPreviewResult {
     key: MediaPreviewKey,
     frame: Option<MediaPreviewFrame>,
     error: Option<String>,
+    generation: u64,
 }
 
 impl AppUiPreviewService {
@@ -313,15 +376,15 @@ impl AppUiPreviewService {
     }
 
     fn request_media_preview(&self, key: MediaPreviewKey, source_secs: f64) {
-        if self.media_pending.borrow().contains(&key) {
+        let generation = self.current_generation.get();
+        if !self.scheduler.request(key.clone(), generation) {
             return;
         }
-        let job = MediaPreviewJob { key: key.clone(), source_secs };
+        let job = MediaPreviewJob { key: key.clone(), source_secs, generation };
         match self.jobs.send(job) {
-            Ok(()) => {
-                self.media_pending.borrow_mut().insert(key);
-            }
+            Ok(()) => {}
             Err(err) => {
+                self.scheduler.cancel(&key);
                 tracing::debug!("viewer preview worker unavailable: {err}");
             }
         }
@@ -406,8 +469,12 @@ fn source_micros(source_secs: f64) -> i64 {
 fn media_preview_worker(
     jobs: mpsc::Receiver<MediaPreviewJob>,
     results: mpsc::Sender<MediaPreviewResult>,
+    scheduler: MediaPreviewScheduler,
 ) {
     while let Ok(job) = jobs.recv() {
+        if !scheduler.should_decode(&job.key) {
+            continue;
+        }
         let result = decode_media_preview(job);
         if results.send(result).is_err() {
             break;
@@ -430,11 +497,13 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                 rgba: frame.data,
             }),
             error: None,
+            generation: job.generation,
         },
         Err(err) => MediaPreviewResult {
             key: job.key,
             frame: None,
             error: Some(err.to_string()),
+            generation: job.generation,
         },
     }
 }
@@ -583,10 +652,59 @@ mod tests {
             target_height: 180,
         };
 
-        let result = decode_media_preview(MediaPreviewJob { key: key.clone(), source_secs: 0.5 });
+        let result = decode_media_preview(MediaPreviewJob {
+            key: key.clone(),
+            source_secs: 0.5,
+            generation: 7,
+        });
 
         assert_eq!(result.key, key);
         assert!(result.frame.is_none());
         assert!(result.error.is_some());
+        assert_eq!(result.generation, 7);
+    }
+
+    #[test]
+    fn media_preview_scheduler_skips_obsolete_generations() {
+        let scheduler = MediaPreviewScheduler::default();
+        let first_generation = scheduler.begin_generation();
+        let key = MediaPreviewKey {
+            asset_id: AssetId::new(),
+            path: PathBuf::from("E:/media/a.mov"),
+            modified: None,
+            source_frame: 1,
+            source_micros: source_micros(1.0),
+            target_width: 320,
+            target_height: 180,
+        };
+        assert!(scheduler.request(key.clone(), first_generation));
+
+        scheduler.begin_generation();
+
+        assert!(!scheduler.should_decode(&key));
+        assert_eq!(scheduler.pending_len(), 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_keeps_re_requested_key_current() {
+        let scheduler = MediaPreviewScheduler::default();
+        let first_generation = scheduler.begin_generation();
+        let key = MediaPreviewKey {
+            asset_id: AssetId::new(),
+            path: PathBuf::from("E:/media/a.mov"),
+            modified: None,
+            source_frame: 1,
+            source_micros: source_micros(1.0),
+            target_width: 320,
+            target_height: 180,
+        };
+        assert!(scheduler.request(key.clone(), first_generation));
+
+        let second_generation = scheduler.begin_generation();
+        assert!(!scheduler.request(key.clone(), second_generation));
+
+        assert!(scheduler.should_decode(&key));
+        assert!(scheduler.complete(&key, first_generation));
+        assert_eq!(scheduler.pending_len(), 0);
     }
 }

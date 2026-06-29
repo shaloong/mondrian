@@ -60,3 +60,15 @@ Playback frame advancement must:
 Viewer preview rendering remains an adapter concern. It consumes the current
 playback frame from `AppState`; it must not own playback state or mutate the
 timeline to request frames.
+
+## Viewer Preview Scheduling
+
+Playback-frame refreshes use a narrow UI update path: the host advances
+`AppState`, then refreshes viewer playback chrome/frame data and the timeline
+playhead without rebuilding the full dock tree.
+
+`AppUiPreviewService` owns media preview scheduling. Each viewer preview request
+starts a monotonic generation, and background media jobs check that their key is
+still requested by the latest generation before decoding. Completed stale jobs
+may warm the cache, but they do not force a UI refresh for an older playback
+frame.

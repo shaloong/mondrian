@@ -300,6 +300,24 @@ impl ViewerSurface {
         self
     }
 
+    /// Update only playback-frame dependent viewer state.
+    pub fn set_playback_frame_state(
+        &mut self,
+        status: impl Into<String>,
+        status_tone: ViewerStatusTone,
+        timecode_label: impl Into<String>,
+        frame_label: impl Into<String>,
+        playing: bool,
+        frame_image: Option<ViewerFrameImage>,
+    ) {
+        self.status = status.into();
+        self.status_tone = status_tone;
+        self.timecode_label = timecode_label.into();
+        self.frame_label = frame_label.into();
+        self.playing = playing;
+        self.frame_image = frame_image;
+    }
+
     /// Set a short message painted inside the canvas when no frame is shown.
     pub fn with_empty_message(mut self, message: impl Into<String>) -> Self {
         self.empty_message = Some(message.into());
