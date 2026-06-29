@@ -165,7 +165,7 @@ pub struct ViewerSurface {
     on_control: Option<Box<ViewerControlAction>>,
     on_zoom: Option<Box<ViewerZoomAction>>,
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
-    root_clip_rect: Cell<Option<Rect>>,
+    overlay_viewport: Cell<Option<Rect>>,
     control_icons: Vec<(ViewerControl, VectorIcon)>,
     play_pause_icon: Option<VectorIcon>,
     playing_pause_icon: Option<VectorIcon>,
@@ -207,7 +207,7 @@ impl ViewerSurface {
             on_control: None,
             on_zoom: None,
             on_preview_quality: None,
-            root_clip_rect: Cell::new(None),
+            overlay_viewport: Cell::new(None),
             control_icons: Vec::new(),
             play_pause_icon: None,
             playing_pause_icon: None,
@@ -408,9 +408,9 @@ impl ViewerSurface {
     }
 
     fn dropdown_rect(&self, dropdown: ViewerDropdown) -> Rect {
-        let root = self.root_clip_rect.get().unwrap_or(self.bounds);
         viewer_model::dropdown_rect(
-            root,
+            self.bounds,
+            self.overlay_viewport.get(),
             dropdown,
             &self.zoom_label,
             &self.preview_quality_label,
@@ -420,6 +420,7 @@ impl ViewerSurface {
     fn dropdown_row_rect(&self, dropdown: ViewerDropdown, index: usize) -> Rect {
         viewer_model::dropdown_row_rect(
             self.bounds,
+            self.overlay_viewport.get(),
             dropdown,
             &self.zoom_label,
             &self.preview_quality_label,
@@ -430,6 +431,7 @@ impl ViewerSurface {
     fn dropdown_item_at(&self, point: Point) -> Option<(ViewerDropdown, usize)> {
         viewer_model::dropdown_item_at(
             self.bounds,
+            self.overlay_viewport.get(),
             self.open_dropdown,
             &self.zoom_label,
             &self.preview_quality_label,
@@ -553,6 +555,13 @@ impl Widget for ViewerSurface {
                 }
             }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                if let Some((dropdown, index)) = self.dropdown_item_at(*position) {
+                    self.open_dropdown = Some(dropdown);
+                    self.hovered_dropdown_index = Some(index);
+                    self.pressed_dropdown_index = Some(index);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if !self.bounds.contains(*position) {
                     if self.open_dropdown.is_some() {
                         self.open_dropdown = None;
@@ -563,13 +572,6 @@ impl Widget for ViewerSurface {
                     return EventResult::Ignored;
                 }
                 self.focus_from_pointer(ctx);
-                if let Some((dropdown, index)) = self.dropdown_item_at(*position) {
-                    self.open_dropdown = Some(dropdown);
-                    self.hovered_dropdown_index = Some(index);
-                    self.pressed_dropdown_index = Some(index);
-                    ctx.request_repaint();
-                    return EventResult::Handled;
-                }
                 if let Some(control) = self.control_at(*position) {
                     self.open_dropdown = None;
                     self.hovered_dropdown_index = None;
@@ -685,7 +687,6 @@ impl Widget for ViewerSurface {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        self.root_clip_rect.set(Some(ctx.clip_rect));
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let typography = &ctx.theme.typography;
@@ -722,11 +723,6 @@ impl Widget for ViewerSurface {
 
         ctx.push_clip(viewport);
         ctx.encoder.draw_rect(viewport, colors.viewer_stage, 0.0);
-        ctx.encoder.draw_rect(
-            canvas.inset(-1.0, -1.0),
-            color_with_alpha(colors.foreground, 0.08),
-            0.0,
-        );
         ctx.push_clip(canvas);
         ctx.encoder.draw_rect(canvas, colors.canvas, 0.0);
         if self.enabled {
@@ -798,7 +794,19 @@ impl Widget for ViewerSurface {
             self.pressed_preview_quality,
             self.open_dropdown == Some(ViewerDropdown::PreviewQuality),
         );
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if self.open_dropdown.is_none() {
+            self.overlay_viewport.set(None);
+            return;
+        }
+        self.overlay_viewport.set(Some(ctx.clip_rect));
         self.paint_open_dropdown(ctx);
+    }
+
+    fn overlay_hit_test(&self, _point: Point) -> bool {
+        self.enabled && self.open_dropdown.is_some()
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -2139,10 +2147,6 @@ mod tests {
         checker_dark.a *= 0.28;
         assert!(encoder.rect_colors.contains(&theme.colors.viewer_stage));
         assert!(encoder.rect_colors.contains(&checker_dark));
-        assert!(encoder
-            .rect_colors
-            .iter()
-            .any(|color| *color == color_with_alpha(theme.colors.foreground, 0.08)));
         assert!(encoder.rect_colors.contains(&theme.colors.canvas));
         assert!(
             encoder.clips.contains(&viewport),

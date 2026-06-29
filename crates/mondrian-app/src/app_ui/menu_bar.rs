@@ -813,7 +813,7 @@ mod tests {
             ("编辑", "剪切"),
             ("窗口", "时间线"),
             ("窗口", "效果"),
-            ("帮助", "关于 Mondrian"),
+            ("帮助", "关于"),
         ] {
             assert!(
                 menu_item(&menu_items, menu_label, item_label).icon.is_none(),
@@ -1337,10 +1337,7 @@ mod tests {
             .iter()
             .find_map(|(label, items)| (*label == "帮助").then_some(items))
             .expect("help menu");
-        let about = help_items
-            .iter()
-            .find(|item| item.label == "关于 Mondrian")
-            .expect("about item");
+        let about = help_items.iter().find(|item| item.label == "关于").expect("about item");
 
         match about.action().expect("about action") {
             Action::Custom { namespace, name, payload } => {

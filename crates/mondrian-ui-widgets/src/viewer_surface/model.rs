@@ -184,6 +184,7 @@ pub(super) fn dropdown_anchor_rect(
 
 pub(super) fn dropdown_rect(
     bounds: Rect,
+    overlay_viewport: Option<Rect>,
     dropdown: ViewerDropdown,
     zoom_label: &str,
     preview_quality_label: &str,
@@ -199,21 +200,41 @@ pub(super) fn dropdown_rect(
     };
     let metrics = ViewerMetrics::current();
     let height = row_count * metrics.dropdown_row_height + metrics.dropdown_padding_y * 2.0;
-    let min_x = bounds.x + 8.0;
-    let max_x = (bounds.x + bounds.width - width - 8.0).max(min_x);
+    let viewport = overlay_viewport.unwrap_or(bounds);
+    let min_x = viewport.x + 8.0;
+    let max_x = (viewport.x + viewport.width - width - 8.0).max(min_x);
     let x = (anchor.x + anchor.width - width).clamp(min_x, max_x);
-    let y = (anchor.y - height - 6.0).max(bounds.y + 8.0);
+    let gap = 6.0;
+    let below_y = anchor.y + anchor.height + gap;
+    let above_y = anchor.y - height - gap;
+    let min_y = viewport.y + 8.0;
+    let max_y = (viewport.y + viewport.height - height - 8.0).max(min_y);
+    let below_fits = below_y + height <= viewport.y + viewport.height - 8.0;
+    let above_fits = above_y >= min_y;
+    let preferred_y = if below_fits || !above_fits {
+        below_y
+    } else {
+        above_y
+    };
+    let y = preferred_y.clamp(min_y, max_y);
     Rect::new(x, y, width, height)
 }
 
 pub(super) fn dropdown_row_rect(
     bounds: Rect,
+    overlay_viewport: Option<Rect>,
     dropdown: ViewerDropdown,
     zoom_label: &str,
     preview_quality_label: &str,
     index: usize,
 ) -> Rect {
-    let menu = dropdown_rect(bounds, dropdown, zoom_label, preview_quality_label);
+    let menu = dropdown_rect(
+        bounds,
+        overlay_viewport,
+        dropdown,
+        zoom_label,
+        preview_quality_label,
+    );
     let metrics = ViewerMetrics::current();
     Rect::new(
         menu.x + metrics.dropdown_padding_x,
@@ -225,20 +246,34 @@ pub(super) fn dropdown_row_rect(
 
 pub(super) fn dropdown_item_at(
     bounds: Rect,
+    overlay_viewport: Option<Rect>,
     open_dropdown: Option<ViewerDropdown>,
     zoom_label: &str,
     preview_quality_label: &str,
     point: Point,
 ) -> Option<(ViewerDropdown, usize)> {
     let dropdown = open_dropdown?;
-    let menu = dropdown_rect(bounds, dropdown, zoom_label, preview_quality_label);
+    let menu = dropdown_rect(
+        bounds,
+        overlay_viewport,
+        dropdown,
+        zoom_label,
+        preview_quality_label,
+    );
     if !menu.contains(point) {
         return None;
     }
     (0..dropdown_options_len(dropdown))
         .find(|index| {
-            dropdown_row_rect(bounds, dropdown, zoom_label, preview_quality_label, *index)
-                .contains(point)
+            dropdown_row_rect(
+                bounds,
+                overlay_viewport,
+                dropdown,
+                zoom_label,
+                preview_quality_label,
+                *index,
+            )
+            .contains(point)
         })
         .map(|index| (dropdown, index))
 }
@@ -333,9 +368,10 @@ mod tests {
     #[test]
     fn dropdown_rect_clamps_to_viewer_bounds_and_rows_hit_test() {
         let bounds = Rect::new(10.0, 20.0, 520.0, 240.0);
-        let row = dropdown_row_rect(bounds, ViewerDropdown::Zoom, "适合", "1/1", 2);
+        let row = dropdown_row_rect(bounds, None, ViewerDropdown::Zoom, "适合", "1/1", 2);
         let hit = dropdown_item_at(
             bounds,
+            None,
             Some(ViewerDropdown::Zoom),
             "适合",
             "1/1",
@@ -343,9 +379,23 @@ mod tests {
         );
 
         assert_eq!(hit, Some((ViewerDropdown::Zoom, 2)));
-        let menu = dropdown_rect(bounds, ViewerDropdown::Zoom, "适合", "1/1");
+        let menu = dropdown_rect(bounds, None, ViewerDropdown::Zoom, "适合", "1/1");
         assert!(menu.x >= bounds.x + 8.0);
         assert!(menu.x + menu.width <= bounds.x + bounds.width - 8.0 + 0.001);
+    }
+
+    #[test]
+    fn dropdown_rect_uses_overlay_viewport_to_expand_below_viewer_panel() {
+        let bounds = Rect::new(10.0, 20.0, 520.0, 240.0);
+        let viewport = Rect::new(0.0, 0.0, 900.0, 720.0);
+        let anchor = dropdown_anchor_rect(bounds, ViewerDropdown::Zoom, "适合", "1/1");
+        let menu = dropdown_rect(bounds, Some(viewport), ViewerDropdown::Zoom, "适合", "1/1");
+
+        assert!(
+            menu.y > anchor.y + anchor.height,
+            "viewer dropdown should open below when the window viewport has room"
+        );
+        assert!(menu.y + menu.height <= viewport.y + viewport.height - 8.0 + 0.001);
     }
 
     #[test]

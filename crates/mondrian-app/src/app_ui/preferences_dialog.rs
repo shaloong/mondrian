@@ -20,15 +20,16 @@ use crate::app::ui_actions::{
     PreferencesTabPayload,
 };
 use crate::app::AppState;
+use crate::app_ui::commands::command_by_id;
 use crate::app_ui::shortcuts::{
     active_shortcuts, default_shortcuts, AppUiShortcutKey, AppUiShortcutOverride,
 };
 use crate::app_ui::window::{APP_UI_BACKGROUND_WORKERS, DEFAULT_APP_UI_LOG_FILTER};
 
-const CARD_MIN_WIDTH: f32 = 480.0;
-const CARD_WIDTH: f32 = 680.0;
+const CARD_MIN_WIDTH: f32 = 560.0;
+const CARD_WIDTH: f32 = 760.0;
 const CARD_MIN_HEIGHT: f32 = 360.0;
-const CARD_HEIGHT: f32 = 480.0;
+const CARD_HEIGHT: f32 = 520.0;
 const CONTENT_PADDING: f32 = 22.0;
 const BODY_FONT_SIZE: f32 = 13.0;
 const NAV_WIDTH: f32 = 144.0;
@@ -47,6 +48,7 @@ const THEME_BUTTON_GAP: f32 = 6.0;
 const SHORTCUT_BUTTON_WIDTH: f32 = 68.0;
 const SHORTCUT_BUTTON_GAP: f32 = 6.0;
 const SHORTCUT_BUTTON_HEIGHT: f32 = 24.0;
+const SHORTCUT_SCROLLBAR_GAP: f32 = 14.0;
 const SHORTCUT_HEADER_ROW_COUNT: usize = 2;
 
 /// Read-only settings/status snapshot shown by the app UI preferences UI.
@@ -561,8 +563,11 @@ impl Widget for PreferencesDialog {
         }
         let mut content_width = content.x + content.width - content_x;
         if self.active_tab == PreferencesDialogTab::Shortcuts {
-            content_width =
-                (content_width - SHORTCUT_BUTTON_WIDTH * 3.0 - SHORTCUT_BUTTON_GAP * 3.0).max(0.0);
+            content_width = (content_width
+                - SHORTCUT_BUTTON_WIDTH * 3.0
+                - SHORTCUT_BUTTON_GAP * 3.0
+                - SHORTCUT_SCROLLBAR_GAP)
+                .max(0.0);
         }
         for (index, label) in self.content_labels.iter_mut().enumerate() {
             let y = if self.active_tab == PreferencesDialogTab::Shortcuts
@@ -579,6 +584,7 @@ impl Widget for PreferencesDialog {
             let buttons_left = content.x + content.width
                 - SHORTCUT_BUTTON_WIDTH * 3.0
                 - SHORTCUT_BUTTON_GAP * 2.0
+                - SHORTCUT_SCROLLBAR_GAP
                 - 2.0;
             for (index, buttons) in self.shortcut_buttons.iter_mut().enumerate() {
                 let y = self.shortcut_viewport.y + index as f32 * ROW_HEIGHT
@@ -947,10 +953,13 @@ fn shortcut_preference_rows(overrides: &[AppUiShortcutOverride]) -> Vec<Shortcut
                     .as_ref()
                     .map_or_else(|| "已禁用".to_owned(), |owner| format!("与 {owner} 冲突"))
             });
+            let action = command_by_id(default.id)
+                .map(|command| command.title.to_owned())
+                .unwrap_or_else(|| default.id.to_owned());
             ShortcutPreferenceRow {
                 id: default.id.to_owned(),
                 label,
-                action: format!("{:?}", default.action),
+                action,
                 default_label: default.label,
                 overridden: override_entry.is_some(),
                 disabled,
@@ -1037,12 +1046,15 @@ fn content_rows_for_tab(
             detail(format!("输出：{}", model.export_output)),
         ],
         PreferencesDialogTab::Shortcuts => {
-            let mut rows = vec![heading("自研 UI 快捷键"), detail("当前命令绑定")];
+            let mut rows = vec![
+                heading("自研 UI 快捷键"),
+                detail("当前绑定 · 命令 · 默认绑定"),
+            ];
             rows.extend(model.shortcut_rows.iter().map(|row| {
-                let suffix = if row.disabled || row.overridden {
-                    format!("默认 {}", row.default_label)
+                let suffix = if row.default_label.is_empty() {
+                    "无默认".to_owned()
                 } else {
-                    "默认".to_owned()
+                    row.default_label.clone()
                 };
                 detail(format!("{}  ·  {}  ·  {}", row.label, row.action, suffix))
             }));
@@ -1140,6 +1152,23 @@ mod tests {
 
         assert_eq!(dialog.active_tab(), PreferencesDialogTab::Shortcuts);
         assert!(dialog.content_labels.len() > crate::app_ui::shortcuts::default_shortcuts().len());
+    }
+
+    #[test]
+    fn preferences_shortcut_rows_show_command_titles_not_debug_actions() {
+        let model = AppUiPreferencesModel::default();
+
+        assert!(model
+            .shortcut_rows
+            .iter()
+            .any(|row| row.id == "file.new_project" && row.action == "新建项目"));
+        assert!(
+            model
+                .shortcut_rows
+                .iter()
+                .all(|row| !row.action.contains("Custom") && !row.action.contains("namespace")),
+            "shortcut preference rows should not expose internal Action debug formatting"
+        );
     }
 
     #[test]

@@ -370,7 +370,7 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
         command(
             "app.about",
             "关于",
-            "关于 Mondrian",
+            "关于",
             AppUiCommandCategory::Help,
             None,
             action_about,

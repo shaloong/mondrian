@@ -215,6 +215,9 @@ impl ContextMenu {
         let parent_rect = self.item_rect(chain_path[0]);
         let children = self.children_at(&chain_path[..1])?;
         let mut bg = submenu_rect(parent_rect, children, MAX_VISIBLE_ITEMS, self.item_height());
+        if chain_path.len() == 1 {
+            return Some(bg);
+        }
         let mut scroll = 0.0f32;
         let mut current_items = children;
 
@@ -986,6 +989,39 @@ mod tests {
 
         assert!(!menu.visible);
         assert_eq!(cell.into_inner(), vec![Action::Cut]);
+    }
+
+    #[test]
+    fn context_menu_submenu_rows_track_hover() {
+        let mut menu = ContextMenu::new(
+            Point::new(100.0, 100.0),
+            vec![MenuItem::submenu(
+                "新建",
+                vec![
+                    MenuItem::new("文件夹", Action::SaveProject),
+                    MenuItem::new("纯色", Action::DeselectAll),
+                ],
+            )],
+        );
+        menu.layout(Rect::ZERO);
+        menu.submenu_chain.push(0);
+        let submenu = menu.submenu_rect_at(&[0]).expect("first submenu should resolve");
+        let target = geometry_item_rect(submenu, 1, menu.item_height(), 0.0).center();
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let dispatch_fn = |_a: Action| {};
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+        assert_eq!(
+            menu.event(
+                &UiEvent::MouseMove { position: target, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(menu.hover_depth, Some((1, 1)));
     }
 
     #[test]
