@@ -4,13 +4,17 @@
 //! deliberately depends on app-shell actions instead of legacy egui preference
 //! state so each preference can be migrated into a clean, typed boundary.
 
+use mondrian_core::Color;
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_export::preset::TimelineExportRange;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_theme::{ThemePreference, ThemePreset};
-use mondrian_ui_widgets::{Button, DialogSurface, Label, WaveformDisplay};
+use mondrian_ui_widgets::{
+    Button, DialogSurface, Label, SegmentedButtonGroup, SegmentedButtonItem, TextInput,
+    WaveformDisplay,
+};
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_preferences_shortcut_disabled_action,
@@ -20,16 +24,17 @@ use crate::app::ui_actions::{
     PreferencesTabPayload,
 };
 use crate::app::AppState;
-use crate::app_ui::commands::command_by_id;
+use crate::app_ui::commands::{command_by_id, AppUiCommandCategory};
 use crate::app_ui::shortcuts::{
-    active_shortcuts, default_shortcuts, AppUiShortcutKey, AppUiShortcutOverride,
+    active_shortcuts, default_shortcuts, AppUiShortcutBinding, AppUiShortcutKey,
+    AppUiShortcutOverride,
 };
 use crate::app_ui::window::{APP_UI_BACKGROUND_WORKERS, DEFAULT_APP_UI_LOG_FILTER};
 
-const CARD_MIN_WIDTH: f32 = 560.0;
-const CARD_WIDTH: f32 = 760.0;
+const CARD_MIN_WIDTH: f32 = 680.0;
+const CARD_WIDTH: f32 = 860.0;
 const CARD_MIN_HEIGHT: f32 = 360.0;
-const CARD_HEIGHT: f32 = 520.0;
+const CARD_HEIGHT: f32 = 560.0;
 const CONTENT_PADDING: f32 = 22.0;
 const BODY_FONT_SIZE: f32 = 13.0;
 const NAV_WIDTH: f32 = 144.0;
@@ -42,14 +47,13 @@ const ROW_HEIGHT: f32 = 28.0;
 const BUTTON_WIDTH: f32 = 84.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
-const THEME_BUTTON_WIDTH: f32 = 76.0;
-const THEME_BUTTON_HEIGHT: f32 = 26.0;
-const THEME_BUTTON_GAP: f32 = 6.0;
-const SHORTCUT_BUTTON_WIDTH: f32 = 68.0;
-const SHORTCUT_BUTTON_GAP: f32 = 6.0;
-const SHORTCUT_BUTTON_HEIGHT: f32 = 24.0;
-const SHORTCUT_SCROLLBAR_GAP: f32 = 14.0;
-const SHORTCUT_HEADER_ROW_COUNT: usize = 2;
+const SEGMENTED_GROUP_HEIGHT: f32 = 30.0;
+const SHORTCUT_SEARCH_HEIGHT: f32 = 32.0;
+const SHORTCUT_SECTION_HEIGHT: f32 = 30.0;
+const SHORTCUT_ROW_HEIGHT: f32 = 38.0;
+const SHORTCUT_ACTION_MENU_WIDTH: f32 = 116.0;
+const SHORTCUT_ACTION_MENU_ROW_HEIGHT: f32 = 28.0;
+const SHORTCUT_SCROLLBAR_GAP: f32 = 10.0;
 
 /// Read-only settings/status snapshot shown by the app UI preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,12 +81,14 @@ pub struct AppUiPreferencesModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortcutPreferenceRow {
     pub id: String,
-    pub label: String,
-    pub action: String,
-    pub default_label: String,
+    pub command_title: String,
+    pub category: AppUiCommandCategory,
+    pub binding_label: String,
+    pub default_binding_label: String,
     pub overridden: bool,
     pub disabled: bool,
     pub conflict_owner: Option<String>,
+    pub search_text: String,
 }
 
 impl AppUiPreferencesModel {
@@ -233,21 +239,50 @@ pub struct PreferencesDialog {
     card: Rect,
     shortcut_viewport: Rect,
     shortcut_scroll_offset: f32,
-    capturing_shortcut: Option<String>,
+    shortcut_search: TextInput,
+    shortcut_search_query: String,
+    shortcut_sections: Vec<ShortcutSectionState>,
+    shortcut_layout_rows: Vec<ShortcutLayoutRow>,
+    hovered_shortcut_id: Option<String>,
+    shortcut_actions_menu: Option<String>,
+    shortcut_capture: Option<ShortcutCaptureState>,
     nav_buttons: Vec<Button>,
-    theme_buttons: Vec<Button>,
-    waveform_buttons: Vec<Button>,
+    theme_group: SegmentedButtonGroup,
+    waveform_group: SegmentedButtonGroup,
     content_labels: Vec<Label>,
-    shortcut_buttons: Vec<ShortcutPreferenceButtons>,
     close_button: Button,
 }
 
-struct ShortcutPreferenceButtons {
+#[derive(Debug, Clone)]
+struct ShortcutSectionState {
+    category: AppUiCommandCategory,
+    collapsed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ShortcutLayoutRow {
+    kind: ShortcutLayoutRowKind,
+    rect: Rect,
+}
+
+#[derive(Debug, Clone)]
+enum ShortcutLayoutRowKind {
+    Section {
+        category: AppUiCommandCategory,
+        title: &'static str,
+        count: usize,
+        collapsed: bool,
+    },
+    Command {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShortcutCaptureState {
     id: String,
-    rebind: Button,
-    rebind_bounds: Rect,
-    disable: Button,
-    reset: Button,
+    pending: Option<AppUiShortcutBinding>,
+    conflict_owner: Option<String>,
 }
 
 impl PreferencesDialog {
@@ -276,25 +311,43 @@ impl PreferencesDialog {
                     .on_click(app_shell_preferences_tab_changed_action(tab.payload()))
             })
             .collect();
-        let theme_buttons = ThemePreference::ALL
-            .into_iter()
-            .map(|preference| {
-                Button::new(preference.display_name())
-                    .on_click(app_shell_preferences_theme_changed_action(preference))
-            })
-            .collect();
-        let waveform_buttons = vec![
-            Button::new("整流")
-                .active(model.waveform_display == WaveformDisplay::BottomAligned)
-                .on_click(app_shell_preferences_waveform_display_changed_action(
-                    WaveformDisplay::BottomAligned,
-                )),
-            Button::new("完整")
-                .active(model.waveform_display == WaveformDisplay::Centered)
-                .on_click(app_shell_preferences_waveform_display_changed_action(
-                    WaveformDisplay::Centered,
-                )),
-        ];
+        let theme_selected = ThemePreference::ALL
+            .iter()
+            .position(|preference| *preference == model.theme_preference)
+            .unwrap_or(0);
+        let theme_group = SegmentedButtonGroup::new(
+            ThemePreference::ALL
+                .into_iter()
+                .map(|preference| {
+                    SegmentedButtonItem::new(
+                        preference.display_name(),
+                        app_shell_preferences_theme_changed_action(preference),
+                    )
+                })
+                .collect(),
+            theme_selected,
+        );
+        let waveform_selected = match model.waveform_display {
+            WaveformDisplay::BottomAligned => 0,
+            WaveformDisplay::Centered => 1,
+        };
+        let waveform_group = SegmentedButtonGroup::new(
+            vec![
+                SegmentedButtonItem::new(
+                    "整流",
+                    app_shell_preferences_waveform_display_changed_action(
+                        WaveformDisplay::BottomAligned,
+                    ),
+                ),
+                SegmentedButtonItem::new(
+                    "完整",
+                    app_shell_preferences_waveform_display_changed_action(
+                        WaveformDisplay::Centered,
+                    ),
+                ),
+            ],
+            waveform_selected,
+        );
         let mut dialog = Self {
             id: WidgetId::new(),
             active_tab,
@@ -308,12 +361,17 @@ impl PreferencesDialog {
             card: Rect::ZERO,
             shortcut_viewport: Rect::ZERO,
             shortcut_scroll_offset: 0.0,
-            capturing_shortcut: None,
+            shortcut_search: TextInput::new("搜索命令或快捷键..."),
+            shortcut_search_query: String::new(),
+            shortcut_sections: default_shortcut_sections(),
+            shortcut_layout_rows: Vec::new(),
+            hovered_shortcut_id: None,
+            shortcut_actions_menu: None,
+            shortcut_capture: None,
             nav_buttons,
-            theme_buttons,
-            waveform_buttons,
+            theme_group,
+            waveform_group,
             content_labels: Vec::new(),
-            shortcut_buttons: Vec::new(),
             close_button: Button::new("完成").on_click(app_shell_close_modal_action()),
         };
         dialog.rebuild_content();
@@ -336,17 +394,30 @@ impl PreferencesDialog {
             return;
         }
         self.model = model;
-        self.waveform_buttons[0]
-            .set_active(self.model.waveform_display == WaveformDisplay::BottomAligned);
-        self.waveform_buttons[1]
-            .set_active(self.model.waveform_display == WaveformDisplay::Centered);
+        let theme_selected = ThemePreference::ALL
+            .iter()
+            .position(|preference| *preference == self.model.theme_preference)
+            .unwrap_or(0);
+        self.theme_group.set_selected_index(theme_selected);
+        self.waveform_group.set_selected_index(
+            if self.model.waveform_display == WaveformDisplay::BottomAligned {
+                0
+            } else {
+                1
+            },
+        );
         if self
-            .capturing_shortcut
-            .as_deref()
+            .shortcut_capture
+            .as_ref()
+            .map(|capture| capture.id.as_str())
             .is_some_and(|id| !self.model.shortcut_rows.iter().any(|row| row.id == id))
         {
-            self.capturing_shortcut = None;
+            self.shortcut_capture = None;
         }
+        self.shortcut_actions_menu = self
+            .shortcut_actions_menu
+            .take()
+            .filter(|id| self.model.shortcut_rows.iter().any(|row| row.id == *id));
         self.clamp_shortcut_scroll();
         self.rebuild_content();
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -364,7 +435,9 @@ impl PreferencesDialog {
             button.set_active(PreferencesDialogTab::ALL[i] == tab);
         }
         if self.active_tab != PreferencesDialogTab::Shortcuts {
-            self.capturing_shortcut = None;
+            self.shortcut_capture = None;
+            self.shortcut_actions_menu = None;
+            self.hovered_shortcut_id = None;
         }
         self.clamp_shortcut_scroll();
         self.rebuild_content();
@@ -391,35 +464,17 @@ impl PreferencesDialog {
                 }
             })
             .collect();
-        self.shortcut_buttons = if self.active_tab == PreferencesDialogTab::Shortcuts {
-            self.model
-                .shortcut_rows
-                .iter()
-                .map(|row| ShortcutPreferenceButtons {
-                    id: row.id.clone(),
-                    rebind: Button::new(if self.capturing_shortcut.as_deref() == Some(&row.id) {
-                        "按下按键"
-                    } else {
-                        "重设"
-                    }),
-                    rebind_bounds: Rect::ZERO,
-                    disable: Button::new("禁用")
-                        .on_click(app_shell_preferences_shortcut_disabled_action(
-                            row.id.clone(),
-                        ))
-                        .enabled(!row.disabled),
-                    reset: Button::new("默认")
-                        .on_click(app_shell_preferences_shortcut_reset_action(row.id.clone()))
-                        .enabled(row.overridden),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        self.rebuild_shortcut_layout_rows();
     }
 
     fn shortcut_content_height(&self) -> f32 {
-        self.model.shortcut_rows.len() as f32 * ROW_HEIGHT
+        self.shortcut_layout_rows
+            .iter()
+            .map(|row| match row.kind {
+                ShortcutLayoutRowKind::Section { .. } => SHORTCUT_SECTION_HEIGHT,
+                ShortcutLayoutRowKind::Command { .. } => SHORTCUT_ROW_HEIGHT,
+            })
+            .sum()
     }
 
     fn max_shortcut_scroll(&self) -> f32 {
@@ -429,6 +484,162 @@ impl PreferencesDialog {
     fn clamp_shortcut_scroll(&mut self) {
         self.shortcut_scroll_offset =
             self.shortcut_scroll_offset.clamp(0.0, self.max_shortcut_scroll());
+    }
+
+    fn rebuild_shortcut_layout_rows(&mut self) {
+        self.shortcut_layout_rows.clear();
+        if self.active_tab != PreferencesDialogTab::Shortcuts {
+            return;
+        }
+        let query = normalized_search_query(&self.shortcut_search_query);
+        for section in &self.shortcut_sections {
+            let rows: Vec<&ShortcutPreferenceRow> = self
+                .model
+                .shortcut_rows
+                .iter()
+                .filter(|row| row.category == section.category)
+                .filter(|row| query.is_empty() || row.search_text.contains(&query))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let collapsed = section.collapsed && query.is_empty();
+            self.shortcut_layout_rows.push(ShortcutLayoutRow {
+                kind: ShortcutLayoutRowKind::Section {
+                    category: section.category,
+                    title: shortcut_category_label(section.category),
+                    count: rows.len(),
+                    collapsed,
+                },
+                rect: Rect::ZERO,
+            });
+            if !collapsed {
+                self.shortcut_layout_rows.extend(rows.into_iter().map(|row| ShortcutLayoutRow {
+                    kind: ShortcutLayoutRowKind::Command { id: row.id.clone() },
+                    rect: Rect::ZERO,
+                }));
+            }
+        }
+        if let Some(id) = self.hovered_shortcut_id.clone() {
+            if !self
+                .shortcut_layout_rows
+                .iter()
+                .any(|row| matches!(&row.kind, ShortcutLayoutRowKind::Command { id: row_id } if row_id == &id))
+            {
+                self.hovered_shortcut_id = None;
+            }
+        }
+    }
+
+    fn find_shortcut_row(&self, id: &str) -> Option<&ShortcutPreferenceRow> {
+        self.model.shortcut_rows.iter().find(|row| row.id == id)
+    }
+
+    fn toggle_shortcut_section(&mut self, category: AppUiCommandCategory, ctx: &mut EventContext) {
+        if let Some(section) =
+            self.shortcut_sections.iter_mut().find(|section| section.category == category)
+        {
+            section.collapsed = !section.collapsed;
+            self.rebuild_shortcut_layout_rows();
+            self.layout(self.bounds);
+            ctx.request_repaint();
+        }
+    }
+
+    fn row_keycap_rect(&self, rect: Rect) -> Rect {
+        Rect::new(rect.x + rect.width - 176.0, rect.y + 7.0, 116.0, 24.0)
+    }
+
+    fn row_action_rect(&self, rect: Rect) -> Rect {
+        Rect::new(rect.x + rect.width - 42.0, rect.y + 7.0, 28.0, 24.0)
+    }
+
+    fn action_menu_rect_for(&self, id: &str) -> Option<Rect> {
+        let row = self.shortcut_layout_rows.iter().find(|row| {
+            matches!(&row.kind, ShortcutLayoutRowKind::Command { id: row_id } if row_id == id)
+        })?;
+        let action = self.row_action_rect(row.rect);
+        Some(Rect::new(
+            action.x + action.width - SHORTCUT_ACTION_MENU_WIDTH,
+            action.y + action.height + 4.0,
+            SHORTCUT_ACTION_MENU_WIDTH,
+            SHORTCUT_ACTION_MENU_ROW_HEIGHT * 2.0 + 8.0,
+        ))
+    }
+
+    fn action_menu_item_at(&self, position: Point) -> Option<(String, ShortcutActionMenuItem)> {
+        let id = self.shortcut_actions_menu.as_ref()?;
+        let menu = self.action_menu_rect_for(id)?;
+        if !menu.contains(position) {
+            return None;
+        }
+        let reset = Rect::new(
+            menu.x + 4.0,
+            menu.y + 4.0,
+            menu.width - 8.0,
+            SHORTCUT_ACTION_MENU_ROW_HEIGHT,
+        );
+        let disable = Rect::new(
+            menu.x + 4.0,
+            reset.y + SHORTCUT_ACTION_MENU_ROW_HEIGHT,
+            menu.width - 8.0,
+            SHORTCUT_ACTION_MENU_ROW_HEIGHT,
+        );
+        if reset.contains(position) {
+            Some((id.clone(), ShortcutActionMenuItem::Reset))
+        } else if disable.contains(position) {
+            Some((id.clone(), ShortcutActionMenuItem::Disable))
+        } else {
+            None
+        }
+    }
+
+    fn shortcut_row_at(&self, position: Point) -> Option<&ShortcutLayoutRow> {
+        self.shortcut_layout_rows.iter().find(|row| row.rect.contains(position))
+    }
+
+    fn shortcut_conflict_owner(&self, id: &str, binding: AppUiShortcutBinding) -> Option<String> {
+        let label = binding.label();
+        self.model
+            .shortcut_rows
+            .iter()
+            .find(|row| row.id != id && !row.disabled && row.binding_label == label)
+            .map(|row| row.id.clone())
+    }
+
+    fn begin_shortcut_capture(&mut self, id: String, ctx: &mut EventContext) {
+        self.shortcut_capture =
+            Some(ShortcutCaptureState { id, pending: None, conflict_owner: None });
+        self.shortcut_actions_menu = None;
+        ctx.request_repaint();
+    }
+
+    fn cancel_shortcut_capture(&mut self, ctx: &mut EventContext) {
+        if self.shortcut_capture.take().is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn commit_shortcut_capture(&mut self, ctx: &mut EventContext) -> EventResult {
+        let Some(capture) = self.shortcut_capture.clone() else {
+            return EventResult::Ignored;
+        };
+        let Some(binding) = capture.pending else {
+            return EventResult::Handled;
+        };
+        (ctx.dispatch)(app_shell_preferences_shortcut_rebound_action(
+            PreferencesShortcutReboundPayload {
+                id: capture.id,
+                key: binding.key.preference_name().to_owned(),
+                ctrl: binding.ctrl,
+                alt: binding.alt,
+                shift: binding.shift,
+                meta: binding.meta,
+            },
+        ));
+        self.shortcut_capture = None;
+        ctx.request_repaint();
+        EventResult::Handled
     }
 
     fn set_shortcut_scroll(&mut self, offset: f32, ctx: &mut EventContext) -> EventResult {
@@ -443,54 +654,44 @@ impl PreferencesDialog {
         }
     }
 
-    fn begin_shortcut_capture(&mut self, id: String, ctx: &mut EventContext) {
-        self.capturing_shortcut = Some(id);
-        self.rebuild_content();
-        if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
-            self.layout(self.bounds);
-        }
-        ctx.request_repaint();
-    }
-
-    fn cancel_shortcut_capture(&mut self, ctx: &mut EventContext) {
-        if self.capturing_shortcut.take().is_some() {
-            self.rebuild_content();
-            if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
-                self.layout(self.bounds);
-            }
-            ctx.request_repaint();
-        }
-    }
-
     fn capture_shortcut_key(
         &mut self,
         key: KeyCode,
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> EventResult {
-        let Some(id) = self.capturing_shortcut.clone() else {
+        let Some(id) = self.shortcut_capture.as_ref().map(|capture| capture.id.clone()) else {
             return EventResult::Ignored;
         };
         if key == KeyCode::Escape {
             self.cancel_shortcut_capture(ctx);
             return EventResult::Handled;
         }
+        if key == KeyCode::Enter {
+            return self.commit_shortcut_capture(ctx);
+        }
         let Some(key) = AppUiShortcutKey::from_key_code(key) else {
             return EventResult::Handled;
         };
-        (ctx.dispatch)(app_shell_preferences_shortcut_rebound_action(
-            PreferencesShortcutReboundPayload {
-                id,
-                key: key.preference_name().to_owned(),
-                ctrl: modifiers.ctrl,
-                alt: modifiers.alt,
-                shift: modifiers.shift,
-                meta: modifiers.meta,
-            },
-        ));
-        self.cancel_shortcut_capture(ctx);
+        let binding = AppUiShortcutBinding {
+            key,
+            ctrl: modifiers.ctrl,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+            meta: modifiers.meta,
+        };
+        let conflict_owner = self.shortcut_conflict_owner(&id, binding);
+        self.shortcut_capture =
+            Some(ShortcutCaptureState { id, pending: Some(binding), conflict_owner });
+        ctx.request_repaint();
         EventResult::Handled
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutActionMenuItem {
+    Reset,
+    Disable,
 }
 
 impl Default for PreferencesDialog {
@@ -521,9 +722,9 @@ impl Widget for PreferencesDialog {
         self.shortcut_viewport = if self.active_tab == PreferencesDialogTab::Shortcuts {
             Rect::new(
                 content_x,
-                body_top + SHORTCUT_HEADER_ROW_COUNT as f32 * ROW_HEIGHT,
+                body_top + SHORTCUT_SEARCH_HEIGHT + 14.0,
                 (content.x + content.width - content_x).max(0.0),
-                (list_bottom - (body_top + SHORTCUT_HEADER_ROW_COUNT as f32 * ROW_HEIGHT)).max(0.0),
+                (list_bottom - (body_top + SHORTCUT_SEARCH_HEIGHT + 14.0)).max(0.0),
             )
         } else {
             Rect::ZERO
@@ -537,79 +738,54 @@ impl Widget for PreferencesDialog {
                 NAV_BUTTON_HEIGHT,
             ));
         }
-        for (index, button) in self.theme_buttons.iter_mut().enumerate() {
-            if self.active_tab == PreferencesDialogTab::General {
-                button.layout(Rect::new(
-                    content_x + 116.0 + index as f32 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
-                    body_top + ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
-                    THEME_BUTTON_WIDTH,
-                    THEME_BUTTON_HEIGHT,
-                ));
-            } else {
-                button.layout(Rect::ZERO);
-            }
-        }
-        for (index, button) in self.waveform_buttons.iter_mut().enumerate() {
-            if self.active_tab == PreferencesDialogTab::General {
-                button.layout(Rect::new(
-                    content_x + 116.0 + index as f32 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
-                    body_top + 2.0 * ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
-                    THEME_BUTTON_WIDTH,
-                    THEME_BUTTON_HEIGHT,
-                ));
-            } else {
-                button.layout(Rect::ZERO);
-            }
-        }
-        let mut content_width = content.x + content.width - content_x;
-        if self.active_tab == PreferencesDialogTab::Shortcuts {
-            content_width = (content_width
-                - SHORTCUT_BUTTON_WIDTH * 3.0
-                - SHORTCUT_BUTTON_GAP * 3.0
-                - SHORTCUT_SCROLLBAR_GAP)
-                .max(0.0);
-        }
-        for (index, label) in self.content_labels.iter_mut().enumerate() {
-            let y = if self.active_tab == PreferencesDialogTab::Shortcuts
-                && index >= SHORTCUT_HEADER_ROW_COUNT
-            {
-                self.shortcut_viewport.y + (index - SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
-                    - self.shortcut_scroll_offset
-            } else {
-                body_top + index as f32 * ROW_HEIGHT
-            };
-            label.layout(Rect::new(content_x, y, content_width, ROW_HEIGHT));
+        if self.active_tab == PreferencesDialogTab::General {
+            self.theme_group.layout(Rect::new(
+                content_x + 126.0,
+                body_top + ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
+                238.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
+            self.waveform_group.layout(Rect::new(
+                content_x + 126.0,
+                body_top + 2.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
+                160.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
+        } else {
+            self.theme_group.layout(Rect::ZERO);
+            self.waveform_group.layout(Rect::ZERO);
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
-            let buttons_left = content.x + content.width
-                - SHORTCUT_BUTTON_WIDTH * 3.0
-                - SHORTCUT_BUTTON_GAP * 2.0
-                - SHORTCUT_SCROLLBAR_GAP
-                - 2.0;
-            for (index, buttons) in self.shortcut_buttons.iter_mut().enumerate() {
-                let y = self.shortcut_viewport.y + index as f32 * ROW_HEIGHT
-                    - self.shortcut_scroll_offset
-                    + (ROW_HEIGHT - SHORTCUT_BUTTON_HEIGHT) * 0.5;
-                buttons.rebind_bounds = Rect::new(
-                    buttons_left,
+            self.shortcut_search.layout(Rect::new(
+                content_x,
+                body_top,
+                (content.x + content.width - content_x).max(0.0),
+                SHORTCUT_SEARCH_HEIGHT,
+            ));
+            let mut y = self.shortcut_viewport.y - self.shortcut_scroll_offset;
+            for row in &mut self.shortcut_layout_rows {
+                let height = match row.kind {
+                    ShortcutLayoutRowKind::Section { .. } => SHORTCUT_SECTION_HEIGHT,
+                    ShortcutLayoutRowKind::Command { .. } => SHORTCUT_ROW_HEIGHT,
+                };
+                row.rect = Rect::new(
+                    self.shortcut_viewport.x,
                     y,
-                    SHORTCUT_BUTTON_WIDTH,
-                    SHORTCUT_BUTTON_HEIGHT,
+                    (self.shortcut_viewport.width - SHORTCUT_SCROLLBAR_GAP).max(0.0),
+                    height,
                 );
-                buttons.rebind.layout(buttons.rebind_bounds);
-                buttons.disable.layout(Rect::new(
-                    buttons_left + SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP,
-                    y,
-                    SHORTCUT_BUTTON_WIDTH,
-                    SHORTCUT_BUTTON_HEIGHT,
-                ));
-                buttons.reset.layout(Rect::new(
-                    buttons_left + (SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP) * 2.0,
-                    y,
-                    SHORTCUT_BUTTON_WIDTH,
-                    SHORTCUT_BUTTON_HEIGHT,
-                ));
+                y += height;
             }
+        } else {
+            self.shortcut_search.layout(Rect::ZERO);
+            for row in &mut self.shortcut_layout_rows {
+                row.rect = Rect::ZERO;
+            }
+        }
+        let content_width = content.x + content.width - content_x;
+        for (index, label) in self.content_labels.iter_mut().enumerate() {
+            let y = body_top + index as f32 * ROW_HEIGHT;
+            label.layout(Rect::new(content_x, y, content_width, ROW_HEIGHT));
         }
 
         self.close_button.layout(Rect::new(
@@ -622,7 +798,7 @@ impl Widget for PreferencesDialog {
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         if let UiEvent::KeyDown { key, modifiers } = event {
-            if self.capturing_shortcut.is_some() {
+            if self.shortcut_capture.is_some() {
                 return self.capture_shortcut_key(*key, *modifiers, ctx);
             }
         }
@@ -656,47 +832,108 @@ impl Widget for PreferencesDialog {
             }
         }
         if self.active_tab == PreferencesDialogTab::General {
-            for button in &mut self.theme_buttons {
-                if button.event(event, ctx) == EventResult::Handled {
-                    return EventResult::Handled;
-                }
+            if self.theme_group.event(event, ctx) == EventResult::Handled {
+                return EventResult::Handled;
             }
-            for button in &mut self.waveform_buttons {
-                if button.event(event, ctx) == EventResult::Handled {
-                    return EventResult::Handled;
-                }
+            if self.waveform_group.event(event, ctx) == EventResult::Handled {
+                return EventResult::Handled;
             }
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
-            let pointer_position = pointer_position(event);
-            let inside_viewport =
-                pointer_position.is_none_or(|position| self.shortcut_viewport.contains(position));
-            if inside_viewport {
-                let mut capture_id = None;
-                for buttons in &mut self.shortcut_buttons {
-                    if buttons.rebind.event(event, ctx) == EventResult::Handled {
-                        if let UiEvent::MouseUp { position, button: MouseButton::Left, .. } = event
-                        {
-                            if buttons.rebind_bounds.contains(*position) {
-                                capture_id = Some(buttons.id.clone());
+            let before_query = self.shortcut_search.text().to_owned();
+            if self.shortcut_search.event(event, ctx) == EventResult::Handled {
+                let next_query = self.shortcut_search.text().to_owned();
+                if next_query != before_query {
+                    self.shortcut_search_query = next_query;
+                    self.shortcut_scroll_offset = 0.0;
+                    self.rebuild_shortcut_layout_rows();
+                    self.layout(self.bounds);
+                }
+                return EventResult::Handled;
+            }
+
+            match event {
+                UiEvent::MouseMove { position, .. } => {
+                    let next_hover = if self.shortcut_viewport.contains(*position) {
+                        self.shortcut_row_at(*position).and_then(|row| match &row.kind {
+                            ShortcutLayoutRowKind::Command { id } => Some(id.clone()),
+                            ShortcutLayoutRowKind::Section { .. } => None,
+                        })
+                    } else {
+                        None
+                    };
+                    if next_hover != self.hovered_shortcut_id {
+                        self.hovered_shortcut_id = next_hover;
+                        ctx.request_repaint();
+                    }
+                }
+                UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                    if let Some((id, item)) = self.action_menu_item_at(*position) {
+                        let row = self.find_shortcut_row(&id);
+                        match item {
+                            ShortcutActionMenuItem::Reset
+                                if row.is_some_and(|row| row.overridden) =>
+                            {
+                                (ctx.dispatch)(app_shell_preferences_shortcut_reset_action(id));
                             }
+                            ShortcutActionMenuItem::Disable
+                                if row.is_some_and(|row| !row.disabled) =>
+                            {
+                                (ctx.dispatch)(app_shell_preferences_shortcut_disabled_action(id));
+                            }
+                            _ => {}
                         }
-                        if capture_id.is_none() {
+                        self.shortcut_actions_menu = None;
+                        ctx.request_repaint();
+                        return EventResult::Handled;
+                    }
+                    if let Some(capture) = &self.shortcut_capture {
+                        let confirm = shortcut_capture_confirm_rect(self.shortcut_viewport);
+                        let replace = Rect::new(
+                            confirm.x + confirm.width - 148.0,
+                            confirm.y + 8.0,
+                            66.0,
+                            24.0,
+                        );
+                        let cancel = Rect::new(
+                            confirm.x + confirm.width - 74.0,
+                            confirm.y + 8.0,
+                            58.0,
+                            24.0,
+                        );
+                        if capture.pending.is_some() && replace.contains(*position) {
+                            return self.commit_shortcut_capture(ctx);
+                        }
+                        if cancel.contains(*position) {
+                            self.cancel_shortcut_capture(ctx);
                             return EventResult::Handled;
                         }
-                        break;
                     }
-                    if buttons.disable.event(event, ctx) == EventResult::Handled {
-                        return EventResult::Handled;
-                    }
-                    if buttons.reset.event(event, ctx) == EventResult::Handled {
-                        return EventResult::Handled;
+                    let Some(row) = self.shortcut_row_at(*position) else {
+                        self.shortcut_actions_menu = None;
+                        return EventResult::Ignored;
+                    };
+                    match &row.kind {
+                        ShortcutLayoutRowKind::Section { category, .. } => {
+                            self.toggle_shortcut_section(*category, ctx);
+                            return EventResult::Handled;
+                        }
+                        ShortcutLayoutRowKind::Command { id } => {
+                            if self.row_keycap_rect(row.rect).contains(*position) {
+                                self.begin_shortcut_capture(id.clone(), ctx);
+                                return EventResult::Handled;
+                            }
+                            if self.row_action_rect(row.rect).contains(*position)
+                                && self.hovered_shortcut_id.as_deref() == Some(id)
+                            {
+                                self.shortcut_actions_menu = Some(id.clone());
+                                ctx.request_repaint();
+                                return EventResult::Handled;
+                            }
+                        }
                     }
                 }
-                if let Some(id) = capture_id {
-                    self.begin_shortcut_capture(id, ctx);
-                    return EventResult::Handled;
-                }
+                _ => {}
             }
         }
         EventResult::Ignored
@@ -725,71 +962,55 @@ impl Widget for PreferencesDialog {
             },
         );
 
-        let content = self.surface.content_rect(self.card);
-        let body_top = content.y;
+        let _content = self.surface.content_rect(self.card);
 
         for button in &self.nav_buttons {
             button.paint(ctx);
         }
         if self.active_tab == PreferencesDialogTab::General {
-            for button in &self.theme_buttons {
-                button.paint(ctx);
-            }
-            for (index, preference) in ThemePreference::ALL.into_iter().enumerate() {
-                if preference == self.model.theme_preference {
-                    paint_theme_button_outline(
-                        ctx,
-                        Rect::new(
-                            content.x
-                                + NAV_WIDTH
-                                + CONTENT_GAP
-                                + 116.0
-                                + index as f32 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
-                            body_top + ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
-                            THEME_BUTTON_WIDTH,
-                            THEME_BUTTON_HEIGHT,
-                        ),
-                    );
-                }
-            }
-            for button in &self.waveform_buttons {
-                button.paint(ctx);
-            }
-            for (index, mode) in [WaveformDisplay::BottomAligned, WaveformDisplay::Centered]
-                .into_iter()
-                .enumerate()
-            {
-                if mode == self.model.waveform_display {
-                    paint_theme_button_outline(
-                        ctx,
-                        Rect::new(
-                            content.x
-                                + NAV_WIDTH
-                                + CONTENT_GAP
-                                + 116.0
-                                + index as f32 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
-                            body_top + 2.0 * ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
-                            THEME_BUTTON_WIDTH,
-                            THEME_BUTTON_HEIGHT,
-                        ),
-                    );
-                }
-            }
+            self.theme_group.paint(ctx);
+            self.waveform_group.paint(ctx);
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
-            for label in self.content_labels.iter().take(SHORTCUT_HEADER_ROW_COUNT) {
-                label.paint(ctx);
-            }
+            self.shortcut_search.paint(ctx);
             ctx.push_clip(self.shortcut_viewport);
-            for label in self.content_labels.iter().skip(SHORTCUT_HEADER_ROW_COUNT) {
-                label.paint(ctx);
-            }
-            for buttons in &self.shortcut_buttons {
-                buttons.rebind.paint(ctx);
-                buttons.disable.paint(ctx);
-                buttons.reset.paint(ctx);
+            for row in &self.shortcut_layout_rows {
+                if row.rect.y + row.rect.height < self.shortcut_viewport.y
+                    || row.rect.y > self.shortcut_viewport.y + self.shortcut_viewport.height
+                {
+                    continue;
+                }
+                match &row.kind {
+                    ShortcutLayoutRowKind::Section { title, count, collapsed, .. } => {
+                        paint_shortcut_section(ctx, row.rect, title, *count, *collapsed);
+                    }
+                    ShortcutLayoutRowKind::Command { id } => {
+                        if let Some(command) = self.find_shortcut_row(id) {
+                            let hovered = self.hovered_shortcut_id.as_deref() == Some(id);
+                            let capture =
+                                self.shortcut_capture.as_ref().filter(|capture| capture.id == *id);
+                            paint_shortcut_command_row(
+                                ctx,
+                                row.rect,
+                                command,
+                                self.row_keycap_rect(row.rect),
+                                self.row_action_rect(row.rect),
+                                hovered,
+                                capture,
+                            );
+                        }
+                    }
+                }
             }
             ctx.pop_clip();
+            if let Some(capture) = &self.shortcut_capture {
+                paint_shortcut_capture_prompt(ctx, self.shortcut_viewport, capture, &self.model);
+            }
+            if let Some(id) = &self.shortcut_actions_menu {
+                if let Some(menu) = self.action_menu_rect_for(id) {
+                    paint_shortcut_action_menu(ctx, menu, self.find_shortcut_row(id));
+                }
+            }
             paint_shortcut_scrollbar(
                 ctx,
                 self.shortcut_viewport,
@@ -809,11 +1030,7 @@ impl Widget for PreferencesDialog {
     }
 
     fn child_count(&self) -> usize {
-        1 + self.nav_buttons.len()
-            + self.theme_buttons.len()
-            + self.waveform_buttons.len()
-            + self.content_labels.len()
-            + self.shortcut_buttons.len() * 3
+        self.nav_buttons.len() + 2 + self.content_labels.len() + 2
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -822,20 +1039,15 @@ impl Widget for PreferencesDialog {
         if (nav_start..nav_end).contains(&index) {
             return self.nav_buttons.get(index - nav_start).map(|button| button as &dyn Widget);
         }
-        let theme_start = nav_end;
-        let theme_end = theme_start + self.theme_buttons.len();
-        if (theme_start..theme_end).contains(&index) {
-            return self.theme_buttons.get(index - theme_start).map(|button| button as &dyn Widget);
+        let theme_index = nav_end;
+        if index == theme_index {
+            return Some(&self.theme_group as &dyn Widget);
         }
-        let waveform_start = theme_end;
-        let waveform_end = waveform_start + self.waveform_buttons.len();
-        if (waveform_start..waveform_end).contains(&index) {
-            return self
-                .waveform_buttons
-                .get(index - waveform_start)
-                .map(|button| button as &dyn Widget);
+        let waveform_index = theme_index + 1;
+        if index == waveform_index {
+            return Some(&self.waveform_group as &dyn Widget);
         }
-        let content_start = waveform_end;
+        let content_start = waveform_index + 1;
         let content_end = content_start + self.content_labels.len();
         if (content_start..content_end).contains(&index) {
             return self
@@ -843,18 +1055,11 @@ impl Widget for PreferencesDialog {
                 .get(index - content_start)
                 .map(|label| label as &dyn Widget);
         }
-        let shortcut_start = content_end;
-        let shortcut_end = shortcut_start + self.shortcut_buttons.len() * 3;
-        if (shortcut_start..shortcut_end).contains(&index) {
-            let button_index = index - shortcut_start;
-            let row = button_index / 3;
-            return self.shortcut_buttons.get(row).map(|buttons| match button_index % 3 {
-                0 => &buttons.rebind as &dyn Widget,
-                1 => &buttons.disable as &dyn Widget,
-                _ => &buttons.reset as &dyn Widget,
-            });
+        let search_index = content_end;
+        if index == search_index {
+            return Some(&self.shortcut_search as &dyn Widget);
         }
-        (index == shortcut_end).then_some(&self.close_button as &dyn Widget)
+        (index == search_index + 1).then_some(&self.close_button as &dyn Widget)
     }
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
@@ -866,23 +1071,15 @@ impl Widget for PreferencesDialog {
                 .get_mut(index - nav_start)
                 .map(|button| button as &mut dyn Widget);
         }
-        let theme_start = nav_end;
-        let theme_end = theme_start + self.theme_buttons.len();
-        if (theme_start..theme_end).contains(&index) {
-            return self
-                .theme_buttons
-                .get_mut(index - theme_start)
-                .map(|button| button as &mut dyn Widget);
+        let theme_index = nav_end;
+        if index == theme_index {
+            return Some(&mut self.theme_group as &mut dyn Widget);
         }
-        let waveform_start = theme_end;
-        let waveform_end = waveform_start + self.waveform_buttons.len();
-        if (waveform_start..waveform_end).contains(&index) {
-            return self
-                .waveform_buttons
-                .get_mut(index - waveform_start)
-                .map(|button| button as &mut dyn Widget);
+        let waveform_index = theme_index + 1;
+        if index == waveform_index {
+            return Some(&mut self.waveform_group as &mut dyn Widget);
         }
-        let content_start = waveform_end;
+        let content_start = waveform_index + 1;
         let content_end = content_start + self.content_labels.len();
         if (content_start..content_end).contains(&index) {
             return self
@@ -890,18 +1087,11 @@ impl Widget for PreferencesDialog {
                 .get_mut(index - content_start)
                 .map(|label| label as &mut dyn Widget);
         }
-        let shortcut_start = content_end;
-        let shortcut_end = shortcut_start + self.shortcut_buttons.len() * 3;
-        if (shortcut_start..shortcut_end).contains(&index) {
-            let button_index = index - shortcut_start;
-            let row = button_index / 3;
-            return self.shortcut_buttons.get_mut(row).map(|buttons| match button_index % 3 {
-                0 => &mut buttons.rebind as &mut dyn Widget,
-                1 => &mut buttons.disable as &mut dyn Widget,
-                _ => &mut buttons.reset as &mut dyn Widget,
-            });
+        let search_index = content_end;
+        if index == search_index {
+            return Some(&mut self.shortcut_search as &mut dyn Widget);
         }
-        (index == shortcut_end).then_some(&mut self.close_button as &mut dyn Widget)
+        (index == search_index + 1).then_some(&mut self.close_button as &mut dyn Widget)
     }
 }
 
@@ -918,14 +1108,47 @@ fn detail(text: impl Into<String>) -> ContentRow {
     ContentRow { text: text.into(), heading: false }
 }
 
-fn pointer_position(event: &UiEvent) -> Option<Point> {
-    match event {
-        UiEvent::MouseDown { position, .. }
-        | UiEvent::MouseUp { position, .. }
-        | UiEvent::MouseMove { position, .. }
-        | UiEvent::MouseWheel { position, .. } => Some(*position),
-        _ => None,
+fn default_shortcut_sections() -> Vec<ShortcutSectionState> {
+    shortcut_category_order()
+        .into_iter()
+        .map(|category| ShortcutSectionState {
+            category,
+            collapsed: !matches!(
+                category,
+                AppUiCommandCategory::File | AppUiCommandCategory::Edit
+            ),
+        })
+        .collect()
+}
+
+fn shortcut_category_order() -> Vec<AppUiCommandCategory> {
+    vec![
+        AppUiCommandCategory::File,
+        AppUiCommandCategory::Edit,
+        AppUiCommandCategory::Timeline,
+        AppUiCommandCategory::Transport,
+        AppUiCommandCategory::View,
+        AppUiCommandCategory::Window,
+        AppUiCommandCategory::Workspace,
+        AppUiCommandCategory::Help,
+    ]
+}
+
+fn shortcut_category_label(category: AppUiCommandCategory) -> &'static str {
+    match category {
+        AppUiCommandCategory::File => "File",
+        AppUiCommandCategory::Edit => "Edit",
+        AppUiCommandCategory::View => "View",
+        AppUiCommandCategory::Window => "Window",
+        AppUiCommandCategory::Workspace => "Workspace",
+        AppUiCommandCategory::Timeline => "Timeline",
+        AppUiCommandCategory::Transport => "Playback",
+        AppUiCommandCategory::Help => "Help",
     }
+}
+
+fn normalized_search_query(query: &str) -> String {
+    query.trim().to_lowercase()
 }
 
 fn shortcut_preference_rows(overrides: &[AppUiShortcutOverride]) -> Vec<ShortcutPreferenceRow> {
@@ -953,43 +1176,297 @@ fn shortcut_preference_rows(overrides: &[AppUiShortcutOverride]) -> Vec<Shortcut
                     .as_ref()
                     .map_or_else(|| "已禁用".to_owned(), |owner| format!("与 {owner} 冲突"))
             });
-            let action = command_by_id(default.id)
+            let command = command_by_id(default.id);
+            let command_title = command
+                .as_ref()
                 .map(|command| command.title.to_owned())
                 .unwrap_or_else(|| default.id.to_owned());
+            let category = command
+                .as_ref()
+                .map(|command| command.category)
+                .unwrap_or(AppUiCommandCategory::Help);
+            let default_label = default.label;
+            let search_text = format!(
+                "{} {} {} {} {}",
+                default.id,
+                command_title,
+                label,
+                default_label,
+                shortcut_category_label(category)
+            )
+            .to_lowercase();
             ShortcutPreferenceRow {
                 id: default.id.to_owned(),
-                label,
-                action,
-                default_label: default.label,
+                command_title,
+                category,
+                binding_label: label,
+                default_binding_label: default_label,
                 overridden: override_entry.is_some(),
                 disabled,
                 conflict_owner,
+                search_text,
             }
         })
         .collect()
 }
 
-fn paint_theme_button_outline(ctx: &mut PaintContext, bounds: Rect) {
-    let color = ctx.theme.colors.ring;
-    let left = bounds.x + 1.0;
-    let right = bounds.x + bounds.width - 1.0;
-    let top = bounds.y + 1.0;
-    let bottom = bounds.y + bounds.height - 1.0;
-    ctx.encoder.draw_line(Point::new(left, top), Point::new(right, top), 1.5, color);
-    ctx.encoder.draw_line(
-        Point::new(right, top),
-        Point::new(right, bottom),
-        1.5,
-        color,
+fn with_alpha(mut color: Color, alpha: f32) -> Color {
+    color.a *= alpha;
+    color
+}
+
+fn paint_shortcut_section(
+    ctx: &mut PaintContext,
+    rect: Rect,
+    title: &str,
+    count: usize,
+    collapsed: bool,
+) {
+    let colors = &ctx.theme.colors;
+    let font_size = ctx.theme.typography.metadata.font_size;
+    let arrow = if collapsed { ">" } else { "v" };
+    ctx.encoder.draw_text(
+        arrow,
+        font_size,
+        Point::new(rect.x + 2.0, rect.y + 9.0),
+        colors.text_tertiary,
     );
-    ctx.encoder.draw_line(
-        Point::new(right, bottom),
-        Point::new(left, bottom),
-        1.5,
-        color,
+    ctx.encoder.draw_text(
+        title,
+        font_size,
+        Point::new(rect.x + 20.0, rect.y + 9.0),
+        colors.text_secondary,
     );
-    ctx.encoder
-        .draw_line(Point::new(left, bottom), Point::new(left, top), 1.5, color);
+    ctx.encoder.draw_text(
+        &count.to_string(),
+        font_size,
+        Point::new(rect.x + 104.0, rect.y + 9.0),
+        colors.text_tertiary,
+    );
+}
+
+fn paint_shortcut_command_row(
+    ctx: &mut PaintContext,
+    rect: Rect,
+    row: &ShortcutPreferenceRow,
+    keycap_rect: Rect,
+    action_rect: Rect,
+    hovered: bool,
+    capture: Option<&ShortcutCaptureState>,
+) {
+    let colors = &ctx.theme.colors;
+    let radius = ctx.theme.spacing.radius_sm;
+    if hovered || capture.is_some() {
+        ctx.encoder.draw_rect(
+            rect.inset(0.0, 2.0),
+            with_alpha(colors.foreground, 0.055),
+            radius,
+        );
+    }
+    let title_color = if row.disabled {
+        colors.text_tertiary
+    } else {
+        colors.foreground
+    };
+    ctx.encoder.draw_text(
+        &row.command_title,
+        ctx.theme.typography.body.font_size,
+        Point::new(rect.x + 10.0, rect.y + 11.0),
+        title_color,
+    );
+    if row.overridden || row.disabled || row.conflict_owner.is_some() {
+        let status = if row.disabled {
+            "Disabled"
+        } else if row.conflict_owner.is_some() {
+            "Conflict"
+        } else {
+            "Custom"
+        };
+        ctx.encoder.draw_text(
+            status,
+            ctx.theme.typography.metadata.font_size,
+            Point::new(rect.x + 208.0, rect.y + 12.0),
+            colors.text_tertiary,
+        );
+    }
+
+    let label = capture
+        .and_then(|capture| capture.pending.map(AppUiShortcutBinding::label))
+        .unwrap_or_else(|| row.binding_label.clone());
+    let capturing = capture.is_some();
+    paint_keycap_label(ctx, keycap_rect, &label, row.disabled, capturing);
+
+    if hovered || capture.is_some() {
+        ctx.encoder.draw_rect(action_rect, with_alpha(colors.foreground, 0.055), radius);
+        ctx.encoder.draw_text(
+            "...",
+            ctx.theme.typography.button.font_size,
+            Point::new(action_rect.x + 8.0, action_rect.y + 5.0),
+            colors.text_secondary,
+        );
+    }
+}
+
+fn paint_keycap_label(
+    ctx: &mut PaintContext,
+    rect: Rect,
+    label: &str,
+    disabled: bool,
+    capturing: bool,
+) {
+    let colors = &ctx.theme.colors;
+    let radius = ctx.theme.spacing.radius_sm;
+    if capturing {
+        ctx.encoder.draw_rect(rect, with_alpha(colors.primary, 0.18), radius);
+        ctx.encoder.draw_rect(
+            rect.inset(0.75, 0.75),
+            with_alpha(colors.ring, 0.55),
+            radius,
+        );
+        let text = if label.is_empty() {
+            "按下组合"
+        } else {
+            label
+        };
+        ctx.encoder.draw_text(
+            text,
+            ctx.theme.typography.metadata.font_size,
+            Point::new(rect.x + 9.0, rect.y + 7.0),
+            colors.foreground,
+        );
+        return;
+    }
+    if disabled || label == "已禁用" {
+        ctx.encoder.draw_text(
+            "未绑定",
+            ctx.theme.typography.metadata.font_size,
+            Point::new(rect.x + 48.0, rect.y + 7.0),
+            colors.text_tertiary,
+        );
+        return;
+    }
+    let mut x = rect.x;
+    for (index, part) in label.split('+').enumerate() {
+        if index > 0 {
+            ctx.encoder.draw_text(
+                "+",
+                ctx.theme.typography.metadata.font_size,
+                Point::new(x + 3.0, rect.y + 7.0),
+                colors.text_tertiary,
+            );
+            x += 14.0;
+        }
+        let width = (part.chars().count() as f32 * 7.0 + 14.0).clamp(24.0, 54.0);
+        let key = Rect::new(x, rect.y + 1.0, width, rect.height - 2.0);
+        ctx.encoder.draw_rect(key, with_alpha(colors.foreground, 0.06), radius);
+        ctx.encoder
+            .draw_rect(key.inset(0.5, 0.5), with_alpha(colors.border, 0.55), radius);
+        ctx.encoder.draw_text(
+            part,
+            ctx.theme.typography.metadata.font_size,
+            Point::new(key.x + 7.0, key.y + 6.0),
+            colors.text_secondary,
+        );
+        x += width;
+    }
+}
+
+fn shortcut_capture_confirm_rect(viewport: Rect) -> Rect {
+    Rect::new(
+        viewport.x,
+        viewport.y,
+        viewport.width - SHORTCUT_SCROLLBAR_GAP,
+        40.0,
+    )
+}
+
+fn paint_shortcut_capture_prompt(
+    ctx: &mut PaintContext,
+    viewport: Rect,
+    capture: &ShortcutCaptureState,
+    model: &AppUiPreferencesModel,
+) {
+    let Some(pending) = capture.pending else {
+        return;
+    };
+    let colors = &ctx.theme.colors;
+    let rect = shortcut_capture_confirm_rect(viewport);
+    ctx.encoder.draw_rect(
+        rect,
+        with_alpha(colors.popover, 0.96),
+        ctx.theme.spacing.radius_md,
+    );
+    ctx.encoder.draw_rect(
+        rect.inset(0.75, 0.75),
+        with_alpha(colors.ring, 0.35),
+        ctx.theme.spacing.radius_md,
+    );
+    let owner = capture
+        .conflict_owner
+        .as_ref()
+        .and_then(|id| model.shortcut_rows.iter().find(|row| row.id == *id))
+        .map(|row| row.command_title.as_str());
+    let message = owner.map_or_else(
+        || format!("确认绑定：{}", pending.label()),
+        |owner| format!("已被占用：{owner}（{}）", pending.label()),
+    );
+    ctx.encoder.draw_text(
+        &message,
+        ctx.theme.typography.body.font_size,
+        Point::new(rect.x + 12.0, rect.y + 13.0),
+        colors.foreground,
+    );
+    let replace = Rect::new(rect.x + rect.width - 148.0, rect.y + 8.0, 66.0, 24.0);
+    let cancel = Rect::new(rect.x + rect.width - 74.0, rect.y + 8.0, 58.0, 24.0);
+    for (button, label) in [(replace, "替换"), (cancel, "取消")] {
+        ctx.encoder.draw_rect(
+            button,
+            with_alpha(colors.foreground, 0.07),
+            ctx.theme.spacing.radius_sm,
+        );
+        ctx.encoder.draw_text(
+            label,
+            ctx.theme.typography.button.font_size,
+            Point::new(button.x + 16.0, button.y + 6.0),
+            colors.foreground,
+        );
+    }
+}
+
+fn paint_shortcut_action_menu(
+    ctx: &mut PaintContext,
+    rect: Rect,
+    row: Option<&ShortcutPreferenceRow>,
+) {
+    let colors = &ctx.theme.colors;
+    ctx.encoder.draw_rect(rect, colors.popover, ctx.theme.spacing.radius_md);
+    ctx.encoder.draw_rect(
+        rect.inset(0.75, 0.75),
+        with_alpha(colors.border, 0.70),
+        ctx.theme.spacing.radius_md,
+    );
+    let reset_enabled = row.is_some_and(|row| row.overridden);
+    let disable_enabled = row.is_some_and(|row| !row.disabled);
+    for (index, (label, enabled)) in
+        [("重置", reset_enabled), ("禁用", disable_enabled)].into_iter().enumerate()
+    {
+        let item = Rect::new(
+            rect.x + 4.0,
+            rect.y + 4.0 + index as f32 * SHORTCUT_ACTION_MENU_ROW_HEIGHT,
+            rect.width - 8.0,
+            SHORTCUT_ACTION_MENU_ROW_HEIGHT,
+        );
+        ctx.encoder.draw_text(
+            label,
+            ctx.theme.typography.button.font_size,
+            Point::new(item.x + 10.0, item.y + 8.0),
+            if enabled {
+                colors.foreground
+            } else {
+                colors.text_tertiary
+            },
+        );
+    }
 }
 
 fn paint_shortcut_scrollbar(
@@ -1045,21 +1522,7 @@ fn content_rows_for_tab(
             detail(format!("范围：{}", model.export_range)),
             detail(format!("输出：{}", model.export_output)),
         ],
-        PreferencesDialogTab::Shortcuts => {
-            let mut rows = vec![
-                heading("自研 UI 快捷键"),
-                detail("当前绑定 · 命令 · 默认绑定"),
-            ];
-            rows.extend(model.shortcut_rows.iter().map(|row| {
-                let suffix = if row.default_label.is_empty() {
-                    "无默认".to_owned()
-                } else {
-                    row.default_label.clone()
-                };
-                detail(format!("{}  ·  {}  ·  {}", row.label, row.action, suffix))
-            }));
-            rows
-        }
+        PreferencesDialogTab::Shortcuts => Vec::new(),
         PreferencesDialogTab::Developer => vec![
             heading("诊断"),
             detail(format!("运行时诊断：{}", model.runtime_diagnostics)),
@@ -1106,27 +1569,51 @@ mod tests {
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
 
     fn click(dialog: &mut PreferencesDialog, ctx: &mut EventContext<'_>, position: Point) {
-        assert_eq!(
-            dialog.event(
-                &UiEvent::MouseDown {
-                    position,
-                    button: MouseButton::Left,
-                    modifiers: Modifiers::none(),
-                },
-                ctx,
-            ),
-            EventResult::Handled
+        let down = dialog.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            ctx,
         );
-        assert_eq!(
-            dialog.event(
-                &UiEvent::MouseUp {
-                    position,
-                    button: MouseButton::Left,
-                    modifiers: Modifiers::none(),
-                },
-                ctx,
-            ),
-            EventResult::Handled
+        let up = dialog.event(
+            &UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            ctx,
+        );
+        assert!(
+            down == EventResult::Handled || up == EventResult::Handled,
+            "click at {position:?} was ignored"
+        );
+    }
+
+    fn command_row_rect(dialog: &PreferencesDialog, id: &str) -> Rect {
+        dialog
+            .shortcut_layout_rows
+            .iter()
+            .find_map(|row| match &row.kind {
+                ShortcutLayoutRowKind::Command { id: row_id } if row_id == id => Some(row.rect),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing visible shortcut command row {id}"))
+    }
+
+    fn shortcut_keycap_center(dialog: &PreferencesDialog, id: &str) -> Point {
+        dialog.row_keycap_rect(command_row_rect(dialog, id)).center()
+    }
+
+    fn shortcut_action_center(dialog: &PreferencesDialog, id: &str) -> Point {
+        dialog.row_action_rect(command_row_rect(dialog, id)).center()
+    }
+
+    fn hover(dialog: &mut PreferencesDialog, ctx: &mut EventContext<'_>, position: Point) {
+        dialog.event(
+            &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+            ctx,
         );
     }
 
@@ -1151,7 +1638,14 @@ mod tests {
         );
 
         assert_eq!(dialog.active_tab(), PreferencesDialogTab::Shortcuts);
-        assert!(dialog.content_labels.len() > crate::app_ui::shortcuts::default_shortcuts().len());
+        assert!(dialog.content_labels.is_empty());
+        assert!(dialog.shortcut_layout_rows.iter().any(|row| matches!(
+            row.kind,
+            ShortcutLayoutRowKind::Section { category: AppUiCommandCategory::File, .. }
+        )));
+        assert!(dialog.shortcut_layout_rows.iter().any(
+            |row| matches!(&row.kind, ShortcutLayoutRowKind::Command { id } if id == "file.save_project")
+        ));
     }
 
     #[test]
@@ -1161,12 +1655,10 @@ mod tests {
         assert!(model
             .shortcut_rows
             .iter()
-            .any(|row| row.id == "file.new_project" && row.action == "新建项目"));
+            .any(|row| row.id == "file.new_project" && row.command_title == "新建项目"));
         assert!(
-            model
-                .shortcut_rows
-                .iter()
-                .all(|row| !row.action.contains("Custom") && !row.action.contains("namespace")),
+            model.shortcut_rows.iter().all(|row| !row.command_title.contains("Custom")
+                && !row.command_title.contains("namespace")),
             "shortcut preference rows should not expose internal Action debug formatting"
         );
     }
@@ -1189,14 +1681,14 @@ mod tests {
             .iter()
             .find(|row| row.id == "panel.inspector")
             .expect("inspector shortcut row");
-        assert_eq!(inspector.label, "已禁用");
+        assert_eq!(inspector.binding_label, "已禁用");
         assert!(inspector.disabled);
         assert_eq!(inspector.conflict_owner, None);
         assert!(inspector.overridden);
         assert!(model
             .shortcut_rows
             .iter()
-            .any(|row| row.id == "file.save_project" && row.label == "Ctrl+S"));
+            .any(|row| row.id == "file.save_project" && row.binding_label == "Ctrl+S"));
     }
 
     #[test]
@@ -1231,17 +1723,17 @@ mod tests {
             .find(|row| row.id == "file.open_project")
             .expect("open row");
 
-        assert_eq!(save.label, "Ctrl+O");
+        assert_eq!(save.binding_label, "Ctrl+O");
         assert!(!save.disabled);
         assert!(save.overridden);
-        assert_eq!(open.label, "与 file.save_project 冲突");
+        assert_eq!(open.binding_label, "与 file.save_project 冲突");
         assert!(open.disabled);
         assert!(!open.overridden);
         assert_eq!(open.conflict_owner.as_deref(), Some("file.save_project"));
     }
 
     #[test]
-    fn preferences_shortcut_buttons_dispatch_disable_and_default_actions() {
+    fn preferences_shortcut_action_menu_dispatches_disable_and_reset_actions() {
         let overrides = vec![AppUiShortcutOverride {
             id: "file.save_project".to_owned(),
             binding: Some(crate::app_ui::shortcuts::AppUiShortcutBinding {
@@ -1277,31 +1769,27 @@ mod tests {
             &dispatch,
         );
 
-        let save_index = dialog
-            .model
-            .shortcut_rows
-            .iter()
-            .position(|row| row.id == "file.save_project")
-            .expect("save row");
-        let content = dialog.surface.content_rect(dialog.card);
-        let buttons_left = content.x + content.width
-            - SHORTCUT_BUTTON_WIDTH * 3.0
-            - SHORTCUT_BUTTON_GAP * 2.0
-            - 2.0;
-        let shortcut_button_center = |row: usize, column: usize| {
-            let x = buttons_left
-                + column as f32 * (SHORTCUT_BUTTON_WIDTH + SHORTCUT_BUTTON_GAP)
-                + SHORTCUT_BUTTON_WIDTH * 0.5;
-            let y = content.y
-                + (row + SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
-                + (ROW_HEIGHT - SHORTCUT_BUTTON_HEIGHT) * 0.5;
-            Point::new(x, y)
-        };
-        let save_disable = shortcut_button_center(save_index, 1);
-        let save_reset = shortcut_button_center(save_index, 2);
+        let action = shortcut_action_center(&dialog, "file.save_project");
+        hover(&mut dialog, &mut ctx, action);
+        click(&mut dialog, &mut ctx, action);
+        let menu = dialog.action_menu_rect_for("file.save_project").expect("action menu");
+        click(
+            &mut dialog,
+            &mut ctx,
+            Point::new(
+                menu.x + 20.0,
+                menu.y + 4.0 + SHORTCUT_ACTION_MENU_ROW_HEIGHT + 12.0,
+            ),
+        );
 
-        click(&mut dialog, &mut ctx, save_disable);
-        click(&mut dialog, &mut ctx, save_reset);
+        hover(&mut dialog, &mut ctx, action);
+        click(&mut dialog, &mut ctx, action);
+        let menu = dialog.action_menu_rect_for("file.save_project").expect("action menu");
+        click(
+            &mut dialog,
+            &mut ctx,
+            Point::new(menu.x + 20.0, menu.y + 16.0),
+        );
 
         let recorded = actions.borrow();
         assert_eq!(recorded.len(), 2);
@@ -1348,31 +1836,25 @@ mod tests {
             &dispatch,
         );
 
-        let save_index = dialog
-            .model
-            .shortcut_rows
-            .iter()
-            .position(|row| row.id == "file.save_project")
-            .expect("save row");
-        let content = dialog.surface.content_rect(dialog.card);
-        let buttons_left = content.x + content.width
-            - SHORTCUT_BUTTON_WIDTH * 3.0
-            - SHORTCUT_BUTTON_GAP * 2.0
-            - 2.0;
-        let rebind = Point::new(
-            buttons_left + SHORTCUT_BUTTON_WIDTH * 0.5,
-            content.y
-                + (save_index + SHORTCUT_HEADER_ROW_COUNT) as f32 * ROW_HEIGHT
-                + (ROW_HEIGHT - SHORTCUT_BUTTON_HEIGHT) * 0.5,
-        );
-
-        click(&mut dialog, &mut ctx, rebind);
+        let keycap = shortcut_keycap_center(&dialog, "file.save_project");
+        click(&mut dialog, &mut ctx, keycap);
         assert_eq!(
             dialog.event(
                 &UiEvent::KeyDown {
                     key: KeyCode::I,
                     modifiers: Modifiers { ctrl: true, alt: true, shift: false, meta: false },
                 },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "shortcut capture should wait for Enter confirmation"
+        );
+        assert_eq!(
+            dialog.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
                 &mut ctx,
             ),
             EventResult::Handled
@@ -1398,7 +1880,7 @@ mod tests {
     }
 
     #[test]
-    fn preferences_shortcuts_scroll_to_late_rows_before_dispatch() {
+    fn preferences_shortcut_search_reveals_collapsed_category_commands_before_dispatch() {
         let mut dialog = PreferencesDialog::with_model_and_tab(
             AppUiPreferencesModel::default(),
             PreferencesDialogTab::Shortcuts,
@@ -1418,43 +1900,31 @@ mod tests {
             &dispatch,
         );
 
-        assert!(dialog.max_shortcut_scroll() > 0.0);
-        assert_eq!(
-            dialog.event(
-                &UiEvent::MouseWheel {
-                    delta: 10_000.0,
-                    position: dialog.shortcut_viewport.center(),
-                    modifiers: Modifiers::none(),
-                },
-                &mut ctx,
+        assert!(
+            !dialog.shortcut_layout_rows.iter().any(
+                |row| matches!(&row.kind, ShortcutLayoutRowKind::Command { id } if id == "panel.export")
             ),
-            EventResult::Handled
+            "Window category starts collapsed"
         );
-        assert!((dialog.shortcut_scroll_offset - dialog.max_shortcut_scroll()).abs() < 0.01);
 
-        let export_index = dialog
-            .model
-            .shortcut_rows
-            .iter()
-            .position(|row| row.id == "panel.export")
-            .expect("export panel shortcut row");
-        let content = dialog.surface.content_rect(dialog.card);
-        let buttons_left = content.x + content.width
-            - SHORTCUT_BUTTON_WIDTH * 3.0
-            - SHORTCUT_BUTTON_GAP * 2.0
-            - 2.0;
-        let export_disable = Point::new(
-            buttons_left
-                + SHORTCUT_BUTTON_WIDTH
-                + SHORTCUT_BUTTON_GAP
-                + SHORTCUT_BUTTON_WIDTH * 0.5,
-            dialog.shortcut_viewport.y + export_index as f32 * ROW_HEIGHT
-                - dialog.shortcut_scroll_offset
-                + ROW_HEIGHT * 0.5,
+        dialog.shortcut_search.set_text("export".to_owned());
+        dialog.shortcut_search_query = "export".to_owned();
+        dialog.rebuild_shortcut_layout_rows();
+        dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
+
+        let export_action = shortcut_action_center(&dialog, "panel.export");
+        assert!(dialog.shortcut_viewport.contains(export_action));
+        hover(&mut dialog, &mut ctx, export_action);
+        click(&mut dialog, &mut ctx, export_action);
+        let menu = dialog.action_menu_rect_for("panel.export").expect("action menu");
+        click(
+            &mut dialog,
+            &mut ctx,
+            Point::new(
+                menu.x + 20.0,
+                menu.y + 4.0 + SHORTCUT_ACTION_MENU_ROW_HEIGHT + 12.0,
+            ),
         );
-        assert!(dialog.shortcut_viewport.contains(export_disable));
-
-        click(&mut dialog, &mut ctx, export_disable);
 
         let recorded = actions.borrow();
         assert_eq!(recorded.len(), 1);
@@ -1514,19 +1984,11 @@ mod tests {
             &mut requests,
             &dispatch,
         );
-        let content = dialog.surface.content_rect(dialog.card);
-        let body_top = content.y;
-        let content_x = dialog.card.x + SIDEBAR_WIDTH + CONTENT_GAP;
-        let light_bounds = Rect::new(
-            content_x + 116.0 + 2.0 * (THEME_BUTTON_WIDTH + THEME_BUTTON_GAP),
-            body_top + ROW_HEIGHT + (ROW_HEIGHT - THEME_BUTTON_HEIGHT) * 0.5,
-            THEME_BUTTON_WIDTH,
-            THEME_BUTTON_HEIGHT,
-        );
+        let light_center = dialog.theme_group.segment_rect(2).center();
 
         dialog.event(
             &UiEvent::MouseDown {
-                position: light_bounds.center(),
+                position: light_center,
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },
@@ -1534,7 +1996,7 @@ mod tests {
         );
         dialog.event(
             &UiEvent::MouseUp {
-                position: light_bounds.center(),
+                position: light_center,
                 button: MouseButton::Left,
                 modifiers: Modifiers::none(),
             },

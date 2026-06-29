@@ -27,6 +27,7 @@ pub mod panel_slot;
 pub mod property_panel;
 pub mod raster_image;
 pub mod scroll;
+pub mod segmented_button_group;
 pub mod slider;
 pub mod text_input;
 mod text_metrics;
@@ -72,6 +73,7 @@ pub use panel_slot::PanelSlot;
 pub use property_panel::{PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection};
 pub use raster_image::RasterImage;
 pub use scroll::{ScrollView, ScrollViewState};
+pub use segmented_button_group::{SegmentedButtonGroup, SegmentedButtonItem};
 pub use slider::Slider;
 pub use text_input::{MultilineTextInput, TabBehavior, TextInput, TextInputChangeAction};
 pub use timeline_view::{
