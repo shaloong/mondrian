@@ -1,12 +1,16 @@
 //! OCIO (OpenColorIO) integration for color management.
 //!
-//! When [`crate::ColorEngine::Ocio`] is selected, color transforms are delegated to
-//! an OCIO v2.5.1 config instead of the built-in MondrianSmart math.
+//! Color transforms are delegated to an OCIO v2.5.1 config whenever a config /
+//! processor can be resolved. `ColorEngine::MondrianSmart` is the productized
+//! default policy and resolves to Mondrian's built-in OCIO config; custom OCIO
+//! mode resolves from [`OcioConfigSource`].
+//!
 //! The config source is determined by [`OcioConfigSource`]:
 //!
-//! 1. **Builtin** — named built-in config (e.g. `"aces_1.2"`)
-//! 2. **Path**      — explicit `config.ocio` file path
-//! 3. **Environment** — `$OCIO` env var → standard system paths
+//! 1. **MondrianDefault** — Mondrian Standard/Simple built-in config
+//! 2. **Builtin** — named built-in config (e.g. `"aces_1.2"`)
+//! 3. **Path** — explicit `config.ocio` file path
+//! 4. **Environment** — `$OCIO` env var → standard system paths
 
 use crate::types::{ColorSpace, OcioConfigSource};
 use ocio_rs::{BuiltinConfigRegistry, CPUProcessor, Config};
@@ -15,6 +19,9 @@ use std::path::{Path, PathBuf};
 // ── Global OCIO state ──────────────────────────────────────────────────────────
 
 static OCIO_CONFIG_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Intended name for Mondrian's bundled default OCIO config.
+pub const MONDRIAN_DEFAULT_OCIO_CONFIG_NAME: &str = "mondrian_default_ocio_v1";
 
 /// Load an OCIO config from `path` and set it as the process-wide current config.
 ///
@@ -80,6 +87,7 @@ pub fn ocio_available() -> bool {
 /// calling it again with the same effective source is a no-op.
 pub fn ensure_ocio_loaded(source: &OcioConfigSource) -> Result<(), String> {
     match source {
+        OcioConfigSource::MondrianDefault => ensure_mondrian_default_ocio_loaded(),
         OcioConfigSource::Builtin { name } => {
             let virtual_path = PathBuf::from(format!("builtin:{name}"));
             if already_loaded_with(&virtual_path) {
@@ -108,6 +116,33 @@ pub fn ensure_ocio_loaded(source: &OcioConfigSource) -> Result<(), String> {
             init_ocio(&resolved)
         }
     }
+}
+
+/// Return the OCIO source used by Mondrian Standard/Simple mode.
+pub fn mondrian_default_ocio_source() -> OcioConfigSource {
+    OcioConfigSource::MondrianDefault
+}
+
+/// Ensure Mondrian's default OCIO config is loaded.
+pub fn ensure_mondrian_default_ocio_loaded() -> Result<(), String> {
+    let virtual_path = PathBuf::from(format!("builtin:{MONDRIAN_DEFAULT_OCIO_CONFIG_NAME}"));
+    if already_loaded_with(&virtual_path) {
+        return Ok(());
+    }
+
+    init_ocio_builtin(MONDRIAN_DEFAULT_OCIO_CONFIG_NAME).map_err(|err| {
+        format!(
+            "Mondrian default OCIO config is unavailable. Expected built-in config '{}': {err}",
+            MONDRIAN_DEFAULT_OCIO_CONFIG_NAME
+        )
+    })
+}
+
+/// Return true when Mondrian's default OCIO config is currently loaded.
+pub fn mondrian_default_ocio_available() -> bool {
+    already_loaded_with(&PathBuf::from(format!(
+        "builtin:{MONDRIAN_DEFAULT_OCIO_CONFIG_NAME}"
+    )))
 }
 
 /// Check whether the config whose path is `path` is already loaded.
@@ -296,6 +331,26 @@ pub fn apply_ocio_rgba8(data: &mut [u8], src: ColorSpace, dst: ColorSpace) -> Re
 
     let cpu = ocio_cpu_processor(src, dst)?;
     apply_cpu_processor_rgba8(&cpu, data);
+    Ok(())
+}
+
+/// Apply an OCIO source -> working -> output conversion to an RGBA8 buffer.
+pub fn apply_ocio_pipeline_rgba8(
+    data: &mut [u8],
+    src: ColorSpace,
+    working: ColorSpace,
+    dst: ColorSpace,
+) -> Result<(), String> {
+    if data.is_empty() || (src == working && working == dst) {
+        return Ok(());
+    }
+
+    if src != working {
+        apply_ocio_rgba8(data, src, working)?;
+    }
+    if working != dst {
+        apply_ocio_rgba8(data, working, dst)?;
+    }
     Ok(())
 }
 

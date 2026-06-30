@@ -1,13 +1,21 @@
 # Color Management
 
-Mondrian supports a built-in color engine and optional OCIO.
+Mondrian has one color-management pipeline. Mondrian Standard and Custom OCIO
+both resolve color transforms through OCIO config / processor. The bundled
+Mondrian default OCIO config is required for Standard mode; missing config or
+processor failures must surface as errors instead of falling back to another
+color science.
 
 ## Engines
 
-- `ColorEngine::MondrianSmart`: pure-Rust built-in conversion path.
-- `ColorEngine::Ocio`: delegates transforms to an OCIO config when loaded.
+- `ColorEngine::MondrianSmart`: productized Standard/Simple policy over the
+  Mondrian default OCIO source.
+- `ColorEngine::Ocio`: explicit OCIO mode over a selected environment,
+  built-in, or path source.
 
-If OCIO is selected but no config is available, current conversion code warns and falls back to MondrianSmart for conversion. UI should surface availability clearly.
+Explicit OCIO mode must load its selected config successfully. It must not
+silently fall back to a different color science. Mondrian Standard follows the
+same rule for `mondrian_default_ocio_v1`.
 
 ## Project and Sequence
 
@@ -30,6 +38,10 @@ Important fields:
 `ColorPipeline` execution is source -> working -> output. The management engine
 dispatch must preserve that full chain; it must not collapse a timeline pipeline
 to source -> output when a sequence working space is available.
+
+OCIO execution also follows source -> working -> output. The Standard mode UI
+can hide OCIO details from normal users, but the backend still routes through
+the Mondrian default OCIO source and fails closed when that source is missing.
 
 ## Color Encoding Contract
 

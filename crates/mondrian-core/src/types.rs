@@ -354,7 +354,10 @@ pub enum ColorSpace {
 /// "选了变体但无实现"的静默 bug。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ColorEngine {
-    /// Mondrian 内置数学管线：标准 OETF/EOTF 曲线 + 色域矩阵 + ACES tone map。
+    /// Mondrian 默认智能模式。
+    ///
+    /// 这是产品化策略入口：普通用户看到简化 UI，底层必须使用 Mondrian
+    /// 内置 OCIO config / processor。当前构建未提供内置 config 时应显式报错。
     #[default]
     MondrianSmart,
     /// OpenColorIO v2.5.1 配置驱动管线。
@@ -371,6 +374,12 @@ pub enum ColorEngine {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OcioConfigSource {
+    /// Mondrian 内置默认 OCIO config。
+    ///
+    /// 这是 Standard / Simple 模式使用的默认来源。UI 可以隐藏 OCIO 细节，
+    /// 但底层仍按 OCIO config / processor 执行。
+    #[serde(rename = "mondrian_default")]
+    MondrianDefault,
     /// 使用 `OCIO` 环境变量（行业标准）。
     /// 未设置时自动回退到系统标准路径。
     #[default]
@@ -388,6 +397,7 @@ pub enum OcioConfigSource {
 impl fmt::Display for OcioConfigSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MondrianDefault => write!(f, "Mondrian Default OCIO"),
             Self::Environment => write!(f, "$OCIO"),
             Self::Builtin { name } => write!(f, "内置: {name}"),
             Self::Path { path } => write!(f, "{}", path.display()),
@@ -427,6 +437,7 @@ mod tests {
     #[test]
     fn ocio_config_source_round_trip() {
         let sources = vec![
+            OcioConfigSource::MondrianDefault,
             OcioConfigSource::Environment,
             OcioConfigSource::Builtin { name: "aces_1.2".into() },
             OcioConfigSource::Path { path: PathBuf::from("/tmp/config.ocio") },

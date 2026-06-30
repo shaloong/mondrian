@@ -37,7 +37,7 @@ impl ColorPipeline {
     pub fn is_noop(&self) -> bool {
         self.input == self.output
             && self.working == self.output
-            && !(self.tone_map && self.input.is_hdr() && !self.output.is_hdr())
+            && !(self.tone_map && self.working.is_hdr() && !self.output.is_hdr())
     }
 
     pub fn transform_plan(self) -> ColorTransformPlan {
@@ -50,25 +50,6 @@ impl ColorPipeline {
 }
 
 // ── ColorEngine: centralized dispatch ─────────────────────────────────────────
-
-/// MondrianSmart engine: pure-Rust source -> working -> output color math.
-fn mondrian_smart_convert_pipeline(
-    data: &mut [u8],
-    src: ColorSpace,
-    working: ColorSpace,
-    dst: ColorSpace,
-    tone_map: bool,
-) -> Result<(), String> {
-    if data.is_empty() {
-        return Ok(());
-    }
-    let is_noop = src == dst && working == dst && !(tone_map && working.is_hdr() && !dst.is_hdr());
-    if is_noop {
-        return Ok(());
-    }
-    let plan = ColorTransformPlan::built_in(src, working, dst, tone_map);
-    plan.apply_rgba8_in_place(data)
-}
 
 impl ColorEngine {
     /// Apply a color space conversion to the given rgba8 data.
@@ -96,21 +77,16 @@ impl ColorEngine {
         src: ColorSpace,
         working: ColorSpace,
         dst: ColorSpace,
-        tone_map: bool,
+        _tone_map: bool,
     ) -> Result<(), String> {
         match self {
             Self::MondrianSmart => {
-                mondrian_smart_convert_pipeline(data, src, working, dst, tone_map)
+                crate::ocio::ensure_mondrian_default_ocio_loaded()?;
+                crate::ocio::apply_ocio_pipeline_rgba8(data, src, working, dst)
             }
             Self::Ocio { .. } => {
-                if crate::ocio::ocio_available() {
-                    crate::ocio::apply_ocio_rgba8(data, src, dst)
-                } else {
-                    tracing::warn!(
-                        "OCIO engine selected but no config loaded; falling back to MondrianSmart"
-                    );
-                    mondrian_smart_convert_pipeline(data, src, working, dst, tone_map)
-                }
+                self.ensure_loaded()?;
+                crate::ocio::apply_ocio_pipeline_rgba8(data, src, working, dst)
             }
         }
     }
@@ -127,18 +103,21 @@ impl ColorEngine {
         view: &str,
     ) -> Result<(), String> {
         match self {
-            Self::MondrianSmart => Err(
-                "MondrianSmart engine uses ICC display profiles, not OCIO display transforms"
-                    .to_string(),
-            ),
-            Self::Ocio { .. } => crate::ocio::apply_ocio_display_rgba8(data, src, display, view),
+            Self::MondrianSmart => {
+                crate::ocio::ensure_mondrian_default_ocio_loaded()?;
+                crate::ocio::apply_ocio_display_rgba8(data, src, display, view)
+            }
+            Self::Ocio { .. } => {
+                self.ensure_loaded()?;
+                crate::ocio::apply_ocio_display_rgba8(data, src, display, view)
+            }
         }
     }
 
     /// Whether the engine is ready to process data.
     pub fn is_available(&self) -> bool {
         match self {
-            Self::MondrianSmart => true,
+            Self::MondrianSmart => crate::ocio::mondrian_default_ocio_available(),
             Self::Ocio { .. } => crate::ocio::ocio_available(),
         }
     }
@@ -146,7 +125,7 @@ impl ColorEngine {
     /// Ensure any required external config is loaded.
     pub fn ensure_loaded(&self) -> Result<(), String> {
         match self {
-            Self::MondrianSmart => Ok(()),
+            Self::MondrianSmart => crate::ocio::ensure_mondrian_default_ocio_loaded(),
             Self::Ocio { source } => crate::ocio::ensure_ocio_loaded(source),
         }
     }
@@ -154,7 +133,7 @@ impl ColorEngine {
     /// Human-readable name for diagnostics / UI.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::MondrianSmart => "Mondrian Smart",
+            Self::MondrianSmart => "Mondrian Standard",
             Self::Ocio { .. } => "OpenColorIO",
         }
     }
@@ -908,17 +887,17 @@ impl ColorSpace {
     }
 }
 
-pub fn convert_rgba8_in_place(data: &mut [u8], pipeline: ColorPipeline) {
+pub fn convert_rgba8_in_place(data: &mut [u8], pipeline: ColorPipeline) -> Result<(), String> {
     if data.is_empty() || pipeline.is_noop() {
-        return;
+        return Ok(());
     }
-    let _ = pipeline.transform_plan().apply_rgba8_in_place(data);
+    pipeline.transform_plan().apply_rgba8_in_place(data)
 }
 
-pub fn convert_rgba8(data: &[u8], pipeline: ColorPipeline) -> Vec<u8> {
+pub fn convert_rgba8(data: &[u8], pipeline: ColorPipeline) -> Result<Vec<u8>, String> {
     let mut out = data.to_vec();
-    convert_rgba8_in_place(&mut out, pipeline);
-    out
+    convert_rgba8_in_place(&mut out, pipeline)?;
+    Ok(out)
 }
 
 fn decode_transfer(space: ColorSpace, v: f32) -> f32 {
@@ -1259,24 +1238,23 @@ mod tests {
                 ColorSpace::Rec709,
                 true,
             ),
-        );
+        )
+        .expect("identity pipeline should be no-op");
         assert_eq!(rgba, original);
     }
 
     #[test]
-    fn managed_pipeline_honors_working_space_when_source_and_output_match() {
+    fn reference_plan_honors_working_space_when_source_and_output_match() {
         let mut rgba = vec![255, 255, 255, 77];
 
-        convert_rgba8_in_place(
-            &mut rgba,
-            ColorPipeline::new(
-                ColorSpace::Rec709,
-                ColorSpace::Rec2100Pq,
-                ColorSpace::Rec709,
-                true,
-            )
-            .with_engine(ColorEngine::MondrianSmart),
-        );
+        ColorTransformPlan::built_in(
+            ColorSpace::Rec709,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec709,
+            true,
+        )
+        .apply_rgba8_in_place(&mut rgba)
+        .expect("reference plan should convert");
 
         assert!(rgba[0] < 255);
         assert_eq!(rgba[0], rgba[1]);
@@ -1285,13 +1263,70 @@ mod tests {
     }
 
     #[test]
+    fn standard_engine_reports_missing_default_ocio_without_fallback() {
+        if crate::ocio::builtin_config_names()
+            .iter()
+            .any(|name| name == crate::ocio::MONDRIAN_DEFAULT_OCIO_CONFIG_NAME)
+        {
+            return;
+        }
+
+        let engine = ColorEngine::MondrianSmart;
+        let mut rgba = vec![12, 34, 56, 78];
+        let original = rgba.clone();
+
+        let err = engine
+            .convert_pipeline(
+                &mut rgba,
+                ColorSpace::Rec709,
+                ColorSpace::Rec709,
+                ColorSpace::Srgb,
+                false,
+            )
+            .expect_err("standard mode should require Mondrian default OCIO");
+
+        assert!(err.contains("Mondrian default OCIO config is unavailable"));
+        assert_eq!(rgba, original);
+    }
+
+    #[test]
+    fn explicit_ocio_engine_reports_missing_config_without_fallback() {
+        let missing_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-ocio-config-{}.ocio",
+            std::process::id()
+        ));
+        let engine = ColorEngine::Ocio {
+            source: crate::types::OcioConfigSource::Path { path: missing_path },
+        };
+        let mut rgba = vec![12, 34, 56, 78];
+        let original = rgba.clone();
+
+        let err = engine
+            .convert_pipeline(
+                &mut rgba,
+                ColorSpace::Rec709,
+                ColorSpace::Rec709,
+                ColorSpace::Srgb,
+                false,
+            )
+            .expect_err("explicit OCIO source should not fall back");
+
+        assert!(err.contains("OCIO config file not found"));
+        assert_eq!(rgba, original);
+    }
+
+    #[test]
     fn color_reference_samples_stay_within_expected_tolerance() {
         for sample in COLOR_REFERENCE_SAMPLES {
             let mut rgba = sample.rgba.to_vec();
-            convert_rgba8_in_place(
-                &mut rgba,
-                ColorPipeline::new(sample.input, sample.working, sample.output, sample.tone_map),
-            );
+            ColorTransformPlan::built_in(
+                sample.input,
+                sample.working,
+                sample.output,
+                sample.tone_map,
+            )
+            .apply_rgba8_in_place(&mut rgba)
+            .expect("reference sample should convert");
             for (index, (actual, expected)) in rgba.iter().zip(sample.expected).enumerate() {
                 assert!(
                     (*actual as i16 - expected as i16).unsigned_abs() <= sample.tolerance as u16,
@@ -1315,15 +1350,14 @@ mod tests {
     #[test]
     fn hdr_to_sdr_tone_map_preserves_alpha_and_clamps() {
         let mut rgba = vec![255, 255, 255, 123];
-        convert_rgba8_in_place(
-            &mut rgba,
-            ColorPipeline::new(
-                ColorSpace::Rec2100Pq,
-                ColorSpace::Rec2100Pq,
-                ColorSpace::Rec709,
-                true,
-            ),
-        );
+        ColorTransformPlan::built_in(
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec709,
+            true,
+        )
+        .apply_rgba8_in_place(&mut rgba)
+        .expect("reference plan should convert");
         assert!(rgba[0] > 0 && rgba[1] > 0 && rgba[2] > 0);
         assert_eq!(rgba[3], 123);
     }
@@ -1331,15 +1365,14 @@ mod tests {
     #[test]
     fn rec2020_to_rec709_keeps_neutral_axis_close() {
         let mut rgba = vec![128, 128, 128, 255];
-        convert_rgba8_in_place(
-            &mut rgba,
-            ColorPipeline::new(
-                ColorSpace::Rec2020,
-                ColorSpace::Rec2020,
-                ColorSpace::Rec709,
-                false,
-            ),
-        );
+        ColorTransformPlan::built_in(
+            ColorSpace::Rec2020,
+            ColorSpace::Rec2020,
+            ColorSpace::Rec709,
+            false,
+        )
+        .apply_rgba8_in_place(&mut rgba)
+        .expect("reference plan should convert");
         assert!((rgba[0] as i16 - rgba[1] as i16).abs() <= 2);
         assert!((rgba[1] as i16 - rgba[2] as i16).abs() <= 2);
     }

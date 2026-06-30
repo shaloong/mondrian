@@ -423,7 +423,10 @@ impl SequenceSettings {
             );
 
         // Auto-populate OCIO display/view from config defaults.
-        let (ocio_display, ocio_view) = if matches!(engine, ColorEngine::Ocio { .. }) {
+        let (ocio_display, ocio_view) = if matches!(
+            engine,
+            ColorEngine::MondrianSmart | ColorEngine::Ocio { .. }
+        ) {
             mondrian_core::ocio_default_display_view()
                 .map(|(d, v)| (Some(d), Some(v)))
                 .unwrap_or((None, None))
