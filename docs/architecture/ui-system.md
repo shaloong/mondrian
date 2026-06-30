@@ -61,6 +61,12 @@ Viewer preview rendering remains an adapter concern. It consumes the current
 playback frame from `AppState`; it must not own playback state or mutate the
 timeline to request frames.
 
+Monitor direct manipulation uses viewer-scoped UI actions with sequence-space
+payloads. The viewer surface may emit absolute clip transform intents for
+position, scale, and rotation, but `AppState` remains the single mutation owner:
+it validates payloads, checks track locks, applies timeline property mutations,
+and records one undoable snapshot for each committed monitor edit.
+
 ## Viewer Preview Scheduling
 
 Playback-frame refreshes use a narrow UI update path: the host advances

@@ -135,6 +135,8 @@ pub const VIEWER_NAMESPACE: &str = "ui.viewer";
 
 /// Action name for changing the active sequence preview resolution scale.
 pub const VIEWER_SET_PREVIEW_RESOLUTION_SCALE: &str = "set_preview_resolution_scale";
+/// Action name for changing one selected clip transform from monitor editing.
+pub const VIEWER_SET_CLIP_TRANSFORM: &str = "set_clip_transform";
 /// Shell-local action name for cycling viewer canvas zoom.
 pub const VIEWER_CYCLE_ZOOM: &str = "cycle_zoom";
 /// Shell-local action name for setting viewer canvas zoom.
@@ -457,6 +459,28 @@ pub struct ViewerSetPreviewResolutionScalePayload {
 pub struct ViewerSetZoomScalePayload {
     /// Fixed canvas scale. `None` means fit to available viewer space.
     pub scale: Option<f32>,
+}
+
+/// Sequence-space position emitted by monitor direct manipulation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ViewerTransformPositionPayload {
+    /// Horizontal position in sequence pixels.
+    pub x: f32,
+    /// Vertical position in sequence pixels.
+    pub y: f32,
+}
+
+/// Change one clip transform from the viewer/monitor surface.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ViewerSetClipTransformPayload {
+    /// Clip targeted by the monitor interaction.
+    pub clip: InspectorClipRefPayload,
+    /// Optional absolute sequence-space position.
+    pub position: Option<ViewerTransformPositionPayload>,
+    /// Optional uniform scale in UI percent units.
+    pub scale_percent: Option<f32>,
+    /// Optional rotation in degrees.
+    pub rotation_degrees: Option<f32>,
 }
 
 /// Seek the active timeline to a frame.
@@ -1160,6 +1184,11 @@ pub fn viewer_set_preview_resolution_scale_action(
     payload: ViewerSetPreviewResolutionScalePayload,
 ) -> Action {
     custom_viewer_action(VIEWER_SET_PREVIEW_RESOLUTION_SCALE, payload)
+}
+
+/// Build a viewer request for changing one selected clip transform.
+pub fn viewer_set_clip_transform_action(payload: ViewerSetClipTransformPayload) -> Action {
+    custom_viewer_action(VIEWER_SET_CLIP_TRANSFORM, payload)
 }
 
 /// Build a shell-local viewer request for cycling canvas zoom.

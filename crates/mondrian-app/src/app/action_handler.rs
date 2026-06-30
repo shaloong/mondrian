@@ -29,13 +29,13 @@ use crate::app::ui_actions::{
     TimelineSelectClipPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
     TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetPreviewResolutionScalePayload,
-    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-    ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER,
-    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB,
-    EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
+    ViewerSetPreviewResolutionScalePayload, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION,
+    ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION,
+    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
+    ASSETS_RENAME_FOLDER, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
+    EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
     INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
     INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
@@ -47,7 +47,7 @@ use crate::app::ui_actions::{
     TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
     TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
     TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
-    VIEWER_NAMESPACE, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
+    VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -1496,6 +1496,14 @@ impl AppState {
                 )?;
                 self.set_preview_resolution_scale_from_ui(payload.scale)
             }
+            VIEWER_SET_CLIP_TRANSFORM => {
+                let payload = parse_ui_payload::<ViewerSetClipTransformPayload>(
+                    "viewer_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_clip_transform_from_viewer_ui(payload)
+            }
             _ => Err(unknown_ui_action_error("viewer_ui_action", name)),
         }
     }
@@ -1992,6 +2000,85 @@ impl AppState {
         Ok(())
     }
 
+    fn set_clip_transform_from_viewer_ui(
+        &mut self,
+        payload: ViewerSetClipTransformPayload,
+    ) -> Result<()> {
+        const STEP_ID: &str = "viewer_set_clip_transform";
+        if payload
+            .position
+            .is_some_and(|position| !position.x.is_finite() || !position.y.is_finite())
+            || payload.scale_percent.is_some_and(|scale| !scale.is_finite())
+            || payload.rotation_degrees.is_some_and(|rotation| !rotation.is_finite())
+        {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: STEP_ID.to_string(),
+                reason: "transform values must be finite".to_string(),
+            });
+        }
+
+        self.ensure_clip_track_unlocked(STEP_ID, payload.clip.clip_id)?;
+        let Some(seq) = self.sequence.as_mut() else {
+            return Err(missing_sequence_error(STEP_ID));
+        };
+        let before = seq.clone();
+        let playhead = seq.playhead;
+        let changed = {
+            let clip = find_clip_mut(seq, payload.clip.clip_id)
+                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+            let mut changed = false;
+
+            if let Some(position) = payload.position {
+                let position = Vec2::new(position.x, position.y);
+                if (clip.transform.get_position(playhead) - position).length_squared()
+                    >= f32::EPSILON
+                {
+                    clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: Transform2D::POSITION_PATH.to_string(),
+                        value: PropertyValue::Vec2(position),
+                    })?;
+                    changed = true;
+                }
+            }
+
+            if let Some(scale_percent) = payload.scale_percent {
+                let scale = Vec2::splat(scale_percent.max(0.0) / 100.0);
+                if (clip.transform.get_scale(playhead) - scale).length_squared() >= f32::EPSILON {
+                    clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: Transform2D::SCALE_PATH.to_string(),
+                        value: PropertyValue::Vec2(scale),
+                    })?;
+                    changed = true;
+                }
+            }
+
+            if let Some(rotation) = payload.rotation_degrees {
+                let current = clip
+                    .transform
+                    .to_property_bag()
+                    .evaluate(
+                        Transform2D::ROTATION_PATH,
+                        mondrian_core::automation::timecode_to_ticks(playhead),
+                    )
+                    .and_then(|value| value.as_f32())
+                    .unwrap_or(0.0);
+                if (current - rotation).abs() >= f32::EPSILON {
+                    clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: Transform2D::ROTATION_PATH.to_string(),
+                        value: PropertyValue::Float(rotation),
+                    })?;
+                    changed = true;
+                }
+            }
+
+            changed
+        };
+        if changed {
+            self.record_timeline_edit_snapshot("调整监视器片段变换", before);
+        }
+        Ok(())
+    }
+
     fn set_clip_curve_from_ui(&mut self, payload: InspectorSetClipCurvePayload) -> Result<()> {
         if payload.points.len() < 2 {
             return Err(MondrianError::WorkflowStepFailed {
@@ -2328,25 +2415,26 @@ mod tests {
         timeline_select_clip_action, timeline_set_in_out_point_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-        viewer_set_preview_resolution_scale_action, AssetsCreateAssetPayload,
-        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsPrepareDragPayload,
-        AssetsRelinkAssetPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-        AssetsSetProxyModePayload, EffectsAddToClipPayload, ExportDraftUpdatePayload,
-        ExportEnqueuePayload, ExportJobTargetPayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-        InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-        ProjectRecoverFromAutosavePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-        TimelineInOutPointPayloadKind, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-        ViewerSetPreviewResolutionScalePayload,
+        viewer_set_clip_transform_action, viewer_set_preview_resolution_scale_action,
+        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
+        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
+        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
+        AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
+        AssetsRenameFolderPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
+        ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, SequenceTargetPayload,
+        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveTrackPayload,
+        TimelineOpenNestedSequencePayload, TimelineSetInOutPointPayload,
+        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+        TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
+        ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
@@ -5011,6 +5099,54 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_viewer_ui_sets_clip_transform_atomically() {
+        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let clip_ref = inspector_clip_payload(track_id, clip_id);
+
+        state
+            .dispatch_action(viewer_set_clip_transform_action(
+                ViewerSetClipTransformPayload {
+                    clip: clip_ref,
+                    position: Some(ViewerTransformPositionPayload { x: 320.0, y: 180.0 }),
+                    scale_percent: Some(125.0),
+                    rotation_degrees: Some(8.5),
+                },
+            ))
+            .expect("dispatch viewer transform");
+
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert_eq!(
+            clip.transform.get_position(sequence.playhead),
+            glam::Vec2::new(320.0, 180.0)
+        );
+        assert_eq!(
+            clip.transform.get_scale(sequence.playhead),
+            glam::Vec2::splat(1.25)
+        );
+        let rotation = clip
+            .transform
+            .to_property_bag()
+            .evaluate(
+                Transform2D::ROTATION_PATH,
+                mondrian_core::automation::timecode_to_ticks(sequence.playhead),
+            )
+            .and_then(|value| value.as_f32())
+            .expect("rotation value");
+        assert!((rotation - 8.5).abs() < f32::EPSILON);
+        assert!(state.can_undo_action());
+
+        assert!(state.undo_timeline().expect("undo viewer transform"));
+        let sequence = state.sequence.as_ref().expect("sequence after undo");
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert_eq!(
+            clip.transform.get_position(sequence.playhead),
+            glam::Vec2::ZERO
+        );
+        assert_eq!(clip.transform.get_scale(sequence.playhead), glam::Vec2::ONE);
+    }
+
+    #[test]
     fn dispatch_inspector_ui_maps_curve_payload_to_opacity_keyframes() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
 
@@ -5059,6 +5195,12 @@ mod tests {
                 clip: clip_ref,
                 field: InspectorClipTransformField::PositionX,
                 value: 128.0,
+            }),
+            viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
+                clip: clip_ref,
+                position: Some(ViewerTransformPositionPayload { x: 320.0, y: 180.0 }),
+                scale_percent: Some(125.0),
+                rotation_degrees: Some(8.5),
             }),
             inspector_set_clip_curve_action(InspectorSetClipCurvePayload {
                 clip: clip_ref,
