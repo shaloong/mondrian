@@ -435,6 +435,7 @@ mod tests {
     use mondrian_core::types::{AssetId, Resolution};
     use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
+    use mondrian_timeline::track::Track;
 
     #[test]
     fn evaluation_request_preview_carries_interactive_contract() {
@@ -634,6 +635,71 @@ mod tests {
     }
 
     #[test]
+    fn preview_and_export_requests_preserve_timeline_semantics() {
+        let mut seq = Sequence::new("preview-export-contract");
+        seq.settings.color_management.nested_processing =
+            NestedColorProcessing::BakeChildOutputTransform;
+        seq.video_tracks = vec![
+            Track::new_video("V1"),
+            Track::new_video("V2"),
+            Track::new_video("V3"),
+            Track::new_video("V4"),
+        ];
+        seq.video_tracks[1].blend_mode = BlendMode::Screen;
+        seq.video_tracks[3].blend_mode = BlendMode::Multiply;
+        let tb = seq.time_base();
+
+        let media_asset = AssetId::new();
+        let mut media = Clip::new(media_asset, TimeCode::new(0, tb), TimeCode::new(30, tb));
+        media.source_in = TimeCode::new(3, tb);
+        media.source_out = TimeCode::new(33, tb);
+        media.interpretation.color_space_override = Some(ColorSpace::Srgb);
+        media.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
+        media.interpretation.field_order_override = Some(FieldOrder::UpperFirst);
+        media.interpretation.alpha = AlphaInterpretation::Premultiplied;
+        media.blend_mode = Some(BlendMode::HardLight);
+        seq.video_tracks[0].add_clip(media).expect("add media");
+
+        let solid = Clip::new_solid_color(
+            AssetId::new(),
+            Color::from_rgba8(16, 48, 128, 255),
+            TimeCode::new(0, tb),
+            TimeCode::new(30, tb),
+        );
+        seq.video_tracks[1].add_clip(solid).expect("add solid");
+
+        let child_id = SequenceId::new();
+        let mut nested = Clip::new_nested_sequence(
+            child_id,
+            TimeCode::new(5, tb),
+            TimeCode::new(30, tb),
+            Some("child".to_owned()),
+        );
+        nested.source_in = TimeCode::new(20, tb);
+        nested.source_out = TimeCode::new(50, tb);
+        seq.video_tracks[2].add_clip(nested).expect("add nested");
+
+        let adjustment =
+            Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        seq.video_tracks[3].add_clip(adjustment).expect("add adjustment");
+
+        let preview =
+            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(12, 0.25));
+        let export = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::export(12));
+
+        assert_eq!(preview.timeline_frame, export.timeline_frame);
+        assert_eq!(preview.time_base, export.time_base);
+        assert_ne!(preview.intent, export.intent);
+        assert_ne!(preview.settings, export.settings);
+        assert_eq!(preview.diagnostics, export.diagnostics);
+        assert_eq!(preview.len(), 4);
+        assert_eq!(
+            preview_semantic_signature(&preview),
+            preview_semantic_signature(&export)
+        );
+    }
+
+    #[test]
     fn evaluate_timeline_render_plan_reports_filtering_diagnostics() {
         let mut seq = Sequence::new("render-plan-diagnostics");
         let tb = seq.time_base();
@@ -663,5 +729,101 @@ mod tests {
         assert_eq!(plan.diagnostics.emitted_elements, 1);
         assert_eq!(plan.diagnostics.skipped_zero_opacity, 1);
         assert_eq!(plan.len(), 1);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum RenderPlanSemanticElement {
+        Media {
+            asset_id: AssetId,
+            color_space_override: Option<ColorSpace>,
+            pixel_aspect_ratio_override: Option<PixelAspectRatio>,
+            field_order_override: Option<FieldOrder>,
+            alpha_interpretation: AlphaInterpretation,
+            source_frame: i64,
+            source_micros: i64,
+            source_time_base: Rational,
+            opacity: f32,
+            blend_mode: BlendMode,
+            transform: [f32; 6],
+            frame_seed: i64,
+            auto_tone_map: bool,
+        },
+        Adjustment {
+            opacity: f32,
+            blend_mode: BlendMode,
+            frame_seed: i64,
+        },
+        SolidColor {
+            color: Color,
+            opacity: f32,
+            blend_mode: BlendMode,
+            transform: [f32; 6],
+            frame_seed: i64,
+        },
+        NestedSequence {
+            sequence_id: SequenceId,
+            source_frame: i64,
+            source_micros: i64,
+            nested_processing: NestedColorProcessing,
+            opacity: f32,
+            blend_mode: BlendMode,
+            transform: [f32; 6],
+            frame_seed: i64,
+        },
+    }
+
+    fn preview_semantic_signature(plan: &TimelineRenderPlan) -> Vec<RenderPlanSemanticElement> {
+        plan.elements
+            .iter()
+            .map(|element| match element {
+                TimelineRenderPlanElement::Media(media) => RenderPlanSemanticElement::Media {
+                    asset_id: media.asset_id,
+                    color_space_override: media.color_space_override,
+                    pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
+                    field_order_override: media.field_order_override,
+                    alpha_interpretation: media.alpha_interpretation,
+                    source_frame: media.source_frame,
+                    source_micros: micros(media.source_secs),
+                    source_time_base: media.source_time_base,
+                    opacity: media.opacity,
+                    blend_mode: media.blend_mode,
+                    transform: media.transform,
+                    frame_seed: media.frame_seed,
+                    auto_tone_map: media.auto_tone_map,
+                },
+                TimelineRenderPlanElement::Adjustment(adjustment) => {
+                    RenderPlanSemanticElement::Adjustment {
+                        opacity: adjustment.opacity,
+                        blend_mode: adjustment.blend_mode,
+                        frame_seed: adjustment.frame_seed,
+                    }
+                }
+                TimelineRenderPlanElement::SolidColor(solid) => {
+                    RenderPlanSemanticElement::SolidColor {
+                        color: solid.color,
+                        opacity: solid.opacity,
+                        blend_mode: solid.blend_mode,
+                        transform: solid.transform,
+                        frame_seed: solid.frame_seed,
+                    }
+                }
+                TimelineRenderPlanElement::NestedSequence(nested) => {
+                    RenderPlanSemanticElement::NestedSequence {
+                        sequence_id: nested.sequence_id,
+                        source_frame: nested.source_frame,
+                        source_micros: micros(nested.source_secs),
+                        nested_processing: nested.nested_processing,
+                        opacity: nested.opacity,
+                        blend_mode: nested.blend_mode,
+                        transform: nested.transform,
+                        frame_seed: nested.frame_seed,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn micros(seconds: f64) -> i64 {
+        (seconds * 1_000_000.0).round() as i64
     }
 }
