@@ -24,7 +24,7 @@ use mondrian_timeline::sequence::Sequence;
 use mondrian_ui_widgets::ViewerFrameImage;
 
 use crate::app::AppState;
-use crate::app_ui::panels::ViewerPreviewSource;
+use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
 const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
@@ -44,6 +44,8 @@ pub struct AppUiPreviewService {
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
+    current_frame_pending: Cell<bool>,
+    last_ready_frame: RefCell<Option<ViewerFrameImage>>,
 }
 
 impl AppUiPreviewService {
@@ -68,6 +70,8 @@ impl AppUiPreviewService {
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             current_generation: Cell::new(0),
+            current_frame_pending: Cell::new(false),
+            last_ready_frame: RefCell::new(None),
         }
     }
 
@@ -98,18 +102,39 @@ impl AppUiPreviewService {
         changed
     }
 
-    fn render_preview(&self, state: &AppState) -> Option<ViewerFrameImage> {
+    fn render_preview(&self, state: &AppState) -> ViewerPreviewState {
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
-        let sequence = state.sequence.as_ref()?;
+        self.current_frame_pending.set(false);
+        let Some(sequence) = state.sequence.as_ref() else {
+            return ViewerPreviewState::Unavailable;
+        };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
         self.schedule_media_prefetches(state, sequence, frame, width, height);
-        let resolved = self.resolve_sequence_elements(state, sequence, frame, width, height, 0)?;
+        let Some(resolved) =
+            self.resolve_sequence_elements(state, sequence, frame, width, height, 0)
+        else {
+            if self.current_frame_pending.get() {
+                return self
+                    .last_ready_frame
+                    .borrow()
+                    .clone()
+                    .map(ViewerPreviewState::Stale)
+                    .unwrap_or(ViewerPreviewState::Loading);
+            }
+            return ViewerPreviewState::Unavailable;
+        };
         let rgba =
             composite_resolved_preview(width, height, &resolved, &mut self.scratch.borrow_mut());
         let key = preview_cache_key(frame, width, height, &rgba);
-        ViewerFrameImage::new(key, width, height, rgba)
+        match ViewerFrameImage::new(key, width, height, rgba) {
+            Some(frame) => {
+                self.last_ready_frame.replace(Some(frame.clone()));
+                ViewerPreviewState::Ready(frame)
+            }
+            None => ViewerPreviewState::Unavailable,
+        }
     }
 
     fn render_nested_sequence_frame(
@@ -231,7 +256,7 @@ enum ResolvedPreviewElement {
 }
 
 impl ViewerPreviewSource for AppUiPreviewService {
-    fn viewer_frame_for_state(&self, state: &AppState) -> Option<ViewerFrameImage> {
+    fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
         self.render_preview(state)
     }
 }
@@ -486,6 +511,7 @@ impl AppUiPreviewService {
         if self.media_failures.borrow().contains(&key) {
             return None;
         }
+        self.current_frame_pending.set(true);
         self.request_media_preview(key, source_secs);
         None
     }
@@ -686,14 +712,20 @@ mod tests {
         state
     }
 
+    fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {
+        match state {
+            ViewerPreviewState::Ready(frame) => frame,
+            other => panic!("expected ready frame, got {other:?}"),
+        }
+    }
+
     #[test]
     fn solid_color_sequence_returns_preview_frame_at_preview_scale() {
         let service = AppUiPreviewService::new();
         let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
 
-        let frame = service
-            .viewer_frame_for_state(&state)
-            .expect("solid-color timeline should preview");
+        let frame = service.viewer_preview_for_state(&state);
+        let frame = ready_frame(frame);
 
         assert_eq!(frame.width, 960);
         assert_eq!(frame.height, 540);
@@ -747,9 +779,8 @@ mod tests {
         state.seek(3);
 
         let service = AppUiPreviewService::new();
-        let frame = service
-            .viewer_frame_for_state(&state)
-            .expect("nested solid sequence should preview");
+        let frame = service.viewer_preview_for_state(&state);
+        let frame = ready_frame(frame);
 
         assert_eq!(frame.width, 960);
         assert_eq!(frame.height, 540);
@@ -772,22 +803,23 @@ mod tests {
 
         let service = AppUiPreviewService::new();
 
-        assert!(service.viewer_frame_for_state(&state).is_none());
+        assert!(matches!(
+            service.viewer_preview_for_state(&state),
+            ViewerPreviewState::Unavailable
+        ));
     }
 
     #[test]
     fn preview_cache_key_changes_when_pixels_change() {
         let service = AppUiPreviewService::new();
-        let first = service
-            .viewer_frame_for_state(&state_with_solid_color_clip(Color::from_rgba8(
-                255, 0, 0, 255,
-            )))
-            .expect("first preview");
-        let second = service
-            .viewer_frame_for_state(&state_with_solid_color_clip(Color::from_rgba8(
-                0, 0, 255, 255,
-            )))
-            .expect("second preview");
+        let first = service.viewer_preview_for_state(&state_with_solid_color_clip(
+            Color::from_rgba8(255, 0, 0, 255),
+        ));
+        let first = ready_frame(first);
+        let second = service.viewer_preview_for_state(&state_with_solid_color_clip(
+            Color::from_rgba8(0, 0, 255, 255),
+        ));
+        let second = ready_frame(second);
 
         assert_ne!(first.key, second.key);
     }

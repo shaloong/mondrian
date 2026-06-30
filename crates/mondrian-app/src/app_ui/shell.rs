@@ -1418,6 +1418,7 @@ fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> b
             model.frame_label.clone(),
             model.playing,
             model.frame_image.clone(),
+            model.empty_message.clone(),
         );
         return true;
     }

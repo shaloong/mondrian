@@ -78,3 +78,9 @@ file modification stamp, source frame/time, and target preview dimensions.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.
+
+Viewer models consume an explicit preview readiness state. `Ready` frames are
+current, `Loading` means the requested frame is queued/in flight, and `Stale`
+means the viewer may keep the last ready frame visible while the current frame is
+prepared. These states are presentation/adaptor semantics only; they must not
+mutate timeline playback state or affect export evaluation.
