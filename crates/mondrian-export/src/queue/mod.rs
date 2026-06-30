@@ -1461,6 +1461,19 @@ mod tests {
         }
     }
 
+    fn timeline_input_with_output_color(output_color_space: ColorSpace) -> TimelineExportInput {
+        let mut sequence = Sequence::new("color-validation");
+        sequence.settings.color_management.output_color_space = output_color_space;
+        TimelineExportInput {
+            sequence,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        }
+    }
+
     fn wait_until(timeout_ms: u64, mut predicate: impl FnMut() -> bool) -> bool {
         let start = std::time::Instant::now();
         while start.elapsed().as_millis() < timeout_ms as u128 {
@@ -1549,6 +1562,31 @@ mod tests {
 
         assert!(queue.list_jobs().is_empty());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn export_color_validation_rejects_camera_log_consumer_codecs() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLog);
+        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        let config = dummy_config("camera-log.mp4");
+
+        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect_err("camera log should reject H.264/MP4 delivery");
+        assert!(err.contains("Camera log"));
+        assert!(err.contains("ProRes"));
+    }
+
+    #[test]
+    fn export_color_validation_allows_camera_log_prores_intermediate() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLog);
+        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+
+        let mut config = dummy_config("camera-log.mov");
+        config.preset.container = Container::Mov;
+        config.preset.video = VideoCodecConfig::ProRes { variant: "4444xq".to_string() };
+
+        validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect("camera log ProRes intermediate should pass");
     }
 
     #[test]

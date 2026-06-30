@@ -44,6 +44,11 @@ for standardized delivery/monitoring spaces. Camera-log acquisition spaces such
 as Apple Log, S-Log3, and ARRI LogC4 currently do not emit FFmpeg delivery tags,
 because writing guessed Rec.709 tags would mislabel the exported media.
 
+Camera-log output is treated as a professional intermediate path. Export
+validation rejects consumer delivery codecs for camera-log output and only
+allows 10-bit-or-higher MOV/MXF ProRes configurations until richer metadata
+carriage is implemented.
+
 ## Unknown Media
 
 When detected media color space is missing, `MissingColorMetadataPolicy` resolves it as:

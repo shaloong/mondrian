@@ -227,8 +227,21 @@ pub(crate) fn validate_timeline_export_color_compatibility(
 ) -> Result<(), String> {
     let settings = &timeline.sequence.settings;
     let output = settings.color_management.output_color_space;
+    let output_encoding = output.encoding();
     let bit_depth = settings.color_management.export_bit_depth;
     let preserve_hdr = settings.color_management.preserve_hdr_metadata;
+
+    if output_encoding.is_camera_log() {
+        if bit_depth == ExportBitDepth::Eight {
+            return Err("Camera log 输出需要 10-bit 或更高位深".to_string());
+        }
+        match (&config.preset.container, &config.preset.video) {
+            (Container::Mov | Container::Mxf, VideoCodecConfig::ProRes { .. }) => {}
+            _ => {
+                return Err("Camera log 输出仅支持 MOV/MXF + ProRes 专业中间格式".to_string());
+            }
+        }
+    }
 
     if output.is_hdr() && bit_depth == ExportBitDepth::Eight {
         return Err("HDR 输出不能使用 8-bit 导出位深".to_string());
