@@ -29,6 +29,7 @@ use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
 const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
 const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
+const MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY: usize = MEDIA_PREVIEW_CACHE_CAPACITY * 2;
 const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
 const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
@@ -42,7 +43,7 @@ pub struct AppUiPreviewService {
     jobs: mpsc::SyncSender<MediaPreviewJob>,
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     media_cache: RefCell<MediaPreviewCache>,
-    media_failures: RefCell<HashSet<MediaPreviewKey>>,
+    media_failures: RefCell<MediaPreviewFailureCache>,
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
@@ -70,7 +71,9 @@ impl AppUiPreviewService {
             jobs: job_tx,
             results: RefCell::new(result_rx),
             media_cache: RefCell::new(MediaPreviewCache::new(MEDIA_PREVIEW_CACHE_CAPACITY)),
-            media_failures: RefCell::new(HashSet::new()),
+            media_failures: RefCell::new(MediaPreviewFailureCache::new(
+                MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY,
+            )),
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             current_generation: Cell::new(0),
@@ -99,6 +102,7 @@ impl AppUiPreviewService {
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
             scheduler,
             media_cache_entries: self.media_cache.borrow().len(),
+            media_failure_entries: self.media_failures.borrow().len(),
         }
     }
 
@@ -338,6 +342,8 @@ pub struct AppUiPreviewDiagnostics {
     pub scheduler: MediaPreviewSchedulerDiagnostics,
     /// Current number of frames in the media preview LRU cache.
     pub media_cache_entries: usize,
+    /// Current number of keys in the media preview failure LRU cache.
+    pub media_failure_entries: usize,
 }
 
 enum ResolvedPreviewElement {
@@ -401,6 +407,57 @@ struct MediaPreviewCache {
     capacity: usize,
     entries: HashMap<MediaPreviewKey, MediaPreviewFrame>,
     lru: VecDeque<MediaPreviewKey>,
+}
+
+struct MediaPreviewFailureCache {
+    capacity: usize,
+    entries: HashSet<MediaPreviewKey>,
+    lru: VecDeque<MediaPreviewKey>,
+}
+
+impl MediaPreviewFailureCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: HashSet::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn contains(&mut self, key: &MediaPreviewKey) -> bool {
+        let contains = self.entries.contains(key);
+        if contains {
+            self.touch(key);
+        }
+        contains
+    }
+
+    fn insert(&mut self, key: MediaPreviewKey) {
+        self.entries.insert(key.clone());
+        self.touch(&key);
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if self.entries.remove(&oldest) {
+                break;
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &MediaPreviewKey) {
+        self.entries.remove(key);
+        self.lru.retain(|candidate| candidate != key);
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn touch(&mut self, key: &MediaPreviewKey) {
+        self.lru.retain(|candidate| candidate != key);
+        self.lru.push_back(key.clone());
+    }
 }
 
 impl MediaPreviewCache {
@@ -745,7 +802,7 @@ impl AppUiPreviewService {
     }
 
     fn failed_media_key(&self, key: &MediaPreviewKey) -> bool {
-        let failed = self.media_failures.borrow().contains(key);
+        let failed = self.media_failures.borrow_mut().contains(key);
         if failed {
             bump(&self.metrics.media_failure_hits);
         }
@@ -1031,6 +1088,7 @@ mod tests {
         assert_eq!(diagnostics.stale_frames, 0);
         assert_eq!(diagnostics.unavailable_frames, 0);
         assert_eq!(diagnostics.media_cache_entries, 0);
+        assert_eq!(diagnostics.media_failure_entries, 0);
     }
 
     #[test]
@@ -1214,6 +1272,37 @@ mod tests {
         let frame = cache.get(&key).expect("updated frame");
         assert_eq!(cache.len(), 1);
         assert_eq!(frame.rgba, vec![9, 0, 0, 255]);
+    }
+
+    #[test]
+    fn media_preview_failure_cache_evicts_least_recently_used_key() {
+        let mut cache = MediaPreviewFailureCache::new(2);
+        let first = test_media_key(1);
+        let second = test_media_key(2);
+        let third = test_media_key(3);
+
+        cache.insert(first.clone());
+        cache.insert(second.clone());
+        assert!(cache.contains(&first));
+
+        cache.insert(third.clone());
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains(&first));
+        assert!(!cache.contains(&second));
+        assert!(cache.contains(&third));
+    }
+
+    #[test]
+    fn media_preview_failure_cache_updates_existing_key_without_growing() {
+        let mut cache = MediaPreviewFailureCache::new(2);
+        let key = test_media_key(1);
+
+        cache.insert(key.clone());
+        cache.insert(key.clone());
+
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains(&key));
     }
 
     #[test]
