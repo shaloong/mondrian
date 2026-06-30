@@ -61,3 +61,10 @@ Preview callers must use `TimelineEvaluationRequest::preview(...)`. Export
 callers must use `TimelineEvaluationRequest::export(...)`. Any future thumbnail,
 analysis, AI, or cache-warm path should add an explicit intent instead of
 reinterpreting sequence state directly.
+
+The renderer test suite contains an explicit preview/export semantic-signature
+contract. It allows request settings such as intent, quality, color target, frame
+drop policy, and resolution scale to differ, but requires media source timing,
+nested-sequence source timing, element order, blend/opacity, transforms, clip
+interpretation, and nested color-processing mode to remain identical for the
+same sequence frame.
