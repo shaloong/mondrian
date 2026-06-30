@@ -85,5 +85,6 @@ excess preview jobs are dropped instead of back-pressuring the UI thread.
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`
 means the viewer may keep the last ready frame visible while the current frame is
-prepared. These states are presentation/adaptor semantics only; they must not
+prepared. Stale frame reuse is scoped to the same sequence and preview
+dimensions. These states are presentation/adaptor semantics only; they must not
 mutate timeline playback state or affect export evaluation.
