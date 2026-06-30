@@ -27,6 +27,10 @@ Important fields:
 
 `SequenceSettings.color_space` is the timeline working color space. Media input transforms resolve from clip/media interpretation into this working space. Output/display transforms convert from working/output context to the destination.
 
+`ColorPipeline` execution is source -> working -> output. The management engine
+dispatch must preserve that full chain; it must not collapse a timeline pipeline
+to source -> output when a sequence working space is available.
+
 ## Color Encoding Contract
 
 `ColorSpace::encoding()` is the canonical metadata source for color

@@ -51,31 +51,22 @@ impl ColorPipeline {
 
 // ── ColorEngine: centralized dispatch ─────────────────────────────────────────
 
-/// MondrianSmart engine: pure-Rust color math.
-///
-/// Called directly (not through `ColorPipeline`) to avoid the recursive loop
-/// that would occur if `ColorEngine::convert()` created a pipeline whose plan
-/// calls back into `ColorEngine::convert()`.
-fn mondrian_smart_convert(
+/// MondrianSmart engine: pure-Rust source -> working -> output color math.
+fn mondrian_smart_convert_pipeline(
     data: &mut [u8],
     src: ColorSpace,
+    working: ColorSpace,
     dst: ColorSpace,
     tone_map: bool,
 ) -> Result<(), String> {
-    if data.is_empty() || src == dst {
+    if data.is_empty() {
         return Ok(());
     }
-    // Build a plan WITHOUT a ManagementEngine node to avoid recursion.
-    let plan = ColorTransformPlan {
-        source: src,
-        working: src,
-        output: dst,
-        tone_map,
-        nodes: vec![
-            ColorTransformNode::DecodeTransfer(src),
-            ColorTransformNode::ConvertPrimaries { from: src, to: src },
-        ],
-    };
+    let is_noop = src == dst && working == dst && !(tone_map && working.is_hdr() && !dst.is_hdr());
+    if is_noop {
+        return Ok(());
+    }
+    let plan = ColorTransformPlan::built_in(src, working, dst, tone_map);
     plan.apply_rgba8_in_place(data)
 }
 
@@ -91,8 +82,26 @@ impl ColorEngine {
         dst: ColorSpace,
         tone_map: bool,
     ) -> Result<(), String> {
+        self.convert_pipeline(data, src, src, dst, tone_map)
+    }
+
+    /// Apply a full source -> working -> output color conversion.
+    ///
+    /// Preview, export and timeline compositing should use this form whenever a
+    /// sequence working space is known. The shorter [`Self::convert`] API is for
+    /// direct source -> output conversions.
+    pub fn convert_pipeline(
+        &self,
+        data: &mut [u8],
+        src: ColorSpace,
+        working: ColorSpace,
+        dst: ColorSpace,
+        tone_map: bool,
+    ) -> Result<(), String> {
         match self {
-            Self::MondrianSmart => mondrian_smart_convert(data, src, dst, tone_map),
+            Self::MondrianSmart => {
+                mondrian_smart_convert_pipeline(data, src, working, dst, tone_map)
+            }
             Self::Ocio { .. } => {
                 if crate::ocio::ocio_available() {
                     crate::ocio::apply_ocio_rgba8(data, src, dst)
@@ -100,7 +109,7 @@ impl ColorEngine {
                     tracing::warn!(
                         "OCIO engine selected but no config loaded; falling back to MondrianSmart"
                     );
-                    mondrian_smart_convert(data, src, dst, tone_map)
+                    mondrian_smart_convert_pipeline(data, src, working, dst, tone_map)
                 }
             }
         }
@@ -172,26 +181,32 @@ pub struct ColorTransformPlan {
 
 impl ColorTransformPlan {
     pub fn from_pipeline(pipeline: ColorPipeline) -> Self {
+        let mut plan = Self::built_in(
+            pipeline.input,
+            pipeline.working,
+            pipeline.output,
+            pipeline.tone_map,
+        );
+        plan.nodes.insert(0, ColorTransformNode::ManagementEngine(pipeline.engine));
+        plan
+    }
+
+    fn built_in(
+        source: ColorSpace,
+        working: ColorSpace,
+        output: ColorSpace,
+        tone_map: bool,
+    ) -> Self {
         let mut nodes = vec![
-            ColorTransformNode::ManagementEngine(pipeline.engine),
-            ColorTransformNode::DecodeTransfer(pipeline.input),
-            ColorTransformNode::ConvertPrimaries { from: pipeline.input, to: pipeline.working },
+            ColorTransformNode::DecodeTransfer(source),
+            ColorTransformNode::ConvertPrimaries { from: source, to: working },
         ];
-        if pipeline.tone_map && pipeline.working.is_hdr() && !pipeline.output.is_hdr() {
+        if tone_map && working.is_hdr() && !output.is_hdr() {
             nodes.push(ColorTransformNode::ToneMapAces);
         }
-        nodes.push(ColorTransformNode::ConvertPrimaries {
-            from: pipeline.working,
-            to: pipeline.output,
-        });
+        nodes.push(ColorTransformNode::ConvertPrimaries { from: working, to: output });
 
-        Self {
-            source: pipeline.input,
-            working: pipeline.working,
-            output: pipeline.output,
-            tone_map: pipeline.tone_map,
-            nodes,
-        }
+        Self { source, working, output, tone_map, nodes }
     }
 
     pub fn with_display_profile(mut self, profile: DisplayColorProfile) -> Self {
@@ -224,8 +239,8 @@ impl ColorTransformPlan {
 
         // If the first node declares an engine, use its centralized dispatch.
         if let Some(ColorTransformNode::ManagementEngine(engine)) = self.nodes.first() {
-            let tone_map = self.tone_map && self.source.is_hdr() && !self.output.is_hdr();
-            return engine.convert(data, self.source, self.output, tone_map);
+            let tone_map = self.tone_map && self.working.is_hdr() && !self.output.is_hdr();
+            return engine.convert_pipeline(data, self.source, self.working, self.output, tone_map);
         }
 
         let mut frame = RgbaF32Frame::from_rgba8(
@@ -1246,6 +1261,27 @@ mod tests {
             ),
         );
         assert_eq!(rgba, original);
+    }
+
+    #[test]
+    fn managed_pipeline_honors_working_space_when_source_and_output_match() {
+        let mut rgba = vec![255, 255, 255, 77];
+
+        convert_rgba8_in_place(
+            &mut rgba,
+            ColorPipeline::new(
+                ColorSpace::Rec709,
+                ColorSpace::Rec2100Pq,
+                ColorSpace::Rec709,
+                true,
+            )
+            .with_engine(ColorEngine::MondrianSmart),
+        );
+
+        assert!(rgba[0] < 255);
+        assert_eq!(rgba[0], rgba[1]);
+        assert_eq!(rgba[1], rgba[2]);
+        assert_eq!(rgba[3], 77);
     }
 
     #[test]
