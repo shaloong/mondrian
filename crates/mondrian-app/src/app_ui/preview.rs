@@ -894,6 +894,7 @@ impl AppUiPreviewService {
             return Some(frame);
         }
         if self.failed_media_key(&key) {
+            self.current_frame_pending.set(true);
             return None;
         }
         self.current_frame_pending.set(true);

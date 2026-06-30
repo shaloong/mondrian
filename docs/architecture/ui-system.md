@@ -97,10 +97,15 @@ without changing the existing UI-only refresh benchmark paths.
 FFmpeg fixture and exercises real media import, decode readiness, cache-hit
 refreshes, and sequential-frame preview readiness as an ignored/manual perf
 probe.
+`preview_media_continuous_playback_smoke` uses the same generated media path to
+simulate a 30fps playback window and records `Ready`/`Loading`/`Stale`/
+`Unavailable` counts, with the contract that steady playback keeps a current or
+stale frame visible instead of falling through to an unavailable viewer.
 
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`
 means the viewer may keep the last ready frame visible while the current frame is
-prepared. Stale frame reuse is scoped to the same sequence and preview
-dimensions. These states are presentation/adaptor semantics only; they must not
-mutate timeline playback state or affect export evaluation.
+prepared or a failed media key is protected by the bounded failure cache. Stale
+frame reuse is scoped to the same sequence and preview dimensions. These states
+are presentation/adaptor semantics only; they must not mutate timeline playback
+state or affect export evaluation.

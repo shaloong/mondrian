@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
@@ -49,6 +50,24 @@ struct PreviewMediaPerfReport {
     scenario: &'static str,
     frames: usize,
     cache_iterations: usize,
+    preview_diagnostics: AppUiPreviewDiagnostics,
+    cases: Vec<PerfCaseReport>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct PreviewReadinessCounts {
+    ready: usize,
+    loading: usize,
+    stale: usize,
+    unavailable: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewMediaPlaybackPerfReport {
+    scenario: &'static str,
+    frames: usize,
+    frame_interval_ms: u64,
+    readiness: PreviewReadinessCounts,
     preview_diagnostics: AppUiPreviewDiagnostics,
     cases: Vec<PerfCaseReport>,
 }
@@ -458,6 +477,105 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "development preview media continuous playback smoke test; run manually"]
+fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+
+    let frame_count = env_usize_clamped("MONDRIAN_PREVIEW_PLAYBACK_FRAMES", 60, 8, 60);
+    let frame_interval_ms =
+        env_usize_clamped("MONDRIAN_PREVIEW_PLAYBACK_FRAME_MS", 33, 1, 250) as u64;
+    let playback_threshold_ms = env_u128("MONDRIAN_PREVIEW_PLAYBACK_WINDOW_MS", 8_000);
+    let ready_timeout = Duration::from_millis(env_u128(
+        "MONDRIAN_PREVIEW_PLAYBACK_READY_TIMEOUT_MS",
+        10_000,
+    ) as u64);
+
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_preview_playback_perf_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let video_path = root_dir.join("preview-playback-smoke.mp4");
+
+    if !generate_preview_media_fixture(&video_path)? {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_continuous_playback\",\"skipped\":\"ffmpeg CLI unavailable or fixture generation failed\"}}"
+        );
+        let _ = fs::remove_dir_all(&root_dir);
+        return Ok(());
+    }
+
+    let result = (|| -> anyhow::Result<PreviewMediaPlaybackPerfReport> {
+        let mut state = build_preview_media_perf_state(&root_dir, &video_path, frame_count)?;
+        let preview_service = AppUiPreviewService::new();
+        let mut readiness = PreviewReadinessCounts::default();
+
+        state.seek(0);
+        wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+        state.play();
+        let playback_case = run_case(
+            "preview_media.continuous_playback_readiness",
+            1,
+            playback_threshold_ms,
+            || {
+                for frame in 0..frame_count {
+                    state.set_playback_frame_running(frame as i64);
+                    let _ = preview_service.poll_finished();
+                    record_preview_readiness(
+                        &mut readiness,
+                        preview_service.viewer_preview_for_state(&state),
+                    );
+                    let _ = preview_service.poll_finished();
+                    thread::sleep(Duration::from_millis(frame_interval_ms));
+                }
+                let _ = preview_service.poll_finished();
+                Ok(())
+            },
+        )?;
+        state.pause();
+
+        anyhow::ensure!(
+            readiness.unavailable == 0,
+            "continuous playback returned unavailable frames: {:?}; diagnostics: {:?}",
+            readiness,
+            preview_service.diagnostics()
+        );
+        anyhow::ensure!(
+            readiness.ready + readiness.stale >= frame_count.saturating_sub(2),
+            "continuous playback did not keep enough frames visible: {:?}; diagnostics: {:?}",
+            readiness,
+            preview_service.diagnostics()
+        );
+
+        Ok(PreviewMediaPlaybackPerfReport {
+            scenario: "preview_media_continuous_playback",
+            frames: frame_count,
+            frame_interval_ms,
+            readiness,
+            preview_diagnostics: preview_service.diagnostics(),
+            cases: vec![playback_case],
+        })
+    })();
+
+    let _ = fs::remove_dir_all(&root_dir);
+
+    let report = result?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    write_report_if_needed(&report_json);
+
+    let failed_cases: Vec<_> =
+        report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();
+    if !failed_cases.is_empty() {
+        anyhow::bail!(
+            "preview media continuous playback smoke test failed: {:?}; report: {}",
+            failed_cases,
+            report_json
+        );
+    }
+
+    Ok(())
+}
+
 fn build_app_ui_perf_state(
     root_dir: &Path,
     asset_count: usize,
@@ -596,6 +714,7 @@ fn build_preview_media_perf_state(
     let asset_id = library.import_media_file(video_path)?;
 
     let mut sequence = Sequence::new("Preview media perf");
+    sequence.settings.frame_rate = Rational::FPS_30;
     let tb = sequence.time_base();
     let duration = TimeCode::new(frame_count as i64, tb);
     sequence.video_tracks[0].add_clip(Clip::new(asset_id, TimeCode::new(0, tb), duration))?;
@@ -650,6 +769,15 @@ fn assert_preview_ready(
             other,
             preview_service.diagnostics()
         ),
+    }
+}
+
+fn record_preview_readiness(counts: &mut PreviewReadinessCounts, state: ViewerPreviewState) {
+    match state {
+        ViewerPreviewState::Ready(_) => counts.ready += 1,
+        ViewerPreviewState::Loading => counts.loading += 1,
+        ViewerPreviewState::Stale(_) => counts.stale += 1,
+        ViewerPreviewState::Unavailable => counts.unavailable += 1,
     }
 }
 
