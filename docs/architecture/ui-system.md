@@ -77,9 +77,10 @@ Media preview frames are held in a bounded LRU cache keyed by asset identity,
 file modification stamp, source frame/time, and target preview dimensions.
 Decode failures are also held in a bounded LRU key cache so repeated bad media
 does not grow memory unbounded during playback.
-Preview plans without media or nested-sequence dependencies may reuse a bounded
-final-frame cache keyed by sequence, dimensions, and deterministic render-plan
-signature. Plans with external frame dependencies bypass this cache.
+Resolved preview plans may reuse a bounded final-frame cache keyed by sequence,
+dimensions, deterministic render-plan signature, and resolved media-frame
+identity. Unresolved media requests still bypass this cache until their source
+frame is available.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.
