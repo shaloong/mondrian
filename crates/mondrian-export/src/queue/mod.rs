@@ -901,7 +901,7 @@ fn render_timeline_frame_into(
     let color_context = timeline
         .sequence
         .settings
-        .root_render_color_context(&timeline.project_color_management);
+        .root_export_color_context(&timeline.project_color_management);
 
     // Ensure the color engine is ready before rendering.
     color_context.engine.ensure_loaded().map_err(|e| format!("OCIO: {e}"))?;

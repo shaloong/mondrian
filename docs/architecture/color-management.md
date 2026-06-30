@@ -41,6 +41,16 @@ Clip-level `MediaInterpretation.color_space_override` takes precedence over dete
 
 Display transforms belong at preview presentation. Export transforms belong at export encoding/tagging. Do not bake display transforms into timeline source data.
 
+`SequenceSettings::root_preview_color_context(...)` builds the monitor
+presentation context with a caller-provided display/output color space.
+`SequenceSettings::root_export_color_context(...)` builds the delivery context
+from the sequence output color space. Callers must choose one of these explicit
+entry points instead of using a generic root render context.
+
+Preview and export may therefore target different output color spaces while
+sharing the same working color space, engine inheritance, workflow,
+missing-metadata policy, and nested-processing policy.
+
 ## HDR/SDR
 
 HDR output spaces include Rec.2100 PQ/HLG. Tone mapping is required when scene/HDR working data targets SDR output. HDR metadata can only be preserved for HDR output spaces.
