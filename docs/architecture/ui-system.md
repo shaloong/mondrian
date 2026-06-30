@@ -78,6 +78,9 @@ file modification stamp, source frame/time, and target preview dimensions.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.
+Current-frame media requests are scheduled before forward prefetch, and the
+worker queue/pending set are bounded. When playback outruns decode, obsolete or
+excess preview jobs are dropped instead of back-pressuring the UI thread.
 
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`

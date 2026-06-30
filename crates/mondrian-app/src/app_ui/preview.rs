@@ -30,6 +30,8 @@ use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
 const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
 const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
+const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
+const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
@@ -37,7 +39,7 @@ const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
 /// renderer compositor. Media and nested-sequence decode can attach here without
 /// changing panel models or widget APIs.
 pub struct AppUiPreviewService {
-    jobs: mpsc::Sender<MediaPreviewJob>,
+    jobs: mpsc::SyncSender<MediaPreviewJob>,
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     media_cache: RefCell<MediaPreviewCache>,
     media_failures: RefCell<HashSet<MediaPreviewKey>>,
@@ -51,7 +53,8 @@ pub struct AppUiPreviewService {
 impl AppUiPreviewService {
     /// Create an empty preview service.
     pub fn new() -> Self {
-        let (job_tx, job_rx) = mpsc::channel::<MediaPreviewJob>();
+        let (job_tx, job_rx) =
+            mpsc::sync_channel::<MediaPreviewJob>(MEDIA_PREVIEW_JOB_QUEUE_CAPACITY);
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let scheduler = MediaPreviewScheduler::default();
         let worker_scheduler = scheduler.clone();
@@ -111,30 +114,35 @@ impl AppUiPreviewService {
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
-        self.schedule_media_prefetches(state, sequence, frame, width, height);
-        let Some(resolved) =
-            self.resolve_sequence_elements(state, sequence, frame, width, height, 0)
-        else {
-            if self.current_frame_pending.get() {
-                return self
+        let preview_state =
+            match self.resolve_sequence_elements(state, sequence, frame, width, height, 0) {
+                Some(resolved) => {
+                    let rgba = composite_resolved_preview(
+                        width,
+                        height,
+                        &resolved,
+                        &mut self.scratch.borrow_mut(),
+                    );
+                    let key = preview_cache_key(frame, width, height, &rgba);
+                    match ViewerFrameImage::new(key, width, height, rgba) {
+                        Some(frame) => {
+                            self.last_ready_frame.replace(Some(frame.clone()));
+                            ViewerPreviewState::Ready(frame)
+                        }
+                        None => ViewerPreviewState::Unavailable,
+                    }
+                }
+                None if self.current_frame_pending.get() => self
                     .last_ready_frame
                     .borrow()
                     .clone()
                     .map(ViewerPreviewState::Stale)
-                    .unwrap_or(ViewerPreviewState::Loading);
-            }
-            return ViewerPreviewState::Unavailable;
-        };
-        let rgba =
-            composite_resolved_preview(width, height, &resolved, &mut self.scratch.borrow_mut());
-        let key = preview_cache_key(frame, width, height, &rgba);
-        match ViewerFrameImage::new(key, width, height, rgba) {
-            Some(frame) => {
-                self.last_ready_frame.replace(Some(frame.clone()));
-                ViewerPreviewState::Ready(frame)
-            }
-            None => ViewerPreviewState::Unavailable,
-        }
+                    .unwrap_or(ViewerPreviewState::Loading),
+                None => ViewerPreviewState::Unavailable,
+            };
+        self.schedule_media_prefetches(state, sequence, frame, width, height);
+        self.scheduler.prune_obsolete();
+        preview_state
     }
 
     fn render_nested_sequence_frame(
@@ -336,9 +344,10 @@ impl MediaPreviewCache {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct MediaPreviewScheduler {
     state: Arc<Mutex<MediaPreviewSchedulerState>>,
+    max_pending: usize,
 }
 
 #[derive(Default)]
@@ -347,18 +356,49 @@ struct MediaPreviewSchedulerState {
     pending: HashMap<MediaPreviewKey, u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPreviewRequestStatus {
+    Scheduled,
+    AlreadyPending,
+    DroppedBackpressure,
+}
+
+impl Default for MediaPreviewScheduler {
+    fn default() -> Self {
+        Self::with_max_pending(MEDIA_PREVIEW_MAX_PENDING_REQUESTS)
+    }
+}
+
 impl MediaPreviewScheduler {
+    fn with_max_pending(max_pending: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(MediaPreviewSchedulerState::default())),
+            max_pending: max_pending.max(1),
+        }
+    }
+
     fn begin_generation(&self) -> u64 {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         state.latest_generation = state.latest_generation.saturating_add(1);
         state.latest_generation
     }
 
-    fn request(&self, key: MediaPreviewKey, generation: u64) -> bool {
+    fn request(&self, key: MediaPreviewKey, generation: u64) -> MediaPreviewRequestStatus {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        let is_new = !state.pending.contains_key(&key);
+        if generation < state.latest_generation {
+            return MediaPreviewRequestStatus::DroppedBackpressure;
+        }
+        if let Some(pending_generation) = state.pending.get_mut(&key) {
+            *pending_generation = generation;
+            Self::prune_obsolete_locked(&mut state);
+            return MediaPreviewRequestStatus::AlreadyPending;
+        }
+        Self::prune_obsolete_locked(&mut state);
+        if state.pending.len() >= self.max_pending {
+            return MediaPreviewRequestStatus::DroppedBackpressure;
+        }
         state.pending.insert(key, generation);
-        is_new
+        MediaPreviewRequestStatus::Scheduled
     }
 
     fn should_decode(&self, key: &MediaPreviewKey) -> bool {
@@ -382,6 +422,16 @@ impl MediaPreviewScheduler {
 
     fn cancel(&self, key: &MediaPreviewKey) {
         self.state.lock().expect("media preview scheduler poisoned").pending.remove(key);
+    }
+
+    fn prune_obsolete(&self) {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        Self::prune_obsolete_locked(&mut state);
+    }
+
+    fn prune_obsolete_locked(state: &mut MediaPreviewSchedulerState) {
+        let latest_generation = state.latest_generation;
+        state.pending.retain(|_, generation| *generation >= latest_generation);
     }
 
     #[cfg(test)]
@@ -555,15 +605,32 @@ impl AppUiPreviewService {
 
     fn request_media_preview(&self, key: MediaPreviewKey, source_secs: f64) {
         let generation = self.current_generation.get();
-        if !self.scheduler.request(key.clone(), generation) {
-            return;
+        match self.scheduler.request(key.clone(), generation) {
+            MediaPreviewRequestStatus::Scheduled => {}
+            MediaPreviewRequestStatus::AlreadyPending => return,
+            MediaPreviewRequestStatus::DroppedBackpressure => {
+                tracing::trace!(
+                    asset_id = %key.asset_id,
+                    source_frame = key.source_frame,
+                    "viewer preview request dropped by backpressure"
+                );
+                return;
+            }
         }
         let job = MediaPreviewJob { key: key.clone(), source_secs, generation };
-        match self.jobs.send(job) {
+        match self.jobs.try_send(job) {
             Ok(()) => {}
-            Err(err) => {
-                self.scheduler.cancel(&key);
-                tracing::debug!("viewer preview worker unavailable: {err}");
+            Err(mpsc::TrySendError::Full(job)) => {
+                self.scheduler.cancel(&job.key);
+                tracing::trace!(
+                    asset_id = %job.key.asset_id,
+                    source_frame = job.key.source_frame,
+                    "viewer preview queue full; dropping media preview request"
+                );
+            }
+            Err(mpsc::TrySendError::Disconnected(job)) => {
+                self.scheduler.cancel(&job.key);
+                tracing::debug!("viewer preview worker unavailable");
             }
         }
     }
@@ -909,7 +976,10 @@ mod tests {
             target_width: 320,
             target_height: 180,
         };
-        assert!(scheduler.request(key.clone(), first_generation));
+        assert_eq!(
+            scheduler.request(key.clone(), first_generation),
+            MediaPreviewRequestStatus::Scheduled
+        );
 
         scheduler.begin_generation();
 
@@ -930,13 +1000,79 @@ mod tests {
             target_width: 320,
             target_height: 180,
         };
-        assert!(scheduler.request(key.clone(), first_generation));
+        assert_eq!(
+            scheduler.request(key.clone(), first_generation),
+            MediaPreviewRequestStatus::Scheduled
+        );
 
         let second_generation = scheduler.begin_generation();
-        assert!(!scheduler.request(key.clone(), second_generation));
+        assert_eq!(
+            scheduler.request(key.clone(), second_generation),
+            MediaPreviewRequestStatus::AlreadyPending
+        );
 
         assert!(scheduler.should_decode(&key));
         assert!(scheduler.complete(&key, first_generation));
+        assert_eq!(scheduler.pending_len(), 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_prunes_obsolete_pending_requests() {
+        let scheduler = MediaPreviewScheduler::default();
+        let first_generation = scheduler.begin_generation();
+        let first = test_media_key(1);
+        let second = test_media_key(2);
+        assert_eq!(
+            scheduler.request(first.clone(), first_generation),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            scheduler.request(second.clone(), first_generation),
+            MediaPreviewRequestStatus::Scheduled
+        );
+
+        scheduler.begin_generation();
+        scheduler.prune_obsolete();
+
+        assert_eq!(scheduler.pending_len(), 0);
+        assert!(!scheduler.should_decode(&first));
+        assert!(!scheduler.should_decode(&second));
+    }
+
+    #[test]
+    fn media_preview_scheduler_drops_new_requests_when_pending_window_is_full() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(2);
+        let generation = scheduler.begin_generation();
+        let first = test_media_key(1);
+        let second = test_media_key(2);
+        let third = test_media_key(3);
+
+        assert_eq!(
+            scheduler.request(first, generation),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            scheduler.request(second, generation),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            scheduler.request(third, generation),
+            MediaPreviewRequestStatus::DroppedBackpressure
+        );
+
+        assert_eq!(scheduler.pending_len(), 2);
+    }
+
+    #[test]
+    fn media_preview_scheduler_rejects_obsolete_generation_requests() {
+        let scheduler = MediaPreviewScheduler::default();
+        let first_generation = scheduler.begin_generation();
+        scheduler.begin_generation();
+
+        assert_eq!(
+            scheduler.request(test_media_key(1), first_generation),
+            MediaPreviewRequestStatus::DroppedBackpressure
+        );
         assert_eq!(scheduler.pending_len(), 0);
     }
 }
