@@ -12,7 +12,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use mondrian_assets::AssetKind;
-use mondrian_core::types::{AssetId, BlendMode};
+use mondrian_core::types::{AssetId, BlendMode, SequenceId};
 use mondrian_effects::CompiledEffectGraph;
 use mondrian_renderer::{
     composite_timeline_elements, evaluate_timeline_render_plan, TimelineAdjustmentLayer,
@@ -47,7 +47,7 @@ pub struct AppUiPreviewService {
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
     current_frame_pending: Cell<bool>,
-    last_ready_frame: RefCell<Option<ViewerFrameImage>>,
+    last_ready_frame: RefCell<Option<ScopedViewerFrame>>,
 }
 
 impl AppUiPreviewService {
@@ -110,6 +110,8 @@ impl AppUiPreviewService {
         self.current_generation.set(generation);
         self.current_frame_pending.set(false);
         let Some(sequence) = state.sequence.as_ref() else {
+            self.scheduler.prune_obsolete();
+            self.last_ready_frame.replace(None);
             return ViewerPreviewState::Unavailable;
         };
         let frame = state.current_frame().max(0);
@@ -126,16 +128,19 @@ impl AppUiPreviewService {
                     let key = preview_cache_key(frame, width, height, &rgba);
                     match ViewerFrameImage::new(key, width, height, rgba) {
                         Some(frame) => {
-                            self.last_ready_frame.replace(Some(frame.clone()));
+                            self.last_ready_frame.replace(Some(ScopedViewerFrame {
+                                sequence_id: sequence.id,
+                                width,
+                                height,
+                                frame: frame.clone(),
+                            }));
                             ViewerPreviewState::Ready(frame)
                         }
                         None => ViewerPreviewState::Unavailable,
                     }
                 }
                 None if self.current_frame_pending.get() => self
-                    .last_ready_frame
-                    .borrow()
-                    .clone()
+                    .stale_frame_for_sequence(sequence, width, height)
                     .map(ViewerPreviewState::Stale)
                     .unwrap_or(ViewerPreviewState::Loading),
                 None => ViewerPreviewState::Unavailable,
@@ -143,6 +148,18 @@ impl AppUiPreviewService {
         self.schedule_media_prefetches(state, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
         preview_state
+    }
+
+    fn stale_frame_for_sequence(
+        &self,
+        sequence: &Sequence,
+        width: u32,
+        height: u32,
+    ) -> Option<ViewerFrameImage> {
+        let last = self.last_ready_frame.borrow();
+        let frame = last.as_ref()?;
+        (frame.sequence_id == sequence.id && frame.width == width && frame.height == height)
+            .then(|| frame.frame.clone())
     }
 
     fn render_nested_sequence_frame(
@@ -297,6 +314,14 @@ struct MediaPreviewFrame {
     width: u32,
     height: u32,
     rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedViewerFrame {
+    sequence_id: SequenceId,
+    width: u32,
+    height: u32,
+    frame: ViewerFrameImage,
 }
 
 struct MediaPreviewCache {
@@ -889,6 +914,26 @@ mod tests {
         let second = ready_frame(second);
 
         assert_ne!(first.key, second.key);
+    }
+
+    #[test]
+    fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
+        let service = AppUiPreviewService::new();
+        let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+
+        let ready = ready_frame(service.viewer_preview_for_state(&state));
+        let same_scope = service
+            .stale_frame_for_sequence(sequence, width, height)
+            .expect("same sequence can reuse stale frame");
+        assert_eq!(same_scope.key, ready.key);
+
+        let different_sequence = Sequence::new("other");
+        assert!(service.stale_frame_for_sequence(&different_sequence, width, height).is_none());
+        assert!(service
+            .stale_frame_for_sequence(sequence, width.saturating_add(1), height)
+            .is_none());
     }
 
     #[test]
