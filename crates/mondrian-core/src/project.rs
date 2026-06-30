@@ -46,7 +46,8 @@ impl ProjectMeta {
 /// 类似于达芬奇项目设置中的色彩科学选择器。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ProjectColorManagement {
-    /// 色彩引擎。默认 [`ColorEngine::MondrianSmart`]。
+    /// 色彩引擎。默认 [`ColorEngine::MondrianSmart`]，即 Mondrian Standard
+    /// policy over the bundled OCIO config.
     #[serde(default)]
     pub engine: ColorEngine,
 }

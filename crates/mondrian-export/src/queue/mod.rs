@@ -903,9 +903,6 @@ fn render_timeline_frame_into(
         .settings
         .root_export_color_context(&timeline.project_color_management);
 
-    // Ensure the color engine is ready before rendering.
-    color_context.engine.ensure_loaded().map_err(|e| format!("OCIO: {e}"))?;
-
     render_sequence_frame_into(
         timeline,
         &timeline.sequence,
@@ -931,9 +928,6 @@ fn render_sequence_frame_into(
     if depth > 16 {
         return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
     }
-
-    // Ensure the color engine is ready.
-    color_context.engine.ensure_loaded().map_err(|e| format!("OCIO: {e}"))?;
 
     let required_len = width as usize * height as usize * 4;
     if canvas.len() != required_len {
@@ -1097,6 +1091,15 @@ fn render_sequence_frame_into(
         }
     }
 
+    if composite_elements.is_empty() {
+        canvas.clear();
+        canvas.resize(width as usize * height as usize * 4, 0);
+        for px in canvas.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        return Ok(());
+    }
+
     let mut scratch = TimelineCompositeScratch::default();
     let rendered = composite_timeline_elements_float_linear(
         width,
@@ -1117,7 +1120,8 @@ fn render_sequence_frame_into(
             color_context.tone_map,
         )
         .with_engine(color_context.engine.clone()),
-    );
+    )
+    .map_err(|err| format!("final color transform failed: {err}"))?;
     Ok(())
 }
 
@@ -1144,7 +1148,8 @@ fn decode_video_layer_scaled(
             tone_map,
         )
         .with_engine(engine.clone()),
-    );
+    )
+    .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
     Ok(Arc::new(DecodedVideoLayer {
         width: decoded.width,
         height: decoded.height,
