@@ -72,3 +72,9 @@ starts a monotonic generation, and background media jobs check that their key is
 still requested by the latest generation before decoding. Completed stale jobs
 may warm the cache, but they do not force a UI refresh for an older playback
 frame.
+
+Media preview frames are held in a bounded LRU cache keyed by asset identity,
+file modification stamp, source frame/time, and target preview dimensions.
+Playback requests may enqueue a small forward prefetch window, but prefetching is
+best-effort: it must not rebuild UI state, block the current frame, or bypass the
+generation checks that protect continuous playback from stale decode work.

@@ -5,7 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
@@ -28,6 +28,8 @@ use crate::app_ui::panels::ViewerPreviewSource;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
 const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
+const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
+const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
 
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
@@ -37,7 +39,7 @@ const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
 pub struct AppUiPreviewService {
     jobs: mpsc::Sender<MediaPreviewJob>,
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
-    media_cache: RefCell<HashMap<MediaPreviewKey, MediaPreviewFrame>>,
+    media_cache: RefCell<MediaPreviewCache>,
     media_failures: RefCell<HashSet<MediaPreviewKey>>,
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
@@ -61,7 +63,7 @@ impl AppUiPreviewService {
         Self {
             jobs: job_tx,
             results: RefCell::new(result_rx),
-            media_cache: RefCell::new(HashMap::new()),
+            media_cache: RefCell::new(MediaPreviewCache::new(MEDIA_PREVIEW_CACHE_CAPACITY)),
             media_failures: RefCell::new(HashSet::new()),
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
@@ -102,6 +104,7 @@ impl AppUiPreviewService {
         let sequence = state.sequence.as_ref()?;
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        self.schedule_media_prefetches(state, sequence, frame, width, height);
         let resolved = self.resolve_sequence_elements(state, sequence, frame, width, height, 0)?;
         let rgba =
             composite_resolved_preview(width, height, &resolved, &mut self.scratch.borrow_mut());
@@ -263,6 +266,51 @@ struct MediaPreviewFrame {
     rgba: Vec<u8>,
 }
 
+struct MediaPreviewCache {
+    capacity: usize,
+    entries: HashMap<MediaPreviewKey, MediaPreviewFrame>,
+    lru: VecDeque<MediaPreviewKey>,
+}
+
+impl MediaPreviewCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &MediaPreviewKey) -> Option<MediaPreviewFrame> {
+        let frame = self.entries.get(key)?.clone();
+        self.touch(key);
+        Some(frame)
+    }
+
+    fn insert(&mut self, key: MediaPreviewKey, frame: MediaPreviewFrame) {
+        self.entries.insert(key.clone(), frame);
+        self.touch(&key);
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if self.entries.remove(&oldest).is_some() {
+                break;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn touch(&mut self, key: &MediaPreviewKey) {
+        self.lru.retain(|candidate| candidate != key);
+        self.lru.push_back(key.clone());
+    }
+}
+
 #[derive(Clone, Default)]
 struct MediaPreviewScheduler {
     state: Arc<Mutex<MediaPreviewSchedulerState>>,
@@ -333,6 +381,88 @@ struct MediaPreviewResult {
 }
 
 impl AppUiPreviewService {
+    fn schedule_media_prefetches(
+        &self,
+        state: &AppState,
+        sequence: &Sequence,
+        frame: i64,
+        target_width: u32,
+        target_height: u32,
+    ) {
+        if !state.is_playing() {
+            return;
+        }
+        for offset in 1..=MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES {
+            self.schedule_media_prefetch_for_sequence(
+                state,
+                sequence,
+                frame.saturating_add(offset),
+                target_width,
+                target_height,
+                0,
+            );
+        }
+    }
+
+    fn schedule_media_prefetch_for_sequence(
+        &self,
+        state: &AppState,
+        sequence: &Sequence,
+        frame: i64,
+        target_width: u32,
+        target_height: u32,
+        depth: usize,
+    ) {
+        if depth >= MAX_NESTED_PREVIEW_DEPTH {
+            return;
+        }
+        let evaluation = evaluate_timeline_render_plan(
+            sequence,
+            TimelineEvaluationRequest::preview(
+                frame.max(0),
+                normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
+            ),
+        );
+
+        for element in evaluation.elements {
+            match element {
+                TimelineRenderPlanElement::Media(media) => {
+                    let Some((key, source_secs)) = self.media_preview_key_for_asset(
+                        state,
+                        &media.asset_id,
+                        media.source_frame,
+                        media.source_secs,
+                        target_width,
+                        target_height,
+                    ) else {
+                        continue;
+                    };
+                    if self.media_cache.borrow_mut().get(&key).is_none()
+                        && !self.media_failures.borrow().contains(&key)
+                    {
+                        self.request_media_preview(key, source_secs);
+                    }
+                }
+                TimelineRenderPlanElement::NestedSequence(nested) => {
+                    if let Some(nested_sequence) = state.sequence_by_id(nested.sequence_id) {
+                        let (nested_width, nested_height) =
+                            preview_dimensions_for_sequence(nested_sequence);
+                        self.schedule_media_prefetch_for_sequence(
+                            state,
+                            nested_sequence,
+                            nested.source_frame,
+                            nested_width,
+                            nested_height,
+                            depth + 1,
+                        );
+                    }
+                }
+                TimelineRenderPlanElement::SolidColor(_)
+                | TimelineRenderPlanElement::Adjustment(_) => {}
+            }
+        }
+    }
+
     fn media_frame_for_plan(
         &self,
         state: &AppState,
@@ -342,6 +472,33 @@ impl AppUiPreviewService {
         target_width: u32,
         target_height: u32,
     ) -> Option<MediaPreviewFrame> {
+        let (key, source_secs) = self.media_preview_key_for_asset(
+            state,
+            asset_id,
+            source_frame,
+            source_secs,
+            target_width,
+            target_height,
+        )?;
+        if let Some(frame) = self.media_cache.borrow_mut().get(&key) {
+            return Some(frame);
+        }
+        if self.media_failures.borrow().contains(&key) {
+            return None;
+        }
+        self.request_media_preview(key, source_secs);
+        None
+    }
+
+    fn media_preview_key_for_asset(
+        &self,
+        state: &AppState,
+        asset_id: &AssetId,
+        source_frame: i64,
+        source_secs: f64,
+        target_width: u32,
+        target_height: u32,
+    ) -> Option<(MediaPreviewKey, f64)> {
         let library = state.asset_library.as_ref()?;
         let asset = match library.get_asset(*asset_id) {
             Ok(Some(asset)) if asset.kind == AssetKind::Video => asset,
@@ -356,23 +513,18 @@ impl AppUiPreviewService {
         }
 
         let modified = modified_stamp(&asset.path);
-        let key = MediaPreviewKey {
-            asset_id: *asset_id,
-            path: asset.path.clone(),
-            modified,
-            source_frame: source_frame.max(0),
-            source_micros: source_micros(source_secs),
-            target_width,
-            target_height,
-        };
-        if let Some(frame) = self.media_cache.borrow().get(&key) {
-            return Some(frame.clone());
-        }
-        if self.media_failures.borrow().contains(&key) {
-            return None;
-        }
-        self.request_media_preview(key, source_secs.max(0.0));
-        None
+        Some((
+            MediaPreviewKey {
+                asset_id: *asset_id,
+                path: asset.path.clone(),
+                modified,
+                source_frame: source_frame.max(0),
+                source_micros: source_micros(source_secs),
+                target_width,
+                target_height,
+            },
+            source_secs.max(0.0),
+        ))
     }
 
     fn request_media_preview(&self, key: MediaPreviewKey, source_secs: f64) {
@@ -662,6 +814,54 @@ mod tests {
         assert!(result.frame.is_none());
         assert!(result.error.is_some());
         assert_eq!(result.generation, 7);
+    }
+
+    fn test_media_key(source_frame: i64) -> MediaPreviewKey {
+        MediaPreviewKey {
+            asset_id: AssetId::new(),
+            path: PathBuf::from(format!("E:/media/{source_frame}.mov")),
+            modified: None,
+            source_frame,
+            source_micros: source_micros(source_frame as f64),
+            target_width: 320,
+            target_height: 180,
+        }
+    }
+
+    fn test_media_frame(seed: u8) -> MediaPreviewFrame {
+        MediaPreviewFrame { width: 1, height: 1, rgba: vec![seed, 0, 0, 255] }
+    }
+
+    #[test]
+    fn media_preview_cache_evicts_least_recently_used_frame() {
+        let mut cache = MediaPreviewCache::new(2);
+        let first = test_media_key(1);
+        let second = test_media_key(2);
+        let third = test_media_key(3);
+
+        cache.insert(first.clone(), test_media_frame(1));
+        cache.insert(second.clone(), test_media_frame(2));
+        assert!(cache.get(&first).is_some());
+
+        cache.insert(third.clone(), test_media_frame(3));
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(&first).is_some());
+        assert!(cache.get(&second).is_none());
+        assert!(cache.get(&third).is_some());
+    }
+
+    #[test]
+    fn media_preview_cache_updates_existing_frame_without_growing() {
+        let mut cache = MediaPreviewCache::new(2);
+        let key = test_media_key(1);
+
+        cache.insert(key.clone(), test_media_frame(1));
+        cache.insert(key.clone(), test_media_frame(9));
+
+        let frame = cache.get(&key).expect("updated frame");
+        assert_eq!(cache.len(), 1);
+        assert_eq!(frame.rgba, vec![9, 0, 0, 255]);
     }
 
     #[test]
