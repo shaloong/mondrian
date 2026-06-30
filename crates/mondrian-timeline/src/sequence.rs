@@ -377,14 +377,36 @@ impl SequenceSettings {
         Ok(())
     }
 
-    /// Build the render color context for the root sequence.
+    /// Build the final-output color context for root sequence export.
     ///
-    /// When the sequence inherits color management from the project
-    /// (`color_management.inherit == true`), the `engine` is taken from
-    /// `project_cm` instead of the per-sequence settings.
-    pub fn root_render_color_context(
+    /// Export uses the sequence output color space because the rendered frames
+    /// will be encoded and tagged for delivery. When the sequence inherits
+    /// color management from the project (`color_management.inherit == true`),
+    /// the `engine` is taken from `project_cm` instead of per-sequence settings.
+    pub fn root_export_color_context(
         &self,
         project_cm: &mondrian_core::ProjectColorManagement,
+    ) -> ColorContext {
+        self.root_color_context_for_output(project_cm, self.color_management.output_color_space)
+    }
+
+    /// Build the presentation color context for root sequence preview.
+    ///
+    /// Preview uses the display/output color space supplied by the caller rather
+    /// than the sequence export output, so monitor presentation can evolve
+    /// independently from delivery encoding.
+    pub fn root_preview_color_context(
+        &self,
+        project_cm: &mondrian_core::ProjectColorManagement,
+        display_color_space: ColorSpace,
+    ) -> ColorContext {
+        self.root_color_context_for_output(project_cm, display_color_space)
+    }
+
+    fn root_color_context_for_output(
+        &self,
+        project_cm: &mondrian_core::ProjectColorManagement,
+        output_color_space: ColorSpace,
     ) -> ColorContext {
         let engine = if self.color_management.inherit {
             project_cm.engine.clone()
@@ -411,7 +433,7 @@ impl SequenceSettings {
 
         ColorContext {
             working_color_space: self.color_space,
-            output_color_space: self.color_management.output_color_space,
+            output_color_space,
             tone_map,
             nested_processing: self.color_management.nested_processing,
             engine,
@@ -1309,7 +1331,7 @@ mod tests {
         child.color_management.inherit = true;
         child.color_management.nested_processing = NestedColorProcessing::ForceParentWorkingSpace;
 
-        let parent_ctx = parent.root_render_color_context(&ProjectColorManagement::default());
+        let parent_ctx = parent.root_export_color_context(&ProjectColorManagement::default());
         let child_ctx = child.nested_render_color_context(parent_ctx.clone());
 
         // ForceParentWorkingSpace uses parent's engine
@@ -1338,7 +1360,7 @@ mod tests {
             ..Default::default()
         };
 
-        let ctx = settings.root_render_color_context(&ProjectColorManagement::default());
+        let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
         assert!(
             ctx.tone_map,
             "SceneReferred should always enable tone mapping"
@@ -1352,7 +1374,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let ctx2 = aces_settings.root_render_color_context(&ProjectColorManagement::default());
+        let ctx2 = aces_settings.root_export_color_context(&ProjectColorManagement::default());
         assert!(ctx2.tone_map, "ACES should always enable tone mapping");
 
         let display_settings = SequenceSettings {
@@ -1363,11 +1385,41 @@ mod tests {
             },
             ..Default::default()
         };
-        let ctx3 = display_settings.root_render_color_context(&ProjectColorManagement::default());
+        let ctx3 = display_settings.root_export_color_context(&ProjectColorManagement::default());
         assert!(
             !ctx3.tone_map,
             "DisplayReferred with auto_tone_map=false should not tone map"
         );
+    }
+
+    #[test]
+    fn preview_and_export_root_color_contexts_separate_presentation_from_delivery() {
+        let settings = SequenceSettings {
+            color_space: ColorSpace::Rec2020,
+            color_management: SequenceColorManagement {
+                output_color_space: ColorSpace::Rec2100Pq,
+                workflow: ColorWorkflow::SceneReferred,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project_cm = ProjectColorManagement::default();
+
+        let preview = settings.root_preview_color_context(&project_cm, ColorSpace::Rec709);
+        let export = settings.root_export_color_context(&project_cm);
+
+        assert_eq!(preview.working_color_space, ColorSpace::Rec2020);
+        assert_eq!(preview.output_color_space, ColorSpace::Rec709);
+        assert_eq!(export.working_color_space, ColorSpace::Rec2020);
+        assert_eq!(export.output_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(preview.engine, export.engine);
+        assert_eq!(preview.workflow, export.workflow);
+        assert_eq!(
+            preview.missing_metadata_policy,
+            export.missing_metadata_policy
+        );
+        assert!(preview.tone_map);
+        assert!(export.tone_map);
     }
 
     #[test]
@@ -1377,14 +1429,14 @@ mod tests {
         settings.color_management.engine =
             ColorEngine::Ocio { source: OcioConfigSource::Environment };
 
-        let ctx = settings.root_render_color_context(&ProjectColorManagement::default());
+        let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
         assert!(matches!(ctx.engine, ColorEngine::Ocio { .. }));
     }
 
     #[test]
     fn mondrian_smart_engine_leaves_display_view_none() {
         let settings = SequenceSettings::default();
-        let ctx = settings.root_render_color_context(&ProjectColorManagement::default());
+        let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
         assert_eq!(ctx.engine, ColorEngine::MondrianSmart);
         assert_eq!(ctx.ocio_display, None);
         assert_eq!(ctx.ocio_view, None);
@@ -1402,7 +1454,7 @@ mod tests {
         let mut settings = SequenceSettings::default();
         settings.color_management.inherit = true;
         settings.color_management.engine = ColorEngine::MondrianSmart;
-        let ctx = settings.root_render_color_context(&project_cm);
+        let ctx = settings.root_export_color_context(&project_cm);
         assert_eq!(
             ctx.engine,
             ColorEngine::Ocio {
@@ -1412,7 +1464,7 @@ mod tests {
 
         // inherit=false → use sequence's own engine
         settings.color_management.inherit = false;
-        let ctx2 = settings.root_render_color_context(&project_cm);
+        let ctx2 = settings.root_export_color_context(&project_cm);
         assert_eq!(ctx2.engine, ColorEngine::MondrianSmart);
     }
 }
