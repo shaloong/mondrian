@@ -1659,6 +1659,17 @@ mod tests {
     }
 
     #[test]
+    fn color_tag_args_skip_camera_log_spaces_without_standard_delivery_tags() {
+        let mut cmd = Command::new("ffmpeg");
+        apply_color_tag_args(&mut cmd, ColorSpace::AppleLog);
+        apply_color_tag_args(&mut cmd, ColorSpace::SLog3);
+        apply_color_tag_args(&mut cmd, ColorSpace::ArriLogC4);
+
+        let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
+        assert!(args.is_empty());
+    }
+
+    #[test]
     fn render_timeline_frame_into_clears_canvas_when_no_layers() {
         let mut seq = Sequence::new("empty");
         seq.in_point_frame = Some(0);

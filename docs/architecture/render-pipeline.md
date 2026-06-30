@@ -30,6 +30,11 @@ The result is a `TimelineRenderPlan` with ordered `TimelineRenderPlanElement`
 values plus diagnostics for active clips, emitted elements, zero-opacity skips,
 and unrenderable skips.
 
+`collect_timeline_color_diagnostics(...)` reports the clip override, working
+space, and output space together with their canonical `ColorEncodingSpec`
+values. Renderer diagnostics must consume `ColorSpace::encoding()` rather than
+duplicating color-space metadata.
+
 The legacy `build_timeline_render_plan` helper delegates to the evaluation API
 and exists only for compatibility with code that needs the element list.
 

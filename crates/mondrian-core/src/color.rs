@@ -302,10 +302,139 @@ impl ColorTransformNode {
     }
 }
 
+/// Broad encoding category used by validation, preview diagnostics and export tagging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColorEncodingKind {
+    /// Display-referred SDR delivery or monitoring signal.
+    DisplaySdr,
+    /// Display-referred HDR delivery or monitoring signal.
+    DisplayHdr,
+    /// Camera-log or acquisition-oriented signal without a stable FFmpeg delivery tag.
+    CameraLog,
+}
+
+/// CICP-style color primaries used by a [`ColorSpace`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColorPrimaries {
+    /// ITU-R BT.709 / sRGB primaries.
+    Bt709,
+    /// ITU-R BT.2020 primaries.
+    Bt2020,
+    /// DCI-P3 / Display P3 D65 primaries as represented by FFmpeg `smpte432`.
+    P3D65,
+}
+
+/// CICP-style transfer characteristic used by a [`ColorSpace`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColorTransferCharacteristic {
+    /// BT.709-style SDR transfer.
+    Bt709,
+    /// IEC 61966-2-1 sRGB transfer.
+    Srgb,
+    /// Hybrid Log-Gamma transfer.
+    Hlg,
+    /// Perceptual Quantizer transfer.
+    Pq,
+    /// Apple Log acquisition transfer.
+    AppleLog,
+    /// Sony S-Log3 acquisition transfer.
+    SLog3,
+    /// ARRI LogC4 acquisition transfer.
+    ArriLogC4,
+}
+
+/// CICP-style matrix coefficients used when encoding YUV/RGB signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColorMatrixCoefficients {
+    /// BT.709 non-constant luminance matrix.
+    Bt709,
+    /// BT.2020 non-constant luminance matrix.
+    Bt2020NonConstant,
+    /// RGB signal with no YUV matrix.
+    Rgb,
+    /// No reliable standardized matrix tag is available for this acquisition space.
+    Unspecified,
+}
+
+/// Canonical encoding metadata for a Mondrian color space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ColorEncodingSpec {
+    /// Primary chromaticities.
+    pub primaries: ColorPrimaries,
+    /// Transfer characteristic.
+    pub transfer: ColorTransferCharacteristic,
+    /// Matrix coefficients for encoded video.
+    pub matrix: ColorMatrixCoefficients,
+    /// Delivery/acquisition category.
+    pub kind: ColorEncodingKind,
+}
+
+impl ColorEncodingSpec {
+    /// Returns true when the encoded signal is display-referred HDR.
+    pub fn is_hdr(self) -> bool {
+        self.kind == ColorEncodingKind::DisplayHdr
+    }
+
+    /// Returns true when this space represents an acquisition log signal.
+    pub fn is_camera_log(self) -> bool {
+        self.kind == ColorEncodingKind::CameraLog
+    }
+
+    /// Convert the canonical metadata to FFmpeg color tags when those tags are trustworthy.
+    pub fn ffmpeg_tags(self) -> Option<FfmpegColorTags> {
+        if self.is_camera_log() || self.matrix == ColorMatrixCoefficients::Unspecified {
+            return None;
+        }
+
+        Some(FfmpegColorTags {
+            color_primaries: self.primaries.ffmpeg_name(),
+            color_trc: self.transfer.ffmpeg_name()?,
+            colorspace: self.matrix.ffmpeg_name()?,
+        })
+    }
+}
+
+impl ColorPrimaries {
+    fn ffmpeg_name(self) -> &'static str {
+        match self {
+            Self::Bt709 => "bt709",
+            Self::Bt2020 => "bt2020",
+            Self::P3D65 => "smpte432",
+        }
+    }
+}
+
+impl ColorTransferCharacteristic {
+    fn ffmpeg_name(self) -> Option<&'static str> {
+        match self {
+            Self::Bt709 => Some("bt709"),
+            Self::Srgb => Some("iec61966-2-1"),
+            Self::Hlg => Some("arib-std-b67"),
+            Self::Pq => Some("smpte2084"),
+            Self::AppleLog | Self::SLog3 | Self::ArriLogC4 => None,
+        }
+    }
+}
+
+impl ColorMatrixCoefficients {
+    fn ffmpeg_name(self) -> Option<&'static str> {
+        match self {
+            Self::Bt709 => Some("bt709"),
+            Self::Bt2020NonConstant => Some("bt2020nc"),
+            Self::Rgb => Some("rgb"),
+            Self::Unspecified => None,
+        }
+    }
+}
+
+/// FFmpeg color tag triplet for standardized delivery spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FfmpegColorTags {
+    /// `-color_primaries` value.
     pub color_primaries: &'static str,
+    /// `-color_trc` value.
     pub color_trc: &'static str,
+    /// `-colorspace` value.
     pub colorspace: &'static str,
 }
 
@@ -691,43 +820,76 @@ pub fn compute_color_scopes(
 }
 
 impl ColorSpace {
-    pub fn is_hdr(self) -> bool {
-        matches!(self, Self::Rec2100Hlg | Self::Rec2100Pq)
-    }
-
-    pub fn ffmpeg_tags(self) -> FfmpegColorTags {
+    /// Canonical encoding metadata used by preview diagnostics and export tagging.
+    pub fn encoding(self) -> ColorEncodingSpec {
         match self {
-            Self::Rec2100Hlg => FfmpegColorTags {
-                color_primaries: "bt2020",
-                color_trc: "arib-std-b67",
-                colorspace: "bt2020nc",
+            Self::Rec709 => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt709,
+                transfer: ColorTransferCharacteristic::Bt709,
+                matrix: ColorMatrixCoefficients::Bt709,
+                kind: ColorEncodingKind::DisplaySdr,
             },
-            Self::Rec2100Pq => FfmpegColorTags {
-                color_primaries: "bt2020",
-                color_trc: "smpte2084",
-                colorspace: "bt2020nc",
+            Self::Rec2100Hlg => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt2020,
+                transfer: ColorTransferCharacteristic::Hlg,
+                matrix: ColorMatrixCoefficients::Bt2020NonConstant,
+                kind: ColorEncodingKind::DisplayHdr,
             },
-            Self::Rec2020 => FfmpegColorTags {
-                color_primaries: "bt2020",
-                color_trc: "bt709",
-                colorspace: "bt2020nc",
+            Self::Rec2100Pq => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt2020,
+                transfer: ColorTransferCharacteristic::Pq,
+                matrix: ColorMatrixCoefficients::Bt2020NonConstant,
+                kind: ColorEncodingKind::DisplayHdr,
             },
-            Self::DciP3 | Self::AppleLog => FfmpegColorTags {
-                color_primaries: "smpte432",
-                color_trc: "bt709",
-                colorspace: "bt709",
+            Self::Srgb => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt709,
+                transfer: ColorTransferCharacteristic::Srgb,
+                matrix: ColorMatrixCoefficients::Rgb,
+                kind: ColorEncodingKind::DisplaySdr,
             },
-            Self::Srgb => FfmpegColorTags {
-                color_primaries: "bt709",
-                color_trc: "iec61966-2-1",
-                colorspace: "rgb",
+            Self::Rec2020 => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt2020,
+                transfer: ColorTransferCharacteristic::Bt709,
+                matrix: ColorMatrixCoefficients::Bt2020NonConstant,
+                kind: ColorEncodingKind::DisplaySdr,
             },
-            Self::SLog3 | Self::ArriLogC4 | Self::Rec709 => FfmpegColorTags {
-                color_primaries: "bt709",
-                color_trc: "bt709",
-                colorspace: "bt709",
+            Self::DciP3 => ColorEncodingSpec {
+                primaries: ColorPrimaries::P3D65,
+                transfer: ColorTransferCharacteristic::Bt709,
+                matrix: ColorMatrixCoefficients::Bt709,
+                kind: ColorEncodingKind::DisplaySdr,
+            },
+            Self::AppleLog => ColorEncodingSpec {
+                primaries: ColorPrimaries::P3D65,
+                transfer: ColorTransferCharacteristic::AppleLog,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::SLog3 => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt2020,
+                transfer: ColorTransferCharacteristic::SLog3,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::ArriLogC4 => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt709,
+                transfer: ColorTransferCharacteristic::ArriLogC4,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
             },
         }
+    }
+
+    pub fn is_hdr(self) -> bool {
+        self.encoding().is_hdr()
+    }
+
+    /// FFmpeg tag triplet for standardized delivery spaces.
+    ///
+    /// Camera-log acquisition spaces return `None`; exporting them with guessed
+    /// Rec.709 tags would be worse than leaving tags unset.
+    pub fn ffmpeg_tags(self) -> Option<FfmpegColorTags> {
+        self.encoding().ffmpeg_tags()
     }
 }
 
@@ -973,6 +1135,47 @@ impl Exp10 for f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_space_encoding_contract_covers_delivery_and_log_spaces() {
+        let rec709 = ColorSpace::Rec709.encoding();
+        assert_eq!(rec709.primaries, ColorPrimaries::Bt709);
+        assert_eq!(rec709.transfer, ColorTransferCharacteristic::Bt709);
+        assert_eq!(rec709.matrix, ColorMatrixCoefficients::Bt709);
+        assert_eq!(rec709.kind, ColorEncodingKind::DisplaySdr);
+        assert!(!rec709.is_hdr());
+        assert!(!rec709.is_camera_log());
+
+        let pq = ColorSpace::Rec2100Pq.encoding();
+        assert_eq!(pq.primaries, ColorPrimaries::Bt2020);
+        assert_eq!(pq.transfer, ColorTransferCharacteristic::Pq);
+        assert_eq!(pq.matrix, ColorMatrixCoefficients::Bt2020NonConstant);
+        assert_eq!(pq.kind, ColorEncodingKind::DisplayHdr);
+        assert!(pq.is_hdr());
+
+        let slog3 = ColorSpace::SLog3.encoding();
+        assert_eq!(slog3.kind, ColorEncodingKind::CameraLog);
+        assert_eq!(slog3.matrix, ColorMatrixCoefficients::Unspecified);
+        assert!(slog3.is_camera_log());
+        assert!(!slog3.is_hdr());
+    }
+
+    #[test]
+    fn ffmpeg_tags_are_only_emitted_for_standardized_delivery_spaces() {
+        let rec2020 = ColorSpace::Rec2020.ffmpeg_tags().expect("rec2020 has delivery tags");
+        assert_eq!(rec2020.color_primaries, "bt2020");
+        assert_eq!(rec2020.color_trc, "bt709");
+        assert_eq!(rec2020.colorspace, "bt2020nc");
+
+        let srgb = ColorSpace::Srgb.ffmpeg_tags().expect("srgb has delivery tags");
+        assert_eq!(srgb.color_primaries, "bt709");
+        assert_eq!(srgb.color_trc, "iec61966-2-1");
+        assert_eq!(srgb.colorspace, "rgb");
+
+        assert_eq!(ColorSpace::AppleLog.ffmpeg_tags(), None);
+        assert_eq!(ColorSpace::SLog3.ffmpeg_tags(), None);
+        assert_eq!(ColorSpace::ArriLogC4.ffmpeg_tags(), None);
+    }
 
     #[derive(Debug, Clone, Copy)]
     struct ColorReferenceSample {

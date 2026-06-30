@@ -4,6 +4,7 @@ use mondrian_core::{
         RenderPlanSource,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, Rational, SequenceId, TimeCode},
+    ColorEncodingSpec,
 };
 use mondrian_effects::CompiledEffectGraph;
 use std::sync::Arc;
@@ -232,8 +233,11 @@ pub enum TimelineRenderPlanElement {
 pub struct TimelineColorDiagnostic {
     pub asset_id: AssetId,
     pub input_color_space_override: Option<ColorSpace>,
+    pub input_encoding_override: Option<ColorEncodingSpec>,
     pub working_color_space: ColorSpace,
+    pub working_encoding: ColorEncodingSpec,
     pub output_color_space: ColorSpace,
+    pub output_encoding: ColorEncodingSpec,
     pub tone_map: bool,
     pub pixel_aspect_ratio_override: Option<PixelAspectRatio>,
     pub field_order_override: Option<FieldOrder>,
@@ -255,8 +259,11 @@ pub fn collect_timeline_color_diagnostics(
             TimelineRenderPlanElement::Media(media) => Some(TimelineColorDiagnostic {
                 asset_id: media.asset_id,
                 input_color_space_override: media.color_space_override,
+                input_encoding_override: media.color_space_override.map(ColorSpace::encoding),
                 working_color_space,
+                working_encoding: working_color_space.encoding(),
                 output_color_space,
+                output_encoding: output_color_space.encoding(),
                 tone_map: media.auto_tone_map,
                 pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
                 field_order_override: media.field_order_override,
@@ -594,7 +601,22 @@ mod tests {
             Some(ColorSpace::AppleLog)
         );
         assert_eq!(diagnostic.working_color_space, ColorSpace::Rec2020);
+        assert_eq!(
+            diagnostic.working_encoding.kind,
+            mondrian_core::ColorEncodingKind::DisplaySdr
+        );
         assert_eq!(diagnostic.output_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(
+            diagnostic.output_encoding.kind,
+            mondrian_core::ColorEncodingKind::DisplayHdr
+        );
+        assert_eq!(
+            diagnostic
+                .input_encoding_override
+                .expect("clip override should carry encoding")
+                .kind,
+            mondrian_core::ColorEncodingKind::CameraLog
+        );
         assert_eq!(
             diagnostic.pixel_aspect_ratio_override,
             Some(PixelAspectRatio::DvcproHd)
