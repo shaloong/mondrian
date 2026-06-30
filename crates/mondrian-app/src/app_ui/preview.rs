@@ -257,7 +257,9 @@ impl AppUiPreviewService {
             .elements;
         let mut scratch = TimelineCompositeScratch::default();
         let rgba = composite_resolved_preview(width, height, &resolved, &mut scratch);
-        Some(MediaPreviewFrame { width, height, rgba })
+        let signature =
+            nested_preview_frame_signature(sequence.id, frame.max(0), width, height, &rgba);
+        Some(MediaPreviewFrame { width, height, rgba, signature })
     }
 
     fn resolve_sequence_elements(
@@ -279,8 +281,6 @@ impl AppUiPreviewService {
         if evaluation.is_empty() {
             return None;
         }
-        let cache_key =
-            viewer_preview_cache_key_for_plan(sequence.id, width, height, &evaluation.elements);
 
         let mut resolved = Vec::with_capacity(evaluation.len());
         for element in evaluation.elements {
@@ -344,6 +344,12 @@ impl AppUiPreviewService {
                 }
             }
         }
+        let cache_key = Some(viewer_preview_cache_key_for_resolved_plan(
+            sequence.id,
+            width,
+            height,
+            &resolved,
+        ));
 
         Some(ResolvedPreviewPlan { elements: resolved, cache_key })
     }
@@ -444,6 +450,7 @@ struct MediaPreviewFrame {
     width: u32,
     height: u32,
     rgba: Vec<u8>,
+    signature: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1011,17 +1018,17 @@ fn bump_value(counter: &mut u64) {
     *counter = counter.saturating_add(1);
 }
 
-fn viewer_preview_cache_key_for_plan(
+fn viewer_preview_cache_key_for_resolved_plan(
     sequence_id: SequenceId,
     width: u32,
     height: u32,
-    elements: &[TimelineRenderPlanElement],
-) -> Option<ViewerPreviewCacheKey> {
+    elements: &[ResolvedPreviewElement],
+) -> ViewerPreviewCacheKey {
     let mut hasher = DefaultHasher::new();
     elements.len().hash(&mut hasher);
     for element in elements {
         match element {
-            TimelineRenderPlanElement::SolidColor(solid) => {
+            ResolvedPreviewElement::SolidColor(solid) => {
                 0u8.hash(&mut hasher);
                 hash_color(solid.color, &mut hasher);
                 solid.opacity.to_bits().hash(&mut hasher);
@@ -1029,7 +1036,7 @@ fn viewer_preview_cache_key_for_plan(
                 hash_transform(solid.transform, &mut hasher);
                 hash_effect_graph_signature(&solid.effect_graph, solid.frame_seed, &mut hasher);
             }
-            TimelineRenderPlanElement::Adjustment(adjustment) => {
+            ResolvedPreviewElement::Adjustment(adjustment) => {
                 1u8.hash(&mut hasher);
                 adjustment.opacity.to_bits().hash(&mut hasher);
                 adjustment.blend_mode.hash(&mut hasher);
@@ -1039,17 +1046,31 @@ fn viewer_preview_cache_key_for_plan(
                     &mut hasher,
                 );
             }
-            TimelineRenderPlanElement::Media(_) | TimelineRenderPlanElement::NestedSequence(_) => {
-                return None
+            ResolvedPreviewElement::Media {
+                frame,
+                opacity,
+                blend_mode,
+                transform,
+                effect_graph,
+                frame_seed,
+            } => {
+                2u8.hash(&mut hasher);
+                frame.signature.hash(&mut hasher);
+                frame.width.hash(&mut hasher);
+                frame.height.hash(&mut hasher);
+                opacity.to_bits().hash(&mut hasher);
+                blend_mode.hash(&mut hasher);
+                hash_transform(*transform, &mut hasher);
+                hash_effect_graph_signature(effect_graph, *frame_seed, &mut hasher);
             }
         }
     }
-    Some(ViewerPreviewCacheKey {
+    ViewerPreviewCacheKey {
         sequence_id,
         width,
         height,
         plan_signature: hasher.finish(),
-    })
+    }
 }
 
 fn hash_color(color: mondrian_core::Color, hasher: &mut impl Hasher) {
@@ -1075,6 +1096,28 @@ fn hash_effect_graph_signature(
     if graph.output_cache_policy == EffectCachePolicy::FrameDependent {
         frame_seed.hash(hasher);
     }
+}
+
+fn media_preview_frame_signature(key: &MediaPreviewKey) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn nested_preview_frame_signature(
+    sequence_id: SequenceId,
+    frame: i64,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    sequence_id.hash(&mut hasher);
+    frame.hash(&mut hasher);
+    width.hash(&mut hasher);
+    height.hash(&mut hasher);
+    rgba.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
@@ -1169,6 +1212,7 @@ fn media_preview_worker(
 }
 
 fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
+    let signature = media_preview_frame_signature(&job.key);
     match mondrian_media::decode_video_frame_at_time_rgba_scaled(
         job.key.path.as_path(),
         job.source_secs,
@@ -1181,6 +1225,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                 width: frame.width,
                 height: frame.height,
                 rgba: frame.data,
+                signature,
             }),
             error: None,
             generation: job.generation,
@@ -1200,6 +1245,7 @@ mod tests {
 
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_core::Color;
+    use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::Sequence;
 
@@ -1375,6 +1421,35 @@ mod tests {
     }
 
     #[test]
+    fn resolved_media_preview_cache_key_includes_media_frame_signature() {
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let make_plan = |signature| {
+            vec![ResolvedPreviewElement::Media {
+                frame: MediaPreviewFrame {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![0; 2 * 2 * 4],
+                    signature,
+                },
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                effect_graph: Arc::clone(&effect_graph),
+                frame_seed: 12,
+            }]
+        };
+        let sequence_id = SequenceId::new();
+
+        let first =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &make_plan(100));
+        let second =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &make_plan(200));
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
         let service = AppUiPreviewService::new();
         let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
@@ -1431,7 +1506,12 @@ mod tests {
     }
 
     fn test_media_frame(seed: u8) -> MediaPreviewFrame {
-        MediaPreviewFrame { width: 1, height: 1, rgba: vec![seed, 0, 0, 255] }
+        MediaPreviewFrame {
+            width: 1,
+            height: 1,
+            rgba: vec![seed, 0, 0, 255],
+            signature: seed as u64,
+        }
     }
 
     #[test]
