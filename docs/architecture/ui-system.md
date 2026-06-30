@@ -92,6 +92,10 @@ backpressure drops, stale completions, and decode failures without changing
 timeline evaluation. The app UI scale smoke test serializes a preview diagnostics
 probe into its JSON report and includes a separate preview-playback refresh case
 without changing the existing UI-only refresh benchmark paths.
+`preview_media_decode_cache_smoke` extends this coverage with a generated
+FFmpeg fixture and exercises real media import, decode readiness, cache-hit
+refreshes, and sequential-frame preview readiness as an ignored/manual perf
+probe.
 
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`
