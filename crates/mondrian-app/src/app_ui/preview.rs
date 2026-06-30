@@ -306,7 +306,7 @@ impl AppUiPreviewService {
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AppUiPreviewDiagnostics {
     /// Viewer preview render requests received by the service.
     pub render_requests: u64,
@@ -474,7 +474,7 @@ struct MediaPreviewSchedulerMetrics {
 }
 
 /// Scheduler-side preview media request counters.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MediaPreviewSchedulerDiagnostics {
     /// Latest render generation observed by the scheduler.
     pub latest_generation: u64,

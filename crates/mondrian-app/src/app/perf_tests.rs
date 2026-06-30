@@ -1,4 +1,6 @@
 use super::*;
+use crate::app_ui::panels::ViewerPreviewSource;
+use crate::app_ui::preview::{AppUiPreviewDiagnostics, AppUiPreviewService};
 use crate::app_ui::shell::AppUiAppRoot;
 use serde::Serialize;
 use std::cmp;
@@ -35,6 +37,7 @@ struct AppUiScaleReport {
     playback_frames: usize,
     initial_paint_commands: usize,
     playback_paint_commands_max: usize,
+    preview_diagnostics: AppUiPreviewDiagnostics,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -194,6 +197,7 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
     let resize_threshold_ms = env_u128("MONDRIAN_UI_PERF_RESIZE_MS", 1_500);
     let paint_threshold_ms = env_u128("MONDRIAN_UI_PERF_PAINT_MS", 1_500);
     let playback_threshold_ms = env_u128("MONDRIAN_UI_PERF_PLAYBACK_MS", 8_000);
+    let preview_probe_threshold_ms = env_u128("MONDRIAN_UI_PERF_PREVIEW_PROBE_MS", 1_500);
 
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_ui_perf_smoke_{uniq}"));
@@ -270,6 +274,19 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
         )?;
         state.pause();
 
+        let preview_service = AppUiPreviewService::new();
+        let mut preview_diagnostics = preview_service.diagnostics();
+        let preview_probe_case = run_case(
+            "app_ui.preview_diagnostics_probe",
+            1,
+            preview_probe_threshold_ms,
+            || {
+                let _ = preview_service.viewer_preview_for_state(&state);
+                preview_diagnostics = preview_service.diagnostics();
+                Ok(())
+            },
+        )?;
+
         Ok(AppUiScaleReport {
             scenario: "app_ui_scale",
             assets: asset_count,
@@ -279,12 +296,14 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
             playback_frames,
             initial_paint_commands,
             playback_paint_commands_max,
+            preview_diagnostics,
             cases: vec![
                 build_case,
                 refresh_case,
                 resize_case,
                 paint_case,
                 playback_case,
+                preview_probe_case,
             ],
         })
     })();
