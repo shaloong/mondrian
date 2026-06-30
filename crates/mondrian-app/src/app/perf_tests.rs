@@ -1,13 +1,15 @@
 use super::*;
-use crate::app_ui::panels::ViewerPreviewSource;
+use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::{AppUiPreviewDiagnostics, AppUiPreviewService};
 use crate::app_ui::shell::AppUiAppRoot;
 use serde::Serialize;
 use std::cmp;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mondrian_effects::{EffectNode, EffectNodeExt};
 use mondrian_timeline::track::Track;
@@ -39,6 +41,15 @@ struct AppUiScaleReport {
     playback_paint_commands_max: usize,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_playback_diagnostics: AppUiPreviewDiagnostics,
+    cases: Vec<PerfCaseReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewMediaPerfReport {
+    scenario: &'static str,
+    frames: usize,
+    cache_iterations: usize,
+    preview_diagnostics: AppUiPreviewDiagnostics,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -353,6 +364,100 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "development preview media decode/cache smoke test; run manually"]
+fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+
+    let frame_count = env_usize_clamped("MONDRIAN_PREVIEW_MEDIA_FRAMES", 12, 2, 120);
+    let cache_iterations = env_usize_clamped("MONDRIAN_PREVIEW_MEDIA_CACHE_ITERS", 30, 1, 500);
+    let first_frame_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_FIRST_READY_MS", 10_000);
+    let cache_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_CACHE_REFRESH_MS", 2_500);
+    let sequential_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_SEQUENCE_READY_MS", 20_000);
+    let ready_timeout =
+        Duration::from_millis(env_u128("MONDRIAN_PREVIEW_MEDIA_READY_TIMEOUT_MS", 10_000) as u64);
+
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_preview_media_perf_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let video_path = root_dir.join("preview-media-smoke.mp4");
+
+    if !generate_preview_media_fixture(&video_path)? {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_decode_cache\",\"skipped\":\"ffmpeg CLI unavailable or fixture generation failed\"}}"
+        );
+        let _ = fs::remove_dir_all(&root_dir);
+        return Ok(());
+    }
+
+    let result = (|| -> anyhow::Result<PreviewMediaPerfReport> {
+        let mut state = build_preview_media_perf_state(&root_dir, &video_path, frame_count)?;
+        let preview_service = AppUiPreviewService::new();
+
+        let first_frame_case = run_case(
+            "preview_media.first_frame_ready",
+            1,
+            first_frame_threshold_ms,
+            || {
+                state.seek(0);
+                wait_for_preview_ready(&preview_service, &state, ready_timeout)
+            },
+        )?;
+
+        let cached_frame_case = run_case(
+            "preview_media.cached_frame_refresh",
+            1,
+            cache_threshold_ms,
+            || {
+                for _ in 0..cache_iterations {
+                    assert_preview_ready(&preview_service, &state)?;
+                }
+                Ok(())
+            },
+        )?;
+
+        let sequential_case = run_case(
+            "preview_media.sequential_frame_ready_window",
+            1,
+            sequential_threshold_ms,
+            || {
+                for frame in 0..frame_count {
+                    state.seek(frame as i64);
+                    wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+                }
+                Ok(())
+            },
+        )?;
+
+        Ok(PreviewMediaPerfReport {
+            scenario: "preview_media_decode_cache",
+            frames: frame_count,
+            cache_iterations,
+            preview_diagnostics: preview_service.diagnostics(),
+            cases: vec![first_frame_case, cached_frame_case, sequential_case],
+        })
+    })();
+
+    let _ = fs::remove_dir_all(&root_dir);
+
+    let report = result?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    write_report_if_needed(&report_json);
+
+    let failed_cases: Vec<_> =
+        report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();
+    if !failed_cases.is_empty() {
+        anyhow::bail!(
+            "preview media performance smoke test failed: {:?}; report: {}",
+            failed_cases,
+            report_json
+        );
+    }
+
+    Ok(())
+}
+
 fn build_app_ui_perf_state(
     root_dir: &Path,
     asset_count: usize,
@@ -455,6 +560,97 @@ fn build_app_ui_perf_state(
     }
 
     Ok(state)
+}
+
+fn generate_preview_media_fixture(path: &Path) -> anyhow::Result<bool> {
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        return Ok(false);
+    }
+
+    let status = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg("testsrc2=size=320x180:rate=30:duration=2")
+        .arg("-an")
+        .arg("-c:v")
+        .arg("mpeg4")
+        .arg("-q:v")
+        .arg("5")
+        .arg(path)
+        .status()?;
+
+    Ok(status.success() && path.exists())
+}
+
+fn build_preview_media_perf_state(
+    root_dir: &Path,
+    video_path: &Path,
+    frame_count: usize,
+) -> anyhow::Result<AppState> {
+    let library = AssetLibrary::open(root_dir.join("library"))?;
+    let asset_id = library.import_media_file(video_path)?;
+
+    let mut sequence = Sequence::new("Preview media perf");
+    let tb = sequence.time_base();
+    let duration = TimeCode::new(frame_count as i64, tb);
+    sequence.video_tracks[0].add_clip(Clip::new(asset_id, TimeCode::new(0, tb), duration))?;
+    sequence.playhead = TimeCode::new(0, tb);
+    sequence.mark_out(frame_count as i64);
+    let sequence_id = sequence.id;
+
+    let mut state = AppState::new();
+    state.asset_library = Some(library);
+    state.active_sequence_id = Some(sequence_id);
+    state.default_sequence_id = Some(sequence_id);
+    state.sequences = vec![sequence.clone()];
+    state.sequence = Some(sequence);
+    Ok(state)
+}
+
+fn wait_for_preview_ready(
+    preview_service: &AppUiPreviewService,
+    state: &AppState,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let started_at = Instant::now();
+    loop {
+        match preview_service.viewer_preview_for_state(state) {
+            ViewerPreviewState::Ready(_) => return Ok(()),
+            ViewerPreviewState::Loading | ViewerPreviewState::Stale(_) => {
+                let _ = preview_service.poll_finished();
+            }
+            ViewerPreviewState::Unavailable => {
+                let _ = preview_service.poll_finished();
+            }
+        }
+        if started_at.elapsed() > timeout {
+            anyhow::bail!(
+                "preview frame did not become ready within {} ms; diagnostics: {:?}",
+                timeout.as_millis(),
+                preview_service.diagnostics()
+            );
+        }
+        thread::sleep(Duration::from_millis(8));
+    }
+}
+
+fn assert_preview_ready(
+    preview_service: &AppUiPreviewService,
+    state: &AppState,
+) -> anyhow::Result<()> {
+    match preview_service.viewer_preview_for_state(state) {
+        ViewerPreviewState::Ready(_) => Ok(()),
+        other => anyhow::bail!(
+            "expected ready preview frame, got {:?}; diagnostics: {:?}",
+            other,
+            preview_service.diagnostics()
+        ),
+    }
 }
 
 fn paint_command_count(
