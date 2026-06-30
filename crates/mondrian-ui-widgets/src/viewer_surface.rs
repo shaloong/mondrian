@@ -309,6 +309,7 @@ impl ViewerSurface {
         frame_label: impl Into<String>,
         playing: bool,
         frame_image: Option<ViewerFrameImage>,
+        empty_message: Option<String>,
     ) {
         self.status = status.into();
         self.status_tone = status_tone;
@@ -316,6 +317,7 @@ impl ViewerSurface {
         self.frame_label = frame_label.into();
         self.playing = playing;
         self.frame_image = frame_image;
+        self.empty_message = empty_message;
     }
 
     /// Set a short message painted inside the canvas when no frame is shown.
@@ -1348,6 +1350,35 @@ mod tests {
         assert!(!encoder.texts.iter().any(|text| text == "No sequence"));
         assert!(encoder.texts.iter().any(|text| text == "未载入序列"));
         assert_eq!(encoder.clip_pops, encoder.clips.len());
+    }
+
+    #[test]
+    fn playback_frame_state_updates_empty_message() {
+        let mut viewer = ViewerSurface::new("Viewer", 16, 9).with_empty_message("旧状态");
+
+        viewer.set_playback_frame_state(
+            "预览准备中",
+            ViewerStatusTone::Warning,
+            "00:00:00:00",
+            "F0",
+            true,
+            None,
+            Some("预览准备中".into()),
+        );
+
+        assert_eq!(viewer.empty_message.as_deref(), Some("预览准备中"));
+
+        viewer.set_playback_frame_state(
+            "就绪",
+            ViewerStatusTone::Neutral,
+            "00:00:00:00",
+            "F0",
+            false,
+            None,
+            None,
+        );
+
+        assert_eq!(viewer.empty_message, None);
     }
 
     #[test]

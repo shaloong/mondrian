@@ -110,8 +110,21 @@ pub trait AssetThumbnailSource {
 /// Implementations own preview caching, media decode, and render-plan execution.
 /// Panel models only receive immutable `ViewerFrameImage` payloads.
 pub trait ViewerPreviewSource {
-    /// Return the current viewer preview frame, or `None` while unavailable.
-    fn viewer_frame_for_state(&self, state: &AppState) -> Option<ViewerFrameImage>;
+    /// Return the current viewer preview lifecycle state.
+    fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState;
+}
+
+/// Current viewer preview lifecycle state for the active frame.
+#[derive(Debug, Clone)]
+pub enum ViewerPreviewState {
+    /// No preview frame is expected for the current state.
+    Unavailable,
+    /// A frame request has been queued or is currently rendering/decoding.
+    Loading,
+    /// The requested frame is not ready, so the viewer may keep the previous frame visible.
+    Stale(ViewerFrameImage),
+    /// A render-ready frame is available for the current playhead frame.
+    Ready(ViewerFrameImage),
 }
 
 /// Current thumbnail lifecycle state for one asset card.
@@ -541,19 +554,35 @@ impl ViewerPanelModel {
             .unwrap_or_else(|| TimeCode::new(current_frame, sequence.time_base()).to_smpte());
         let duration_frame = sequence.total_duration().frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
-        let frame_image = preview.and_then(|preview| preview.viewer_frame_for_state(state));
+        let preview_state = preview
+            .map(|preview| preview.viewer_preview_for_state(state))
+            .unwrap_or(ViewerPreviewState::Unavailable);
+        let frame_image = match &preview_state {
+            ViewerPreviewState::Ready(frame) | ViewerPreviewState::Stale(frame) => {
+                Some(frame.clone())
+            }
+            ViewerPreviewState::Unavailable | ViewerPreviewState::Loading => None,
+        };
         let preview_resolution_scale =
             normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
         let preview_quality_label = viewer_preview_quality_label(preview_resolution_scale);
+        let preview_waiting = matches!(
+            preview_state,
+            ViewerPreviewState::Loading | ViewerPreviewState::Stale(_)
+        );
 
         Self {
             title: sequence.name.clone(),
-            status: if state.is_playing() {
+            status: if preview_waiting {
+                "预览准备中".into()
+            } else if state.is_playing() {
                 "播放中".into()
             } else {
                 "就绪".into()
             },
-            status_tone: if state.is_playing() {
+            status_tone: if preview_waiting {
+                ViewerStatusTone::Warning
+            } else if state.is_playing() {
                 ViewerStatusTone::Accent
             } else {
                 ViewerStatusTone::Neutral
@@ -574,7 +603,11 @@ impl ViewerPanelModel {
             playing: state.is_playing(),
             enabled: true,
             frame_image,
-            empty_message: None,
+            empty_message: if matches!(preview_state, ViewerPreviewState::Loading) {
+                Some("预览准备中".into())
+            } else {
+                None
+            },
         }
     }
 
@@ -6505,8 +6538,11 @@ mod tests {
         struct TestPreview;
 
         impl ViewerPreviewSource for TestPreview {
-            fn viewer_frame_for_state(&self, _state: &AppState) -> Option<ViewerFrameImage> {
-                ViewerFrameImage::new("test-preview", 320, 180, vec![128; 320 * 180 * 4])
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Ready(
+                    ViewerFrameImage::new("test-preview", 320, 180, vec![128; 320 * 180 * 4])
+                        .expect("preview frame"),
+                )
             }
         }
 
@@ -6529,12 +6565,71 @@ mod tests {
     }
 
     #[test]
+    fn app_state_models_surface_viewer_preview_loading_state() {
+        struct LoadingPreview;
+
+        impl ViewerPreviewSource for LoadingPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Loading
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&LoadingPreview),
+        );
+
+        assert_eq!(models.viewer.status, "预览准备中");
+        assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
+        assert!(models.viewer.frame_image.is_none());
+        assert_eq!(models.viewer.empty_message.as_deref(), Some("预览准备中"));
+    }
+
+    #[test]
+    fn app_state_models_keep_stale_viewer_preview_frame_visible() {
+        struct StalePreview;
+
+        impl ViewerPreviewSource for StalePreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Stale(
+                    ViewerFrameImage::new("stale-preview", 320, 180, vec![96; 320 * 180 * 4])
+                        .expect("stale preview frame"),
+                )
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&StalePreview),
+        );
+
+        let frame = models.viewer.frame_image.expect("stale frame remains visible");
+        assert_eq!(models.viewer.status, "预览准备中");
+        assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
+        assert_eq!(frame.key, "stale-preview");
+        assert_eq!(models.viewer.empty_message, None);
+    }
+
+    #[test]
     fn app_state_models_do_not_request_viewer_preview_without_sequence() {
         struct UnexpectedPreview;
 
         impl ViewerPreviewSource for UnexpectedPreview {
-            fn viewer_frame_for_state(&self, _state: &AppState) -> Option<ViewerFrameImage> {
-                ViewerFrameImage::new("unexpected-preview", 320, 180, vec![128; 320 * 180 * 4])
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Ready(
+                    ViewerFrameImage::new("unexpected-preview", 320, 180, vec![128; 320 * 180 * 4])
+                        .expect("preview frame"),
+                )
             }
         }
 
