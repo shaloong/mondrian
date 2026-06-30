@@ -165,13 +165,14 @@ pub(crate) fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig
 }
 
 pub(crate) fn apply_color_tag_args(cmd: &mut Command, color_space: ColorSpace) {
-    let tags = color_space.ffmpeg_tags();
-    cmd.arg("-color_primaries")
-        .arg(tags.color_primaries)
-        .arg("-color_trc")
-        .arg(tags.color_trc)
-        .arg("-colorspace")
-        .arg(tags.colorspace);
+    if let Some(tags) = color_space.ffmpeg_tags() {
+        cmd.arg("-color_primaries")
+            .arg(tags.color_primaries)
+            .arg("-color_trc")
+            .arg(tags.color_trc)
+            .arg("-colorspace")
+            .arg(tags.colorspace);
+    }
 }
 
 /// 写入 HDR10 元数据（母版显示色彩体积 + 内容光级别）。
