@@ -13,7 +13,7 @@ use std::time::UNIX_EPOCH;
 
 use mondrian_assets::AssetKind;
 use mondrian_core::types::{AssetId, BlendMode, SequenceId};
-use mondrian_effects::CompiledEffectGraph;
+use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
     composite_timeline_elements, evaluate_timeline_render_plan, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
@@ -30,6 +30,7 @@ use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
 const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
 const MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY: usize = MEDIA_PREVIEW_CACHE_CAPACITY * 2;
+const VIEWER_PREVIEW_FRAME_CACHE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
 const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
@@ -44,6 +45,7 @@ pub struct AppUiPreviewService {
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     media_cache: RefCell<MediaPreviewCache>,
     media_failures: RefCell<MediaPreviewFailureCache>,
+    viewer_frame_cache: RefCell<ViewerPreviewFrameCache>,
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
@@ -74,6 +76,9 @@ impl AppUiPreviewService {
             media_failures: RefCell::new(MediaPreviewFailureCache::new(
                 MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY,
             )),
+            viewer_frame_cache: RefCell::new(ViewerPreviewFrameCache::new(
+                VIEWER_PREVIEW_FRAME_CACHE_CAPACITY,
+            )),
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             current_generation: Cell::new(0),
@@ -101,6 +106,9 @@ impl AppUiPreviewService {
             queue_full_drops: self.metrics.queue_full_drops.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
             scheduler,
+            viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
+            viewer_frame_cache_misses: self.metrics.viewer_frame_cache_misses.get(),
+            viewer_frame_cache_entries: self.viewer_frame_cache.borrow().len(),
             media_cache_entries: self.media_cache.borrow().len(),
             media_failure_entries: self.media_failures.borrow().len(),
         }
@@ -151,24 +159,43 @@ impl AppUiPreviewService {
         let preview_state =
             match self.resolve_sequence_elements(state, sequence, frame, width, height, 0) {
                 Some(resolved) => {
-                    let rgba = composite_resolved_preview(
-                        width,
-                        height,
-                        &resolved,
-                        &mut self.scratch.borrow_mut(),
-                    );
-                    let key = preview_cache_key(frame, width, height, &rgba);
-                    match ViewerFrameImage::new(key, width, height, rgba) {
-                        Some(frame) => {
-                            self.last_ready_frame.replace(Some(ScopedViewerFrame {
-                                sequence_id: sequence.id,
-                                width,
-                                height,
-                                frame: frame.clone(),
-                            }));
-                            ViewerPreviewState::Ready(frame)
+                    if let Some(frame) = resolved
+                        .cache_key
+                        .as_ref()
+                        .and_then(|cache_key| self.cached_viewer_frame(cache_key))
+                    {
+                        self.last_ready_frame.replace(Some(ScopedViewerFrame {
+                            sequence_id: sequence.id,
+                            width,
+                            height,
+                            frame: frame.clone(),
+                        }));
+                        ViewerPreviewState::Ready(frame)
+                    } else {
+                        let rgba = composite_resolved_preview(
+                            width,
+                            height,
+                            &resolved.elements,
+                            &mut self.scratch.borrow_mut(),
+                        );
+                        let key = preview_cache_key(frame, width, height, &rgba);
+                        match ViewerFrameImage::new(key, width, height, rgba) {
+                            Some(frame) => {
+                                if let Some(cache_key) = resolved.cache_key {
+                                    self.viewer_frame_cache
+                                        .borrow_mut()
+                                        .insert(cache_key, frame.clone());
+                                }
+                                self.last_ready_frame.replace(Some(ScopedViewerFrame {
+                                    sequence_id: sequence.id,
+                                    width,
+                                    height,
+                                    frame: frame.clone(),
+                                }));
+                                ViewerPreviewState::Ready(frame)
+                            }
+                            None => ViewerPreviewState::Unavailable,
                         }
-                        None => ViewerPreviewState::Unavailable,
                     }
                 }
                 None if self.current_frame_pending.get() => self
@@ -181,6 +208,16 @@ impl AppUiPreviewService {
         self.scheduler.prune_obsolete();
         self.record_preview_state(&preview_state);
         preview_state
+    }
+
+    fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
+        let frame = self.viewer_frame_cache.borrow_mut().get(key);
+        if frame.is_some() {
+            bump(&self.metrics.viewer_frame_cache_hits);
+        } else {
+            bump(&self.metrics.viewer_frame_cache_misses);
+        }
+        frame
     }
 
     fn record_preview_state(&self, state: &ViewerPreviewState) {
@@ -215,8 +252,9 @@ impl AppUiPreviewService {
             return None;
         }
         let (width, height) = preview_dimensions_for_sequence(sequence);
-        let resolved =
-            self.resolve_sequence_elements(state, sequence, frame.max(0), width, height, depth)?;
+        let resolved = self
+            .resolve_sequence_elements(state, sequence, frame.max(0), width, height, depth)?
+            .elements;
         let mut scratch = TimelineCompositeScratch::default();
         let rgba = composite_resolved_preview(width, height, &resolved, &mut scratch);
         Some(MediaPreviewFrame { width, height, rgba })
@@ -230,7 +268,7 @@ impl AppUiPreviewService {
         width: u32,
         height: u32,
         depth: usize,
-    ) -> Option<Vec<ResolvedPreviewElement>> {
+    ) -> Option<ResolvedPreviewPlan> {
         let evaluation = evaluate_timeline_render_plan(
             sequence,
             TimelineEvaluationRequest::preview(
@@ -241,6 +279,8 @@ impl AppUiPreviewService {
         if evaluation.is_empty() {
             return None;
         }
+        let cache_key =
+            viewer_preview_cache_key_for_plan(sequence.id, width, height, &evaluation.elements);
 
         let mut resolved = Vec::with_capacity(evaluation.len());
         for element in evaluation.elements {
@@ -305,8 +345,13 @@ impl AppUiPreviewService {
             }
         }
 
-        Some(resolved)
+        Some(ResolvedPreviewPlan { elements: resolved, cache_key })
     }
+}
+
+struct ResolvedPreviewPlan {
+    elements: Vec<ResolvedPreviewElement>,
+    cache_key: Option<ViewerPreviewCacheKey>,
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.
@@ -340,6 +385,12 @@ pub struct AppUiPreviewDiagnostics {
     pub worker_disconnected_drops: u64,
     /// Scheduler-side request, drop, completion, and pruning counters.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
+    /// Final viewer preview frame cache hits.
+    pub viewer_frame_cache_hits: u64,
+    /// Final viewer preview frame cache misses.
+    pub viewer_frame_cache_misses: u64,
+    /// Current number of final viewer preview frames in the bounded cache.
+    pub viewer_frame_cache_entries: usize,
     /// Current number of frames in the media preview LRU cache.
     pub media_cache_entries: usize,
     /// Current number of keys in the media preview failure LRU cache.
@@ -401,6 +452,58 @@ struct ScopedViewerFrame {
     width: u32,
     height: u32,
     frame: ViewerFrameImage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ViewerPreviewCacheKey {
+    sequence_id: SequenceId,
+    width: u32,
+    height: u32,
+    plan_signature: u64,
+}
+
+struct ViewerPreviewFrameCache {
+    capacity: usize,
+    entries: HashMap<ViewerPreviewCacheKey, ViewerFrameImage>,
+    lru: VecDeque<ViewerPreviewCacheKey>,
+}
+
+impl ViewerPreviewFrameCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
+        let frame = self.entries.get(key)?.clone();
+        self.touch(key);
+        Some(frame)
+    }
+
+    fn insert(&mut self, key: ViewerPreviewCacheKey, frame: ViewerFrameImage) {
+        self.entries.insert(key.clone(), frame);
+        self.touch(&key);
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if self.entries.remove(&oldest).is_some() {
+                break;
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn touch(&mut self, key: &ViewerPreviewCacheKey) {
+        self.lru.retain(|candidate| candidate != key);
+        self.lru.push_back(key.clone());
+    }
 }
 
 struct MediaPreviewCache {
@@ -888,6 +991,8 @@ struct AppUiPreviewMetrics {
     loading_frames: Cell<u64>,
     stale_frames: Cell<u64>,
     unavailable_frames: Cell<u64>,
+    viewer_frame_cache_hits: Cell<u64>,
+    viewer_frame_cache_misses: Cell<u64>,
     media_cache_hits: Cell<u64>,
     media_cache_misses: Cell<u64>,
     media_failure_hits: Cell<u64>,
@@ -904,6 +1009,72 @@ fn bump(counter: &Cell<u64>) {
 
 fn bump_value(counter: &mut u64) {
     *counter = counter.saturating_add(1);
+}
+
+fn viewer_preview_cache_key_for_plan(
+    sequence_id: SequenceId,
+    width: u32,
+    height: u32,
+    elements: &[TimelineRenderPlanElement],
+) -> Option<ViewerPreviewCacheKey> {
+    let mut hasher = DefaultHasher::new();
+    elements.len().hash(&mut hasher);
+    for element in elements {
+        match element {
+            TimelineRenderPlanElement::SolidColor(solid) => {
+                0u8.hash(&mut hasher);
+                hash_color(solid.color, &mut hasher);
+                solid.opacity.to_bits().hash(&mut hasher);
+                solid.blend_mode.hash(&mut hasher);
+                hash_transform(solid.transform, &mut hasher);
+                hash_effect_graph_signature(&solid.effect_graph, solid.frame_seed, &mut hasher);
+            }
+            TimelineRenderPlanElement::Adjustment(adjustment) => {
+                1u8.hash(&mut hasher);
+                adjustment.opacity.to_bits().hash(&mut hasher);
+                adjustment.blend_mode.hash(&mut hasher);
+                hash_effect_graph_signature(
+                    &adjustment.effect_graph,
+                    adjustment.frame_seed,
+                    &mut hasher,
+                );
+            }
+            TimelineRenderPlanElement::Media(_) | TimelineRenderPlanElement::NestedSequence(_) => {
+                return None
+            }
+        }
+    }
+    Some(ViewerPreviewCacheKey {
+        sequence_id,
+        width,
+        height,
+        plan_signature: hasher.finish(),
+    })
+}
+
+fn hash_color(color: mondrian_core::Color, hasher: &mut impl Hasher) {
+    color.r.to_bits().hash(hasher);
+    color.g.to_bits().hash(hasher);
+    color.b.to_bits().hash(hasher);
+    color.a.to_bits().hash(hasher);
+}
+
+fn hash_transform(transform: [f32; 6], hasher: &mut impl Hasher) {
+    for value in transform {
+        value.to_bits().hash(hasher);
+    }
+}
+
+fn hash_effect_graph_signature(
+    graph: &CompiledEffectGraph,
+    frame_seed: i64,
+    hasher: &mut impl Hasher,
+) {
+    graph.signature_hash.hash(hasher);
+    graph.output_cache_policy.hash(hasher);
+    if graph.output_cache_policy == EffectCachePolicy::FrameDependent {
+        frame_seed.hash(hasher);
+    }
 }
 
 fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
@@ -1087,6 +1258,9 @@ mod tests {
         assert_eq!(diagnostics.loading_frames, 0);
         assert_eq!(diagnostics.stale_frames, 0);
         assert_eq!(diagnostics.unavailable_frames, 0);
+        assert_eq!(diagnostics.viewer_frame_cache_hits, 0);
+        assert_eq!(diagnostics.viewer_frame_cache_misses, 1);
+        assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
         assert_eq!(diagnostics.media_cache_entries, 0);
         assert_eq!(diagnostics.media_failure_entries, 0);
     }
@@ -1180,6 +1354,24 @@ mod tests {
         let second = ready_frame(second);
 
         assert_ne!(first.key, second.key);
+    }
+
+    #[test]
+    fn deterministic_solid_preview_reuses_final_frame_cache_across_frames() {
+        let service = AppUiPreviewService::new();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(255, 128, 0, 255));
+
+        let first = ready_frame(service.viewer_preview_for_state(&state));
+        state.seek(5);
+        let second = ready_frame(service.viewer_preview_for_state(&state));
+
+        assert_eq!(first.key, second.key);
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.render_requests, 2);
+        assert_eq!(diagnostics.ready_frames, 2);
+        assert_eq!(diagnostics.viewer_frame_cache_misses, 1);
+        assert_eq!(diagnostics.viewer_frame_cache_hits, 1);
+        assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
     }
 
     #[test]
