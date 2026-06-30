@@ -38,6 +38,7 @@ struct AppUiScaleReport {
     initial_paint_commands: usize,
     playback_paint_commands_max: usize,
     preview_diagnostics: AppUiPreviewDiagnostics,
+    preview_playback_diagnostics: AppUiPreviewDiagnostics,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -198,6 +199,7 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
     let paint_threshold_ms = env_u128("MONDRIAN_UI_PERF_PAINT_MS", 1_500);
     let playback_threshold_ms = env_u128("MONDRIAN_UI_PERF_PLAYBACK_MS", 8_000);
     let preview_probe_threshold_ms = env_u128("MONDRIAN_UI_PERF_PREVIEW_PROBE_MS", 1_500);
+    let preview_playback_threshold_ms = env_u128("MONDRIAN_UI_PERF_PREVIEW_PLAYBACK_MS", 20_000);
 
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_ui_perf_smoke_{uniq}"));
@@ -287,6 +289,27 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
             },
         )?;
 
+        let preview_playback_service = AppUiPreviewService::new();
+        let mut preview_playback_diagnostics = preview_playback_service.diagnostics();
+        let preview_playback_case = run_case(
+            "app_ui.preview_playback_refresh",
+            1,
+            preview_playback_threshold_ms,
+            || {
+                for frame in 0..playback_frames {
+                    state.set_playback_frame_running(frame as i64);
+                    root.refresh_playback_frame_from_app_state(
+                        &state,
+                        Some(&preview_playback_service),
+                    );
+                    TreeWalker::layout(&mut root, bounds);
+                }
+                preview_playback_diagnostics = preview_playback_service.diagnostics();
+                Ok(())
+            },
+        )?;
+        state.pause();
+
         Ok(AppUiScaleReport {
             scenario: "app_ui_scale",
             assets: asset_count,
@@ -297,6 +320,7 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
             initial_paint_commands,
             playback_paint_commands_max,
             preview_diagnostics,
+            preview_playback_diagnostics,
             cases: vec![
                 build_case,
                 refresh_case,
@@ -304,6 +328,7 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
                 paint_case,
                 playback_case,
                 preview_probe_case,
+                preview_playback_case,
             ],
         })
     })();

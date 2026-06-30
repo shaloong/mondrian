@@ -87,8 +87,8 @@ excess preview jobs are dropped instead of back-pressuring the UI thread.
 scheduler counters so performance tooling can distinguish cache misses,
 backpressure drops, stale completions, and decode failures without changing
 timeline evaluation. The app UI scale smoke test serializes a preview diagnostics
-probe into its JSON report without changing the existing UI refresh benchmark
-paths.
+probe into its JSON report and includes a separate preview-playback refresh case
+without changing the existing UI-only refresh benchmark paths.
 
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`
