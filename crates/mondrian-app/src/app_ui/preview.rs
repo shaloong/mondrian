@@ -48,6 +48,7 @@ pub struct AppUiPreviewService {
     current_generation: Cell<u64>,
     current_frame_pending: Cell<bool>,
     last_ready_frame: RefCell<Option<ScopedViewerFrame>>,
+    metrics: AppUiPreviewMetrics,
 }
 
 impl AppUiPreviewService {
@@ -75,6 +76,29 @@ impl AppUiPreviewService {
             current_generation: Cell::new(0),
             current_frame_pending: Cell::new(false),
             last_ready_frame: RefCell::new(None),
+            metrics: AppUiPreviewMetrics::default(),
+        }
+    }
+
+    /// Return a point-in-time snapshot of preview scheduling and cache health.
+    pub fn diagnostics(&self) -> AppUiPreviewDiagnostics {
+        let scheduler = self.scheduler.diagnostics();
+        AppUiPreviewDiagnostics {
+            render_requests: self.metrics.render_requests.get(),
+            ready_frames: self.metrics.ready_frames.get(),
+            loading_frames: self.metrics.loading_frames.get(),
+            stale_frames: self.metrics.stale_frames.get(),
+            unavailable_frames: self.metrics.unavailable_frames.get(),
+            media_cache_hits: self.metrics.media_cache_hits.get(),
+            media_cache_misses: self.metrics.media_cache_misses.get(),
+            media_failure_hits: self.metrics.media_failure_hits.get(),
+            decode_successes: self.metrics.decode_successes.get(),
+            decode_failures: self.metrics.decode_failures.get(),
+            enqueued_jobs: self.metrics.enqueued_jobs.get(),
+            queue_full_drops: self.metrics.queue_full_drops.get(),
+            worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
+            scheduler,
+            media_cache_entries: self.media_cache.borrow().len(),
         }
     }
 
@@ -85,11 +109,13 @@ impl AppUiPreviewService {
             let is_current = self.scheduler.complete(&result.key, result.generation);
             match result.frame {
                 Some(frame) => {
+                    bump(&self.metrics.decode_successes);
                     self.media_cache.borrow_mut().insert(result.key.clone(), frame);
                     self.media_failures.borrow_mut().remove(&result.key);
                     changed |= is_current;
                 }
                 None => {
+                    bump(&self.metrics.decode_failures);
                     if let Some(error) = result.error {
                         tracing::debug!(
                             asset_id = %result.key.asset_id,
@@ -106,12 +132,14 @@ impl AppUiPreviewService {
     }
 
     fn render_preview(&self, state: &AppState) -> ViewerPreviewState {
+        bump(&self.metrics.render_requests);
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
         self.current_frame_pending.set(false);
         let Some(sequence) = state.sequence.as_ref() else {
             self.scheduler.prune_obsolete();
             self.last_ready_frame.replace(None);
+            bump(&self.metrics.unavailable_frames);
             return ViewerPreviewState::Unavailable;
         };
         let frame = state.current_frame().max(0);
@@ -147,7 +175,17 @@ impl AppUiPreviewService {
             };
         self.schedule_media_prefetches(state, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
+        self.record_preview_state(&preview_state);
         preview_state
+    }
+
+    fn record_preview_state(&self, state: &ViewerPreviewState) {
+        match state {
+            ViewerPreviewState::Ready(_) => bump(&self.metrics.ready_frames),
+            ViewerPreviewState::Loading => bump(&self.metrics.loading_frames),
+            ViewerPreviewState::Stale(_) => bump(&self.metrics.stale_frames),
+            ViewerPreviewState::Unavailable => bump(&self.metrics.unavailable_frames),
+        }
     }
 
     fn stale_frame_for_sequence(
@@ -267,6 +305,41 @@ impl AppUiPreviewService {
     }
 }
 
+/// Point-in-time preview service counters for local performance diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AppUiPreviewDiagnostics {
+    /// Viewer preview render requests received by the service.
+    pub render_requests: u64,
+    /// Requests that produced a current ready frame.
+    pub ready_frames: u64,
+    /// Requests waiting for the first current frame.
+    pub loading_frames: u64,
+    /// Requests that reused a scoped previous frame while the current frame is pending.
+    pub stale_frames: u64,
+    /// Requests with no renderable preview frame.
+    pub unavailable_frames: u64,
+    /// Media preview cache hits.
+    pub media_cache_hits: u64,
+    /// Media preview cache misses.
+    pub media_cache_misses: u64,
+    /// Requests skipped because a media preview key is known to have failed.
+    pub media_failure_hits: u64,
+    /// Successful background media decodes received by the UI service.
+    pub decode_successes: u64,
+    /// Failed background media decodes received by the UI service.
+    pub decode_failures: u64,
+    /// Media preview jobs accepted by the worker queue.
+    pub enqueued_jobs: u64,
+    /// Media preview jobs dropped because the bounded worker queue was full.
+    pub queue_full_drops: u64,
+    /// Media preview jobs dropped because the worker channel was disconnected.
+    pub worker_disconnected_drops: u64,
+    /// Scheduler-side request, drop, completion, and pruning counters.
+    pub scheduler: MediaPreviewSchedulerDiagnostics,
+    /// Current number of frames in the media preview LRU cache.
+    pub media_cache_entries: usize,
+}
+
 enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),
     Adjustment(TimelineAdjustmentLayer),
@@ -358,7 +431,6 @@ impl MediaPreviewCache {
         }
     }
 
-    #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -379,6 +451,7 @@ struct MediaPreviewScheduler {
 struct MediaPreviewSchedulerState {
     latest_generation: u64,
     pending: HashMap<MediaPreviewKey, u64>,
+    metrics: MediaPreviewSchedulerMetrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,6 +459,43 @@ enum MediaPreviewRequestStatus {
     Scheduled,
     AlreadyPending,
     DroppedBackpressure,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MediaPreviewSchedulerMetrics {
+    scheduled_requests: u64,
+    already_pending_requests: u64,
+    dropped_backpressure_requests: u64,
+    skipped_decode_jobs: u64,
+    completed_current_results: u64,
+    completed_stale_results: u64,
+    canceled_requests: u64,
+    pruned_obsolete_requests: u64,
+}
+
+/// Scheduler-side preview media request counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MediaPreviewSchedulerDiagnostics {
+    /// Latest render generation observed by the scheduler.
+    pub latest_generation: u64,
+    /// Requests currently waiting to decode or complete.
+    pub pending_requests: usize,
+    /// New requests accepted into the pending set.
+    pub scheduled_requests: u64,
+    /// Requests that updated an already-pending key.
+    pub already_pending_requests: u64,
+    /// Requests rejected by generation or pending-window backpressure.
+    pub dropped_backpressure_requests: u64,
+    /// Worker jobs skipped because their key was no longer pending/current.
+    pub skipped_decode_jobs: u64,
+    /// Completed jobs still relevant to the latest generation.
+    pub completed_current_results: u64,
+    /// Completed jobs that were stale by the time the UI polled them.
+    pub completed_stale_results: u64,
+    /// Pending requests canceled before completion.
+    pub canceled_requests: u64,
+    /// Obsolete pending requests removed during generation pruning.
+    pub pruned_obsolete_requests: u64,
 }
 
 impl Default for MediaPreviewScheduler {
@@ -411,42 +521,57 @@ impl MediaPreviewScheduler {
     fn request(&self, key: MediaPreviewKey, generation: u64) -> MediaPreviewRequestStatus {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         if generation < state.latest_generation {
+            bump_value(&mut state.metrics.dropped_backpressure_requests);
             return MediaPreviewRequestStatus::DroppedBackpressure;
         }
         if let Some(pending_generation) = state.pending.get_mut(&key) {
             *pending_generation = generation;
             Self::prune_obsolete_locked(&mut state);
+            bump_value(&mut state.metrics.already_pending_requests);
             return MediaPreviewRequestStatus::AlreadyPending;
         }
         Self::prune_obsolete_locked(&mut state);
         if state.pending.len() >= self.max_pending {
+            bump_value(&mut state.metrics.dropped_backpressure_requests);
             return MediaPreviewRequestStatus::DroppedBackpressure;
         }
         state.pending.insert(key, generation);
+        bump_value(&mut state.metrics.scheduled_requests);
         MediaPreviewRequestStatus::Scheduled
     }
 
     fn should_decode(&self, key: &MediaPreviewKey) -> bool {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         let Some(generation) = state.pending.get(key).copied() else {
+            bump_value(&mut state.metrics.skipped_decode_jobs);
             return false;
         };
         if generation >= state.latest_generation {
             return true;
         }
         state.pending.remove(key);
+        bump_value(&mut state.metrics.skipped_decode_jobs);
         false
     }
 
     fn complete(&self, key: &MediaPreviewKey, result_generation: u64) -> bool {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         let pending_generation = state.pending.remove(key).unwrap_or(result_generation);
-        pending_generation >= state.latest_generation
-            || result_generation >= state.latest_generation
+        let is_current = pending_generation >= state.latest_generation
+            || result_generation >= state.latest_generation;
+        if is_current {
+            bump_value(&mut state.metrics.completed_current_results);
+        } else {
+            bump_value(&mut state.metrics.completed_stale_results);
+        }
+        is_current
     }
 
     fn cancel(&self, key: &MediaPreviewKey) {
-        self.state.lock().expect("media preview scheduler poisoned").pending.remove(key);
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        if state.pending.remove(key).is_some() {
+            bump_value(&mut state.metrics.canceled_requests);
+        }
     }
 
     fn prune_obsolete(&self) {
@@ -456,7 +581,27 @@ impl MediaPreviewScheduler {
 
     fn prune_obsolete_locked(state: &mut MediaPreviewSchedulerState) {
         let latest_generation = state.latest_generation;
+        let before = state.pending.len();
         state.pending.retain(|_, generation| *generation >= latest_generation);
+        let pruned = before.saturating_sub(state.pending.len()) as u64;
+        state.metrics.pruned_obsolete_requests =
+            state.metrics.pruned_obsolete_requests.saturating_add(pruned);
+    }
+
+    fn diagnostics(&self) -> MediaPreviewSchedulerDiagnostics {
+        let state = self.state.lock().expect("media preview scheduler poisoned");
+        MediaPreviewSchedulerDiagnostics {
+            latest_generation: state.latest_generation,
+            pending_requests: state.pending.len(),
+            scheduled_requests: state.metrics.scheduled_requests,
+            already_pending_requests: state.metrics.already_pending_requests,
+            dropped_backpressure_requests: state.metrics.dropped_backpressure_requests,
+            skipped_decode_jobs: state.metrics.skipped_decode_jobs,
+            completed_current_results: state.metrics.completed_current_results,
+            completed_stale_results: state.metrics.completed_stale_results,
+            canceled_requests: state.metrics.canceled_requests,
+            pruned_obsolete_requests: state.metrics.pruned_obsolete_requests,
+        }
     }
 
     #[cfg(test)]
@@ -537,9 +682,7 @@ impl AppUiPreviewService {
                     ) else {
                         continue;
                     };
-                    if self.media_cache.borrow_mut().get(&key).is_none()
-                        && !self.media_failures.borrow().contains(&key)
-                    {
+                    if self.cached_media_frame(&key).is_none() && !self.failed_media_key(&key) {
                         self.request_media_preview(key, source_secs);
                     }
                 }
@@ -580,15 +723,33 @@ impl AppUiPreviewService {
             target_width,
             target_height,
         )?;
-        if let Some(frame) = self.media_cache.borrow_mut().get(&key) {
+        if let Some(frame) = self.cached_media_frame(&key) {
             return Some(frame);
         }
-        if self.media_failures.borrow().contains(&key) {
+        if self.failed_media_key(&key) {
             return None;
         }
         self.current_frame_pending.set(true);
         self.request_media_preview(key, source_secs);
         None
+    }
+
+    fn cached_media_frame(&self, key: &MediaPreviewKey) -> Option<MediaPreviewFrame> {
+        let frame = self.media_cache.borrow_mut().get(key);
+        if frame.is_some() {
+            bump(&self.metrics.media_cache_hits);
+        } else {
+            bump(&self.metrics.media_cache_misses);
+        }
+        frame
+    }
+
+    fn failed_media_key(&self, key: &MediaPreviewKey) -> bool {
+        let failed = self.media_failures.borrow().contains(key);
+        if failed {
+            bump(&self.metrics.media_failure_hits);
+        }
+        failed
     }
 
     fn media_preview_key_for_asset(
@@ -644,8 +805,9 @@ impl AppUiPreviewService {
         }
         let job = MediaPreviewJob { key: key.clone(), source_secs, generation };
         match self.jobs.try_send(job) {
-            Ok(()) => {}
+            Ok(()) => bump(&self.metrics.enqueued_jobs),
             Err(mpsc::TrySendError::Full(job)) => {
+                bump(&self.metrics.queue_full_drops);
                 self.scheduler.cancel(&job.key);
                 tracing::trace!(
                     asset_id = %job.key.asset_id,
@@ -654,11 +816,37 @@ impl AppUiPreviewService {
                 );
             }
             Err(mpsc::TrySendError::Disconnected(job)) => {
+                bump(&self.metrics.worker_disconnected_drops);
                 self.scheduler.cancel(&job.key);
                 tracing::debug!("viewer preview worker unavailable");
             }
         }
     }
+}
+
+#[derive(Default)]
+struct AppUiPreviewMetrics {
+    render_requests: Cell<u64>,
+    ready_frames: Cell<u64>,
+    loading_frames: Cell<u64>,
+    stale_frames: Cell<u64>,
+    unavailable_frames: Cell<u64>,
+    media_cache_hits: Cell<u64>,
+    media_cache_misses: Cell<u64>,
+    media_failure_hits: Cell<u64>,
+    decode_successes: Cell<u64>,
+    decode_failures: Cell<u64>,
+    enqueued_jobs: Cell<u64>,
+    queue_full_drops: Cell<u64>,
+    worker_disconnected_drops: Cell<u64>,
+}
+
+fn bump(counter: &Cell<u64>) {
+    counter.set(counter.get().saturating_add(1));
+}
+
+fn bump_value(counter: &mut u64) {
+    *counter = counter.saturating_add(1);
 }
 
 fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
@@ -823,6 +1011,26 @@ mod tests {
         assert_eq!(frame.height, 540);
         assert_eq!(frame.rgba.len(), 960 * 540 * 4);
         assert!(frame.key.contains("app UI-viewer:960x540:f4:"));
+    }
+
+    #[test]
+    fn preview_diagnostics_count_ready_render_requests() {
+        let service = AppUiPreviewService::new();
+        let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.render_requests, 0);
+
+        let frame = service.viewer_preview_for_state(&state);
+        let _ = ready_frame(frame);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.render_requests, 1);
+        assert_eq!(diagnostics.ready_frames, 1);
+        assert_eq!(diagnostics.loading_frames, 0);
+        assert_eq!(diagnostics.stale_frames, 0);
+        assert_eq!(diagnostics.unavailable_frames, 0);
+        assert_eq!(diagnostics.media_cache_entries, 0);
     }
 
     #[test]
@@ -1119,5 +1327,42 @@ mod tests {
             MediaPreviewRequestStatus::DroppedBackpressure
         );
         assert_eq!(scheduler.pending_len(), 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_reports_request_and_drop_diagnostics() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(1);
+        let generation = scheduler.begin_generation();
+        let first = test_media_key(1);
+        let second = test_media_key(2);
+
+        assert_eq!(
+            scheduler.request(first.clone(), generation),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            scheduler.request(first.clone(), generation),
+            MediaPreviewRequestStatus::AlreadyPending
+        );
+        assert_eq!(
+            scheduler.request(second.clone(), generation),
+            MediaPreviewRequestStatus::DroppedBackpressure
+        );
+
+        scheduler.begin_generation();
+        scheduler.prune_obsolete();
+        assert!(!scheduler.should_decode(&first));
+        assert!(!scheduler.complete(&second, generation));
+
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.latest_generation, generation + 1);
+        assert_eq!(diagnostics.pending_requests, 0);
+        assert_eq!(diagnostics.scheduled_requests, 1);
+        assert_eq!(diagnostics.already_pending_requests, 1);
+        assert_eq!(diagnostics.dropped_backpressure_requests, 1);
+        assert_eq!(diagnostics.pruned_obsolete_requests, 1);
+        assert_eq!(diagnostics.skipped_decode_jobs, 1);
+        assert_eq!(diagnostics.completed_current_results, 0);
+        assert_eq!(diagnostics.completed_stale_results, 1);
     }
 }
