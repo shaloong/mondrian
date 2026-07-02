@@ -53,10 +53,14 @@ pub use ocio_gpu::{
     OcioGpuShaderTranslationRequest, OcioGpuShaderTranslator, OcioGpuTexture2DBindingContract,
     OcioGpuTexture3DBindingContract, OcioGpuTranslatedShader, OcioGpuWgpuBindingLayoutPlan,
     OcioGpuWgpuBindingPlan, OcioGpuWgpuBindingResource, OcioGpuWgpuBlocker,
-    OcioGpuWgpuExecutionPlan, OcioGpuWgpuLutUploadPlan, OcioGpuWgpuPreparedResources,
-    OcioGpuWgpuResourceCache, OcioGpuWgpuResourceCacheDiagnostics, OcioGpuWgpuResourcePlan,
-    OcioGpuWgpuShaderModule, OcioGpuWgpuShaderModuleCache, OcioGpuWgpuShaderModuleCacheDiagnostics,
+    OcioGpuWgpuExecutionPlan, OcioGpuWgpuLutTextureDimension, OcioGpuWgpuLutTextureExtent,
+    OcioGpuWgpuLutTextureFormat, OcioGpuWgpuLutUploadError, OcioGpuWgpuLutUploadPlan,
+    OcioGpuWgpuLutUploadResource, OcioGpuWgpuLutUploader, OcioGpuWgpuPackedLutTexture,
+    OcioGpuWgpuPackedLutUploadPlan, OcioGpuWgpuPreparedResources, OcioGpuWgpuResourceCache,
+    OcioGpuWgpuResourceCacheDiagnostics, OcioGpuWgpuResourcePlan, OcioGpuWgpuShaderModule,
+    OcioGpuWgpuShaderModuleCache, OcioGpuWgpuShaderModuleCacheDiagnostics,
     OcioGpuWgpuShaderModuleError, OcioGpuWgpuTexture2DUpload, OcioGpuWgpuTexture3DUpload,
+    OcioGpuWgpuUploadedLutTexture, OcioGpuWgpuUploadedLuts,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{

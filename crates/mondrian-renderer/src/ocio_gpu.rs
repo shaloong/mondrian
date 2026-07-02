@@ -750,6 +750,380 @@ impl OcioGpuWgpuLutUploadPlan {
             textures_3d,
         }
     }
+
+    /// Validate and pack OCIO LUT payloads into wgpu texture upload bytes.
+    pub fn pack_textures(
+        &self,
+    ) -> Result<OcioGpuWgpuPackedLutUploadPlan, OcioGpuWgpuLutUploadError> {
+        let textures_2d = self
+            .textures_2d
+            .iter()
+            .map(OcioGpuWgpuPackedLutTexture::from_2d_upload)
+            .collect::<Result<Vec<_>, _>>()?;
+        let textures_3d = self
+            .textures_3d
+            .iter()
+            .map(OcioGpuWgpuPackedLutTexture::from_3d_upload)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(OcioGpuWgpuPackedLutUploadPlan {
+            resource_key: self.resource_key,
+            textures_2d,
+            textures_3d,
+        })
+    }
+}
+
+/// Packed OCIO LUT payloads ready for wgpu texture creation and queue upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuWgpuPackedLutUploadPlan {
+    /// Stable resource key this packed upload plan belongs to.
+    pub resource_key: u64,
+    /// Packed 1D/2D LUT textures.
+    pub textures_2d: Vec<OcioGpuWgpuPackedLutTexture>,
+    /// Packed 3D LUT textures.
+    pub textures_3d: Vec<OcioGpuWgpuPackedLutTexture>,
+}
+
+/// Texture format selected for an OCIO LUT upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuLutTextureFormat {
+    /// Single-channel 32-bit float texture.
+    R32Float,
+    /// Four-channel 32-bit float texture.
+    Rgba32Float,
+}
+
+impl OcioGpuWgpuLutTextureFormat {
+    fn to_wgpu(self) -> wgpu::TextureFormat {
+        match self {
+            Self::R32Float => wgpu::TextureFormat::R32Float,
+            Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
+        }
+    }
+
+    fn bytes_per_texel(self) -> u32 {
+        match self {
+            Self::R32Float => 4,
+            Self::Rgba32Float => 16,
+        }
+    }
+}
+
+/// Texture dimensionality selected for an OCIO LUT upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuLutTextureDimension {
+    /// 2D wgpu texture, including OCIO logical 1D LUTs stored as 2D resources.
+    D2,
+    /// 3D wgpu texture.
+    D3,
+}
+
+impl OcioGpuWgpuLutTextureDimension {
+    fn to_wgpu(self) -> wgpu::TextureDimension {
+        match self {
+            Self::D2 => wgpu::TextureDimension::D2,
+            Self::D3 => wgpu::TextureDimension::D3,
+        }
+    }
+
+    fn view_dimension(self) -> wgpu::TextureViewDimension {
+        match self {
+            Self::D2 => wgpu::TextureViewDimension::D2,
+            Self::D3 => wgpu::TextureViewDimension::D3,
+        }
+    }
+}
+
+/// Extent for an OCIO LUT texture upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuLutTextureExtent {
+    /// Texture width in texels.
+    pub width: u32,
+    /// Texture height in texels.
+    pub height: u32,
+    /// Texture depth or array layer count.
+    pub depth_or_array_layers: u32,
+}
+
+impl OcioGpuWgpuLutTextureExtent {
+    fn to_wgpu(self) -> wgpu::Extent3d {
+        wgpu::Extent3d {
+            width: self.width,
+            height: self.height,
+            depth_or_array_layers: self.depth_or_array_layers,
+        }
+    }
+}
+
+/// Packed bytes for one OCIO LUT texture upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuWgpuPackedLutTexture {
+    /// Texture index in the OCIO descriptor.
+    pub index: u32,
+    /// OCIO-generated texture symbol name.
+    pub texture_name: String,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO-reported binding slot.
+    pub binding_index: u32,
+    /// Interpolation policy expected by OCIO.
+    pub interpolation: OcioGpuTextureInterpolation,
+    /// Texture format selected for wgpu upload.
+    pub format: OcioGpuWgpuLutTextureFormat,
+    /// Texture dimension selected for wgpu upload.
+    pub dimension: OcioGpuWgpuLutTextureDimension,
+    /// Texture extent.
+    pub extent: OcioGpuWgpuLutTextureExtent,
+    /// Bytes per row for `Queue::write_texture`.
+    pub bytes_per_row: u32,
+    /// Rows per image for `Queue::write_texture`.
+    pub rows_per_image: u32,
+    /// Hash of the OCIO source `f32` values.
+    pub source_values_hash: u64,
+    /// Hash of the packed upload bytes.
+    pub packed_bytes_hash: u64,
+    /// Packed texture bytes.
+    pub bytes: Vec<u8>,
+}
+
+impl OcioGpuWgpuPackedLutTexture {
+    fn from_2d_upload(
+        upload: &OcioGpuWgpuTexture2DUpload,
+    ) -> Result<Self, OcioGpuWgpuLutUploadError> {
+        if upload.width == 0 || upload.height == 0 {
+            return Err(OcioGpuWgpuLutUploadError::EmptyTexture2D {
+                index: upload.index,
+                width: upload.width,
+                height: upload.height,
+            });
+        }
+
+        let texel_count = checked_texel_count_2d(upload.index, upload.width, upload.height)?;
+        let (format, bytes) = match upload.channel {
+            OcioGpuTextureChannel::Red => {
+                validate_value_count(
+                    OcioGpuWgpuLutUploadResource::Texture2D { index: upload.index },
+                    upload.values.len(),
+                    texel_count,
+                )?;
+                (
+                    OcioGpuWgpuLutTextureFormat::R32Float,
+                    f32_values_to_bytes(&upload.values),
+                )
+            }
+            OcioGpuTextureChannel::Rgb => {
+                let expected = checked_rgb_value_count(
+                    OcioGpuWgpuLutUploadResource::Texture2D { index: upload.index },
+                    texel_count,
+                )?;
+                validate_value_count(
+                    OcioGpuWgpuLutUploadResource::Texture2D { index: upload.index },
+                    upload.values.len(),
+                    expected,
+                )?;
+                (
+                    OcioGpuWgpuLutTextureFormat::Rgba32Float,
+                    pack_rgb_values_as_rgba32(&upload.values),
+                )
+            }
+        };
+        let extent = OcioGpuWgpuLutTextureExtent {
+            width: upload.width,
+            height: upload.height,
+            depth_or_array_layers: 1,
+        };
+        Ok(Self::new(
+            upload.index,
+            upload.texture_name.clone(),
+            upload.sampler_name.clone(),
+            upload.binding_index,
+            upload.interpolation,
+            format,
+            OcioGpuWgpuLutTextureDimension::D2,
+            extent,
+            upload.values_hash,
+            bytes,
+        ))
+    }
+
+    fn from_3d_upload(
+        upload: &OcioGpuWgpuTexture3DUpload,
+    ) -> Result<Self, OcioGpuWgpuLutUploadError> {
+        if upload.edge_len == 0 {
+            return Err(OcioGpuWgpuLutUploadError::EmptyTexture3D {
+                index: upload.index,
+                edge_len: upload.edge_len,
+            });
+        }
+
+        let texel_count = checked_texel_count_3d(upload.index, upload.edge_len)?;
+        let expected = checked_rgb_value_count(
+            OcioGpuWgpuLutUploadResource::Texture3D { index: upload.index },
+            texel_count,
+        )?;
+        validate_value_count(
+            OcioGpuWgpuLutUploadResource::Texture3D { index: upload.index },
+            upload.values.len(),
+            expected,
+        )?;
+        let extent = OcioGpuWgpuLutTextureExtent {
+            width: upload.edge_len,
+            height: upload.edge_len,
+            depth_or_array_layers: upload.edge_len,
+        };
+        Ok(Self::new(
+            upload.index,
+            upload.texture_name.clone(),
+            upload.sampler_name.clone(),
+            upload.binding_index,
+            upload.interpolation,
+            OcioGpuWgpuLutTextureFormat::Rgba32Float,
+            OcioGpuWgpuLutTextureDimension::D3,
+            extent,
+            upload.values_hash,
+            pack_rgb_values_as_rgba32(&upload.values),
+        ))
+    }
+
+    fn new(
+        index: u32,
+        texture_name: String,
+        sampler_name: String,
+        binding_index: u32,
+        interpolation: OcioGpuTextureInterpolation,
+        format: OcioGpuWgpuLutTextureFormat,
+        dimension: OcioGpuWgpuLutTextureDimension,
+        extent: OcioGpuWgpuLutTextureExtent,
+        source_values_hash: u64,
+        bytes: Vec<u8>,
+    ) -> Self {
+        let bytes_per_row = extent.width.saturating_mul(format.bytes_per_texel());
+        let rows_per_image = extent.height;
+        let packed_bytes_hash = hash_bytes(&bytes);
+        Self {
+            index,
+            texture_name,
+            sampler_name,
+            binding_index,
+            interpolation,
+            format,
+            dimension,
+            extent,
+            bytes_per_row,
+            rows_per_image,
+            source_values_hash,
+            packed_bytes_hash,
+            bytes,
+        }
+    }
+}
+
+/// Resource identifier for an OCIO LUT upload validation error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcioGpuWgpuLutUploadResource {
+    /// A 1D/2D LUT texture.
+    Texture2D { index: u32 },
+    /// A 3D LUT texture.
+    Texture3D { index: u32 },
+}
+
+/// Error returned when an OCIO LUT payload cannot be packed or uploaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuLutUploadError {
+    /// OCIO reported a 1D/2D texture with an empty extent.
+    EmptyTexture2D { index: u32, width: u32, height: u32 },
+    /// OCIO reported a 3D texture with an empty edge length.
+    EmptyTexture3D { index: u32, edge_len: u32 },
+    /// Texture extent overflowed when computing texel count.
+    TexelCountOverflow {
+        /// Resource that overflowed.
+        resource: OcioGpuWgpuLutUploadResource,
+    },
+    /// The copied value payload does not match the texture metadata.
+    ValueCountMismatch {
+        /// Resource with an invalid payload length.
+        resource: OcioGpuWgpuLutUploadResource,
+        /// Actual number of `f32` values.
+        actual: usize,
+        /// Expected number of `f32` values.
+        expected: usize,
+    },
+}
+
+/// Uploaded OCIO LUT texture resources owned by wgpu.
+pub struct OcioGpuWgpuUploadedLutTexture {
+    /// Texture index in the OCIO descriptor.
+    pub index: u32,
+    /// OCIO-generated texture symbol name.
+    pub texture_name: String,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO-reported binding slot.
+    pub binding_index: u32,
+    /// Texture format selected for upload.
+    pub format: OcioGpuWgpuLutTextureFormat,
+    /// Texture dimension selected for upload.
+    pub dimension: OcioGpuWgpuLutTextureDimension,
+    /// Texture extent.
+    pub extent: OcioGpuWgpuLutTextureExtent,
+    /// Hash of the source OCIO values.
+    pub source_values_hash: u64,
+    /// Hash of the packed bytes uploaded to wgpu.
+    pub packed_bytes_hash: u64,
+    /// Uploaded texture.
+    pub texture: wgpu::Texture,
+    /// Default texture view for shader binding.
+    pub view: wgpu::TextureView,
+    /// Sampler matching the OCIO interpolation policy.
+    pub sampler: wgpu::Sampler,
+}
+
+/// Uploaded OCIO LUT resources for a shader plan.
+pub struct OcioGpuWgpuUploadedLuts {
+    /// Stable resource key this upload belongs to.
+    pub resource_key: u64,
+    /// Uploaded 1D/2D LUT textures.
+    pub textures_2d: Vec<OcioGpuWgpuUploadedLutTexture>,
+    /// Uploaded 3D LUT textures.
+    pub textures_3d: Vec<OcioGpuWgpuUploadedLutTexture>,
+}
+
+/// Stateless uploader for OCIO LUT texture payloads.
+pub struct OcioGpuWgpuLutUploader;
+
+impl OcioGpuWgpuLutUploader {
+    /// Upload a validated OCIO LUT plan into wgpu textures.
+    pub fn upload(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        plan: &OcioGpuWgpuLutUploadPlan,
+    ) -> Result<OcioGpuWgpuUploadedLuts, OcioGpuWgpuLutUploadError> {
+        let packed = plan.pack_textures()?;
+        Self::upload_packed(device, queue, &packed)
+    }
+
+    /// Upload an already packed OCIO LUT plan into wgpu textures.
+    pub fn upload_packed(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        packed: &OcioGpuWgpuPackedLutUploadPlan,
+    ) -> Result<OcioGpuWgpuUploadedLuts, OcioGpuWgpuLutUploadError> {
+        let textures_2d = packed
+            .textures_2d
+            .iter()
+            .map(|texture| upload_lut_texture(device, queue, texture))
+            .collect();
+        let textures_3d = packed
+            .textures_3d
+            .iter()
+            .map(|texture| upload_lut_texture(device, queue, texture))
+            .collect();
+        Ok(OcioGpuWgpuUploadedLuts {
+            resource_key: packed.resource_key,
+            textures_2d,
+            textures_3d,
+        })
+    }
 }
 
 /// Bounded cache for renderer backend resource-layout preparation.
@@ -1289,6 +1663,149 @@ fn backend_shader_module_cache_key(
     Ok(hasher.finish())
 }
 
+fn upload_lut_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    packed: &OcioGpuWgpuPackedLutTexture,
+) -> OcioGpuWgpuUploadedLutTexture {
+    let label = format!("ocio_lut_{}", packed.texture_name);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(&label),
+        size: packed.extent.to_wgpu(),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: packed.dimension.to_wgpu(),
+        format: packed.format.to_wgpu(),
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &packed.bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(packed.bytes_per_row),
+            rows_per_image: Some(packed.rows_per_image),
+        },
+        packed.extent.to_wgpu(),
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("ocio_lut_texture_view"),
+        format: Some(packed.format.to_wgpu()),
+        dimension: Some(packed.dimension.view_dimension()),
+        usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+        aspect: wgpu::TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: Some(1),
+        base_array_layer: 0,
+        array_layer_count: None,
+    });
+    let sampler = device.create_sampler(&sampler_descriptor_for_interpolation(
+        packed.interpolation,
+        &packed.sampler_name,
+    ));
+    OcioGpuWgpuUploadedLutTexture {
+        index: packed.index,
+        texture_name: packed.texture_name.clone(),
+        sampler_name: packed.sampler_name.clone(),
+        binding_index: packed.binding_index,
+        format: packed.format,
+        dimension: packed.dimension,
+        extent: packed.extent,
+        source_values_hash: packed.source_values_hash,
+        packed_bytes_hash: packed.packed_bytes_hash,
+        texture,
+        view,
+        sampler,
+    }
+}
+
+fn sampler_descriptor_for_interpolation(
+    interpolation: OcioGpuTextureInterpolation,
+    label: &str,
+) -> wgpu::SamplerDescriptor<'_> {
+    let filter = match interpolation {
+        OcioGpuTextureInterpolation::Nearest => wgpu::FilterMode::Nearest,
+        OcioGpuTextureInterpolation::Unknown
+        | OcioGpuTextureInterpolation::Linear
+        | OcioGpuTextureInterpolation::Tetrahedral
+        | OcioGpuTextureInterpolation::Cubic
+        | OcioGpuTextureInterpolation::Default
+        | OcioGpuTextureInterpolation::Best => wgpu::FilterMode::Linear,
+    };
+    wgpu::SamplerDescriptor {
+        label: Some(label),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: filter,
+        min_filter: filter,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    }
+}
+
+fn checked_texel_count_2d(
+    index: u32,
+    width: u32,
+    height: u32,
+) -> Result<usize, OcioGpuWgpuLutUploadError> {
+    (width as usize).checked_mul(height as usize).ok_or(
+        OcioGpuWgpuLutUploadError::TexelCountOverflow {
+            resource: OcioGpuWgpuLutUploadResource::Texture2D { index },
+        },
+    )
+}
+
+fn checked_texel_count_3d(index: u32, edge_len: u32) -> Result<usize, OcioGpuWgpuLutUploadError> {
+    let edge = edge_len as usize;
+    edge.checked_mul(edge).and_then(|area| area.checked_mul(edge)).ok_or(
+        OcioGpuWgpuLutUploadError::TexelCountOverflow {
+            resource: OcioGpuWgpuLutUploadResource::Texture3D { index },
+        },
+    )
+}
+
+fn validate_value_count(
+    resource: OcioGpuWgpuLutUploadResource,
+    actual: usize,
+    expected: usize,
+) -> Result<(), OcioGpuWgpuLutUploadError> {
+    if actual != expected {
+        return Err(OcioGpuWgpuLutUploadError::ValueCountMismatch { resource, actual, expected });
+    }
+    Ok(())
+}
+
+fn checked_rgb_value_count(
+    resource: OcioGpuWgpuLutUploadResource,
+    texel_count: usize,
+) -> Result<usize, OcioGpuWgpuLutUploadError> {
+    texel_count
+        .checked_mul(3)
+        .ok_or(OcioGpuWgpuLutUploadError::TexelCountOverflow { resource })
+}
+
+fn f32_values_to_bytes(values: &[f32]) -> Vec<u8> {
+    bytemuck::cast_slice(values).to_vec()
+}
+
+fn pack_rgb_values_as_rgba32(values: &[f32]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(values.len() / 3 * 4);
+    for rgb in values.chunks_exact(3) {
+        rgba.push(rgb[0]);
+        rgba.push(rgb[1]);
+        rgba.push(rgb[2]);
+        rgba.push(1.0);
+    }
+    f32_values_to_bytes(&rgba)
+}
+
 struct ResourceLayoutSignature {
     language: GpuLanguage,
     binding_contract_hash: u64,
@@ -1345,10 +1862,156 @@ fn hash_f32_values(values: &[f32]) -> u64 {
     hasher.finish()
 }
 
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, ocio_default_display_view};
+
+    fn f32s_from_bytes(bytes: &[u8]) -> Vec<f32> {
+        bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+
+    fn texture_2d_upload(
+        channel: OcioGpuTextureChannel,
+        width: u32,
+        height: u32,
+        values: Vec<f32>,
+    ) -> OcioGpuWgpuTexture2DUpload {
+        OcioGpuWgpuTexture2DUpload {
+            index: 7,
+            texture_name: "lut2d".to_owned(),
+            sampler_name: "lut2d_sampler".to_owned(),
+            binding_index: 3,
+            channel,
+            dimensions: OcioGpuTextureDimensions::Texture2D,
+            interpolation: OcioGpuTextureInterpolation::Linear,
+            width,
+            height,
+            values_hash: hash_f32_values(&values),
+            values,
+        }
+    }
+
+    fn texture_3d_upload(edge_len: u32, values: Vec<f32>) -> OcioGpuWgpuTexture3DUpload {
+        OcioGpuWgpuTexture3DUpload {
+            index: 9,
+            texture_name: "lut3d".to_owned(),
+            sampler_name: "lut3d_sampler".to_owned(),
+            binding_index: 4,
+            interpolation: OcioGpuTextureInterpolation::Tetrahedral,
+            edge_len,
+            values_hash: hash_f32_values(&values),
+            values,
+        }
+    }
+
+    #[test]
+    fn lut_upload_pack_preserves_red_2d_values_as_r32float() {
+        let upload = texture_2d_upload(OcioGpuTextureChannel::Red, 2, 1, vec![0.25, 0.75]);
+        let plan = OcioGpuWgpuLutUploadPlan {
+            resource_key: 11,
+            textures_2d: vec![upload.clone()],
+            textures_3d: Vec::new(),
+        };
+
+        let packed = plan.pack_textures().expect("pack red 2D LUT");
+
+        assert_eq!(packed.resource_key, 11);
+        assert_eq!(packed.textures_2d.len(), 1);
+        let texture = &packed.textures_2d[0];
+        assert_eq!(texture.format, OcioGpuWgpuLutTextureFormat::R32Float);
+        assert_eq!(texture.dimension, OcioGpuWgpuLutTextureDimension::D2);
+        assert_eq!(
+            texture.extent,
+            OcioGpuWgpuLutTextureExtent { width: 2, height: 1, depth_or_array_layers: 1 }
+        );
+        assert_eq!(texture.bytes_per_row, 8);
+        assert_eq!(texture.rows_per_image, 1);
+        assert_eq!(texture.source_values_hash, upload.values_hash);
+        assert_eq!(f32s_from_bytes(&texture.bytes), upload.values);
+    }
+
+    #[test]
+    fn lut_upload_pack_expands_rgb_2d_values_to_rgba32float() {
+        let upload = texture_2d_upload(
+            OcioGpuTextureChannel::Rgb,
+            2,
+            1,
+            vec![1.0, 0.0, 0.25, 0.0, 1.0, 0.5],
+        );
+        let plan = OcioGpuWgpuLutUploadPlan {
+            resource_key: 12,
+            textures_2d: vec![upload],
+            textures_3d: Vec::new(),
+        };
+
+        let packed = plan.pack_textures().expect("pack RGB 2D LUT");
+        let texture = &packed.textures_2d[0];
+
+        assert_eq!(texture.format, OcioGpuWgpuLutTextureFormat::Rgba32Float);
+        assert_eq!(texture.bytes_per_row, 32);
+        assert_eq!(
+            f32s_from_bytes(&texture.bytes),
+            vec![1.0, 0.0, 0.25, 1.0, 0.0, 1.0, 0.5, 1.0]
+        );
+        assert_ne!(texture.packed_bytes_hash, 0);
+    }
+
+    #[test]
+    fn lut_upload_pack_expands_rgb_3d_values_to_rgba32float() {
+        let values = (0..24).map(|value| value as f32 / 23.0).collect::<Vec<_>>();
+        let upload = texture_3d_upload(2, values);
+        let plan = OcioGpuWgpuLutUploadPlan {
+            resource_key: 13,
+            textures_2d: Vec::new(),
+            textures_3d: vec![upload],
+        };
+
+        let packed = plan.pack_textures().expect("pack RGB 3D LUT");
+        let texture = &packed.textures_3d[0];
+        let unpacked = f32s_from_bytes(&texture.bytes);
+
+        assert_eq!(texture.format, OcioGpuWgpuLutTextureFormat::Rgba32Float);
+        assert_eq!(texture.dimension, OcioGpuWgpuLutTextureDimension::D3);
+        assert_eq!(
+            texture.extent,
+            OcioGpuWgpuLutTextureExtent { width: 2, height: 2, depth_or_array_layers: 2 }
+        );
+        assert_eq!(texture.bytes_per_row, 32);
+        assert_eq!(texture.rows_per_image, 2);
+        assert_eq!(unpacked.len(), 32);
+        assert!(unpacked.chunks_exact(4).all(|rgba| rgba[3] == 1.0));
+    }
+
+    #[test]
+    fn lut_upload_pack_rejects_mismatched_rgb_value_count() {
+        let upload = texture_2d_upload(OcioGpuTextureChannel::Rgb, 1, 1, vec![0.0, 1.0]);
+        let plan = OcioGpuWgpuLutUploadPlan {
+            resource_key: 14,
+            textures_2d: vec![upload],
+            textures_3d: Vec::new(),
+        };
+
+        let err = plan.pack_textures().expect_err("RGB 2D LUT needs 3 values per texel");
+
+        assert_eq!(
+            err,
+            OcioGpuWgpuLutUploadError::ValueCountMismatch {
+                resource: OcioGpuWgpuLutUploadResource::Texture2D { index: 7 },
+                actual: 2,
+                expected: 3
+            }
+        );
+    }
 
     #[test]
     fn cache_extracts_and_reuses_color_space_shader_plan() {

@@ -102,6 +102,14 @@ policy, value hashes, and the raw `f32` values. Upload code must use
 this plan rather than reconstructing LUT values from shader text or generated
 WGSL.
 
+`OcioGpuWgpuPackedLutUploadPlan` validates payload lengths against OCIO
+metadata, preserves single-channel LUTs as `R32Float`, and expands RGB LUTs to
+`Rgba32Float` with alpha set to `1.0` because wgpu has no portable RGB32Float
+sampled texture format. `OcioGpuWgpuLutUploader` is the concrete backend
+boundary that creates `wgpu::Texture`, `wgpu::TextureView`, and
+interpolation-aware `wgpu::Sampler` objects from that packed plan, but upload
+success alone still does not make the color pass executable.
+
 `OcioGpuWgpuShaderModuleCache` is the first concrete backend-object boundary.
 It validates that an `OcioGpuTranslatedShader` and `OcioGpuWgpuResourcePlan`
 share the same shader hash and expanded OCIO binding contract before creating a
