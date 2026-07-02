@@ -53,8 +53,10 @@ pub use ocio_gpu::{
     OcioGpuShaderTranslationRequest, OcioGpuShaderTranslator, OcioGpuTexture2DBindingContract,
     OcioGpuTexture3DBindingContract, OcioGpuTranslatedShader, OcioGpuWgpuBindingLayoutPlan,
     OcioGpuWgpuBindingPlan, OcioGpuWgpuBindingResource, OcioGpuWgpuBlocker,
-    OcioGpuWgpuExecutionPlan, OcioGpuWgpuPreparedResources, OcioGpuWgpuResourceCache,
-    OcioGpuWgpuResourceCacheDiagnostics, OcioGpuWgpuResourcePlan,
+    OcioGpuWgpuExecutionPlan, OcioGpuWgpuLutUploadPlan, OcioGpuWgpuPreparedResources,
+    OcioGpuWgpuResourceCache, OcioGpuWgpuResourceCacheDiagnostics, OcioGpuWgpuResourcePlan,
+    OcioGpuWgpuShaderModule, OcioGpuWgpuShaderModuleCache, OcioGpuWgpuShaderModuleCacheDiagnostics,
+    OcioGpuWgpuShaderModuleError, OcioGpuWgpuTexture2DUpload, OcioGpuWgpuTexture3DUpload,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{

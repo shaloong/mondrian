@@ -155,11 +155,12 @@ This cache is deliberately not a fake wgpu execution path. OCIO emits backend
 shader source such as GLSL/HLSL/MSL, while Mondrian's native renderer should
 prefer validated Naga IR via `wgpu::ShaderSource::Naga` once translation is
 proven. A later backend compiler/upload stage must turn the cached OCIO plan,
-`OcioGpuShaderTranslationCache` artifact, and `OcioGpuWgpuResourcePlan` into
-concrete shader modules, pipeline layouts, bind groups, LUT textures, uniform
-buffers, and render-graph nodes before the preview graph can execute it on the
-GPU. Until that stage exists, CPU processor execution is the correctness path
-and the cached shader plus resource plan is the production boundary for GPU
+`OcioGpuShaderTranslationCache` artifact, `OcioGpuWgpuResourcePlan`,
+`OcioGpuWgpuLutUploadPlan`, and `OcioGpuWgpuShaderModuleCache` output into
+concrete pipeline layouts, bind groups, LUT textures, uniform buffers, and
+render-graph nodes before the preview graph can execute it on the GPU. Until
+that stage exists, CPU processor execution is the correctness path and the
+cached shader/module/upload plans are the production boundary for GPU
 integration work.
 
 Preview and export may therefore target different output color spaces while

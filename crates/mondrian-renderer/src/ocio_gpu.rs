@@ -1,8 +1,10 @@
 use lru::LruCache;
 use mondrian_core::{
     extract_ocio_display_gpu_shader_bundle, extract_ocio_gpu_shader_bundle, ColorSpace,
-    GpuLanguage, OcioGpuShaderBundle,
+    GpuLanguage, OcioGpuShaderBundle, OcioGpuTextureChannel, OcioGpuTextureDimensions,
+    OcioGpuTextureInterpolation,
 };
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
@@ -211,12 +213,20 @@ pub struct OcioGpuTexture2DBindingContract {
     pub sampler_name: String,
     /// OCIO-reported binding slot.
     pub binding_index: u32,
+    /// Channel packing used by the texture values.
+    pub channel: OcioGpuTextureChannel,
+    /// Logical dimensionality of this LUT resource.
+    pub dimensions: OcioGpuTextureDimensions,
+    /// Interpolation policy expected by OCIO.
+    pub interpolation: OcioGpuTextureInterpolation,
     /// Logical texture width.
     pub width: u32,
     /// Logical texture height.
     pub height: u32,
     /// Logical texel payload length in f32 values.
     pub value_count: usize,
+    /// Stable hash of the copied LUT values.
+    pub values_hash: u64,
 }
 
 /// OCIO 3D texture binding contract.
@@ -230,10 +240,14 @@ pub struct OcioGpuTexture3DBindingContract {
     pub sampler_name: String,
     /// OCIO-reported binding slot.
     pub binding_index: u32,
+    /// Interpolation policy expected by OCIO.
+    pub interpolation: OcioGpuTextureInterpolation,
     /// Cube edge length.
     pub edge_len: u32,
     /// Logical texel payload length in f32 values.
     pub value_count: usize,
+    /// Stable hash of the copied LUT values.
+    pub values_hash: u64,
 }
 
 /// Error returned when shader translation cannot produce a native wgpu shader.
@@ -632,6 +646,112 @@ pub struct OcioGpuWgpuPreparedResources {
     pub binding_layout: OcioGpuWgpuBindingLayoutPlan,
 }
 
+/// Complete LUT payload plan for future wgpu texture uploads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcioGpuWgpuLutUploadPlan {
+    /// Stable resource key this upload plan belongs to.
+    pub resource_key: u64,
+    /// OCIO 1D/2D LUT texture payloads copied as-is.
+    pub textures_2d: Vec<OcioGpuWgpuTexture2DUpload>,
+    /// OCIO 3D LUT texture payloads copied as-is.
+    pub textures_3d: Vec<OcioGpuWgpuTexture3DUpload>,
+}
+
+/// Upload payload for an OCIO 1D/2D LUT texture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcioGpuWgpuTexture2DUpload {
+    /// Texture index in the OCIO descriptor.
+    pub index: u32,
+    /// OCIO-generated texture symbol name.
+    pub texture_name: String,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO-reported binding slot.
+    pub binding_index: u32,
+    /// Channel packing used by the texture values.
+    pub channel: OcioGpuTextureChannel,
+    /// Logical dimensionality of this LUT resource.
+    pub dimensions: OcioGpuTextureDimensions,
+    /// Interpolation policy expected by OCIO.
+    pub interpolation: OcioGpuTextureInterpolation,
+    /// Logical texture width.
+    pub width: u32,
+    /// Logical texture height.
+    pub height: u32,
+    /// Stable hash of the copied LUT values.
+    pub values_hash: u64,
+    /// Flattened texel payload copied from OCIO as-is.
+    pub values: Vec<f32>,
+}
+
+/// Upload payload for an OCIO 3D LUT texture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcioGpuWgpuTexture3DUpload {
+    /// Texture index in the OCIO descriptor.
+    pub index: u32,
+    /// OCIO-generated texture symbol name.
+    pub texture_name: String,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO-reported binding slot.
+    pub binding_index: u32,
+    /// Interpolation policy expected by OCIO.
+    pub interpolation: OcioGpuTextureInterpolation,
+    /// Cube edge length.
+    pub edge_len: u32,
+    /// Stable hash of the copied LUT values.
+    pub values_hash: u64,
+    /// Flattened texel payload copied from OCIO as-is.
+    pub values: Vec<f32>,
+}
+
+impl OcioGpuWgpuLutUploadPlan {
+    /// Build a LUT upload plan from the exact OCIO shader bundle payloads.
+    pub fn for_shader_plan(
+        shader_plan: &OcioGpuShaderPlan,
+        resources: &OcioGpuWgpuResourcePlan,
+    ) -> Self {
+        let textures_2d = shader_plan
+            .bundle()
+            .textures_2d
+            .iter()
+            .map(|texture| OcioGpuWgpuTexture2DUpload {
+                index: texture.index,
+                texture_name: texture.texture_name.clone(),
+                sampler_name: texture.sampler_name.clone(),
+                binding_index: texture.binding_index,
+                channel: texture.channel,
+                dimensions: texture.dimensions,
+                interpolation: texture.interpolation,
+                width: texture.width,
+                height: texture.height,
+                values_hash: hash_f32_values(&texture.values),
+                values: texture.values.clone(),
+            })
+            .collect();
+        let textures_3d = shader_plan
+            .bundle()
+            .textures_3d
+            .iter()
+            .map(|texture| OcioGpuWgpuTexture3DUpload {
+                index: texture.index,
+                texture_name: texture.texture_name.clone(),
+                sampler_name: texture.sampler_name.clone(),
+                binding_index: texture.binding_index,
+                interpolation: texture.interpolation,
+                edge_len: texture.edge_len,
+                values_hash: hash_f32_values(&texture.values),
+                values: texture.values.clone(),
+            })
+            .collect();
+        Self {
+            resource_key: resources.resource_key,
+            textures_2d,
+            textures_3d,
+        }
+    }
+}
+
 /// Bounded cache for renderer backend resource-layout preparation.
 pub struct OcioGpuWgpuResourceCache {
     entries: LruCache<u64, Arc<OcioGpuWgpuPreparedResources>>,
@@ -693,6 +813,122 @@ pub struct OcioGpuWgpuResourceCacheDiagnostics {
     pub hits: u64,
     /// Cache misses.
     pub misses: u64,
+}
+
+/// Cached wgpu shader module produced from a validated Naga OCIO shader.
+pub struct OcioGpuWgpuShaderModule {
+    /// Stable cache key for this backend shader module.
+    pub cache_key: u64,
+    /// Source shader hash this module was created from.
+    pub shader_hash: u64,
+    /// OCIO binding contract hash paired with this module.
+    pub binding_contract_hash: u64,
+    /// Backend shader module created with `wgpu::ShaderSource::Naga`.
+    pub shader_module: wgpu::ShaderModule,
+}
+
+/// Error returned before creating an OCIO wgpu shader module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuShaderModuleError {
+    /// The translated shader and resource plan do not describe the same source.
+    ShaderHashMismatch {
+        /// Hash from the translated shader request.
+        translated_shader_hash: u64,
+        /// Hash from the resource plan.
+        resource_shader_hash: u64,
+    },
+    /// The translated shader and resource plan do not share a binding contract.
+    BindingContractMismatch {
+        /// Hash from the translated shader request.
+        translated_binding_hash: u64,
+        /// Hash from the resource plan.
+        resource_binding_hash: u64,
+    },
+    /// The expanded binding contracts differ even though their hashes matched.
+    BindingContractPayloadMismatch,
+}
+
+/// Point-in-time OCIO wgpu shader-module cache diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuShaderModuleCacheDiagnostics {
+    /// Cached backend shader modules.
+    pub entries: usize,
+    /// Cache hits.
+    pub hits: u64,
+    /// Cache misses.
+    pub misses: u64,
+    /// Contract validation failures before module creation.
+    pub validation_failures: u64,
+}
+
+/// Bounded cache for creating backend shader modules from Naga IR.
+pub struct OcioGpuWgpuShaderModuleCache {
+    entries: LruCache<u64, Arc<OcioGpuWgpuShaderModule>>,
+    hits: u64,
+    misses: u64,
+    validation_failures: u64,
+}
+
+impl OcioGpuWgpuShaderModuleCache {
+    /// Create a cache with a fixed non-zero capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            entries: LruCache::new(capacity),
+            hits: 0,
+            misses: 0,
+            validation_failures: 0,
+        }
+    }
+
+    /// Prepare a wgpu shader module from a validated Naga OCIO shader.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        translated: &OcioGpuTranslatedShader,
+        resources: &OcioGpuWgpuResourcePlan,
+    ) -> Result<Arc<OcioGpuWgpuShaderModule>, OcioGpuWgpuShaderModuleError> {
+        let cache_key = match backend_shader_module_cache_key(translated, resources) {
+            Ok(cache_key) => cache_key,
+            Err(err) => {
+                self.validation_failures = self.validation_failures.saturating_add(1);
+                return Err(err);
+            }
+        };
+        if let Some(hit) = self.entries.get(&cache_key) {
+            self.hits = self.hits.saturating_add(1);
+            return Ok(Arc::clone(hit));
+        }
+
+        self.misses = self.misses.saturating_add(1);
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ocio_naga_shader_module"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(translated.naga_module.clone())),
+        });
+        let module = Arc::new(OcioGpuWgpuShaderModule {
+            cache_key,
+            shader_hash: resources.shader_hash,
+            binding_contract_hash: resources.binding_contract_hash,
+            shader_module,
+        });
+        self.entries.put(cache_key, Arc::clone(&module));
+        Ok(module)
+    }
+
+    /// Return backend shader-module cache diagnostics.
+    pub fn diagnostics(&self) -> OcioGpuWgpuShaderModuleCacheDiagnostics {
+        OcioGpuWgpuShaderModuleCacheDiagnostics {
+            entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+            validation_failures: self.validation_failures,
+        }
+    }
+}
+
+impl Default for OcioGpuWgpuShaderModuleCache {
+    fn default() -> Self {
+        Self::new(NonZeroUsize::new(64).expect("default cache capacity is non-zero"))
+    }
 }
 
 /// Missing pieces before an OCIO GPU shader plan can run in wgpu.
@@ -949,9 +1185,13 @@ fn binding_contract_for_plan(plan: &OcioGpuShaderPlan) -> OcioGpuBindingContract
                 texture_name: texture.texture_name.clone(),
                 sampler_name: texture.sampler_name.clone(),
                 binding_index: texture.binding_index,
+                channel: texture.channel,
+                dimensions: texture.dimensions,
+                interpolation: texture.interpolation,
                 width: texture.width,
                 height: texture.height,
                 value_count: texture.value_count,
+                values_hash: hash_f32_values(&texture.values),
             })
             .collect(),
         textures_3d: bundle
@@ -962,8 +1202,10 @@ fn binding_contract_for_plan(plan: &OcioGpuShaderPlan) -> OcioGpuBindingContract
                 texture_name: texture.texture_name.clone(),
                 sampler_name: texture.sampler_name.clone(),
                 binding_index: texture.binding_index,
+                interpolation: texture.interpolation,
                 edge_len: texture.edge_len,
                 value_count: texture.value_count,
+                values_hash: hash_f32_values(&texture.values),
             })
             .collect(),
     }
@@ -1020,6 +1262,33 @@ fn hash_binding_layout(entries: &[OcioGpuWgpuBindingPlan]) -> u64 {
     hash_value(&entries)
 }
 
+fn backend_shader_module_cache_key(
+    translated: &OcioGpuTranslatedShader,
+    resources: &OcioGpuWgpuResourcePlan,
+) -> Result<u64, OcioGpuWgpuShaderModuleError> {
+    if translated.request.source_shader_hash != resources.shader_hash {
+        return Err(OcioGpuWgpuShaderModuleError::ShaderHashMismatch {
+            translated_shader_hash: translated.request.source_shader_hash,
+            resource_shader_hash: resources.shader_hash,
+        });
+    }
+    if translated.request.binding_contract_hash != resources.binding_contract_hash {
+        return Err(OcioGpuWgpuShaderModuleError::BindingContractMismatch {
+            translated_binding_hash: translated.request.binding_contract_hash,
+            resource_binding_hash: resources.binding_contract_hash,
+        });
+    }
+    if translated.required_bindings != resources.binding_contract {
+        return Err(OcioGpuWgpuShaderModuleError::BindingContractPayloadMismatch);
+    }
+
+    let mut hasher = DefaultHasher::new();
+    translated.request.hash(&mut hasher);
+    resources.resource_key.hash(&mut hasher);
+    resources.pipeline_layout_hash.hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
 struct ResourceLayoutSignature {
     language: GpuLanguage,
     binding_contract_hash: u64,
@@ -1064,6 +1333,15 @@ fn fullscreen_wrapper_contract_for(
 fn hash_value<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn hash_f32_values(values: &[f32]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    values.len().hash(&mut hasher);
+    for value in values {
+        value.to_bits().hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -1140,6 +1418,17 @@ mod tests {
                     && entry.resource
                         == OcioGpuWgpuBindingResource::OcioLutTexture2d { index: texture.index }
             }));
+            let contract = resources
+                .binding_contract
+                .textures_2d
+                .iter()
+                .find(|contract| contract.index == texture.index)
+                .expect("2D LUT binding contract");
+            assert_eq!(contract.channel, texture.channel);
+            assert_eq!(contract.dimensions, texture.dimensions);
+            assert_eq!(contract.interpolation, texture.interpolation);
+            assert_eq!(contract.value_count, texture.values.len());
+            assert_eq!(contract.values_hash, hash_f32_values(&texture.values));
         }
         for texture in &first.bundle().textures_3d {
             assert!(binding_layout.entries.iter().any(|entry| {
@@ -1147,8 +1436,47 @@ mod tests {
                     && entry.resource
                         == OcioGpuWgpuBindingResource::OcioLutTexture3d { index: texture.index }
             }));
+            let contract = resources
+                .binding_contract
+                .textures_3d
+                .iter()
+                .find(|contract| contract.index == texture.index)
+                .expect("3D LUT binding contract");
+            assert_eq!(contract.interpolation, texture.interpolation);
+            assert_eq!(contract.value_count, texture.values.len());
+            assert_eq!(contract.values_hash, hash_f32_values(&texture.values));
         }
         assert_ne!(binding_layout.layout_hash, 0);
+        let upload_plan = OcioGpuWgpuLutUploadPlan::for_shader_plan(&first, &resources);
+        assert_eq!(upload_plan.resource_key, resources.resource_key);
+        assert_eq!(upload_plan.textures_2d.len() as u32, first.texture_2d_count);
+        assert_eq!(upload_plan.textures_3d.len() as u32, first.texture_3d_count);
+        for upload in &upload_plan.textures_2d {
+            assert_eq!(upload.values_hash, hash_f32_values(&upload.values));
+            assert_eq!(
+                upload.values_hash,
+                resources
+                    .binding_contract
+                    .textures_2d
+                    .iter()
+                    .find(|contract| contract.index == upload.index)
+                    .expect("2D upload contract")
+                    .values_hash
+            );
+        }
+        for upload in &upload_plan.textures_3d {
+            assert_eq!(upload.values_hash, hash_f32_values(&upload.values));
+            assert_eq!(
+                upload.values_hash,
+                resources
+                    .binding_contract
+                    .textures_3d
+                    .iter()
+                    .find(|contract| contract.index == upload.index)
+                    .expect("3D upload contract")
+                    .values_hash
+            );
+        }
 
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);
@@ -1312,6 +1640,64 @@ mod tests {
         assert_eq!(diagnostics.hits, 1);
         assert_eq!(diagnostics.misses, 1);
         assert_eq!(diagnostics.failures, 0);
+    }
+
+    #[test]
+    fn backend_shader_module_cache_key_rejects_contract_mismatch() {
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: ColorSpace::Rec709,
+            dst: ColorSpace::Srgb,
+            language: GpuLanguage::Glsl4_0,
+        };
+        let bundle = Arc::new(OcioGpuShaderBundle {
+            src_color_space: "test-src".to_owned(),
+            dst_color_space: "test-dst".to_owned(),
+            language: GpuLanguage::Glsl4_0,
+            shader_text: r#"
+                #version 450 core
+                layout(location = 0) out vec4 frag_color;
+
+                void main() {
+                    frag_color = vec4(1.0, 0.5, 0.25, 1.0);
+                }
+            "#
+            .to_owned(),
+            descriptor_set_index: 0,
+            texture_binding_start: 1,
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: 0,
+            texture_2d_count: 0,
+            texture_3d_count: 0,
+            uniform_count: 0,
+            textures_2d: Vec::new(),
+            textures_3d: Vec::new(),
+            cache_id: Some("test-cache".to_owned()),
+        });
+        let plan = plan_from_bundle(request, bundle);
+        let translated = OcioGpuShaderTranslator::default()
+            .translate_plan(&plan)
+            .expect("translate GLSL to Naga IR");
+        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&plan);
+        assert_ne!(
+            backend_shader_module_cache_key(&translated, &resources).expect("matching contract"),
+            0
+        );
+
+        let mut mismatched_resources = resources.clone();
+        mismatched_resources.binding_contract.texture_binding_start =
+            mismatched_resources.binding_contract.texture_binding_start.saturating_add(1);
+        assert!(matches!(
+            backend_shader_module_cache_key(&translated, &mismatched_resources),
+            Err(OcioGpuWgpuShaderModuleError::BindingContractPayloadMismatch)
+        ));
+
+        let mut mismatched_hash = resources;
+        mismatched_hash.binding_contract_hash =
+            mismatched_hash.binding_contract_hash.wrapping_add(1);
+        assert!(matches!(
+            backend_shader_module_cache_key(&translated, &mismatched_hash),
+            Err(OcioGpuWgpuShaderModuleError::BindingContractMismatch { .. })
+        ));
     }
 
     #[test]

@@ -14,7 +14,11 @@
 
 use crate::types::{ColorSpace, OcioConfigSource};
 pub use ocio_rs::GpuLanguage;
-use ocio_rs::{BuiltinConfigRegistry, CPUProcessor, Config, GpuShaderDesc};
+use ocio_rs::{
+    BuiltinConfigRegistry, CPUProcessor, Config, GpuShaderDesc,
+    GpuTextureChannel as OcioRsGpuTextureChannel,
+    GpuTextureDimensions as OcioRsGpuTextureDimensions, Interpolation as OcioRsInterpolation,
+};
 use std::path::{Path, PathBuf};
 
 // ── Global OCIO state ──────────────────────────────────────────────────────────
@@ -334,7 +338,44 @@ pub struct OcioGpuShaderBundle {
 }
 
 /// OCIO 1D/2D LUT resource binding metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuTextureChannel {
+    /// Single-channel red texture payload.
+    Red,
+    /// Three-channel RGB texture payload.
+    Rgb,
+}
+
+/// OCIO 1D/2D LUT dimensionality metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuTextureDimensions {
+    /// Logical 1D LUT stored in a 1D/2D texture resource.
+    Texture1D,
+    /// Logical 2D LUT.
+    Texture2D,
+}
+
+/// Interpolation policy OCIO expects for a GPU LUT resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuTextureInterpolation {
+    /// Unknown interpolation mode.
+    Unknown,
+    /// Nearest-neighbor sampling.
+    Nearest,
+    /// Linear sampling.
+    Linear,
+    /// Tetrahedral sampling.
+    Tetrahedral,
+    /// Cubic sampling.
+    Cubic,
+    /// OCIO default interpolation policy.
+    Default,
+    /// OCIO best-quality interpolation policy.
+    Best,
+}
+
+/// OCIO 1D/2D LUT resource binding metadata.
+#[derive(Debug, Clone, PartialEq)]
 pub struct OcioGpuTexture2DBinding {
     /// Texture index in the OCIO descriptor.
     pub index: u32,
@@ -344,16 +385,24 @@ pub struct OcioGpuTexture2DBinding {
     pub sampler_name: String,
     /// OCIO-reported binding slot.
     pub binding_index: u32,
+    /// Channel packing used by the texture values.
+    pub channel: OcioGpuTextureChannel,
+    /// Logical dimensionality of this LUT resource.
+    pub dimensions: OcioGpuTextureDimensions,
+    /// Interpolation policy expected by OCIO.
+    pub interpolation: OcioGpuTextureInterpolation,
     /// Logical texture width.
     pub width: u32,
     /// Logical texture height.
     pub height: u32,
     /// Logical texel payload length in f32 values.
     pub value_count: usize,
+    /// Flattened texel payload copied from OCIO as-is.
+    pub values: Vec<f32>,
 }
 
 /// OCIO 3D LUT resource binding metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OcioGpuTexture3DBinding {
     /// Texture index in the OCIO descriptor.
     pub index: u32,
@@ -363,10 +412,14 @@ pub struct OcioGpuTexture3DBinding {
     pub sampler_name: String,
     /// OCIO-reported binding slot.
     pub binding_index: u32,
+    /// Interpolation policy expected by OCIO.
+    pub interpolation: OcioGpuTextureInterpolation,
     /// Cube edge length.
     pub edge_len: u32,
     /// Logical texel payload length in f32 values.
     pub value_count: usize,
+    /// Flattened texel payload copied from OCIO as-is.
+    pub values: Vec<f32>,
 }
 
 impl OcioGpuShaderBundle {
@@ -433,9 +486,13 @@ fn ocio_texture_2d_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuTexture2DBinding
             texture_name: texture.texture_name,
             sampler_name: texture.sampler_name,
             binding_index: texture.binding_index,
+            channel: ocio_texture_channel(texture.channel),
+            dimensions: ocio_texture_dimensions(texture.dimensions),
+            interpolation: ocio_texture_interpolation(texture.interpolation),
             width: texture.width,
             height: texture.height,
             value_count: texture.values.len(),
+            values: texture.values,
         })
         .collect()
 }
@@ -449,10 +506,38 @@ fn ocio_texture_3d_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuTexture3DBinding
             texture_name: texture.texture_name,
             sampler_name: texture.sampler_name,
             binding_index: texture.binding_index,
+            interpolation: ocio_texture_interpolation(texture.interpolation),
             edge_len: texture.edge_len,
             value_count: texture.values.len(),
+            values: texture.values,
         })
         .collect()
+}
+
+fn ocio_texture_channel(channel: OcioRsGpuTextureChannel) -> OcioGpuTextureChannel {
+    match channel {
+        OcioRsGpuTextureChannel::Red => OcioGpuTextureChannel::Red,
+        OcioRsGpuTextureChannel::Rgb => OcioGpuTextureChannel::Rgb,
+    }
+}
+
+fn ocio_texture_dimensions(dimensions: OcioRsGpuTextureDimensions) -> OcioGpuTextureDimensions {
+    match dimensions {
+        OcioRsGpuTextureDimensions::Texture1D => OcioGpuTextureDimensions::Texture1D,
+        OcioRsGpuTextureDimensions::Texture2D => OcioGpuTextureDimensions::Texture2D,
+    }
+}
+
+fn ocio_texture_interpolation(interpolation: OcioRsInterpolation) -> OcioGpuTextureInterpolation {
+    match interpolation {
+        OcioRsInterpolation::Unknown => OcioGpuTextureInterpolation::Unknown,
+        OcioRsInterpolation::Nearest => OcioGpuTextureInterpolation::Nearest,
+        OcioRsInterpolation::Linear => OcioGpuTextureInterpolation::Linear,
+        OcioRsInterpolation::Tetrahedral => OcioGpuTextureInterpolation::Tetrahedral,
+        OcioRsInterpolation::Cubic => OcioGpuTextureInterpolation::Cubic,
+        OcioRsInterpolation::Default => OcioGpuTextureInterpolation::Default,
+        OcioRsInterpolation::Best => OcioGpuTextureInterpolation::Best,
+    }
 }
 
 // ── CPU transform helpers ──────────────────────────────────────────────────────
@@ -839,6 +924,24 @@ mod tests {
         assert_eq!(bundle.dst_color_space, "Camera Rec.709");
         assert!(bundle.shader_text.contains("mondrian_ocio_main"));
         assert!(bundle.cache_id.as_deref().is_some_and(|id| !id.trim().is_empty()));
+        assert_eq!(bundle.descriptor_set_index, 0);
+        assert_eq!(bundle.texture_binding_start, 1);
+        assert_eq!(bundle.uniform_buffer_binding, 0);
+        assert_eq!(bundle.textures_2d.len() as u32, bundle.texture_2d_count);
+        assert_eq!(bundle.textures_3d.len() as u32, bundle.texture_3d_count);
+        for texture in &bundle.textures_2d {
+            assert!(!texture.texture_name.trim().is_empty());
+            assert!(!texture.sampler_name.trim().is_empty());
+            assert_eq!(texture.value_count, texture.values.len());
+            assert!(texture.width > 0);
+            assert!(texture.height > 0);
+        }
+        for texture in &bundle.textures_3d {
+            assert!(!texture.texture_name.trim().is_empty());
+            assert!(!texture.sampler_name.trim().is_empty());
+            assert_eq!(texture.value_count, texture.values.len());
+            assert!(texture.edge_len > 0);
+        }
     }
 
     #[test]

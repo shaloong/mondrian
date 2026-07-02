@@ -95,6 +95,21 @@ compatibility work to proceed incrementally while keeping `can_execute()` false
 until shader translation, LUT upload, uniform packing, bind-group creation, and
 pipeline creation are all proven.
 
+`OcioGpuWgpuLutUploadPlan` is the texture-upload handoff. It carries OCIO LUT
+payloads copied from the GPU shader descriptor as-is, including texture/sampler
+symbol names, binding indices, dimensions, channel packing, interpolation
+policy, value hashes, and the raw `f32` values. Upload code must use
+this plan rather than reconstructing LUT values from shader text or generated
+WGSL.
+
+`OcioGpuWgpuShaderModuleCache` is the first concrete backend-object boundary.
+It validates that an `OcioGpuTranslatedShader` and `OcioGpuWgpuResourcePlan`
+share the same shader hash and expanded OCIO binding contract before creating a
+`wgpu::ShaderModule` with `wgpu::ShaderSource::Naga`. It deliberately does not
+create bind groups, upload textures, pack uniforms, or create the final
+fullscreen render pipeline; those remain explicit native blockers until the
+resource upload and wrapper shader contract are implemented and verified.
+
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
 `RenderColorTransform` requests to the OCIO shader cache. It produces a
