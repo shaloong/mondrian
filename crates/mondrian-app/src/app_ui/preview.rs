@@ -13,14 +13,13 @@ use std::time::UNIX_EPOCH;
 
 use mondrian_assets::AssetKind;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
-use mondrian_core::{convert_rgba8_in_place, ColorPipeline};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    CpuColorTransformExecutor, RenderColorTransform, TimelineAdjustmentLayer,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    composite_timeline_elements_color_frame, evaluate_timeline_render_plan, CpuColorFrame,
+    CpuColorTransformExecutor, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
+    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence};
 use mondrian_ui_widgets::ViewerFrameImage;
@@ -291,7 +290,22 @@ impl AppUiPreviewService {
                 .ok()?;
         let signature =
             nested_preview_frame_signature(sequence.id, frame.max(0), width, height, &rgba);
-        Some(MediaPreviewFrame { width, height, rgba, signature })
+        let source = CpuEncodedColorFrame::source_rgba8(
+            width,
+            height,
+            color_context.output_color_space,
+            rgba,
+        );
+        let frame = CpuColorTransformExecutor::input_to_working(
+            &source,
+            &RenderInputTransform::to_working(
+                color_context.output_color_space,
+                false,
+                color_context.engine.clone(),
+            ),
+        )
+        .ok()?;
+        Some(MediaPreviewFrame { frame, signature })
     }
 
     fn resolve_sequence_elements(
@@ -489,10 +503,18 @@ struct ModifiedStamp {
 
 #[derive(Debug, Clone)]
 struct MediaPreviewFrame {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
+    frame: CpuColorFrame,
     signature: u64,
+}
+
+impl MediaPreviewFrame {
+    fn width(&self) -> u32 {
+        self.frame.descriptor().width
+    }
+
+    fn height(&self) -> u32 {
+        self.frame.descriptor().height
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1145,8 +1167,8 @@ fn viewer_preview_cache_key_for_resolved_plan(
             } => {
                 2u8.hash(&mut hasher);
                 frame.signature.hash(&mut hasher);
-                frame.width.hash(&mut hasher);
-                frame.height.hash(&mut hasher);
+                frame.width().hash(&mut hasher);
+                frame.height().hash(&mut hasher);
                 opacity.to_bits().hash(&mut hasher);
                 blend_mode.hash(&mut hasher);
                 hash_transform(*transform, &mut hasher);
@@ -1241,9 +1263,7 @@ fn composite_resolved_preview(
                 effect_graph,
                 frame_seed,
             } => TimelineCompositeElement::Media(TimelineMediaLayer {
-                rgba: frame.rgba.as_slice(),
-                width: frame.width,
-                height: frame.height,
+                frame: &frame.frame,
                 opacity: *opacity,
                 blend_mode: *blend_mode,
                 transform: *transform,
@@ -1318,35 +1338,37 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
         Some(job.key.target_width.max(1)),
         Some(job.key.target_height.max(1)),
     ) {
-        Ok(mut frame) => {
-            if let Err(err) = convert_rgba8_in_place(
-                &mut frame.data,
-                ColorPipeline::new(
-                    job.key.input_color_space,
-                    job.key.working_color_space,
+        Ok(frame) => {
+            let source = CpuEncodedColorFrame::source_rgba8(
+                frame.width,
+                frame.height,
+                job.key.input_color_space,
+                frame.data,
+            );
+            let working = match CpuColorTransformExecutor::input_to_working(
+                &source,
+                &RenderInputTransform::to_working(
                     job.key.working_color_space,
                     job.key.tone_map,
-                )
-                .with_engine(job.key.engine.clone()),
+                    job.key.engine.clone(),
+                ),
             ) {
-                return MediaPreviewResult {
-                    key: job.key,
-                    frame: None,
-                    error: Some(format!(
-                        "viewer preview input color transform failed: {err}"
-                    )),
-                    generation: job.generation,
-                };
-            }
+                Ok(frame) => frame,
+                Err(err) => {
+                    return MediaPreviewResult {
+                        key: job.key,
+                        frame: None,
+                        error: Some(format!(
+                            "viewer preview input color transform failed: {err}"
+                        )),
+                        generation: job.generation,
+                    };
+                }
+            };
 
             MediaPreviewResult {
                 key: job.key,
-                frame: Some(MediaPreviewFrame {
-                    width: frame.width,
-                    height: frame.height,
-                    rgba: frame.data,
-                    signature,
-                }),
+                frame: Some(MediaPreviewFrame { frame: working, signature }),
                 error: None,
                 generation: job.generation,
             }
@@ -1553,12 +1575,7 @@ mod tests {
             .expect("default effect graph");
         let make_plan = |signature| {
             vec![ResolvedPreviewElement::Media {
-                frame: MediaPreviewFrame {
-                    width: 2,
-                    height: 2,
-                    rgba: vec![0; 2 * 2 * 4],
-                    signature,
-                },
+                frame: test_media_frame_with_size(0, 2, 2, signature),
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -1592,12 +1609,7 @@ mod tests {
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
         let resolved = vec![ResolvedPreviewElement::Media {
-            frame: MediaPreviewFrame {
-                width: 2,
-                height: 2,
-                rgba: vec![0; 2 * 2 * 4],
-                signature: 100,
-            },
+            frame: test_media_frame_with_size(0, 2, 2, 100),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -1651,12 +1663,7 @@ mod tests {
     fn preview_single_media_color_output_matches_export_composite_contract() {
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
-        let frame = MediaPreviewFrame {
-            width: 1,
-            height: 1,
-            rgba: vec![200, 100, 40, 255],
-            signature: 77,
-        };
+        let frame = test_media_frame_rgba(vec![200, 100, 40, 255], 1, 1, 77);
         let color_context = test_color_context(ColorSpace::Srgb);
         let resolved = vec![ResolvedPreviewElement::Media {
             frame: frame.clone(),
@@ -1672,9 +1679,7 @@ mod tests {
                 .expect("preview color composite");
 
         let export_elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
-            rgba: frame.rgba.as_slice(),
-            width: frame.width,
-            height: frame.height,
+            frame: &frame.frame,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -1773,12 +1778,51 @@ mod tests {
     }
 
     fn test_media_frame(seed: u8) -> MediaPreviewFrame {
-        MediaPreviewFrame {
-            width: 1,
-            height: 1,
-            rgba: vec![seed, 0, 0, 255],
-            signature: seed as u64,
-        }
+        test_media_frame_rgba(vec![seed, 0, 0, 255], 1, 1, seed as u64)
+    }
+
+    fn test_media_frame_with_size(
+        seed: u8,
+        width: u32,
+        height: u32,
+        signature: u64,
+    ) -> MediaPreviewFrame {
+        test_media_frame_rgba(
+            std::iter::repeat_n([seed, 0, 0, 255], width as usize * height as usize)
+                .flatten()
+                .collect(),
+            width,
+            height,
+            signature,
+        )
+    }
+
+    fn test_media_frame_rgba(
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        signature: u64,
+    ) -> MediaPreviewFrame {
+        let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, rgba);
+        let frame = CpuColorTransformExecutor::input_to_working(
+            &source,
+            &RenderInputTransform::to_working(
+                ColorSpace::Rec709,
+                false,
+                ColorEngine::MondrianSmart,
+            ),
+        )
+        .expect("test media input transform");
+        MediaPreviewFrame { frame, signature }
+    }
+
+    fn test_media_frame_rgba8(frame: &MediaPreviewFrame) -> Vec<u8> {
+        CpuColorTransformExecutor::transform(
+            &frame.frame,
+            &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        )
+        .expect("test media output transform")
+        .into_rgba()
     }
 
     #[test]
@@ -1810,7 +1854,7 @@ mod tests {
 
         let frame = cache.get(&key).expect("updated frame");
         assert_eq!(cache.len(), 1);
-        assert_eq!(frame.rgba, vec![9, 0, 0, 255]);
+        assert_eq!(test_media_frame_rgba8(&frame), vec![9, 0, 0, 255]);
     }
 
     #[test]

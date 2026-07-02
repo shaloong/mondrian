@@ -6,9 +6,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, CpuColorTransformExecutor, RenderColorTransform,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer,
+    composite_timeline_elements_color_frame, CpuColorFrame, CpuColorTransformExecutor,
+    CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
 };
 use std::sync::Arc;
 
@@ -27,23 +27,33 @@ fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
     .expect("compile identity graph")
 }
 
+fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
+    let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec709, rgba);
+    CpuColorTransformExecutor::input_to_working(
+        &source,
+        &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+    )
+    .expect("benchmark input transform")
+}
+
 fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
-    let layers: Vec<(Vec<u8>, f32)> = (0..n)
+    let layers: Vec<(CpuColorFrame, f32)> = (0..n)
         .map(|i| {
             let r = ((i * 67) % 256) as u8;
             let g = ((i * 133) % 256) as u8;
             let b = ((i * 197) % 256) as u8;
-            (solid_rgba(w, h, r, g, b), 0.5 + (i as f32 * 0.1).min(0.5))
+            (
+                working_frame(w, h, solid_rgba(w, h, r, g, b)),
+                0.5 + (i as f32 * 0.1).min(0.5),
+            )
         })
         .collect();
 
     let elements: Vec<TimelineCompositeElement> = layers
         .iter()
-        .map(|(data, opacity)| {
+        .map(|(frame, opacity)| {
             TimelineCompositeElement::Media(TimelineMediaLayer {
-                rgba: data,
-                width: w,
-                height: h,
+                frame,
                 opacity: *opacity,
                 blend_mode: BlendMode::Normal,
                 transform: IDENTITY,

@@ -64,6 +64,12 @@ export crates build a `RenderColorTransform` from their `ColorContext` and pass
 typed frames to `CpuColorTransformExecutor` or a future GPU executor; they must
 not duplicate working -> output conversion logic locally.
 
+Input transforms follow the same rule. Decode/import code wraps source pixels in
+`CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks
+the renderer executor for a `CpuColorFrame` in timeline working space. App and
+export crates must not perform source -> working color conversion with local
+`ColorPipeline` calls.
+
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative
 delivery, HDR, and camera-log processor pairs must create real CPU processors.

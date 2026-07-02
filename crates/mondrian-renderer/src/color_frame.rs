@@ -117,6 +117,21 @@ impl CpuEncodedColorFrame {
         Self { descriptor, rgba }
     }
 
+    /// Create a source/import RGBA8 boundary frame.
+    pub fn source_rgba8(width: u32, height: u32, color_space: ColorSpace, rgba: Vec<u8>) -> Self {
+        Self::rgba8(width, height, color_space, ColorFrameDomain::Source, rgba)
+    }
+
+    /// Return frame width.
+    pub fn width(&self) -> u32 {
+        self.descriptor.width
+    }
+
+    /// Return frame height.
+    pub fn height(&self) -> u32 {
+        self.descriptor.height
+    }
+
     /// Return the frame metadata contract.
     pub fn descriptor(&self) -> ColorFrameDescriptor {
         self.descriptor

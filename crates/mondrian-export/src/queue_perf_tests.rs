@@ -1,8 +1,9 @@
 use super::*;
-use mondrian_core::types::BlendMode;
+use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 use mondrian_renderer::{
-    composite_timeline_elements_into, TimelineCompositeElement, TimelineCompositeOptions,
+    composite_timeline_elements_into, CpuColorTransformExecutor, CpuEncodedColorFrame,
+    RenderInputTransform, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
 };
 use serde::Serialize;
@@ -111,7 +112,13 @@ fn generate_layer(width: u32, height: u32, seed: u8) -> Arc<DecodedVideoLayer> {
         data[base + 2] = x ^ y ^ seed.wrapping_mul(3);
         data[base + 3] = 240;
     }
-    Arc::new(DecodedVideoLayer { width, height, data })
+    let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, data);
+    let frame = CpuColorTransformExecutor::input_to_working(
+        &source,
+        &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+    )
+    .expect("perf input transform");
+    Arc::new(DecodedVideoLayer { frame })
 }
 
 fn build_frame_layers(
@@ -148,9 +155,7 @@ fn compose_frame_layers_into_canvas(
         .iter()
         .map(|(layer, opacity)| {
             TimelineCompositeElement::Media(TimelineMediaLayer {
-                rgba: &layer.data,
-                width: layer.width,
-                height: layer.height,
+                frame: &layer.frame,
                 opacity: *opacity,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -203,8 +208,8 @@ fn run_export_render_simulation(
     let first_frame_layers = build_frame_layers(&layers, 0, pattern);
     let first_frame_passthrough = first_frame_layers.len() == 1
         && first_frame_layers[0].1 >= 0.999
-        && first_frame_layers[0].0.width == width
-        && first_frame_layers[0].0.height == height;
+        && first_frame_layers[0].0.frame.descriptor().width == width
+        && first_frame_layers[0].0.frame.descriptor().height == height;
     let first_started = Instant::now();
     compose_frame_layers_into_canvas(&mut canvas, width, height, &first_frame_layers, 0);
     let first_frame_ms = first_started.elapsed().as_millis();
@@ -220,8 +225,8 @@ fn run_export_render_simulation(
         let frame_layers = build_frame_layers(&layers, frame + 1, pattern);
         let frame_passthrough = frame_layers.len() == 1
             && frame_layers[0].1 >= 0.999
-            && frame_layers[0].0.width == width
-            && frame_layers[0].0.height == height;
+            && frame_layers[0].0.frame.descriptor().width == width
+            && frame_layers[0].0.frame.descriptor().height == height;
 
         let started = Instant::now();
         compose_frame_layers_into_canvas(&mut canvas, width, height, &frame_layers, frame + 1);

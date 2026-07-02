@@ -2,7 +2,7 @@ use crate::{ColorFrameDomain, CpuColorFrame, CpuEncodedColorFrame};
 use mondrian_core::{
     convert_rgba8_in_place,
     types::{ColorEngine, ColorSpace},
-    ColorPipeline,
+    ColorPipeline, RgbaF32Frame,
 };
 
 /// Backend used to execute a render color transform.
@@ -25,6 +25,35 @@ pub struct RenderColorTransform {
     pub engine: ColorEngine,
     /// Execution backend selected for this transform.
     pub backend: RenderColorTransformBackend,
+}
+
+/// Input transform requested by a decode/source boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RenderInputTransform {
+    /// Timeline working color space.
+    pub working_color_space: ColorSpace,
+    /// Whether input HDR/scene data should be tone-mapped while entering working space.
+    pub tone_map: bool,
+    /// Color engine used to execute the input transform.
+    pub engine: ColorEngine,
+    /// Execution backend selected for this transform.
+    pub backend: RenderColorTransformBackend,
+}
+
+impl RenderInputTransform {
+    /// Build a source/import -> timeline working-space transform.
+    pub fn to_working(
+        working_color_space: ColorSpace,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            working_color_space,
+            tone_map,
+            engine,
+            backend: RenderColorTransformBackend::CpuOcioRgba8Boundary,
+        }
+    }
 }
 
 impl RenderColorTransform {
@@ -55,6 +84,41 @@ impl RenderColorTransform {
 pub struct CpuColorTransformExecutor;
 
 impl CpuColorTransformExecutor {
+    /// Apply a source/import transform to a typed encoded CPU frame.
+    pub fn input_to_working(
+        frame: &CpuEncodedColorFrame,
+        transform: &RenderInputTransform,
+    ) -> Result<CpuColorFrame, RenderColorTransformError> {
+        let descriptor = frame.descriptor();
+        if descriptor.domain != ColorFrameDomain::Source {
+            return Err(RenderColorTransformError::UnsupportedInputDomain {
+                domain: descriptor.domain,
+            });
+        }
+
+        let mut rgba = frame.rgba().to_vec();
+        convert_rgba8_in_place(
+            &mut rgba,
+            ColorPipeline::new(
+                descriptor.color_space,
+                transform.working_color_space,
+                transform.working_color_space,
+                transform.tone_map,
+            )
+            .with_engine(transform.engine.clone()),
+        )
+        .map_err(RenderColorTransformError::ExecutionFailed)?;
+
+        Ok(CpuColorFrame::working(RgbaF32Frame::from_rgba8(
+            descriptor.width,
+            descriptor.height,
+            &rgba,
+            transform.working_color_space,
+            transform.working_color_space,
+            false,
+        )))
+    }
+
     /// Apply a render color transform to a typed CPU working frame.
     pub fn transform(
         frame: &CpuColorFrame,
@@ -128,5 +192,22 @@ mod tests {
         assert_eq!(descriptor.color_space, ColorSpace::Srgb);
         assert_eq!(descriptor.encoding, crate::ColorFrameEncoding::EncodedRgba8);
         assert_eq!(output.rgba().len(), 4);
+    }
+
+    #[test]
+    fn input_transform_returns_typed_working_frame() {
+        let source =
+            CpuEncodedColorFrame::source_rgba8(1, 1, ColorSpace::Rec709, vec![128, 64, 32, 255]);
+        let transform =
+            RenderInputTransform::to_working(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+
+        let working = CpuColorTransformExecutor::input_to_working(&source, &transform)
+            .expect("input transform");
+
+        let descriptor = working.descriptor();
+        assert_eq!(descriptor.domain, ColorFrameDomain::Working);
+        assert_eq!(descriptor.color_space, ColorSpace::Srgb);
+        assert_eq!(descriptor.encoding, crate::ColorFrameEncoding::LinearFloat);
+        assert_eq!(working.rgba_f32().data.len(), 1);
     }
 }

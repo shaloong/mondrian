@@ -57,6 +57,12 @@ Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
+Decoded media enters the graph as a typed source/import RGBA8 boundary
+(`CpuEncodedColorFrame::source_rgba8`). Preview and export must use
+`RenderInputTransform` plus `CpuColorTransformExecutor::input_to_working(...)`
+to produce `CpuColorFrame` before building `TimelineMediaLayer`. Timeline media
+layers therefore carry typed working frames, not naked RGBA slices.
+
 `FrameCompositor` supports GPU batched compositing with texture pooling and can
 return either RGBA readback or a GPU texture. Long-term render graph nodes should
 return typed frame handles rather than naked textures or byte vectors.

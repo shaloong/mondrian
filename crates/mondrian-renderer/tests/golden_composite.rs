@@ -12,8 +12,8 @@ use std::sync::Arc;
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, CpuColorFrame, CpuColorTransformExecutor,
-    RenderColorTransform, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineMediaLayer,
+    CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
 };
 
 const IDENTITY_TRANSFORM: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -50,11 +50,19 @@ fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {
     .into_rgba()
 }
 
+fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
+    let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec709, rgba);
+    CpuColorTransformExecutor::input_to_working(
+        &source,
+        &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+    )
+    .expect("input transform golden frame")
+}
+
 fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: BlendMode) -> Vec<u8> {
+    let media = working_frame(w, h, rgba.to_vec());
     let elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
-        rgba,
-        width: w,
-        height: h,
+        frame: &media,
         opacity,
         blend_mode: blend,
         transform: IDENTITY_TRANSFORM,
@@ -172,11 +180,11 @@ fn golden_two_layers_normal() {
     let h = 64;
     let bg = solid_rgba(w, h, 255, 0, 0, 255);
     let fg = solid_rgba(w, h, 0, 255, 0, 128);
+    let bg = working_frame(w, h, bg);
+    let fg = working_frame(w, h, fg);
     let elements = vec![
         TimelineCompositeElement::Media(TimelineMediaLayer {
-            rgba: &bg,
-            width: w,
-            height: h,
+            frame: &bg,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_TRANSFORM,
@@ -184,9 +192,7 @@ fn golden_two_layers_normal() {
             frame_seed: 0,
         }),
         TimelineCompositeElement::Media(TimelineMediaLayer {
-            rgba: &fg,
-            width: w,
-            height: h,
+            frame: &fg,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_TRANSFORM,

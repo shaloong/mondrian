@@ -9,21 +9,17 @@ use crate::validator::{
     ExportValidationExpectations,
 };
 use chrono::{DateTime, Utc};
-use mondrian_core::{
-    convert_rgba8_in_place,
-    types::{AssetId, ColorEngine, ColorSpace, JobId, Rational, TimeCode},
-    ColorPipeline,
-};
+use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, JobId, Rational, TimeCode};
 use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    CpuColorTransformExecutor, RenderColorTransform, TimelineAdjustmentLayer,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    composite_timeline_elements_color_frame, evaluate_timeline_render_plan, CpuColorFrame,
+    CpuColorTransformExecutor, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
+    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, ExportBitDepth, SequenceSettings, VideoRange};
 use parking_lot::{Condvar, Mutex};
@@ -149,9 +145,7 @@ enum TimelineAudioInput {
 
 #[derive(Clone)]
 struct DecodedVideoLayer {
-    width: u32,
-    height: u32,
-    data: Vec<u8>,
+    frame: CpuColorFrame,
 }
 
 fn execute_file_export(
@@ -949,8 +943,9 @@ fn render_sequence_frame_into(
     });
     let mut decoded_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
-    let mut nested_media =
-        std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
+    let mut nested_media = std::iter::repeat_with(|| None)
+        .take(render_plan.len())
+        .collect::<Vec<Option<CpuColorFrame>>>();
 
     for (index, element) in render_plan.elements.iter().enumerate() {
         let TimelineRenderPlanElement::Media(media) = element else {
@@ -1021,6 +1016,8 @@ fn render_sequence_frame_into(
         let mut nested_canvas = vec![0u8; nested_width as usize * nested_height as usize * 4];
         let nested_context =
             nested_sequence.settings.nested_render_color_context(color_context.clone());
+        let nested_output_color_space = nested_context.output_color_space;
+        let nested_engine = nested_context.engine.clone();
         render_sequence_frame_into(
             timeline,
             nested_sequence,
@@ -1031,7 +1028,18 @@ fn render_sequence_frame_into(
             &mut nested_canvas,
             depth + 1,
         )?;
-        nested_media[index] = Some((nested_canvas, nested_width, nested_height));
+        let nested_source = CpuEncodedColorFrame::source_rgba8(
+            nested_width,
+            nested_height,
+            nested_output_color_space,
+            nested_canvas,
+        );
+        let nested_frame = CpuColorTransformExecutor::input_to_working(
+            &nested_source,
+            &RenderInputTransform::to_working(nested_output_color_space, false, nested_engine),
+        )
+        .map_err(|err| format!("nested sequence input color transform failed: {err}"))?;
+        nested_media[index] = Some(nested_frame);
     }
 
     let mut composite_elements = Vec::with_capacity(render_plan.len());
@@ -1052,9 +1060,7 @@ fn render_sequence_frame_into(
                     continue;
                 };
                 composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
-                    rgba: &decoded.data,
-                    width: decoded.width,
-                    height: decoded.height,
+                    frame: &decoded.frame,
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform: media.transform,
@@ -1063,13 +1069,11 @@ fn render_sequence_frame_into(
                 }));
             }
             TimelineRenderPlanElement::NestedSequence(nested) => {
-                let Some((rgba, nested_width, nested_height)) = nested_media[index].as_ref() else {
+                let Some(frame) = nested_media[index].as_ref() else {
                     continue;
                 };
                 composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
-                    rgba,
-                    width: *nested_width,
-                    height: *nested_height,
+                    frame,
                     opacity: nested.opacity,
                     blend_mode: nested.blend_mode,
                     transform: nested.transform,
@@ -1135,25 +1139,21 @@ fn decode_video_layer_scaled(
     width: u32,
     height: u32,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
-    let mut decoded =
+    let decoded =
         decode_video_frame_at_time_rgba_scaled(path, source_secs, Some(width), Some(height))
             .map_err(|err| format!("asset={} path={} err={}", asset_id, path.display(), err))?;
-    convert_rgba8_in_place(
-        &mut decoded.data,
-        ColorPipeline::new(
-            input_color_space,
-            working_color_space,
-            working_color_space,
-            tone_map,
-        )
-        .with_engine(engine.clone()),
+    let source = CpuEncodedColorFrame::source_rgba8(
+        decoded.width,
+        decoded.height,
+        input_color_space,
+        decoded.data,
+    );
+    let frame = CpuColorTransformExecutor::input_to_working(
+        &source,
+        &RenderInputTransform::to_working(working_color_space, tone_map, engine.clone()),
     )
     .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
-    Ok(Arc::new(DecodedVideoLayer {
-        width: decoded.width,
-        height: decoded.height,
-        data: decoded.data,
-    }))
+    Ok(Arc::new(DecodedVideoLayer { frame }))
 }
 
 fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRenderRange {
@@ -1419,6 +1419,28 @@ mod tests {
     use mondrian_timeline::sequence::Sequence;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
+
+    fn test_working_frame(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> mondrian_renderer::CpuColorFrame {
+        let source = mondrian_renderer::CpuEncodedColorFrame::source_rgba8(
+            width,
+            height,
+            ColorSpace::Rec709,
+            rgba.to_vec(),
+        );
+        mondrian_renderer::CpuColorTransformExecutor::input_to_working(
+            &source,
+            &mondrian_renderer::RenderInputTransform::to_working(
+                ColorSpace::Rec709,
+                false,
+                ColorEngine::MondrianSmart,
+            ),
+        )
+        .expect("test input transform")
+    }
 
     struct FakeExecutor {
         calls: Arc<AtomicUsize>,
@@ -1736,14 +1758,13 @@ mod tests {
     #[test]
     fn shared_compositor_applies_media_effects_for_export() {
         let mut scratch = mondrian_renderer::TimelineCompositeScratch::default();
+        let media = test_working_frame(&[120, 80, 40, 255], 1, 1);
         let output = mondrian_renderer::composite_timeline_elements(
             1,
             1,
             &[mondrian_renderer::TimelineCompositeElement::Media(
                 mondrian_renderer::TimelineMediaLayer {
-                    rgba: &[120, 80, 40, 255],
-                    width: 1,
-                    height: 1,
+                    frame: &media,
                     opacity: 1.0,
                     blend_mode: BlendMode::Normal,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -1770,15 +1791,15 @@ mod tests {
     #[test]
     fn shared_compositor_respects_adjustment_order_for_export() {
         let mut scratch = mondrian_renderer::TimelineCompositeScratch::default();
+        let lower = test_working_frame(&[255, 0, 0, 255, 255, 0, 0, 255], 2, 1);
+        let upper = test_working_frame(&[0, 0, 0, 0, 0, 255, 0, 255], 2, 1);
         let output = mondrian_renderer::composite_timeline_elements(
             2,
             1,
             &[
                 mondrian_renderer::TimelineCompositeElement::Media(
                     mondrian_renderer::TimelineMediaLayer {
-                        rgba: &[255, 0, 0, 255, 255, 0, 0, 255],
-                        width: 2,
-                        height: 1,
+                        frame: &lower,
                         opacity: 1.0,
                         blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -1806,9 +1827,7 @@ mod tests {
                 ),
                 mondrian_renderer::TimelineCompositeElement::Media(
                     mondrian_renderer::TimelineMediaLayer {
-                        rgba: &[0, 0, 0, 0, 0, 255, 0, 255],
-                        width: 2,
-                        height: 1,
+                        frame: &upper,
                         opacity: 1.0,
                         blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],

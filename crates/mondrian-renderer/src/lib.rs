@@ -28,7 +28,7 @@ pub use color_frame::{
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,
-    RenderColorTransformError,
+    RenderColorTransformError, RenderInputTransform,
 };
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;

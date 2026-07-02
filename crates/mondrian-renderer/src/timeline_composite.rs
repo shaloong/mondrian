@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct TimelineMediaLayer<'a> {
-    pub rgba: &'a [u8],
-    pub width: u32,
-    pub height: u32,
+    pub frame: &'a CpuColorFrame,
     pub opacity: f32,
     pub blend_mode: BlendMode,
     pub transform: [f32; 6],
@@ -53,6 +51,7 @@ pub struct TimelineCompositeOptions {
 
 #[derive(Default)]
 pub struct TimelineCompositeScratch {
+    media_source: Vec<u8>,
     media_effect: Vec<u8>,
     adjustment: Vec<u8>,
     solid_fill: Vec<u8>,
@@ -127,33 +126,34 @@ fn composite_supported_elements_to_working_frame(
         let TimelineCompositeElement::Media(layer) = element else {
             continue;
         };
-        let src_rgba = if layer.effect_graph.graph.is_identity() {
-            layer.rgba
+        let src = if layer.effect_graph.graph.is_identity() {
+            layer.frame.rgba_f32().clone()
         } else {
+            let descriptor = layer.frame.descriptor();
+            scratch.media_source = layer.frame.to_output_rgba8(descriptor.color_space, false);
             scratch.media_effect = apply_compiled_effect_graph(
-                layer.rgba,
-                layer.width,
-                layer.height,
+                &scratch.media_source,
+                descriptor.width,
+                descriptor.height,
                 &layer.effect_graph,
                 layer.frame_seed,
             );
-            scratch.media_effect.as_slice()
+            RgbaF32Frame::from_rgba8(
+                descriptor.width,
+                descriptor.height,
+                scratch.media_effect.as_slice(),
+                descriptor.color_space,
+                descriptor.color_space,
+                false,
+            )
         };
-        let src = RgbaF32Frame::from_rgba8(
-            layer.width,
-            layer.height,
-            src_rgba,
-            working_color_space,
-            working_color_space,
-            false,
-        );
         alpha_blend_f32_normal(
             &mut canvas,
             width as usize,
             height as usize,
             &src.data,
-            layer.width as usize,
-            layer.height as usize,
+            src.width as usize,
+            src.height as usize,
             layer.opacity,
         );
         has_composited_media = true;
@@ -233,13 +233,15 @@ pub fn composite_timeline_elements_into(
     for element in elements {
         match element {
             TimelineCompositeElement::Media(layer) => {
+                let descriptor = layer.frame.descriptor();
+                scratch.media_source = layer.frame.to_output_rgba8(descriptor.color_space, false);
                 let src_rgba = if layer.effect_graph.graph.is_identity() {
-                    layer.rgba
+                    scratch.media_source.as_slice()
                 } else {
                     scratch.media_effect = apply_compiled_effect_graph(
-                        layer.rgba,
-                        layer.width,
-                        layer.height,
+                        &scratch.media_source,
+                        descriptor.width,
+                        descriptor.height,
                         &layer.effect_graph,
                         layer.frame_seed,
                     );
@@ -250,8 +252,8 @@ pub fn composite_timeline_elements_into(
                     width,
                     height,
                     src_rgba,
-                    layer.width,
-                    layer.height,
+                    descriptor.width,
+                    descriptor.height,
                     layer.opacity,
                     layer.blend_mode,
                     layer.transform,
@@ -488,11 +490,20 @@ mod tests {
     use super::*;
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 
-    fn identity_media<'a>(rgba: &'a [u8], width: u32, height: u32) -> TimelineCompositeElement<'a> {
-        TimelineCompositeElement::Media(TimelineMediaLayer {
-            rgba,
+    fn working_frame(rgba: &[u8], width: u32, height: u32) -> CpuColorFrame {
+        CpuColorFrame::working(RgbaF32Frame::from_rgba8(
             width,
             height,
+            rgba,
+            mondrian_core::types::ColorSpace::Rec709,
+            mondrian_core::types::ColorSpace::Rec709,
+            false,
+        ))
+    }
+
+    fn identity_media<'a>(frame: &'a CpuColorFrame) -> TimelineCompositeElement<'a> {
+        TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -505,13 +516,12 @@ mod tests {
     #[test]
     fn media_effects_are_applied_before_compositing() {
         let mut scratch = TimelineCompositeScratch::default();
+        let media = working_frame(&[120, 80, 40, 255], 1, 1);
         let output = composite_timeline_elements(
             1,
             1,
             &[TimelineCompositeElement::Media(TimelineMediaLayer {
-                rgba: &[120, 80, 40, 255],
-                width: 1,
-                height: 1,
+                frame: &media,
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -549,13 +559,12 @@ mod tests {
         );
 
         let mut scratch = TimelineCompositeScratch::default();
+        let media = working_frame(&[10, 20, 30, 255], 1, 1);
         let output = composite_timeline_elements(
             1,
             1,
             &[TimelineCompositeElement::Media(TimelineMediaLayer {
-                rgba: &[10, 20, 30, 255],
-                width: 1,
-                height: 1,
+                frame: &media,
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -580,11 +589,13 @@ mod tests {
     #[test]
     fn adjustment_affects_only_layers_below_it() {
         let mut scratch = TimelineCompositeScratch::default();
+        let lower = working_frame(&[255, 0, 0, 255, 255, 0, 0, 255], 2, 1);
+        let upper = working_frame(&[0, 0, 0, 0, 0, 255, 0, 255], 2, 1);
         let output = composite_timeline_elements(
             2,
             1,
             &[
-                identity_media(&[255, 0, 0, 255, 255, 0, 0, 255], 2, 1),
+                identity_media(&lower),
                 TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
                     effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
                         ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
@@ -598,7 +609,7 @@ mod tests {
                     blend_mode: Some(BlendMode::Normal),
                     frame_seed: 0,
                 }),
-                identity_media(&[0, 0, 0, 0, 0, 255, 0, 255], 2, 1),
+                identity_media(&upper),
             ],
             TimelineCompositeOptions::default(),
             &mut scratch,
@@ -611,15 +622,15 @@ mod tests {
     #[test]
     fn media_blend_mode_is_applied_during_compositing() {
         let mut scratch = TimelineCompositeScratch::default();
+        let base = working_frame(&[128, 64, 32, 255], 1, 1);
+        let blend = working_frame(&[64, 192, 128, 255], 1, 1);
         let output = composite_timeline_elements(
             1,
             1,
             &[
-                identity_media(&[128, 64, 32, 255], 1, 1),
+                identity_media(&base),
                 TimelineCompositeElement::Media(TimelineMediaLayer {
-                    rgba: &[64, 192, 128, 255],
-                    width: 1,
-                    height: 1,
+                    frame: &blend,
                     opacity: 1.0,
                     blend_mode: BlendMode::Multiply,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -640,13 +651,12 @@ mod tests {
     #[test]
     fn float_linear_compositor_matches_normal_single_layer_and_preserves_alpha() {
         let mut scratch = TimelineCompositeScratch::default();
+        let media = working_frame(&[64, 128, 192, 255], 1, 1);
         let frame = composite_timeline_elements_color_frame(
             1,
             1,
             &[TimelineCompositeElement::Media(TimelineMediaLayer {
-                rgba: &[64, 128, 192, 255],
-                width: 1,
-                height: 1,
+                frame: &media,
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -671,8 +681,9 @@ mod tests {
     fn float_linear_compositor_falls_back_for_adjustments() {
         let mut float_scratch = TimelineCompositeScratch::default();
         let mut legacy_scratch = TimelineCompositeScratch::default();
+        let media = working_frame(&[255, 0, 0, 255], 1, 1);
         let elements = [
-            identity_media(&[255, 0, 0, 255], 1, 1),
+            identity_media(&media),
             TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
                 effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
                     ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
