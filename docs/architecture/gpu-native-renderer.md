@@ -52,17 +52,18 @@ shader extraction. It accepts color-space and display/view requests, calls the
 core OCIO extraction boundary, and returns a shader plan with shader text length,
 shader hash, texture/uniform counts, and the OCIO processor cache id.
 
-This is the stable boundary before native GPU execution. The cache must not
-claim wgpu execution until a backend compiler/upload layer creates real pipeline
-resources, bind groups, LUT textures, and render-graph nodes from the OCIO plan.
-Renderer diagnostics should track cache hits, misses, and extraction failures so
-preview performance work can distinguish shader planning cost from actual frame
-execution cost.
+This is the stable boundary before concrete backend execution. The cache must
+not create device objects itself; shader modules, bind groups, LUT textures,
+fullscreen wrappers, pipelines, and render-pass nodes belong to the backend
+prep/object runtimes. Renderer diagnostics should track cache hits, misses, and
+extraction failures so preview performance work can distinguish shader planning
+cost from actual frame execution cost.
 
-`OcioGpuShaderCache::prepare_wgpu_execution(...)` reports native execution
-blockers explicitly, including shader-language translation, LUT/uniform
-bind-group integration, and final pipeline execution. Render scheduling must
-treat those blockers as diagnostics, not as silent fallback.
+`OcioGpuShaderCache::prepare_wgpu_execution(...)` validates the shader-side
+wgpu resource contract and returns a blocker-free execution plan when that
+contract is internally consistent. Concrete backend failures must surface later
+from `OcioGpuWgpuBackendPrepRuntime` or `OcioGpuWgpuBackendObjectRuntime`, not
+as stale "not prepared" blockers in the planner.
 
 The same preparation step also returns an `OcioGpuWgpuResourcePlan`. This plan
 is the renderer contract for the future native pass: the OCIO binding contract

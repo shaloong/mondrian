@@ -1669,9 +1669,9 @@ impl OcioGpuWgpuLayoutBindingResource {
                 dimension: OcioGpuWgpuLutTextureDimension::D2,
                 sample_type: OcioGpuWgpuTextureSampleType::Float32,
             },
-            OcioGpuWgpuWrapperBindingResource::InputFrameSampler => {
-                Self::Sampler { filtering: OcioGpuWgpuSamplerFiltering::Filtering }
-            }
+            OcioGpuWgpuWrapperBindingResource::InputFrameSampler => Self::Sampler {
+                filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+            },
         }
     }
 
@@ -2128,6 +2128,8 @@ impl OcioGpuWgpuPipelineLayoutPlan {
         ocio_layout: &OcioGpuWgpuBindingLayoutPlan,
         wrapper_layout: &OcioGpuWgpuWrapperBindingPlan,
     ) -> Self {
+        let wrapper_layout_descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(wrapper_layout);
         let mut bind_groups = vec![
             OcioGpuWgpuPipelineBindGroupSlot {
                 bind_group: ocio_layout.bind_group,
@@ -2137,20 +2139,20 @@ impl OcioGpuWgpuPipelineLayoutPlan {
             OcioGpuWgpuPipelineBindGroupSlot {
                 bind_group: wrapper_layout.bind_group,
                 resource: OcioGpuWgpuPipelineBindGroupResource::WrapperInput,
-                layout_hash: wrapper_layout.layout_hash,
+                layout_hash: wrapper_layout_descriptor.layout_hash,
             },
         ];
         bind_groups.sort_by_key(|slot| slot.bind_group);
         let layout_hash = hash_pipeline_layout_plan(
             resources.resource_key,
             ocio_layout.layout_hash,
-            wrapper_layout.layout_hash,
+            wrapper_layout_descriptor.layout_hash,
             &bind_groups,
         );
         Self {
             resource_key: resources.resource_key,
             ocio_layout_hash: ocio_layout.layout_hash,
-            wrapper_layout_hash: wrapper_layout.layout_hash,
+            wrapper_layout_hash: wrapper_layout_descriptor.layout_hash,
             bind_groups,
             layout_hash,
         }
@@ -4427,20 +4429,15 @@ impl OcioGpuShaderCache {
 
     /// Prepare an OCIO GPU shader plan for native wgpu execution.
     ///
-    /// This currently exposes the exact blockers that keep Mondrian on the CPU
-    /// correctness path for OCIO color transforms. The render graph should only
-    /// schedule a native pass once `can_execute()` is true.
+    /// This validates the shader-side wgpu resource contract. Concrete backend
+    /// object creation is owned by `OcioGpuWgpuBackendPrepRuntime` and
+    /// `OcioGpuWgpuBackendObjectRuntime`, so missing shader modules, bind
+    /// groups, wrappers, and pipelines are not blockers at this planning layer.
     pub fn prepare_wgpu_execution(
         &mut self,
         request: OcioGpuShaderRequest,
     ) -> Result<OcioGpuWgpuExecutionPlan, OcioGpuShaderError> {
         let shader_plan = self.get_or_extract(request)?;
-        let mut blockers = Vec::new();
-
-        blockers.push(OcioGpuWgpuBlocker::ShaderModuleNotPrepared {
-            language: shader_plan.request.language(),
-        });
-
         let resources =
             OcioGpuWgpuResourcePlan::for_shader_plan(&shader_plan).map_err(|reason| {
                 OcioGpuShaderError {
@@ -4448,20 +4445,8 @@ impl OcioGpuShaderCache {
                     reason: reason.to_string(),
                 }
             })?;
-        if shader_plan.texture_2d_count > 0
-            || shader_plan.texture_3d_count > 0
-            || resources.uniform_buffers > 0
-        {
-            blockers.push(OcioGpuWgpuBlocker::OcioResourceBindGroupNotPrepared {
-                texture_2d_count: shader_plan.texture_2d_count,
-                texture_3d_count: shader_plan.texture_3d_count,
-                uniform_buffers: resources.uniform_buffers,
-            });
-        }
-        blockers.push(OcioGpuWgpuBlocker::FullscreenWrapperNotPrepared);
-        blockers.push(OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
 
-        Ok(OcioGpuWgpuExecutionPlan { shader_plan, resources, blockers })
+        Ok(OcioGpuWgpuExecutionPlan { shader_plan, resources, blockers: Vec::new() })
     }
 
     /// Return cache health counters.
@@ -6707,7 +6692,7 @@ mod tests {
             entry.binding == 1
                 && entry.resource
                     == OcioGpuWgpuLayoutBindingResource::Sampler {
-                        filtering: OcioGpuWgpuSamplerFiltering::Filtering,
+                        filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
                     }
         }));
         assert_ne!(ocio_descriptor.layout_hash, wrapper_descriptor.layout_hash);
@@ -6892,6 +6877,8 @@ mod tests {
             resources.binding_layout_plan().expect("binding layout with separated samplers");
         let wrapper_layout =
             OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
+        let wrapper_descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout);
         let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
@@ -6922,7 +6909,7 @@ mod tests {
             OcioGpuWgpuPipelineBindGroupSlot {
                 bind_group: 1,
                 resource: OcioGpuWgpuPipelineBindGroupResource::WrapperInput,
-                layout_hash: wrapper_layout.layout_hash,
+                layout_hash: wrapper_descriptor.layout_hash,
             }
         );
         assert_ne!(pipeline_layout.layout_hash, 0);
@@ -7516,7 +7503,7 @@ mod tests {
     }
 
     #[test]
-    fn wgpu_execution_preparation_reports_native_blockers_without_fallback() {
+    fn wgpu_execution_preparation_returns_backend_ready_resource_contract() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let mut cache = OcioGpuShaderCache::default();
 
@@ -7528,7 +7515,7 @@ mod tests {
             })
             .expect("prepare wgpu execution");
 
-        assert!(!prepared.can_execute());
+        assert!(prepared.can_execute());
         assert_eq!(prepared.resources.input_textures, 1);
         assert_eq!(prepared.resources.output_textures, 1);
         assert_eq!(
@@ -7543,16 +7530,7 @@ mod tests {
             prepared.resources.uniform_buffers,
             u32::from(prepared.shader_plan.uniform_count > 0)
         );
-        assert!(prepared.blockers.iter().any(|blocker| matches!(
-            blocker,
-            OcioGpuWgpuBlocker::ShaderModuleNotPrepared { language: GpuLanguage::Glsl4_0 }
-        )));
-        assert!(prepared.blockers.iter().any(|blocker| matches!(
-            blocker,
-            OcioGpuWgpuBlocker::OcioResourceBindGroupNotPrepared { .. }
-        )));
-        assert!(prepared.blockers.contains(&OcioGpuWgpuBlocker::FullscreenWrapperNotPrepared));
-        assert!(prepared.blockers.contains(&OcioGpuWgpuBlocker::RenderPipelineNotPrepared));
+        assert!(prepared.blockers.is_empty());
 
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);

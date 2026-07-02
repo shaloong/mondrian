@@ -9,13 +9,13 @@ use crate::{
     OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
     OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
     OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
-    OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
-    OcioGpuWgpuRenderPassError, OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder,
-    OcioGpuWgpuRenderPassTarget, OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup,
-    OcioGpuWgpuWrapperBindingPlan, OcioGpuWgpuWrapperInputResources, RenderColorTransform,
-    RenderColorTransformError, RenderColorTransformGpuOptions, RenderColorTransformGpuPlan,
-    RenderColorTransformGpuPlanner, RenderInputTransform, RenderInputTransformResult,
-    RenderOutputTransformResult,
+    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBindGroupPreparer,
+    OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup, OcioGpuWgpuRenderPassError,
+    OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
+    OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
+    OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
+    RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
+    RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
 
@@ -1109,10 +1109,13 @@ impl RenderGpuColorPassSchedule {
         }
         let wrapper_layout =
             OcioGpuWgpuWrapperBindingPlan::for_contract(&transform.wgpu.resources.wrapper_contract);
-        if pass_node.wrapper_layout_hash != wrapper_layout.layout_hash {
+        let wrapper_layout_hash =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout)
+                .layout_hash;
+        if pass_node.wrapper_layout_hash != wrapper_layout_hash {
             return Err(
                 RenderGpuColorPassScheduleError::PassWrapperLayoutHashMismatch {
-                    expected: wrapper_layout.layout_hash,
+                    expected: wrapper_layout_hash,
                     actual: pass_node.wrapper_layout_hash,
                 },
             );
@@ -1181,11 +1184,14 @@ impl RenderGpuColorPassSchedule {
     ) -> Result<OcioGpuWgpuWrapperBindGroup, RenderGpuColorPassExecutionError> {
         self.validate_input_frame(input.frame)?;
         let wrapper_layout = self.wrapper_binding_plan();
-        if wrapper_layout.layout_hash != self.pass_node.wrapper_layout_hash {
+        let wrapper_layout_hash =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout)
+                .layout_hash;
+        if wrapper_layout_hash != self.pass_node.wrapper_layout_hash {
             return Err(
                 RenderGpuColorPassExecutionError::WrapperLayoutHashMismatch {
                     expected: self.pass_node.wrapper_layout_hash,
-                    actual: wrapper_layout.layout_hash,
+                    actual: wrapper_layout_hash,
                 },
             );
         }
@@ -1786,7 +1792,8 @@ fn validate_execution_frame(
 mod tests {
     use super::*;
     use crate::{
-        GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameTextureFormat, OcioGpuShaderRequest,
+        GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameTextureFormat, GpuContext,
+        OcioGpuShaderRequest, OcioGpuWgpuBlocker,
     };
     use mondrian_core::types::{ColorEngine, ColorSpace};
     use mondrian_core::RgbaF32Frame;
@@ -2015,6 +2022,58 @@ mod tests {
         assert_eq!(runtime.diagnostics().frame_table_entries, 0);
     }
 
+    #[tokio::test]
+    async fn gpu_output_boundary_runtime_records_with_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu output boundary test: no GPU adapter available");
+            return;
+        };
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-output-boundary"),
+        });
+
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("runtime-owned GPU output boundary should record");
+
+        assert!(record.readback_buffer.is_some());
+        assert_eq!(record.materialized.input.id().raw(), 1_000);
+        assert_eq!(record.materialized.output.id().raw(), 1_001);
+
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let _ = context
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.shader_cache.entries, 1);
+        assert_eq!(diagnostics.shader_cache.misses, 1);
+        assert_eq!(diagnostics.backend_prep.resources.entries, 1);
+        assert_eq!(diagnostics.backend_objects.entries, 1);
+        assert_eq!(diagnostics.backend_objects.misses, 1);
+        assert_eq!(diagnostics.frame_table_entries, 2);
+        assert_eq!(diagnostics.next_frame_id, 1_002);
+    }
+
     #[test]
     fn output_boundary_cpu_planner_produces_cpu_stage_plan() {
         let frame = cpu_working_frame();
@@ -2035,7 +2094,7 @@ mod tests {
     }
 
     #[test]
-    fn output_boundary_prefer_gpu_planner_keeps_gpu_stage_plan_with_blockers() {
+    fn output_boundary_prefer_gpu_planner_builds_backend_ready_stage_plan() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let frame = cpu_working_frame();
         let boundary =
@@ -2059,7 +2118,7 @@ mod tests {
         assert_eq!(diagnostics.upload_stages, 1);
         assert_eq!(diagnostics.gpu_color_stages, 1);
         assert_eq!(diagnostics.readback_stages, 1);
-        assert!(diagnostics.gpu_blockers > 0);
+        assert_eq!(diagnostics.gpu_blockers, 0);
     }
 
     #[test]
@@ -2095,7 +2154,8 @@ mod tests {
                 ..RenderColorTransformGpuOptions::default()
             },
         );
-        let plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        let mut plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        add_gpu_stage_blocker(&mut plan.stage_plan);
         let mut ids = GpuColorFrameIdAllocator::new(710);
 
         let err = plan
@@ -2122,8 +2182,7 @@ mod tests {
                 ..RenderColorTransformGpuOptions::default()
             },
         );
-        let mut plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
-        clear_gpu_stage_blockers(&mut plan.stage_plan);
+        let plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
         let mut ids = GpuColorFrameIdAllocator::new(720);
 
         let resources = plan
@@ -2467,8 +2526,7 @@ mod tests {
     #[test]
     fn gpu_output_stage_resource_plan_materializes_upload_allocation_and_schedulable_transform() {
         let frame = cpu_working_frame();
-        let mut stage_plan = gpu_output_stage_plan_for_frame(&frame);
-        clear_gpu_stage_blockers(&mut stage_plan);
+        let stage_plan = gpu_output_stage_plan_for_frame(&frame);
         let mut ids = GpuColorFrameIdAllocator::new(500);
 
         let resources = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
@@ -2541,7 +2599,8 @@ mod tests {
     #[test]
     fn gpu_output_stage_resource_plan_rejects_native_blockers() {
         let frame = cpu_working_frame();
-        let stage_plan = gpu_output_stage_plan_for_frame(&frame);
+        let mut stage_plan = gpu_output_stage_plan_for_frame(&frame);
+        add_gpu_stage_blocker(&mut stage_plan);
         let mut ids = GpuColorFrameIdAllocator::default();
 
         let err = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
@@ -2687,8 +2746,7 @@ mod tests {
     #[test]
     fn gpu_output_stage_resource_plan_carries_cpu_boundary_readback_plan() {
         let frame = cpu_working_frame();
-        let mut stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
-        clear_gpu_stage_blockers(&mut stage_plan);
+        let stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
         let mut ids = GpuColorFrameIdAllocator::new(630);
 
         let resources = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
@@ -2720,8 +2778,7 @@ mod tests {
     #[test]
     fn gpu_output_stage_resource_plan_rejects_unsupported_cpu_boundary_texture_format() {
         let frame = cpu_working_frame();
-        let mut stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
-        clear_gpu_stage_blockers(&mut stage_plan);
+        let stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
         let mut ids = GpuColorFrameIdAllocator::new(640);
 
         let err = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
@@ -2809,9 +2866,11 @@ mod tests {
             &mut cache,
             RenderColorTransformGpuOptions::default(),
         );
-        planner
+        let mut plan = planner
             .plan_output_transform(working_descriptor(ColorFrameResidency::Gpu), &transform)
-            .expect("GPU output plan")
+            .expect("GPU output plan");
+        plan.wgpu.blockers.push(OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+        plan
     }
 
     fn executable_gpu_output_plan() -> RenderColorTransformGpuPlan {
@@ -2869,18 +2928,17 @@ mod tests {
             .expect("GPU output stage plan")
     }
 
-    fn clear_gpu_stage_blockers(stage_plan: &mut RenderColorStagePlan) {
+    fn add_gpu_stage_blocker(stage_plan: &mut RenderColorStagePlan) {
         for stage in &mut stage_plan.stages {
             if let RenderColorStage::GpuColorTransform { plan, .. } = stage {
-                plan.wgpu.blockers.clear();
+                plan.wgpu.blockers.push(OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
             }
         }
     }
 
     fn executable_gpu_output_stage_resources(first_id: u64) -> RenderGpuOutputStageResourcePlan {
         let frame = cpu_working_frame();
-        let mut stage_plan = gpu_output_stage_plan_for_frame(&frame);
-        clear_gpu_stage_blockers(&mut stage_plan);
+        let stage_plan = gpu_output_stage_plan_for_frame(&frame);
         let mut ids = GpuColorFrameIdAllocator::new(first_id);
         RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
             &mut ids,
@@ -2895,8 +2953,7 @@ mod tests {
         first_id: u64,
     ) -> RenderGpuOutputStageResourcePlan {
         let frame = cpu_working_frame();
-        let mut stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
-        clear_gpu_stage_blockers(&mut stage_plan);
+        let stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
         let mut ids = GpuColorFrameIdAllocator::new(first_id);
         RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
             &mut ids,
@@ -2940,12 +2997,14 @@ mod tests {
     ) -> OcioGpuWgpuRenderPassNodePlan {
         let wrapper_layout =
             OcioGpuWgpuWrapperBindingPlan::for_contract(&transform.wgpu.resources.wrapper_contract);
+        let wrapper_layout_descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout);
         OcioGpuWgpuRenderPassNodePlan {
             resource_key: transform.wgpu.resources.resource_key,
             render_pipeline_cache_key: 11,
             render_descriptor_hash: 12,
             ocio_layout_hash: 13,
-            wrapper_layout_hash: wrapper_layout.layout_hash,
+            wrapper_layout_hash: wrapper_layout_descriptor.layout_hash,
             output_format: crate::OcioGpuWgpuColorTargetFormat::Rgba16Float,
             vertex_count: 4,
             node_hash: 15,

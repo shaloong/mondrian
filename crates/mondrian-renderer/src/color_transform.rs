@@ -493,7 +493,8 @@ mod tests {
         assert!(plan.requires_source_upload);
         assert!(!plan.requires_output_readback);
         assert!(!plan.can_execute_in_place_on_gpu());
-        assert!(!plan.wgpu.blockers.is_empty());
+        assert!(plan.wgpu.blockers.is_empty());
+        assert!(plan.wgpu.can_execute());
     }
 
     #[test]
