@@ -16,6 +16,12 @@ The Standard mode config is packaged as
 ACES 2.0 studio config semantics instead of resolving an upstream `latest`
 alias at runtime. Product builds therefore have a deterministic default color
 science while still using real OCIO processors.
+`mondrian-core::mondrian_default_ocio_contract()` is the Rust-level product
+contract for that asset. It lists the pinned config name, virtual path, default
+display/view, scene-linear working role, supported Mondrian `ColorSpace`
+mappings, and product-supported display/view pairs. Core tests validate the
+embedded `.ocio` file against this contract so config edits fail loudly when
+they break Standard mode.
 
 ## Engines
 

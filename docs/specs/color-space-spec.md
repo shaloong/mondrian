@@ -19,6 +19,11 @@ MondrianSmart loads Mondrian's embedded `mondrian_default_ocio_v1` config and
 must fail closed if that asset cannot parse or cannot produce the requested
 OCIO processor.
 
+The embedded Standard config is also exposed through
+`mondrian_default_ocio_contract()`. That contract is the authoritative list of
+Mondrian `ColorSpace` to OCIO name mappings plus the default and supported
+display/view pairs for product UI and renderer integration.
+
 ## Pipeline
 
 Color conversion is represented by `ColorPipeline`:

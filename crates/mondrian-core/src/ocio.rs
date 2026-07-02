@@ -33,6 +33,113 @@ const MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH: &str = "embedded:mondrian_default_ocio
 const MONDRIAN_DEFAULT_OCIO_CONFIG: &str =
     include_str!("../assets/ocio/mondrian_default_ocio_v1.ocio");
 
+/// Product-level contract for Mondrian's embedded default OCIO config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MondrianDefaultOcioContract {
+    /// Pinned OCIO config name.
+    pub config_name: &'static str,
+    /// Virtual path used when the embedded config is loaded into process state.
+    pub virtual_path: &'static str,
+    /// Default display selected by Standard mode.
+    pub default_display: &'static str,
+    /// Default view selected for [`Self::default_display`].
+    pub default_view: &'static str,
+    /// Scene-linear working role expected by Mondrian's internal compositor.
+    pub scene_linear_role: &'static str,
+    /// Mondrian color spaces that must be present in the embedded config.
+    pub color_spaces: &'static [MondrianDefaultOcioColorSpace],
+    /// Product-supported display/view pairs that must be present in the embedded config.
+    pub display_views: &'static [MondrianDefaultOcioDisplayView],
+}
+
+/// One Mondrian [`ColorSpace`] mapping guaranteed by the embedded OCIO config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MondrianDefaultOcioColorSpace {
+    /// Mondrian domain color-space enum value.
+    pub color_space: ColorSpace,
+    /// Pinned OCIO color-space name or alias.
+    pub ocio_name: &'static str,
+}
+
+/// One product-supported display/view pair in the embedded OCIO config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MondrianDefaultOcioDisplayView {
+    /// OCIO display name.
+    pub display: &'static str,
+    /// OCIO view name.
+    pub view: &'static str,
+}
+
+const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 9] = [
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::Rec709,
+        ocio_name: "Camera Rec.709",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::Rec2100Hlg,
+        ocio_name: "Rec.2100-HLG - Display",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::Rec2100Pq,
+        ocio_name: "Rec.2100-PQ - Display",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::Srgb,
+        ocio_name: "sRGB Encoded Rec.709 (sRGB)",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::Rec2020,
+        ocio_name: "Linear Rec.2020",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::DciP3,
+        ocio_name: "sRGB Encoded P3-D65",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::AppleLog,
+        ocio_name: "Apple Log",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::SLog3,
+        ocio_name: "S-Log3 S-Gamut3.Cine",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::ArriLogC4,
+        ocio_name: "ARRI LogC4",
+    },
+];
+
+const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 7] = [
+    MondrianDefaultOcioDisplayView {
+        display: "sRGB - Display",
+        view: "ACES 2.0 - SDR 100 nits (Rec.709)",
+    },
+    MondrianDefaultOcioDisplayView {
+        display: "sRGB - Display",
+        view: "Video (colorimetric)",
+    },
+    MondrianDefaultOcioDisplayView {
+        display: "Rec.1886 Rec.709 - Display",
+        view: "ACES 2.0 - SDR 100 nits (Rec.709)",
+    },
+    MondrianDefaultOcioDisplayView {
+        display: "Display P3 - Display",
+        view: "ACES 2.0 - SDR 100 nits (P3 D65)",
+    },
+    MondrianDefaultOcioDisplayView {
+        display: "Display P3 HDR - Display",
+        view: "ACES 2.0 - HDR 1000 nits (P3 D65)",
+    },
+    MondrianDefaultOcioDisplayView {
+        display: "Rec.2100-HLG - Display",
+        view: "ACES 2.0 - HDR 1000 nits (P3 D65)",
+    },
+    MondrianDefaultOcioDisplayView {
+        display: "Rec.2100-PQ - Display",
+        view: "ACES 2.0 - HDR 1000 nits (Rec.2020)",
+    },
+];
+
 /// OCIO GPU function name generated for Mondrian wrapper shaders.
 pub const MONDRIAN_OCIO_GPU_FUNCTION_NAME: &str = "mondrian_ocio_main";
 /// OCIO GPU pixel variable name generated for Mondrian wrapper shaders.
@@ -47,6 +154,19 @@ pub const MONDRIAN_OCIO_GPU_TEXTURE_BINDING_START: u32 = 1;
 /// Return the pinned OCIO config text used by Mondrian Standard mode.
 pub fn mondrian_default_ocio_config_text() -> &'static str {
     MONDRIAN_DEFAULT_OCIO_CONFIG
+}
+
+/// Return the product contract for Mondrian Standard mode's embedded OCIO config.
+pub fn mondrian_default_ocio_contract() -> MondrianDefaultOcioContract {
+    MondrianDefaultOcioContract {
+        config_name: MONDRIAN_DEFAULT_OCIO_CONFIG_NAME,
+        virtual_path: MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH,
+        default_display: "sRGB - Display",
+        default_view: "ACES 2.0 - SDR 100 nits (Rec.709)",
+        scene_linear_role: "ACEScg",
+        color_spaces: &MONDRIAN_DEFAULT_OCIO_COLOR_SPACES,
+        display_views: &MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS,
+    }
 }
 
 /// Load an OCIO config from `path` and set it as the process-wide current config.
@@ -917,32 +1037,21 @@ pub fn ocio_default_display_view() -> Option<(String, String)> {
 mod tests {
     use super::*;
 
-    const ALL_COLOR_SPACES: [ColorSpace; 9] = [
-        ColorSpace::Rec709,
-        ColorSpace::Rec2100Hlg,
-        ColorSpace::Rec2100Pq,
-        ColorSpace::Srgb,
-        ColorSpace::Rec2020,
-        ColorSpace::DciP3,
-        ColorSpace::AppleLog,
-        ColorSpace::SLog3,
-        ColorSpace::ArriLogC4,
-    ];
-
     #[test]
     fn mondrian_default_config_asset_parses_and_is_named() {
         let config = Config::from_stream(mondrian_default_ocio_config_text())
             .expect("embedded Mondrian OCIO config should parse");
+        let contract = mondrian_default_ocio_contract();
 
+        assert_eq!(config.name().as_deref(), Some(contract.config_name));
+        assert!(config.num_color_spaces() > contract.color_spaces.len() as i32);
         assert_eq!(
-            config.name().as_deref(),
-            Some(MONDRIAN_DEFAULT_OCIO_CONFIG_NAME)
+            config.default_display().as_deref(),
+            Some(contract.default_display)
         );
-        assert!(config.num_color_spaces() > ALL_COLOR_SPACES.len() as i32);
-        assert_eq!(config.default_display().as_deref(), Some("sRGB - Display"));
         assert_eq!(
-            config.default_view("sRGB - Display").as_deref(),
-            Some("ACES 2.0 - SDR 100 nits (Rec.709)")
+            config.default_view(contract.default_display).as_deref(),
+            Some(contract.default_view)
         );
     }
 
@@ -950,12 +1059,34 @@ mod tests {
     fn mondrian_default_config_covers_color_space_contract() {
         let config = Config::from_stream(mondrian_default_ocio_config_text())
             .expect("embedded Mondrian OCIO config should parse");
+        let contract = mondrian_default_ocio_contract();
 
-        for color_space in ALL_COLOR_SPACES {
-            let ocio_name = ocio_color_space_name(color_space);
+        for mapped in contract.color_spaces {
+            assert_eq!(mapped.ocio_name, ocio_color_space_name(mapped.color_space));
             assert!(
-                config.canonical_name(ocio_name).is_some(),
-                "{color_space:?} mapped to missing OCIO color space '{ocio_name}'"
+                config.canonical_name(mapped.ocio_name).is_some(),
+                "{:?} mapped to missing OCIO color space '{}'",
+                mapped.color_space,
+                mapped.ocio_name
+            );
+        }
+    }
+
+    #[test]
+    fn mondrian_default_config_covers_display_view_contract() {
+        let config = Config::from_stream(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO config should parse");
+        let contract = mondrian_default_ocio_contract();
+
+        for display_view in contract.display_views {
+            let views = (0..config.num_views(display_view.display))
+                .filter_map(|index| config.view(display_view.display, index))
+                .collect::<Vec<_>>();
+            assert!(
+                views.iter().any(|view| view == display_view.view),
+                "display '{}' is missing view '{}'; views: {views:?}",
+                display_view.display,
+                display_view.view
             );
         }
     }
@@ -992,17 +1123,18 @@ mod tests {
     #[test]
     fn standard_mode_loads_embedded_default_config() {
         ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+        let contract = mondrian_default_ocio_contract();
 
         assert!(mondrian_default_ocio_available());
         assert_eq!(
             ocio_config_path().as_deref(),
-            Some(Path::new(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH))
+            Some(Path::new(contract.virtual_path))
         );
         assert_eq!(
             ocio_default_display_view()
                 .as_ref()
                 .map(|(display, view)| { (display.as_str(), view.as_str()) }),
-            Some(("sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)"))
+            Some((contract.default_display, contract.default_view))
         );
     }
 
