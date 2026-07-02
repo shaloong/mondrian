@@ -191,11 +191,14 @@ preview/export-facing entry point that resolves those table entries, prepares
 the wrapper bind group, and records the pass. `GpuColorFrameAllocationPlan`,
 `GpuColorFrameUploadPlan`, and `GpuColorFrameUploader` are the shared renderer
 entry points for allocating render targets and uploading CPU boundary frames
-into `GpuColorFrameResourceTable`. Until preview/export frame evaluation calls
-those entries and then records through `record_wgpu_from_resources`, CPU
-processor execution is the correctness path and the cached shader/module/upload/
-bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are the
-production boundary for GPU integration work.
+into `GpuColorFrameResourceTable`. `RenderGpuOutputStageResourcePlan` maps a
+validated `RenderColorStagePlan` into those upload/allocation plans and a
+transfer-resolved GPU transform that can be scheduled without callers mutating
+transform internals. Until preview/export frame evaluation calls these entries
+and then records through `record_wgpu_from_resources`, CPU processor execution
+is the correctness path and the cached shader/module/upload/bind-resource/
+layout/bind-group/wrapper-link/pipeline-contract plans are the production
+boundary for GPU integration work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

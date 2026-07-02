@@ -215,6 +215,12 @@ with a shared usage contract for upload, sampling, rendering, and readback.
 materializes those plans into `GpuColorFrameWgpuResource` entries. Preview and
 export frame evaluation should fill the shared resource table through these
 plans before calling `record_wgpu_from_resources`.
+`RenderGpuOutputStageResourcePlan` is the bridge from `RenderColorStagePlan` to
+those concrete resource plans: it consumes the explicit
+`UploadToGpu -> GpuColorTransform -> optional ReadbackToCpu` stage shape,
+allocates stable GPU frame handles, creates the CPU upload and output target
+allocation plans, and produces a transfer-resolved GPU transform for
+`RenderGpuColorPassSchedule`.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /

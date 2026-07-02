@@ -78,6 +78,37 @@ impl GpuColorFrameId {
     }
 }
 
+/// Monotonic allocator for renderer-owned GPU color frame ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuColorFrameIdAllocator {
+    next: u64,
+}
+
+impl GpuColorFrameIdAllocator {
+    /// Create an allocator starting at the provided raw id.
+    pub fn new(first: u64) -> Self {
+        Self { next: first }
+    }
+
+    /// Allocate the next frame id.
+    pub fn allocate(&mut self) -> GpuColorFrameId {
+        let id = GpuColorFrameId::from_raw(self.next);
+        self.next = self.next.saturating_add(1);
+        id
+    }
+
+    /// Return the next raw id that will be allocated.
+    pub fn next_raw(&self) -> u64 {
+        self.next
+    }
+}
+
+impl Default for GpuColorFrameIdAllocator {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
 /// Texture format used by a GPU-resident color frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuColorFrameTextureFormat {
@@ -790,6 +821,15 @@ mod tests {
         );
         assert_eq!(handle.label(), "timeline-working");
         assert_eq!(handle.descriptor().pixel_count(), 3840 * 2160);
+    }
+
+    #[test]
+    fn gpu_color_frame_id_allocator_is_monotonic() {
+        let mut allocator = GpuColorFrameIdAllocator::new(40);
+
+        assert_eq!(allocator.allocate().raw(), 40);
+        assert_eq!(allocator.allocate().raw(), 41);
+        assert_eq!(allocator.next_raw(), 42);
     }
 
     #[test]
