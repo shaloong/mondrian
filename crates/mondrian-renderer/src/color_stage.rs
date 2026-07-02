@@ -294,6 +294,76 @@ impl RenderOutputColorBoundaryStagePlan {
             output_texture_format,
         )
     }
+
+    /// Build GPU resources and record this final-output boundary into a command encoder.
+    pub fn record_wgpu_output_boundary(
+        &self,
+        request: RenderGpuOutputBoundaryRecordRequest<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRecordError> {
+        let RenderGpuOutputBoundaryRecordRequest {
+            ids,
+            frame,
+            output_texture_format,
+            device,
+            queue,
+            encoder,
+            pipeline,
+            ocio_bind_group,
+            pass_node,
+            table,
+            load_op,
+        } = request;
+        let resources = self
+            .gpu_resource_plan(ids, frame, output_texture_format)
+            .map_err(RenderGpuOutputBoundaryRecordError::ResourcePlan)?;
+        resources
+            .record_wgpu_output_stage(RenderGpuOutputStageRecordRequest {
+                device,
+                queue,
+                encoder,
+                pipeline,
+                ocio_bind_group,
+                pass_node,
+                table,
+                load_op,
+            })
+            .map_err(RenderGpuOutputBoundaryRecordError::Record)
+    }
+}
+
+/// Borrowed inputs required to record one final-output GPU color boundary.
+pub struct RenderGpuOutputBoundaryRecordRequest<'a> {
+    /// GPU frame id allocator for upload/output handles.
+    pub ids: &'a mut GpuColorFrameIdAllocator,
+    /// CPU working frame entering the output boundary.
+    pub frame: &'a CpuColorFrame,
+    /// Texture format for the GPU output target.
+    pub output_texture_format: GpuColorFrameTextureFormat,
+    /// wgpu device used for resource materialization and bind-group creation.
+    pub device: &'a wgpu::Device,
+    /// wgpu queue used for upload writes.
+    pub queue: &'a wgpu::Queue,
+    /// Command encoder receiving the color pass and optional readback copy.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Prepared OCIO fullscreen render pipeline.
+    pub pipeline: &'a OcioGpuWgpuRenderPipeline,
+    /// Prepared OCIO resource bind group.
+    pub ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    /// Backend render-pass node for this color transform.
+    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+    /// Shared GPU color frame resource table.
+    pub table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    /// Load operation for the output color attachment.
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// Error returned when a final-output GPU boundary cannot be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputBoundaryRecordError {
+    /// The boundary stage plan could not produce GPU resources.
+    ResourcePlan(RenderGpuOutputStageResourcePlanError),
+    /// Resource materialization, pass recording, or readback recording failed.
+    Record(RenderGpuOutputStageRecordError),
 }
 
 /// Strategy-aware planner for preview/export final output color boundaries.

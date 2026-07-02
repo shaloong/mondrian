@@ -203,11 +203,15 @@ transform internals. Its materialization path uploads/allocates resources and
 preflights resource-table slots before inserting, so preview/export does not
 hand-assemble table entries. When the stage plan ends in `ReadbackToCpu`, the
 resource plan carries the matching `GpuColorFrameReadbackPlan`; preview/export
-must resolve and record that readback through the resource-plan API instead of
-deriving it from texture format at the call site. `record_wgpu_output_stage`
-is the renderer-owned sequencing point for this output boundary: it schedules
-the pass, materializes resources, records the OCIO fullscreen draw, and records
-the optional readback copy in one command encoder. `GpuColorFrameReadbackPlan`
+must resolve and record that readback through the renderer-owned output
+boundary API instead of deriving it from texture format at the call site.
+`RenderOutputColorBoundaryStagePlan::record_wgpu_output_boundary(...)` is the
+preview/export-facing sequencing point for this output boundary: it derives the
+resource plan, materializes resources, schedules the pass, records the OCIO
+fullscreen draw, and records the optional readback copy in one command encoder.
+Callers that already hold a resource plan may use `record_wgpu_output_stage`,
+but app/export scheduling should prefer the boundary-level API so final-output
+policy remains renderer-owned. `GpuColorFrameReadbackPlan`
 and `GpuColorFrameReadback` are the only renderer-owned GPU-to-CPU boundary for
 encoded output frames; they currently read back only explicit `Rgba8Unorm` /
 `EncodedRgba8` contracts and do not reinterpret float targets. Until

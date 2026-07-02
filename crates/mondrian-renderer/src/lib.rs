@@ -39,6 +39,7 @@ pub use color_stage::{
     RenderGpuColorPassExecutionError, RenderGpuColorPassInputView,
     RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
     RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView,
+    RenderGpuOutputBoundaryRecordError, RenderGpuOutputBoundaryRecordRequest,
     RenderGpuOutputStageMaterializeError, RenderGpuOutputStageMaterializedResources,
     RenderGpuOutputStageReadbackError, RenderGpuOutputStageRecord, RenderGpuOutputStageRecordError,
     RenderGpuOutputStageRecordRequest, RenderGpuOutputStageResourcePlan,

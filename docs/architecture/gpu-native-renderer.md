@@ -227,9 +227,12 @@ partially materialized stage when a contract conflict exists.
 When the source stage shape includes `ReadbackToCpu`, the resource plan keeps
 the matching `GpuColorFrameReadbackPlan` and exposes renderer-owned helpers to
 resolve the output frame from `GpuColorFrameResourceTable` and record the copy.
-`record_wgpu_output_stage` is the single renderer-facing entry point that
-materializes the planned frames, schedules the matching `RenderGpuColorPassSchedule`,
-records the OCIO fullscreen pass, and records the optional readback copy.
+`RenderOutputColorBoundaryStagePlan::record_wgpu_output_boundary(...)` is the
+preview/export-facing entry point that derives that resource plan, materializes
+the planned frames, schedules the matching `RenderGpuColorPassSchedule`, records
+the OCIO fullscreen pass, and records the optional readback copy. Lower-level
+renderer code may call `record_wgpu_output_stage` after it already owns the
+validated resource plan.
 `GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
 encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
 unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only

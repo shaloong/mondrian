@@ -107,12 +107,15 @@ the resource plan's materialization helper to fill the resource table. If the
 same stage plan ends in `ReadbackToCpu`,
 `RenderGpuOutputStageResourcePlan` carries the `GpuColorFrameReadbackPlan` and
 owns resource-table lookup plus readback-copy recording. Once a backend
-pipeline node and OCIO bind group are prepared, callers should use
-`record_wgpu_output_stage` so materialization, schedule validation, pass
-recording, and optional readback stay in renderer-owned order. GPU-to-CPU
-output for encode, thumbnails, tests, or debug captures must use that path;
-readback is valid only for explicit encoded RGBA8 output contracts unless a
-future conversion stage says otherwise.
+pipeline node and OCIO bind group are prepared, preview/export callers should
+use `RenderOutputColorBoundaryStagePlan::record_wgpu_output_boundary(...)` so
+resource-plan derivation, materialization, schedule validation, pass recording,
+and optional readback stay in renderer-owned order. Lower-level renderer code
+that already owns a validated `RenderGpuOutputStageResourcePlan` may call
+`record_wgpu_output_stage`. GPU-to-CPU output for encode, thumbnails, tests, or
+debug captures must use one of those renderer-owned paths; readback is valid
+only for explicit encoded RGBA8 output contracts unless a future conversion
+stage says otherwise.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
 source boundaries and `execute_cpu_output_boundary(...)` for final display or
 export output. These helpers plan CPU-only stages and execute them through
