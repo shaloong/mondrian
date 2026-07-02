@@ -2243,6 +2243,50 @@ impl OcioGpuWgpuPipelineLayoutPreparer {
             pipeline_layout,
         })
     }
+
+    /// Create a concrete wgpu pipeline layout from stable prepared layouts.
+    pub fn prepare_with_wrapper_layout(
+        device: &wgpu::Device,
+        plan: &OcioGpuWgpuPipelineLayoutPlan,
+        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        wrapper_layout_hash: u64,
+        wrapper_layout: &wgpu::BindGroupLayout,
+    ) -> Result<OcioGpuWgpuPipelineLayout, OcioGpuWgpuPipelineLayoutError> {
+        if plan.resource_key != ocio_bind_group.resource_key {
+            return Err(OcioGpuWgpuPipelineLayoutError::ResourceKeyMismatch {
+                expected: plan.resource_key,
+                actual: ocio_bind_group.resource_key,
+            });
+        }
+        if plan.ocio_layout_hash != ocio_bind_group.layout_hash {
+            return Err(OcioGpuWgpuPipelineLayoutError::OcioLayoutHashMismatch {
+                expected: plan.ocio_layout_hash,
+                actual: ocio_bind_group.layout_hash,
+            });
+        }
+        if plan.wrapper_layout_hash != wrapper_layout_hash {
+            return Err(OcioGpuWgpuPipelineLayoutError::WrapperLayoutHashMismatch {
+                expected: plan.wrapper_layout_hash,
+                actual: wrapper_layout_hash,
+            });
+        }
+
+        let bind_group_layouts = pipeline_layout_bind_group_layouts_from_wrapper_layout(
+            plan,
+            ocio_bind_group,
+            wrapper_layout,
+        )?;
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ocio_fullscreen_pipeline_layout"),
+            immediate_size: 0,
+            bind_group_layouts: &bind_group_layouts,
+        });
+        Ok(OcioGpuWgpuPipelineLayout {
+            resource_key: plan.resource_key,
+            layout_hash: plan.layout_hash,
+            pipeline_layout,
+        })
+    }
 }
 
 /// Fullscreen wrapper shader contract for an OCIO render pipeline.
@@ -2510,6 +2554,23 @@ impl OcioGpuWgpuBindGroupPreparer {
         let descriptor =
             OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(wrapper_layout);
         let layout = descriptor.create_bind_group_layout(device);
+        Self::prepare_wrapper_bind_group_with_layout(
+            device,
+            wrapper_layout,
+            descriptor.layout_hash,
+            &layout,
+            input,
+        )
+    }
+
+    /// Create the concrete fullscreen wrapper input bind group from a stable layout.
+    pub fn prepare_wrapper_bind_group_with_layout(
+        device: &wgpu::Device,
+        wrapper_layout: &OcioGpuWgpuWrapperBindingPlan,
+        layout_hash: u64,
+        layout: &wgpu::BindGroupLayout,
+        input: OcioGpuWgpuWrapperInputResources<'_>,
+    ) -> OcioGpuWgpuWrapperBindGroup {
         let entries = wrapper_layout
             .entries
             .iter()
@@ -2526,13 +2587,13 @@ impl OcioGpuWgpuBindGroupPreparer {
             .collect::<Vec<_>>();
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ocio_wrapper_input_bind_group"),
-            layout: &layout,
+            layout,
             entries: &entries,
         });
         OcioGpuWgpuWrapperBindGroup {
             bind_group_index: wrapper_layout.bind_group,
-            layout_hash: descriptor.layout_hash,
-            layout,
+            layout_hash,
+            layout: layout.clone(),
             bind_group,
         }
     }
@@ -3493,6 +3554,274 @@ pub struct OcioGpuWgpuBackendPrepRuntimeDiagnostics {
     pub wrapper_module_artifacts: OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics,
 }
 
+/// Prepared stable wrapper input layout for an OCIO fullscreen pass.
+pub struct OcioGpuWgpuPreparedWrapperInputLayout {
+    /// Wrapper bind group index.
+    pub bind_group: u32,
+    /// Stable hash of the wrapper layout descriptor.
+    pub layout_hash: u64,
+    /// Concrete wgpu bind-group layout reused for per-frame wrapper bind groups.
+    pub layout: wgpu::BindGroupLayout,
+}
+
+impl OcioGpuWgpuPreparedWrapperInputLayout {
+    /// Create a per-frame wrapper input bind group using this stable layout.
+    pub fn prepare_bind_group(
+        &self,
+        device: &wgpu::Device,
+        wrapper_binding: &OcioGpuWgpuWrapperBindingPlan,
+        input: OcioGpuWgpuWrapperInputResources<'_>,
+    ) -> OcioGpuWgpuWrapperBindGroup {
+        OcioGpuWgpuBindGroupPreparer::prepare_wrapper_bind_group_with_layout(
+            device,
+            wrapper_binding,
+            self.layout_hash,
+            &self.layout,
+            input,
+        )
+    }
+}
+
+/// Concrete backend objects prepared for a static OCIO fullscreen pipeline.
+pub struct OcioGpuWgpuPreparedBackendObjects {
+    /// Stable cache key for this object bundle.
+    pub cache_key: u64,
+    /// Stable resource key shared by all prepared objects.
+    pub resource_key: u64,
+    /// Packed/upload-validated bind-resource contract.
+    pub bind_resource_plan: OcioGpuWgpuBindResourcePlan,
+    /// Uploaded LUT textures.
+    pub uploaded_luts: OcioGpuWgpuUploadedLuts,
+    /// Uploaded uniform buffer, when required by OCIO.
+    pub uploaded_uniform: Option<OcioGpuWgpuUploadedUniformBuffer>,
+    /// Concrete OCIO LUT/uniform bind group.
+    pub ocio_bind_group: OcioGpuWgpuOcioBindGroup,
+    /// Stable wrapper input layout reused by per-frame wrapper bind groups.
+    pub wrapper_input_layout: OcioGpuWgpuPreparedWrapperInputLayout,
+    /// Concrete wrapper shader modules.
+    pub wrapper_modules: Arc<OcioGpuWgpuWrapperShaderModules>,
+    /// Concrete pipeline layout.
+    pub pipeline_layout: OcioGpuWgpuPipelineLayout,
+    /// Concrete render pipeline.
+    pub render_pipeline: Arc<OcioGpuWgpuRenderPipeline>,
+    /// Render-pass node plan for scheduling/recording.
+    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+}
+
+/// Error returned while preparing concrete OCIO GPU backend objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuBackendObjectError {
+    /// LUT payloads could not be packed or uploaded.
+    LutUpload(OcioGpuWgpuLutUploadError),
+    /// Uniform payloads could not be packed or uploaded.
+    UniformUpload(OcioGpuWgpuUniformUploadError),
+    /// Packed resources did not match the OCIO binding contract.
+    BindResource(OcioGpuWgpuBindResourcePlanError),
+    /// Concrete bind-group creation failed contract validation.
+    BindGroup(OcioGpuWgpuBindGroupError),
+    /// Concrete pipeline layout creation failed contract validation.
+    PipelineLayout(OcioGpuWgpuPipelineLayoutError),
+    /// Concrete render pipeline creation failed contract validation.
+    RenderPipeline(OcioGpuWgpuRenderPipelineError),
+    /// Render-pass node creation failed contract validation.
+    RenderPass(OcioGpuWgpuRenderPassError),
+}
+
+impl std::fmt::Display for OcioGpuWgpuBackendObjectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OCIO GPU backend object preparation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for OcioGpuWgpuBackendObjectError {}
+
+/// Renderer-owned runtime for concrete OCIO GPU backend object preparation.
+pub struct OcioGpuWgpuBackendObjectRuntime {
+    objects: LruCache<u64, Arc<OcioGpuWgpuPreparedBackendObjects>>,
+    wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache,
+    render_pipelines: OcioGpuWgpuRenderPipelineCache,
+    hits: u64,
+    misses: u64,
+    failures: u64,
+}
+
+impl OcioGpuWgpuBackendObjectRuntime {
+    /// Create a runtime with a fixed non-zero object-cache capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            objects: LruCache::new(capacity),
+            wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache::default(),
+            render_pipelines: OcioGpuWgpuRenderPipelineCache::default(),
+            hits: 0,
+            misses: 0,
+            failures: 0,
+        }
+    }
+
+    /// Prepare or reuse concrete backend objects for a static OCIO pipeline.
+    pub fn prepare_backend_objects(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shader_plan: &OcioGpuShaderPlan,
+        static_pipeline: &OcioGpuWgpuPreparedStaticPipeline,
+    ) -> Result<Arc<OcioGpuWgpuPreparedBackendObjects>, OcioGpuWgpuBackendObjectError> {
+        let cache_key = backend_object_cache_key(static_pipeline);
+        if let Some(hit) = self.objects.get(&cache_key) {
+            self.hits = self.hits.saturating_add(1);
+            return Ok(Arc::clone(hit));
+        }
+
+        self.misses = self.misses.saturating_add(1);
+        match self.prepare_backend_objects_uncached(
+            device,
+            queue,
+            shader_plan,
+            static_pipeline,
+            cache_key,
+        ) {
+            Ok(objects) => {
+                let objects = Arc::new(objects);
+                self.objects.put(cache_key, Arc::clone(&objects));
+                Ok(objects)
+            }
+            Err(err) => {
+                self.failures = self.failures.saturating_add(1);
+                Err(err)
+            }
+        }
+    }
+
+    fn prepare_backend_objects_uncached(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shader_plan: &OcioGpuShaderPlan,
+        static_pipeline: &OcioGpuWgpuPreparedStaticPipeline,
+        cache_key: u64,
+    ) -> Result<OcioGpuWgpuPreparedBackendObjects, OcioGpuWgpuBackendObjectError> {
+        let resources = &static_pipeline.resources.resources;
+        let lut_upload_plan = OcioGpuWgpuLutUploadPlan::for_shader_plan(shader_plan, resources);
+        let packed_luts = lut_upload_plan
+            .pack_textures()
+            .map_err(OcioGpuWgpuBackendObjectError::LutUpload)?;
+        let uploaded_luts = OcioGpuWgpuLutUploader::upload_packed(device, queue, &packed_luts)
+            .map_err(OcioGpuWgpuBackendObjectError::LutUpload)?;
+
+        let uniform_upload_plan =
+            OcioGpuWgpuUniformUploadPlan::for_shader_plan(shader_plan, resources);
+        let packed_uniform = uniform_upload_plan
+            .pack_buffer()
+            .map_err(OcioGpuWgpuBackendObjectError::UniformUpload)?;
+        let uploaded_uniform = OcioGpuWgpuUniformUploader::upload_packed(device, &packed_uniform);
+
+        let bind_resource_plan = OcioGpuWgpuBindResourcePlan::from_packed_resources(
+            resources,
+            &packed_luts,
+            if packed_uniform.bytes.is_empty() {
+                None
+            } else {
+                Some(&packed_uniform)
+            },
+        )
+        .map_err(OcioGpuWgpuBackendObjectError::BindResource)?;
+        let ocio_bind_group = OcioGpuWgpuBindGroupPreparer::prepare_ocio_bind_group(
+            device,
+            &static_pipeline.resources.binding_layout,
+            &bind_resource_plan,
+            &uploaded_luts,
+            uploaded_uniform.as_ref(),
+        )
+        .map_err(OcioGpuWgpuBackendObjectError::BindGroup)?;
+
+        let wrapper_descriptor = OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(
+            &static_pipeline.wrapper_binding,
+        );
+        let wrapper_layout = wrapper_descriptor.create_bind_group_layout(device);
+        let wrapper_input_layout = OcioGpuWgpuPreparedWrapperInputLayout {
+            bind_group: static_pipeline.wrapper_binding.bind_group,
+            layout_hash: wrapper_descriptor.layout_hash,
+            layout: wrapper_layout,
+        };
+
+        let pipeline_layout = OcioGpuWgpuPipelineLayoutPreparer::prepare_with_wrapper_layout(
+            device,
+            &static_pipeline.pipeline_layout,
+            &ocio_bind_group,
+            wrapper_input_layout.layout_hash,
+            &wrapper_input_layout.layout,
+        )
+        .map_err(OcioGpuWgpuBackendObjectError::PipelineLayout)?;
+        let wrapper_modules =
+            self.wrapper_modules.prepare(device, &static_pipeline.wrapper_module_artifact);
+        let render_pipeline = self
+            .render_pipelines
+            .prepare(
+                device,
+                &static_pipeline.render_descriptor,
+                &pipeline_layout,
+                &wrapper_modules,
+            )
+            .map_err(OcioGpuWgpuBackendObjectError::RenderPipeline)?;
+        let pass_node = OcioGpuWgpuRenderPassNodePlan::for_pipeline_and_wrapper_layout(
+            &render_pipeline,
+            &ocio_bind_group,
+            wrapper_input_layout.layout_hash,
+            static_pipeline.render_descriptor.output_format,
+        )
+        .map_err(OcioGpuWgpuBackendObjectError::RenderPass)?;
+
+        Ok(OcioGpuWgpuPreparedBackendObjects {
+            cache_key,
+            resource_key: resources.resource_key,
+            bind_resource_plan,
+            uploaded_luts,
+            uploaded_uniform,
+            ocio_bind_group,
+            wrapper_input_layout,
+            wrapper_modules,
+            pipeline_layout,
+            render_pipeline,
+            pass_node,
+        })
+    }
+
+    /// Return point-in-time diagnostics for backend object caches.
+    pub fn diagnostics(&self) -> OcioGpuWgpuBackendObjectRuntimeDiagnostics {
+        OcioGpuWgpuBackendObjectRuntimeDiagnostics {
+            entries: self.objects.len(),
+            hits: self.hits,
+            misses: self.misses,
+            failures: self.failures,
+            wrapper_modules: self.wrapper_modules.diagnostics(),
+            render_pipelines: self.render_pipelines.diagnostics(),
+        }
+    }
+}
+
+impl Default for OcioGpuWgpuBackendObjectRuntime {
+    fn default() -> Self {
+        Self::new(NonZeroUsize::new(64).expect("default cache capacity is non-zero"))
+    }
+}
+
+/// Point-in-time diagnostics for concrete OCIO GPU backend object caches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuBackendObjectRuntimeDiagnostics {
+    /// Cached prepared backend object bundles.
+    pub entries: usize,
+    /// Object cache hits.
+    pub hits: u64,
+    /// Object cache misses.
+    pub misses: u64,
+    /// Object preparation failures.
+    pub failures: u64,
+    /// Wrapper shader-module cache diagnostics.
+    pub wrapper_modules: OcioGpuWgpuWrapperShaderModuleCacheDiagnostics,
+    /// Render-pipeline cache diagnostics.
+    pub render_pipelines: OcioGpuWgpuRenderPipelineCacheDiagnostics,
+}
+
 /// Cached wgpu shader module produced from a validated Naga OCIO shader.
 pub struct OcioGpuWgpuShaderModule {
     /// Stable cache key for this backend shader module.
@@ -3906,6 +4235,27 @@ impl OcioGpuWgpuRenderPassNodePlan {
             ocio_bind_group.resource_key,
             ocio_bind_group.layout_hash,
             wrapper_bind_group.layout_hash,
+            output_format,
+        )
+    }
+
+    /// Build a render-pass node plan from a pipeline, OCIO bind group, and stable wrapper layout.
+    pub fn for_pipeline_and_wrapper_layout(
+        pipeline: &OcioGpuWgpuRenderPipeline,
+        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        wrapper_layout_hash: u64,
+        output_format: OcioGpuWgpuColorTargetFormat,
+    ) -> Result<Self, OcioGpuWgpuRenderPassError> {
+        let metadata = OcioGpuWgpuRenderPipelineMetadata {
+            resource_key: pipeline.resource_key,
+            cache_key: pipeline.cache_key,
+            descriptor_hash: pipeline.descriptor_hash,
+        };
+        Self::for_pipeline_metadata_and_bind_groups(
+            metadata,
+            ocio_bind_group.resource_key,
+            ocio_bind_group.layout_hash,
+            wrapper_layout_hash,
             output_format,
         )
     }
@@ -4632,6 +4982,18 @@ fn pipeline_layout_bind_group_layouts<'a>(
     ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
     wrapper_bind_group: &'a OcioGpuWgpuWrapperBindGroup,
 ) -> Result<Vec<Option<&'a wgpu::BindGroupLayout>>, OcioGpuWgpuPipelineLayoutError> {
+    pipeline_layout_bind_group_layouts_from_wrapper_layout(
+        plan,
+        ocio_bind_group,
+        &wrapper_bind_group.layout,
+    )
+}
+
+fn pipeline_layout_bind_group_layouts_from_wrapper_layout<'a>(
+    plan: &OcioGpuWgpuPipelineLayoutPlan,
+    ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    wrapper_layout: &'a wgpu::BindGroupLayout,
+) -> Result<Vec<Option<&'a wgpu::BindGroupLayout>>, OcioGpuWgpuPipelineLayoutError> {
     let max_bind_group =
         plan.bind_groups.iter().map(|slot| slot.bind_group).max().unwrap_or_default();
     let len = usize::try_from(max_bind_group)
@@ -4647,7 +5009,7 @@ fn pipeline_layout_bind_group_layouts<'a>(
         })?;
         layouts[index] = Some(match slot.resource {
             OcioGpuWgpuPipelineBindGroupResource::OcioResources => &ocio_bind_group.layout,
-            OcioGpuWgpuPipelineBindGroupResource::WrapperInput => &wrapper_bind_group.layout,
+            OcioGpuWgpuPipelineBindGroupResource::WrapperInput => wrapper_layout,
         });
     }
     Ok(layouts)
@@ -5488,6 +5850,18 @@ fn hash_resource_layout(signature: ResourceLayoutSignature) -> u64 {
     hasher.finish()
 }
 
+fn backend_object_cache_key(static_pipeline: &OcioGpuWgpuPreparedStaticPipeline) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    static_pipeline.resources.resources.resource_key.hash(&mut hasher);
+    static_pipeline.resources.binding_layout.layout_hash.hash(&mut hasher);
+    static_pipeline.wrapper_binding.layout_hash.hash(&mut hasher);
+    static_pipeline.pipeline_layout.layout_hash.hash(&mut hasher);
+    static_pipeline.wrapper_module_artifact.module_key.hash(&mut hasher);
+    static_pipeline.render_descriptor.descriptor_hash.hash(&mut hasher);
+    static_pipeline.render_descriptor.output_format.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn fullscreen_wrapper_contract_for(
     binding_contract: &OcioGpuBindingContract,
 ) -> OcioGpuFullscreenWrapperContract {
@@ -5965,6 +6339,47 @@ mod tests {
         let diagnostics = runtime.diagnostics();
         assert_eq!(diagnostics.resources.entries, 1);
         assert_eq!(diagnostics.wrapper_module_artifacts.entries, 0);
+    }
+
+    #[test]
+    fn backend_object_cache_key_is_stable_and_output_format_sensitive() {
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
+        let first = runtime
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("prepare first static pipeline");
+        let second = runtime
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("prepare second static pipeline");
+        let different_format = runtime
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba32Float)
+            .expect("prepare different static pipeline");
+
+        assert_eq!(
+            backend_object_cache_key(&first),
+            backend_object_cache_key(&second)
+        );
+        assert_ne!(
+            backend_object_cache_key(&first),
+            backend_object_cache_key(&different_format)
+        );
+    }
+
+    #[test]
+    fn backend_object_runtime_diagnostics_start_empty() {
+        let runtime = OcioGpuWgpuBackendObjectRuntime::default();
+
+        assert_eq!(
+            runtime.diagnostics(),
+            OcioGpuWgpuBackendObjectRuntimeDiagnostics {
+                entries: 0,
+                hits: 0,
+                misses: 0,
+                failures: 0,
+                wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache::default().diagnostics(),
+                render_pipelines: OcioGpuWgpuRenderPipelineCache::default().diagnostics(),
+            }
+        );
     }
 
     #[test]

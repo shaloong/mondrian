@@ -90,6 +90,16 @@ validated stage-split Naga wrapper modules, and the render-pipeline descriptor.
 It creates no concrete wgpu objects; backend object caches consume this static
 pipeline afterward.
 
+`OcioGpuWgpuBackendObjectRuntime` is the renderer-owned concrete-object runtime
+for that static pipeline. It uploads OCIO LUT and uniform payloads, validates
+the packed bind-resource contract, creates the OCIO bind group, creates a
+stable wrapper input bind-group layout, prepares wrapper shader modules,
+pipeline layout, render pipeline, and render-pass node, then caches the whole
+object bundle by resource/layout/module/output-format contract. Per-frame
+wrapper input bind groups must be created from the stable
+`OcioGpuWgpuPreparedWrapperInputLayout` so the bind group remains compatible
+with the render pipeline layout.
+
 `OcioGpuWgpuResourceCache` prepares and caches the backend binding-layout
 contract derived from that resource plan. OCIO bind-group entries use the
 descriptor set, uniform-buffer binding, texture binding start, and LUT binding

@@ -211,6 +211,10 @@ uniform buffers before backend resource planning continues.
 prepared resource layout, wrapper binding/layout, wrapper link/source,
 validated wrapper Naga artifacts, and render descriptor into one static
 pipeline contract before concrete wgpu object creation begins.
+`OcioGpuWgpuBackendObjectRuntime` owns concrete backend-object preparation for
+that static pipeline: LUT/uniform upload, bind-resource validation, OCIO bind
+group, stable wrapper input layout, wrapper shader modules, pipeline layout,
+render pipeline, and render-pass node are cached as one backend object bundle.
 `RenderGpuColorPassSchedule::record_wgpu_from_resources` is the single
 preview/export-facing entry point that resolves those table entries, prepares
 the wrapper bind group, and records the pass. `GpuColorFrameAllocationPlan`,
