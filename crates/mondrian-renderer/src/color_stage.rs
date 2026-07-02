@@ -335,28 +335,6 @@ pub struct RenderGpuOutputBoundaryBackendContext<'a> {
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
 
-/// Per-record backend context supplied to [`RenderGpuOutputBoundaryRuntime`].
-///
-/// The runtime owns the shader cache, GPU frame id allocator, and frame resource
-/// table. This context only carries backend objects whose lifetime belongs to
-/// the current render submission.
-pub struct RenderGpuOutputBoundaryRuntimeBackendContext<'a> {
-    /// wgpu device used for resource materialization and bind-group creation.
-    pub device: &'a wgpu::Device,
-    /// wgpu queue used for upload writes.
-    pub queue: &'a wgpu::Queue,
-    /// Command encoder receiving the color pass and optional readback copy.
-    pub encoder: &'a mut wgpu::CommandEncoder,
-    /// Prepared OCIO fullscreen render pipeline.
-    pub pipeline: &'a OcioGpuWgpuRenderPipeline,
-    /// Prepared OCIO resource bind group.
-    pub ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
-    /// Backend render-pass node for this color transform.
-    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
-    /// Load operation for the output color attachment.
-    pub load_op: wgpu::LoadOp<wgpu::Color>,
-}
-
 /// Per-record backend context for runtime-owned OCIO backend objects.
 ///
 /// The output runtime owns OCIO shader extraction, backend preparation, concrete
@@ -412,9 +390,9 @@ pub enum RenderGpuOutputBoundaryRuntimeRecordError {
 /// Renderer-owned state for native GPU final-output color boundaries.
 ///
 /// App/export code should hold one runtime per render backend lifetime. The
-/// runtime owns renderer-internal color resources and exposes executor-level
-/// recording so callers do not manage shader caches, frame ids, or frame tables
-/// directly.
+/// runtime owns renderer-internal color resources, OCIO shader extraction,
+/// backend-object preparation, and executor-level recording so callers only pass
+/// per-submission wgpu objects.
 pub struct RenderGpuOutputBoundaryRuntime {
     shader_cache: OcioGpuShaderCache,
     backend_prep: OcioGpuWgpuBackendPrepRuntime,
@@ -496,37 +474,6 @@ impl RenderGpuOutputBoundaryRuntime {
     /// Mutably borrow the runtime-owned concrete backend-object cache.
     pub fn backend_objects_mut(&mut self) -> &mut OcioGpuWgpuBackendObjectRuntime {
         &mut self.backend_objects
-    }
-
-    /// Plan and record a native GPU final display/export output boundary.
-    pub fn record_wgpu_output_boundary(
-        &mut self,
-        boundary: &RenderOutputColorBoundary,
-        frame: &CpuColorFrame,
-        output_texture_format: GpuColorFrameTextureFormat,
-        gpu_options: RenderColorTransformGpuOptions,
-        backend: RenderGpuOutputBoundaryRuntimeBackendContext<'_>,
-    ) -> Result<RenderGpuOutputStageRecord, RenderOutputColorBoundaryGpuRecordError> {
-        let Self { shader_cache, frame_ids, frame_table, .. } = self;
-        let mut executor = RenderOutputColorBoundaryExecutor::prefer_gpu(shader_cache, gpu_options);
-        executor.record_wgpu_output_boundary(
-            boundary,
-            RenderGpuOutputBoundaryRecordRequest {
-                ids: frame_ids,
-                frame,
-                output_texture_format,
-                backend: RenderGpuOutputBoundaryBackendContext {
-                    device: backend.device,
-                    queue: backend.queue,
-                    encoder: backend.encoder,
-                    pipeline: backend.pipeline,
-                    ocio_bind_group: backend.ocio_bind_group,
-                    pass_node: backend.pass_node,
-                    table: frame_table,
-                    load_op: backend.load_op,
-                },
-            },
-        )
     }
 
     /// Plan, prepare runtime-owned backend objects, and record a native GPU output boundary.

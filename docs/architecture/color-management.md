@@ -243,7 +243,7 @@ per-submission inputs are grouped in
 device, queue, encoder, and load operation without hand-threading wgpu
 pipelines, bind groups, pass nodes, or the frame table through each layer.
 Callers that already hold a stage or resource plan may use the lower-level
-recorders, but app/export scheduling should prefer the executor-level API so
+recorders, but app/export scheduling should prefer the runtime-owned boundary API so
 final-output policy remains renderer-owned. `GpuColorFrameReadbackPlan`
 and `GpuColorFrameReadback` are the only renderer-owned GPU-to-CPU boundary for
 encoded output frames; they currently read back only explicit `Rgba8Unorm` /

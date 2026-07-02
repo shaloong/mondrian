@@ -85,11 +85,11 @@ renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
 that planner. Its CPU-only mode is the current correctness execution path;
 its PreferGpu mode must produce GPU/upload/readback stages plus explicit
 blocker diagnostics instead of silently falling back to a CPU output stage.
-`RenderOutputColorBoundaryExecutor` is the app/export-facing execution boundary:
+`RenderOutputColorBoundaryExecutor` is the CPU final-output execution boundary:
 callers choose an explicit strategy at construction time, and the executor owns
 the final-output plan/execute sequence instead of exposing low-level transform
 executors to app/export code. CPU callers use `cpu_only().execute(...)`; native
-GPU app/export callers should use
+GPU app/export callers must use
 `RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
 with `RenderGpuOutputBoundaryRuntimeOwnedBackendContext`. GPU planning,
 backend-object preparation, or recording failures are reported structurally and
