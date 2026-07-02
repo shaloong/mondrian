@@ -16,9 +16,9 @@ use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, Sequence
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, CpuColorFrame, CpuEncodedColorFrame, RenderColorStageDiagnostics,
-    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
-    RenderOutputColorBoundary, RenderOutputColorBoundaryExecutor, TimelineAdjustmentLayer,
+    execute_cpu_input_stage, execute_cpu_output_boundary, CpuColorFrame, CpuEncodedColorFrame,
+    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderColorTransformDirection,
+    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
     TimelineSolidColorLayer,
@@ -1426,9 +1426,7 @@ fn composite_resolved_preview(
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    let mut output_executor = RenderOutputColorBoundaryExecutor::cpu_only();
-    output_executor
-        .execute(&working_frame, &boundary)
+    execute_cpu_output_boundary(&working_frame, &boundary)
         .map(|frame| PreviewCompositeOutput {
             rgba: frame.result.frame.into_rgba(),
             color_diagnostics: frame.result.diagnostics,
@@ -1544,7 +1542,6 @@ mod tests {
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_core::{Color, ProjectColorManagement};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
-    use mondrian_renderer::execute_cpu_output_boundary;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
 

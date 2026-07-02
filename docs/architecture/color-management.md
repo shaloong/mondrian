@@ -85,9 +85,10 @@ Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderOutputColorBoundary` from their `ColorContext` and
 pass typed working frames to renderer stage execution helpers; they must not
 construct display/export `RenderColorTransform` values or duplicate
-working -> output conversion logic locally. `RenderOutputColorBoundaryExecutor`
-is the preview/export execution boundary; its construction selects an explicit
-strategy and must not silently fall back between CPU and GPU execution.
+working -> output conversion logic locally. CPU reference execution uses
+`execute_cpu_output_boundary(...)`; app/export crates must not instantiate
+`RenderOutputColorBoundaryExecutor::cpu_only()` directly. Native GPU execution
+uses `RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`.
 `RenderOutputColorBoundaryPlanner` owns CPU-only versus PreferGpu stage
 selection for that boundary, and PreferGpu planning reports native blockers
 instead of falling back to CPU stages. The resulting

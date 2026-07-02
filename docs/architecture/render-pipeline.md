@@ -137,10 +137,11 @@ GPU-to-CPU output for encode, thumbnails, tests, or debug captures must use one
 of those renderer-owned paths; readback is valid only for explicit encoded RGBA8
 output contracts unless a future conversion stage says otherwise.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
-source boundaries and `RenderOutputColorBoundaryExecutor::cpu_only()` for final
-display or export output. The compatibility helper
-`execute_cpu_output_boundary(...)` delegates to that executor; app/export code
-should not call `execute_cpu_output_stage(...)` directly. Direct
+source boundaries and `execute_cpu_output_boundary(...)` for final display or
+export output. That CPU reference helper delegates to
+`RenderOutputColorBoundaryExecutor::cpu_only()`; app/export code should not
+instantiate the final-output executor directly or call
+`execute_cpu_output_stage(...)` for final timeline output. Direct
 `CpuColorTransformExecutor` usage is limited to renderer internals and its
 focused unit tests.
 
