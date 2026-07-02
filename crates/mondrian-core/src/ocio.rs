@@ -33,6 +33,17 @@ const MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH: &str = "embedded:mondrian_default_ocio
 const MONDRIAN_DEFAULT_OCIO_CONFIG: &str =
     include_str!("../assets/ocio/mondrian_default_ocio_v1.ocio");
 
+/// OCIO GPU function name generated for Mondrian wrapper shaders.
+pub const MONDRIAN_OCIO_GPU_FUNCTION_NAME: &str = "mondrian_ocio_main";
+/// OCIO GPU pixel variable name generated for Mondrian wrapper shaders.
+pub const MONDRIAN_OCIO_GPU_PIXEL_NAME: &str = "mondrian_ocio_pixel";
+/// OCIO GPU resource symbol prefix generated for Mondrian wrapper shaders.
+pub const MONDRIAN_OCIO_GPU_RESOURCE_PREFIX: &str = "mondrian_ocio_";
+/// OCIO GPU descriptor set used by Mondrian.
+pub const MONDRIAN_OCIO_GPU_DESCRIPTOR_SET_INDEX: u32 = 0;
+/// First OCIO GPU texture binding slot. Binding 0 is reserved for uniforms.
+pub const MONDRIAN_OCIO_GPU_TEXTURE_BINDING_START: u32 = 1;
+
 /// Return the pinned OCIO config text used by Mondrian Standard mode.
 pub fn mondrian_default_ocio_config_text() -> &'static str {
     MONDRIAN_DEFAULT_OCIO_CONFIG
@@ -823,13 +834,16 @@ pub fn extract_ocio_display_gpu_shader_bundle(
 fn configured_gpu_shader_desc(language: GpuLanguage) -> Result<GpuShaderDesc, String> {
     let desc = GpuShaderDesc::create().map_err(|e| format!("OCIO GPU shader desc: {e}"))?;
     desc.set_language(language);
-    desc.set_function_name("mondrian_ocio_main")
+    desc.set_function_name(MONDRIAN_OCIO_GPU_FUNCTION_NAME)
         .map_err(|e| format!("OCIO GPU shader function name: {e}"))?;
-    desc.set_pixel_name("mondrian_ocio_pixel")
+    desc.set_pixel_name(MONDRIAN_OCIO_GPU_PIXEL_NAME)
         .map_err(|e| format!("OCIO GPU shader pixel name: {e}"))?;
-    desc.set_resource_prefix("mondrian_ocio_")
+    desc.set_resource_prefix(MONDRIAN_OCIO_GPU_RESOURCE_PREFIX)
         .map_err(|e| format!("OCIO GPU shader resource prefix: {e}"))?;
-    desc.set_descriptor_set_index(0, 1);
+    desc.set_descriptor_set_index(
+        MONDRIAN_OCIO_GPU_DESCRIPTOR_SET_INDEX,
+        MONDRIAN_OCIO_GPU_TEXTURE_BINDING_START,
+    );
     Ok(desc)
 }
 

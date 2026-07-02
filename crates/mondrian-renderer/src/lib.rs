@@ -45,7 +45,8 @@ pub use gpu_backend::{
     gpu_enabled, set_gpu_enabled, GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason,
 };
 pub use ocio_gpu::{
-    OcioGpuBindingContract, OcioGpuFullscreenWrapperContract, OcioGpuShaderCache,
+    OcioGpuBindingContract, OcioGpuFullscreenWrapperContract, OcioGpuGeneratedProgramContract,
+    OcioGpuGeneratedProgramDiagnostic, OcioGpuGeneratedProgramSourceKind, OcioGpuShaderCache,
     OcioGpuShaderCacheDiagnostics, OcioGpuShaderDiagnostic, OcioGpuShaderError, OcioGpuShaderPlan,
     OcioGpuShaderRequest, OcioGpuShaderStage, OcioGpuShaderTargetLanguage,
     OcioGpuShaderTranslationCache, OcioGpuShaderTranslationCacheDiagnostics,
@@ -77,6 +78,7 @@ pub use ocio_gpu::{
     OcioGpuWgpuUploadedUniformMismatch, OcioGpuWgpuWrapperBindGroup,
     OcioGpuWgpuWrapperBindingEntry, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperBindingResource, OcioGpuWgpuWrapperInputResources,
+    OcioGpuWgpuWrapperLinkBlocker, OcioGpuWgpuWrapperLinkPlan,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{

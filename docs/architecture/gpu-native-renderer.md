@@ -160,13 +160,18 @@ wrapper input bind group into a stable pipeline-layout contract, and
 `OcioGpuWgpuPipelineLayoutPreparer` can create the concrete
 `wgpu::PipelineLayout` once both bind groups have been prepared.
 `OcioGpuWgpuFullscreenShaderContract` records Mondrian's fullscreen vertex and
-fragment entry points, output location, and draw topology. The contract still
-marks `requires_ocio_program_link = true`: the fragment wrapper must be linked
-with the OCIO-generated program and must call the OCIO transform before a real
-render pipeline can execute. `OcioGpuWgpuRenderPipelineDescriptorPlan` captures
-the output target format and render-pipeline descriptor hash, but it remains a
-contract rather than an executable pipeline until that wrapper/program link is
-implemented and verified.
+fragment entry points, output location, and draw topology.
+`OcioGpuGeneratedProgramContract` analyzes the OCIO-generated source using the
+function name, pixel variable, and resource prefix configured by
+`mondrian-core`; it distinguishes callable OCIO programs from complete fragment
+shaders or unknown source shapes. `OcioGpuWgpuWrapperLinkPlan` combines that
+program contract with Mondrian's fullscreen wrapper contract and reports
+structured blockers such as missing function names, missing pixel variables, or
+complete fragment shaders that must be split before wrapping.
+`OcioGpuWgpuRenderPipelineDescriptorPlan` consumes the wrapper-link plan and
+captures the output target format plus render-pipeline descriptor hash. It
+remains a contract rather than an executable pipeline until Mondrian generates
+and validates the final wrapper shader module and render-pass node.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /

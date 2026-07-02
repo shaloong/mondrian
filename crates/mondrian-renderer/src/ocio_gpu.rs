@@ -3,6 +3,8 @@ use mondrian_core::{
     extract_ocio_display_gpu_shader_bundle, extract_ocio_gpu_shader_bundle, ColorSpace,
     GpuLanguage, OcioGpuShaderBundle, OcioGpuTextureChannel, OcioGpuTextureDimensions,
     OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
+    MONDRIAN_OCIO_GPU_FUNCTION_NAME, MONDRIAN_OCIO_GPU_PIXEL_NAME,
+    MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
 };
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
@@ -120,6 +122,168 @@ impl OcioGpuShaderPlan {
     /// Borrow the full OCIO shader bundle.
     pub fn bundle(&self) -> &OcioGpuShaderBundle {
         &self.bundle
+    }
+}
+
+/// Shape of an OCIO-generated GPU program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuGeneratedProgramSourceKind {
+    /// OCIO emitted a callable color function/program without a fragment entry point.
+    CallableFunction,
+    /// OCIO emitted a complete fragment shader entry point.
+    CompleteFragmentShader,
+    /// The generated source does not match a known linkable shape.
+    Unknown,
+}
+
+/// Diagnostic observed while analyzing an OCIO-generated GPU program.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum OcioGpuGeneratedProgramDiagnostic {
+    /// The expected OCIO function name is not present in the generated source.
+    MissingFunctionName { function_name: String },
+    /// The expected OCIO pixel variable name is not present in the generated source.
+    MissingPixelName { pixel_name: String },
+    /// The generated source already contains a fragment `main` entry point.
+    ContainsFragmentMain,
+}
+
+/// Renderer-facing contract for the OCIO-generated GPU program.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuGeneratedProgramContract {
+    /// Stable hash of the OCIO-generated shader source.
+    pub shader_hash: u64,
+    /// OCIO function name configured in `mondrian-core`.
+    pub function_name: String,
+    /// OCIO pixel variable name configured in `mondrian-core`.
+    pub pixel_name: String,
+    /// OCIO resource symbol prefix configured in `mondrian-core`.
+    pub resource_prefix: String,
+    /// Detected source shape.
+    pub source_kind: OcioGpuGeneratedProgramSourceKind,
+    /// Whether the expected function name appears in the source.
+    pub function_present: bool,
+    /// Whether the expected pixel variable name appears in the source.
+    pub pixel_name_present: bool,
+    /// Whether the source contains a fragment `main` entry point.
+    pub main_function_present: bool,
+    /// Diagnostics that affect wrapper-link readiness.
+    pub diagnostics: Vec<OcioGpuGeneratedProgramDiagnostic>,
+}
+
+impl OcioGpuGeneratedProgramContract {
+    /// Analyze the OCIO-generated shader source carried by a shader plan.
+    pub fn for_shader_plan(plan: &OcioGpuShaderPlan) -> Self {
+        Self::analyze(plan.shader_hash, &plan.bundle().shader_text)
+    }
+
+    /// Analyze raw OCIO-generated shader source.
+    pub fn analyze(shader_hash: u64, shader_text: &str) -> Self {
+        let function_name = MONDRIAN_OCIO_GPU_FUNCTION_NAME.to_owned();
+        let pixel_name = MONDRIAN_OCIO_GPU_PIXEL_NAME.to_owned();
+        let resource_prefix = MONDRIAN_OCIO_GPU_RESOURCE_PREFIX.to_owned();
+        let function_present = shader_text.contains(MONDRIAN_OCIO_GPU_FUNCTION_NAME);
+        let pixel_name_present = shader_text.contains(MONDRIAN_OCIO_GPU_PIXEL_NAME);
+        let main_function_present = contains_glsl_main(shader_text);
+        let source_kind = match (function_present, main_function_present) {
+            (true, false) => OcioGpuGeneratedProgramSourceKind::CallableFunction,
+            (true, true) => OcioGpuGeneratedProgramSourceKind::CompleteFragmentShader,
+            (false, true) => OcioGpuGeneratedProgramSourceKind::CompleteFragmentShader,
+            (false, false) => OcioGpuGeneratedProgramSourceKind::Unknown,
+        };
+        let mut diagnostics = Vec::new();
+        if !function_present {
+            diagnostics.push(OcioGpuGeneratedProgramDiagnostic::MissingFunctionName {
+                function_name: function_name.clone(),
+            });
+        }
+        if !pixel_name_present {
+            diagnostics.push(OcioGpuGeneratedProgramDiagnostic::MissingPixelName {
+                pixel_name: pixel_name.clone(),
+            });
+        }
+        if main_function_present {
+            diagnostics.push(OcioGpuGeneratedProgramDiagnostic::ContainsFragmentMain);
+        }
+        Self {
+            shader_hash,
+            function_name,
+            pixel_name,
+            resource_prefix,
+            source_kind,
+            function_present,
+            pixel_name_present,
+            main_function_present,
+            diagnostics,
+        }
+    }
+
+    /// Whether Mondrian can link this program into its fullscreen wrapper.
+    pub fn is_wrapper_linkable(&self) -> bool {
+        self.function_present
+            && self.pixel_name_present
+            && self.source_kind == OcioGpuGeneratedProgramSourceKind::CallableFunction
+    }
+}
+
+/// Missing piece before Mondrian can link an OCIO program into its fullscreen wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuWrapperLinkBlocker {
+    /// OCIO did not emit the configured callable function name.
+    MissingFunctionName { function_name: String },
+    /// OCIO did not emit the configured pixel variable name.
+    MissingPixelName { pixel_name: String },
+    /// OCIO emitted a complete fragment shader, not a callable wrapper program.
+    CompleteFragmentShaderRequiresSplit,
+    /// The generated program source shape is unknown.
+    UnknownProgramShape,
+}
+
+/// Pure link plan between the OCIO generated program and Mondrian's fullscreen wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuWrapperLinkPlan {
+    /// Stable resource key this link plan belongs to.
+    pub resource_key: u64,
+    /// Stable hash of the OCIO-generated shader source.
+    pub shader_hash: u64,
+    /// OCIO generated program contract.
+    pub program_contract: OcioGpuGeneratedProgramContract,
+    /// Fullscreen wrapper shader contract.
+    pub shader_contract: OcioGpuWgpuFullscreenShaderContract,
+    /// Blockers that prevent wrapper shader generation.
+    pub blockers: Vec<OcioGpuWgpuWrapperLinkBlocker>,
+    /// Stable hash of the link plan.
+    pub link_hash: u64,
+}
+
+impl OcioGpuWgpuWrapperLinkPlan {
+    /// Build a wrapper-link plan from a shader plan and renderer resource contract.
+    pub fn for_shader_plan(
+        shader_plan: &OcioGpuShaderPlan,
+        resources: &OcioGpuWgpuResourcePlan,
+    ) -> Self {
+        let program_contract = OcioGpuGeneratedProgramContract::for_shader_plan(shader_plan);
+        let shader_contract =
+            OcioGpuWgpuFullscreenShaderContract::for_wrapper_contract(&resources.wrapper_contract);
+        let blockers = wrapper_link_blockers(&program_contract);
+        let link_hash = hash_wrapper_link_plan(
+            resources.resource_key,
+            shader_plan.shader_hash,
+            &program_contract,
+            &shader_contract,
+        );
+        Self {
+            resource_key: resources.resource_key,
+            shader_hash: shader_plan.shader_hash,
+            program_contract,
+            shader_contract,
+            blockers,
+            link_hash,
+        }
+    }
+
+    /// Whether this link plan can generate a wrapper shader.
+    pub fn can_link(&self) -> bool {
+        self.blockers.is_empty()
     }
 }
 
@@ -1559,20 +1723,20 @@ impl OcioGpuWgpuRenderPipelineDescriptorPlan {
     pub fn for_pipeline_layout(
         resources: &OcioGpuWgpuResourcePlan,
         pipeline_layout: &OcioGpuWgpuPipelineLayoutPlan,
+        wrapper_link: &OcioGpuWgpuWrapperLinkPlan,
         output_format: OcioGpuWgpuColorTargetFormat,
     ) -> Self {
-        let shader_contract =
-            OcioGpuWgpuFullscreenShaderContract::for_wrapper_contract(&resources.wrapper_contract);
         let descriptor_hash = hash_render_pipeline_descriptor(
             resources.resource_key,
             pipeline_layout.layout_hash,
-            &shader_contract,
+            wrapper_link.link_hash,
+            &wrapper_link.shader_contract,
             output_format,
         );
         Self {
             resource_key: resources.resource_key,
             pipeline_layout_hash: pipeline_layout.layout_hash,
-            shader_contract,
+            shader_contract: wrapper_link.shader_contract.clone(),
             output_format,
             descriptor_hash,
         }
@@ -2950,6 +3114,27 @@ fn is_glsl_language(language: GpuLanguage) -> bool {
     )
 }
 
+fn contains_glsl_main(shader_text: &str) -> bool {
+    shader_text.match_indices("main").any(|(index, _)| {
+        let before = shader_text[..index].chars().next_back();
+        let after_index = index.saturating_add("main".len());
+        let after = shader_text[after_index..].chars().next();
+        let ident_before = before.is_some_and(is_glsl_identifier_char);
+        let ident_after = after.is_some_and(is_glsl_identifier_char);
+        !ident_before
+            && !ident_after
+            && next_non_whitespace_is_open_paren(&shader_text[after_index..])
+    })
+}
+
+fn is_glsl_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn next_non_whitespace_is_open_paren(text: &str) -> bool {
+    text.chars().find(|ch| !ch.is_whitespace()) == Some('(')
+}
+
 fn binding_contract_for_plan(plan: &OcioGpuShaderPlan) -> OcioGpuBindingContract {
     let bundle = plan.bundle();
     OcioGpuBindingContract {
@@ -3142,15 +3327,57 @@ fn hash_pipeline_layout_plan(
 fn hash_render_pipeline_descriptor(
     resource_key: u64,
     pipeline_layout_hash: u64,
+    wrapper_link_hash: u64,
     shader_contract: &OcioGpuWgpuFullscreenShaderContract,
     output_format: OcioGpuWgpuColorTargetFormat,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     resource_key.hash(&mut hasher);
     pipeline_layout_hash.hash(&mut hasher);
+    wrapper_link_hash.hash(&mut hasher);
     shader_contract.hash(&mut hasher);
     output_format.hash(&mut hasher);
     hasher.finish()
+}
+
+fn hash_wrapper_link_plan(
+    resource_key: u64,
+    shader_hash: u64,
+    program_contract: &OcioGpuGeneratedProgramContract,
+    shader_contract: &OcioGpuWgpuFullscreenShaderContract,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    resource_key.hash(&mut hasher);
+    shader_hash.hash(&mut hasher);
+    program_contract.hash(&mut hasher);
+    shader_contract.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn wrapper_link_blockers(
+    contract: &OcioGpuGeneratedProgramContract,
+) -> Vec<OcioGpuWgpuWrapperLinkBlocker> {
+    let mut blockers = Vec::new();
+    if !contract.function_present {
+        blockers.push(OcioGpuWgpuWrapperLinkBlocker::MissingFunctionName {
+            function_name: contract.function_name.clone(),
+        });
+    }
+    if !contract.pixel_name_present {
+        blockers.push(OcioGpuWgpuWrapperLinkBlocker::MissingPixelName {
+            pixel_name: contract.pixel_name.clone(),
+        });
+    }
+    match contract.source_kind {
+        OcioGpuGeneratedProgramSourceKind::CallableFunction => {}
+        OcioGpuGeneratedProgramSourceKind::CompleteFragmentShader => {
+            blockers.push(OcioGpuWgpuWrapperLinkBlocker::CompleteFragmentShaderRequiresSplit);
+        }
+        OcioGpuGeneratedProgramSourceKind::Unknown => {
+            blockers.push(OcioGpuWgpuWrapperLinkBlocker::UnknownProgramShape);
+        }
+    }
+    blockers
 }
 
 fn pipeline_layout_bind_group_layouts<'a>(
@@ -3997,6 +4224,40 @@ mod tests {
         }
     }
 
+    fn shader_plan_with_text(shader_text: &str) -> OcioGpuShaderPlan {
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: ColorSpace::Rec709,
+            dst: ColorSpace::Srgb,
+            language: GpuLanguage::Glsl4_0,
+        };
+        let bundle = Arc::new(OcioGpuShaderBundle {
+            src_color_space: "test-src".to_owned(),
+            dst_color_space: "test-dst".to_owned(),
+            language: GpuLanguage::Glsl4_0,
+            shader_text: shader_text.to_owned(),
+            descriptor_set_index: 0,
+            texture_binding_start: 1,
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: 0,
+            texture_2d_count: 0,
+            texture_3d_count: 0,
+            uniform_count: 0,
+            textures_2d: Vec::new(),
+            textures_3d: Vec::new(),
+            uniforms: Vec::new(),
+            cache_id: Some("test-cache".to_owned()),
+        });
+        plan_from_bundle(request, bundle)
+    }
+
+    fn callable_ocio_program_text() -> &'static str {
+        r#"
+            void mondrian_ocio_main(inout vec4 mondrian_ocio_pixel) {
+                mondrian_ocio_pixel.rgb = clamp(mondrian_ocio_pixel.rgb, vec3(0.0), vec3(1.0));
+            }
+        "#
+    }
+
     fn packed_luts_for_bind_resource(resource_key: u64) -> OcioGpuWgpuPackedLutUploadPlan {
         let texture_2d = texture_2d_upload(
             OcioGpuTextureChannel::Rgb,
@@ -4360,21 +4621,92 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_layout_and_render_descriptor_preserve_fullscreen_contract() {
+    fn wrapper_link_plan_accepts_callable_ocio_program_shape() {
         let resources = bind_resource_test_plan(42);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+
+        assert!(link_plan.can_link());
+        assert_eq!(
+            link_plan.program_contract.source_kind,
+            OcioGpuGeneratedProgramSourceKind::CallableFunction
+        );
+        assert!(link_plan.program_contract.function_present);
+        assert!(link_plan.program_contract.pixel_name_present);
+        assert!(!link_plan.program_contract.main_function_present);
+        assert!(link_plan.blockers.is_empty());
+        assert_ne!(link_plan.link_hash, 0);
+    }
+
+    #[test]
+    fn wrapper_link_plan_blocks_complete_fragment_shader_shape() {
+        let resources = bind_resource_test_plan(43);
+        let shader_plan = shader_plan_with_text(
+            r#"
+                void mondrian_ocio_main(inout vec4 mondrian_ocio_pixel) {
+                    mondrian_ocio_pixel = vec4(1.0);
+                }
+                void main() {}
+            "#,
+        );
+
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+
+        assert!(!link_plan.can_link());
+        assert_eq!(
+            link_plan.program_contract.source_kind,
+            OcioGpuGeneratedProgramSourceKind::CompleteFragmentShader
+        );
+        assert!(link_plan
+            .blockers
+            .contains(&OcioGpuWgpuWrapperLinkBlocker::CompleteFragmentShaderRequiresSplit));
+    }
+
+    #[test]
+    fn wrapper_link_plan_blocks_missing_function_and_pixel_contract() {
+        let resources = bind_resource_test_plan(44);
+        let shader_plan =
+            shader_plan_with_text("vec4 unrelated_color(vec4 color) { return color; }");
+
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+
+        assert!(!link_plan.can_link());
+        assert_eq!(
+            link_plan.program_contract.source_kind,
+            OcioGpuGeneratedProgramSourceKind::Unknown
+        );
+        assert!(link_plan.blockers.iter().any(|blocker| matches!(
+            blocker,
+            OcioGpuWgpuWrapperLinkBlocker::MissingFunctionName { .. }
+        )));
+        assert!(link_plan.blockers.iter().any(|blocker| matches!(
+            blocker,
+            OcioGpuWgpuWrapperLinkBlocker::MissingPixelName { .. }
+        )));
+        assert!(link_plan.blockers.contains(&OcioGpuWgpuWrapperLinkBlocker::UnknownProgramShape));
+    }
+
+    #[test]
+    fn pipeline_layout_and_render_descriptor_preserve_fullscreen_contract() {
+        let resources = bind_resource_test_plan(45);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
         let ocio_layout =
             resources.binding_layout_plan().expect("binding layout with separated samplers");
         let wrapper_layout =
             OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
             &resources,
             &ocio_layout,
             &wrapper_layout,
         );
+        assert!(link_plan.can_link());
         let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
             &resources,
             &pipeline_layout,
+            &link_plan,
             OcioGpuWgpuColorTargetFormat::Rgba16Float,
         );
 
@@ -4402,16 +4734,7 @@ mod tests {
             render_descriptor.pipeline_layout_hash,
             pipeline_layout.layout_hash
         );
-        assert_eq!(
-            render_descriptor.shader_contract,
-            OcioGpuWgpuFullscreenShaderContract {
-                vertex_entry_point: "vs_main".to_owned(),
-                fragment_entry_point: "fs_main".to_owned(),
-                topology: OcioGpuWgpuFullscreenTopology::TriangleStrip,
-                output_location: resources.wrapper_contract.output_location,
-                requires_ocio_program_link: true,
-            }
-        );
+        assert_eq!(render_descriptor.shader_contract, link_plan.shader_contract);
         assert_eq!(
             render_descriptor.output_format,
             OcioGpuWgpuColorTargetFormat::Rgba16Float
@@ -4567,6 +4890,17 @@ mod tests {
         );
         assert_ne!(resources.resource_key, 0);
         assert_ne!(resources.pipeline_layout_hash, 0);
+        let program_contract = OcioGpuGeneratedProgramContract::for_shader_plan(&first);
+        assert!(program_contract.function_present);
+        assert!(program_contract.pixel_name_present);
+        assert_ne!(
+            program_contract.source_kind,
+            OcioGpuGeneratedProgramSourceKind::Unknown
+        );
+        let wrapper_link = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&first, &resources);
+        assert_eq!(wrapper_link.resource_key, resources.resource_key);
+        assert_eq!(wrapper_link.shader_hash, first.shader_hash);
+        assert_ne!(wrapper_link.link_hash, 0);
         let binding_layout =
             resources.binding_layout_plan().expect("binding layout with separated samplers");
         assert_eq!(
