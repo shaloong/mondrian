@@ -220,7 +220,10 @@ those concrete resource plans: it consumes the explicit
 `UploadToGpu -> GpuColorTransform -> optional ReadbackToCpu` stage shape,
 allocates stable GPU frame handles, creates the CPU upload and output target
 allocation plans, and produces a transfer-resolved GPU transform for
-`RenderGpuColorPassSchedule`.
+`RenderGpuColorPassSchedule`. Its materializer uploads and allocates wgpu
+resources through `GpuColorFrameUploader`, validates both planned table slots,
+and inserts the resources into `GpuColorFrameResourceTable` without leaving a
+partially materialized stage when a contract conflict exists.
 `GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
 encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
 unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only

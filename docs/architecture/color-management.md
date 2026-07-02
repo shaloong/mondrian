@@ -194,14 +194,17 @@ entry points for allocating render targets and uploading CPU boundary frames
 into `GpuColorFrameResourceTable`. `RenderGpuOutputStageResourcePlan` maps a
 validated `RenderColorStagePlan` into those upload/allocation plans and a
 transfer-resolved GPU transform that can be scheduled without callers mutating
-transform internals. `GpuColorFrameReadbackPlan` and `GpuColorFrameReadback`
-are the only renderer-owned GPU-to-CPU boundary for encoded output frames; they
-currently read back only explicit `Rgba8Unorm` / `EncodedRgba8` contracts and do
-not reinterpret float targets. Until preview/export frame evaluation calls these
-entries and then records through `record_wgpu_from_resources`, CPU processor
-execution is the correctness path and the cached shader/module/upload/
-bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are the
-production boundary for GPU integration work.
+transform internals. Its materialization path uploads/allocates resources and
+preflights resource-table slots before inserting, so preview/export does not
+hand-assemble table entries. `GpuColorFrameReadbackPlan` and
+`GpuColorFrameReadback` are the only renderer-owned GPU-to-CPU boundary for
+encoded output frames; they currently read back only explicit `Rgba8Unorm` /
+`EncodedRgba8` contracts and do not reinterpret float targets. Until
+preview/export frame evaluation calls these entries and then records through
+`record_wgpu_from_resources`, CPU processor execution is the correctness path
+and the cached shader/module/upload/bind-resource/layout/bind-group/wrapper-
+link/pipeline-contract plans are the production boundary for GPU integration
+work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

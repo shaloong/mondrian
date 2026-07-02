@@ -38,6 +38,7 @@ pub use color_stage::{
     RenderColorStagePlan, RenderColorStagePlanner, RenderGpuColorPassExecutionError,
     RenderGpuColorPassInputView, RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
     RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView,
+    RenderGpuOutputStageMaterializeError, RenderGpuOutputStageMaterializedResources,
     RenderGpuOutputStageResourcePlan, RenderGpuOutputStageResourcePlanError,
 };
 pub use color_transform::{

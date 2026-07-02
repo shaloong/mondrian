@@ -3,14 +3,14 @@ use crate::{
     CpuColorTransformExecutor, CpuEncodedColorFrame, GpuColorFrameAllocationPlan,
     GpuColorFrameHandle, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameWgpuResource,
-    OcioGpuShaderCache, OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuColorTargetFormat,
-    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuRenderPassError, OcioGpuWgpuRenderPassNodePlan,
-    OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget, OcioGpuWgpuRenderPipeline,
-    OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan, OcioGpuWgpuWrapperInputResources,
-    RenderColorTransform, RenderColorTransformError, RenderColorTransformGpuOptions,
-    RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner, RenderInputTransform,
-    RenderInputTransformResult, RenderOutputTransformResult,
+    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
+    GpuColorFrameWgpuResource, OcioGpuShaderCache, OcioGpuWgpuBindGroupPreparer,
+    OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup, OcioGpuWgpuRenderPassError,
+    OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
+    OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
+    OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
+    RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
+    RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
 };
 
 /// Preferred execution mode for a renderer color transform stage.
@@ -261,6 +261,15 @@ pub struct RenderGpuOutputStageResourcePlan {
     pub transform: RenderColorTransformGpuPlan,
 }
 
+/// Handles materialized into a GPU frame resource table for one output stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderGpuOutputStageMaterializedResources {
+    /// Input GPU frame inserted into the table.
+    pub input: GpuColorFrameHandle,
+    /// Output GPU frame inserted into the table.
+    pub output: GpuColorFrameHandle,
+}
+
 impl RenderGpuOutputStageResourcePlan {
     /// Build resource plans for a CPU working frame entering a planned native GPU output transform.
     pub fn from_cpu_working_frame(
@@ -321,6 +330,59 @@ impl RenderGpuOutputStageResourcePlan {
             transform,
         })
     }
+
+    /// Insert already-materialized resources into a GPU color frame resource table.
+    pub fn insert_resources<R>(
+        &self,
+        table: &mut GpuColorFrameResourceTable<R>,
+        input: GpuColorFrameResource<R>,
+        output: GpuColorFrameResource<R>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
+        if input.handle() != &self.input {
+            return Err(
+                RenderGpuOutputStageMaterializeError::InputResourceMismatch {
+                    expected: self.input.clone(),
+                    actual: input.handle().clone(),
+                },
+            );
+        }
+        if output.handle() != &self.output {
+            return Err(
+                RenderGpuOutputStageMaterializeError::OutputResourceMismatch {
+                    expected: self.output.clone(),
+                    actual: output.handle().clone(),
+                },
+            );
+        }
+        validate_materialization_table_slot(table, &self.input)?;
+        validate_materialization_table_slot(table, &self.output)?;
+        table
+            .insert(input)
+            .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+        table
+            .insert(output)
+            .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+        Ok(RenderGpuOutputStageMaterializedResources {
+            input: self.input.clone(),
+            output: self.output.clone(),
+        })
+    }
+
+    /// Upload/allocate this stage's wgpu resources and insert them into a resource table.
+    pub fn materialize_wgpu(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
+        validate_materialization_table_slot(table, &self.input)?;
+        validate_materialization_table_slot(table, &self.output)?;
+        let input = GpuColorFrameUploader::upload(device, queue, &self.input_upload);
+        let output = GpuColorFrameUploader::allocate(device, &self.output_allocation);
+        self.insert_resources(table, input, output)
+    }
 }
 
 /// Error returned when GPU output stage resources cannot be planned.
@@ -354,6 +416,27 @@ pub enum RenderGpuOutputStageResourcePlanError {
     InputUpload(GpuColorFrameUploadError),
     /// The output GPU handle could not be created.
     OutputHandle(crate::GpuColorFrameHandleError),
+}
+
+/// Error returned when planned GPU output stage resources cannot be materialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputStageMaterializeError {
+    /// The provided input resource does not match the planned input handle.
+    InputResourceMismatch {
+        /// Expected planned handle.
+        expected: GpuColorFrameHandle,
+        /// Actual resource handle.
+        actual: GpuColorFrameHandle,
+    },
+    /// The provided output resource does not match the planned output handle.
+    OutputResourceMismatch {
+        /// Expected planned handle.
+        expected: GpuColorFrameHandle,
+        /// Actual resource handle.
+        actual: GpuColorFrameHandle,
+    },
+    /// Resource table rejected one of the materialized resources.
+    ResourceTable(GpuColorFrameResourceTableError),
 }
 
 impl RenderGpuColorPassSchedule {
@@ -1000,6 +1083,16 @@ fn planned_gpu_upload_transform_readback(
     })
 }
 
+fn validate_materialization_table_slot<R>(
+    table: &GpuColorFrameResourceTable<R>,
+    handle: &GpuColorFrameHandle,
+) -> Result<(), RenderGpuOutputStageMaterializeError> {
+    match table.get(handle) {
+        Ok(_) | Err(GpuColorFrameResourceTableError::MissingFrame { .. }) => Ok(()),
+        Err(err) => Err(RenderGpuOutputStageMaterializeError::ResourceTable(err)),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum RenderGpuColorPassExecutionFrameRole {
     Input,
@@ -1605,6 +1698,99 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn gpu_output_stage_resource_plan_inserts_materialized_resources() {
+        let resources = executable_gpu_output_stage_resources(600);
+        let mut table = GpuColorFrameResourceTable::new();
+
+        let materialized = resources
+            .insert_resources(
+                &mut table,
+                GpuColorFrameResource::new(resources.input.clone(), "input-resource"),
+                GpuColorFrameResource::new(resources.output.clone(), "output-resource"),
+            )
+            .expect("insert materialized resources");
+
+        assert_eq!(materialized.input, resources.input);
+        assert_eq!(materialized.output, resources.output);
+        assert_eq!(
+            table.get(&resources.input).expect("input").resource(),
+            &"input-resource"
+        );
+        assert_eq!(
+            table.get(&resources.output).expect("output").resource(),
+            &"output-resource"
+        );
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_rejects_mismatched_materialized_input() {
+        let resources = executable_gpu_output_stage_resources(610);
+        let wrong_input = gpu_handle(
+            999,
+            resources.input.descriptor(),
+            "wrong-materialized-input",
+        );
+        let mut table = GpuColorFrameResourceTable::new();
+
+        let err = resources
+            .insert_resources(
+                &mut table,
+                GpuColorFrameResource::new(wrong_input.clone(), "wrong-input"),
+                GpuColorFrameResource::new(resources.output.clone(), "output-resource"),
+            )
+            .expect_err("wrong input handle must fail");
+
+        assert_eq!(
+            err,
+            RenderGpuOutputStageMaterializeError::InputResourceMismatch {
+                expected: resources.input,
+                actual: wrong_input
+            }
+        );
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_surfaces_resource_table_conflicts() {
+        let resources = executable_gpu_output_stage_resources(620);
+        let mut stale_descriptor = resources.output.descriptor();
+        stale_descriptor.color_space = ColorSpace::Rec2020;
+        let stale_output = gpu_handle_with_format(
+            resources.output.id().raw(),
+            stale_descriptor,
+            resources.output.texture_format(),
+            "stale-output",
+        );
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(stale_output.clone(), "stale"))
+            .expect("insert stale output");
+
+        let err = resources
+            .insert_resources(
+                &mut table,
+                GpuColorFrameResource::new(resources.input.clone(), "input-resource"),
+                GpuColorFrameResource::new(resources.output.clone(), "output-resource"),
+            )
+            .expect_err("table conflict must surface");
+
+        assert_eq!(
+            err,
+            RenderGpuOutputStageMaterializeError::ResourceTable(
+                GpuColorFrameResourceTableError::ContractMismatch {
+                    id: resources.output.id(),
+                    expected: resources.output.contract(),
+                    actual: stale_output.contract()
+                }
+            )
+        );
+        assert!(matches!(
+            table.get(&resources.input),
+            Err(GpuColorFrameResourceTableError::MissingFrame { .. })
+        ));
+    }
+
     fn assert_stage_chain_is_contiguous(plan: &RenderColorStagePlan) {
         for pair in plan.stages.windows(2) {
             assert_eq!(pair[0].output(), pair[1].input());
@@ -1673,6 +1859,20 @@ mod tests {
                 plan.wgpu.blockers.clear();
             }
         }
+    }
+
+    fn executable_gpu_output_stage_resources(first_id: u64) -> RenderGpuOutputStageResourcePlan {
+        let frame = cpu_working_frame();
+        let mut stage_plan = gpu_output_stage_plan_for_frame(&frame);
+        clear_gpu_stage_blockers(&mut stage_plan);
+        let mut ids = GpuColorFrameIdAllocator::new(first_id);
+        RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+        )
+        .expect("GPU output stage resources")
     }
 
     fn gpu_handle(
