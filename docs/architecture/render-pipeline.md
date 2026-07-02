@@ -93,9 +93,10 @@ GPU callers use `prefer_gpu(...).record_wgpu_output_boundary(...)` with a
 `RenderGpuOutputBoundaryBackendContext`. GPU planning or recording failures are
 reported structurally and must not silently run the CPU executor.
 App/export integrations should hold a `RenderGpuOutputBoundaryRuntime` per
-renderer backend lifetime. The runtime owns the OCIO shader cache, GPU frame id
-allocator, and GPU frame resource table, and exposes an executor-level record
-method that accepts only the per-submission backend context.
+renderer backend lifetime. The runtime owns the OCIO shader cache, pure backend
+prep cache, concrete backend-object cache, GPU frame id allocator, and GPU
+frame resource table, and exposes an executor-level record method that accepts
+only the per-submission backend context.
 For native GPU OCIO execution, `RenderGpuColorPassSchedule` is the bridge
 between the stage plan and backend recorder: it requires GPU-resident source and
 target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a

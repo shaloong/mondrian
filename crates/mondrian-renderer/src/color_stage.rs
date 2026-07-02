@@ -6,6 +6,8 @@ use crate::{
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
     GpuColorFrameWgpuResource, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
+    OcioGpuWgpuBackendObjectRuntime, OcioGpuWgpuBackendObjectRuntimeDiagnostics,
+    OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
     OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
     OcioGpuWgpuRenderPassError, OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder,
     OcioGpuWgpuRenderPassTarget, OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup,
@@ -383,6 +385,8 @@ pub enum RenderGpuOutputBoundaryRecordError {
 /// directly.
 pub struct RenderGpuOutputBoundaryRuntime {
     shader_cache: OcioGpuShaderCache,
+    backend_prep: OcioGpuWgpuBackendPrepRuntime,
+    backend_objects: OcioGpuWgpuBackendObjectRuntime,
     frame_ids: GpuColorFrameIdAllocator,
     frame_table: GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
 }
@@ -397,6 +401,8 @@ impl RenderGpuOutputBoundaryRuntime {
     pub fn with_first_frame_id(first_frame_id: u64) -> Self {
         Self {
             shader_cache: OcioGpuShaderCache::default(),
+            backend_prep: OcioGpuWgpuBackendPrepRuntime::default(),
+            backend_objects: OcioGpuWgpuBackendObjectRuntime::default(),
             frame_ids: GpuColorFrameIdAllocator::new(first_frame_id),
             frame_table: GpuColorFrameResourceTable::new(),
         }
@@ -406,6 +412,8 @@ impl RenderGpuOutputBoundaryRuntime {
     pub fn diagnostics(&self) -> RenderGpuOutputBoundaryRuntimeDiagnostics {
         RenderGpuOutputBoundaryRuntimeDiagnostics {
             shader_cache: self.shader_cache.diagnostics(),
+            backend_prep: self.backend_prep.diagnostics(),
+            backend_objects: self.backend_objects.diagnostics(),
             next_frame_id: self.frame_ids.next_raw(),
             frame_table_entries: self.frame_table.len(),
         }
@@ -438,6 +446,26 @@ impl RenderGpuOutputBoundaryRuntime {
         &mut self.shader_cache
     }
 
+    /// Borrow the runtime-owned pure backend-preparation cache.
+    pub fn backend_prep(&self) -> &OcioGpuWgpuBackendPrepRuntime {
+        &self.backend_prep
+    }
+
+    /// Mutably borrow the runtime-owned pure backend-preparation cache.
+    pub fn backend_prep_mut(&mut self) -> &mut OcioGpuWgpuBackendPrepRuntime {
+        &mut self.backend_prep
+    }
+
+    /// Borrow the runtime-owned concrete backend-object cache.
+    pub fn backend_objects(&self) -> &OcioGpuWgpuBackendObjectRuntime {
+        &self.backend_objects
+    }
+
+    /// Mutably borrow the runtime-owned concrete backend-object cache.
+    pub fn backend_objects_mut(&mut self) -> &mut OcioGpuWgpuBackendObjectRuntime {
+        &mut self.backend_objects
+    }
+
     /// Plan and record a native GPU final display/export output boundary.
     pub fn record_wgpu_output_boundary(
         &mut self,
@@ -447,7 +475,7 @@ impl RenderGpuOutputBoundaryRuntime {
         gpu_options: RenderColorTransformGpuOptions,
         backend: RenderGpuOutputBoundaryRuntimeBackendContext<'_>,
     ) -> Result<RenderGpuOutputStageRecord, RenderOutputColorBoundaryGpuRecordError> {
-        let Self { shader_cache, frame_ids, frame_table } = self;
+        let Self { shader_cache, frame_ids, frame_table, .. } = self;
         let mut executor = RenderOutputColorBoundaryExecutor::prefer_gpu(shader_cache, gpu_options);
         executor.record_wgpu_output_boundary(
             boundary,
@@ -481,6 +509,10 @@ impl Default for RenderGpuOutputBoundaryRuntime {
 pub struct RenderGpuOutputBoundaryRuntimeDiagnostics {
     /// OCIO shader extraction cache diagnostics.
     pub shader_cache: OcioGpuShaderCacheDiagnostics,
+    /// Pure backend-preparation cache diagnostics.
+    pub backend_prep: OcioGpuWgpuBackendPrepRuntimeDiagnostics,
+    /// Concrete backend-object cache diagnostics.
+    pub backend_objects: OcioGpuWgpuBackendObjectRuntimeDiagnostics,
     /// Next GPU color frame id that will be allocated.
     pub next_frame_id: u64,
     /// Number of materialized frame resources currently retained.
@@ -1924,6 +1956,8 @@ mod tests {
             runtime.diagnostics(),
             RenderGpuOutputBoundaryRuntimeDiagnostics {
                 shader_cache: OcioGpuShaderCache::default().diagnostics(),
+                backend_prep: OcioGpuWgpuBackendPrepRuntime::default().diagnostics(),
+                backend_objects: OcioGpuWgpuBackendObjectRuntime::default().diagnostics(),
                 next_frame_id: 900,
                 frame_table_entries: 0
             }
@@ -1941,6 +1975,8 @@ mod tests {
         let diagnostics = runtime.diagnostics();
         assert_eq!(diagnostics.shader_cache.entries, 1);
         assert_eq!(diagnostics.shader_cache.misses, 1);
+        assert_eq!(diagnostics.backend_prep.resources.entries, 0);
+        assert_eq!(diagnostics.backend_objects.entries, 0);
         assert_eq!(diagnostics.next_frame_id, 900);
         assert_eq!(diagnostics.frame_table_entries, 0);
 
