@@ -61,6 +61,15 @@ blockers explicitly, including shader-language translation, LUT texture upload,
 and uniform packing. Render scheduling must treat those blockers as diagnostics,
 not as silent fallback.
 
+`RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
+connects typed frame descriptors and `RenderInputTransform` /
+`RenderColorTransform` requests to the OCIO shader cache. It produces a
+descriptor-level GPU plan with the OCIO request, prepared wgpu blockers,
+transform diagnostics, and explicit CPU upload/readback boundary flags. This is
+the only place color-transform scheduling should ask whether a GPU OCIO path is
+ready; CPU execution remains the correctness executor until the plan reports no
+native blockers and the render graph owns GPU-resident frame handles.
+
 ## Allowed Readback
 
 Readback is allowed for:

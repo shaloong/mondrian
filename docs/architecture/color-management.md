@@ -131,6 +131,10 @@ for real-time playback. `mondrian-core::extract_ocio_gpu_shader_bundle` and
 boundaries: they return OCIO-generated shader text plus texture/uniform counts
 and the processor cache id. `mondrian-renderer::OcioGpuShaderCache` stores this
 as a renderer shader plan keyed by the request and OCIO processor cache id.
+`mondrian-renderer::RenderColorTransformGpuPlanner` is the color-transform
+scheduling boundary that turns typed frame descriptors plus renderer color
+transforms into OCIO GPU shader plans with explicit blockers and upload/readback
+requirements.
 
 This cache is deliberately not a fake wgpu execution path. OCIO emits backend
 shader source such as GLSL/HLSL/MSL, while Mondrian's native renderer currently

@@ -1,8 +1,12 @@
-use crate::{ColorFrameDescriptor, ColorFrameDomain, CpuColorFrame, CpuEncodedColorFrame};
+use crate::{
+    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
+    CpuEncodedColorFrame, OcioGpuShaderCache, OcioGpuShaderError, OcioGpuShaderRequest,
+    OcioGpuWgpuExecutionPlan,
+};
 use mondrian_core::{
     convert_rgba8_in_place,
     types::{ColorEngine, ColorSpace},
-    ColorPipeline, RgbaF32Frame,
+    ColorPipeline, GpuLanguage, RgbaF32Frame,
 };
 
 /// Backend used to execute a render color transform.
@@ -10,6 +14,8 @@ use mondrian_core::{
 pub enum RenderColorTransformBackend {
     /// CPU OCIO path via an explicit RGBA8 boundary.
     CpuOcioRgba8Boundary,
+    /// Planned OCIO GPU shader path before native wgpu upload/execution.
+    OcioGpuShaderPlan,
 }
 
 /// Logical transform direction used for diagnostics.
@@ -54,6 +60,43 @@ pub struct RenderOutputTransformResult {
     pub frame: CpuEncodedColorFrame,
     /// Execution diagnostics.
     pub diagnostics: RenderColorTransformDiagnostics,
+}
+
+/// GPU color-transform planning options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderColorTransformGpuOptions {
+    /// OCIO shader language to extract for the renderer backend.
+    pub language: GpuLanguage,
+}
+
+impl Default for RenderColorTransformGpuOptions {
+    fn default() -> Self {
+        Self { language: GpuLanguage::Glsl4_0 }
+    }
+}
+
+/// Renderer-side GPU planning result for a color-transform boundary.
+#[derive(Debug, Clone)]
+pub struct RenderColorTransformGpuPlan {
+    /// Logical transform direction.
+    pub direction: RenderColorTransformDirection,
+    /// OCIO shader extraction request used for this plan.
+    pub request: OcioGpuShaderRequest,
+    /// Prepared native wgpu execution plan and its explicit blockers.
+    pub wgpu: OcioGpuWgpuExecutionPlan,
+    /// Descriptor-level diagnostics for the planned transform.
+    pub diagnostics: RenderColorTransformDiagnostics,
+    /// Whether the current source descriptor is CPU-resident and needs an upload node.
+    pub requires_source_upload: bool,
+    /// Whether the requested output descriptor is CPU-resident and needs a readback node.
+    pub requires_output_readback: bool,
+}
+
+impl RenderColorTransformGpuPlan {
+    /// Whether native wgpu execution can be scheduled without CPU upload/readback nodes.
+    pub fn can_execute_in_place_on_gpu(&self) -> bool {
+        self.wgpu.can_execute() && !self.requires_source_upload && !self.requires_output_readback
+    }
 }
 
 /// Color transform requested by a render graph boundary.
@@ -218,6 +261,107 @@ impl CpuColorTransformExecutor {
     }
 }
 
+/// Plans OCIO GPU shader execution for renderer color-transform boundaries.
+pub struct RenderColorTransformGpuPlanner<'a> {
+    cache: &'a mut OcioGpuShaderCache,
+    options: RenderColorTransformGpuOptions,
+}
+
+impl<'a> RenderColorTransformGpuPlanner<'a> {
+    /// Create a planner backed by the shared renderer OCIO GPU shader cache.
+    pub fn new(cache: &'a mut OcioGpuShaderCache, options: RenderColorTransformGpuOptions) -> Self {
+        Self { cache, options }
+    }
+
+    /// Plan source/import -> timeline working-space GPU execution.
+    pub fn plan_input_to_working(
+        &mut self,
+        input: ColorFrameDescriptor,
+        transform: &RenderInputTransform,
+    ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
+        if input.domain != ColorFrameDomain::Source {
+            return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
+        }
+
+        let output = ColorFrameDescriptor {
+            width: input.width,
+            height: input.height,
+            color_space: transform.working_color_space,
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: input.color_space,
+            dst: transform.working_color_space,
+            language: self.options.language,
+        };
+        self.plan(
+            RenderColorTransformDirection::InputToWorking,
+            input,
+            output,
+            request,
+        )
+    }
+
+    /// Plan timeline working-space -> display/export GPU execution.
+    pub fn plan_output_transform(
+        &mut self,
+        input: ColorFrameDescriptor,
+        transform: &RenderColorTransform,
+    ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
+        if input.domain != ColorFrameDomain::Working {
+            return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
+        }
+
+        let output = ColorFrameDescriptor {
+            width: input.width,
+            height: input.height,
+            color_space: transform.output_color_space,
+            domain: transform.output_domain,
+            encoding: ColorFrameEncoding::EncodedRgba8,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: input.color_space,
+            dst: transform.output_color_space,
+            language: self.options.language,
+        };
+        self.plan(
+            RenderColorTransformDirection::WorkingToOutput,
+            input,
+            output,
+            request,
+        )
+    }
+
+    fn plan(
+        &mut self,
+        direction: RenderColorTransformDirection,
+        input: ColorFrameDescriptor,
+        output: ColorFrameDescriptor,
+        request: OcioGpuShaderRequest,
+    ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
+        let wgpu = self.cache.prepare_wgpu_execution(request.clone())?;
+        let diagnostics = RenderColorTransformDiagnostics {
+            backend: RenderColorTransformBackend::OcioGpuShaderPlan,
+            direction,
+            input,
+            output,
+            pixel_count: input.width as usize * input.height as usize,
+            used_rgba8_boundary: false,
+        };
+        Ok(RenderColorTransformGpuPlan {
+            direction,
+            request,
+            wgpu,
+            diagnostics,
+            requires_source_upload: input.residency == ColorFrameResidency::Cpu,
+            requires_output_readback: output.residency == ColorFrameResidency::Cpu,
+        })
+    }
+}
+
 /// Error returned by render color transform execution.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RenderColorTransformError {
@@ -230,12 +374,15 @@ pub enum RenderColorTransformError {
     /// The selected color engine failed.
     #[error("render color transform failed: {0}")]
     ExecutionFailed(String),
+    /// GPU shader planning failed before native execution could be scheduled.
+    #[error("render GPU color transform planning failed: {0}")]
+    GpuPlanningFailed(#[from] OcioGpuShaderError),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::RgbaF32Frame;
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, RgbaF32Frame};
 
     #[test]
     fn cpu_transform_returns_typed_display_boundary_frame() {
@@ -289,5 +436,75 @@ mod tests {
         assert_eq!(working.diagnostics.output.domain, ColorFrameDomain::Working);
         assert_eq!(working.diagnostics.pixel_count, 1);
         assert!(working.diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn gpu_planner_builds_input_shader_plan_with_explicit_boundaries() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let source =
+            CpuEncodedColorFrame::source_rgba8(2, 3, ColorSpace::SLog3, vec![128; 2 * 3 * 4]);
+        let transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+
+        let plan = planner
+            .plan_input_to_working(source.descriptor(), &transform)
+            .expect("input GPU plan");
+
+        assert_eq!(
+            plan.direction,
+            RenderColorTransformDirection::InputToWorking
+        );
+        assert_eq!(
+            plan.diagnostics.backend,
+            RenderColorTransformBackend::OcioGpuShaderPlan
+        );
+        assert_eq!(plan.diagnostics.input.domain, ColorFrameDomain::Source);
+        assert_eq!(plan.diagnostics.output.domain, ColorFrameDomain::Working);
+        assert_eq!(plan.diagnostics.output.residency, ColorFrameResidency::Gpu);
+        assert_eq!(plan.diagnostics.pixel_count, 6);
+        assert!(!plan.diagnostics.used_rgba8_boundary);
+        assert!(plan.requires_source_upload);
+        assert!(!plan.requires_output_readback);
+        assert!(!plan.can_execute_in_place_on_gpu());
+        assert!(!plan.wgpu.blockers.is_empty());
+    }
+
+    #[test]
+    fn gpu_planner_builds_output_shader_plan_from_working_descriptor() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let source = CpuColorFrame::working(RgbaF32Frame {
+            width: 4,
+            height: 5,
+            data: vec![[0.5, 0.25, 0.125, 1.0]; 20],
+            color_space: ColorSpace::Rec709,
+        });
+        let transform =
+            RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+
+        let plan = planner
+            .plan_output_transform(source.descriptor(), &transform)
+            .expect("output GPU plan");
+
+        assert_eq!(
+            plan.direction,
+            RenderColorTransformDirection::WorkingToOutput
+        );
+        assert_eq!(plan.diagnostics.input.domain, ColorFrameDomain::Working);
+        assert_eq!(plan.diagnostics.output.domain, ColorFrameDomain::Display);
+        assert_eq!(plan.diagnostics.output.color_space, ColorSpace::Srgb);
+        assert_eq!(plan.diagnostics.output.residency, ColorFrameResidency::Gpu);
+        assert_eq!(plan.diagnostics.pixel_count, 20);
+        assert!(plan.requires_source_upload);
+        assert!(!plan.requires_output_readback);
     }
 }
