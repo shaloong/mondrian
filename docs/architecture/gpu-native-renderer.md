@@ -125,6 +125,17 @@ create bind groups or the final fullscreen render pipeline; those remain
 explicit native blockers until the wrapper shader contract and render pass are
 implemented and verified.
 
+`OcioGpuWgpuBindResourcePlan` is the bind-resource validation boundary between
+packed OCIO payloads and concrete bind-group creation. It validates that packed
+LUT textures and packed uniform buffers share the resource key, binding indices,
+texture/sampler symbols, extents, dimensions, and source-value hashes required
+by `OcioGpuWgpuResourcePlan`. The plan also keeps Mondrian's fullscreen wrapper
+input texture/sampler bindings in a separate wrapper bind group. It still does
+not fabricate a concrete `wgpu::BindGroup`: OCIO's GLSL contract exposes
+texture and sampler symbols together while wgpu separates texture-view and
+sampler bindings, so the sampler-binding policy must be resolved explicitly in
+the wrapper/backend layer before native execution can become true.
+
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
 `RenderColorTransform` requests to the OCIO shader cache. It produces a

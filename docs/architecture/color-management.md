@@ -158,11 +158,12 @@ proven. A later backend compiler/upload stage must turn the cached OCIO plan,
 `OcioGpuShaderTranslationCache` artifact, `OcioGpuWgpuResourcePlan`,
 `OcioGpuWgpuLutUploadPlan`, packed/uploaded LUT textures,
 `OcioGpuWgpuUniformUploadPlan`, packed/uploaded uniform buffers, and
-`OcioGpuWgpuShaderModuleCache` output into concrete pipeline layouts, bind
-groups, and render-graph nodes before the preview graph can execute it on the
-GPU. Until that stage exists, CPU processor execution is the correctness path
-and the cached shader/module/upload plans are the production boundary for GPU
-integration work.
+`OcioGpuWgpuShaderModuleCache` output into validated
+`OcioGpuWgpuBindResourcePlan` entries, concrete pipeline layouts, bind groups,
+and render-graph nodes before the preview graph can execute it on the GPU.
+Until that stage exists, CPU processor execution is the correctness path and
+the cached shader/module/upload/bind-resource plans are the production boundary
+for GPU integration work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,
