@@ -4,8 +4,9 @@ use mondrian_core::{
     RgbaF32Frame,
 };
 use mondrian_effects::{
-    apply_compiled_effect_graph, apply_compiled_effect_graph_pass, blend_rgba_pixel_seeded,
-    CompiledEffectGraph,
+    apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
+    apply_compiled_effect_graph_rgba_f32, blend_rgba_pixel_seeded,
+    compiled_effect_graph_supports_rgba_f32, CompiledEffectGraph,
 };
 use std::sync::Arc;
 
@@ -125,14 +126,28 @@ fn composite_supported_elements_to_working_frame(
     for element in elements {
         match element {
             TimelineCompositeElement::Media(layer) => {
-                let src = layer.frame.rgba_f32();
+                let frame = layer.frame.rgba_f32();
+                let effect_output;
+                let (src_data, src_width, src_height) = if layer.effect_graph.graph.is_identity() {
+                    (&frame.data, frame.width, frame.height)
+                } else {
+                    effect_output = apply_compiled_effect_graph_rgba_f32(
+                        &frame.data,
+                        frame.width,
+                        frame.height,
+                        &layer.effect_graph,
+                        layer.frame_seed,
+                    )
+                    .expect("float-compatible effect graph");
+                    (&effect_output, frame.width, frame.height)
+                };
                 alpha_blend_f32_normal(
                     &mut canvas,
                     width as usize,
                     height as usize,
-                    &src.data,
-                    src.width as usize,
-                    src.height as usize,
+                    src_data,
+                    src_width as usize,
+                    src_height as usize,
                     layer.opacity,
                 );
                 has_composited_layer = true;
@@ -168,7 +183,7 @@ fn can_float_linear_composite(elements: &[TimelineCompositeElement<'_>]) -> bool
         TimelineCompositeElement::Media(layer) => {
             layer.blend_mode == BlendMode::Normal
                 && is_identity_transform(layer.transform)
-                && layer.effect_graph.graph.is_identity()
+                && compiled_effect_graph_supports_rgba_f32(&layer.effect_graph)
         }
         TimelineCompositeElement::SolidColor(layer) => {
             layer.blend_mode == BlendMode::Normal
@@ -729,6 +744,47 @@ mod tests {
     }
 
     #[test]
+    fn float_linear_compositor_runs_color_adjust_effect_without_rgba8_scratch() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let media = CpuColorFrame::working(RgbaF32Frame {
+            width: 1,
+            height: 1,
+            data: vec![[1.25, 0.25, 0.125, 1.0]],
+            color_space: mondrian_core::types::ColorSpace::Rec709,
+        });
+        let frame = composite_timeline_elements_color_frame(
+            1,
+            1,
+            &[TimelineCompositeElement::Media(TimelineMediaLayer {
+                frame: &media,
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                    ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
+                        exposure: 1.0,
+                        contrast: 1.0,
+                        saturation: 1.0,
+                    }],
+                })
+                .expect("compile float color adjust"),
+                frame_seed: 0,
+            })],
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch,
+        );
+
+        let px = frame.rgba_f32().data[0];
+        assert!((px[0] - 2.5).abs() <= 1.0e-6);
+        assert!((px[1] - 0.5).abs() <= 1.0e-6);
+        assert!((px[2] - 0.25).abs() <= 1.0e-6);
+        assert!((px[3] - 1.0).abs() <= f32::EPSILON);
+        assert!(scratch.media_source.is_empty());
+        assert!(scratch.media_effect.is_empty());
+    }
+
+    #[test]
     fn float_linear_compositor_falls_back_for_adjustments() {
         let mut float_scratch = TimelineCompositeScratch::default();
         let mut legacy_scratch = TimelineCompositeScratch::default();
@@ -769,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn float_linear_compositor_falls_back_for_media_effects() {
+    fn float_linear_compositor_falls_back_for_legacy_media_effects() {
         let mut float_scratch = TimelineCompositeScratch::default();
         let mut legacy_scratch = TimelineCompositeScratch::default();
         let media = working_frame(&[120, 80, 40, 255], 1, 1);
@@ -779,11 +835,7 @@ mod tests {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
-                ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
-                    exposure: 0.0,
-                    contrast: 1.0,
-                    saturation: 0.0,
-                }],
+                ops: vec![mondrian_effects::EffectRenderOp::GaussianBlur { radius: 1.0 }],
             })
             .expect("compile media effect"),
             frame_seed: 0,

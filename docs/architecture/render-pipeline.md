@@ -63,9 +63,11 @@ exchange format.
 The CPU timeline compositor keeps simple `Normal`/identity media and solid-color
 layers in the typed float/linear working frame. Those paths must not round-trip
 through RGBA8 scratch buffers, so extended working values remain available to
-the final output boundary. Effects, adjustment layers, non-normal blend modes,
-and geometric transforms currently use the legacy RGBA8 compositor path until
-their own float/linear execution contracts are implemented.
+the final output boundary. Float-capable unary effects such as color adjustment
+and white balance may also run in this path through the
+`mondrian-effects` float contract. Adjustment layers, non-normal blend modes,
+geometric transforms, and legacy-only effects currently use the RGBA8 compositor
+path until their own float/linear execution contracts are implemented.
 
 Decoded media enters the graph as a typed source/import RGBA8 boundary
 (`CpuEncodedColorFrame::source_rgba8`). Preview and export must use

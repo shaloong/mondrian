@@ -244,6 +244,41 @@ pub(crate) fn apply_render_op(
     }
 }
 
+pub(crate) fn apply_render_op_f32(working: &mut [[f32; 4]], op: &EffectRenderOp) -> bool {
+    match op {
+        EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
+            apply_primary_color_adjustments_f32(
+                working,
+                AdjustmentLayerParams {
+                    exposure: *exposure,
+                    contrast: *contrast,
+                    saturation: *saturation,
+                    ..AdjustmentLayerParams::default()
+                },
+            );
+            true
+        }
+        EffectRenderOp::WhiteBalance { temperature, tint } => {
+            apply_primary_color_adjustments_f32(
+                working,
+                AdjustmentLayerParams {
+                    temperature: *temperature,
+                    tint: *tint,
+                    ..AdjustmentLayerParams::default()
+                },
+            );
+            true
+        }
+        EffectRenderOp::GaussianBlur { .. }
+        | EffectRenderOp::Sharpen { .. }
+        | EffectRenderOp::Vignette { .. }
+        | EffectRenderOp::ChromaticAberration { .. }
+        | EffectRenderOp::Grain { .. }
+        | EffectRenderOp::Lut3D { .. }
+        | EffectRenderOp::Custom { .. } => false,
+    }
+}
+
 pub fn blend_adjustment_result(
     base: &[u8],
     processed: &[u8],
@@ -421,6 +456,35 @@ fn apply_primary_color_adjustments(buffer: &mut [u8], params: AdjustmentLayerPar
         px[0] = unit_to_u8(rgb[0]);
         px[1] = unit_to_u8(rgb[1]);
         px[2] = unit_to_u8(rgb[2]);
+    }
+}
+
+fn apply_primary_color_adjustments_f32(buffer: &mut [[f32; 4]], params: AdjustmentLayerParams) {
+    let exposure_scale = 2.0f32.powf(params.exposure.clamp(-4.0, 4.0));
+    let contrast = params.contrast.clamp(0.0, 3.0);
+    let temperature = params.temperature.clamp(-1.0, 1.0);
+    let tint = params.tint.clamp(-1.0, 1.0);
+    let saturation = params.saturation.clamp(0.0, 3.0);
+
+    for px in buffer {
+        if px[3] <= 1.0e-6 {
+            continue;
+        }
+
+        let mut rgb = [px[0], px[1], px[2]];
+        for channel in &mut rgb {
+            *channel *= exposure_scale;
+            *channel = (*channel - 0.5) * contrast + 0.5;
+        }
+
+        rgb[0] += temperature * 0.12 - tint * 0.04;
+        rgb[1] += tint * 0.05;
+        rgb[2] += -temperature * 0.12 - tint * 0.02;
+
+        let luma = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+        px[0] = luma + (rgb[0] - luma) * saturation;
+        px[1] = luma + (rgb[1] - luma) * saturation;
+        px[2] = luma + (rgb[2] - luma) * saturation;
     }
 }
 

@@ -52,6 +52,22 @@ Effect stack order affects graph output. UI reorder operations must mutate the c
 
 The renderer/effects system may merge deterministic unary ops, cache deterministic subtrees, skip identity graphs, and keep frame-dependent ops such as grain out of cross-frame caches. These optimizations must preserve graph semantics.
 
+## Float/Linear Execution
+
+`mondrian-effects` exposes a typed float/linear execution boundary for the
+subset of effect graphs that can operate directly on working-space `f32` RGBA
+pixels. `compiled_effect_graph_supports_rgba_f32(...)` and
+`apply_compiled_effect_graph_rgba_f32(...)` use the same validation rules:
+currently `Source` plus unary `ColorAdjust` and `WhiteBalance` nodes are
+supported. The float path must preserve extended scene-linear values and must
+not clamp RGB to 0..1 as the legacy RGBA8 path does.
+
+Unsupported graph nodes and render ops return structured
+`EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
+callers can make an explicit legacy fallback decision. Blur, sharpen, vignette,
+chromatic aberration, grain, LUT, custom/plugin processors, masks, blends, and
+multi-input nodes remain legacy-only until they gain their own float contract.
+
 File-backed LUT caches key existing files by canonical path and invalidate on
 file fingerprint changes. Tests that validate cache behavior should use local
 cache instances rather than the process-global cache so workspace-level

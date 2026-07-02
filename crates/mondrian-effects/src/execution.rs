@@ -1,5 +1,6 @@
 use crate::adjustment::{
-    apply_render_op, blend_adjustment_result, blend_rgba_pixel_seeded, unit_to_u8,
+    apply_render_op, apply_render_op_f32, blend_adjustment_result, blend_rgba_pixel_seeded,
+    unit_to_u8,
 };
 use crate::{
     get_or_compile_scheduled_effect_graph, graph::effect_graph_node_use_counts,
@@ -29,6 +30,45 @@ pub trait EffectGpuExecutor: Send + Sync {
         width: u32,
         height: u32,
     ) -> Option<Vec<u8>>;
+}
+
+/// Error returned when an effect graph cannot execute on the float/linear CPU path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectFloatExecutionError {
+    /// Input pixel count does not match the requested extent.
+    InputSizeMismatch {
+        /// Expected number of RGBA pixels.
+        expected: usize,
+        /// Actual number of RGBA pixels.
+        actual: usize,
+    },
+    /// The graph contains a node shape or render op that is still legacy-only.
+    UnsupportedNode {
+        /// Unsupported node id.
+        node_id: EffectGraphNodeId,
+        /// Specific unsupported reason.
+        reason: EffectFloatUnsupportedReason,
+    },
+    /// The compiled graph did not produce its declared output node.
+    MissingOutput {
+        /// Missing output node id.
+        node_id: EffectGraphNodeId,
+    },
+}
+
+/// Reason an effect graph cannot use the float/linear CPU path yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectFloatUnsupportedReason {
+    /// The graph node kind needs a float implementation before it can run here.
+    UnsupportedGraphNode {
+        /// Stable node kind label for diagnostics.
+        kind: &'static str,
+    },
+    /// The render op needs a float implementation before it can run here.
+    UnsupportedRenderOp {
+        /// Stable render-op label for diagnostics.
+        op: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -656,6 +696,85 @@ pub fn apply_compiled_effect_graph_with_gpu(
     output
 }
 
+/// Return whether a compiled graph can execute entirely on the float/linear CPU path.
+pub fn compiled_effect_graph_supports_rgba_f32(compiled: &CompiledEffectGraph) -> bool {
+    validate_float_effect_graph(compiled).is_ok()
+}
+
+/// Execute a compiled graph over linear `f32` RGBA pixels.
+///
+/// This path is intentionally narrower than the legacy RGBA8 effect executor.
+/// It currently supports source nodes plus unary `ColorAdjust` and
+/// `WhiteBalance` render ops. Unsupported nodes return structured errors so
+/// callers can make an explicit legacy fallback decision.
+pub fn apply_compiled_effect_graph_rgba_f32(
+    input: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    _frame_seed: i64,
+) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+    let required_len = width as usize * height as usize;
+    if input.len() != required_len {
+        return Err(EffectFloatExecutionError::InputSizeMismatch {
+            expected: required_len,
+            actual: input.len(),
+        });
+    }
+    if compiled.graph.is_identity() || input.is_empty() || width == 0 || height == 0 {
+        return Ok(input.to_vec());
+    }
+    validate_float_effect_graph(compiled)?;
+
+    let mut outputs = HashMap::<EffectGraphNodeId, Vec<[f32; 4]>>::new();
+    for node_id in &compiled.schedule.ordered_nodes {
+        let Some(node) = compiled.graph.node(*node_id) else {
+            return Err(EffectFloatExecutionError::UnsupportedNode {
+                node_id: *node_id,
+                reason: EffectFloatUnsupportedReason::UnsupportedGraphNode { kind: "missing" },
+            });
+        };
+        match &node.kind {
+            EffectGraphNodeKind::Source => {
+                outputs.insert(node.id, input.to_vec());
+            }
+            EffectGraphNodeKind::UnaryEffect { input: input_id, op } => {
+                let Some(mut source) = outputs.get(input_id).cloned() else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *input_id });
+                };
+                if !apply_render_op_f32(&mut source, op) {
+                    return Err(EffectFloatExecutionError::UnsupportedNode {
+                        node_id: node.id,
+                        reason: EffectFloatUnsupportedReason::UnsupportedRenderOp {
+                            op: effect_render_op_name(op),
+                        },
+                    });
+                }
+                outputs.insert(node.id, source);
+            }
+            EffectGraphNodeKind::Blend { .. } => {
+                return Err(unsupported_float_graph_node(node.id, "blend"));
+            }
+            EffectGraphNodeKind::Mask { .. } => {
+                return Err(unsupported_float_graph_node(node.id, "mask"));
+            }
+            EffectGraphNodeKind::MaskSource { .. } => {
+                return Err(unsupported_float_graph_node(node.id, "mask_source"));
+            }
+            EffectGraphNodeKind::MultiInput { .. } => {
+                return Err(unsupported_float_graph_node(node.id, "multi_input"));
+            }
+        }
+    }
+
+    let Some(output_id) = compiled.graph.output else {
+        return Ok(input.to_vec());
+    };
+    outputs
+        .remove(&output_id)
+        .ok_or(EffectFloatExecutionError::MissingOutput { node_id: output_id })
+}
+
 pub fn apply_effect_render_graph_pass(
     base: &[u8],
     width: u32,
@@ -758,6 +877,73 @@ fn effect_output_cache_key(
             == crate::effect::EffectCachePolicy::FrameDependent)
             .then_some(frame_seed),
     })
+}
+
+fn validate_float_effect_graph(
+    compiled: &CompiledEffectGraph,
+) -> Result<(), EffectFloatExecutionError> {
+    for node_id in &compiled.schedule.ordered_nodes {
+        let Some(node) = compiled.graph.node(*node_id) else {
+            return Err(unsupported_float_graph_node(*node_id, "missing"));
+        };
+        match &node.kind {
+            EffectGraphNodeKind::Source => {}
+            EffectGraphNodeKind::UnaryEffect { op, .. } => {
+                if !effect_render_op_supports_rgba_f32(op) {
+                    return Err(EffectFloatExecutionError::UnsupportedNode {
+                        node_id: node.id,
+                        reason: EffectFloatUnsupportedReason::UnsupportedRenderOp {
+                            op: effect_render_op_name(op),
+                        },
+                    });
+                }
+            }
+            EffectGraphNodeKind::Blend { .. } => {
+                return Err(unsupported_float_graph_node(node.id, "blend"));
+            }
+            EffectGraphNodeKind::Mask { .. } => {
+                return Err(unsupported_float_graph_node(node.id, "mask"));
+            }
+            EffectGraphNodeKind::MaskSource { .. } => {
+                return Err(unsupported_float_graph_node(node.id, "mask_source"));
+            }
+            EffectGraphNodeKind::MultiInput { .. } => {
+                return Err(unsupported_float_graph_node(node.id, "multi_input"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
+    matches!(
+        op,
+        EffectRenderOp::ColorAdjust { .. } | EffectRenderOp::WhiteBalance { .. }
+    )
+}
+
+fn unsupported_float_graph_node(
+    node_id: EffectGraphNodeId,
+    kind: &'static str,
+) -> EffectFloatExecutionError {
+    EffectFloatExecutionError::UnsupportedNode {
+        node_id,
+        reason: EffectFloatUnsupportedReason::UnsupportedGraphNode { kind },
+    }
+}
+
+fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
+    match op {
+        EffectRenderOp::ColorAdjust { .. } => "color_adjust",
+        EffectRenderOp::WhiteBalance { .. } => "white_balance",
+        EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
+        EffectRenderOp::Sharpen { .. } => "sharpen",
+        EffectRenderOp::Vignette { .. } => "vignette",
+        EffectRenderOp::ChromaticAberration { .. } => "chromatic_aberration",
+        EffectRenderOp::Grain { .. } => "grain",
+        EffectRenderOp::Lut3D { .. } => "lut3d",
+        EffectRenderOp::Custom { .. } => "custom",
+    }
 }
 
 fn frame_buffer_signature(buffer: &[u8]) -> u64 {
@@ -928,5 +1114,73 @@ fn apply_alpha_mask_in_place(
             MaskOp::Difference => (src_alpha - matte).abs(),
         };
         out_px[3] = unit_to_u8(result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn float_effect_graph_runs_color_adjust_without_clamping_extended_values() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::ColorAdjust {
+                exposure: 1.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            }],
+        })
+        .expect("compile color adjust graph");
+
+        let output =
+            apply_compiled_effect_graph_rgba_f32(&[[1.25, 0.25, 0.125, 1.0]], 1, 1, &compiled, 0)
+                .expect("float color adjust");
+
+        assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert!((output[0][0] - 2.5).abs() <= 1.0e-6);
+        assert!((output[0][1] - 0.5).abs() <= 1.0e-6);
+        assert!((output[0][2] - 0.25).abs() <= 1.0e-6);
+        assert_eq!(output[0][3], 1.0);
+    }
+
+    #[test]
+    fn float_effect_graph_reports_legacy_only_ops() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::GaussianBlur { radius: 2.0 }],
+        })
+        .expect("compile blur graph");
+
+        let err =
+            apply_compiled_effect_graph_rgba_f32(&[[0.25, 0.5, 0.75, 1.0]], 1, 1, &compiled, 0)
+                .expect_err("blur is legacy-only on float path");
+
+        assert!(!compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert!(matches!(
+            err,
+            EffectFloatExecutionError::UnsupportedNode {
+                reason: EffectFloatUnsupportedReason::UnsupportedRenderOp { op: "gaussian_blur" },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn float_effect_graph_rejects_mismatched_input_extent() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::ColorAdjust {
+                exposure: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            }],
+        })
+        .expect("compile color adjust graph");
+
+        let err = apply_compiled_effect_graph_rgba_f32(&[], 1, 1, &compiled, 0)
+            .expect_err("input extent mismatch");
+
+        assert!(matches!(
+            err,
+            EffectFloatExecutionError::InputSizeMismatch { expected: 1, actual: 0 }
+        ));
     }
 }
