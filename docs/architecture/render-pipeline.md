@@ -85,7 +85,10 @@ target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a
 matching `OcioGpuWgpuRenderPassNodePlan`. The schedule also owns the renderer
 entry points that bind a resolved input frame view into the wrapper bind group
 and record the output target through `OcioGpuWgpuRenderPassRecorder`; preview
-and export callers must not duplicate OCIO pass assembly.
+and export callers must not duplicate OCIO pass assembly. Resolved GPU frame
+views must come from `GpuColorFrameResourceTable`, which validates the
+`GpuColorFrameHandle` contract before exposing the backend texture/view/sampler
+payload.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
 `execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
 through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage

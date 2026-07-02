@@ -182,11 +182,14 @@ OCIO wrapper contract, turns the scheduled output handle into a render-pass
 target, and calls the shared recorder. The wrapper source artifact is
 stage-split; its combined source is diagnostic text, not the canonical
 execution artifact. Mondrian validates/owns stage-split Naga IR for the wrapper
-and keeps generated WGSL as diagnostics only. Until preview/export frame
-evaluation resolves GPU frame handles into real texture views through a shared
-resource table, CPU processor execution is the correctness path and the cached
-shader/module/upload/bind-resource/layout/bind-group/wrapper-link/pipeline-
-contract plans are the production boundary for GPU integration work.
+and keeps generated WGSL as diagnostics only. Preview/export frame evaluation
+must resolve GPU frame handles through `GpuColorFrameResourceTable`; the table
+revalidates descriptor and texture-format contracts for every lookup before
+exposing backend resources such as `GpuColorFrameWgpuResource`. Until the frame
+evaluation path allocates/uploads real entries into that shared table, CPU
+processor execution is the correctness path and the cached shader/module/upload/
+bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are the
+production boundary for GPU integration work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

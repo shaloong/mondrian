@@ -199,6 +199,14 @@ integration work is the shared GPU frame resource table used by preview/export
 frame evaluation; app and export code must not reassemble OCIO bind groups or
 render-pass targets independently.
 
+`GpuColorFrameResourceTable` is the shared resolver for GPU-resident color
+frames. It maps typed `GpuColorFrameHandle` ids to backend payloads, and every
+lookup revalidates the handle's descriptor and texture format against the stored
+entry. This prevents stale texture reuse when a resource id is recycled across a
+different color space, domain, encoding, extent, or target format. The concrete
+wgpu payload is `GpuColorFrameWgpuResource`, which owns the texture, default
+view, and sampler used by fullscreen color passes.
+
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
 `RenderColorTransform` requests to the OCIO shader cache. It produces a
