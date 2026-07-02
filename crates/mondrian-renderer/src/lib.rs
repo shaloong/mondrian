@@ -42,6 +42,7 @@ pub use color_stage::{
     RenderGpuOutputBoundaryBackendContext, RenderGpuOutputBoundaryRecordError,
     RenderGpuOutputBoundaryRecordRequest, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeBackendContext, RenderGpuOutputBoundaryRuntimeDiagnostics,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
     RenderGpuOutputStageBackendContext, RenderGpuOutputStageMaterializeError,
     RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageReadbackError,
     RenderGpuOutputStageRecord, RenderGpuOutputStageRecordError, RenderGpuOutputStageRecordRequest,

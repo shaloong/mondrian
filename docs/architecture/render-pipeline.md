@@ -89,14 +89,18 @@ blocker diagnostics instead of silently falling back to a CPU output stage.
 callers choose an explicit strategy at construction time, and the executor owns
 the final-output plan/execute sequence instead of exposing low-level transform
 executors to app/export code. CPU callers use `cpu_only().execute(...)`; native
-GPU callers use `prefer_gpu(...).record_wgpu_output_boundary(...)` with a
-`RenderGpuOutputBoundaryBackendContext`. GPU planning or recording failures are
-reported structurally and must not silently run the CPU executor.
+GPU app/export callers should use
+`RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
+with `RenderGpuOutputBoundaryRuntimeOwnedBackendContext`. GPU planning,
+backend-object preparation, or recording failures are reported structurally and
+must not silently run the CPU executor.
 App/export integrations should hold a `RenderGpuOutputBoundaryRuntime` per
 renderer backend lifetime. The runtime owns the OCIO shader cache, pure backend
 prep cache, concrete backend-object cache, GPU frame id allocator, and GPU
 frame resource table, and exposes an executor-level record method that accepts
-only the per-submission backend context.
+only the per-submission device/queue/encoder/load-op context. Lower-level code
+that already owns a prepared pipeline, OCIO bind group, and pass node may still
+use `RenderGpuOutputBoundaryBackendContext`.
 For native GPU OCIO execution, `RenderGpuColorPassSchedule` is the bridge
 between the stage plan and backend recorder: it requires GPU-resident source and
 target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a
@@ -120,14 +124,13 @@ structurally at this bridge instead of falling back to CPU execution. Then call
 the resource plan's materialization helper to fill the resource table. If the
 same stage plan ends in `ReadbackToCpu`,
 `RenderGpuOutputStageResourcePlan` carries the `GpuColorFrameReadbackPlan` and
-owns resource-table lookup plus readback-copy recording. Once a backend
-pipeline node and OCIO bind group are prepared, preview/export callers should
-use `RenderOutputColorBoundaryExecutor::record_wgpu_output_boundary(...)`; the
-executor owns planning, resource-plan derivation, materialization, schedule
-validation, pass recording, and optional readback in renderer-owned order. The
-required wgpu backend objects are grouped in
-`RenderGpuOutputBoundaryBackendContext`, not duplicated as ad hoc app/export
-parameters. Lower-level renderer code that already owns a validated
+owns resource-table lookup plus readback-copy recording. Preview/export callers
+should use
+`RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`;
+the runtime owns planning, resource-plan derivation, backend-object
+preparation, materialization, schedule validation, pass recording, and optional
+readback in renderer-owned order. Lower-level renderer code that already owns a
+validated
 `RenderOutputColorBoundaryStagePlan` or `RenderGpuOutputStageResourcePlan` may
 call the matching stage/resource recorder with renderer backend contexts.
 GPU-to-CPU output for encode, thumbnails, tests, or debug captures must use one

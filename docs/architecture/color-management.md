@@ -229,19 +229,19 @@ hand-assemble table entries. When the stage plan ends in `ReadbackToCpu`, the
 resource plan carries the matching `GpuColorFrameReadbackPlan`; preview/export
 must resolve and record that readback through the renderer-owned output
 boundary API instead of deriving it from texture format at the call site.
-`RenderOutputColorBoundaryExecutor::record_wgpu_output_boundary(...)` is the
-preview/export-facing sequencing point for this output boundary: it plans the
-boundary, derives the resource plan, materializes resources, schedules the pass,
-records the OCIO fullscreen draw, and records the optional readback copy in one
-command encoder.
-Its backend inputs are grouped in `RenderGpuOutputBoundaryBackendContext` so
-app/export code passes one renderer-owned backend contract rather than
-hand-threading wgpu objects, bind groups, pass nodes, and the frame table
-through each layer.
 `RenderGpuOutputBoundaryRuntime` is the intended owner for long-lived preview
 or export GPU output state: it keeps the OCIO shader cache, pure backend prep
 runtime, concrete backend-object runtime, GPU frame id allocator, and GPU frame
 table together for the backend lifetime.
+`RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
+is the preview/export-facing sequencing point for this output boundary: it
+plans the boundary, prepares runtime-owned backend objects, derives the resource
+plan, materializes resources, schedules the pass, records the OCIO fullscreen
+draw, and records the optional readback copy in one command encoder. Its
+per-submission inputs are grouped in
+`RenderGpuOutputBoundaryRuntimeOwnedBackendContext` so app/export code passes
+device, queue, encoder, and load operation without hand-threading wgpu
+pipelines, bind groups, pass nodes, or the frame table through each layer.
 Callers that already hold a stage or resource plan may use the lower-level
 recorders, but app/export scheduling should prefer the executor-level API so
 final-output policy remains renderer-owned. `GpuColorFrameReadbackPlan`

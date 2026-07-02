@@ -252,19 +252,18 @@ partially materialized stage when a contract conflict exists.
 When the source stage shape includes `ReadbackToCpu`, the resource plan keeps
 the matching `GpuColorFrameReadbackPlan` and exposes renderer-owned helpers to
 resolve the output frame from `GpuColorFrameResourceTable` and record the copy.
-`RenderOutputColorBoundaryExecutor::record_wgpu_output_boundary(...)` is the
-preview/export-facing entry point that plans the boundary, derives that resource
-plan, materializes the planned frames, schedules the matching
-`RenderGpuColorPassSchedule`, records the OCIO fullscreen pass, and records the
-optional readback copy. The backend objects for that operation travel as
-`RenderGpuOutputBoundaryBackendContext`; lower-level renderer code may call the
-stage or resource recorder with renderer backend contexts after it already owns
-the validated plan.
 `RenderGpuOutputBoundaryRuntime` is the app/export owner for this path's
 long-lived renderer state. It combines the OCIO shader cache, pure backend prep
 runtime, concrete backend-object runtime, GPU color frame id allocator, and
 `GpuColorFrameResourceTable<GpuColorFrameWgpuResource>` so callers do not split
 those contracts across unrelated services.
+`RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
+is the app/export-facing entry point that plans the boundary, prepares or reuses
+the static/backend OCIO objects, derives the resource plan, materializes the
+planned frames, schedules the matching `RenderGpuColorPassSchedule`, records
+the OCIO fullscreen pass, and records the optional readback copy. Lower-level
+renderer code may still call the stage or resource recorder with explicit
+backend contexts after it already owns the validated backend objects.
 `GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
 encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
 unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only

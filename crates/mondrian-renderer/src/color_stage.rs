@@ -6,7 +6,8 @@ use crate::{
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
     GpuColorFrameWgpuResource, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
-    OcioGpuWgpuBackendObjectRuntime, OcioGpuWgpuBackendObjectRuntimeDiagnostics,
+    OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
+    OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
     OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
     OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
     OcioGpuWgpuRenderPassError, OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder,
@@ -356,6 +357,22 @@ pub struct RenderGpuOutputBoundaryRuntimeBackendContext<'a> {
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
 
+/// Per-record backend context for runtime-owned OCIO backend objects.
+///
+/// The output runtime owns OCIO shader extraction, backend preparation, concrete
+/// backend-object caches, frame ids, and frame resources. This context only
+/// supplies objects whose lifetime is tied to the current command submission.
+pub struct RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'a> {
+    /// wgpu device used for resource materialization and backend-object creation.
+    pub device: &'a wgpu::Device,
+    /// wgpu queue used for upload writes.
+    pub queue: &'a wgpu::Queue,
+    /// Command encoder receiving the color pass and optional readback copy.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Load operation for the output color attachment.
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
 /// Borrowed inputs required to record one final-output GPU color boundary.
 pub struct RenderGpuOutputBoundaryRecordRequest<'a> {
     /// GPU frame id allocator for upload/output handles.
@@ -373,6 +390,21 @@ pub struct RenderGpuOutputBoundaryRecordRequest<'a> {
 pub enum RenderGpuOutputBoundaryRecordError {
     /// The boundary stage plan could not produce GPU resources.
     ResourcePlan(RenderGpuOutputStageResourcePlanError),
+    /// Resource materialization, pass recording, or readback recording failed.
+    Record(RenderGpuOutputStageRecordError),
+}
+
+/// Error returned when runtime-owned GPU backend objects cannot record a final boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuOutputBoundaryRuntimeRecordError {
+    /// The output boundary could not be planned.
+    Plan(RenderColorTransformError),
+    /// The planned boundary could not produce GPU resources.
+    ResourcePlan(RenderGpuOutputStageResourcePlanError),
+    /// Pure OCIO backend contracts could not be prepared.
+    BackendPrep(OcioGpuWgpuBackendPrepError),
+    /// Concrete wgpu backend objects could not be prepared.
+    BackendObjects(OcioGpuWgpuBackendObjectError),
     /// Resource materialization, pass recording, or readback recording failed.
     Record(RenderGpuOutputStageRecordError),
 }
@@ -495,6 +527,58 @@ impl RenderGpuOutputBoundaryRuntime {
                 },
             },
         )
+    }
+
+    /// Plan, prepare runtime-owned backend objects, and record a native GPU output boundary.
+    pub fn record_wgpu_output_boundary_owned_backend(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        frame: &CpuColorFrame,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRuntimeRecordError> {
+        let Self {
+            shader_cache,
+            backend_prep,
+            backend_objects,
+            frame_ids,
+            frame_table,
+        } = self;
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
+        let plan = planner
+            .plan(frame, boundary)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
+        let resources = plan
+            .gpu_resource_plan(frame_ids, frame, output_texture_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_output_stage(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Record)
     }
 }
 
