@@ -175,15 +175,18 @@ proven. A later backend compiler/upload stage must turn the cached OCIO plan,
 modules through `OcioGpuWgpuWrapperShaderModuleCache`, and the fullscreen
 pipeline through `OcioGpuWgpuRenderPipelineCache`, then through
 `OcioGpuWgpuRenderPassNodePlan` and `OcioGpuWgpuRenderPassRecorder` before the
-preview graph can execute it on the GPU. The wrapper source artifact is
-stage-split; its combined source is diagnostic text, not the canonical execution
-artifact. Mondrian validates/owns stage-split Naga IR for the wrapper and keeps
-generated WGSL as diagnostics only. Until the render graph owns GPU-resident
-source/target frames and calls the recorder from preview/export frame
-evaluation, CPU
-processor execution is the correctness path and the cached shader/module/upload/
-bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are the
-production boundary for GPU integration work.
+preview graph can execute it on the GPU. `RenderGpuColorPassSchedule` now owns
+the preview/export-facing recording boundary: it validates source/target
+`GpuColorFrameHandle` values, derives the wrapper input bind group from the
+OCIO wrapper contract, turns the scheduled output handle into a render-pass
+target, and calls the shared recorder. The wrapper source artifact is
+stage-split; its combined source is diagnostic text, not the canonical
+execution artifact. Mondrian validates/owns stage-split Naga IR for the wrapper
+and keeps generated WGSL as diagnostics only. Until preview/export frame
+evaluation resolves GPU frame handles into real texture views through a shared
+resource table, CPU processor execution is the correctness path and the cached
+shader/module/upload/bind-resource/layout/bind-group/wrapper-link/pipeline-
+contract plans are the production boundary for GPU integration work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

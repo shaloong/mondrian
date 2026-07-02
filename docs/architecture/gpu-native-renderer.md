@@ -190,9 +190,14 @@ layout, and wrapper module metadata before creating the fullscreen
 `OcioGpuWgpuRenderPassRecorder` are the final backend-node boundary: they
 validate the pipeline, OCIO bind group, wrapper input bind group, target format,
 and target resource key before recording a fullscreen draw into an existing
-command encoder. The path becomes scheduler-executable only once the render
-graph owns GPU-resident source/target frames and calls this recorder from
-preview/export frame evaluation.
+command encoder. `RenderGpuColorPassSchedule` is the renderer-facing execution
+binding above that recorder. It validates concrete input/output
+`GpuColorFrameHandle` values, creates the wrapper input bind group from the
+scheduled transform's wrapper contract, converts the output frame view into the
+OCIO render-pass target, and records through the shared recorder. The remaining
+integration work is the shared GPU frame resource table used by preview/export
+frame evaluation; app and export code must not reassemble OCIO bind groups or
+render-pass targets independently.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
@@ -211,8 +216,8 @@ should consume this stage plan instead of branching independently on CPU/GPU
 state, so transfer cost and GPU blockers remain visible to diagnostics and
 performance budgets. Once a planned GPU stage has concrete source/target
 `GpuColorFrameHandle` values and a matching backend render-pass node,
-`RenderGpuColorPassSchedule` validates those pieces before preview/export can
-hand the command encoder to `OcioGpuWgpuRenderPassRecorder`.
+`RenderGpuColorPassSchedule` validates those pieces, prepares the wrapper input
+bind group, and records the fullscreen pass into the caller's command encoder.
 
 ## Allowed Readback
 

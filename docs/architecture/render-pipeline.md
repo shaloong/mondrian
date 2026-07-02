@@ -82,7 +82,10 @@ renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
 For native GPU OCIO execution, `RenderGpuColorPassSchedule` is the bridge
 between the stage plan and backend recorder: it requires GPU-resident source and
 target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a
-matching `OcioGpuWgpuRenderPassNodePlan`.
+matching `OcioGpuWgpuRenderPassNodePlan`. The schedule also owns the renderer
+entry points that bind a resolved input frame view into the wrapper bind group
+and record the output target through `OcioGpuWgpuRenderPassRecorder`; preview
+and export callers must not duplicate OCIO pass assembly.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
 `execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
 through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage
