@@ -1269,6 +1269,8 @@ fn viewer_preview_cache_key_for_resolved_plan(
     color_context.output_color_space.hash(&mut hasher);
     color_context.tone_map.hash(&mut hasher);
     color_context.engine.hash(&mut hasher);
+    color_context.ocio_display.hash(&mut hasher);
+    color_context.ocio_view.hash(&mut hasher);
     elements.len().hash(&mut hasher);
     for element in elements {
         match element {
@@ -1798,6 +1800,43 @@ mod tests {
             viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &rec709);
         let second =
             viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &srgb);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn resolved_media_preview_cache_key_includes_display_view_context() {
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let resolved = vec![ResolvedPreviewElement::Media {
+            frame: test_media_frame_with_size(0, 2, 2, 100),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            effect_graph,
+            frame_seed: 12,
+        }];
+        let sequence_id = SequenceId::new();
+
+        let mut rec709_view = test_color_context(ColorSpace::Rec709);
+        rec709_view.ocio_display = Some("sRGB - Display".to_owned());
+        rec709_view.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
+        let mut colorimetric_view = rec709_view.clone();
+        colorimetric_view.ocio_view = Some("Video (colorimetric)".to_owned());
+        let first = viewer_preview_cache_key_for_resolved_plan(
+            sequence_id,
+            320,
+            180,
+            &resolved,
+            &rec709_view,
+        );
+        let second = viewer_preview_cache_key_for_resolved_plan(
+            sequence_id,
+            320,
+            180,
+            &resolved,
+            &colorimetric_view,
+        );
 
         assert_ne!(first, second);
     }

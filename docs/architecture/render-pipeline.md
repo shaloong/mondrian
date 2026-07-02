@@ -32,8 +32,10 @@ and unrenderable skips.
 
 `collect_timeline_color_diagnostics(...)` reports the clip override, working
 space, and output space together with their canonical `ColorEncodingSpec`
-values. Renderer diagnostics must consume `ColorSpace::encoding()` rather than
-duplicating color-space metadata.
+values. `collect_timeline_color_diagnostics_with_display_view(...)` attaches
+the resolved OCIO display/view for presentation diagnostics. Renderer
+diagnostics must consume `ColorSpace::encoding()` rather than duplicating
+color-space metadata.
 
 `evaluate_timeline_render_plan(...)` is the render-plan entry point. Callers
 must choose an explicit `TimelineEvaluationRequest` intent so preview, export,
@@ -154,6 +156,9 @@ color space before compositing. The source color space resolves from clip
 override first, then media metadata, then the configured missing-metadata policy.
 Preview final-frame cache keys must include the effective color context so a
 monitor/output transform change cannot reuse stale pixels from a previous view.
+For OCIO-backed preview this includes the resolved display and view names, not
+only the output color-space enum, because two views on the same display can
+produce different presentation pixels.
 
 Preview callers must use `TimelineEvaluationRequest::preview(...)`. Export
 callers must use `TimelineEvaluationRequest::export(...)`. Any future thumbnail,

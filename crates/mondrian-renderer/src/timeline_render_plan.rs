@@ -238,6 +238,10 @@ pub struct TimelineColorDiagnostic {
     pub working_encoding: ColorEncodingSpec,
     pub output_color_space: ColorSpace,
     pub output_encoding: ColorEncodingSpec,
+    /// OCIO display used for presentation, when the caller is collecting display diagnostics.
+    pub ocio_display: Option<String>,
+    /// OCIO view used for presentation, when the caller is collecting display diagnostics.
+    pub ocio_view: Option<String>,
     pub tone_map: bool,
     pub pixel_aspect_ratio_override: Option<PixelAspectRatio>,
     pub field_order_override: Option<FieldOrder>,
@@ -252,6 +256,25 @@ pub fn collect_timeline_color_diagnostics(
     working_color_space: ColorSpace,
     output_color_space: ColorSpace,
 ) -> Vec<TimelineColorDiagnostic> {
+    collect_timeline_color_diagnostics_with_display_view(
+        source,
+        timeline_frame,
+        working_color_space,
+        output_color_space,
+        None,
+        None,
+    )
+}
+
+/// Collect color diagnostics and attach the caller's resolved OCIO display/view.
+pub fn collect_timeline_color_diagnostics_with_display_view(
+    source: &dyn RenderPlanSource,
+    timeline_frame: i64,
+    working_color_space: ColorSpace,
+    output_color_space: ColorSpace,
+    ocio_display: Option<&str>,
+    ocio_view: Option<&str>,
+) -> Vec<TimelineColorDiagnostic> {
     evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))
         .elements
         .into_iter()
@@ -264,6 +287,8 @@ pub fn collect_timeline_color_diagnostics(
                 working_encoding: working_color_space.encoding(),
                 output_color_space,
                 output_encoding: output_color_space.encoding(),
+                ocio_display: ocio_display.map(str::to_owned),
+                ocio_view: ocio_view.map(str::to_owned),
                 tone_map: media.auto_tone_map,
                 pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
                 field_order_override: media.field_order_override,
@@ -626,6 +651,33 @@ mod tests {
             Some(FieldOrder::LowerFirst)
         );
         assert_eq!(diagnostic.alpha_interpretation, AlphaInterpretation::Ignore);
+    }
+
+    #[test]
+    fn color_diagnostics_can_carry_display_view_context() {
+        let mut seq = Sequence::new("display-view-diagnostics");
+        let tb = seq.time_base();
+        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let diagnostics = collect_timeline_color_diagnostics_with_display_view(
+            &seq,
+            4,
+            ColorSpace::Rec709,
+            ColorSpace::Srgb,
+            Some("sRGB - Display"),
+            Some("ACES 2.0 - SDR 100 nits (Rec.709)"),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].ocio_display.as_deref(),
+            Some("sRGB - Display")
+        );
+        assert_eq!(
+            diagnostics[0].ocio_view.as_deref(),
+            Some("ACES 2.0 - SDR 100 nits (Rec.709)")
+        );
     }
 
     #[test]

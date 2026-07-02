@@ -155,6 +155,9 @@ For `MondrianSmart` and explicit `Ocio` engines, root sequence contexts copy
 the currently loaded OCIO config's default display/view into the context when
 one is available. Absence of a display/view is only valid when no current OCIO
 config exposes defaults; it is not a fallback color pipeline.
+Preview cache keys and timeline color diagnostics treat display/view as part of
+the effective presentation context. A display/view change must invalidate cached
+viewer frames even when the output `ColorSpace` enum is unchanged.
 
 GPU preview should use OCIO shader extraction instead of CPU processor execution
 for real-time playback. `mondrian-core::extract_ocio_gpu_shader_bundle` and
