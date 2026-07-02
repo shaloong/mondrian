@@ -6,6 +6,10 @@ Mondrian default OCIO config is required for Standard mode; missing config or
 processor failures must surface as errors instead of falling back to another
 color science.
 
+The Rust integration is `ocio-rs` 0.2.x with the `bundled` feature enabled, so
+normal application builds exercise the real OpenColorIO bridge rather than a
+stub runtime.
+
 ## Engines
 
 - `ColorEngine::MondrianSmart`: productized Standard/Simple policy over the
@@ -80,6 +84,11 @@ presentation context with a caller-provided display/output color space.
 `SequenceSettings::root_export_color_context(...)` builds the delivery context
 from the sequence output color space. Callers must choose one of these explicit
 entry points instead of using a generic root render context.
+
+For `MondrianSmart` and explicit `Ocio` engines, root sequence contexts copy
+the currently loaded OCIO config's default display/view into the context when
+one is available. Absence of a display/view is only valid when no current OCIO
+config exposes defaults; it is not a fallback color pipeline.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

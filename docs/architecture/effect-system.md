@@ -51,3 +51,8 @@ Effect stack order affects graph output. UI reorder operations must mutate the c
 ## Optimization
 
 The renderer/effects system may merge deterministic unary ops, cache deterministic subtrees, skip identity graphs, and keep frame-dependent ops such as grain out of cross-frame caches. These optimizations must preserve graph semantics.
+
+File-backed LUT caches key existing files by canonical path and invalidate on
+file fingerprint changes. Tests that validate cache behavior should use local
+cache instances rather than the process-global cache so workspace-level
+parallel test runs remain deterministic.

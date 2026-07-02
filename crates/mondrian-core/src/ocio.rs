@@ -1,6 +1,6 @@
 //! OCIO (OpenColorIO) integration for color management.
 //!
-//! Color transforms are delegated to an OCIO v2.5.1 config whenever a config /
+//! Color transforms are delegated to an OCIO v2.5.2 config whenever a config /
 //! processor can be resolved. `ColorEngine::MondrianSmart` is the productized
 //! default policy and resolves to Mondrian's built-in OCIO config; custom OCIO
 //! mode resolves from [`OcioConfigSource`].
@@ -228,7 +228,7 @@ fn standard_ocio_paths() -> Vec<PathBuf> {
 /// Return the list of available built-in OCIO config names.
 ///
 /// These come from the OCIO library bundled with the application.
-/// Returns an empty vec in stub mode or when no built-in configs are compiled in.
+/// Returns an empty vec when no built-in configs are compiled in.
 pub fn builtin_config_names() -> Vec<String> {
     let Ok(registry) = BuiltinConfigRegistry::get() else {
         return Vec::new();
@@ -277,7 +277,7 @@ pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
 
 /// Obtain a CPU processor for `src → dst` using the current global config.
 fn ocio_cpu_processor(src: ColorSpace, dst: ColorSpace) -> Result<CPUProcessor, String> {
-    let config = ocio_rs::get_current_config()
+    let config = ocio_rs::current_config()
         .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
 
     let src_name = ocio_color_space_name(src);
@@ -298,7 +298,7 @@ fn ocio_display_cpu_processor(
     display: &str,
     view: &str,
 ) -> Result<CPUProcessor, String> {
-    let config = ocio_rs::get_current_config()
+    let config = ocio_rs::current_config()
         .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
 
     let src_name = ocio_color_space_name(src);
@@ -406,7 +406,7 @@ fn apply_cpu_processor_rgba8(cpu: &CPUProcessor, data: &mut [u8]) {
 
 /// Return the list of display names from the current OCIO config.
 pub fn ocio_display_names() -> Vec<String> {
-    let Some(config) = ocio_rs::get_current_config() else {
+    let Some(config) = ocio_rs::current_config() else {
         return Vec::new();
     };
     let n = config.num_displays();
@@ -415,7 +415,7 @@ pub fn ocio_display_names() -> Vec<String> {
 
 /// Return the list of view names for a given display.
 pub fn ocio_view_names(display: &str) -> Vec<String> {
-    let Some(config) = ocio_rs::get_current_config() else {
+    let Some(config) = ocio_rs::current_config() else {
         return Vec::new();
     };
     let n = config.num_views(display);
@@ -424,7 +424,7 @@ pub fn ocio_view_names(display: &str) -> Vec<String> {
 
 /// Return the default display / view pair from the current OCIO config.
 pub fn ocio_default_display_view() -> Option<(String, String)> {
-    let config = ocio_rs::get_current_config()?;
+    let config = ocio_rs::current_config()?;
     let display = config.default_display()?;
     let view = config.default_view(&display)?;
     Some((display, view))

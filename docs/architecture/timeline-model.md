@@ -14,6 +14,11 @@ A `Sequence` contains:
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
 
+Root preview/export color contexts resolve the effective color engine from the
+sequence/project inheritance rules. When the effective engine is
+`MondrianSmart` or explicit OCIO, the context carries the loaded OCIO config's
+default display/view if one is available.
+
 ## Track
 
 `Track` owns an ordered `Vec<Clip>` and track-level state:

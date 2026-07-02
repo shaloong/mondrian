@@ -312,7 +312,7 @@ impl LutCache {
 }
 
 fn cache_key_for_path(path: &Path) -> PathBuf {
-    path.to_path_buf()
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn lut_file_fingerprint(path: &Path) -> Result<LutCacheFingerprint> {
@@ -438,7 +438,7 @@ mod tests {
     fn lut_cache_reuses_entries_and_invalidates_on_file_change() {
         use std::time::UNIX_EPOCH;
 
-        LutCache::global().clear();
+        let cache = LutCache::default();
         let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
         let root = std::env::temp_dir().join(format!("mondrian-lut-cache-{unique}"));
         let _ = std::fs::remove_dir_all(&root);
@@ -446,10 +446,10 @@ mod tests {
         let path = root.join("look.cube");
         std::fs::write(&path, cube_identity_2()).expect("cube");
 
-        let first = Lut3D::from_cube_file_cached(&path).expect("first");
-        let second = Lut3D::from_cube_file_cached(&path).expect("second");
+        let first = cache.load_cube(&path).expect("first");
+        let second = cache.load_cube(&path).expect("second");
         assert_eq!(first, second);
-        assert_eq!(LutCache::global().len(), 1);
+        assert_eq!(cache.len(), 1);
 
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::write(
@@ -466,16 +466,15 @@ mod tests {
 ",
         )
         .expect("changed cube");
-        let changed = Lut3D::from_cube_file_cached(&path).expect("changed");
+        let changed = cache.load_cube(&path).expect("changed");
         assert_ne!(first.data, changed.data);
         assert_eq!(
-            LutCache::global().len(),
+            cache.len(),
             1,
             "cache should still have 1 entry after file modification"
         );
 
         let _ = std::fs::remove_dir_all(root);
-        LutCache::global().clear();
     }
 
     #[test]

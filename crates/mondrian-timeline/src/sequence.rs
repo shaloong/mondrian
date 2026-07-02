@@ -1437,12 +1437,16 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_smart_engine_leaves_display_view_none() {
+    fn mondrian_smart_engine_uses_available_default_display_view() {
         let settings = SequenceSettings::default();
         let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
         assert_eq!(ctx.engine, ColorEngine::MondrianSmart);
-        assert_eq!(ctx.ocio_display, None);
-        assert_eq!(ctx.ocio_view, None);
+        let expected = mondrian_core::ocio_default_display_view();
+        assert_eq!(
+            ctx.ocio_display,
+            expected.as_ref().map(|(display, _)| display.clone())
+        );
+        assert_eq!(ctx.ocio_view, expected.map(|(_, view)| view));
     }
 
     #[test]

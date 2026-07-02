@@ -360,7 +360,7 @@ pub enum ColorEngine {
     /// 内置 OCIO config / processor。当前构建未提供内置 config 时应显式报错。
     #[default]
     MondrianSmart,
-    /// OpenColorIO v2.5.1 配置驱动管线。
+    /// OpenColorIO v2.5.2 配置驱动管线。
     Ocio {
         /// OCIO 配置来源。`ensure_ocio_loaded` 在首次转换前根据此来源加载配置。
         source: OcioConfigSource,
