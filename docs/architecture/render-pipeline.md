@@ -71,8 +71,14 @@ pixels, and temporary RGBA8 boundary crossings so performance smoke tests can
 catch accidental CPU-bound color work as the GPU path comes online.
 
 `FrameCompositor` supports GPU batched compositing with texture pooling and can
-return either RGBA readback or a GPU texture. Long-term render graph nodes should
-return typed frame handles rather than naked textures or byte vectors.
+return either RGBA readback or a GPU texture. GPU render graph nodes return
+`GpuColorFrameHandle` values carrying the same descriptor contract as CPU
+frames, rather than naked textures or byte vectors.
+
+`RenderColorStagePlanner` sits between timeline evaluation/compositing and the
+CPU/GPU color executors. It produces ordered stage plans for CPU transforms,
+GPU OCIO transforms, upload, and readback. App and export crates should consume
+renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
 
 ## Required Semantics
 

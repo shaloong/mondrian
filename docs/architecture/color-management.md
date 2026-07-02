@@ -59,6 +59,11 @@ CPU-resident linear working-frame contract; future GPU frames must expose the
 same domain/encoding/residency/color-space descriptor. RGBA8 is a boundary
 format, not an intermediate color-management contract.
 
+GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
+handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are
+scheduled explicitly by `RenderColorStagePlan` nodes rather than hidden inside
+color conversion helpers.
+
 Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderColorTransform` from their `ColorContext` and pass
 typed frames to `CpuColorTransformExecutor` or a future GPU executor; they must
@@ -135,6 +140,9 @@ as a renderer shader plan keyed by the request and OCIO processor cache id.
 scheduling boundary that turns typed frame descriptors plus renderer color
 transforms into OCIO GPU shader plans with explicit blockers and upload/readback
 requirements.
+`mondrian-renderer::RenderColorStagePlanner` wraps that boundary with ordered
+CPU/GPU/upload/readback stages so preview and export can share scheduling
+semantics while still choosing different output residency.
 
 This cache is deliberately not a fake wgpu execution path. OCIO emits backend
 shader source such as GLSL/HLSL/MSL, while Mondrian's native renderer currently

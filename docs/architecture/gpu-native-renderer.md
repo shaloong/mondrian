@@ -36,7 +36,10 @@ UI code may use `mondrian-ui-renderer`; timeline/video rendering should stay in 
 - Readback buffers are transient and must be named in code as readback/export/debug paths.
 - CPU RGBA must not be the default exchange type between renderer stages.
 - CPU-resident intermediate frames use `CpuColorFrame`; GPU-resident
-  intermediate frames should use the same descriptor contract with a GPU handle.
+  intermediate frames use `GpuColorFrameHandle`. The handle carries a
+  `ColorFrameDescriptor`, renderer resource id, texture format, and diagnostic
+  label; it does not expose CPU pixels or claim ownership of a concrete wgpu
+  object outside the renderer resource table.
 
 ## Effect Integration
 
@@ -69,6 +72,13 @@ transform diagnostics, and explicit CPU upload/readback boundary flags. This is
 the only place color-transform scheduling should ask whether a GPU OCIO path is
 ready; CPU execution remains the correctness executor until the plan reports no
 native blockers and the render graph owns GPU-resident frame handles.
+
+`RenderColorStagePlanner` is the scheduling layer above CPU and GPU color
+executors. It emits an ordered `RenderColorStagePlan` containing CPU transform,
+GPU color transform, upload, and readback nodes. Preview and export scheduling
+should consume this stage plan instead of branching independently on CPU/GPU
+state, so transfer cost and GPU blockers remain visible to diagnostics and
+performance budgets.
 
 ## Allowed Readback
 

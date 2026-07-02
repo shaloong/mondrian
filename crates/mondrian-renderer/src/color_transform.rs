@@ -67,11 +67,16 @@ pub struct RenderOutputTransformResult {
 pub struct RenderColorTransformGpuOptions {
     /// OCIO shader language to extract for the renderer backend.
     pub language: GpuLanguage,
+    /// Desired residency for the planned output descriptor.
+    pub output_residency: ColorFrameResidency,
 }
 
 impl Default for RenderColorTransformGpuOptions {
     fn default() -> Self {
-        Self { language: GpuLanguage::Glsl4_0 }
+        Self {
+            language: GpuLanguage::Glsl4_0,
+            output_residency: ColorFrameResidency::Gpu,
+        }
     }
 }
 
@@ -289,7 +294,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             color_space: transform.working_color_space,
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
-            residency: ColorFrameResidency::Gpu,
+            residency: self.options.output_residency,
         };
         let request = OcioGpuShaderRequest::ColorSpace {
             src: input.color_space,
@@ -320,7 +325,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             color_space: transform.output_color_space,
             domain: transform.output_domain,
             encoding: ColorFrameEncoding::EncodedRgba8,
-            residency: ColorFrameResidency::Gpu,
+            residency: self.options.output_residency,
         };
         let request = OcioGpuShaderRequest::ColorSpace {
             src: input.color_space,
@@ -348,7 +353,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             direction,
             input,
             output,
-            pixel_count: input.width as usize * input.height as usize,
+            pixel_count: input.pixel_count(),
             used_rgba8_boundary: false,
         };
         Ok(RenderColorTransformGpuPlan {
@@ -377,6 +382,9 @@ pub enum RenderColorTransformError {
     /// GPU shader planning failed before native execution could be scheduled.
     #[error("render GPU color transform planning failed: {0}")]
     GpuPlanningFailed(#[from] OcioGpuShaderError),
+    /// GPU planning was requested without an OCIO GPU shader cache.
+    #[error("render GPU color transform planning requested without a GPU planner")]
+    GpuPlannerUnavailable,
 }
 
 #[cfg(test)]
@@ -506,5 +514,33 @@ mod tests {
         assert_eq!(plan.diagnostics.pixel_count, 20);
         assert!(plan.requires_source_upload);
         assert!(!plan.requires_output_readback);
+    }
+
+    #[test]
+    fn gpu_planner_can_request_cpu_output_readback_boundary() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let source = CpuColorFrame::working(RgbaF32Frame {
+            width: 2,
+            height: 2,
+            data: vec![[0.5, 0.25, 0.125, 1.0]; 4],
+            color_space: ColorSpace::Rec709,
+        });
+        let transform =
+            RenderColorTransform::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+
+        let plan = planner
+            .plan_output_transform(source.descriptor(), &transform)
+            .expect("output GPU plan");
+
+        assert_eq!(plan.diagnostics.output.residency, ColorFrameResidency::Cpu);
+        assert!(plan.requires_output_readback);
     }
 }

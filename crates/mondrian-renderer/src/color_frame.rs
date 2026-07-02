@@ -48,6 +48,122 @@ pub struct ColorFrameDescriptor {
     pub residency: ColorFrameResidency,
 }
 
+impl ColorFrameDescriptor {
+    /// Number of pixels described by this frame.
+    pub fn pixel_count(&self) -> usize {
+        self.width as usize * self.height as usize
+    }
+
+    /// Return this descriptor with a different memory residency.
+    pub fn with_residency(mut self, residency: ColorFrameResidency) -> Self {
+        self.residency = residency;
+        self
+    }
+}
+
+/// Renderer-owned identifier for a GPU color frame resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuColorFrameId(u64);
+
+impl GpuColorFrameId {
+    /// Create an identifier from a renderer resource table key.
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Return the raw renderer resource table key.
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// Texture format used by a GPU-resident color frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuColorFrameTextureFormat {
+    /// 8-bit normalized RGBA texture.
+    Rgba8Unorm,
+    /// 16-bit floating-point RGBA texture.
+    Rgba16Float,
+    /// 32-bit floating-point RGBA texture.
+    Rgba32Float,
+}
+
+/// GPU-resident color frame handle.
+///
+/// This is a typed renderer resource handle, not a CPU pixel container. Native
+/// backends own the actual texture and use the id to resolve it from their
+/// resource tables.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GpuColorFrameHandle {
+    id: GpuColorFrameId,
+    descriptor: ColorFrameDescriptor,
+    texture_format: GpuColorFrameTextureFormat,
+    label: String,
+}
+
+impl GpuColorFrameHandle {
+    /// Create a GPU frame handle with a validated descriptor.
+    pub fn new(
+        id: GpuColorFrameId,
+        descriptor: ColorFrameDescriptor,
+        texture_format: GpuColorFrameTextureFormat,
+        label: impl Into<String>,
+    ) -> Result<Self, GpuColorFrameHandleError> {
+        if descriptor.residency != ColorFrameResidency::Gpu {
+            return Err(GpuColorFrameHandleError::CpuResidentDescriptor);
+        }
+        if descriptor.width == 0 || descriptor.height == 0 {
+            return Err(GpuColorFrameHandleError::EmptyExtent {
+                width: descriptor.width,
+                height: descriptor.height,
+            });
+        }
+
+        Ok(Self {
+            id,
+            descriptor,
+            texture_format,
+            label: label.into(),
+        })
+    }
+
+    /// Return the renderer resource id.
+    pub fn id(&self) -> GpuColorFrameId {
+        self.id
+    }
+
+    /// Return the frame metadata contract.
+    pub fn descriptor(&self) -> ColorFrameDescriptor {
+        self.descriptor
+    }
+
+    /// Return the backend texture format.
+    pub fn texture_format(&self) -> GpuColorFrameTextureFormat {
+        self.texture_format
+    }
+
+    /// Human-readable resource label for diagnostics/profiling.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+/// Error returned when constructing a GPU color frame handle.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum GpuColorFrameHandleError {
+    /// The descriptor does not describe a GPU-resident frame.
+    #[error("GPU color frame handle requires a GPU-resident descriptor")]
+    CpuResidentDescriptor,
+    /// The descriptor has an empty pixel extent.
+    #[error("GPU color frame handle requires a non-empty extent, got {width}x{height}")]
+    EmptyExtent {
+        /// Descriptor width.
+        width: u32,
+        /// Descriptor height.
+        height: u32,
+    },
+}
+
 /// CPU-resident linear floating-point frame with a typed color contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpuColorFrame {
@@ -145,5 +261,61 @@ impl CpuEncodedColorFrame {
     /// Consume this wrapper and return RGBA8 pixels.
     pub fn into_rgba(self) -> Vec<u8> {
         self.rgba
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_color_frame_handle_requires_gpu_residency() {
+        let descriptor = ColorFrameDescriptor {
+            width: 1920,
+            height: 1080,
+            color_space: ColorSpace::Rec709,
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Cpu,
+        };
+
+        let err = GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(7),
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "working-frame",
+        )
+        .expect_err("CPU descriptor must be rejected");
+
+        assert_eq!(err, GpuColorFrameHandleError::CpuResidentDescriptor);
+    }
+
+    #[test]
+    fn gpu_color_frame_handle_carries_descriptor_and_resource_id() {
+        let descriptor = ColorFrameDescriptor {
+            width: 3840,
+            height: 2160,
+            color_space: ColorSpace::Rec2020,
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+
+        let handle = GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(42),
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "timeline-working",
+        )
+        .expect("GPU descriptor");
+
+        assert_eq!(handle.id().raw(), 42);
+        assert_eq!(handle.descriptor(), descriptor);
+        assert_eq!(
+            handle.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float
+        );
+        assert_eq!(handle.label(), "timeline-working");
+        assert_eq!(handle.descriptor().pixel_count(), 3840 * 2160);
     }
 }
