@@ -168,12 +168,14 @@ proven. A later backend compiler/upload stage must turn the cached OCIO plan,
 `OcioGpuWgpuRenderPipelineDescriptorPlan` and
 `OcioGpuWgpuWrapperShaderModuleArtifactCache`, then concrete wrapper shader
 modules through `OcioGpuWgpuWrapperShaderModuleCache`, and the fullscreen
-pipeline through `OcioGpuWgpuRenderPipelineCache` before the preview graph can
-execute it on the GPU. The wrapper source artifact is stage-split; its combined
-source is diagnostic text, not the canonical execution artifact. Mondrian
-validates/owns stage-split Naga IR for the wrapper and keeps generated WGSL as
-diagnostics only. Until Mondrian creates the render-pass node that binds the
-OCIO resources, wrapper input, pipeline, and target frame, CPU
+pipeline through `OcioGpuWgpuRenderPipelineCache`, then through
+`OcioGpuWgpuRenderPassNodePlan` and `OcioGpuWgpuRenderPassRecorder` before the
+preview graph can execute it on the GPU. The wrapper source artifact is
+stage-split; its combined source is diagnostic text, not the canonical execution
+artifact. Mondrian validates/owns stage-split Naga IR for the wrapper and keeps
+generated WGSL as diagnostics only. Until the render graph owns GPU-resident
+source/target frames and calls the recorder from preview/export frame
+evaluation, CPU
 processor execution is the correctness path and the cached shader/module/upload/
 bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are the
 production boundary for GPU integration work.

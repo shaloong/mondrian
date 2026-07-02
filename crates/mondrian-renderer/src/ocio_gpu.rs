@@ -1771,6 +1771,8 @@ pub struct OcioGpuWgpuWrapperInputResources<'a> {
 
 /// Concrete OCIO resource bind group created from validated uploaded resources.
 pub struct OcioGpuWgpuOcioBindGroup {
+    /// OCIO resource bind group index.
+    pub bind_group_index: u32,
     /// Stable resource key this bind group belongs to.
     pub resource_key: u64,
     /// Hash of the bind-resource plan used to create it.
@@ -2181,6 +2183,7 @@ impl OcioGpuWgpuBindGroupPreparer {
             entries: &entries,
         });
         Ok(OcioGpuWgpuOcioBindGroup {
+            bind_group_index: layout_plan.bind_group,
             resource_key: bind_resource_plan.resource_key,
             bind_resource_plan_hash: bind_resource_plan.plan_hash,
             layout_hash: descriptor.layout_hash,
@@ -3419,6 +3422,166 @@ impl Default for OcioGpuWgpuRenderPipelineCache {
     }
 }
 
+/// Render target borrowed while recording an OCIO fullscreen pass.
+pub struct OcioGpuWgpuRenderPassTarget<'a> {
+    /// Stable resource key this target belongs to.
+    pub resource_key: u64,
+    /// Output color target format.
+    pub output_format: OcioGpuWgpuColorTargetFormat,
+    /// Target view written by the fullscreen pass.
+    pub view: &'a wgpu::TextureView,
+    /// Load operation for the target attachment.
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// Pure render-pass node contract for an OCIO fullscreen color pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuRenderPassNodePlan {
+    /// Stable resource key this render pass belongs to.
+    pub resource_key: u64,
+    /// Hash of the render pipeline contract.
+    pub render_pipeline_cache_key: u64,
+    /// Hash of the render-pipeline descriptor plan.
+    pub render_descriptor_hash: u64,
+    /// Hash of the OCIO bind-group layout.
+    pub ocio_layout_hash: u64,
+    /// Hash of the wrapper bind-group layout.
+    pub wrapper_layout_hash: u64,
+    /// Output color target format.
+    pub output_format: OcioGpuWgpuColorTargetFormat,
+    /// Number of vertices drawn by the fullscreen pass.
+    pub vertex_count: u32,
+    /// Stable hash of this render-pass node.
+    pub node_hash: u64,
+}
+
+impl OcioGpuWgpuRenderPassNodePlan {
+    /// Build a render-pass node plan from validated backend objects.
+    pub fn for_pipeline_and_bind_groups(
+        pipeline: &OcioGpuWgpuRenderPipeline,
+        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
+        output_format: OcioGpuWgpuColorTargetFormat,
+    ) -> Result<Self, OcioGpuWgpuRenderPassError> {
+        let metadata = OcioGpuWgpuRenderPipelineMetadata {
+            resource_key: pipeline.resource_key,
+            cache_key: pipeline.cache_key,
+            descriptor_hash: pipeline.descriptor_hash,
+        };
+        Self::for_pipeline_metadata_and_bind_groups(
+            metadata,
+            ocio_bind_group.resource_key,
+            ocio_bind_group.layout_hash,
+            wrapper_bind_group.layout_hash,
+            output_format,
+        )
+    }
+
+    fn for_pipeline_metadata_and_bind_groups(
+        pipeline: OcioGpuWgpuRenderPipelineMetadata,
+        ocio_bind_group_resource_key: u64,
+        ocio_layout_hash: u64,
+        wrapper_layout_hash: u64,
+        output_format: OcioGpuWgpuColorTargetFormat,
+    ) -> Result<Self, OcioGpuWgpuRenderPassError> {
+        let node_hash = render_pass_node_hash(
+            pipeline,
+            ocio_bind_group_resource_key,
+            ocio_layout_hash,
+            wrapper_layout_hash,
+            output_format,
+        )?;
+        Ok(Self {
+            resource_key: pipeline.resource_key,
+            render_pipeline_cache_key: pipeline.cache_key,
+            render_descriptor_hash: pipeline.descriptor_hash,
+            ocio_layout_hash,
+            wrapper_layout_hash,
+            output_format,
+            vertex_count: 4,
+            node_hash,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OcioGpuWgpuRenderPipelineMetadata {
+    resource_key: u64,
+    cache_key: u64,
+    descriptor_hash: u64,
+}
+
+/// Error returned before recording an OCIO fullscreen render pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuRenderPassError {
+    /// The OCIO bind group belongs to a different resource key.
+    OcioBindGroupResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The render target belongs to a different resource key.
+    TargetResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The render target format differs from the pass contract.
+    TargetFormatMismatch {
+        expected: OcioGpuWgpuColorTargetFormat,
+        actual: OcioGpuWgpuColorTargetFormat,
+    },
+    /// The render pipeline differs from the pass contract.
+    PipelineCacheKeyMismatch { expected: u64, actual: u64 },
+    /// The OCIO bind-group layout differs from the pass contract.
+    OcioLayoutHashMismatch { expected: u64, actual: u64 },
+    /// The wrapper bind-group layout differs from the pass contract.
+    WrapperLayoutHashMismatch { expected: u64, actual: u64 },
+}
+
+/// Stateless recorder for an OCIO fullscreen render pass.
+pub struct OcioGpuWgpuRenderPassRecorder;
+
+impl OcioGpuWgpuRenderPassRecorder {
+    /// Record a fullscreen OCIO pass into an existing command encoder.
+    pub fn record(
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &OcioGpuWgpuRenderPassNodePlan,
+        pipeline: &OcioGpuWgpuRenderPipeline,
+        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
+        target: OcioGpuWgpuRenderPassTarget<'_>,
+    ) -> Result<(), OcioGpuWgpuRenderPassError> {
+        validate_render_pass_contract(
+            plan,
+            pipeline,
+            ocio_bind_group,
+            wrapper_bind_group,
+            &target,
+        )?;
+
+        let attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: target.view,
+            resolve_target: None,
+            ops: wgpu::Operations { load: target.load_op, store: wgpu::StoreOp::Store },
+            depth_slice: None,
+        })];
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ocio_fullscreen_render_pass"),
+            color_attachments: &attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline.render_pipeline);
+        pass.set_bind_group(
+            ocio_bind_group.bind_group_index,
+            &ocio_bind_group.bind_group,
+            &[],
+        );
+        pass.set_bind_group(
+            wrapper_bind_group.bind_group_index,
+            &wrapper_bind_group.bind_group,
+            &[],
+        );
+        pass.draw(0..plan.vertex_count, 0..1);
+        Ok(())
+    }
+}
+
 /// Missing pieces before an OCIO GPU shader plan can run in wgpu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OcioGpuWgpuBlocker {
@@ -4598,6 +4761,80 @@ struct OcioGpuWgpuWrapperShaderModuleKeyMetadata {
     render_descriptor_hash: u64,
     cache_key: u64,
     module_key: u64,
+}
+
+fn render_pass_node_hash(
+    pipeline: OcioGpuWgpuRenderPipelineMetadata,
+    ocio_bind_group_resource_key: u64,
+    ocio_layout_hash: u64,
+    wrapper_layout_hash: u64,
+    output_format: OcioGpuWgpuColorTargetFormat,
+) -> Result<u64, OcioGpuWgpuRenderPassError> {
+    if pipeline.resource_key != ocio_bind_group_resource_key {
+        return Err(
+            OcioGpuWgpuRenderPassError::OcioBindGroupResourceKeyMismatch {
+                expected: pipeline.resource_key,
+                actual: ocio_bind_group_resource_key,
+            },
+        );
+    }
+
+    let mut hasher = DefaultHasher::new();
+    pipeline.resource_key.hash(&mut hasher);
+    pipeline.cache_key.hash(&mut hasher);
+    pipeline.descriptor_hash.hash(&mut hasher);
+    ocio_layout_hash.hash(&mut hasher);
+    wrapper_layout_hash.hash(&mut hasher);
+    output_format.hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
+fn validate_render_pass_contract(
+    plan: &OcioGpuWgpuRenderPassNodePlan,
+    pipeline: &OcioGpuWgpuRenderPipeline,
+    ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+    wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
+    target: &OcioGpuWgpuRenderPassTarget<'_>,
+) -> Result<(), OcioGpuWgpuRenderPassError> {
+    if plan.resource_key != ocio_bind_group.resource_key {
+        return Err(
+            OcioGpuWgpuRenderPassError::OcioBindGroupResourceKeyMismatch {
+                expected: plan.resource_key,
+                actual: ocio_bind_group.resource_key,
+            },
+        );
+    }
+    if plan.resource_key != target.resource_key {
+        return Err(OcioGpuWgpuRenderPassError::TargetResourceKeyMismatch {
+            expected: plan.resource_key,
+            actual: target.resource_key,
+        });
+    }
+    if plan.output_format != target.output_format {
+        return Err(OcioGpuWgpuRenderPassError::TargetFormatMismatch {
+            expected: plan.output_format,
+            actual: target.output_format,
+        });
+    }
+    if plan.render_pipeline_cache_key != pipeline.cache_key {
+        return Err(OcioGpuWgpuRenderPassError::PipelineCacheKeyMismatch {
+            expected: plan.render_pipeline_cache_key,
+            actual: pipeline.cache_key,
+        });
+    }
+    if plan.ocio_layout_hash != ocio_bind_group.layout_hash {
+        return Err(OcioGpuWgpuRenderPassError::OcioLayoutHashMismatch {
+            expected: plan.ocio_layout_hash,
+            actual: ocio_bind_group.layout_hash,
+        });
+    }
+    if plan.wrapper_layout_hash != wrapper_bind_group.layout_hash {
+        return Err(OcioGpuWgpuRenderPassError::WrapperLayoutHashMismatch {
+            expected: plan.wrapper_layout_hash,
+            actual: wrapper_bind_group.layout_hash,
+        });
+    }
+    Ok(())
 }
 
 fn backend_shader_module_cache_key(
@@ -5882,6 +6119,62 @@ mod tests {
             ),
             Err(OcioGpuWgpuRenderPipelineError::ShaderModuleRenderDescriptorHashMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn render_pass_node_plan_binds_pipeline_bind_groups_and_target_contract() {
+        let pipeline = OcioGpuWgpuRenderPipelineMetadata {
+            resource_key: 54,
+            cache_key: 101,
+            descriptor_hash: 202,
+        };
+
+        let plan = OcioGpuWgpuRenderPassNodePlan::for_pipeline_metadata_and_bind_groups(
+            pipeline,
+            54,
+            303,
+            404,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        )
+        .expect("render pass node plan");
+
+        assert_eq!(plan.resource_key, 54);
+        assert_eq!(plan.render_pipeline_cache_key, 101);
+        assert_eq!(plan.render_descriptor_hash, 202);
+        assert_eq!(plan.ocio_layout_hash, 303);
+        assert_eq!(plan.wrapper_layout_hash, 404);
+        assert_eq!(
+            plan.output_format,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float
+        );
+        assert_eq!(plan.vertex_count, 4);
+        assert_ne!(plan.node_hash, 0);
+    }
+
+    #[test]
+    fn render_pass_node_plan_rejects_mismatched_ocio_resource_key() {
+        let pipeline = OcioGpuWgpuRenderPipelineMetadata {
+            resource_key: 55,
+            cache_key: 101,
+            descriptor_hash: 202,
+        };
+
+        let err = OcioGpuWgpuRenderPassNodePlan::for_pipeline_metadata_and_bind_groups(
+            pipeline,
+            56,
+            303,
+            404,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        )
+        .expect_err("resource key mismatch must fail");
+
+        assert_eq!(
+            err,
+            OcioGpuWgpuRenderPassError::OcioBindGroupResourceKeyMismatch {
+                expected: 55,
+                actual: 56
+            }
+        );
     }
 
     #[test]

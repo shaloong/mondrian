@@ -186,9 +186,13 @@ format. WGSL remains diagnostic output only.
 `wgpu::ShaderModule` pair from those Naga artifacts, and
 `OcioGpuWgpuRenderPipelineCache` validates the descriptor, concrete pipeline
 layout, and wrapper module metadata before creating the fullscreen
-`wgpu::RenderPipeline`. The path is still not executable until a render-pass
-node binds the prepared OCIO/wrapper bind groups, draws the fullscreen pass, and
-writes into the target frame used by preview/export.
+`wgpu::RenderPipeline`. `OcioGpuWgpuRenderPassNodePlan` and
+`OcioGpuWgpuRenderPassRecorder` are the final backend-node boundary: they
+validate the pipeline, OCIO bind group, wrapper input bind group, target format,
+and target resource key before recording a fullscreen draw into an existing
+command encoder. The path becomes scheduler-executable only once the render
+graph owns GPU-resident source/target frames and calls this recorder from
+preview/export frame evaluation.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
