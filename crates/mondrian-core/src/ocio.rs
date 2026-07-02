@@ -70,6 +70,54 @@ pub struct MondrianDefaultOcioDisplayView {
     pub view: &'static str,
 }
 
+/// Structured validation summary for Mondrian's embedded OCIO config asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MondrianDefaultOcioValidationReport {
+    /// Parsed config name.
+    pub config_name: String,
+    /// Number of OCIO color spaces in the embedded config.
+    pub color_space_count: i32,
+    /// Number of Mondrian color-space mappings validated against OCIO canonical names.
+    pub color_space_mappings_checked: usize,
+    /// Number of product display/view pairs validated against the config.
+    pub display_views_checked: usize,
+    /// Number of scene/display roles validated.
+    pub roles_checked: usize,
+    /// Number of color-space CPU processors built from the contract matrix.
+    pub color_space_cpu_processors_checked: usize,
+    /// Number of color-space GPU shader processors built from the non-identity contract matrix.
+    pub color_space_gpu_processors_checked: usize,
+    /// Number of display/view CPU processors built from contract inputs.
+    pub display_cpu_processors_checked: usize,
+    /// Number of display/view GPU shader processors built from contract inputs.
+    pub display_gpu_processors_checked: usize,
+}
+
+/// Validation failure for Mondrian's embedded OCIO config asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MondrianDefaultOcioValidationError {
+    /// Individual validation issues found while checking the embedded config.
+    pub issues: Vec<String>,
+}
+
+impl MondrianDefaultOcioValidationError {
+    fn new(issues: Vec<String>) -> Self {
+        Self { issues }
+    }
+}
+
+impl std::fmt::Display for MondrianDefaultOcioValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "embedded Mondrian OCIO config failed {} validation check(s)",
+            self.issues.len()
+        )
+    }
+}
+
+impl std::error::Error for MondrianDefaultOcioValidationError {}
+
 const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 9] = [
     MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::Rec709,
@@ -166,6 +214,284 @@ pub fn mondrian_default_ocio_contract() -> MondrianDefaultOcioContract {
         scene_linear_role: "ACEScg",
         color_spaces: &MONDRIAN_DEFAULT_OCIO_COLOR_SPACES,
         display_views: &MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS,
+    }
+}
+
+/// Validate the embedded Mondrian default OCIO config against its product contract.
+///
+/// This is the production gate for `mondrian_default_ocio_v1`: it parses the
+/// embedded asset, verifies pinned names/roles/display views, and proves that
+/// every contract color-space pair can build a CPU processor while every
+/// non-identity pair and display/view transform can extract a GPU shader.
+pub fn validate_mondrian_default_ocio_contract(
+) -> Result<MondrianDefaultOcioValidationReport, MondrianDefaultOcioValidationError> {
+    let contract = mondrian_default_ocio_contract();
+    let config = match Config::from_stream(MONDRIAN_DEFAULT_OCIO_CONFIG) {
+        Ok(config) => config,
+        Err(err) => {
+            return Err(MondrianDefaultOcioValidationError::new(vec![format!(
+                "embedded Mondrian OCIO config '{}' failed to parse: {err}",
+                contract.config_name
+            )]));
+        }
+    };
+
+    let mut errors = Vec::new();
+    let mut report = MondrianDefaultOcioValidationReport {
+        config_name: config.name().unwrap_or_default(),
+        color_space_count: config.num_color_spaces(),
+        color_space_mappings_checked: 0,
+        display_views_checked: 0,
+        roles_checked: 0,
+        color_space_cpu_processors_checked: 0,
+        color_space_gpu_processors_checked: 0,
+        display_cpu_processors_checked: 0,
+        display_gpu_processors_checked: 0,
+    };
+
+    validate_mondrian_default_config_identity(&config, contract, &mut report, &mut errors);
+    validate_mondrian_default_color_spaces(&config, contract, &mut report, &mut errors);
+    validate_mondrian_default_display_views(&config, contract, &mut report, &mut errors);
+    validate_mondrian_default_color_space_processors(&config, contract, &mut report, &mut errors);
+    validate_mondrian_default_display_processors(&config, contract, &mut report, &mut errors);
+
+    if errors.is_empty() {
+        Ok(report)
+    } else {
+        Err(MondrianDefaultOcioValidationError::new(errors))
+    }
+}
+
+fn validate_mondrian_default_config_identity(
+    config: &Config,
+    contract: MondrianDefaultOcioContract,
+    report: &mut MondrianDefaultOcioValidationReport,
+    errors: &mut Vec<String>,
+) {
+    if report.config_name != contract.config_name {
+        errors.push(format!(
+            "embedded Mondrian OCIO config name mismatch: expected '{}', got '{}'",
+            contract.config_name, report.config_name
+        ));
+    }
+    if report.color_space_count < contract.color_spaces.len() as i32 {
+        errors.push(format!(
+            "embedded Mondrian OCIO config has only {} color spaces for {} contract mappings",
+            report.color_space_count,
+            contract.color_spaces.len()
+        ));
+    }
+
+    match config.default_display() {
+        Some(display) if display == contract.default_display => report.roles_checked += 1,
+        Some(display) => errors.push(format!(
+            "embedded Mondrian OCIO default display mismatch: expected '{}', got '{display}'",
+            contract.default_display
+        )),
+        None => errors.push("embedded Mondrian OCIO config has no default display".to_string()),
+    }
+    match config.default_view(contract.default_display) {
+        Some(view) if view == contract.default_view => report.roles_checked += 1,
+        Some(view) => errors.push(format!(
+            "embedded Mondrian OCIO default view mismatch for '{}': expected '{}', got '{view}'",
+            contract.default_display, contract.default_view
+        )),
+        None => errors.push(format!(
+            "embedded Mondrian OCIO config has no default view for '{}'",
+            contract.default_display
+        )),
+    }
+    match config.role_color_space("scene_linear") {
+        Some(role) if role == contract.scene_linear_role => report.roles_checked += 1,
+        Some(role) => errors.push(format!(
+            "embedded Mondrian OCIO scene_linear role mismatch: expected '{}', got '{role}'",
+            contract.scene_linear_role
+        )),
+        None => errors.push("embedded Mondrian OCIO config has no scene_linear role".to_string()),
+    }
+}
+
+fn validate_mondrian_default_color_spaces(
+    config: &Config,
+    contract: MondrianDefaultOcioContract,
+    report: &mut MondrianDefaultOcioValidationReport,
+    errors: &mut Vec<String>,
+) {
+    for mapped in contract.color_spaces {
+        if mapped.ocio_name != ocio_color_space_name(mapped.color_space) {
+            errors.push(format!(
+                "{:?} contract name mismatch: contract '{}', mapper '{}'",
+                mapped.color_space,
+                mapped.ocio_name,
+                ocio_color_space_name(mapped.color_space)
+            ));
+            continue;
+        }
+        if config.canonical_name(mapped.ocio_name).is_some() {
+            report.color_space_mappings_checked += 1;
+        } else {
+            errors.push(format!(
+                "{:?} maps to missing OCIO color space '{}'",
+                mapped.color_space, mapped.ocio_name
+            ));
+        }
+    }
+}
+
+fn validate_mondrian_default_display_views(
+    config: &Config,
+    contract: MondrianDefaultOcioContract,
+    report: &mut MondrianDefaultOcioValidationReport,
+    errors: &mut Vec<String>,
+) {
+    for display_view in contract.display_views {
+        if config_has_display_view(config, display_view.display, display_view.view) {
+            report.display_views_checked += 1;
+        } else {
+            let views = config_view_names(config, display_view.display);
+            errors.push(format!(
+                "display '{}' is missing view '{}'; views: {views:?}",
+                display_view.display, display_view.view
+            ));
+        }
+    }
+}
+
+fn validate_mondrian_default_color_space_processors(
+    config: &Config,
+    contract: MondrianDefaultOcioContract,
+    report: &mut MondrianDefaultOcioValidationReport,
+    errors: &mut Vec<String>,
+) {
+    for src in contract.color_spaces {
+        for dst in contract.color_spaces {
+            let src_name = ocio_color_space_name(src.color_space);
+            let dst_name = ocio_color_space_name(dst.color_space);
+            let processor = match config.processor(src_name, dst_name) {
+                Ok(processor) => processor,
+                Err(err) => {
+                    errors.push(format!(
+                        "{:?}->{:?} OCIO processor missing: {err}",
+                        src.color_space, dst.color_space
+                    ));
+                    continue;
+                }
+            };
+
+            match processor.default_cpu_processor() {
+                Ok(_) => report.color_space_cpu_processors_checked += 1,
+                Err(err) => errors.push(format!(
+                    "{:?}->{:?} OCIO CPU processor missing: {err}",
+                    src.color_space, dst.color_space
+                )),
+            }
+
+            if src.color_space != dst.color_space
+                && validate_gpu_shader_processor(
+                    &processor,
+                    GpuLanguage::Glsl4_0,
+                    &format!("{:?}->{:?}", src.color_space, dst.color_space),
+                    errors,
+                )
+            {
+                report.color_space_gpu_processors_checked += 1;
+            }
+        }
+    }
+}
+
+fn validate_mondrian_default_display_processors(
+    config: &Config,
+    contract: MondrianDefaultOcioContract,
+    report: &mut MondrianDefaultOcioValidationReport,
+    errors: &mut Vec<String>,
+) {
+    for src in contract.color_spaces {
+        let src_name = ocio_color_space_name(src.color_space);
+        for display_view in contract.display_views {
+            let processor = match config.processor_display(
+                src_name,
+                display_view.display,
+                display_view.view,
+                ocio_rs::TransformDirection::Forward,
+            ) {
+                Ok(processor) => processor,
+                Err(err) => {
+                    errors.push(format!(
+                        "{:?}->{}/{} OCIO display processor missing: {err}",
+                        src.color_space, display_view.display, display_view.view
+                    ));
+                    continue;
+                }
+            };
+
+            match processor.default_cpu_processor() {
+                Ok(_) => report.display_cpu_processors_checked += 1,
+                Err(err) => errors.push(format!(
+                    "{:?}->{}/{} OCIO display CPU processor missing: {err}",
+                    src.color_space, display_view.display, display_view.view
+                )),
+            }
+
+            if validate_gpu_shader_processor(
+                &processor,
+                GpuLanguage::Glsl4_0,
+                &format!(
+                    "{:?}->{}/{}",
+                    src.color_space, display_view.display, display_view.view
+                ),
+                errors,
+            ) {
+                report.display_gpu_processors_checked += 1;
+            }
+        }
+    }
+}
+
+fn config_view_names(config: &Config, display: &str) -> Vec<String> {
+    (0..config.num_views(display))
+        .filter_map(|index| config.view(display, index))
+        .collect()
+}
+
+fn config_has_display_view(config: &Config, display: &str, view: &str) -> bool {
+    config_view_names(config, display).iter().any(|candidate| candidate == view)
+}
+
+fn validate_gpu_shader_processor(
+    processor: &ocio_rs::Processor,
+    language: GpuLanguage,
+    label: &str,
+    errors: &mut Vec<String>,
+) -> bool {
+    let gpu = match processor.default_gpu_processor() {
+        Ok(gpu) => gpu,
+        Err(err) => {
+            errors.push(format!("{label} OCIO GPU processor missing: {err}"));
+            return false;
+        }
+    };
+    let mut desc = match configured_gpu_shader_desc(language) {
+        Ok(desc) => desc,
+        Err(err) => {
+            errors.push(format!("{label} OCIO GPU shader descriptor failed: {err}"));
+            return false;
+        }
+    };
+    gpu.extract_shader_info(&mut desc);
+    match extracted_shader_text(&desc) {
+        Ok(shader_text) if shader_text.contains(MONDRIAN_OCIO_GPU_FUNCTION_NAME) => true,
+        Ok(_) => {
+            errors.push(format!(
+                "{label} OCIO GPU shader missing function '{}'",
+                MONDRIAN_OCIO_GPU_FUNCTION_NAME
+            ));
+            false
+        }
+        Err(err) => {
+            errors.push(format!("{label} OCIO GPU shader extraction failed: {err}"));
+            false
+        }
     }
 }
 
@@ -1089,6 +1415,37 @@ mod tests {
                 display_view.view
             );
         }
+    }
+
+    #[test]
+    fn mondrian_default_contract_validation_checks_cpu_and_gpu_processors() {
+        let contract = mondrian_default_ocio_contract();
+        let report = validate_mondrian_default_ocio_contract()
+            .unwrap_or_else(|err| panic!("default OCIO contract errors: {:#?}", err.issues));
+
+        assert_eq!(report.config_name, contract.config_name);
+        assert_eq!(
+            report.color_space_mappings_checked,
+            contract.color_spaces.len()
+        );
+        assert_eq!(report.display_views_checked, contract.display_views.len());
+        assert_eq!(report.roles_checked, 3);
+        assert_eq!(
+            report.color_space_cpu_processors_checked,
+            contract.color_spaces.len() * contract.color_spaces.len()
+        );
+        assert_eq!(
+            report.color_space_gpu_processors_checked,
+            contract.color_spaces.len() * (contract.color_spaces.len() - 1)
+        );
+        assert_eq!(
+            report.display_cpu_processors_checked,
+            contract.color_spaces.len() * contract.display_views.len()
+        );
+        assert_eq!(
+            report.display_gpu_processors_checked,
+            contract.color_spaces.len() * contract.display_views.len()
+        );
     }
 
     #[test]

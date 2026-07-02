@@ -22,6 +22,12 @@ display/view, scene-linear working role, supported Mondrian `ColorSpace`
 mappings, and product-supported display/view pairs. Core tests validate the
 embedded `.ocio` file against this contract so config edits fail loudly when
 they break Standard mode.
+`mondrian-core::validate_mondrian_default_ocio_contract()` is the production
+validation gate for this asset. It returns a structured report after proving
+the embedded config parses, matches the pinned roles/display contract, resolves
+every Mondrian color-space mapping, builds CPU processors for the full contract
+color-space matrix, and extracts GPU shaders for every non-identity
+color-space transform plus every supported display/view transform.
 
 ## Engines
 
