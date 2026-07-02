@@ -161,11 +161,13 @@ proven. A later backend compiler/upload stage must turn the cached OCIO plan,
 `OcioGpuWgpuShaderModuleCache` output into validated
 `OcioGpuWgpuBindResourcePlan` entries and
 `OcioGpuWgpuBindGroupLayoutDescriptorPlan` descriptors, then through
-`OcioGpuWgpuBindGroupPreparer` into concrete bind groups, pipeline layouts, and
-render-graph nodes before the preview graph can execute it on the GPU. Until
-that stage exists, CPU processor execution is the correctness path and the
-cached shader/module/upload/bind-resource/layout/bind-group plans are the
-production boundary for GPU integration work.
+`OcioGpuWgpuBindGroupPreparer` into concrete bind groups,
+`OcioGpuWgpuPipelineLayoutPlan`, `OcioGpuWgpuFullscreenShaderContract`, and
+`OcioGpuWgpuRenderPipelineDescriptorPlan` before the preview graph can execute
+it on the GPU. Until the fullscreen wrapper links and calls the OCIO-generated
+program inside a render-pass node, CPU processor execution is the correctness
+path and the cached shader/module/upload/bind-resource/layout/bind-group/
+pipeline-contract plans are the production boundary for GPU integration work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

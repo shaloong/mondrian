@@ -155,6 +155,19 @@ groups is necessary but still not sufficient for native execution:
 pipeline/render-pass node consume those bind groups and prove preview/export
 consistency.
 
+`OcioGpuWgpuPipelineLayoutPlan` composes the OCIO resource bind group and the
+wrapper input bind group into a stable pipeline-layout contract, and
+`OcioGpuWgpuPipelineLayoutPreparer` can create the concrete
+`wgpu::PipelineLayout` once both bind groups have been prepared.
+`OcioGpuWgpuFullscreenShaderContract` records Mondrian's fullscreen vertex and
+fragment entry points, output location, and draw topology. The contract still
+marks `requires_ocio_program_link = true`: the fragment wrapper must be linked
+with the OCIO-generated program and must call the OCIO transform before a real
+render pipeline can execute. `OcioGpuWgpuRenderPipelineDescriptorPlan` captures
+the output target format and render-pipeline descriptor hash, but it remains a
+contract rather than an executable pipeline until that wrapper/program link is
+implemented and verified.
+
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
 `RenderColorTransform` requests to the OCIO shader cache. It produces a

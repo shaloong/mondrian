@@ -1336,6 +1336,271 @@ pub struct OcioGpuWgpuWrapperBindGroup {
     pub bind_group: wgpu::BindGroup,
 }
 
+/// Pure pipeline-layout contract for an OCIO fullscreen color pass.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuPipelineLayoutPlan {
+    /// Stable resource key this pipeline layout belongs to.
+    pub resource_key: u64,
+    /// Hash of the OCIO resource bind-group layout.
+    pub ocio_layout_hash: u64,
+    /// Hash of the wrapper input bind-group layout.
+    pub wrapper_layout_hash: u64,
+    /// Ordered bind-group slots used by the future render pipeline.
+    pub bind_groups: Vec<OcioGpuWgpuPipelineBindGroupSlot>,
+    /// Stable hash of this pipeline-layout plan.
+    pub layout_hash: u64,
+}
+
+impl OcioGpuWgpuPipelineLayoutPlan {
+    /// Build a pipeline-layout plan from validated bind-group contracts.
+    pub fn for_bind_groups(
+        resources: &OcioGpuWgpuResourcePlan,
+        ocio_layout: &OcioGpuWgpuBindingLayoutPlan,
+        wrapper_layout: &OcioGpuWgpuWrapperBindingPlan,
+    ) -> Self {
+        let mut bind_groups = vec![
+            OcioGpuWgpuPipelineBindGroupSlot {
+                bind_group: ocio_layout.bind_group,
+                resource: OcioGpuWgpuPipelineBindGroupResource::OcioResources,
+                layout_hash: ocio_layout.layout_hash,
+            },
+            OcioGpuWgpuPipelineBindGroupSlot {
+                bind_group: wrapper_layout.bind_group,
+                resource: OcioGpuWgpuPipelineBindGroupResource::WrapperInput,
+                layout_hash: wrapper_layout.layout_hash,
+            },
+        ];
+        bind_groups.sort_by_key(|slot| slot.bind_group);
+        let layout_hash = hash_pipeline_layout_plan(
+            resources.resource_key,
+            ocio_layout.layout_hash,
+            wrapper_layout.layout_hash,
+            &bind_groups,
+        );
+        Self {
+            resource_key: resources.resource_key,
+            ocio_layout_hash: ocio_layout.layout_hash,
+            wrapper_layout_hash: wrapper_layout.layout_hash,
+            bind_groups,
+            layout_hash,
+        }
+    }
+}
+
+/// One bind-group slot in the OCIO fullscreen pipeline layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuPipelineBindGroupSlot {
+    /// Bind group index.
+    pub bind_group: u32,
+    /// Resource class bound at this index.
+    pub resource: OcioGpuWgpuPipelineBindGroupResource,
+    /// Hash of the bind-group layout at this slot.
+    pub layout_hash: u64,
+}
+
+/// Resource class for a pipeline-layout bind-group slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuPipelineBindGroupResource {
+    /// OCIO LUT/uniform resources.
+    OcioResources,
+    /// Mondrian input frame texture/sampler resources.
+    WrapperInput,
+}
+
+/// Concrete wgpu pipeline layout for an OCIO fullscreen color pass.
+pub struct OcioGpuWgpuPipelineLayout {
+    /// Stable resource key this pipeline layout belongs to.
+    pub resource_key: u64,
+    /// Hash of the pure pipeline-layout plan.
+    pub layout_hash: u64,
+    /// Concrete wgpu pipeline layout.
+    pub pipeline_layout: wgpu::PipelineLayout,
+}
+
+/// Error returned when a concrete pipeline layout cannot satisfy the contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuPipelineLayoutError {
+    /// The OCIO bind group belongs to a different resource plan.
+    ResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The OCIO bind-group layout hash does not match the plan.
+    OcioLayoutHashMismatch { expected: u64, actual: u64 },
+    /// The wrapper bind-group layout hash does not match the plan.
+    WrapperLayoutHashMismatch { expected: u64, actual: u64 },
+    /// A bind group index cannot be represented by the backend layout vector.
+    BindGroupIndexOverflow { bind_group: u32 },
+}
+
+/// Stateless backend preparer for OCIO pipeline layouts.
+pub struct OcioGpuWgpuPipelineLayoutPreparer;
+
+impl OcioGpuWgpuPipelineLayoutPreparer {
+    /// Create a concrete wgpu pipeline layout from prepared OCIO/wrapper bind groups.
+    pub fn prepare(
+        device: &wgpu::Device,
+        plan: &OcioGpuWgpuPipelineLayoutPlan,
+        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
+    ) -> Result<OcioGpuWgpuPipelineLayout, OcioGpuWgpuPipelineLayoutError> {
+        if plan.resource_key != ocio_bind_group.resource_key {
+            return Err(OcioGpuWgpuPipelineLayoutError::ResourceKeyMismatch {
+                expected: plan.resource_key,
+                actual: ocio_bind_group.resource_key,
+            });
+        }
+        if plan.ocio_layout_hash != ocio_bind_group.layout_hash {
+            return Err(OcioGpuWgpuPipelineLayoutError::OcioLayoutHashMismatch {
+                expected: plan.ocio_layout_hash,
+                actual: ocio_bind_group.layout_hash,
+            });
+        }
+        if plan.wrapper_layout_hash != wrapper_bind_group.layout_hash {
+            return Err(OcioGpuWgpuPipelineLayoutError::WrapperLayoutHashMismatch {
+                expected: plan.wrapper_layout_hash,
+                actual: wrapper_bind_group.layout_hash,
+            });
+        }
+
+        let bind_group_layouts =
+            pipeline_layout_bind_group_layouts(plan, ocio_bind_group, wrapper_bind_group)?;
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ocio_fullscreen_pipeline_layout"),
+            immediate_size: 0,
+            bind_group_layouts: &bind_group_layouts,
+        });
+        Ok(OcioGpuWgpuPipelineLayout {
+            resource_key: plan.resource_key,
+            layout_hash: plan.layout_hash,
+            pipeline_layout,
+        })
+    }
+}
+
+/// Fullscreen wrapper shader contract for an OCIO render pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuFullscreenShaderContract {
+    /// Vertex entry point owned by Mondrian.
+    pub vertex_entry_point: String,
+    /// Fragment entry point owned by Mondrian.
+    pub fragment_entry_point: String,
+    /// Draw topology used by the fullscreen pass.
+    pub topology: OcioGpuWgpuFullscreenTopology,
+    /// Fragment output location.
+    pub output_location: u32,
+    /// Whether the fragment wrapper still needs to link/call the OCIO program.
+    pub requires_ocio_program_link: bool,
+}
+
+impl OcioGpuWgpuFullscreenShaderContract {
+    /// Build the default fullscreen wrapper shader contract.
+    pub fn for_wrapper_contract(contract: &OcioGpuFullscreenWrapperContract) -> Self {
+        Self {
+            vertex_entry_point: "vs_main".to_owned(),
+            fragment_entry_point: "fs_main".to_owned(),
+            topology: OcioGpuWgpuFullscreenTopology::TriangleStrip,
+            output_location: contract.output_location,
+            requires_ocio_program_link: true,
+        }
+    }
+}
+
+/// Fullscreen draw topology for an OCIO wrapper pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuFullscreenTopology {
+    /// Four-vertex fullscreen triangle strip.
+    TriangleStrip,
+}
+
+impl OcioGpuWgpuFullscreenTopology {
+    fn to_wgpu(self) -> wgpu::PrimitiveTopology {
+        match self {
+            Self::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+        }
+    }
+}
+
+/// Color target format for the future OCIO render pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuColorTargetFormat {
+    /// 8-bit normalized RGBA target.
+    Rgba8Unorm,
+    /// 16-bit float RGBA target.
+    Rgba16Float,
+    /// 32-bit float RGBA target.
+    Rgba32Float,
+}
+
+impl OcioGpuWgpuColorTargetFormat {
+    fn to_wgpu(self) -> wgpu::TextureFormat {
+        match self {
+            Self::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+            Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+            Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
+        }
+    }
+}
+
+/// Pure render-pipeline descriptor contract for an OCIO fullscreen pass.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuRenderPipelineDescriptorPlan {
+    /// Stable resource key this pipeline belongs to.
+    pub resource_key: u64,
+    /// Hash of the pipeline layout plan.
+    pub pipeline_layout_hash: u64,
+    /// Fullscreen wrapper shader contract.
+    pub shader_contract: OcioGpuWgpuFullscreenShaderContract,
+    /// Output color target format.
+    pub output_format: OcioGpuWgpuColorTargetFormat,
+    /// Stable hash of this render-pipeline descriptor plan.
+    pub descriptor_hash: u64,
+}
+
+impl OcioGpuWgpuRenderPipelineDescriptorPlan {
+    /// Build a render-pipeline descriptor contract from resource/layout state.
+    pub fn for_pipeline_layout(
+        resources: &OcioGpuWgpuResourcePlan,
+        pipeline_layout: &OcioGpuWgpuPipelineLayoutPlan,
+        output_format: OcioGpuWgpuColorTargetFormat,
+    ) -> Self {
+        let shader_contract =
+            OcioGpuWgpuFullscreenShaderContract::for_wrapper_contract(&resources.wrapper_contract);
+        let descriptor_hash = hash_render_pipeline_descriptor(
+            resources.resource_key,
+            pipeline_layout.layout_hash,
+            &shader_contract,
+            output_format,
+        );
+        Self {
+            resource_key: resources.resource_key,
+            pipeline_layout_hash: pipeline_layout.layout_hash,
+            shader_contract,
+            output_format,
+            descriptor_hash,
+        }
+    }
+
+    /// Return the wgpu primitive state implied by this descriptor.
+    pub fn primitive_state(&self) -> wgpu::PrimitiveState {
+        wgpu::PrimitiveState {
+            topology: self.shader_contract.topology.to_wgpu(),
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        }
+    }
+
+    /// Return the wgpu color target state implied by this descriptor.
+    pub fn color_target_state(&self) -> wgpu::ColorTargetState {
+        wgpu::ColorTargetState {
+            format: self.output_format.to_wgpu(),
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }
+    }
+}
+
 /// Error returned when actual wgpu bind-group creation cannot satisfy the contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OcioGpuWgpuBindGroupError {
@@ -2860,6 +3125,60 @@ fn hash_bind_resource_plan(
     hasher.finish()
 }
 
+fn hash_pipeline_layout_plan(
+    resource_key: u64,
+    ocio_layout_hash: u64,
+    wrapper_layout_hash: u64,
+    bind_groups: &[OcioGpuWgpuPipelineBindGroupSlot],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    resource_key.hash(&mut hasher);
+    ocio_layout_hash.hash(&mut hasher);
+    wrapper_layout_hash.hash(&mut hasher);
+    bind_groups.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn hash_render_pipeline_descriptor(
+    resource_key: u64,
+    pipeline_layout_hash: u64,
+    shader_contract: &OcioGpuWgpuFullscreenShaderContract,
+    output_format: OcioGpuWgpuColorTargetFormat,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    resource_key.hash(&mut hasher);
+    pipeline_layout_hash.hash(&mut hasher);
+    shader_contract.hash(&mut hasher);
+    output_format.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn pipeline_layout_bind_group_layouts<'a>(
+    plan: &OcioGpuWgpuPipelineLayoutPlan,
+    ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    wrapper_bind_group: &'a OcioGpuWgpuWrapperBindGroup,
+) -> Result<Vec<Option<&'a wgpu::BindGroupLayout>>, OcioGpuWgpuPipelineLayoutError> {
+    let max_bind_group =
+        plan.bind_groups.iter().map(|slot| slot.bind_group).max().unwrap_or_default();
+    let len = usize::try_from(max_bind_group)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(OcioGpuWgpuPipelineLayoutError::BindGroupIndexOverflow {
+            bind_group: max_bind_group,
+        })?;
+    let mut layouts = vec![None; len];
+    for slot in &plan.bind_groups {
+        let index = usize::try_from(slot.bind_group).map_err(|_| {
+            OcioGpuWgpuPipelineLayoutError::BindGroupIndexOverflow { bind_group: slot.bind_group }
+        })?;
+        layouts[index] = Some(match slot.resource {
+            OcioGpuWgpuPipelineBindGroupResource::OcioResources => &ocio_bind_group.layout,
+            OcioGpuWgpuPipelineBindGroupResource::WrapperInput => &wrapper_bind_group.layout,
+        });
+    }
+    Ok(layouts)
+}
+
 fn ocio_bind_group_entry<'a>(
     layout_entry: OcioGpuWgpuBindingPlan,
     bind_resource_plan: &OcioGpuWgpuBindResourcePlan,
@@ -4038,6 +4357,74 @@ mod tests {
                     }
         }));
         assert_ne!(ocio_descriptor.layout_hash, wrapper_descriptor.layout_hash);
+    }
+
+    #[test]
+    fn pipeline_layout_and_render_descriptor_preserve_fullscreen_contract() {
+        let resources = bind_resource_test_plan(42);
+        let ocio_layout =
+            resources.binding_layout_plan().expect("binding layout with separated samplers");
+        let wrapper_layout =
+            OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
+
+        let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
+            &resources,
+            &ocio_layout,
+            &wrapper_layout,
+        );
+        let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
+            &resources,
+            &pipeline_layout,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        );
+
+        assert_eq!(pipeline_layout.resource_key, resources.resource_key);
+        assert_eq!(pipeline_layout.bind_groups.len(), 2);
+        assert_eq!(
+            pipeline_layout.bind_groups[0],
+            OcioGpuWgpuPipelineBindGroupSlot {
+                bind_group: 0,
+                resource: OcioGpuWgpuPipelineBindGroupResource::OcioResources,
+                layout_hash: ocio_layout.layout_hash,
+            }
+        );
+        assert_eq!(
+            pipeline_layout.bind_groups[1],
+            OcioGpuWgpuPipelineBindGroupSlot {
+                bind_group: 1,
+                resource: OcioGpuWgpuPipelineBindGroupResource::WrapperInput,
+                layout_hash: wrapper_layout.layout_hash,
+            }
+        );
+        assert_ne!(pipeline_layout.layout_hash, 0);
+        assert_eq!(render_descriptor.resource_key, resources.resource_key);
+        assert_eq!(
+            render_descriptor.pipeline_layout_hash,
+            pipeline_layout.layout_hash
+        );
+        assert_eq!(
+            render_descriptor.shader_contract,
+            OcioGpuWgpuFullscreenShaderContract {
+                vertex_entry_point: "vs_main".to_owned(),
+                fragment_entry_point: "fs_main".to_owned(),
+                topology: OcioGpuWgpuFullscreenTopology::TriangleStrip,
+                output_location: resources.wrapper_contract.output_location,
+                requires_ocio_program_link: true,
+            }
+        );
+        assert_eq!(
+            render_descriptor.output_format,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float
+        );
+        assert_ne!(render_descriptor.descriptor_hash, 0);
+        assert_eq!(
+            render_descriptor.primitive_state().topology,
+            wgpu::PrimitiveTopology::TriangleStrip
+        );
+        assert_eq!(
+            render_descriptor.color_target_state().format,
+            wgpu::TextureFormat::Rgba16Float
+        );
     }
 
     #[test]
