@@ -221,6 +221,11 @@ those concrete resource plans: it consumes the explicit
 allocates stable GPU frame handles, creates the CPU upload and output target
 allocation plans, and produces a transfer-resolved GPU transform for
 `RenderGpuColorPassSchedule`.
+`GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
+encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
+unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only
+`Rgba8Unorm` / `EncodedRgba8` readback is defined here; float or half-float
+targets require explicit conversion before readback.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
@@ -252,7 +257,9 @@ Readback is allowed for:
 - debug/profiling captures
 - interoperability with CPU-only plugins
 
-Readback is not allowed as an invisible hop between ordinary render passes.
+Readback is not allowed as an invisible hop between ordinary render passes. All
+readback callers must use `GpuColorFrameReadbackPlan`; ad hoc
+`copy_texture_to_buffer` logic belongs in lower-level experiments only.
 
 ## Display and Export Boundary
 

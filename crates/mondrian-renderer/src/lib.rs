@@ -26,7 +26,8 @@ pub mod timeline_render_plan;
 pub use color_frame::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuEncodedColorFrame, GpuColorFrameAllocationPlan, GpuColorFrameContract, GpuColorFrameHandle,
-    GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameResource,
+    GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadback,
+    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
     GpuColorFrameWgpuResource,

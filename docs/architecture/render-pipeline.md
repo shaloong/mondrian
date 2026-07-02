@@ -96,7 +96,10 @@ resource table through `GpuColorFrameUploadPlan` / `GpuColorFrameAllocationPlan`
 and `GpuColorFrameUploader`, not ad hoc texture creation in preview or export.
 Use `RenderGpuOutputStageResourcePlan` to derive those upload/allocation plans
 from the stage plan so transfer descriptors, frame ids, and the scheduled GPU
-transform stay consistent.
+transform stay consistent. GPU-to-CPU output for encode, thumbnails, tests, or
+debug captures must use `GpuColorFrameReadbackPlan`; readback is valid only for
+explicit encoded RGBA8 output contracts unless a future conversion stage says
+otherwise.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
 `execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
 through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage

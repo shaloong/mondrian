@@ -568,6 +568,154 @@ pub enum GpuColorFrameUploadError {
     },
 }
 
+/// GPU-to-CPU readback plan for one encoded color frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuColorFrameReadbackPlan {
+    /// GPU frame handle read by this plan.
+    pub handle: GpuColorFrameHandle,
+    /// CPU descriptor produced after unpacking.
+    pub output_descriptor: ColorFrameDescriptor,
+    /// Texture format copied from the GPU resource.
+    pub texture_format: GpuColorFrameTextureFormat,
+    /// Texture copy extent.
+    pub extent: wgpu::Extent3d,
+    /// Unpadded bytes in one logical image row.
+    pub unpadded_bytes_per_row: u32,
+    /// wgpu-aligned bytes in one copied buffer row.
+    pub padded_bytes_per_row: u32,
+    /// Readback buffer size in bytes.
+    pub buffer_size: u64,
+}
+
+impl GpuColorFrameReadbackPlan {
+    /// Build a readback plan for an encoded RGBA8 GPU frame.
+    pub fn encoded_rgba8(handle: GpuColorFrameHandle) -> Result<Self, GpuColorFrameReadbackError> {
+        if handle.texture_format() != GpuColorFrameTextureFormat::Rgba8Unorm {
+            return Err(GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                texture_format: handle.texture_format(),
+            });
+        }
+        let descriptor = handle.descriptor();
+        if descriptor.encoding != ColorFrameEncoding::EncodedRgba8 {
+            return Err(GpuColorFrameReadbackError::UnsupportedEncoding {
+                encoding: descriptor.encoding,
+            });
+        }
+        let unpadded_bytes_per_row = descriptor
+            .width
+            .checked_mul(handle.texture_format().bytes_per_pixel())
+            .ok_or(GpuColorFrameReadbackError::ReadbackLayoutOverflow)?;
+        let padded_bytes_per_row = align_copy_bytes_per_row(unpadded_bytes_per_row)?;
+        let buffer_size = u64::from(padded_bytes_per_row)
+            .checked_mul(u64::from(descriptor.height))
+            .ok_or(GpuColorFrameReadbackError::ReadbackLayoutOverflow)?;
+        Ok(Self {
+            handle,
+            output_descriptor: descriptor.with_residency(ColorFrameResidency::Cpu),
+            texture_format: GpuColorFrameTextureFormat::Rgba8Unorm,
+            extent: wgpu::Extent3d {
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: 1,
+            },
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+            buffer_size,
+        })
+    }
+
+    /// Unpack a padded mapped readback buffer into a typed CPU encoded frame.
+    pub fn unpack_mapped_rgba8(
+        &self,
+        mapped: &[u8],
+    ) -> Result<CpuEncodedColorFrame, GpuColorFrameReadbackError> {
+        let expected = self.buffer_size as usize;
+        if mapped.len() < expected {
+            return Err(GpuColorFrameReadbackError::MappedBufferTooSmall {
+                expected,
+                actual: mapped.len(),
+            });
+        }
+        let mut rgba = vec![0; self.unpadded_bytes_per_row as usize * self.extent.height as usize];
+        for row in 0..self.extent.height as usize {
+            let src_start = row * self.padded_bytes_per_row as usize;
+            let src_end = src_start + self.unpadded_bytes_per_row as usize;
+            let dst_start = row * self.unpadded_bytes_per_row as usize;
+            let dst_end = dst_start + self.unpadded_bytes_per_row as usize;
+            rgba[dst_start..dst_end].copy_from_slice(&mapped[src_start..src_end]);
+        }
+        Ok(CpuEncodedColorFrame::rgba8(
+            self.output_descriptor.width,
+            self.output_descriptor.height,
+            self.output_descriptor.color_space,
+            self.output_descriptor.domain,
+            rgba,
+        ))
+    }
+}
+
+/// Records and completes GPU color frame readback copies.
+pub struct GpuColorFrameReadback;
+
+impl GpuColorFrameReadback {
+    /// Create a MAP_READ buffer and record a texture-to-buffer copy into the encoder.
+    pub fn record_copy(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &GpuColorFrameReadbackPlan,
+        resource: &GpuColorFrameWgpuResource,
+    ) -> wgpu::Buffer {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gpu_color_frame_readback"),
+            size: plan.buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &resource.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(plan.padded_bytes_per_row),
+                    rows_per_image: Some(plan.extent.height),
+                },
+            },
+            plan.extent,
+        );
+        readback
+    }
+}
+
+/// Error returned when a GPU color frame cannot be read back as a CPU frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuColorFrameReadbackError {
+    /// Only RGBA8 readback is currently defined for encoded CPU boundaries.
+    UnsupportedTextureFormat {
+        /// Actual GPU texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
+    /// Only encoded RGBA8 descriptors can use this readback path.
+    UnsupportedEncoding {
+        /// Actual GPU frame encoding.
+        encoding: ColorFrameEncoding,
+    },
+    /// Row layout calculation overflowed.
+    ReadbackLayoutOverflow,
+    /// The mapped readback buffer is smaller than the plan requires.
+    MappedBufferTooSmall {
+        /// Expected mapped byte length.
+        expected: usize,
+        /// Actual mapped byte length.
+        actual: usize,
+    },
+}
+
 /// Error returned when resolving GPU color frame resources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GpuColorFrameResourceTableError {
@@ -722,6 +870,14 @@ fn validate_cpu_byte_count(
         return Err(GpuColorFrameUploadError::ByteCountMismatch { expected, actual });
     }
     Ok(())
+}
+
+fn align_copy_bytes_per_row(bytes_per_row: u32) -> Result<u32, GpuColorFrameReadbackError> {
+    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    bytes_per_row
+        .checked_add(alignment - 1)
+        .map(|value| (value / alignment) * alignment)
+        .ok_or(GpuColorFrameReadbackError::ReadbackLayoutOverflow)
 }
 
 fn default_color_frame_texture_usage() -> wgpu::TextureUsages {
@@ -1060,6 +1216,101 @@ mod tests {
             encoded_err,
             GpuColorFrameUploadError::UnsupportedCpuEncodedTextureFormat {
                 texture_format: GpuColorFrameTextureFormat::Rgba32Float
+            }
+        );
+    }
+
+    #[test]
+    fn gpu_color_frame_readback_plan_aligns_rows_and_unpacks_rgba8() {
+        let descriptor = ColorFrameDescriptor {
+            width: 3,
+            height: 2,
+            color_space: ColorSpace::Srgb,
+            domain: ColorFrameDomain::Display,
+            encoding: ColorFrameEncoding::EncodedRgba8,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let handle = gpu_handle(300, descriptor, GpuColorFrameTextureFormat::Rgba8Unorm);
+
+        let plan = GpuColorFrameReadbackPlan::encoded_rgba8(handle.clone()).expect("readback plan");
+
+        assert_eq!(plan.handle, handle);
+        assert_eq!(
+            plan.output_descriptor,
+            descriptor.with_residency(ColorFrameResidency::Cpu)
+        );
+        assert_eq!(plan.unpadded_bytes_per_row, 12);
+        assert_eq!(
+            plan.padded_bytes_per_row,
+            wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+        );
+        assert_eq!(
+            plan.buffer_size,
+            u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * 2
+        );
+
+        let row0 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let row1 = [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24];
+        let mut mapped = vec![0u8; plan.buffer_size as usize];
+        mapped[0..12].copy_from_slice(&row0);
+        let row1_start = plan.padded_bytes_per_row as usize;
+        mapped[row1_start..row1_start + 12].copy_from_slice(&row1);
+
+        let frame = plan.unpack_mapped_rgba8(&mapped).expect("unpack readback");
+
+        assert_eq!(frame.descriptor(), plan.output_descriptor);
+        assert_eq!(frame.rgba(), [&row0[..], &row1[..]].concat().as_slice());
+    }
+
+    #[test]
+    fn gpu_color_frame_readback_plan_rejects_unsupported_contracts() {
+        let mut descriptor = working_descriptor();
+        descriptor.encoding = ColorFrameEncoding::EncodedRgba8;
+        let rgba16 = gpu_handle(301, descriptor, GpuColorFrameTextureFormat::Rgba16Float);
+        let err = GpuColorFrameReadbackPlan::encoded_rgba8(rgba16)
+            .expect_err("rgba16 readback must be explicit");
+        assert_eq!(
+            err,
+            GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                texture_format: GpuColorFrameTextureFormat::Rgba16Float
+            }
+        );
+
+        let linear = gpu_handle(
+            302,
+            working_descriptor(),
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+        );
+        let err = GpuColorFrameReadbackPlan::encoded_rgba8(linear)
+            .expect_err("linear frame cannot use encoded readback");
+        assert_eq!(
+            err,
+            GpuColorFrameReadbackError::UnsupportedEncoding {
+                encoding: ColorFrameEncoding::LinearFloat
+            }
+        );
+    }
+
+    #[test]
+    fn gpu_color_frame_readback_unpack_rejects_short_mapped_buffer() {
+        let descriptor = ColorFrameDescriptor {
+            width: 2,
+            height: 1,
+            color_space: ColorSpace::Rec709,
+            domain: ColorFrameDomain::Export,
+            encoding: ColorFrameEncoding::EncodedRgba8,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let handle = gpu_handle(303, descriptor, GpuColorFrameTextureFormat::Rgba8Unorm);
+        let plan = GpuColorFrameReadbackPlan::encoded_rgba8(handle).expect("readback plan");
+
+        let err = plan.unpack_mapped_rgba8(&[0; 8]).expect_err("short mapped buffer must fail");
+
+        assert_eq!(
+            err,
+            GpuColorFrameReadbackError::MappedBufferTooSmall {
+                expected: plan.buffer_size as usize,
+                actual: 8
             }
         );
     }
