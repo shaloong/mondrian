@@ -5909,6 +5909,7 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GpuContext;
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, ocio_default_display_view};
 
     fn f32s_from_bytes(bytes: &[u8]) -> Vec<f32> {
@@ -6365,6 +6366,86 @@ mod tests {
                 render_pipelines: OcioGpuWgpuRenderPipelineCache::default().diagnostics(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn backend_object_runtime_creates_naga_wrapper_modules_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu OCIO backend object test: no GPU adapter available");
+            return;
+        };
+        let mut shader_cache = OcioGpuShaderCache::default();
+        let shader_plan = shader_cache
+            .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                src: ColorSpace::Rec709,
+                dst: ColorSpace::Srgb,
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("extract default OCIO shader");
+        let mut prep_runtime = OcioGpuWgpuBackendPrepRuntime::default();
+        let static_pipeline = prep_runtime
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("prepare static OCIO GPU pipeline");
+        let mut object_runtime = OcioGpuWgpuBackendObjectRuntime::default();
+
+        let first = object_runtime
+            .prepare_backend_objects(
+                &context.device,
+                &context.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .expect("create wgpu OCIO backend objects");
+        let second = object_runtime
+            .prepare_backend_objects(
+                &context.device,
+                &context.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .expect("reuse wgpu OCIO backend objects");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            first.resource_key,
+            static_pipeline.resources.resources.resource_key
+        );
+        assert_eq!(
+            first.wrapper_modules.module_key,
+            static_pipeline.wrapper_module_artifact.module_key
+        );
+        assert_eq!(
+            first.wrapper_modules.pipeline_layout_hash,
+            static_pipeline.pipeline_layout.layout_hash
+        );
+        assert_eq!(
+            first.wrapper_modules.render_descriptor_hash,
+            static_pipeline.render_descriptor.descriptor_hash
+        );
+        assert_eq!(
+            first.render_pipeline.descriptor_hash,
+            static_pipeline.render_descriptor.descriptor_hash
+        );
+        assert_eq!(
+            first.pass_node.wrapper_layout_hash,
+            first.wrapper_input_layout.layout_hash
+        );
+        assert_ne!(first.wrapper_modules.cache_key, 0);
+        assert_ne!(first.render_pipeline.cache_key, 0);
+        assert_ne!(first.pass_node.node_hash, 0);
+
+        let diagnostics = object_runtime.diagnostics();
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.misses, 1);
+        assert_eq!(diagnostics.hits, 1);
+        assert_eq!(diagnostics.failures, 0);
+        assert_eq!(diagnostics.wrapper_modules.entries, 1);
+        assert_eq!(diagnostics.wrapper_modules.misses, 1);
+        assert_eq!(diagnostics.wrapper_modules.hits, 0);
+        assert_eq!(diagnostics.render_pipelines.entries, 1);
+        assert_eq!(diagnostics.render_pipelines.misses, 1);
+        assert_eq!(diagnostics.render_pipelines.hits, 0);
     }
 
     #[test]

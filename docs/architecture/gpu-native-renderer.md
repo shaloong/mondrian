@@ -80,7 +80,7 @@ texture extents, or empty LUT payloads before backend layout planning begins.
 It is not a fake resource allocation layer; concrete `wgpu::ShaderModule`,
 `wgpu::Texture`, `wgpu::BindGroupLayout`, `wgpu::BindGroup`, and pipeline
 objects must still be created by the backend compiler/upload layer before
-`can_execute()` can become true.
+the render graph records a native pass.
 
 `OcioGpuWgpuBackendPrepRuntime` is the renderer-owned pure-preparation runtime
 for this path. It owns the resource-layout cache and wrapper Naga artifact
@@ -111,7 +111,7 @@ the OCIO texture/uniform range and keeps the mapping by OCIO texture index,
 dimension, sampler symbol, and interpolation policy. Mondrian wrapper resources
 stay in a separate wrapper contract. This cache reports hits/misses
 independently from OCIO shader extraction. It is the handoff point for backend
-layout/object creation; it still does not bypass native blockers.
+layout/object creation; it still creates no concrete device objects.
 
 `OcioGpuWgpuBindGroupLayoutDescriptorPlan` turns the pure OCIO and wrapper
 layout contracts into wgpu-ready bind-group layout descriptors. OCIO LUT
@@ -126,12 +126,10 @@ semantics, either manually or through a feature-gated hardware-filtering path.
 It parses OCIO GLSL-family shader text through Naga, validates the module, and
 caches successful Naga IR artifacts by source shader hash, OCIO binding-contract
 hash, stage, source language, and target language. Optional WGSL is emitted only
-as debug/diagnostic output; it is not the canonical execution artifact. Future
-execution should prefer `wgpu::ShaderSource::Naga` while translation failures
-remain structured diagnostics, not fallbacks. This allows real OCIO shader
-compatibility work to proceed incrementally while keeping `can_execute()` false
-until shader translation, resource uploads, bind-group creation, and pipeline
-execution are all proven.
+as debug/diagnostic output; it is not the canonical execution artifact. Backend
+module caches must create shader modules from `wgpu::ShaderSource::Naga` so
+Mondrian avoids a GLSL-to-WGSL text round trip in the execution path.
+Translation failures remain structured diagnostics, not fallbacks.
 
 `OcioGpuWgpuLutUploadPlan` is the texture-upload handoff. It carries OCIO LUT
 payloads copied from the GPU shader descriptor as-is, including texture/sampler
