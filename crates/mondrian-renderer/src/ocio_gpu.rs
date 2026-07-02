@@ -3173,6 +3173,252 @@ impl Default for OcioGpuWgpuShaderModuleCache {
     }
 }
 
+/// Concrete wgpu shader modules for a validated OCIO fullscreen wrapper.
+pub struct OcioGpuWgpuWrapperShaderModules {
+    /// Stable cache key for these backend shader modules.
+    pub cache_key: u64,
+    /// Stable resource key this wrapper belongs to.
+    pub resource_key: u64,
+    /// Wrapper shader module artifact key.
+    pub module_key: u64,
+    /// Hash of the stage-split wrapper shader sources.
+    pub source_hash: u64,
+    /// Hash of the pipeline layout contract.
+    pub pipeline_layout_hash: u64,
+    /// Hash of the render-pipeline descriptor contract.
+    pub render_descriptor_hash: u64,
+    /// Backend fullscreen vertex shader module.
+    pub vertex_module: wgpu::ShaderModule,
+    /// Backend fragment shader module that calls the OCIO-generated function.
+    pub fragment_module: wgpu::ShaderModule,
+}
+
+/// Point-in-time wrapper wgpu shader-module cache diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuWrapperShaderModuleCacheDiagnostics {
+    /// Cached wrapper shader module pairs.
+    pub entries: usize,
+    /// Cache hits.
+    pub hits: u64,
+    /// Cache misses.
+    pub misses: u64,
+}
+
+/// Bounded cache for concrete wgpu shader modules built from wrapper Naga artifacts.
+pub struct OcioGpuWgpuWrapperShaderModuleCache {
+    entries: LruCache<u64, Arc<OcioGpuWgpuWrapperShaderModules>>,
+    hits: u64,
+    misses: u64,
+}
+
+impl OcioGpuWgpuWrapperShaderModuleCache {
+    /// Create a cache with a fixed non-zero capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            entries: LruCache::new(capacity),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Prepare concrete wgpu shader modules from a validated wrapper module artifact.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        artifact: &OcioGpuWgpuWrapperShaderModuleArtifact,
+    ) -> Arc<OcioGpuWgpuWrapperShaderModules> {
+        let cache_key = wrapper_backend_shader_modules_cache_key(artifact);
+        if let Some(hit) = self.entries.get(&cache_key) {
+            self.hits = self.hits.saturating_add(1);
+            return Arc::clone(hit);
+        }
+
+        self.misses = self.misses.saturating_add(1);
+        let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ocio_wrapper_vertex_naga_shader_module"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(artifact.vertex.naga_module.clone())),
+        });
+        let fragment_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ocio_wrapper_fragment_naga_shader_module"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(artifact.fragment.naga_module.clone())),
+        });
+        let modules = Arc::new(OcioGpuWgpuWrapperShaderModules {
+            cache_key,
+            resource_key: artifact.resource_key,
+            module_key: artifact.module_key,
+            source_hash: artifact.source_hash,
+            pipeline_layout_hash: artifact.pipeline_layout_hash,
+            render_descriptor_hash: artifact.render_descriptor_hash,
+            vertex_module,
+            fragment_module,
+        });
+        self.entries.put(cache_key, Arc::clone(&modules));
+        modules
+    }
+
+    /// Return wrapper shader-module cache diagnostics.
+    pub fn diagnostics(&self) -> OcioGpuWgpuWrapperShaderModuleCacheDiagnostics {
+        OcioGpuWgpuWrapperShaderModuleCacheDiagnostics {
+            entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+        }
+    }
+}
+
+impl Default for OcioGpuWgpuWrapperShaderModuleCache {
+    fn default() -> Self {
+        Self::new(NonZeroUsize::new(64).expect("default cache capacity is non-zero"))
+    }
+}
+
+/// Concrete wgpu render pipeline for an OCIO fullscreen color pass.
+pub struct OcioGpuWgpuRenderPipeline {
+    /// Stable cache key for this backend render pipeline.
+    pub cache_key: u64,
+    /// Stable resource key this render pipeline belongs to.
+    pub resource_key: u64,
+    /// Hash of the pure render-pipeline descriptor plan.
+    pub descriptor_hash: u64,
+    /// Hash of the concrete pipeline layout contract.
+    pub pipeline_layout_hash: u64,
+    /// Wrapper shader module key consumed by this pipeline.
+    pub module_key: u64,
+    /// Concrete wgpu render pipeline.
+    pub render_pipeline: wgpu::RenderPipeline,
+}
+
+/// Error returned before creating an OCIO fullscreen render pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuRenderPipelineError {
+    /// The pipeline layout belongs to a different resource key.
+    PipelineLayoutResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The wrapper shader modules belong to a different resource key.
+    ShaderModuleResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The concrete pipeline layout hash does not match the descriptor plan.
+    PipelineLayoutHashMismatch { expected: u64, actual: u64 },
+    /// The wrapper shader modules were built for a different pipeline layout.
+    ShaderModulePipelineLayoutHashMismatch { expected: u64, actual: u64 },
+    /// The wrapper shader modules were built for a different render descriptor.
+    ShaderModuleRenderDescriptorHashMismatch { expected: u64, actual: u64 },
+}
+
+/// Point-in-time OCIO render pipeline cache diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuRenderPipelineCacheDiagnostics {
+    /// Cached render pipelines.
+    pub entries: usize,
+    /// Cache hits.
+    pub hits: u64,
+    /// Cache misses.
+    pub misses: u64,
+    /// Contract validation failures before pipeline creation.
+    pub validation_failures: u64,
+}
+
+/// Bounded cache for concrete OCIO fullscreen render pipelines.
+pub struct OcioGpuWgpuRenderPipelineCache {
+    entries: LruCache<u64, Arc<OcioGpuWgpuRenderPipeline>>,
+    hits: u64,
+    misses: u64,
+    validation_failures: u64,
+}
+
+impl OcioGpuWgpuRenderPipelineCache {
+    /// Create a cache with a fixed non-zero capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            entries: LruCache::new(capacity),
+            hits: 0,
+            misses: 0,
+            validation_failures: 0,
+        }
+    }
+
+    /// Prepare a concrete render pipeline from validated layout and wrapper shader modules.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
+        pipeline_layout: &OcioGpuWgpuPipelineLayout,
+        modules: &OcioGpuWgpuWrapperShaderModules,
+    ) -> Result<Arc<OcioGpuWgpuRenderPipeline>, OcioGpuWgpuRenderPipelineError> {
+        let cache_key = match render_pipeline_cache_key(
+            descriptor,
+            pipeline_layout.resource_key,
+            pipeline_layout.layout_hash,
+            OcioGpuWgpuWrapperShaderModuleKeyMetadata {
+                resource_key: modules.resource_key,
+                pipeline_layout_hash: modules.pipeline_layout_hash,
+                render_descriptor_hash: modules.render_descriptor_hash,
+                cache_key: modules.cache_key,
+                module_key: modules.module_key,
+            },
+        ) {
+            Ok(cache_key) => cache_key,
+            Err(err) => {
+                self.validation_failures = self.validation_failures.saturating_add(1);
+                return Err(err);
+            }
+        };
+        if let Some(hit) = self.entries.get(&cache_key) {
+            self.hits = self.hits.saturating_add(1);
+            return Ok(Arc::clone(hit));
+        }
+
+        self.misses = self.misses.saturating_add(1);
+        let color_target = descriptor.color_target_state();
+        let targets = [Some(color_target)];
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            cache: None,
+            multiview_mask: None,
+            label: Some("ocio_fullscreen_render_pipeline"),
+            layout: Some(&pipeline_layout.pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &modules.vertex_module,
+                entry_point: Some(&descriptor.shader_contract.vertex_entry_point),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &modules.fragment_module,
+                entry_point: Some(&descriptor.shader_contract.fragment_entry_point),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &targets,
+            }),
+            primitive: descriptor.primitive_state(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+        });
+        let pipeline = Arc::new(OcioGpuWgpuRenderPipeline {
+            cache_key,
+            resource_key: descriptor.resource_key,
+            descriptor_hash: descriptor.descriptor_hash,
+            pipeline_layout_hash: pipeline_layout.layout_hash,
+            module_key: modules.module_key,
+            render_pipeline,
+        });
+        self.entries.put(cache_key, Arc::clone(&pipeline));
+        Ok(pipeline)
+    }
+
+    /// Return render pipeline cache diagnostics.
+    pub fn diagnostics(&self) -> OcioGpuWgpuRenderPipelineCacheDiagnostics {
+        OcioGpuWgpuRenderPipelineCacheDiagnostics {
+            entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+            validation_failures: self.validation_failures,
+        }
+    }
+}
+
+impl Default for OcioGpuWgpuRenderPipelineCache {
+    fn default() -> Self {
+        Self::new(NonZeroUsize::new(64).expect("default cache capacity is non-zero"))
+    }
+}
+
 /// Missing pieces before an OCIO GPU shader plan can run in wgpu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OcioGpuWgpuBlocker {
@@ -4275,6 +4521,83 @@ fn wrapper_shader_module_artifact_key(
     render_descriptor.descriptor_hash.hash(&mut hasher);
     render_descriptor.output_format.hash(&mut hasher);
     Ok(hasher.finish())
+}
+
+fn wrapper_backend_shader_modules_cache_key(
+    artifact: &OcioGpuWgpuWrapperShaderModuleArtifact,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    artifact.resource_key.hash(&mut hasher);
+    artifact.module_key.hash(&mut hasher);
+    artifact.source_hash.hash(&mut hasher);
+    artifact.pipeline_layout_hash.hash(&mut hasher);
+    artifact.render_descriptor_hash.hash(&mut hasher);
+    artifact.vertex.source_hash.hash(&mut hasher);
+    artifact.fragment.source_hash.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn render_pipeline_cache_key(
+    descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
+    pipeline_layout_resource_key: u64,
+    pipeline_layout_hash: u64,
+    modules: OcioGpuWgpuWrapperShaderModuleKeyMetadata,
+) -> Result<u64, OcioGpuWgpuRenderPipelineError> {
+    if descriptor.resource_key != pipeline_layout_resource_key {
+        return Err(
+            OcioGpuWgpuRenderPipelineError::PipelineLayoutResourceKeyMismatch {
+                expected: descriptor.resource_key,
+                actual: pipeline_layout_resource_key,
+            },
+        );
+    }
+    if descriptor.resource_key != modules.resource_key {
+        return Err(
+            OcioGpuWgpuRenderPipelineError::ShaderModuleResourceKeyMismatch {
+                expected: descriptor.resource_key,
+                actual: modules.resource_key,
+            },
+        );
+    }
+    if descriptor.pipeline_layout_hash != pipeline_layout_hash {
+        return Err(OcioGpuWgpuRenderPipelineError::PipelineLayoutHashMismatch {
+            expected: descriptor.pipeline_layout_hash,
+            actual: pipeline_layout_hash,
+        });
+    }
+    if modules.pipeline_layout_hash != pipeline_layout_hash {
+        return Err(
+            OcioGpuWgpuRenderPipelineError::ShaderModulePipelineLayoutHashMismatch {
+                expected: pipeline_layout_hash,
+                actual: modules.pipeline_layout_hash,
+            },
+        );
+    }
+    if modules.render_descriptor_hash != descriptor.descriptor_hash {
+        return Err(
+            OcioGpuWgpuRenderPipelineError::ShaderModuleRenderDescriptorHashMismatch {
+                expected: descriptor.descriptor_hash,
+                actual: modules.render_descriptor_hash,
+            },
+        );
+    }
+
+    let mut hasher = DefaultHasher::new();
+    descriptor.resource_key.hash(&mut hasher);
+    descriptor.descriptor_hash.hash(&mut hasher);
+    pipeline_layout_hash.hash(&mut hasher);
+    modules.cache_key.hash(&mut hasher);
+    modules.module_key.hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OcioGpuWgpuWrapperShaderModuleKeyMetadata {
+    resource_key: u64,
+    pipeline_layout_hash: u64,
+    render_descriptor_hash: u64,
+    cache_key: u64,
+    module_key: u64,
 }
 
 fn backend_shader_module_cache_key(
@@ -5437,6 +5760,128 @@ mod tests {
         assert_eq!(diagnostics.entries, 0);
         assert_eq!(diagnostics.misses, 0);
         assert_eq!(diagnostics.failures, 1);
+    }
+
+    #[test]
+    fn render_pipeline_cache_key_binds_descriptor_layout_and_wrapper_modules() {
+        let resources = bind_resource_test_plan(52);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let ocio_layout =
+            resources.binding_layout_plan().expect("binding layout with separated samplers");
+        let wrapper_layout =
+            OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
+        let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
+            &resources,
+            &ocio_layout,
+            &wrapper_layout,
+        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+        let source = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
+            .expect("generate wrapper shader source");
+        let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
+            &resources,
+            &pipeline_layout,
+            &link_plan,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        );
+        let module_artifact = OcioGpuWgpuWrapperShaderModuleArtifact::translate(
+            &source,
+            &pipeline_layout,
+            &render_descriptor,
+        )
+        .expect("translate wrapper modules");
+        let module_cache_key = wrapper_backend_shader_modules_cache_key(&module_artifact);
+        let metadata = OcioGpuWgpuWrapperShaderModuleKeyMetadata {
+            resource_key: module_artifact.resource_key,
+            pipeline_layout_hash: module_artifact.pipeline_layout_hash,
+            render_descriptor_hash: module_artifact.render_descriptor_hash,
+            cache_key: module_cache_key,
+            module_key: module_artifact.module_key,
+        };
+
+        let key = render_pipeline_cache_key(
+            &render_descriptor,
+            pipeline_layout.resource_key,
+            pipeline_layout.layout_hash,
+            metadata,
+        )
+        .expect("render pipeline cache key");
+
+        assert_ne!(module_cache_key, 0);
+        assert_ne!(key, 0);
+    }
+
+    #[test]
+    fn render_pipeline_cache_key_rejects_mismatched_contracts() {
+        let resources = bind_resource_test_plan(53);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let ocio_layout =
+            resources.binding_layout_plan().expect("binding layout with separated samplers");
+        let wrapper_layout =
+            OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
+        let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
+            &resources,
+            &ocio_layout,
+            &wrapper_layout,
+        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+        let source = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
+            .expect("generate wrapper shader source");
+        let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
+            &resources,
+            &pipeline_layout,
+            &link_plan,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        );
+        let module_artifact = OcioGpuWgpuWrapperShaderModuleArtifact::translate(
+            &source,
+            &pipeline_layout,
+            &render_descriptor,
+        )
+        .expect("translate wrapper modules");
+        let metadata = OcioGpuWgpuWrapperShaderModuleKeyMetadata {
+            resource_key: module_artifact.resource_key,
+            pipeline_layout_hash: module_artifact.pipeline_layout_hash,
+            render_descriptor_hash: module_artifact.render_descriptor_hash,
+            cache_key: wrapper_backend_shader_modules_cache_key(&module_artifact),
+            module_key: module_artifact.module_key,
+        };
+
+        assert!(matches!(
+            render_pipeline_cache_key(
+                &render_descriptor,
+                pipeline_layout.resource_key.wrapping_add(1),
+                pipeline_layout.layout_hash,
+                metadata,
+            ),
+            Err(OcioGpuWgpuRenderPipelineError::PipelineLayoutResourceKeyMismatch { .. })
+        ));
+
+        let mut mismatched_modules = metadata;
+        mismatched_modules.pipeline_layout_hash =
+            mismatched_modules.pipeline_layout_hash.wrapping_add(1);
+        assert!(matches!(
+            render_pipeline_cache_key(
+                &render_descriptor,
+                pipeline_layout.resource_key,
+                pipeline_layout.layout_hash,
+                mismatched_modules,
+            ),
+            Err(OcioGpuWgpuRenderPipelineError::ShaderModulePipelineLayoutHashMismatch { .. })
+        ));
+
+        let mut mismatched_descriptor = metadata;
+        mismatched_descriptor.render_descriptor_hash =
+            mismatched_descriptor.render_descriptor_hash.wrapping_add(1);
+        assert!(matches!(
+            render_pipeline_cache_key(
+                &render_descriptor,
+                pipeline_layout.resource_key,
+                pipeline_layout.layout_hash,
+                mismatched_descriptor,
+            ),
+            Err(OcioGpuWgpuRenderPipelineError::ShaderModuleRenderDescriptorHashMismatch { .. })
+        ));
     }
 
     #[test]

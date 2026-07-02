@@ -66,11 +66,12 @@ pub use ocio_gpu::{
     OcioGpuWgpuPackedLutTexture, OcioGpuWgpuPackedLutUploadPlan, OcioGpuWgpuPackedUniformBuffer,
     OcioGpuWgpuPipelineBindGroupResource, OcioGpuWgpuPipelineBindGroupSlot,
     OcioGpuWgpuPipelineLayout, OcioGpuWgpuPipelineLayoutError, OcioGpuWgpuPipelineLayoutPlan,
-    OcioGpuWgpuPipelineLayoutPreparer, OcioGpuWgpuPreparedResources,
-    OcioGpuWgpuRenderPipelineDescriptorPlan, OcioGpuWgpuResourceCache,
-    OcioGpuWgpuResourceCacheDiagnostics, OcioGpuWgpuResourcePlan, OcioGpuWgpuSamplerBinding,
-    OcioGpuWgpuSamplerBindingPolicy, OcioGpuWgpuSamplerFiltering, OcioGpuWgpuShaderModule,
-    OcioGpuWgpuShaderModuleCache, OcioGpuWgpuShaderModuleCacheDiagnostics,
+    OcioGpuWgpuPipelineLayoutPreparer, OcioGpuWgpuPreparedResources, OcioGpuWgpuRenderPipeline,
+    OcioGpuWgpuRenderPipelineCache, OcioGpuWgpuRenderPipelineCacheDiagnostics,
+    OcioGpuWgpuRenderPipelineDescriptorPlan, OcioGpuWgpuRenderPipelineError,
+    OcioGpuWgpuResourceCache, OcioGpuWgpuResourceCacheDiagnostics, OcioGpuWgpuResourcePlan,
+    OcioGpuWgpuSamplerBinding, OcioGpuWgpuSamplerBindingPolicy, OcioGpuWgpuSamplerFiltering,
+    OcioGpuWgpuShaderModule, OcioGpuWgpuShaderModuleCache, OcioGpuWgpuShaderModuleCacheDiagnostics,
     OcioGpuWgpuShaderModuleError, OcioGpuWgpuShaderVisibility, OcioGpuWgpuTexture2DUpload,
     OcioGpuWgpuTexture3DUpload, OcioGpuWgpuTextureContractMismatch, OcioGpuWgpuTextureSampleType,
     OcioGpuWgpuUniformUpload, OcioGpuWgpuUniformUploadError, OcioGpuWgpuUniformUploadPlan,
@@ -83,7 +84,9 @@ pub use ocio_gpu::{
     OcioGpuWgpuWrapperShaderArtifactError, OcioGpuWgpuWrapperShaderModuleArtifact,
     OcioGpuWgpuWrapperShaderModuleArtifactCache,
     OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics,
-    OcioGpuWgpuWrapperShaderModuleArtifactError, OcioGpuWgpuWrapperShaderSourceArtifact,
+    OcioGpuWgpuWrapperShaderModuleArtifactError, OcioGpuWgpuWrapperShaderModuleCache,
+    OcioGpuWgpuWrapperShaderModuleCacheDiagnostics, OcioGpuWgpuWrapperShaderModules,
+    OcioGpuWgpuWrapperShaderSourceArtifact,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{

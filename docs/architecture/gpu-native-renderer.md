@@ -181,9 +181,14 @@ captures the output target format plus render-pipeline descriptor hash.
 `OcioGpuWgpuWrapperShaderModuleArtifactCache` translates the wrapper source
 artifact into validated vertex and fragment Naga modules, keyed by wrapper
 source hash, link hash, pipeline-layout hash, render-descriptor hash, and output
-format. WGSL remains diagnostic output only. The path is still not executable
-until a concrete render pipeline and render-pass node consume the prepared
-pipeline layout, bind groups, wrapper Naga modules, and target frame.
+format. WGSL remains diagnostic output only.
+`OcioGpuWgpuWrapperShaderModuleCache` creates the concrete vertex/fragment
+`wgpu::ShaderModule` pair from those Naga artifacts, and
+`OcioGpuWgpuRenderPipelineCache` validates the descriptor, concrete pipeline
+layout, and wrapper module metadata before creating the fullscreen
+`wgpu::RenderPipeline`. The path is still not executable until a render-pass
+node binds the prepared OCIO/wrapper bind groups, draws the fullscreen pass, and
+writes into the target frame used by preview/export.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
