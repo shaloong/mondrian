@@ -406,7 +406,17 @@ impl RenderOutputColorBoundaryExecutor<'_> {
     }
 }
 
-impl RenderOutputColorBoundaryExecutor<'_> {
+impl<'a> RenderOutputColorBoundaryExecutor<'a> {
+    /// Create a final-output executor that plans native GPU OCIO output stages.
+    pub fn prefer_gpu(
+        gpu_cache: &'a mut OcioGpuShaderCache,
+        gpu_options: RenderColorTransformGpuOptions,
+    ) -> Self {
+        Self {
+            planner: RenderOutputColorBoundaryPlanner::prefer_gpu(gpu_cache, gpu_options),
+        }
+    }
+
     /// Plan and execute a final display/export output boundary.
     pub fn execute(
         &mut self,
@@ -417,6 +427,36 @@ impl RenderOutputColorBoundaryExecutor<'_> {
         let plan = self.planner.plan(frame, boundary)?;
         CpuRenderColorStageExecutor::output_transform(frame, &plan.stage_plan)
     }
+
+    /// Plan and record a native GPU final display/export output boundary.
+    pub fn record_wgpu_output_boundary(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        request: RenderGpuOutputBoundaryRecordRequest<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderOutputColorBoundaryGpuRecordError> {
+        let RenderGpuOutputBoundaryRecordRequest { ids, frame, output_texture_format, backend } =
+            request;
+        let plan = self
+            .planner
+            .plan(frame, boundary)
+            .map_err(RenderOutputColorBoundaryGpuRecordError::Plan)?;
+        plan.record_wgpu_output_boundary(RenderGpuOutputBoundaryRecordRequest {
+            ids,
+            frame,
+            output_texture_format,
+            backend,
+        })
+        .map_err(RenderOutputColorBoundaryGpuRecordError::Record)
+    }
+}
+
+/// Error returned when a final-output executor cannot record a GPU boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderOutputColorBoundaryGpuRecordError {
+    /// The output boundary could not be planned.
+    Plan(RenderColorTransformError),
+    /// The planned GPU boundary could not be recorded.
+    Record(RenderGpuOutputBoundaryRecordError),
 }
 
 /// Schedulable GPU OCIO color pass with resolved source/target frame handles.
