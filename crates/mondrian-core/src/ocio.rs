@@ -13,7 +13,7 @@
 //! 4. **Environment** — `$OCIO` env var → standard system paths
 
 use crate::types::{ColorSpace, OcioConfigSource};
-use ocio_rs::{BuiltinConfigRegistry, CPUProcessor, Config};
+use ocio_rs::{BuiltinConfigRegistry, CPUProcessor, Config, GpuLanguage, GpuShaderDesc};
 use std::path::{Path, PathBuf};
 
 // ── Global OCIO state ──────────────────────────────────────────────────────────
@@ -22,6 +22,15 @@ static OCIO_CONFIG_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::n
 
 /// Intended name for Mondrian's bundled default OCIO config.
 pub const MONDRIAN_DEFAULT_OCIO_CONFIG_NAME: &str = "mondrian_default_ocio_v1";
+
+const MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH: &str = "embedded:mondrian_default_ocio_v1";
+const MONDRIAN_DEFAULT_OCIO_CONFIG: &str =
+    include_str!("../assets/ocio/mondrian_default_ocio_v1.ocio");
+
+/// Return the pinned OCIO config text used by Mondrian Standard mode.
+pub fn mondrian_default_ocio_config_text() -> &'static str {
+    MONDRIAN_DEFAULT_OCIO_CONFIG
+}
 
 /// Load an OCIO config from `path` and set it as the process-wide current config.
 ///
@@ -66,6 +75,29 @@ pub fn init_ocio_builtin(name: &str) -> Result<(), String> {
     std::mem::forget(registry);
 
     tracing::info!(builtin=%name, "OCIO built-in config loaded");
+    Ok(())
+}
+
+/// Load Mondrian's embedded default OCIO config and set it as the current config.
+pub fn init_mondrian_default_ocio() -> Result<(), String> {
+    let config = Config::from_stream(MONDRIAN_DEFAULT_OCIO_CONFIG).map_err(|e| {
+        format!(
+            "failed to load embedded Mondrian OCIO config '{}': {e}",
+            MONDRIAN_DEFAULT_OCIO_CONFIG_NAME
+        )
+    })?;
+
+    ocio_rs::set_current_config(&config);
+    std::mem::forget(config);
+
+    if let Ok(mut guard) = OCIO_CONFIG_PATH.lock() {
+        *guard = Some(PathBuf::from(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH));
+    }
+
+    tracing::info!(
+        config = MONDRIAN_DEFAULT_OCIO_CONFIG_NAME,
+        "Mondrian embedded OCIO config loaded"
+    );
     Ok(())
 }
 
@@ -125,24 +157,17 @@ pub fn mondrian_default_ocio_source() -> OcioConfigSource {
 
 /// Ensure Mondrian's default OCIO config is loaded.
 pub fn ensure_mondrian_default_ocio_loaded() -> Result<(), String> {
-    let virtual_path = PathBuf::from(format!("builtin:{MONDRIAN_DEFAULT_OCIO_CONFIG_NAME}"));
+    let virtual_path = PathBuf::from(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH);
     if already_loaded_with(&virtual_path) {
         return Ok(());
     }
 
-    init_ocio_builtin(MONDRIAN_DEFAULT_OCIO_CONFIG_NAME).map_err(|err| {
-        format!(
-            "Mondrian default OCIO config is unavailable. Expected built-in config '{}': {err}",
-            MONDRIAN_DEFAULT_OCIO_CONFIG_NAME
-        )
-    })
+    init_mondrian_default_ocio()
 }
 
 /// Return true when Mondrian's default OCIO config is currently loaded.
 pub fn mondrian_default_ocio_available() -> bool {
-    already_loaded_with(&PathBuf::from(format!(
-        "builtin:{MONDRIAN_DEFAULT_OCIO_CONFIG_NAME}"
-    )))
+    already_loaded_with(&PathBuf::from(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH))
 }
 
 /// Check whether the config whose path is `path` is already loaded.
@@ -254,23 +279,45 @@ pub fn builtin_config_entries() -> Vec<(String, String)> {
 
 // ── Color-space name mapping ───────────────────────────────────────────────────
 
-/// Map a Mondrian [`ColorSpace`] to its conventional OCIO color-space name.
+/// Map a Mondrian [`ColorSpace`] to its pinned OCIO color-space name.
 ///
-/// These names match the built-in ACES and CG configs shipped with OCIO.
-/// If a config uses different names the user must align them in their
-/// `.ocio` file or contribute additional mappings here.
+/// These names are part of Mondrian's color-space contract and are validated
+/// against the embedded `mondrian_default_ocio_v1` config. Custom OCIO configs
+/// should provide the same names or aliases if they want to use Mondrian's
+/// built-in `ColorSpace` enum directly.
 pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
     match cs {
-        ColorSpace::Srgb => "sRGB",
-        ColorSpace::Rec709 => "Rec.709",
-        ColorSpace::Rec2020 => "Rec.2020",
-        ColorSpace::Rec2100Pq => "Rec.2100-PQ",
-        ColorSpace::Rec2100Hlg => "Rec.2100-HLG",
-        ColorSpace::DciP3 => "P3-D65",
+        ColorSpace::Srgb => "sRGB Encoded Rec.709 (sRGB)",
+        ColorSpace::Rec709 => "Camera Rec.709",
+        ColorSpace::Rec2020 => "Linear Rec.2020",
+        ColorSpace::Rec2100Pq => "Rec.2100-PQ - Display",
+        ColorSpace::Rec2100Hlg => "Rec.2100-HLG - Display",
+        ColorSpace::DciP3 => "sRGB Encoded P3-D65",
         ColorSpace::AppleLog => "Apple Log",
-        ColorSpace::SLog3 => "S-Log3",
+        ColorSpace::SLog3 => "S-Log3 S-Gamut3.Cine",
         ColorSpace::ArriLogC4 => "ARRI LogC4",
     }
+}
+
+/// GPU shader resources extracted from an OCIO processor.
+#[derive(Debug, Clone)]
+pub struct OcioGpuShaderBundle {
+    /// The OCIO color-space name used as processor input.
+    pub src_color_space: &'static str,
+    /// The OCIO color-space name used as processor output.
+    pub dst_color_space: &'static str,
+    /// The shader language requested from OCIO.
+    pub language: GpuLanguage,
+    /// OCIO-generated shader source.
+    pub shader_text: String,
+    /// Number of 1D/2D texture resources referenced by the shader.
+    pub texture_2d_count: u32,
+    /// Number of 3D texture resources referenced by the shader.
+    pub texture_3d_count: u32,
+    /// Number of uniforms referenced by the shader.
+    pub uniform_count: u32,
+    /// Stable OCIO processor cache id for renderer-side shader caching.
+    pub cache_id: Option<String>,
 }
 
 // ── CPU transform helpers ──────────────────────────────────────────────────────
@@ -290,6 +337,18 @@ fn ocio_cpu_processor(src: ColorSpace, dst: ColorSpace) -> Result<CPUProcessor, 
     processor
         .default_cpu_processor()
         .map_err(|e| format!("OCIO CPU processor '{src_name}' → '{dst_name}': {e}"))
+}
+
+fn ocio_processor(src: ColorSpace, dst: ColorSpace) -> Result<ocio_rs::Processor, String> {
+    let config = ocio_rs::current_config()
+        .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
+
+    let src_name = ocio_color_space_name(src);
+    let dst_name = ocio_color_space_name(dst);
+
+    config
+        .processor(src_name, dst_name)
+        .map_err(|e| format!("OCIO processor '{src_name}' -> '{dst_name}': {e}"))
 }
 
 /// Obtain a CPU processor for a display transform using the current global config.
@@ -374,6 +433,55 @@ pub fn apply_ocio_display_rgba8(
     Ok(())
 }
 
+/// Extract a GPU shader bundle for `src -> dst` from the current OCIO config.
+///
+/// The returned bundle is renderer-facing metadata. It deliberately does not
+/// allocate wgpu resources; callers should cache compiled shaders and uploaded
+/// texture/uniform resources by `cache_id` plus their render-target contract.
+pub fn extract_ocio_gpu_shader_bundle(
+    src: ColorSpace,
+    dst: ColorSpace,
+    language: GpuLanguage,
+) -> Result<OcioGpuShaderBundle, String> {
+    let processor = ocio_processor(src, dst)?;
+    let cache_id = processor.cache_id();
+    let gpu = processor.default_gpu_processor().map_err(|e| {
+        format!(
+            "OCIO GPU processor '{}' -> '{}': {e}",
+            ocio_color_space_name(src),
+            ocio_color_space_name(dst)
+        )
+    })?;
+    let desc = GpuShaderDesc::create().map_err(|e| format!("OCIO GPU shader desc: {e}"))?;
+    desc.set_language(language);
+    desc.set_function_name("mondrian_ocio_main")
+        .map_err(|e| format!("OCIO GPU shader function name: {e}"))?;
+    desc.set_pixel_name("mondrian_ocio_pixel")
+        .map_err(|e| format!("OCIO GPU shader pixel name: {e}"))?;
+    desc.set_resource_prefix("mondrian_ocio_")
+        .map_err(|e| format!("OCIO GPU shader resource prefix: {e}"))?;
+
+    let mut desc = desc;
+    gpu.extract_shader_info(&mut desc);
+    let shader_text = desc
+        .shader_text()
+        .ok_or_else(|| "OCIO GPU shader extraction returned empty shader text".to_string())?;
+    if shader_text.trim().is_empty() {
+        return Err("OCIO GPU shader extraction returned blank shader text".to_string());
+    }
+
+    Ok(OcioGpuShaderBundle {
+        src_color_space: ocio_color_space_name(src),
+        dst_color_space: ocio_color_space_name(dst),
+        language,
+        shader_text,
+        texture_2d_count: desc.num_textures(),
+        texture_3d_count: desc.num_3d_textures(),
+        uniform_count: desc.num_uniforms(),
+        cache_id,
+    })
+}
+
 /// Low-level: run an already-obtained [`CPUProcessor`] over an RGBA8 buffer.
 fn apply_cpu_processor_rgba8(cpu: &CPUProcessor, data: &mut [u8]) {
     let num_pixels = (data.len() / 4) as i64;
@@ -428,4 +536,116 @@ pub fn ocio_default_display_view() -> Option<(String, String)> {
     let display = config.default_display()?;
     let view = config.default_view(&display)?;
     Some((display, view))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_COLOR_SPACES: [ColorSpace; 9] = [
+        ColorSpace::Rec709,
+        ColorSpace::Rec2100Hlg,
+        ColorSpace::Rec2100Pq,
+        ColorSpace::Srgb,
+        ColorSpace::Rec2020,
+        ColorSpace::DciP3,
+        ColorSpace::AppleLog,
+        ColorSpace::SLog3,
+        ColorSpace::ArriLogC4,
+    ];
+
+    #[test]
+    fn mondrian_default_config_asset_parses_and_is_named() {
+        let config = Config::from_stream(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO config should parse");
+
+        assert_eq!(
+            config.name().as_deref(),
+            Some(MONDRIAN_DEFAULT_OCIO_CONFIG_NAME)
+        );
+        assert!(config.num_color_spaces() > ALL_COLOR_SPACES.len() as i32);
+        assert_eq!(config.default_display().as_deref(), Some("sRGB - Display"));
+        assert_eq!(
+            config.default_view("sRGB - Display").as_deref(),
+            Some("ACES 2.0 - SDR 100 nits (Rec.709)")
+        );
+    }
+
+    #[test]
+    fn mondrian_default_config_covers_color_space_contract() {
+        let config = Config::from_stream(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO config should parse");
+
+        for color_space in ALL_COLOR_SPACES {
+            let ocio_name = ocio_color_space_name(color_space);
+            assert!(
+                config.canonical_name(ocio_name).is_some(),
+                "{color_space:?} mapped to missing OCIO color space '{ocio_name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn mondrian_default_processors_cover_delivery_hdr_and_log_inputs() {
+        let config = Config::from_stream(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO config should parse");
+
+        let processor_pairs = [
+            (ColorSpace::Rec709, ColorSpace::Srgb),
+            (ColorSpace::Srgb, ColorSpace::Rec709),
+            (ColorSpace::Rec2020, ColorSpace::Rec709),
+            (ColorSpace::Rec2100Pq, ColorSpace::Rec709),
+            (ColorSpace::Rec2100Hlg, ColorSpace::Rec709),
+            (ColorSpace::DciP3, ColorSpace::Rec709),
+            (ColorSpace::AppleLog, ColorSpace::Rec709),
+            (ColorSpace::SLog3, ColorSpace::Rec709),
+            (ColorSpace::ArriLogC4, ColorSpace::Rec709),
+        ];
+
+        for (src, dst) in processor_pairs {
+            let src_name = ocio_color_space_name(src);
+            let dst_name = ocio_color_space_name(dst);
+            let processor = config
+                .processor(src_name, dst_name)
+                .unwrap_or_else(|err| panic!("{src:?}->{dst:?} processor missing: {err}"));
+            processor
+                .default_cpu_processor()
+                .unwrap_or_else(|err| panic!("{src:?}->{dst:?} CPU processor missing: {err}"));
+        }
+    }
+
+    #[test]
+    fn standard_mode_loads_embedded_default_config() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+
+        assert!(mondrian_default_ocio_available());
+        assert_eq!(
+            ocio_config_path().as_deref(),
+            Some(Path::new(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH))
+        );
+        assert_eq!(
+            ocio_default_display_view()
+                .as_ref()
+                .map(|(display, view)| { (display.as_str(), view.as_str()) }),
+            Some(("sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)"))
+        );
+    }
+
+    #[test]
+    fn standard_mode_extracts_gpu_shader_bundle() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+
+        let bundle = extract_ocio_gpu_shader_bundle(
+            ColorSpace::SLog3,
+            ColorSpace::Rec709,
+            GpuLanguage::Glsl4_0,
+        )
+        .expect("default config should produce a GPU shader bundle");
+
+        assert_eq!(bundle.language, GpuLanguage::Glsl4_0);
+        assert_eq!(bundle.src_color_space, "S-Log3 S-Gamut3.Cine");
+        assert_eq!(bundle.dst_color_space, "Camera Rec.709");
+        assert!(bundle.shader_text.contains("mondrian_ocio_main"));
+        assert!(bundle.cache_id.as_deref().is_some_and(|id| !id.trim().is_empty()));
+    }
 }

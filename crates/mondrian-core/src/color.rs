@@ -1263,19 +1263,11 @@ mod tests {
     }
 
     #[test]
-    fn standard_engine_reports_missing_default_ocio_without_fallback() {
-        if crate::ocio::builtin_config_names()
-            .iter()
-            .any(|name| name == crate::ocio::MONDRIAN_DEFAULT_OCIO_CONFIG_NAME)
-        {
-            return;
-        }
-
+    fn standard_engine_uses_embedded_default_ocio_without_fallback() {
         let engine = ColorEngine::MondrianSmart;
         let mut rgba = vec![12, 34, 56, 78];
-        let original = rgba.clone();
 
-        let err = engine
+        engine
             .convert_pipeline(
                 &mut rgba,
                 ColorSpace::Rec709,
@@ -1283,10 +1275,10 @@ mod tests {
                 ColorSpace::Srgb,
                 false,
             )
-            .expect_err("standard mode should require Mondrian default OCIO");
+            .expect("standard mode should use the embedded Mondrian default OCIO config");
 
-        assert!(err.contains("Mondrian default OCIO config is unavailable"));
-        assert_eq!(rgba, original);
+        assert!(engine.is_available());
+        assert_eq!(rgba[3], 78);
     }
 
     #[test]

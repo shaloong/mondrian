@@ -10,6 +10,13 @@ The Rust integration is `ocio-rs` 0.2.x with the `bundled` feature enabled, so
 normal application builds exercise the real OpenColorIO bridge rather than a
 stub runtime.
 
+The Standard mode config is packaged as
+`crates/mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio` and loaded via
+`include_str!` as `embedded:mondrian_default_ocio_v1`. It is pinned to the OCIO
+ACES 2.0 studio config semantics instead of resolving an upstream `latest`
+alias at runtime. Product builds therefore have a deterministic default color
+science while still using real OCIO processors.
+
 ## Engines
 
 - `ColorEngine::MondrianSmart`: productized Standard/Simple policy over the
@@ -19,7 +26,7 @@ stub runtime.
 
 Explicit OCIO mode must load its selected config successfully. It must not
 silently fall back to a different color science. Mondrian Standard follows the
-same rule for `mondrian_default_ocio_v1`.
+same rule for the embedded `mondrian_default_ocio_v1` asset.
 
 ## Project and Sequence
 
@@ -46,6 +53,12 @@ to source -> output when a sequence working space is available.
 OCIO execution also follows source -> working -> output. The Standard mode UI
 can hide OCIO details from normal users, but the backend still routes through
 the Mondrian default OCIO source and fails closed when that source is missing.
+
+Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
+default config. The mapping is tested for every enum variant, and representative
+delivery, HDR, and camera-log processor pairs must create real CPU processors.
+Custom OCIO configs should provide the same names or aliases if they are used
+with Mondrian's built-in `ColorSpace` enum.
 
 ## Color Encoding Contract
 
@@ -89,6 +102,13 @@ For `MondrianSmart` and explicit `Ocio` engines, root sequence contexts copy
 the currently loaded OCIO config's default display/view into the context when
 one is available. Absence of a display/view is only valid when no current OCIO
 config exposes defaults; it is not a fallback color pipeline.
+
+GPU preview should use OCIO shader extraction instead of CPU processor execution
+for real-time playback. `mondrian-core::ocio::extract_ocio_gpu_shader_bundle`
+is the renderer-facing boundary: it returns OCIO-generated shader text plus
+texture/uniform counts and the processor cache id. The renderer is responsible
+for compiling the shader language it requests and for caching uploaded
+texture/uniform resources by that cache id and render-target contract.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

@@ -14,7 +14,10 @@ Supported color spaces currently include:
 
 ## Engine
 
-`ColorEngine` is either MondrianSmart or OCIO. OCIO requires a loaded config; MondrianSmart is always available.
+`ColorEngine` is either MondrianSmart or OCIO. OCIO requires a loaded config.
+MondrianSmart loads Mondrian's embedded `mondrian_default_ocio_v1` config and
+must fail closed if that asset cannot parse or cannot produce the requested
+OCIO processor.
 
 ## Pipeline
 
