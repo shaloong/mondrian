@@ -12,15 +12,16 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use mondrian_assets::AssetKind;
-use mondrian_core::types::{AssetId, BlendMode, SequenceId};
+use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
+use mondrian_core::{convert_rgba8_in_place, ColorPipeline};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
-    composite_timeline_elements, evaluate_timeline_render_plan, TimelineAdjustmentLayer,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    composite_timeline_elements_float_linear, evaluate_timeline_render_plan,
+    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
-use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::sequence::{ColorContext, Sequence};
 use mondrian_ui_widgets::ViewerFrameImage;
 
 use crate::app::AppState;
@@ -156,54 +157,72 @@ impl AppUiPreviewService {
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
-        let preview_state =
-            match self.resolve_sequence_elements(state, sequence, frame, width, height, 0) {
-                Some(resolved) => {
-                    if let Some(frame) = resolved
-                        .cache_key
-                        .as_ref()
-                        .and_then(|cache_key| self.cached_viewer_frame(cache_key))
-                    {
-                        self.last_ready_frame.replace(Some(ScopedViewerFrame {
-                            sequence_id: sequence.id,
-                            width,
-                            height,
-                            frame: frame.clone(),
-                        }));
-                        ViewerPreviewState::Ready(frame)
-                    } else {
-                        let rgba = composite_resolved_preview(
-                            width,
-                            height,
-                            &resolved.elements,
-                            &mut self.scratch.borrow_mut(),
-                        );
-                        let key = preview_cache_key(frame, width, height, &rgba);
-                        match ViewerFrameImage::new(key, width, height, rgba) {
-                            Some(frame) => {
-                                if let Some(cache_key) = resolved.cache_key {
-                                    self.viewer_frame_cache
-                                        .borrow_mut()
-                                        .insert(cache_key, frame.clone());
-                                }
-                                self.last_ready_frame.replace(Some(ScopedViewerFrame {
-                                    sequence_id: sequence.id,
-                                    width,
-                                    height,
-                                    frame: frame.clone(),
-                                }));
-                                ViewerPreviewState::Ready(frame)
-                            }
-                            None => ViewerPreviewState::Unavailable,
+        let color_context = sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            ColorSpace::Rec709,
+        );
+        let preview_state = match self.resolve_sequence_elements(
+            state,
+            sequence,
+            frame,
+            width,
+            height,
+            0,
+            color_context,
+        ) {
+            Some(resolved) => {
+                if let Some(frame) = resolved
+                    .cache_key
+                    .as_ref()
+                    .and_then(|cache_key| self.cached_viewer_frame(cache_key))
+                {
+                    self.last_ready_frame.replace(Some(ScopedViewerFrame {
+                        sequence_id: sequence.id,
+                        width,
+                        height,
+                        frame: frame.clone(),
+                    }));
+                    ViewerPreviewState::Ready(frame)
+                } else {
+                    let rgba = match composite_resolved_preview(
+                        width,
+                        height,
+                        &resolved.elements,
+                        &resolved.color_context,
+                        &mut self.scratch.borrow_mut(),
+                    ) {
+                        Ok(rgba) => rgba,
+                        Err(err) => {
+                            tracing::warn!("viewer preview color render failed: {err}");
+                            return ViewerPreviewState::Unavailable;
                         }
+                    };
+                    let key = preview_cache_key(frame, width, height, &rgba);
+                    match ViewerFrameImage::new(key, width, height, rgba) {
+                        Some(frame) => {
+                            if let Some(cache_key) = resolved.cache_key {
+                                self.viewer_frame_cache
+                                    .borrow_mut()
+                                    .insert(cache_key, frame.clone());
+                            }
+                            self.last_ready_frame.replace(Some(ScopedViewerFrame {
+                                sequence_id: sequence.id,
+                                width,
+                                height,
+                                frame: frame.clone(),
+                            }));
+                            ViewerPreviewState::Ready(frame)
+                        }
+                        None => ViewerPreviewState::Unavailable,
                     }
                 }
-                None if self.current_frame_pending.get() => self
-                    .stale_frame_for_sequence(sequence, width, height)
-                    .map(ViewerPreviewState::Stale)
-                    .unwrap_or(ViewerPreviewState::Loading),
-                None => ViewerPreviewState::Unavailable,
-            };
+            }
+            None if self.current_frame_pending.get() => self
+                .stale_frame_for_sequence(sequence, width, height)
+                .map(ViewerPreviewState::Stale)
+                .unwrap_or(ViewerPreviewState::Loading),
+            None => ViewerPreviewState::Unavailable,
+        };
         self.schedule_media_prefetches(state, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
         self.record_preview_state(&preview_state);
@@ -247,16 +266,28 @@ impl AppUiPreviewService {
         sequence: &Sequence,
         frame: i64,
         depth: usize,
+        parent_color_context: ColorContext,
     ) -> Option<MediaPreviewFrame> {
         if depth >= MAX_NESTED_PREVIEW_DEPTH {
             return None;
         }
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let color_context = sequence.settings.nested_render_color_context(parent_color_context);
         let resolved = self
-            .resolve_sequence_elements(state, sequence, frame.max(0), width, height, depth)?
+            .resolve_sequence_elements(
+                state,
+                sequence,
+                frame.max(0),
+                width,
+                height,
+                depth,
+                color_context.clone(),
+            )?
             .elements;
         let mut scratch = TimelineCompositeScratch::default();
-        let rgba = composite_resolved_preview(width, height, &resolved, &mut scratch);
+        let rgba =
+            composite_resolved_preview(width, height, &resolved, &color_context, &mut scratch)
+                .ok()?;
         let signature =
             nested_preview_frame_signature(sequence.id, frame.max(0), width, height, &rgba);
         Some(MediaPreviewFrame { width, height, rgba, signature })
@@ -270,6 +301,7 @@ impl AppUiPreviewService {
         width: u32,
         height: u32,
         depth: usize,
+        color_context: ColorContext,
     ) -> Option<ResolvedPreviewPlan> {
         let evaluation = evaluate_timeline_render_plan(
             sequence,
@@ -301,10 +333,12 @@ impl AppUiPreviewService {
                     let frame = self.media_frame_for_plan(
                         state,
                         &media.asset_id,
+                        media.color_space_override,
                         media.source_frame,
                         media.source_secs,
                         width,
                         height,
+                        &color_context,
                     )?;
                     resolved.push(ResolvedPreviewElement::Media {
                         frame,
@@ -332,6 +366,7 @@ impl AppUiPreviewService {
                         nested_sequence,
                         nested.source_frame,
                         depth + 1,
+                        color_context.clone(),
                     )?;
                     resolved.push(ResolvedPreviewElement::Media {
                         frame,
@@ -349,15 +384,17 @@ impl AppUiPreviewService {
             width,
             height,
             &resolved,
+            &color_context,
         ));
 
-        Some(ResolvedPreviewPlan { elements: resolved, cache_key })
+        Some(ResolvedPreviewPlan { elements: resolved, cache_key, color_context })
     }
 }
 
 struct ResolvedPreviewPlan {
     elements: Vec<ResolvedPreviewElement>,
     cache_key: Option<ViewerPreviewCacheKey>,
+    color_context: ColorContext,
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.
@@ -437,6 +474,10 @@ struct MediaPreviewKey {
     source_micros: i64,
     target_width: u32,
     target_height: u32,
+    input_color_space: ColorSpace,
+    working_color_space: ColorSpace,
+    tone_map: bool,
+    engine: ColorEngine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -804,6 +845,10 @@ impl AppUiPreviewService {
         if !state.is_playing() {
             return;
         }
+        let color_context = sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            ColorSpace::Rec709,
+        );
         for offset in 1..=MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES {
             self.schedule_media_prefetch_for_sequence(
                 state,
@@ -812,6 +857,7 @@ impl AppUiPreviewService {
                 target_width,
                 target_height,
                 0,
+                color_context.clone(),
             );
         }
     }
@@ -824,6 +870,7 @@ impl AppUiPreviewService {
         target_width: u32,
         target_height: u32,
         depth: usize,
+        color_context: ColorContext,
     ) {
         if depth >= MAX_NESTED_PREVIEW_DEPTH {
             return;
@@ -842,10 +889,12 @@ impl AppUiPreviewService {
                     let Some((key, source_secs)) = self.media_preview_key_for_asset(
                         state,
                         &media.asset_id,
+                        media.color_space_override,
                         media.source_frame,
                         media.source_secs,
                         target_width,
                         target_height,
+                        &color_context,
                     ) else {
                         continue;
                     };
@@ -857,6 +906,9 @@ impl AppUiPreviewService {
                     if let Some(nested_sequence) = state.sequence_by_id(nested.sequence_id) {
                         let (nested_width, nested_height) =
                             preview_dimensions_for_sequence(nested_sequence);
+                        let nested_context = nested_sequence
+                            .settings
+                            .nested_render_color_context(color_context.clone());
                         self.schedule_media_prefetch_for_sequence(
                             state,
                             nested_sequence,
@@ -864,6 +916,7 @@ impl AppUiPreviewService {
                             nested_width,
                             nested_height,
                             depth + 1,
+                            nested_context,
                         );
                     }
                 }
@@ -877,18 +930,22 @@ impl AppUiPreviewService {
         &self,
         state: &AppState,
         asset_id: &AssetId,
+        color_space_override: Option<ColorSpace>,
         source_frame: i64,
         source_secs: f64,
         target_width: u32,
         target_height: u32,
+        color_context: &ColorContext,
     ) -> Option<MediaPreviewFrame> {
         let (key, source_secs) = self.media_preview_key_for_asset(
             state,
             asset_id,
+            color_space_override,
             source_frame,
             source_secs,
             target_width,
             target_height,
+            color_context,
         )?;
         if let Some(frame) = self.cached_media_frame(&key) {
             return Some(frame);
@@ -924,10 +981,12 @@ impl AppUiPreviewService {
         &self,
         state: &AppState,
         asset_id: &AssetId,
+        color_space_override: Option<ColorSpace>,
         source_frame: i64,
         source_secs: f64,
         target_width: u32,
         target_height: u32,
+        color_context: &ColorContext,
     ) -> Option<(MediaPreviewKey, f64)> {
         let library = state.asset_library.as_ref()?;
         let asset = match library.get_asset(*asset_id) {
@@ -943,6 +1002,13 @@ impl AppUiPreviewService {
         }
 
         let modified = modified_stamp(&asset.path);
+        let detected_color_space =
+            asset.media_info.video_streams.first().map(|video| video.color_space);
+        let input_color_space = resolve_preview_input_color_space(
+            color_space_override,
+            detected_color_space,
+            color_context,
+        )?;
         Some((
             MediaPreviewKey {
                 asset_id: *asset_id,
@@ -952,6 +1018,10 @@ impl AppUiPreviewService {
                 source_micros: source_micros(source_secs),
                 target_width,
                 target_height,
+                input_color_space,
+                working_color_space: color_context.working_color_space,
+                tone_map: color_context.tone_map,
+                engine: color_context.engine.clone(),
             },
             source_secs.max(0.0),
         ))
@@ -992,6 +1062,18 @@ impl AppUiPreviewService {
     }
 }
 
+fn resolve_preview_input_color_space(
+    override_color_space: Option<ColorSpace>,
+    detected_color_space: Option<ColorSpace>,
+    color_context: &ColorContext,
+) -> Option<ColorSpace> {
+    override_color_space.or_else(|| {
+        color_context
+            .missing_metadata_policy
+            .resolve_input(detected_color_space, color_context.working_color_space)
+    })
+}
+
 #[derive(Default)]
 struct AppUiPreviewMetrics {
     render_requests: Cell<u64>,
@@ -1024,8 +1106,13 @@ fn viewer_preview_cache_key_for_resolved_plan(
     width: u32,
     height: u32,
     elements: &[ResolvedPreviewElement],
+    color_context: &ColorContext,
 ) -> ViewerPreviewCacheKey {
     let mut hasher = DefaultHasher::new();
+    color_context.working_color_space.hash(&mut hasher);
+    color_context.output_color_space.hash(&mut hasher);
+    color_context.tone_map.hash(&mut hasher);
+    color_context.engine.hash(&mut hasher);
     elements.len().hash(&mut hasher);
     for element in elements {
         match element {
@@ -1133,8 +1220,9 @@ fn composite_resolved_preview(
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
+    color_context: &ColorContext,
     scratch: &mut TimelineCompositeScratch,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     let elements: Vec<_> = resolved
         .iter()
         .map(|element| match element {
@@ -1163,13 +1251,26 @@ fn composite_resolved_preview(
             }),
         })
         .collect();
-    composite_timeline_elements(
+    let mut rgba = composite_timeline_elements_float_linear(
         width,
         height,
         &elements,
         TimelineCompositeOptions::default(),
+        color_context.working_color_space,
         scratch,
+    );
+    convert_rgba8_in_place(
+        &mut rgba,
+        ColorPipeline::new(
+            color_context.working_color_space,
+            color_context.working_color_space,
+            color_context.output_color_space,
+            color_context.tone_map,
+        )
+        .with_engine(color_context.engine.clone()),
     )
+    .map_err(|err| format!("viewer preview final color transform failed: {err}"))?;
+    Ok(rgba)
 }
 
 fn preview_cache_key(frame: i64, width: u32, height: u32, rgba: &[u8]) -> String {
@@ -1220,17 +1321,39 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
         Some(job.key.target_width.max(1)),
         Some(job.key.target_height.max(1)),
     ) {
-        Ok(frame) => MediaPreviewResult {
-            key: job.key,
-            frame: Some(MediaPreviewFrame {
-                width: frame.width,
-                height: frame.height,
-                rgba: frame.data,
-                signature,
-            }),
-            error: None,
-            generation: job.generation,
-        },
+        Ok(mut frame) => {
+            if let Err(err) = convert_rgba8_in_place(
+                &mut frame.data,
+                ColorPipeline::new(
+                    job.key.input_color_space,
+                    job.key.working_color_space,
+                    job.key.working_color_space,
+                    job.key.tone_map,
+                )
+                .with_engine(job.key.engine.clone()),
+            ) {
+                return MediaPreviewResult {
+                    key: job.key,
+                    frame: None,
+                    error: Some(format!(
+                        "viewer preview input color transform failed: {err}"
+                    )),
+                    generation: job.generation,
+                };
+            }
+
+            MediaPreviewResult {
+                key: job.key,
+                frame: Some(MediaPreviewFrame {
+                    width: frame.width,
+                    height: frame.height,
+                    rgba: frame.data,
+                    signature,
+                }),
+                error: None,
+                generation: job.generation,
+            }
+        }
         Err(err) => MediaPreviewResult {
             key: job.key,
             frame: None,
@@ -1245,10 +1368,10 @@ mod tests {
     use super::*;
 
     use mondrian_core::types::{AssetId, TimeCode};
-    use mondrian_core::Color;
+    use mondrian_core::{Color, ProjectColorManagement};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_timeline::clip::Clip;
-    use mondrian_timeline::sequence::Sequence;
+    use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
 
     fn state_with_solid_color_clip(color: Color) -> AppState {
         let mut state = AppState::new();
@@ -1265,6 +1388,12 @@ mod tests {
         state.sequence = Some(sequence);
         state.seek(4);
         state
+    }
+
+    fn test_color_context(output_color_space: ColorSpace) -> ColorContext {
+        Sequence::new("color-context")
+            .settings
+            .root_preview_color_context(&ProjectColorManagement::default(), output_color_space)
     }
 
     fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {
@@ -1442,12 +1571,141 @@ mod tests {
         };
         let sequence_id = SequenceId::new();
 
-        let first =
-            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &make_plan(100));
-        let second =
-            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &make_plan(200));
+        let color_context = test_color_context(ColorSpace::Rec709);
+        let first = viewer_preview_cache_key_for_resolved_plan(
+            sequence_id,
+            320,
+            180,
+            &make_plan(100),
+            &color_context,
+        );
+        let second = viewer_preview_cache_key_for_resolved_plan(
+            sequence_id,
+            320,
+            180,
+            &make_plan(200),
+            &color_context,
+        );
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn resolved_media_preview_cache_key_includes_color_context() {
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let resolved = vec![ResolvedPreviewElement::Media {
+            frame: MediaPreviewFrame {
+                width: 2,
+                height: 2,
+                rgba: vec![0; 2 * 2 * 4],
+                signature: 100,
+            },
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            effect_graph,
+            frame_seed: 12,
+        }];
+        let sequence_id = SequenceId::new();
+
+        let rec709 = test_color_context(ColorSpace::Rec709);
+        let srgb = test_color_context(ColorSpace::Srgb);
+        let first =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &rec709);
+        let second =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &srgb);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn preview_input_color_resolution_honors_override_metadata_and_missing_policy() {
+        let mut color_context = test_color_context(ColorSpace::Rec709);
+        color_context.working_color_space = ColorSpace::Rec2020;
+        color_context.missing_metadata_policy =
+            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+
+        assert_eq!(
+            resolve_preview_input_color_space(
+                Some(ColorSpace::SLog3),
+                Some(ColorSpace::Srgb),
+                &color_context,
+            ),
+            Some(ColorSpace::SLog3)
+        );
+        assert_eq!(
+            resolve_preview_input_color_space(None, Some(ColorSpace::Srgb), &color_context),
+            Some(ColorSpace::Srgb)
+        );
+        assert_eq!(
+            resolve_preview_input_color_space(None, None, &color_context),
+            Some(ColorSpace::Rec2020)
+        );
+
+        color_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
+        assert_eq!(
+            resolve_preview_input_color_space(None, None, &color_context),
+            None
+        );
+    }
+
+    #[test]
+    fn preview_single_media_color_output_matches_export_composite_contract() {
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let frame = MediaPreviewFrame {
+            width: 1,
+            height: 1,
+            rgba: vec![200, 100, 40, 255],
+            signature: 77,
+        };
+        let color_context = test_color_context(ColorSpace::Srgb);
+        let resolved = vec![ResolvedPreviewElement::Media {
+            frame: frame.clone(),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            effect_graph: Arc::clone(&effect_graph),
+            frame_seed: 0,
+        }];
+        let mut preview_scratch = TimelineCompositeScratch::default();
+        let preview =
+            composite_resolved_preview(1, 1, &resolved, &color_context, &mut preview_scratch)
+                .expect("preview color composite");
+
+        let export_elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
+            rgba: frame.rgba.as_slice(),
+            width: frame.width,
+            height: frame.height,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            effect_graph,
+            frame_seed: 0,
+        })];
+        let mut export_scratch = TimelineCompositeScratch::default();
+        let mut expected = composite_timeline_elements_float_linear(
+            1,
+            1,
+            &export_elements,
+            TimelineCompositeOptions::default(),
+            color_context.working_color_space,
+            &mut export_scratch,
+        );
+        convert_rgba8_in_place(
+            &mut expected,
+            ColorPipeline::new(
+                color_context.working_color_space,
+                color_context.working_color_space,
+                color_context.output_color_space,
+                color_context.tone_map,
+            )
+            .with_engine(color_context.engine.clone()),
+        )
+        .expect("export color transform");
+
+        assert_eq!(preview, expected);
     }
 
     #[test]
@@ -1480,6 +1738,10 @@ mod tests {
             source_micros: source_micros(0.5),
             target_width: 320,
             target_height: 180,
+            input_color_space: ColorSpace::Rec709,
+            working_color_space: ColorSpace::Rec709,
+            tone_map: false,
+            engine: ColorEngine::MondrianSmart,
         };
 
         let result = decode_media_preview(MediaPreviewJob {
@@ -1503,6 +1765,10 @@ mod tests {
             source_micros: source_micros(source_frame as f64),
             target_width: 320,
             target_height: 180,
+            input_color_space: ColorSpace::Rec709,
+            working_color_space: ColorSpace::Rec709,
+            tone_map: false,
+            engine: ColorEngine::MondrianSmart,
         }
     }
 
@@ -1590,6 +1856,10 @@ mod tests {
             source_micros: source_micros(1.0),
             target_width: 320,
             target_height: 180,
+            input_color_space: ColorSpace::Rec709,
+            working_color_space: ColorSpace::Rec709,
+            tone_map: false,
+            engine: ColorEngine::MondrianSmart,
         };
         assert_eq!(
             scheduler.request(key.clone(), first_generation),
@@ -1614,6 +1884,10 @@ mod tests {
             source_micros: source_micros(1.0),
             target_width: 320,
             target_height: 180,
+            input_color_space: ColorSpace::Rec709,
+            working_color_space: ColorSpace::Rec709,
+            tone_map: false,
+            engine: ColorEngine::MondrianSmart,
         };
         assert_eq!(
             scheduler.request(key.clone(), first_generation),

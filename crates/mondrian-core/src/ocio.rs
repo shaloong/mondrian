@@ -13,7 +13,8 @@
 //! 4. **Environment** — `$OCIO` env var → standard system paths
 
 use crate::types::{ColorSpace, OcioConfigSource};
-use ocio_rs::{BuiltinConfigRegistry, CPUProcessor, Config, GpuLanguage, GpuShaderDesc};
+pub use ocio_rs::GpuLanguage;
+use ocio_rs::{BuiltinConfigRegistry, CPUProcessor, Config, GpuShaderDesc};
 use std::path::{Path, PathBuf};
 
 // ── Global OCIO state ──────────────────────────────────────────────────────────
@@ -303,9 +304,9 @@ pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
 #[derive(Debug, Clone)]
 pub struct OcioGpuShaderBundle {
     /// The OCIO color-space name used as processor input.
-    pub src_color_space: &'static str,
-    /// The OCIO color-space name used as processor output.
-    pub dst_color_space: &'static str,
+    pub src_color_space: String,
+    /// The OCIO color-space or display/view name used as processor output.
+    pub dst_color_space: String,
     /// The shader language requested from OCIO.
     pub language: GpuLanguage,
     /// OCIO-generated shader source.
@@ -318,6 +319,49 @@ pub struct OcioGpuShaderBundle {
     pub uniform_count: u32,
     /// Stable OCIO processor cache id for renderer-side shader caching.
     pub cache_id: Option<String>,
+}
+
+impl OcioGpuShaderBundle {
+    fn for_color_space(
+        src: ColorSpace,
+        dst: ColorSpace,
+        language: GpuLanguage,
+        shader_text: String,
+        desc: &GpuShaderDesc,
+        cache_id: Option<String>,
+    ) -> Self {
+        Self {
+            src_color_space: ocio_color_space_name(src).to_string(),
+            dst_color_space: ocio_color_space_name(dst).to_string(),
+            language,
+            shader_text,
+            texture_2d_count: desc.num_textures(),
+            texture_3d_count: desc.num_3d_textures(),
+            uniform_count: desc.num_uniforms(),
+            cache_id,
+        }
+    }
+
+    fn for_display(
+        src: ColorSpace,
+        display: &str,
+        view: &str,
+        language: GpuLanguage,
+        shader_text: String,
+        desc: &GpuShaderDesc,
+        cache_id: Option<String>,
+    ) -> Self {
+        Self {
+            src_color_space: ocio_color_space_name(src).to_string(),
+            dst_color_space: format!("{display}/{view}"),
+            language,
+            shader_text,
+            texture_2d_count: desc.num_textures(),
+            texture_3d_count: desc.num_3d_textures(),
+            uniform_count: desc.num_uniforms(),
+            cache_id,
+        }
+    }
 }
 
 // ── CPU transform helpers ──────────────────────────────────────────────────────
@@ -349,6 +393,26 @@ fn ocio_processor(src: ColorSpace, dst: ColorSpace) -> Result<ocio_rs::Processor
     config
         .processor(src_name, dst_name)
         .map_err(|e| format!("OCIO processor '{src_name}' -> '{dst_name}': {e}"))
+}
+
+fn ocio_display_processor(
+    src: ColorSpace,
+    display: &str,
+    view: &str,
+) -> Result<ocio_rs::Processor, String> {
+    let config = ocio_rs::current_config()
+        .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
+
+    let src_name = ocio_color_space_name(src);
+
+    config
+        .processor_display(
+            src_name,
+            display,
+            view,
+            ocio_rs::TransformDirection::Forward,
+        )
+        .map_err(|e| format!("OCIO display processor '{src_name}' -> {display}/{view}: {e}"))
 }
 
 /// Obtain a CPU processor for a display transform using the current global config.
@@ -452,6 +516,51 @@ pub fn extract_ocio_gpu_shader_bundle(
             ocio_color_space_name(dst)
         )
     })?;
+    let mut desc = configured_gpu_shader_desc(language)?;
+    gpu.extract_shader_info(&mut desc);
+    let shader_text = extracted_shader_text(&desc)?;
+
+    Ok(OcioGpuShaderBundle::for_color_space(
+        src,
+        dst,
+        language,
+        shader_text,
+        &desc,
+        cache_id,
+    ))
+}
+
+/// Extract a GPU shader bundle for an OCIO display/view transform.
+pub fn extract_ocio_display_gpu_shader_bundle(
+    src: ColorSpace,
+    display: &str,
+    view: &str,
+    language: GpuLanguage,
+) -> Result<OcioGpuShaderBundle, String> {
+    let processor = ocio_display_processor(src, display, view)?;
+    let cache_id = processor.cache_id();
+    let gpu = processor.default_gpu_processor().map_err(|e| {
+        format!(
+            "OCIO GPU display processor '{}' -> {display}/{view}: {e}",
+            ocio_color_space_name(src),
+        )
+    })?;
+    let mut desc = configured_gpu_shader_desc(language)?;
+    gpu.extract_shader_info(&mut desc);
+    let shader_text = extracted_shader_text(&desc)?;
+
+    Ok(OcioGpuShaderBundle::for_display(
+        src,
+        display,
+        view,
+        language,
+        shader_text,
+        &desc,
+        cache_id,
+    ))
+}
+
+fn configured_gpu_shader_desc(language: GpuLanguage) -> Result<GpuShaderDesc, String> {
     let desc = GpuShaderDesc::create().map_err(|e| format!("OCIO GPU shader desc: {e}"))?;
     desc.set_language(language);
     desc.set_function_name("mondrian_ocio_main")
@@ -460,26 +569,17 @@ pub fn extract_ocio_gpu_shader_bundle(
         .map_err(|e| format!("OCIO GPU shader pixel name: {e}"))?;
     desc.set_resource_prefix("mondrian_ocio_")
         .map_err(|e| format!("OCIO GPU shader resource prefix: {e}"))?;
+    Ok(desc)
+}
 
-    let mut desc = desc;
-    gpu.extract_shader_info(&mut desc);
+fn extracted_shader_text(desc: &GpuShaderDesc) -> Result<String, String> {
     let shader_text = desc
         .shader_text()
         .ok_or_else(|| "OCIO GPU shader extraction returned empty shader text".to_string())?;
     if shader_text.trim().is_empty() {
         return Err("OCIO GPU shader extraction returned blank shader text".to_string());
     }
-
-    Ok(OcioGpuShaderBundle {
-        src_color_space: ocio_color_space_name(src),
-        dst_color_space: ocio_color_space_name(dst),
-        language,
-        shader_text,
-        texture_2d_count: desc.num_textures(),
-        texture_3d_count: desc.num_3d_textures(),
-        uniform_count: desc.num_uniforms(),
-        cache_id,
-    })
+    Ok(shader_text)
 }
 
 /// Low-level: run an already-obtained [`CPUProcessor`] over an RGBA8 buffer.
@@ -645,6 +745,29 @@ mod tests {
         assert_eq!(bundle.language, GpuLanguage::Glsl4_0);
         assert_eq!(bundle.src_color_space, "S-Log3 S-Gamut3.Cine");
         assert_eq!(bundle.dst_color_space, "Camera Rec.709");
+        assert!(bundle.shader_text.contains("mondrian_ocio_main"));
+        assert!(bundle.cache_id.as_deref().is_some_and(|id| !id.trim().is_empty()));
+    }
+
+    #[test]
+    fn standard_mode_extracts_display_gpu_shader_bundle() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+        let (display, view) = ocio_default_display_view().expect("default display/view");
+
+        let bundle = extract_ocio_display_gpu_shader_bundle(
+            ColorSpace::Rec709,
+            &display,
+            &view,
+            GpuLanguage::Glsl4_0,
+        )
+        .expect("default config should produce a display GPU shader bundle");
+
+        assert_eq!(bundle.language, GpuLanguage::Glsl4_0);
+        assert_eq!(bundle.src_color_space, "Camera Rec.709");
+        assert_eq!(
+            bundle.dst_color_space,
+            "sRGB - Display/ACES 2.0 - SDR 100 nits (Rec.709)"
+        );
         assert!(bundle.shader_text.contains("mondrian_ocio_main"));
         assert!(bundle.cache_id.as_deref().is_some_and(|id| !id.trim().is_empty()));
     }

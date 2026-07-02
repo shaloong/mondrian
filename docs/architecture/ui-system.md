@@ -80,13 +80,17 @@ may warm the cache, but they do not force a UI refresh for an older playback
 frame.
 
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
-file modification stamp, source frame/time, and target preview dimensions.
+file modification stamp, source frame/time, target preview dimensions, input
+color interpretation, target working color space, tone-map policy, and color
+engine. A media frame decoded for one working-space contract must never be
+reused for another viewer/export color contract.
 Decode failures are also held in a bounded LRU key cache so repeated bad media
 does not grow memory unbounded during playback.
 Resolved preview plans may reuse a bounded final-frame cache keyed by sequence,
 dimensions, deterministic render-plan signature, and resolved media-frame
-identity. Unresolved media requests still bypass this cache until their source
-frame is available.
+identity. The final-frame key also includes the effective preview color context,
+so monitor/output changes invalidate previously rendered pixels. Unresolved
+media requests still bypass this cache until their source frame is available.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.

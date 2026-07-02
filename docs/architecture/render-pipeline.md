@@ -47,7 +47,12 @@ and exists only for compatibility with code that needs the element list.
 
 Each element carries opacity, blend mode, transforms where applicable, effect graph, frame seed, and color/media interpretation data.
 
-`timeline_composite` still supports CPU RGBA compositing and a float-linear path for simple normal-blend media. `FrameCompositor` supports GPU batched compositing with texture pooling and can return either RGBA readback or a GPU texture.
+`timeline_composite` still supports CPU RGBA compositing and a float-linear path
+for simple normal-blend media. Viewer preview and export both enter the
+float-linear compositor when that path supports the resolved elements, then
+apply the same working -> output color transform contract for their respective
+preview/export `ColorContext`. `FrameCompositor` supports GPU batched compositing
+with texture pooling and can return either RGBA readback or a GPU texture.
 
 ## Required Semantics
 
@@ -61,6 +66,12 @@ Each element carries opacity, blend mode, transforms where applicable, effect gr
 ## Preview vs Export
 
 Preview and export may use different scheduling, cache lifetime, and readback strategy. They must share timeline interpretation, clip ordering, effect evaluation, blend semantics, and color-management decisions.
+
+Preview media decoding must convert source media into the sequence working
+color space before compositing. The source color space resolves from clip
+override first, then media metadata, then the configured missing-metadata policy.
+Preview final-frame cache keys must include the effective color context so a
+monitor/output transform change cannot reuse stale pixels from a previous view.
 
 Preview callers must use `TimelineEvaluationRequest::preview(...)`. Export
 callers must use `TimelineEvaluationRequest::export(...)`. Any future thumbnail,

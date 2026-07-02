@@ -104,11 +104,19 @@ one is available. Absence of a display/view is only valid when no current OCIO
 config exposes defaults; it is not a fallback color pipeline.
 
 GPU preview should use OCIO shader extraction instead of CPU processor execution
-for real-time playback. `mondrian-core::ocio::extract_ocio_gpu_shader_bundle`
-is the renderer-facing boundary: it returns OCIO-generated shader text plus
-texture/uniform counts and the processor cache id. The renderer is responsible
-for compiling the shader language it requests and for caching uploaded
-texture/uniform resources by that cache id and render-target contract.
+for real-time playback. `mondrian-core::extract_ocio_gpu_shader_bundle` and
+`mondrian-core::extract_ocio_display_gpu_shader_bundle` are the core extraction
+boundaries: they return OCIO-generated shader text plus texture/uniform counts
+and the processor cache id. `mondrian-renderer::OcioGpuShaderCache` stores this
+as a renderer shader plan keyed by the request and OCIO processor cache id.
+
+This cache is deliberately not a fake wgpu execution path. OCIO emits backend
+shader source such as GLSL/HLSL/MSL, while Mondrian's native renderer currently
+executes WGSL/wgpu passes. A later backend compiler/upload stage must translate
+the cached OCIO plan into concrete pipeline resources before the preview graph
+can execute it on the GPU. Until that stage exists, CPU processor execution is
+the correctness path and the cached shader plan is the production boundary for
+GPU integration work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

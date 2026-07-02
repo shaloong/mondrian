@@ -40,6 +40,20 @@ UI code may use `mondrian-ui-renderer`; timeline/video rendering should stay in 
 
 `mondrian-effects` already exposes `EffectGpuExecutor` as an acceleration hook. Long-term, effects should compile to graph nodes that the renderer can execute on GPU where supported, with CPU fallback only for unsupported ops/plugins.
 
+## OCIO GPU Integration
+
+`mondrian-renderer::OcioGpuShaderCache` is the renderer-side cache for OCIO GPU
+shader extraction. It accepts color-space and display/view requests, calls the
+core OCIO extraction boundary, and returns a shader plan with shader text length,
+shader hash, texture/uniform counts, and the OCIO processor cache id.
+
+This is the stable boundary before native GPU execution. The cache must not
+claim wgpu execution until a backend compiler/upload layer creates real pipeline
+resources, bind groups, LUT textures, and render-graph nodes from the OCIO plan.
+Renderer diagnostics should track cache hits, misses, and extraction failures so
+preview performance work can distinguish shader planning cost from actual frame
+execution cost.
+
 ## Allowed Readback
 
 Readback is allowed for:

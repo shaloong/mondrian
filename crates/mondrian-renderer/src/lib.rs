@@ -12,6 +12,7 @@ pub mod batched_pipeline;
 pub mod compositor;
 pub mod context;
 pub mod gpu_backend;
+pub mod ocio_gpu;
 pub mod pipeline;
 pub mod profile;
 pub mod shaders;
@@ -23,6 +24,10 @@ pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
 pub use gpu_backend::{
     gpu_enabled, set_gpu_enabled, GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason,
+};
+pub use ocio_gpu::{
+    OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuShaderError, OcioGpuShaderPlan,
+    OcioGpuShaderRequest,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{
