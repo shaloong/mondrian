@@ -44,8 +44,8 @@ pub use color_stage::{
     RenderGpuOutputStageReadbackError, RenderGpuOutputStageRecord, RenderGpuOutputStageRecordError,
     RenderGpuOutputStageRecordRequest, RenderGpuOutputStageResourcePlan,
     RenderGpuOutputStageResourcePlanError, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryPlanner, RenderOutputColorBoundaryStagePlan,
-    RenderOutputColorBoundaryTarget,
+    RenderOutputColorBoundaryExecutor, RenderOutputColorBoundaryPlanner,
+    RenderOutputColorBoundaryStagePlan, RenderOutputColorBoundaryTarget,
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,

@@ -16,8 +16,8 @@ use mondrian_media::audio::{
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, execute_cpu_output_boundary, CpuColorFrame, CpuEncodedColorFrame,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    execute_cpu_input_stage, CpuColorFrame, CpuEncodedColorFrame, RenderInputTransform,
+    RenderOutputColorBoundary, RenderOutputColorBoundaryExecutor, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
     TimelineSolidColorLayer,
@@ -1117,17 +1117,17 @@ fn render_sequence_frame_into(
         color_context.working_color_space,
         &mut scratch,
     );
-    let encoded = execute_cpu_output_boundary(
-        &rendered,
-        &RenderOutputColorBoundary::export(
-            color_context.output_color_space,
-            color_context.tone_map,
-            color_context.engine.clone(),
-        ),
-    )
-    .map_err(|err| format!("final color transform failed: {err}"))?
-    .result
-    .frame;
+    let boundary = RenderOutputColorBoundary::export(
+        color_context.output_color_space,
+        color_context.tone_map,
+        color_context.engine.clone(),
+    );
+    let mut output_executor = RenderOutputColorBoundaryExecutor::cpu_only();
+    let encoded = output_executor
+        .execute(&rendered, &boundary)
+        .map_err(|err| format!("final color transform failed: {err}"))?
+        .result
+        .frame;
     canvas.clear();
     canvas.extend_from_slice(encoded.rgba());
     Ok(())

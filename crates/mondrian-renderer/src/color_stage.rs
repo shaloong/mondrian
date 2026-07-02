@@ -402,6 +402,37 @@ impl<'a> RenderOutputColorBoundaryPlanner<'a> {
     }
 }
 
+/// Renderer-owned executor for preview/export final output color boundaries.
+///
+/// This is the call-site boundary for app/export code. Construction selects an
+/// explicit execution strategy; the executor does not silently fall back between
+/// CPU and GPU modes.
+pub struct RenderOutputColorBoundaryExecutor<'a> {
+    planner: RenderOutputColorBoundaryPlanner<'a>,
+}
+
+impl RenderOutputColorBoundaryExecutor<'_> {
+    /// Create a final-output executor that always schedules CPU color stages.
+    pub fn cpu_only() -> Self {
+        Self {
+            planner: RenderOutputColorBoundaryPlanner::cpu_only(),
+        }
+    }
+}
+
+impl RenderOutputColorBoundaryExecutor<'_> {
+    /// Plan and execute a final display/export output boundary.
+    pub fn execute(
+        &mut self,
+        frame: &CpuColorFrame,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError>
+    {
+        let plan = self.planner.plan(frame, boundary)?;
+        CpuRenderColorStageExecutor::output_transform(frame, &plan.stage_plan)
+    }
+}
+
 /// Schedulable GPU OCIO color pass with resolved source/target frame handles.
 #[derive(Debug, Clone)]
 pub struct RenderGpuColorPassSchedule {
@@ -1178,9 +1209,8 @@ pub fn execute_cpu_output_boundary(
     frame: &CpuColorFrame,
     boundary: &RenderOutputColorBoundary,
 ) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError> {
-    let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
-    let plan = planner.plan(frame, boundary)?;
-    CpuRenderColorStageExecutor::output_transform(frame, &plan.stage_plan)
+    let mut executor = RenderOutputColorBoundaryExecutor::cpu_only();
+    executor.execute(frame, boundary)
 }
 
 impl<'a> RenderColorStagePlanner<'a> {
@@ -1675,6 +1705,27 @@ mod tests {
             crate::RenderColorTransformDirection::WorkingToOutput
         );
         assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+    }
+
+    #[test]
+    fn output_boundary_executor_cpu_only_executes_display_target() {
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut executor = RenderOutputColorBoundaryExecutor::cpu_only();
+
+        let output = executor.execute(&frame, &boundary).expect("display boundary should execute");
+
+        assert_eq!(
+            output.result.frame.descriptor().domain,
+            ColorFrameDomain::Display
+        );
+        assert_eq!(
+            output.result.diagnostics.direction,
+            crate::RenderColorTransformDirection::WorkingToOutput
+        );
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+        assert_eq!(output.stage_diagnostics.gpu_color_stages, 0);
     }
 
     #[test]

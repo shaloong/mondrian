@@ -83,6 +83,10 @@ renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
 that planner. Its CPU-only mode is the current correctness execution path;
 its PreferGpu mode must produce GPU/upload/readback stages plus explicit
 blocker diagnostics instead of silently falling back to a CPU output stage.
+`RenderOutputColorBoundaryExecutor` is the app/export-facing execution boundary:
+callers choose an explicit strategy at construction time, and the executor owns
+the final-output plan/execute sequence instead of exposing low-level transform
+executors to app/export code.
 For native GPU OCIO execution, `RenderGpuColorPassSchedule` is the bridge
 between the stage plan and backend recorder: it requires GPU-resident source and
 target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a
@@ -117,10 +121,10 @@ debug captures must use one of those renderer-owned paths; readback is valid
 only for explicit encoded RGBA8 output contracts unless a future conversion
 stage says otherwise.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
-source boundaries and `execute_cpu_output_boundary(...)` for final display or
-export output. These helpers plan CPU-only stages and execute them through
-`RenderOutputColorBoundaryPlanner` / `CpuRenderColorStageExecutor`; app/export
-code should not call `execute_cpu_output_stage(...)` directly. Direct
+source boundaries and `RenderOutputColorBoundaryExecutor::cpu_only()` for final
+display or export output. The compatibility helper
+`execute_cpu_output_boundary(...)` delegates to that executor; app/export code
+should not call `execute_cpu_output_stage(...)` directly. Direct
 `CpuColorTransformExecutor` usage is limited to renderer internals and its
 focused unit tests.
 
