@@ -81,6 +81,15 @@ It is not a fake resource allocation layer; concrete `wgpu::ShaderModule`,
 objects must still be created by the backend compiler/upload layer before
 `can_execute()` can become true.
 
+`OcioGpuWgpuBackendPrepRuntime` is the renderer-owned pure-preparation runtime
+for this path. It owns the resource-layout cache and wrapper Naga artifact
+cache, and turns one `OcioGpuShaderPlan` into an
+`OcioGpuWgpuPreparedStaticPipeline`: prepared OCIO resource layout, wrapper
+input binding plan, pipeline layout plan, wrapper link/source artifacts,
+validated stage-split Naga wrapper modules, and the render-pipeline descriptor.
+It creates no concrete wgpu objects; backend object caches consume this static
+pipeline afterward.
+
 `OcioGpuWgpuResourceCache` prepares and caches the backend binding-layout
 contract derived from that resource plan. OCIO bind-group entries use the
 descriptor set, uniform-buffer binding, texture binding start, and LUT binding

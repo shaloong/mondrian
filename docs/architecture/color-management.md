@@ -207,6 +207,10 @@ The OCIO binding contract is taken from the shader descriptor, not inferred
 from generated WGSL or Naga output, and `OcioGpuWgpuResourcePlan` rejects
 invalid descriptor counts, bindings, resource names, extents, and missing
 uniform buffers before backend resource planning continues.
+`OcioGpuWgpuBackendPrepRuntime` owns the pure preparation caches that assemble
+prepared resource layout, wrapper binding/layout, wrapper link/source,
+validated wrapper Naga artifacts, and render descriptor into one static
+pipeline contract before concrete wgpu object creation begins.
 `RenderGpuColorPassSchedule::record_wgpu_from_resources` is the single
 preview/export-facing entry point that resolves those table entries, prepares
 the wrapper bind group, and records the pass. `GpuColorFrameAllocationPlan`,

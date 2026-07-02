@@ -3369,6 +3369,130 @@ pub struct OcioGpuWgpuResourceCacheDiagnostics {
     pub misses: u64,
 }
 
+/// Validated pure-preparation output for an OCIO fullscreen GPU pipeline.
+///
+/// This contains no concrete wgpu device objects. It is the deterministic
+/// contract bundle that backend object creation must consume.
+#[derive(Debug, Clone)]
+pub struct OcioGpuWgpuPreparedStaticPipeline {
+    /// Cached resource/layout preparation.
+    pub resources: Arc<OcioGpuWgpuPreparedResources>,
+    /// Wrapper input bind-group plan.
+    pub wrapper_binding: OcioGpuWgpuWrapperBindingPlan,
+    /// Pipeline layout plan joining OCIO resources and wrapper input resources.
+    pub pipeline_layout: OcioGpuWgpuPipelineLayoutPlan,
+    /// Link plan between the OCIO-generated program and Mondrian wrapper.
+    pub wrapper_link: OcioGpuWgpuWrapperLinkPlan,
+    /// Generated stage-split wrapper shader source.
+    pub wrapper_source: OcioGpuWgpuWrapperShaderSourceArtifact,
+    /// Validated stage-split Naga wrapper modules.
+    pub wrapper_module_artifact: Arc<OcioGpuWgpuWrapperShaderModuleArtifact>,
+    /// Render-pipeline descriptor contract for the fullscreen pass.
+    pub render_descriptor: OcioGpuWgpuRenderPipelineDescriptorPlan,
+}
+
+/// Error returned while preparing pure OCIO GPU backend contracts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuBackendPrepError {
+    /// The OCIO shader descriptor binding contract is invalid.
+    BindingContract(OcioGpuBindingContractValidationError),
+    /// The OCIO resource layout cannot be built safely.
+    ResourceLayout(OcioGpuWgpuBindingLayoutPlanError),
+    /// The OCIO generated program cannot be linked into Mondrian's wrapper.
+    WrapperSource(OcioGpuWgpuWrapperShaderArtifactError),
+    /// The wrapper shader source cannot become validated Naga modules.
+    WrapperModule(OcioGpuWgpuWrapperShaderModuleArtifactError),
+}
+
+impl std::fmt::Display for OcioGpuWgpuBackendPrepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OCIO GPU backend preparation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for OcioGpuWgpuBackendPrepError {}
+
+/// Renderer-owned runtime for pure OCIO GPU backend preparation.
+///
+/// This runtime owns the caches needed to turn a shader plan into validated
+/// layout and wrapper Naga artifacts. Concrete wgpu object creation remains in
+/// the backend caches that consume this prepared static pipeline.
+#[derive(Default)]
+pub struct OcioGpuWgpuBackendPrepRuntime {
+    resources: OcioGpuWgpuResourceCache,
+    wrapper_module_artifacts: OcioGpuWgpuWrapperShaderModuleArtifactCache,
+}
+
+impl OcioGpuWgpuBackendPrepRuntime {
+    /// Create a runtime with default cache capacities.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Prepare pure backend contracts for an OCIO fullscreen color pass.
+    pub fn prepare_static_pipeline(
+        &mut self,
+        shader_plan: &OcioGpuShaderPlan,
+        output_format: OcioGpuWgpuColorTargetFormat,
+    ) -> Result<OcioGpuWgpuPreparedStaticPipeline, OcioGpuWgpuBackendPrepError> {
+        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(shader_plan)
+            .map_err(OcioGpuWgpuBackendPrepError::BindingContract)?;
+        let resources = self
+            .resources
+            .prepare(resources)
+            .map_err(OcioGpuWgpuBackendPrepError::ResourceLayout)?;
+        let wrapper_binding =
+            OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.resources.wrapper_contract);
+        let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
+            &resources.resources,
+            &resources.binding_layout,
+            &wrapper_binding,
+        );
+        let wrapper_link =
+            OcioGpuWgpuWrapperLinkPlan::for_shader_plan(shader_plan, &resources.resources);
+        let wrapper_source =
+            OcioGpuWgpuWrapperShaderSourceArtifact::generate(shader_plan, &wrapper_link)
+                .map_err(OcioGpuWgpuBackendPrepError::WrapperSource)?;
+        let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
+            &resources.resources,
+            &pipeline_layout,
+            &wrapper_link,
+            output_format,
+        );
+        let wrapper_module_artifact = self
+            .wrapper_module_artifacts
+            .translate(&wrapper_source, &pipeline_layout, &render_descriptor)
+            .map_err(OcioGpuWgpuBackendPrepError::WrapperModule)?;
+
+        Ok(OcioGpuWgpuPreparedStaticPipeline {
+            resources,
+            wrapper_binding,
+            pipeline_layout,
+            wrapper_link,
+            wrapper_source,
+            wrapper_module_artifact,
+            render_descriptor,
+        })
+    }
+
+    /// Return point-in-time cache diagnostics for this runtime.
+    pub fn diagnostics(&self) -> OcioGpuWgpuBackendPrepRuntimeDiagnostics {
+        OcioGpuWgpuBackendPrepRuntimeDiagnostics {
+            resources: self.resources.diagnostics(),
+            wrapper_module_artifacts: self.wrapper_module_artifacts.diagnostics(),
+        }
+    }
+}
+
+/// Point-in-time diagnostics for OCIO GPU backend preparation caches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuBackendPrepRuntimeDiagnostics {
+    /// Resource-layout cache diagnostics.
+    pub resources: OcioGpuWgpuResourceCacheDiagnostics,
+    /// Wrapper Naga artifact cache diagnostics.
+    pub wrapper_module_artifacts: OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics,
+}
+
 /// Cached wgpu shader module produced from a validated Naga OCIO shader.
 pub struct OcioGpuWgpuShaderModule {
     /// Stable cache key for this backend shader module.
@@ -5757,6 +5881,90 @@ mod tests {
             err,
             OcioGpuBindingContractValidationError::MissingUniformBuffer { uniform_count: 1 }
         ));
+    }
+
+    #[test]
+    fn backend_prep_runtime_prepares_static_pipeline_and_reuses_caches() {
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
+
+        let first = runtime
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("prepare static pipeline");
+
+        assert_eq!(
+            first.resources.resources.shader_hash,
+            shader_plan.shader_hash
+        );
+        assert_eq!(
+            first.wrapper_binding.bind_group,
+            first.resources.resources.wrapper_contract.bind_group
+        );
+        assert_eq!(
+            first.pipeline_layout.resource_key,
+            first.resources.resources.resource_key
+        );
+        assert_eq!(
+            first.wrapper_link.resource_key,
+            first.resources.resources.resource_key
+        );
+        assert_eq!(
+            first.render_descriptor.output_format,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float
+        );
+        assert_eq!(
+            first.wrapper_module_artifact.render_descriptor_hash,
+            first.render_descriptor.descriptor_hash
+        );
+        assert_eq!(
+            first.wrapper_module_artifact.pipeline_layout_hash,
+            first.pipeline_layout.layout_hash
+        );
+
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.resources.entries, 1);
+        assert_eq!(diagnostics.resources.misses, 1);
+        assert_eq!(diagnostics.resources.hits, 0);
+        assert_eq!(diagnostics.wrapper_module_artifacts.entries, 1);
+        assert_eq!(diagnostics.wrapper_module_artifacts.misses, 1);
+        assert_eq!(diagnostics.wrapper_module_artifacts.hits, 0);
+
+        let second = runtime
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("reuse static pipeline");
+
+        assert!(Arc::ptr_eq(&first.resources, &second.resources));
+        assert!(Arc::ptr_eq(
+            &first.wrapper_module_artifact,
+            &second.wrapper_module_artifact
+        ));
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.resources.entries, 1);
+        assert_eq!(diagnostics.resources.misses, 1);
+        assert_eq!(diagnostics.resources.hits, 1);
+        assert_eq!(diagnostics.wrapper_module_artifacts.entries, 1);
+        assert_eq!(diagnostics.wrapper_module_artifacts.misses, 1);
+        assert_eq!(diagnostics.wrapper_module_artifacts.hits, 1);
+    }
+
+    #[test]
+    fn backend_prep_runtime_surfaces_wrapper_link_blockers() {
+        let shader_plan = shader_plan_with_text("void unrelated(inout vec4 color) {}");
+        let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
+
+        let err = runtime
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect_err("unlinked wrapper should fail");
+
+        assert!(matches!(
+            err,
+            OcioGpuWgpuBackendPrepError::WrapperSource(
+                OcioGpuWgpuWrapperShaderArtifactError::LinkPlanBlocked { .. }
+            )
+        ));
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.resources.entries, 1);
+        assert_eq!(diagnostics.wrapper_module_artifacts.entries, 0);
     }
 
     #[test]
