@@ -16,9 +16,9 @@ use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, Sequence
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, execute_cpu_output_stage, CpuColorFrame, CpuEncodedColorFrame,
-    RenderColorStageDiagnostics, RenderColorTransform, RenderColorTransformDiagnostics,
-    RenderColorTransformDirection, RenderInputTransform, TimelineAdjustmentLayer,
+    execute_cpu_input_stage, execute_cpu_output_boundary, CpuColorFrame, CpuEncodedColorFrame,
+    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderColorTransformDirection,
+    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
     TimelineSolidColorLayer,
@@ -1419,12 +1419,12 @@ fn composite_resolved_preview(
         color_context.working_color_space,
         scratch,
     );
-    let transform = RenderColorTransform::display(
+    let boundary = RenderOutputColorBoundary::display(
         color_context.output_color_space,
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    execute_cpu_output_stage(&working_frame, &transform)
+    execute_cpu_output_boundary(&working_frame, &boundary)
         .map(|frame| PreviewCompositeOutput {
             rgba: frame.result.frame.into_rgba(),
             color_diagnostics: frame.result.diagnostics,
@@ -1871,9 +1871,9 @@ mod tests {
             expected_frame.descriptor().color_space,
             color_context.working_color_space
         );
-        let expected = execute_cpu_output_stage(
+        let expected = execute_cpu_output_boundary(
             &expected_frame,
-            &RenderColorTransform::display(
+            &RenderOutputColorBoundary::display(
                 color_context.output_color_space,
                 color_context.tone_map,
                 color_context.engine.clone(),
@@ -1994,9 +1994,13 @@ mod tests {
     }
 
     fn test_media_frame_rgba8(frame: &MediaPreviewFrame) -> Vec<u8> {
-        execute_cpu_output_stage(
+        execute_cpu_output_boundary(
             &frame.frame,
-            &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+            &RenderOutputColorBoundary::display(
+                ColorSpace::Rec709,
+                false,
+                ColorEngine::MondrianSmart,
+            ),
         )
         .expect("test media output transform")
         .result

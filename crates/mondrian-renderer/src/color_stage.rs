@@ -13,6 +13,7 @@ use crate::{
     RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
     RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
 };
+use mondrian_core::types::{ColorEngine, ColorSpace};
 
 /// Preferred execution mode for a renderer color transform stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -203,6 +204,65 @@ pub struct RenderColorStageExecution<T> {
     pub result: T,
     /// Diagnostics for the stage plan that was executed.
     pub stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+/// Final output boundary requested by preview or export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderOutputColorBoundaryTarget {
+    /// Viewer/display presentation output.
+    Display,
+    /// Encoded delivery/export output.
+    Export,
+}
+
+/// Renderer-owned description of a working-frame to final-output color boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderOutputColorBoundary {
+    /// Caller-visible output target.
+    pub target: RenderOutputColorBoundaryTarget,
+    /// Destination color space.
+    pub output_color_space: ColorSpace,
+    /// Whether tone mapping is requested.
+    pub tone_map: bool,
+    /// Color engine selected for this output boundary.
+    pub engine: ColorEngine,
+}
+
+impl RenderOutputColorBoundary {
+    /// Build a display/viewer output boundary.
+    pub fn display(output_color_space: ColorSpace, tone_map: bool, engine: ColorEngine) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::Display,
+            output_color_space,
+            tone_map,
+            engine,
+        }
+    }
+
+    /// Build an encoded export output boundary.
+    pub fn export(output_color_space: ColorSpace, tone_map: bool, engine: ColorEngine) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::Export,
+            output_color_space,
+            tone_map,
+            engine,
+        }
+    }
+
+    fn transform(&self) -> RenderColorTransform {
+        match self.target {
+            RenderOutputColorBoundaryTarget::Display => RenderColorTransform::display(
+                self.output_color_space,
+                self.tone_map,
+                self.engine.clone(),
+            ),
+            RenderOutputColorBoundaryTarget::Export => RenderColorTransform::export(
+                self.output_color_space,
+                self.tone_map,
+                self.engine.clone(),
+            ),
+        }
+    }
 }
 
 /// Schedulable GPU OCIO color pass with resolved source/target frame handles.
@@ -976,6 +1036,14 @@ pub fn execute_cpu_output_stage(
     CpuRenderColorStageExecutor::output_transform(frame, &plan)
 }
 
+/// Plan and execute a CPU final-output boundary described by preview/export intent.
+pub fn execute_cpu_output_boundary(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError> {
+    execute_cpu_output_stage(frame, &boundary.transform())
+}
+
 impl<'a> RenderColorStagePlanner<'a> {
     /// Create a planner that always schedules CPU color transforms.
     pub fn cpu_only() -> Self {
@@ -1446,6 +1514,49 @@ mod tests {
         assert_eq!(
             output.result.frame.descriptor().residency,
             ColorFrameResidency::Cpu
+        );
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+    }
+
+    #[test]
+    fn cpu_output_boundary_executes_display_target() {
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+
+        let output = execute_cpu_output_boundary(&frame, &boundary)
+            .expect("display boundary should execute");
+
+        assert_eq!(
+            output.result.frame.descriptor().domain,
+            ColorFrameDomain::Display
+        );
+        assert_eq!(
+            output.result.diagnostics.direction,
+            crate::RenderColorTransformDirection::WorkingToOutput
+        );
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+    }
+
+    #[test]
+    fn cpu_output_boundary_executes_export_target() {
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
+
+        let output =
+            execute_cpu_output_boundary(&frame, &boundary).expect("export boundary should execute");
+
+        assert_eq!(
+            output.result.frame.descriptor().domain,
+            ColorFrameDomain::Export
+        );
+        assert_eq!(
+            output.result.frame.descriptor().color_space,
+            ColorSpace::Rec709
         );
         assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
     }

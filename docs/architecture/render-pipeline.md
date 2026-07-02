@@ -52,8 +52,8 @@ Each element carries opacity, blend mode, transforms where applicable, effect gr
 `composite_timeline_elements_color_frame(...)`. It returns a typed
 `CpuColorFrame` whose descriptor records domain, encoding, residency, dimensions,
 and color space. Viewer preview and export must consume this typed working-frame
-contract, then apply their respective working -> output transform through
-renderer color stage execution helpers and `RenderColorTransform`.
+contract, then apply their respective working -> output boundary through
+`RenderOutputColorBoundary` and renderer color stage execution helpers.
 Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
@@ -106,10 +106,12 @@ recording, and optional readback stay in renderer-owned order. GPU-to-CPU
 output for encode, thumbnails, tests, or debug captures must use that path;
 readback is valid only for explicit encoded RGBA8 output contracts unless a
 future conversion stage says otherwise.
-Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
-`execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
-through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage
-is limited to renderer internals and its focused unit tests.
+Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
+source boundaries and `execute_cpu_output_boundary(...)` for final display or
+export output. These helpers plan CPU-only stages and execute them through
+`CpuRenderColorStageExecutor`; app/export code should not call
+`execute_cpu_output_stage(...)` directly. Direct `CpuColorTransformExecutor`
+usage is limited to renderer internals and its focused unit tests.
 
 Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
 result. App, export, tests, and benches must read frames from `.result` and

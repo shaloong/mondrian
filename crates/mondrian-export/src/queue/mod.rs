@@ -16,10 +16,11 @@ use mondrian_media::audio::{
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, execute_cpu_output_stage, CpuColorFrame, CpuEncodedColorFrame,
-    RenderColorTransform, RenderInputTransform, TimelineAdjustmentLayer, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    execute_cpu_input_stage, execute_cpu_output_boundary, CpuColorFrame, CpuEncodedColorFrame,
+    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, ExportBitDepth, SequenceSettings, VideoRange};
 use parking_lot::{Condvar, Mutex};
@@ -1116,9 +1117,9 @@ fn render_sequence_frame_into(
         color_context.working_color_space,
         &mut scratch,
     );
-    let encoded = execute_cpu_output_stage(
+    let encoded = execute_cpu_output_boundary(
         &rendered,
-        &RenderColorTransform::export(
+        &RenderOutputColorBoundary::export(
             color_context.output_color_space,
             color_context.tone_map,
             color_context.engine.clone(),

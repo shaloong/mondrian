@@ -70,8 +70,9 @@ target `GpuColorFrameHandle`, `RenderColorTransformGpuPlan`, and
 frame descriptors, residency, extents, or OCIO resource keys differ.
 
 Preview and export final transforms are renderer execution concerns. App and
-export crates build a `RenderColorTransform` from their `ColorContext` and pass
-typed frames to renderer stage execution helpers; they must not duplicate
+export crates build a `RenderOutputColorBoundary` from their `ColorContext` and
+pass typed working frames to renderer stage execution helpers; they must not
+construct display/export `RenderColorTransform` values or duplicate
 working -> output conversion logic locally.
 
 Input transforms follow the same rule. Decode/import code wraps source pixels in
