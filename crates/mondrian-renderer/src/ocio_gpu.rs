@@ -193,6 +193,11 @@ impl OcioGpuWgpuResourcePlan {
         }
     }
 
+    /// Build the bind-group layout contract implied by this resource plan.
+    pub fn binding_layout_plan(&self) -> OcioGpuWgpuBindingLayoutPlan {
+        OcioGpuWgpuBindingLayoutPlan::for_resource_plan(self)
+    }
+
     /// Total texture resources referenced by this plan.
     pub fn total_textures(&self) -> u32 {
         self.input_textures
@@ -200,6 +205,182 @@ impl OcioGpuWgpuResourcePlan {
             .saturating_add(self.ocio_texture_2d_bindings)
             .saturating_add(self.ocio_texture_3d_bindings)
     }
+}
+
+/// Bind-group layout contract for an OCIO GPU color pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuWgpuBindingLayoutPlan {
+    /// Stable resource key this layout belongs to.
+    pub resource_key: u64,
+    /// Bind group index used by the future OCIO color pass.
+    pub bind_group: u32,
+    /// Ordered binding entries.
+    pub entries: Vec<OcioGpuWgpuBindingPlan>,
+    /// Stable hash of the ordered entries.
+    pub layout_hash: u64,
+}
+
+impl OcioGpuWgpuBindingLayoutPlan {
+    fn for_resource_plan(plan: &OcioGpuWgpuResourcePlan) -> Self {
+        let mut entries = Vec::with_capacity(plan.bind_group_entries as usize);
+        let mut binding = 0u32;
+
+        for index in 0..plan.input_textures {
+            entries.push(OcioGpuWgpuBindingPlan {
+                binding,
+                resource: OcioGpuWgpuBindingResource::InputFrameTexture { index },
+            });
+            binding = binding.saturating_add(1);
+        }
+
+        if plan.samplers > 0 {
+            entries.push(OcioGpuWgpuBindingPlan {
+                binding,
+                resource: OcioGpuWgpuBindingResource::FilteringSampler,
+            });
+            binding = binding.saturating_add(1);
+        }
+
+        for index in 0..plan.ocio_texture_2d_bindings {
+            entries.push(OcioGpuWgpuBindingPlan {
+                binding,
+                resource: OcioGpuWgpuBindingResource::OcioLutTexture2d { index },
+            });
+            binding = binding.saturating_add(1);
+        }
+
+        for index in 0..plan.ocio_texture_3d_bindings {
+            entries.push(OcioGpuWgpuBindingPlan {
+                binding,
+                resource: OcioGpuWgpuBindingResource::OcioLutTexture3d { index },
+            });
+            binding = binding.saturating_add(1);
+        }
+
+        for index in 0..plan.uniform_buffers {
+            entries.push(OcioGpuWgpuBindingPlan {
+                binding,
+                resource: OcioGpuWgpuBindingResource::OcioUniformBuffer { index },
+            });
+            binding = binding.saturating_add(1);
+        }
+
+        let layout_hash = hash_binding_layout(&entries);
+        Self {
+            resource_key: plan.resource_key,
+            bind_group: 0,
+            entries,
+            layout_hash,
+        }
+    }
+}
+
+/// One binding entry in the future wgpu OCIO bind group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuBindingPlan {
+    /// Binding index in the bind group.
+    pub binding: u32,
+    /// Resource bound at this index.
+    pub resource: OcioGpuWgpuBindingResource,
+}
+
+/// Resource class for an OCIO GPU color binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuBindingResource {
+    /// Source/intermediate frame texture sampled by the color pass.
+    InputFrameTexture {
+        /// Input texture index.
+        index: u32,
+    },
+    /// Shared filtering sampler for input and LUT sampling.
+    FilteringSampler,
+    /// OCIO 1D/2D LUT texture.
+    OcioLutTexture2d {
+        /// LUT texture index from the OCIO shader descriptor.
+        index: u32,
+    },
+    /// OCIO 3D LUT texture.
+    OcioLutTexture3d {
+        /// LUT texture index from the OCIO shader descriptor.
+        index: u32,
+    },
+    /// OCIO dynamic-property uniform buffer.
+    OcioUniformBuffer {
+        /// Uniform buffer index from the OCIO shader descriptor.
+        index: u32,
+    },
+}
+
+/// Cached backend-preparation result for an OCIO GPU color pass.
+#[derive(Debug, Clone)]
+pub struct OcioGpuWgpuPreparedResources {
+    /// Resource contract this preparation was derived from.
+    pub resources: OcioGpuWgpuResourcePlan,
+    /// Bind-group layout contract for backend object creation.
+    pub binding_layout: OcioGpuWgpuBindingLayoutPlan,
+}
+
+/// Bounded cache for renderer backend resource-layout preparation.
+pub struct OcioGpuWgpuResourceCache {
+    entries: LruCache<u64, Arc<OcioGpuWgpuPreparedResources>>,
+    hits: u64,
+    misses: u64,
+}
+
+impl OcioGpuWgpuResourceCache {
+    /// Create a cache with a fixed non-zero capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            entries: LruCache::new(capacity),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Prepare backend resource-layout contracts from an OCIO resource plan.
+    pub fn prepare(
+        &mut self,
+        resources: OcioGpuWgpuResourcePlan,
+    ) -> Arc<OcioGpuWgpuPreparedResources> {
+        if let Some(hit) = self.entries.get(&resources.resource_key) {
+            self.hits = self.hits.saturating_add(1);
+            return Arc::clone(hit);
+        }
+
+        self.misses = self.misses.saturating_add(1);
+        let prepared = Arc::new(OcioGpuWgpuPreparedResources {
+            binding_layout: resources.binding_layout_plan(),
+            resources,
+        });
+        self.entries.put(prepared.resources.resource_key, Arc::clone(&prepared));
+        prepared
+    }
+
+    /// Return backend resource preparation cache diagnostics.
+    pub fn diagnostics(&self) -> OcioGpuWgpuResourceCacheDiagnostics {
+        OcioGpuWgpuResourceCacheDiagnostics {
+            entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+        }
+    }
+}
+
+impl Default for OcioGpuWgpuResourceCache {
+    fn default() -> Self {
+        Self::new(NonZeroUsize::new(64).expect("default cache capacity is non-zero"))
+    }
+}
+
+/// Point-in-time OCIO GPU backend resource cache diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuResourceCacheDiagnostics {
+    /// Cached backend resource-layout entries.
+    pub entries: usize,
+    /// Cache hits.
+    pub hits: u64,
+    /// Cache misses.
+    pub misses: u64,
 }
 
 /// Missing pieces before an OCIO GPU shader plan can run in wgpu.
@@ -392,6 +573,10 @@ fn hash_resource_key(shader_cache_key: u64, shader_hash: u64, pipeline_layout_ha
     hasher.finish()
 }
 
+fn hash_binding_layout(entries: &[OcioGpuWgpuBindingPlan]) -> u64 {
+    hash_value(&entries)
+}
+
 struct ResourceLayoutSignature {
     language: GpuLanguage,
     input_textures: u32,
@@ -469,6 +654,20 @@ mod tests {
         );
         assert_ne!(resources.resource_key, 0);
         assert_ne!(resources.pipeline_layout_hash, 0);
+        let binding_layout = resources.binding_layout_plan();
+        assert_eq!(
+            binding_layout.entries.len(),
+            resources.bind_group_entries as usize
+        );
+        assert_eq!(
+            binding_layout.entries.first().map(|entry| entry.resource),
+            Some(OcioGpuWgpuBindingResource::InputFrameTexture { index: 0 })
+        );
+        assert_eq!(
+            binding_layout.entries.get(1).map(|entry| entry.resource),
+            Some(OcioGpuWgpuBindingResource::FilteringSampler)
+        );
+        assert_ne!(binding_layout.layout_hash, 0);
 
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);
@@ -538,5 +737,41 @@ mod tests {
         assert_eq!(diagnostics.entries, 1);
         assert_eq!(diagnostics.misses, 1);
         assert_eq!(diagnostics.extraction_failures, 0);
+    }
+
+    #[test]
+    fn wgpu_resource_cache_reuses_prepared_binding_layouts() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut shader_cache = OcioGpuShaderCache::default();
+        let prepared = shader_cache
+            .prepare_wgpu_execution(OcioGpuShaderRequest::ColorSpace {
+                src: ColorSpace::SLog3,
+                dst: ColorSpace::Rec709,
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("prepare shader execution");
+
+        let mut resource_cache = OcioGpuWgpuResourceCache::default();
+        let first = resource_cache.prepare(prepared.resources);
+        let second = resource_cache.prepare(prepared.resources);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            first.resources.resource_key,
+            prepared.resources.resource_key
+        );
+        assert_eq!(
+            first.binding_layout.entries.len(),
+            first.resources.bind_group_entries as usize
+        );
+        assert_eq!(
+            first.binding_layout.layout_hash,
+            prepared.resources.binding_layout_plan().layout_hash
+        );
+
+        let diagnostics = resource_cache.diagnostics();
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.hits, 1);
+        assert_eq!(diagnostics.misses, 1);
     }
 }

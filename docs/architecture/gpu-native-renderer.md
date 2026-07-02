@@ -73,6 +73,13 @@ It is not a fake resource allocation layer; concrete `wgpu::ShaderModule`,
 objects must still be created by the backend compiler/upload layer before
 `can_execute()` can become true.
 
+`OcioGpuWgpuResourceCache` prepares and caches the backend binding-layout
+contract derived from that resource plan. It assigns deterministic binding
+slots for the input frame texture, shared sampler, OCIO 2D LUTs, OCIO 3D LUTs,
+and OCIO uniform buffers, and reports cache hits/misses independently from OCIO
+shader extraction. This is the handoff point for the future object-creation
+layer; it still does not allocate `wgpu` objects or bypass native blockers.
+
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
 `RenderColorTransform` requests to the OCIO shader cache. It produces a
