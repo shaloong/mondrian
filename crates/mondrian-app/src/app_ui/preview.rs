@@ -1542,6 +1542,7 @@ mod tests {
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_core::{Color, ProjectColorManagement};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
+    use mondrian_renderer::ColorFrameDomain;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
 
@@ -1886,8 +1887,11 @@ mod tests {
         let mut preview_scratch = TimelineCompositeScratch::default();
         let preview =
             composite_resolved_preview(1, 1, &resolved, &color_context, &mut preview_scratch)
-                .expect("preview color composite")
-                .rgba;
+                .expect("preview color composite");
+        assert_eq!(
+            preview.color_diagnostics.output.domain,
+            ColorFrameDomain::Display
+        );
 
         let export_elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &frame.frame,
@@ -1910,20 +1914,26 @@ mod tests {
             expected_frame.descriptor().color_space,
             color_context.working_color_space
         );
-        let expected = execute_cpu_output_boundary(
+        let export = execute_cpu_output_boundary(
             &expected_frame,
-            &RenderOutputColorBoundary::display(
+            &RenderOutputColorBoundary::export(
                 color_context.output_color_space,
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
         )
-        .expect("preview color transform")
-        .result
-        .frame
-        .into_rgba();
+        .expect("export color transform");
+        assert_eq!(
+            export.result.diagnostics.output.domain,
+            ColorFrameDomain::Export
+        );
+        assert_eq!(
+            preview.color_stage_diagnostics.cpu_output_stages,
+            export.stage_diagnostics.cpu_output_stages
+        );
+        let expected = export.result.frame.into_rgba();
 
-        assert_eq!(preview, expected);
+        assert_eq!(preview.rgba, expected);
     }
 
     #[test]

@@ -185,4 +185,7 @@ contract. It allows request settings such as intent, quality, color target, fram
 drop policy, and resolution scale to differ, but requires media source timing,
 nested-sequence source timing, element order, blend/opacity, transforms, clip
 interpretation, and nested color-processing mode to remain identical for the
-same sequence frame.
+same sequence frame. Renderer and app tests also pin the final color boundary:
+for the same working frame, output color space, tone-map flag, and engine,
+preview display and export delivery targets must produce identical RGBA pixels
+while preserving distinct output domains in diagnostics.

@@ -2228,6 +2228,47 @@ mod tests {
     }
 
     #[test]
+    fn cpu_output_boundary_display_and_export_targets_match_pixels_for_same_transform() {
+        let frame = cpu_working_frame();
+        let display = execute_cpu_output_boundary(
+            &frame,
+            &RenderOutputColorBoundary::display(
+                ColorSpace::Srgb,
+                false,
+                ColorEngine::MondrianSmart,
+            ),
+        )
+        .expect("display output boundary");
+        let export = execute_cpu_output_boundary(
+            &frame,
+            &RenderOutputColorBoundary::export(ColorSpace::Srgb, false, ColorEngine::MondrianSmart),
+        )
+        .expect("export output boundary");
+
+        assert_eq!(display.result.frame.rgba(), export.result.frame.rgba());
+        assert_eq!(
+            display.result.frame.descriptor().domain,
+            ColorFrameDomain::Display
+        );
+        assert_eq!(
+            export.result.frame.descriptor().domain,
+            ColorFrameDomain::Export
+        );
+        assert_eq!(
+            display.result.diagnostics.output.color_space,
+            export.result.diagnostics.output.color_space
+        );
+        assert_eq!(
+            display.stage_diagnostics.cpu_output_stages,
+            export.stage_diagnostics.cpu_output_stages
+        );
+        assert_eq!(
+            display.stage_diagnostics.stage_pixels,
+            export.stage_diagnostics.stage_pixels
+        );
+    }
+
+    #[test]
     fn gpu_input_plan_adds_upload_for_cpu_source() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let transform =
