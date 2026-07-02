@@ -196,8 +196,11 @@ validated `RenderColorStagePlan` into those upload/allocation plans and a
 transfer-resolved GPU transform that can be scheduled without callers mutating
 transform internals. Its materialization path uploads/allocates resources and
 preflights resource-table slots before inserting, so preview/export does not
-hand-assemble table entries. `GpuColorFrameReadbackPlan` and
-`GpuColorFrameReadback` are the only renderer-owned GPU-to-CPU boundary for
+hand-assemble table entries. When the stage plan ends in `ReadbackToCpu`, the
+resource plan carries the matching `GpuColorFrameReadbackPlan`; preview/export
+must resolve and record that readback through the resource-plan API instead of
+deriving it from texture format at the call site. `GpuColorFrameReadbackPlan`
+and `GpuColorFrameReadback` are the only renderer-owned GPU-to-CPU boundary for
 encoded output frames; they currently read back only explicit `Rgba8Unorm` /
 `EncodedRgba8` contracts and do not reinterpret float targets. Until
 preview/export frame evaluation calls these entries and then records through

@@ -224,6 +224,9 @@ allocation plans, and produces a transfer-resolved GPU transform for
 resources through `GpuColorFrameUploader`, validates both planned table slots,
 and inserts the resources into `GpuColorFrameResourceTable` without leaving a
 partially materialized stage when a contract conflict exists.
+When the source stage shape includes `ReadbackToCpu`, the resource plan keeps
+the matching `GpuColorFrameReadbackPlan` and exposes renderer-owned helpers to
+resolve the output frame from `GpuColorFrameResourceTable` and record the copy.
 `GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
 encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
 unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only

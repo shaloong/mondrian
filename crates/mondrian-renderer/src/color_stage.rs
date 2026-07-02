@@ -1,7 +1,8 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuColorTransformExecutor, CpuEncodedColorFrame, GpuColorFrameAllocationPlan,
-    GpuColorFrameHandle, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameResource,
+    GpuColorFrameHandle, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadback,
+    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
     GpuColorFrameWgpuResource, OcioGpuShaderCache, OcioGpuWgpuBindGroupPreparer,
@@ -253,6 +254,8 @@ pub struct RenderGpuOutputStageResourcePlan {
     pub input: GpuColorFrameHandle,
     /// Output GPU frame handle produced by the color pass.
     pub output: GpuColorFrameHandle,
+    /// Readback contract when the planned output returns to a CPU encoded boundary.
+    pub readback: Option<GpuColorFrameReadbackPlan>,
     /// Upload plan that moves the CPU working frame into the input GPU frame.
     pub input_upload: GpuColorFrameUploadPlan,
     /// Allocation plan for the output GPU target frame.
@@ -316,6 +319,14 @@ impl RenderGpuOutputStageResourcePlan {
             "color-stage-output-target",
         )
         .map_err(RenderGpuOutputStageResourcePlanError::OutputHandle)?;
+        let readback = if planned.readback_output.is_some() {
+            Some(
+                GpuColorFrameReadbackPlan::encoded_rgba8(output.clone())
+                    .map_err(RenderGpuOutputStageResourcePlanError::OutputReadback)?,
+            )
+        } else {
+            None
+        };
         let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
         let mut transform = (*planned.transform).clone();
         transform.diagnostics.input = planned.gpu_input;
@@ -325,6 +336,7 @@ impl RenderGpuOutputStageResourcePlan {
         Ok(Self {
             input: input_upload.handle.clone(),
             output,
+            readback,
             input_upload,
             output_allocation,
             transform,
@@ -383,6 +395,41 @@ impl RenderGpuOutputStageResourcePlan {
         let output = GpuColorFrameUploader::allocate(device, &self.output_allocation);
         self.insert_resources(table, input, output)
     }
+
+    /// Resolve the materialized output resource used by this stage's optional readback.
+    pub fn resolve_readback_resource<'a, R>(
+        &self,
+        table: &'a GpuColorFrameResourceTable<R>,
+    ) -> Result<Option<&'a GpuColorFrameResource<R>>, RenderGpuOutputStageReadbackError> {
+        let Some(readback) = &self.readback else {
+            return Ok(None);
+        };
+        table
+            .get(&readback.handle)
+            .map(Some)
+            .map_err(RenderGpuOutputStageReadbackError::ResourceTable)
+    }
+
+    /// Record this stage's optional GPU-to-CPU readback copy into an encoder.
+    pub fn record_readback_wgpu(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        table: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    ) -> Result<Option<wgpu::Buffer>, RenderGpuOutputStageReadbackError> {
+        let Some(readback) = &self.readback else {
+            return Ok(None);
+        };
+        match self.resolve_readback_resource(table)? {
+            Some(resource) => Ok(Some(GpuColorFrameReadback::record_copy(
+                device,
+                encoder,
+                readback,
+                resource.resource(),
+            ))),
+            None => Ok(None),
+        }
+    }
 }
 
 /// Error returned when GPU output stage resources cannot be planned.
@@ -416,6 +463,8 @@ pub enum RenderGpuOutputStageResourcePlanError {
     InputUpload(GpuColorFrameUploadError),
     /// The output GPU handle could not be created.
     OutputHandle(crate::GpuColorFrameHandleError),
+    /// The output GPU frame cannot be read back into the requested CPU boundary.
+    OutputReadback(GpuColorFrameReadbackError),
 }
 
 /// Error returned when planned GPU output stage resources cannot be materialized.
@@ -436,6 +485,13 @@ pub enum RenderGpuOutputStageMaterializeError {
         actual: GpuColorFrameHandle,
     },
     /// Resource table rejected one of the materialized resources.
+    ResourceTable(GpuColorFrameResourceTableError),
+}
+
+/// Error returned when a GPU output stage readback cannot be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputStageReadbackError {
+    /// Resource table rejected the readback target lookup.
     ResourceTable(GpuColorFrameResourceTableError),
 }
 
@@ -1006,6 +1062,7 @@ struct PlannedGpuUploadTransform<'a> {
     upload_input: ColorFrameDescriptor,
     gpu_input: ColorFrameDescriptor,
     gpu_output: ColorFrameDescriptor,
+    readback_output: Option<ColorFrameDescriptor>,
     transform: &'a RenderColorTransformGpuPlan,
 }
 
@@ -1079,6 +1136,10 @@ fn planned_gpu_upload_transform_readback(
         upload_input: *upload_input,
         gpu_input: *gpu_input,
         gpu_output: *gpu_output,
+        readback_output: readback.map(|stage| match stage {
+            RenderColorStage::ReadbackToCpu { output, .. } => *output,
+            _ => unreachable!("matched optional readback stage"),
+        }),
         transform,
     })
 }
@@ -1791,6 +1852,112 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn gpu_output_stage_resource_plan_carries_cpu_boundary_readback_plan() {
+        let frame = cpu_working_frame();
+        let mut stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
+        clear_gpu_stage_blockers(&mut stage_plan);
+        let mut ids = GpuColorFrameIdAllocator::new(630);
+
+        let resources = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+        )
+        .expect("GPU output resources with readback");
+
+        let readback = resources.readback.as_ref().expect("CPU boundary readback");
+        assert_eq!(readback.handle, resources.output);
+        assert_eq!(readback.output_descriptor, stage_plan.final_descriptor);
+        assert_eq!(
+            readback.texture_format,
+            GpuColorFrameTextureFormat::Rgba8Unorm
+        );
+        assert_eq!(
+            resources.output.descriptor().residency,
+            ColorFrameResidency::Gpu
+        );
+        assert_eq!(
+            stage_plan.final_descriptor.residency,
+            ColorFrameResidency::Cpu
+        );
+        assert!(!resources.transform.requires_output_readback);
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_rejects_unsupported_cpu_boundary_texture_format() {
+        let frame = cpu_working_frame();
+        let mut stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
+        clear_gpu_stage_blockers(&mut stage_plan);
+        let mut ids = GpuColorFrameIdAllocator::new(640);
+
+        let err = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+        )
+        .expect_err("CPU boundary readback requires an encoded RGBA8 target");
+
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::OutputReadback(
+                GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                    texture_format: GpuColorFrameTextureFormat::Rgba16Float
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn gpu_output_stage_readback_resource_resolves_from_materialized_table() {
+        let resources = executable_gpu_output_stage_resources_with_readback(650);
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(
+                resources.output.clone(),
+                "readback-target",
+            ))
+            .expect("insert output resource");
+
+        let resolved = resources
+            .resolve_readback_resource(&table)
+            .expect("resolve readback resource")
+            .expect("readback resource");
+
+        assert_eq!(resolved.handle(), &resources.output);
+        assert_eq!(resolved.resource(), &"readback-target");
+    }
+
+    #[test]
+    fn gpu_output_stage_readback_resource_reports_missing_output() {
+        let resources = executable_gpu_output_stage_resources_with_readback(660);
+        let table = GpuColorFrameResourceTable::<&'static str>::new();
+
+        let err = resources
+            .resolve_readback_resource(&table)
+            .expect_err("missing readback target must surface");
+
+        assert_eq!(
+            err,
+            RenderGpuOutputStageReadbackError::ResourceTable(
+                GpuColorFrameResourceTableError::MissingFrame { id: resources.output.id() }
+            )
+        );
+    }
+
+    #[test]
+    fn gpu_output_stage_without_cpu_boundary_has_no_readback_resource() {
+        let resources = executable_gpu_output_stage_resources(670);
+        let table = GpuColorFrameResourceTable::<&'static str>::new();
+
+        assert!(resources
+            .resolve_readback_resource(&table)
+            .expect("resolve no-readback resource")
+            .is_none());
+    }
+
     fn assert_stage_chain_is_contiguous(plan: &RenderColorStagePlan) {
         for pair in plan.stages.windows(2) {
             assert_eq!(pair[0].output(), pair[1].input());
@@ -1853,6 +2020,23 @@ mod tests {
             .expect("GPU output stage plan")
     }
 
+    fn gpu_output_stage_plan_for_cpu_output(frame: &CpuColorFrame) -> RenderColorStagePlan {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let transform =
+            RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+        planner
+            .plan_output_transform(frame.descriptor(), &transform)
+            .expect("GPU output stage plan")
+    }
+
     fn clear_gpu_stage_blockers(stage_plan: &mut RenderColorStagePlan) {
         for stage in &mut stage_plan.stages {
             if let RenderColorStage::GpuColorTransform { plan, .. } = stage {
@@ -1873,6 +2057,22 @@ mod tests {
             GpuColorFrameTextureFormat::Rgba16Float,
         )
         .expect("GPU output stage resources")
+    }
+
+    fn executable_gpu_output_stage_resources_with_readback(
+        first_id: u64,
+    ) -> RenderGpuOutputStageResourcePlan {
+        let frame = cpu_working_frame();
+        let mut stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
+        clear_gpu_stage_blockers(&mut stage_plan);
+        let mut ids = GpuColorFrameIdAllocator::new(first_id);
+        RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+        )
+        .expect("GPU output stage resources with readback")
     }
 
     fn gpu_handle(
