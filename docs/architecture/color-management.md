@@ -72,9 +72,10 @@ same domain/encoding/residency/color-space descriptor. RGBA8 is a boundary
 format, not an intermediate color-management contract.
 Timeline compositing must therefore prefer direct float/linear operations for
 supported working-space media, solid-color layers, and float-capable unary
-effects; any temporary RGBA8 path inside legacy effects or legacy blend modes
-must remain explicit and visible in tests until that subsystem has its own
-float/linear contract.
+effects, including Normal adjustment passes built from those unary effects; any
+temporary RGBA8 path inside legacy effects or legacy blend modes must remain
+explicit and visible in tests until that subsystem has its own float/linear
+contract.
 
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are

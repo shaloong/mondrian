@@ -69,6 +69,11 @@ pub enum EffectFloatUnsupportedReason {
         /// Stable render-op label for diagnostics.
         op: &'static str,
     },
+    /// The requested blend mode needs a float implementation before it can run here.
+    UnsupportedBlendMode {
+        /// Blend mode that is still legacy-only on the float path.
+        mode: BlendMode,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -775,6 +780,45 @@ pub fn apply_compiled_effect_graph_rgba_f32(
         .ok_or(EffectFloatExecutionError::MissingOutput { node_id: output_id })
 }
 
+/// Execute a compiled adjustment graph and blend the result over a float base frame.
+pub fn apply_compiled_effect_graph_pass_rgba_f32(
+    base: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    opacity: f32,
+    blend_mode: Option<BlendMode>,
+    frame_seed: i64,
+) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+    let required_len = width as usize * height as usize;
+    if base.len() != required_len {
+        return Err(EffectFloatExecutionError::InputSizeMismatch {
+            expected: required_len,
+            actual: base.len(),
+        });
+    }
+    if required_len == 0 {
+        return Ok(Vec::new());
+    }
+    let mode = blend_mode.unwrap_or(BlendMode::Normal);
+    if mode != BlendMode::Normal {
+        return Err(EffectFloatExecutionError::UnsupportedNode {
+            node_id: compiled.graph.output.unwrap_or(EffectGraphNodeId(0)),
+            reason: EffectFloatUnsupportedReason::UnsupportedBlendMode { mode },
+        });
+    }
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 1.0e-4 || compiled.graph.is_identity() {
+        return Ok(base.to_vec());
+    }
+
+    let processed =
+        apply_compiled_effect_graph_rgba_f32(base, width, height, compiled, frame_seed)?;
+    let mut out = base.to_vec();
+    blend_rgba_f32_normal_in_place(&mut out, &processed, opacity);
+    Ok(out)
+}
+
 pub fn apply_effect_render_graph_pass(
     base: &[u8],
     width: u32,
@@ -1094,6 +1138,41 @@ fn blend_graph_inputs_in_place(
     }
 }
 
+fn blend_rgba_f32_normal_in_place(base: &mut [[f32; 4]], overlay: &[[f32; 4]], opacity: f32) {
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 1.0e-4 {
+        return;
+    }
+
+    for (base_px, overlay_px) in base.iter_mut().zip(overlay.iter()) {
+        let base_alpha = base_px[3].clamp(0.0, 1.0);
+        let overlay_alpha = (overlay_px[3] * opacity).clamp(0.0, 1.0);
+        if overlay_alpha <= 1.0e-4 {
+            continue;
+        }
+        if base_alpha <= 1.0e-4 {
+            base_px[0] = overlay_px[0];
+            base_px[1] = overlay_px[1];
+            base_px[2] = overlay_px[2];
+            base_px[3] = overlay_alpha;
+            continue;
+        }
+
+        let out_alpha = overlay_alpha + base_alpha * (1.0 - overlay_alpha);
+        if out_alpha <= 1.0e-4 {
+            *base_px = [0.0, 0.0, 0.0, 0.0];
+            continue;
+        }
+
+        for channel in 0..3 {
+            let premultiplied = overlay_px[channel] * overlay_alpha
+                + base_px[channel] * base_alpha * (1.0 - overlay_alpha);
+            base_px[channel] = premultiplied / out_alpha;
+        }
+        base_px[3] = out_alpha;
+    }
+}
+
 fn apply_alpha_mask_in_place(
     input: &mut [u8],
     mask: &[u8],
@@ -1141,6 +1220,68 @@ mod tests {
         assert!((output[0][1] - 0.5).abs() <= 1.0e-6);
         assert!((output[0][2] - 0.25).abs() <= 1.0e-6);
         assert_eq!(output[0][3], 1.0);
+    }
+
+    #[test]
+    fn float_effect_graph_pass_blends_normal_adjustment_without_clamping_extended_values() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::ColorAdjust {
+                exposure: 1.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            }],
+        })
+        .expect("compile color adjust graph");
+
+        let output = apply_compiled_effect_graph_pass_rgba_f32(
+            &[[1.25, 0.25, 0.125, 1.0]],
+            1,
+            1,
+            &compiled,
+            0.5,
+            Some(BlendMode::Normal),
+            0,
+        )
+        .expect("float color adjust pass");
+
+        assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert!((output[0][0] - 1.875).abs() <= 1.0e-6);
+        assert!((output[0][1] - 0.375).abs() <= 1.0e-6);
+        assert!((output[0][2] - 0.1875).abs() <= 1.0e-6);
+        assert_eq!(output[0][3], 1.0);
+    }
+
+    #[test]
+    fn float_effect_graph_pass_reports_legacy_blend_modes() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::ColorAdjust {
+                exposure: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            }],
+        })
+        .expect("compile color adjust graph");
+
+        let err = apply_compiled_effect_graph_pass_rgba_f32(
+            &[[0.25, 0.5, 0.75, 1.0]],
+            1,
+            1,
+            &compiled,
+            1.0,
+            Some(BlendMode::Multiply),
+            0,
+        )
+        .expect_err("multiply is legacy-only on float pass path");
+
+        assert!(matches!(
+            err,
+            EffectFloatExecutionError::UnsupportedNode {
+                reason: EffectFloatUnsupportedReason::UnsupportedBlendMode {
+                    mode: BlendMode::Multiply
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

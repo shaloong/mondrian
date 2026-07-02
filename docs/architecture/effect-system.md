@@ -62,11 +62,17 @@ currently `Source` plus unary `ColorAdjust` and `WhiteBalance` nodes are
 supported. The float path must preserve extended scene-linear values and must
 not clamp RGB to 0..1 as the legacy RGBA8 path does.
 
+Adjustment-layer passes use `apply_compiled_effect_graph_pass_rgba_f32(...)`
+when the graph is float-capable and the requested blend mode is `Normal`. This
+keeps ordinary color-correction layers in the same linear working frame instead
+of forcing an RGBA8 scratch boundary.
+
 Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
 callers can make an explicit legacy fallback decision. Blur, sharpen, vignette,
-chromatic aberration, grain, LUT, custom/plugin processors, masks, blends, and
-multi-input nodes remain legacy-only until they gain their own float contract.
+chromatic aberration, grain, LUT, custom/plugin processors, masks, non-normal
+blend modes, and multi-input nodes remain legacy-only until they gain their own
+float contract.
 
 File-backed LUT caches key existing files by canonical path and invalidate on
 file fingerprint changes. Tests that validate cache behavior should use local

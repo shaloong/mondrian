@@ -5,8 +5,8 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
-    apply_compiled_effect_graph_rgba_f32, blend_rgba_pixel_seeded,
-    compiled_effect_graph_supports_rgba_f32, CompiledEffectGraph,
+    apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
+    blend_rgba_pixel_seeded, compiled_effect_graph_supports_rgba_f32, CompiledEffectGraph,
 };
 use std::sync::Arc;
 
@@ -160,8 +160,23 @@ fn composite_supported_elements_to_working_frame(
                 );
                 has_composited_layer = true;
             }
-            TimelineCompositeElement::Adjustment(_) => {
-                continue;
+            TimelineCompositeElement::Adjustment(layer) => {
+                if !has_composited_layer
+                    || layer.opacity <= 1.0e-4
+                    || layer.effect_graph.graph.is_identity()
+                {
+                    continue;
+                }
+                canvas = apply_compiled_effect_graph_pass_rgba_f32(
+                    &canvas,
+                    width,
+                    height,
+                    &layer.effect_graph,
+                    layer.opacity,
+                    layer.blend_mode,
+                    layer.frame_seed,
+                )
+                .expect("float-compatible adjustment graph");
             }
         }
     }
@@ -190,7 +205,10 @@ fn can_float_linear_composite(elements: &[TimelineCompositeElement<'_>]) -> bool
                 && is_identity_transform(layer.transform)
                 && layer.effect_graph.graph.is_identity()
         }
-        TimelineCompositeElement::Adjustment(_) => false,
+        TimelineCompositeElement::Adjustment(layer) => {
+            layer.blend_mode.unwrap_or(BlendMode::Normal) == BlendMode::Normal
+                && compiled_effect_graph_supports_rgba_f32(&layer.effect_graph)
+        }
     })
 }
 
@@ -785,7 +803,50 @@ mod tests {
     }
 
     #[test]
-    fn float_linear_compositor_falls_back_for_adjustments() {
+    fn float_linear_compositor_runs_normal_adjustment_without_rgba8_scratch() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let media = CpuColorFrame::working(RgbaF32Frame {
+            width: 1,
+            height: 1,
+            data: vec![[1.25, 0.25, 0.125, 1.0]],
+            color_space: mondrian_core::types::ColorSpace::Rec709,
+        });
+        let frame = composite_timeline_elements_color_frame(
+            1,
+            1,
+            &[
+                identity_media(&media),
+                TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
+                    effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                        ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
+                            exposure: 1.0,
+                            contrast: 1.0,
+                            saturation: 1.0,
+                        }],
+                    })
+                    .expect("compile adjustment"),
+                    opacity: 0.5,
+                    blend_mode: Some(BlendMode::Normal),
+                    frame_seed: 0,
+                }),
+            ],
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch,
+        );
+
+        let px = frame.rgba_f32().data[0];
+        assert!((px[0] - 1.875).abs() <= 1.0e-6);
+        assert!((px[1] - 0.375).abs() <= 1.0e-6);
+        assert!((px[2] - 0.1875).abs() <= 1.0e-6);
+        assert!((px[3] - 1.0).abs() <= f32::EPSILON);
+        assert!(scratch.media_source.is_empty());
+        assert!(scratch.media_effect.is_empty());
+        assert!(scratch.adjustment.is_empty());
+    }
+
+    #[test]
+    fn float_linear_compositor_falls_back_for_legacy_adjustment_blend_modes() {
         let mut float_scratch = TimelineCompositeScratch::default();
         let mut legacy_scratch = TimelineCompositeScratch::default();
         let media = working_frame(&[255, 0, 0, 255], 1, 1);
@@ -801,7 +862,7 @@ mod tests {
                 })
                 .expect("compile adjustment"),
                 opacity: 1.0,
-                blend_mode: Some(BlendMode::Normal),
+                blend_mode: Some(BlendMode::Multiply),
                 frame_seed: 0,
             }),
         ];
