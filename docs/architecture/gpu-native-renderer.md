@@ -70,6 +70,12 @@ reported by the GPU shader descriptor, the separate Mondrian fullscreen wrapper
 contract for input sampling/output location, input/output frame resource counts,
 LUT texture counts, uniform buffers, samplers, bind group entries, bind groups,
 and stable resource/pipeline-layout hashes.
+`OcioGpuWgpuResourcePlan::for_shader_plan(...)` is a fail-closed validation
+boundary. It rejects OCIO descriptor inconsistencies such as mismatched
+texture/uniform counts, texture bindings before OCIO's `texture_binding_start`,
+texture bindings overlapping the reserved uniform binding, missing uniform
+buffers, duplicate resource indices/bindings, empty resource names, zero
+texture extents, or empty LUT payloads before backend layout planning begins.
 It is not a fake resource allocation layer; concrete `wgpu::ShaderModule`,
 `wgpu::Texture`, `wgpu::BindGroupLayout`, `wgpu::BindGroup`, and pipeline
 objects must still be created by the backend compiler/upload layer before

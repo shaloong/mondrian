@@ -203,6 +203,10 @@ and keeps generated WGSL as diagnostics only. Preview/export frame evaluation
 must resolve GPU frame handles through `GpuColorFrameResourceTable`; the table
 revalidates descriptor and texture-format contracts for every lookup before
 exposing backend resources such as `GpuColorFrameWgpuResource`.
+The OCIO binding contract is taken from the shader descriptor, not inferred
+from generated WGSL or Naga output, and `OcioGpuWgpuResourcePlan` rejects
+invalid descriptor counts, bindings, resource names, extents, and missing
+uniform buffers before backend resource planning continues.
 `RenderGpuColorPassSchedule::record_wgpu_from_resources` is the single
 preview/export-facing entry point that resolves those table entries, prepares
 the wrapper bind group, and records the pass. `GpuColorFrameAllocationPlan`,

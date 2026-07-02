@@ -62,7 +62,8 @@ pub use gpu_backend::{
     gpu_enabled, set_gpu_enabled, GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason,
 };
 pub use ocio_gpu::{
-    OcioGpuBindingContract, OcioGpuFullscreenWrapperContract, OcioGpuGeneratedProgramContract,
+    OcioGpuBindingContract, OcioGpuBindingContractValidationError,
+    OcioGpuFullscreenWrapperContract, OcioGpuGeneratedProgramContract,
     OcioGpuGeneratedProgramDiagnostic, OcioGpuGeneratedProgramSourceKind,
     OcioGpuNagaShaderStageArtifact, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
     OcioGpuShaderDiagnostic, OcioGpuShaderError, OcioGpuShaderPlan, OcioGpuShaderRequest,

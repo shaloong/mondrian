@@ -7,7 +7,7 @@ use mondrian_core::{
     MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
 };
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -661,6 +661,312 @@ impl OcioGpuBindingContract {
     pub fn stable_hash(&self) -> u64 {
         hash_value(self)
     }
+
+    /// Validate this contract against the shader plan it was extracted from.
+    pub fn validate_for_shader_plan(
+        &self,
+        shader_plan: &OcioGpuShaderPlan,
+    ) -> Result<(), OcioGpuBindingContractValidationError> {
+        let texture_2d_count = u32::try_from(self.textures_2d.len()).map_err(|_| {
+            OcioGpuBindingContractValidationError::Texture2DCountMismatch {
+                expected: shader_plan.texture_2d_count,
+                actual: usize::MAX,
+            }
+        })?;
+        if shader_plan.texture_2d_count != texture_2d_count {
+            return Err(
+                OcioGpuBindingContractValidationError::Texture2DCountMismatch {
+                    expected: shader_plan.texture_2d_count,
+                    actual: self.textures_2d.len(),
+                },
+            );
+        }
+
+        let texture_3d_count = u32::try_from(self.textures_3d.len()).map_err(|_| {
+            OcioGpuBindingContractValidationError::Texture3DCountMismatch {
+                expected: shader_plan.texture_3d_count,
+                actual: usize::MAX,
+            }
+        })?;
+        if shader_plan.texture_3d_count != texture_3d_count {
+            return Err(
+                OcioGpuBindingContractValidationError::Texture3DCountMismatch {
+                    expected: shader_plan.texture_3d_count,
+                    actual: self.textures_3d.len(),
+                },
+            );
+        }
+
+        let uniform_count = u32::try_from(self.uniforms.len()).map_err(|_| {
+            OcioGpuBindingContractValidationError::UniformCountMismatch {
+                expected: shader_plan.uniform_count,
+                actual: usize::MAX,
+            }
+        })?;
+        if shader_plan.uniform_count != self.uniform_count || self.uniform_count != uniform_count {
+            return Err(
+                OcioGpuBindingContractValidationError::UniformCountMismatch {
+                    expected: shader_plan.uniform_count,
+                    actual: self.uniforms.len(),
+                },
+            );
+        }
+
+        if self.texture_binding_start <= self.uniform_buffer_binding {
+            return Err(
+                OcioGpuBindingContractValidationError::TextureBindingStartOverlapsUniform {
+                    uniform_binding: self.uniform_buffer_binding,
+                    texture_binding_start: self.texture_binding_start,
+                },
+            );
+        }
+
+        if self.uniform_count > 0 && self.uniform_buffer_size == 0 {
+            return Err(
+                OcioGpuBindingContractValidationError::MissingUniformBuffer {
+                    uniform_count: self.uniform_count,
+                },
+            );
+        }
+
+        let mut uniform_indices = BTreeSet::new();
+        let mut resource_bindings = BTreeSet::new();
+        if self.uniform_count > 0 || self.uniform_buffer_size > 0 {
+            resource_bindings.insert(self.uniform_buffer_binding);
+        }
+
+        for uniform in &self.uniforms {
+            if uniform.name.is_empty() {
+                return Err(OcioGpuBindingContractValidationError::EmptyUniformName {
+                    index: uniform.index,
+                });
+            }
+            if !uniform_indices.insert(uniform.index) {
+                return Err(
+                    OcioGpuBindingContractValidationError::DuplicateUniformIndex {
+                        index: uniform.index,
+                    },
+                );
+            }
+        }
+
+        let mut texture_2d_indices = BTreeSet::new();
+        for texture in &self.textures_2d {
+            validate_texture_contract_names(
+                OcioGpuWgpuLutTextureDimension::D2,
+                texture.index,
+                &texture.texture_name,
+                &texture.sampler_name,
+            )?;
+            validate_texture_binding_index(
+                OcioGpuWgpuLutTextureDimension::D2,
+                texture.index,
+                texture.binding_index,
+                self.texture_binding_start,
+                &mut resource_bindings,
+            )?;
+            if !texture_2d_indices.insert(texture.index) {
+                return Err(
+                    OcioGpuBindingContractValidationError::DuplicateTextureIndex {
+                        dimension: OcioGpuWgpuLutTextureDimension::D2,
+                        index: texture.index,
+                    },
+                );
+            }
+            if texture.width == 0 || texture.height == 0 {
+                return Err(
+                    OcioGpuBindingContractValidationError::InvalidTextureExtent {
+                        dimension: OcioGpuWgpuLutTextureDimension::D2,
+                        index: texture.index,
+                    },
+                );
+            }
+            if texture.value_count == 0 {
+                return Err(OcioGpuBindingContractValidationError::EmptyTexturePayload {
+                    dimension: OcioGpuWgpuLutTextureDimension::D2,
+                    index: texture.index,
+                });
+            }
+        }
+
+        let mut texture_3d_indices = BTreeSet::new();
+        for texture in &self.textures_3d {
+            validate_texture_contract_names(
+                OcioGpuWgpuLutTextureDimension::D3,
+                texture.index,
+                &texture.texture_name,
+                &texture.sampler_name,
+            )?;
+            validate_texture_binding_index(
+                OcioGpuWgpuLutTextureDimension::D3,
+                texture.index,
+                texture.binding_index,
+                self.texture_binding_start,
+                &mut resource_bindings,
+            )?;
+            if !texture_3d_indices.insert(texture.index) {
+                return Err(
+                    OcioGpuBindingContractValidationError::DuplicateTextureIndex {
+                        dimension: OcioGpuWgpuLutTextureDimension::D3,
+                        index: texture.index,
+                    },
+                );
+            }
+            if texture.edge_len == 0 {
+                return Err(
+                    OcioGpuBindingContractValidationError::InvalidTextureExtent {
+                        dimension: OcioGpuWgpuLutTextureDimension::D3,
+                        index: texture.index,
+                    },
+                );
+            }
+            if texture.value_count == 0 {
+                return Err(OcioGpuBindingContractValidationError::EmptyTexturePayload {
+                    dimension: OcioGpuWgpuLutTextureDimension::D3,
+                    index: texture.index,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Structural error in an OCIO GPU binding contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuBindingContractValidationError {
+    /// OCIO-reported 2D texture count does not match copied texture resources.
+    Texture2DCountMismatch {
+        /// Count reported by the shader plan.
+        expected: u32,
+        /// Count present in the binding contract.
+        actual: usize,
+    },
+    /// OCIO-reported 3D texture count does not match copied texture resources.
+    Texture3DCountMismatch {
+        /// Count reported by the shader plan.
+        expected: u32,
+        /// Count present in the binding contract.
+        actual: usize,
+    },
+    /// OCIO-reported uniform count does not match copied uniform resources.
+    UniformCountMismatch {
+        /// Count reported by the shader plan.
+        expected: u32,
+        /// Count present in the binding contract.
+        actual: usize,
+    },
+    /// OCIO texture bindings overlap the reserved uniform binding range.
+    TextureBindingStartOverlapsUniform {
+        /// Uniform buffer binding.
+        uniform_binding: u32,
+        /// First OCIO texture binding.
+        texture_binding_start: u32,
+    },
+    /// OCIO reported uniforms without a backing uniform buffer.
+    MissingUniformBuffer {
+        /// Uniform count reported by OCIO.
+        uniform_count: u32,
+    },
+    /// A uniform resource has no shader symbol name.
+    EmptyUniformName {
+        /// Uniform index.
+        index: u32,
+    },
+    /// A uniform index appears more than once.
+    DuplicateUniformIndex {
+        /// Duplicate uniform index.
+        index: u32,
+    },
+    /// A texture or sampler resource has no shader symbol name.
+    EmptyTextureResourceName {
+        /// Texture dimensionality.
+        dimension: OcioGpuWgpuLutTextureDimension,
+        /// Texture index.
+        index: u32,
+    },
+    /// A texture binding is lower than OCIO's declared texture binding start.
+    TextureBindingBeforeStart {
+        /// Texture dimensionality.
+        dimension: OcioGpuWgpuLutTextureDimension,
+        /// Texture index.
+        index: u32,
+        /// Texture binding.
+        binding: u32,
+        /// First valid OCIO texture binding.
+        texture_binding_start: u32,
+    },
+    /// Two OCIO resources use the same binding slot.
+    DuplicateResourceBinding {
+        /// Duplicate binding slot.
+        binding: u32,
+    },
+    /// A texture index appears more than once within the same dimensionality.
+    DuplicateTextureIndex {
+        /// Texture dimensionality.
+        dimension: OcioGpuWgpuLutTextureDimension,
+        /// Duplicate texture index.
+        index: u32,
+    },
+    /// A texture resource has an invalid zero extent.
+    InvalidTextureExtent {
+        /// Texture dimensionality.
+        dimension: OcioGpuWgpuLutTextureDimension,
+        /// Texture index.
+        index: u32,
+    },
+    /// A texture resource has no LUT payload.
+    EmptyTexturePayload {
+        /// Texture dimensionality.
+        dimension: OcioGpuWgpuLutTextureDimension,
+        /// Texture index.
+        index: u32,
+    },
+}
+
+impl std::fmt::Display for OcioGpuBindingContractValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid OCIO GPU binding contract: {self:?}")
+    }
+}
+
+impl std::error::Error for OcioGpuBindingContractValidationError {}
+
+fn validate_texture_contract_names(
+    dimension: OcioGpuWgpuLutTextureDimension,
+    index: u32,
+    texture_name: &str,
+    sampler_name: &str,
+) -> Result<(), OcioGpuBindingContractValidationError> {
+    if texture_name.is_empty() || sampler_name.is_empty() {
+        return Err(
+            OcioGpuBindingContractValidationError::EmptyTextureResourceName { dimension, index },
+        );
+    }
+    Ok(())
+}
+
+fn validate_texture_binding_index(
+    dimension: OcioGpuWgpuLutTextureDimension,
+    index: u32,
+    binding: u32,
+    texture_binding_start: u32,
+    resource_bindings: &mut BTreeSet<u32>,
+) -> Result<(), OcioGpuBindingContractValidationError> {
+    if binding < texture_binding_start {
+        return Err(
+            OcioGpuBindingContractValidationError::TextureBindingBeforeStart {
+                dimension,
+                index,
+                binding,
+                texture_binding_start,
+            },
+        );
+    }
+    if !resource_bindings.insert(binding) {
+        return Err(OcioGpuBindingContractValidationError::DuplicateResourceBinding { binding });
+    }
+    Ok(())
 }
 
 /// OCIO uniform binding contract.
@@ -961,8 +1267,11 @@ pub struct OcioGpuWgpuResourcePlan {
 
 impl OcioGpuWgpuResourcePlan {
     /// Build a renderer resource contract from a cached OCIO shader plan.
-    pub fn for_shader_plan(shader_plan: &OcioGpuShaderPlan) -> Self {
+    pub fn for_shader_plan(
+        shader_plan: &OcioGpuShaderPlan,
+    ) -> Result<Self, OcioGpuBindingContractValidationError> {
         let binding_contract = binding_contract_for_plan(shader_plan);
+        binding_contract.validate_for_shader_plan(shader_plan)?;
         let binding_contract_hash = binding_contract.stable_hash();
         let wrapper_contract = fullscreen_wrapper_contract_for(&binding_contract);
         let wrapper_contract_hash = hash_value(&wrapper_contract);
@@ -996,7 +1305,7 @@ impl OcioGpuWgpuResourcePlan {
             binding_contract_hash,
             pipeline_layout_hash,
         );
-        Self {
+        Ok(Self {
             resource_key,
             shader_hash: shader_plan.shader_hash,
             binding_contract_hash,
@@ -1011,7 +1320,7 @@ impl OcioGpuWgpuResourcePlan {
             bind_group_entries,
             bind_groups,
             pipeline_layout_hash,
-        }
+        })
     }
 
     /// Build the bind-group layout contract implied by this resource plan.
@@ -3658,7 +3967,13 @@ impl OcioGpuShaderCache {
             language: shader_plan.request.language(),
         });
 
-        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&shader_plan);
+        let resources =
+            OcioGpuWgpuResourcePlan::for_shader_plan(&shader_plan).map_err(|reason| {
+                OcioGpuShaderError {
+                    request: shader_plan.request.clone(),
+                    reason: reason.to_string(),
+                }
+            })?;
         if shader_plan.texture_2d_count > 0
             || shader_plan.texture_3d_count > 0
             || resources.uniform_buffers > 0
@@ -5282,6 +5597,79 @@ mod tests {
         plan_from_bundle(request, bundle)
     }
 
+    fn shader_plan_with_single_2d_texture_binding(binding_index: u32) -> OcioGpuShaderPlan {
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: ColorSpace::Rec709,
+            dst: ColorSpace::Srgb,
+            language: GpuLanguage::Glsl4_0,
+        };
+        let values = vec![0.0, 0.5, 1.0];
+        let bundle = Arc::new(OcioGpuShaderBundle {
+            src_color_space: "test-src".to_owned(),
+            dst_color_space: "test-dst".to_owned(),
+            language: GpuLanguage::Glsl4_0,
+            shader_text: callable_ocio_program_text().to_owned(),
+            descriptor_set_index: 0,
+            texture_binding_start: 1,
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: 0,
+            texture_2d_count: 1,
+            texture_3d_count: 0,
+            uniform_count: 0,
+            textures_2d: vec![mondrian_core::OcioGpuTexture2DBinding {
+                index: 0,
+                texture_name: "lut2d".to_owned(),
+                sampler_name: "lut2d_sampler".to_owned(),
+                binding_index,
+                channel: OcioGpuTextureChannel::Rgb,
+                dimensions: OcioGpuTextureDimensions::Texture2D,
+                interpolation: OcioGpuTextureInterpolation::Linear,
+                width: 1,
+                height: 1,
+                value_count: values.len(),
+                values,
+            }],
+            textures_3d: Vec::new(),
+            uniforms: Vec::new(),
+            cache_id: Some("test-cache".to_owned()),
+        });
+        plan_from_bundle(request, bundle)
+    }
+
+    fn shader_plan_with_single_uniform_buffer_size(buffer_size: usize) -> OcioGpuShaderPlan {
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: ColorSpace::Rec709,
+            dst: ColorSpace::Srgb,
+            language: GpuLanguage::Glsl4_0,
+        };
+        let value = OcioGpuUniformValue::F32(vec![1.0]);
+        let bundle = Arc::new(OcioGpuShaderBundle {
+            src_color_space: "test-src".to_owned(),
+            dst_color_space: "test-dst".to_owned(),
+            language: GpuLanguage::Glsl4_0,
+            shader_text: callable_ocio_program_text().to_owned(),
+            descriptor_set_index: 0,
+            texture_binding_start: 1,
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: buffer_size,
+            texture_2d_count: 0,
+            texture_3d_count: 0,
+            uniform_count: 1,
+            textures_2d: Vec::new(),
+            textures_3d: Vec::new(),
+            uniforms: vec![mondrian_core::OcioGpuUniformBinding {
+                index: 0,
+                name: "exposure".to_owned(),
+                uniform_type: OcioGpuUniformType::VectorFloat,
+                buffer_offset: 0,
+                value_count: 1,
+                value,
+            }],
+            cache_id: Some("test-cache".to_owned()),
+        });
+        plan_from_bundle(request, bundle)
+    }
+
     fn callable_ocio_program_text() -> &'static str {
         r#"
             #version 450 core
@@ -5321,6 +5709,54 @@ mod tests {
         }
         .pack_buffer()
         .expect("pack bind-resource uniform")
+    }
+
+    #[test]
+    fn resource_plan_rejects_binding_contract_count_mismatch() {
+        let mut plan = shader_plan_with_text(callable_ocio_program_text());
+        plan.texture_2d_count = 1;
+
+        let err = OcioGpuWgpuResourcePlan::for_shader_plan(&plan)
+            .expect_err("texture count mismatch should fail");
+
+        assert!(matches!(
+            err,
+            OcioGpuBindingContractValidationError::Texture2DCountMismatch {
+                expected: 1,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn resource_plan_rejects_texture_binding_before_ocio_start() {
+        let plan = shader_plan_with_single_2d_texture_binding(0);
+
+        let err = OcioGpuWgpuResourcePlan::for_shader_plan(&plan)
+            .expect_err("texture binding before start should fail");
+
+        assert!(matches!(
+            err,
+            OcioGpuBindingContractValidationError::TextureBindingBeforeStart {
+                dimension: OcioGpuWgpuLutTextureDimension::D2,
+                index: 0,
+                binding: 0,
+                texture_binding_start: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn resource_plan_rejects_uniform_without_uniform_buffer() {
+        let plan = shader_plan_with_single_uniform_buffer_size(0);
+
+        let err = OcioGpuWgpuResourcePlan::for_shader_plan(&plan)
+            .expect_err("uniform without buffer should fail");
+
+        assert!(matches!(
+            err,
+            OcioGpuBindingContractValidationError::MissingUniformBuffer { uniform_count: 1 }
+        ));
     }
 
     #[test]
@@ -6281,7 +6717,7 @@ mod tests {
         assert_eq!(first.bundle().src_color_space, "S-Log3 S-Gamut3.Cine");
         assert_eq!(first.bundle().dst_color_space, "Camera Rec.709");
         assert!(first.processor_cache_id.as_deref().is_some_and(|id| !id.is_empty()));
-        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&first);
+        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&first).expect("resource plan");
         assert_eq!(resources.input_textures, 1);
         assert_eq!(resources.output_textures, 1);
         assert_eq!(resources.ocio_texture_2d_bindings, first.texture_2d_count);
@@ -6636,7 +7072,7 @@ mod tests {
         let translated = OcioGpuShaderTranslator::default()
             .translate_plan(&plan)
             .expect("translate GLSL to Naga IR");
-        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&plan);
+        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&plan).expect("resource plan");
         assert_ne!(
             backend_shader_module_cache_key(&translated, &resources).expect("matching contract"),
             0
