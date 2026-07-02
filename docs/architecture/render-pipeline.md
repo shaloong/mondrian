@@ -79,6 +79,10 @@ frames, rather than naked textures or byte vectors.
 CPU/GPU color executors. It produces ordered stage plans for CPU transforms,
 GPU OCIO transforms, upload, and readback. App and export crates should consume
 renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
+`RenderOutputColorBoundaryPlanner` is the final-output boundary wrapper around
+that planner. Its CPU-only mode is the current correctness execution path;
+its PreferGpu mode must produce GPU/upload/readback stages plus explicit
+blocker diagnostics instead of silently falling back to a CPU output stage.
 For native GPU OCIO execution, `RenderGpuColorPassSchedule` is the bridge
 between the stage plan and backend recorder: it requires GPU-resident source and
 target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a
@@ -109,9 +113,10 @@ future conversion stage says otherwise.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
 source boundaries and `execute_cpu_output_boundary(...)` for final display or
 export output. These helpers plan CPU-only stages and execute them through
-`CpuRenderColorStageExecutor`; app/export code should not call
-`execute_cpu_output_stage(...)` directly. Direct `CpuColorTransformExecutor`
-usage is limited to renderer internals and its focused unit tests.
+`RenderOutputColorBoundaryPlanner` / `CpuRenderColorStageExecutor`; app/export
+code should not call `execute_cpu_output_stage(...)` directly. Direct
+`CpuColorTransformExecutor` usage is limited to renderer internals and its
+focused unit tests.
 
 Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
 result. App, export, tests, and benches must read frames from `.result` and

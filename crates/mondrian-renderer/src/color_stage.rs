@@ -265,6 +265,58 @@ impl RenderOutputColorBoundary {
     }
 }
 
+/// Planned stage graph for one final output color boundary.
+#[derive(Debug, Clone)]
+pub struct RenderOutputColorBoundaryStagePlan {
+    /// Boundary that produced this stage plan.
+    pub boundary: RenderOutputColorBoundary,
+    /// Ordered renderer stages for the boundary.
+    pub stage_plan: RenderColorStagePlan,
+}
+
+impl RenderOutputColorBoundaryStagePlan {
+    /// Return stage diagnostics for this planned boundary.
+    pub fn diagnostics(&self) -> RenderColorStageDiagnostics {
+        self.stage_plan.diagnostics()
+    }
+}
+
+/// Strategy-aware planner for preview/export final output color boundaries.
+pub struct RenderOutputColorBoundaryPlanner<'a> {
+    stage_planner: RenderColorStagePlanner<'a>,
+}
+
+impl RenderOutputColorBoundaryPlanner<'_> {
+    /// Create a planner that always chooses the CPU correctness path.
+    pub fn cpu_only() -> Self {
+        Self { stage_planner: RenderColorStagePlanner::cpu_only() }
+    }
+}
+
+impl<'a> RenderOutputColorBoundaryPlanner<'a> {
+    /// Create a planner that asks the renderer GPU backend for an OCIO stage plan.
+    pub fn prefer_gpu(
+        gpu_cache: &'a mut OcioGpuShaderCache,
+        gpu_options: RenderColorTransformGpuOptions,
+    ) -> Self {
+        Self {
+            stage_planner: RenderColorStagePlanner::prefer_gpu(gpu_cache, gpu_options),
+        }
+    }
+
+    /// Plan the final output boundary for a typed working frame.
+    pub fn plan(
+        &mut self,
+        frame: &CpuColorFrame,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
+        let stage_plan = self
+            .stage_planner
+            .plan_output_transform(frame.descriptor(), &boundary.transform())?;
+        Ok(RenderOutputColorBoundaryStagePlan { boundary: boundary.clone(), stage_plan })
+    }
+}
+
 /// Schedulable GPU OCIO color pass with resolved source/target frame handles.
 #[derive(Debug, Clone)]
 pub struct RenderGpuColorPassSchedule {
@@ -1041,7 +1093,9 @@ pub fn execute_cpu_output_boundary(
     frame: &CpuColorFrame,
     boundary: &RenderOutputColorBoundary,
 ) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError> {
-    execute_cpu_output_stage(frame, &boundary.transform())
+    let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
+    let plan = planner.plan(frame, boundary)?;
+    CpuRenderColorStageExecutor::output_transform(frame, &plan.stage_plan)
 }
 
 impl<'a> RenderColorStagePlanner<'a> {
@@ -1536,6 +1590,53 @@ mod tests {
             crate::RenderColorTransformDirection::WorkingToOutput
         );
         assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+    }
+
+    #[test]
+    fn output_boundary_cpu_planner_produces_cpu_stage_plan() {
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
+
+        let plan = planner.plan(&frame, &boundary).expect("CPU output boundary plan");
+
+        assert_eq!(plan.boundary, boundary);
+        assert_eq!(plan.stage_plan.stages.len(), 1);
+        assert!(matches!(
+            plan.stage_plan.stages[0],
+            RenderColorStage::CpuOutputTransform { .. }
+        ));
+        assert_eq!(plan.diagnostics().cpu_output_stages, 1);
+        assert_eq!(plan.diagnostics().gpu_color_stages, 0);
+    }
+
+    #[test]
+    fn output_boundary_prefer_gpu_planner_keeps_gpu_stage_plan_with_blockers() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+
+        let plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        let diagnostics = plan.diagnostics();
+
+        assert_eq!(plan.boundary, boundary);
+        assert!(plan.stage_plan.contains_gpu_transform());
+        assert!(plan.stage_plan.contains_transfer());
+        assert_eq!(diagnostics.cpu_output_stages, 0);
+        assert_eq!(diagnostics.upload_stages, 1);
+        assert_eq!(diagnostics.gpu_color_stages, 1);
+        assert_eq!(diagnostics.readback_stages, 1);
+        assert!(diagnostics.gpu_blockers > 0);
     }
 
     #[test]

@@ -73,7 +73,9 @@ Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderOutputColorBoundary` from their `ColorContext` and
 pass typed working frames to renderer stage execution helpers; they must not
 construct display/export `RenderColorTransform` values or duplicate
-working -> output conversion logic locally.
+working -> output conversion logic locally. `RenderOutputColorBoundaryPlanner`
+owns CPU-only versus PreferGpu stage selection for that boundary, and PreferGpu
+planning reports native blockers instead of falling back to CPU stages.
 
 Input transforms follow the same rule. Decode/import code wraps source pixels in
 `CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks
