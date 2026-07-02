@@ -188,11 +188,14 @@ revalidates descriptor and texture-format contracts for every lookup before
 exposing backend resources such as `GpuColorFrameWgpuResource`.
 `RenderGpuColorPassSchedule::record_wgpu_from_resources` is the single
 preview/export-facing entry point that resolves those table entries, prepares
-the wrapper bind group, and records the pass. Until the frame evaluation path
-allocates/uploads real entries into that shared table and calls this entry point,
-CPU processor execution is the correctness path and the cached shader/module/
-upload/bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are
-the production boundary for GPU integration work.
+the wrapper bind group, and records the pass. `GpuColorFrameAllocationPlan`,
+`GpuColorFrameUploadPlan`, and `GpuColorFrameUploader` are the shared renderer
+entry points for allocating render targets and uploading CPU boundary frames
+into `GpuColorFrameResourceTable`. Until preview/export frame evaluation calls
+those entries and then records through `record_wgpu_from_resources`, CPU
+processor execution is the correctness path and the cached shader/module/upload/
+bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are the
+production boundary for GPU integration work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

@@ -89,6 +89,26 @@ pub enum GpuColorFrameTextureFormat {
     Rgba32Float,
 }
 
+impl GpuColorFrameTextureFormat {
+    /// Return the byte stride for one pixel in this texture format.
+    pub fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::Rgba8Unorm => 4,
+            Self::Rgba16Float => 8,
+            Self::Rgba32Float => 16,
+        }
+    }
+
+    /// Return the wgpu texture format represented by this renderer format.
+    pub fn to_wgpu(self) -> wgpu::TextureFormat {
+        match self {
+            Self::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+            Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+            Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
+        }
+    }
+}
+
 /// GPU-resident color frame handle.
 ///
 /// This is a typed renderer resource handle, not a CPU pixel container. Native
@@ -167,7 +187,7 @@ pub struct GpuColorFrameContract {
 }
 
 /// Error returned when constructing a GPU color frame handle.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum GpuColorFrameHandleError {
     /// The descriptor does not describe a GPU-resident frame.
     #[error("GPU color frame handle requires a GPU-resident descriptor")]
@@ -299,6 +319,222 @@ pub struct GpuColorFrameWgpuResource {
     pub texture_view: wgpu::TextureView,
     /// Default sampler used when this frame is sampled by a fullscreen pass.
     pub sampler: wgpu::Sampler,
+}
+
+/// GPU texture allocation plan for a color frame resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuColorFrameAllocationPlan {
+    /// GPU frame handle produced by this allocation.
+    pub handle: GpuColorFrameHandle,
+    /// Texture format to create.
+    pub texture_format: GpuColorFrameTextureFormat,
+    /// Texture extent.
+    pub extent: wgpu::Extent3d,
+    /// Texture usages required by color upload, sampling, rendering, and readback.
+    pub usage: wgpu::TextureUsages,
+}
+
+impl GpuColorFrameAllocationPlan {
+    /// Build an allocation plan for a validated GPU frame handle.
+    pub fn for_handle(handle: GpuColorFrameHandle) -> Self {
+        let descriptor = handle.descriptor();
+        Self {
+            texture_format: handle.texture_format(),
+            extent: wgpu::Extent3d {
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: 1,
+            },
+            usage: default_color_frame_texture_usage(),
+            handle,
+        }
+    }
+}
+
+/// CPU-to-GPU upload plan for one color frame resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuColorFrameUploadPlan {
+    /// GPU frame handle produced by this upload.
+    pub handle: GpuColorFrameHandle,
+    /// Texture format to create.
+    pub texture_format: GpuColorFrameTextureFormat,
+    /// Texture extent.
+    pub extent: wgpu::Extent3d,
+    /// Bytes per texture row.
+    pub bytes_per_row: u32,
+    /// Rows per uploaded image.
+    pub rows_per_image: u32,
+    /// Packed upload bytes.
+    pub bytes: Vec<u8>,
+}
+
+impl GpuColorFrameUploadPlan {
+    /// Build an upload plan for a CPU linear floating-point frame.
+    pub fn from_cpu_color_frame(
+        id: GpuColorFrameId,
+        frame: &CpuColorFrame,
+        texture_format: GpuColorFrameTextureFormat,
+        label: impl Into<String>,
+    ) -> Result<Self, GpuColorFrameUploadError> {
+        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+            return Err(GpuColorFrameUploadError::UnsupportedCpuFloatTextureFormat {
+                texture_format,
+            });
+        }
+        let descriptor = frame.descriptor().with_residency(ColorFrameResidency::Gpu);
+        validate_cpu_pixel_count(descriptor, frame.rgba_f32().data.len())?;
+        let handle = GpuColorFrameHandle::new(id, descriptor, texture_format, label)
+            .map_err(GpuColorFrameUploadError::Handle)?;
+        let bytes = bytemuck::cast_slice(&frame.rgba_f32().data).to_vec();
+        Self::new(handle, bytes)
+    }
+
+    /// Build an upload plan for a CPU encoded RGBA8 boundary frame.
+    pub fn from_cpu_encoded_frame(
+        id: GpuColorFrameId,
+        frame: &CpuEncodedColorFrame,
+        texture_format: GpuColorFrameTextureFormat,
+        label: impl Into<String>,
+    ) -> Result<Self, GpuColorFrameUploadError> {
+        if texture_format != GpuColorFrameTextureFormat::Rgba8Unorm {
+            return Err(
+                GpuColorFrameUploadError::UnsupportedCpuEncodedTextureFormat { texture_format },
+            );
+        }
+        let descriptor = frame.descriptor().with_residency(ColorFrameResidency::Gpu);
+        validate_cpu_byte_count(descriptor, frame.rgba().len())?;
+        let handle = GpuColorFrameHandle::new(id, descriptor, texture_format, label)
+            .map_err(GpuColorFrameUploadError::Handle)?;
+        Self::new(handle, frame.rgba().to_vec())
+    }
+
+    fn new(handle: GpuColorFrameHandle, bytes: Vec<u8>) -> Result<Self, GpuColorFrameUploadError> {
+        let descriptor = handle.descriptor();
+        let texture_format = handle.texture_format();
+        let bytes_per_row = descriptor
+            .width
+            .checked_mul(texture_format.bytes_per_pixel())
+            .ok_or(GpuColorFrameUploadError::UploadLayoutOverflow)?;
+        let expected_len = bytes_per_row as usize * descriptor.height as usize;
+        if bytes.len() != expected_len {
+            return Err(GpuColorFrameUploadError::ByteLengthMismatch {
+                expected: expected_len,
+                actual: bytes.len(),
+            });
+        }
+        Ok(Self {
+            handle,
+            texture_format,
+            extent: wgpu::Extent3d {
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: 1,
+            },
+            bytes_per_row,
+            rows_per_image: descriptor.height,
+            bytes,
+        })
+    }
+}
+
+/// Uploads validated color frame upload plans into wgpu resources.
+pub struct GpuColorFrameUploader;
+
+impl GpuColorFrameUploader {
+    /// Allocate an empty renderer-owned wgpu color frame resource.
+    pub fn allocate(
+        device: &wgpu::Device,
+        plan: &GpuColorFrameAllocationPlan,
+    ) -> GpuColorFrameResource<GpuColorFrameWgpuResource> {
+        let texture = create_color_frame_texture(
+            device,
+            plan.handle.label(),
+            plan.extent,
+            plan.texture_format,
+            plan.usage,
+        );
+        let (texture_view, sampler) = create_color_frame_view_and_sampler(device, &texture);
+        GpuColorFrameResource::new(
+            plan.handle.clone(),
+            GpuColorFrameWgpuResource { texture, texture_view, sampler },
+        )
+    }
+
+    /// Upload a validated color frame plan into a renderer-owned wgpu resource.
+    pub fn upload(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        plan: &GpuColorFrameUploadPlan,
+    ) -> GpuColorFrameResource<GpuColorFrameWgpuResource> {
+        let allocation = GpuColorFrameAllocationPlan::for_handle(plan.handle.clone());
+        let texture = create_color_frame_texture(
+            device,
+            plan.handle.label(),
+            plan.extent,
+            plan.texture_format,
+            allocation.usage,
+        );
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &plan.bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(plan.bytes_per_row),
+                rows_per_image: Some(plan.rows_per_image),
+            },
+            plan.extent,
+        );
+        let (texture_view, sampler) = create_color_frame_view_and_sampler(device, &texture);
+        GpuColorFrameResource::new(
+            plan.handle.clone(),
+            GpuColorFrameWgpuResource { texture, texture_view, sampler },
+        )
+    }
+}
+
+/// Error returned when a CPU color frame cannot be packed for GPU upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuColorFrameUploadError {
+    /// The requested texture format cannot represent a CPU linear float frame yet.
+    UnsupportedCpuFloatTextureFormat {
+        /// Requested texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
+    /// The requested texture format cannot represent a CPU encoded RGBA8 frame.
+    UnsupportedCpuEncodedTextureFormat {
+        /// Requested texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
+    /// The GPU frame handle could not be created.
+    Handle(GpuColorFrameHandleError),
+    /// The CPU frame pixel count does not match its descriptor.
+    PixelCountMismatch {
+        /// Expected pixel count.
+        expected: usize,
+        /// Actual pixel count.
+        actual: usize,
+    },
+    /// The CPU RGBA8 byte count does not match its descriptor.
+    ByteCountMismatch {
+        /// Expected byte count.
+        expected: usize,
+        /// Actual byte count.
+        actual: usize,
+    },
+    /// Row-stride calculation overflowed.
+    UploadLayoutOverflow,
+    /// Packed upload bytes do not match the texture extent/format.
+    ByteLengthMismatch {
+        /// Expected upload byte length.
+        expected: usize,
+        /// Actual upload byte length.
+        actual: usize,
+    },
 }
 
 /// Error returned when resolving GPU color frame resources.
@@ -433,6 +669,72 @@ fn validate_frame_contract(
         });
     }
     Ok(())
+}
+
+fn validate_cpu_pixel_count(
+    descriptor: ColorFrameDescriptor,
+    actual: usize,
+) -> Result<(), GpuColorFrameUploadError> {
+    let expected = descriptor.pixel_count();
+    if actual != expected {
+        return Err(GpuColorFrameUploadError::PixelCountMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+fn validate_cpu_byte_count(
+    descriptor: ColorFrameDescriptor,
+    actual: usize,
+) -> Result<(), GpuColorFrameUploadError> {
+    let expected = descriptor.pixel_count() * 4;
+    if actual != expected {
+        return Err(GpuColorFrameUploadError::ByteCountMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+fn default_color_frame_texture_usage() -> wgpu::TextureUsages {
+    wgpu::TextureUsages::COPY_DST
+        | wgpu::TextureUsages::COPY_SRC
+        | wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::RENDER_ATTACHMENT
+}
+
+fn create_color_frame_texture(
+    device: &wgpu::Device,
+    label: &str,
+    extent: wgpu::Extent3d,
+    texture_format: GpuColorFrameTextureFormat,
+    usage: wgpu::TextureUsages,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: texture_format.to_wgpu(),
+        usage,
+        view_formats: &[],
+    })
+}
+
+fn create_color_frame_view_and_sampler(
+    device: &wgpu::Device,
+    texture: &wgpu::Texture,
+) -> (wgpu::TextureView, wgpu::Sampler) {
+    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("gpu_color_frame_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..wgpu::SamplerDescriptor::default()
+    });
+    (texture_view, sampler)
 }
 
 #[cfg(test)]
@@ -600,6 +902,124 @@ mod tests {
                 id: handle.id(),
                 expected: wrong_format.contract(),
                 actual: handle.contract()
+            }
+        );
+    }
+
+    #[test]
+    fn gpu_color_frame_upload_plan_packs_cpu_linear_float_as_rgba32float() {
+        let frame = CpuColorFrame::working(RgbaF32Frame {
+            width: 2,
+            height: 1,
+            color_space: ColorSpace::Rec709,
+            data: vec![[0.25, 0.5, 0.75, 1.0], [1.25, 1.5, 1.75, 0.5]],
+        });
+
+        let plan = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            GpuColorFrameId::from_raw(200),
+            &frame,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "working-upload",
+        )
+        .expect("float upload plan");
+
+        assert_eq!(plan.handle.id().raw(), 200);
+        assert_eq!(
+            plan.handle.descriptor(),
+            frame.descriptor().with_residency(ColorFrameResidency::Gpu)
+        );
+        assert_eq!(plan.texture_format, GpuColorFrameTextureFormat::Rgba32Float);
+        assert_eq!(plan.bytes_per_row, 2 * 16);
+        assert_eq!(plan.rows_per_image, 1);
+        assert_eq!(plan.bytes.len(), 2 * 16);
+        let floats: &[f32] = bytemuck::cast_slice(&plan.bytes);
+        assert_eq!(floats, &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 0.5]);
+    }
+
+    #[test]
+    fn gpu_color_frame_allocation_plan_preserves_handle_contract_and_usage() {
+        let handle = gpu_handle(
+            199,
+            working_descriptor(),
+            GpuColorFrameTextureFormat::Rgba16Float,
+        );
+
+        let plan = GpuColorFrameAllocationPlan::for_handle(handle.clone());
+
+        assert_eq!(plan.handle, handle);
+        assert_eq!(plan.texture_format, GpuColorFrameTextureFormat::Rgba16Float);
+        assert_eq!(plan.extent.width, 1920);
+        assert_eq!(plan.extent.height, 1080);
+        assert_eq!(plan.extent.depth_or_array_layers, 1);
+        assert!(plan.usage.contains(wgpu::TextureUsages::COPY_DST));
+        assert!(plan.usage.contains(wgpu::TextureUsages::COPY_SRC));
+        assert!(plan.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
+        assert!(plan.usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
+    }
+
+    #[test]
+    fn gpu_color_frame_upload_plan_packs_cpu_encoded_rgba8() {
+        let frame = CpuEncodedColorFrame::source_rgba8(
+            2,
+            1,
+            ColorSpace::Srgb,
+            vec![0, 64, 128, 255, 255, 128, 64, 32],
+        );
+
+        let plan = GpuColorFrameUploadPlan::from_cpu_encoded_frame(
+            GpuColorFrameId::from_raw(201),
+            &frame,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+            "source-upload",
+        )
+        .expect("encoded upload plan");
+
+        assert_eq!(
+            plan.handle.descriptor(),
+            frame.descriptor().with_residency(ColorFrameResidency::Gpu)
+        );
+        assert_eq!(plan.texture_format, GpuColorFrameTextureFormat::Rgba8Unorm);
+        assert_eq!(plan.bytes_per_row, 2 * 4);
+        assert_eq!(plan.rows_per_image, 1);
+        assert_eq!(plan.bytes, frame.rgba());
+    }
+
+    #[test]
+    fn gpu_color_frame_upload_plan_rejects_unsupported_cpu_formats() {
+        let frame = CpuColorFrame::working(RgbaF32Frame {
+            width: 1,
+            height: 1,
+            color_space: ColorSpace::Rec709,
+            data: vec![[0.0, 0.0, 0.0, 1.0]],
+        });
+        let encoded =
+            CpuEncodedColorFrame::source_rgba8(1, 1, ColorSpace::Rec709, vec![0, 0, 0, 255]);
+
+        let float_err = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            GpuColorFrameId::from_raw(202),
+            &frame,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "float-rgba16",
+        )
+        .expect_err("rgba16 float upload is intentionally not implicit");
+        assert_eq!(
+            float_err,
+            GpuColorFrameUploadError::UnsupportedCpuFloatTextureFormat {
+                texture_format: GpuColorFrameTextureFormat::Rgba16Float
+            }
+        );
+
+        let encoded_err = GpuColorFrameUploadPlan::from_cpu_encoded_frame(
+            GpuColorFrameId::from_raw(203),
+            &encoded,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "encoded-rgba32",
+        )
+        .expect_err("encoded upload must stay rgba8");
+        assert_eq!(
+            encoded_err,
+            GpuColorFrameUploadError::UnsupportedCpuEncodedTextureFormat {
+                texture_format: GpuColorFrameTextureFormat::Rgba32Float
             }
         );
     }

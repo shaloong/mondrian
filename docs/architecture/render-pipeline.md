@@ -91,7 +91,9 @@ views must come from `GpuColorFrameResourceTable`, which validates the
 payload. Callers that already have concrete wgpu resources should use
 `record_wgpu_from_resources` so resource resolution, wrapper bind-group
 preparation, output target construction, and recorder invocation stay in one
-renderer-owned path.
+renderer-owned path. CPU boundary frames and empty GPU targets must enter that
+resource table through `GpuColorFrameUploadPlan` / `GpuColorFrameAllocationPlan`
+and `GpuColorFrameUploader`, not ad hoc texture creation in preview or export.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
 `execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
 through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage

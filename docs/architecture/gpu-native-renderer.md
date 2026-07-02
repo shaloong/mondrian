@@ -207,6 +207,15 @@ different color space, domain, encoding, extent, or target format. The concrete
 wgpu payload is `GpuColorFrameWgpuResource`, which owns the texture, default
 view, and sampler used by fullscreen color passes.
 
+`GpuColorFrameAllocationPlan` creates empty GPU color targets/intermediates
+with a shared usage contract for upload, sampling, rendering, and readback.
+`GpuColorFrameUploadPlan` packs CPU boundary frames for upload: linear
+`CpuColorFrame` data is explicitly packed as `Rgba32Float`, while encoded
+`CpuEncodedColorFrame` data is packed as `Rgba8Unorm`. `GpuColorFrameUploader`
+materializes those plans into `GpuColorFrameWgpuResource` entries. Preview and
+export frame evaluation should fill the shared resource table through these
+plans before calling `record_wgpu_from_resources`.
+
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
 `RenderColorTransform` requests to the OCIO shader cache. It produces a
