@@ -60,6 +60,13 @@ Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
+The CPU timeline compositor keeps simple `Normal`/identity media and solid-color
+layers in the typed float/linear working frame. Those paths must not round-trip
+through RGBA8 scratch buffers, so extended working values remain available to
+the final output boundary. Effects, adjustment layers, non-normal blend modes,
+and geometric transforms currently use the legacy RGBA8 compositor path until
+their own float/linear execution contracts are implemented.
+
 Decoded media enters the graph as a typed source/import RGBA8 boundary
 (`CpuEncodedColorFrame::source_rgba8`). Preview and export must use
 `RenderInputTransform` plus `execute_cpu_input_stage(...)` or a future GPU-capable
