@@ -54,6 +54,11 @@ OCIO execution also follows source -> working -> output. The Standard mode UI
 can hide OCIO details from normal users, but the backend still routes through
 the Mondrian default OCIO source and fails closed when that source is missing.
 
+Renderer stages must carry typed color-frame metadata. `CpuColorFrame` is the
+CPU-resident linear working-frame contract; future GPU frames must expose the
+same domain/encoding/residency/color-space descriptor. RGBA8 is a boundary
+format, not an intermediate color-management contract.
+
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative
 delivery, HDR, and camera-log processor pairs must create real CPU processors.

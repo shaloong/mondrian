@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use mondrian_core::types::{BlendMode, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_float_linear, TimelineCompositeElement, TimelineCompositeOptions,
+    composite_timeline_elements_color_frame, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
 };
 
@@ -52,7 +52,7 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         frame_seed: 0,
     })];
     let mut scratch = TimelineCompositeScratch::default();
-    composite_timeline_elements_float_linear(
+    composite_timeline_elements_color_frame(
         w,
         h,
         &elements,
@@ -60,6 +60,7 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         ColorSpace::Rec709,
         &mut scratch,
     )
+    .to_output_rgba8(ColorSpace::Rec709, false)
 }
 
 fn assert_rgba8_equal(actual: &[u8], expected: &[u8], w: u32, _h: u32, name: &str) {
@@ -116,14 +117,15 @@ fn golden_transparent_canvas() {
     let h = 64;
     let elements: Vec<TimelineCompositeElement> = vec![];
     let mut scratch = TimelineCompositeScratch::default();
-    let result = composite_timeline_elements_float_linear(
+    let result = composite_timeline_elements_color_frame(
         w,
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
         ColorSpace::Rec709,
         &mut scratch,
-    );
+    )
+    .to_output_rgba8(ColorSpace::Rec709, false);
     check_golden("transparent_canvas_64x64.png", w, h, &result);
 }
 
@@ -183,13 +185,14 @@ fn golden_two_layers_normal() {
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
-    let result = composite_timeline_elements_float_linear(
+    let result = composite_timeline_elements_color_frame(
         w,
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
         ColorSpace::Rec709,
         &mut scratch,
-    );
+    )
+    .to_output_rgba8(ColorSpace::Rec709, false);
     check_golden("two_layers_normal_64x64.png", w, h, &result);
 }

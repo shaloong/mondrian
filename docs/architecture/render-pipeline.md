@@ -47,12 +47,18 @@ and exists only for compatibility with code that needs the element list.
 
 Each element carries opacity, blend mode, transforms where applicable, effect graph, frame seed, and color/media interpretation data.
 
-`timeline_composite` still supports CPU RGBA compositing and a float-linear path
-for simple normal-blend media. Viewer preview and export both enter the
-float-linear compositor when that path supports the resolved elements, then
-apply the same working -> output color transform contract for their respective
-preview/export `ColorContext`. `FrameCompositor` supports GPU batched compositing
-with texture pooling and can return either RGBA readback or a GPU texture.
+`timeline_composite` exposes one color-managed composition contract:
+`composite_timeline_elements_color_frame(...)`. It returns a typed
+`CpuColorFrame` whose descriptor records domain, encoding, residency, dimensions,
+and color space. Viewer preview and export must consume this typed working-frame
+contract, then explicitly apply their respective working -> output transform.
+Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
+presentation readback, and CPU encoder boundaries. They are not a renderer-stage
+exchange format.
+
+`FrameCompositor` supports GPU batched compositing with texture pooling and can
+return either RGBA readback or a GPU texture. Long-term render graph nodes should
+return typed frame handles rather than naked textures or byte vectors.
 
 ## Required Semantics
 

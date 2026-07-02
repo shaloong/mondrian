@@ -1,12 +1,12 @@
 //! CPU compositor benchmarks using criterion.
 //!
-//! Measures composite_timeline_elements_float_linear performance
+//! Measures typed color-frame compositor performance
 //! at common resolutions with varying layer counts.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mondrian_core::types::{BlendMode, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_float_linear, TimelineCompositeElement, TimelineCompositeOptions,
+    composite_timeline_elements_color_frame, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
 };
 use std::sync::Arc;
@@ -55,7 +55,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
     let mut scratch = TimelineCompositeScratch::default();
     c.bench_function(name, |b| {
         b.iter(|| {
-            composite_timeline_elements_float_linear(
+            composite_timeline_elements_color_frame(
                 black_box(w),
                 black_box(h),
                 black_box(&elements),
@@ -63,6 +63,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 ColorSpace::Rec709,
                 &mut scratch,
             )
+            .to_output_rgba8(ColorSpace::Rec709, false)
         })
     });
 }

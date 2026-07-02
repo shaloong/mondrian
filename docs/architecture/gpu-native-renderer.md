@@ -34,7 +34,9 @@ UI code may use `mondrian-ui-renderer`; timeline/video rendering should stay in 
 - Temporary textures should come from pools keyed by size/format/usage.
 - Textures handed to display/export become caller-owned or reference-counted handles with clear lifetime.
 - Readback buffers are transient and must be named in code as readback/export/debug paths.
-- CPU RGBA should not be the default exchange type between renderer stages.
+- CPU RGBA must not be the default exchange type between renderer stages.
+- CPU-resident intermediate frames use `CpuColorFrame`; GPU-resident
+  intermediate frames should use the same descriptor contract with a GPU handle.
 
 ## Effect Integration
 
@@ -53,6 +55,11 @@ resources, bind groups, LUT textures, and render-graph nodes from the OCIO plan.
 Renderer diagnostics should track cache hits, misses, and extraction failures so
 preview performance work can distinguish shader planning cost from actual frame
 execution cost.
+
+`OcioGpuShaderCache::prepare_wgpu_execution(...)` reports native execution
+blockers explicitly, including shader-language translation, LUT texture upload,
+and uniform packing. Render scheduling must treat those blockers as diagnostics,
+not as silent fallback.
 
 ## Allowed Readback
 

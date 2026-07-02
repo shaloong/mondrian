@@ -9,6 +9,7 @@
 //! - `ShaderRegistry`：可扩展效果 Shader 注册
 
 pub mod batched_pipeline;
+pub mod color_frame;
 pub mod compositor;
 pub mod context;
 pub mod gpu_backend;
@@ -20,6 +21,9 @@ pub mod texture_pool;
 pub mod timeline_composite;
 pub mod timeline_render_plan;
 
+pub use color_frame::{
+    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
+};
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
 pub use gpu_backend::{
@@ -27,11 +31,11 @@ pub use gpu_backend::{
 };
 pub use ocio_gpu::{
     OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuShaderError, OcioGpuShaderPlan,
-    OcioGpuShaderRequest,
+    OcioGpuShaderRequest, OcioGpuWgpuBlocker, OcioGpuWgpuExecutionPlan,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{
-    composite_timeline_elements, composite_timeline_elements_float_linear,
+    composite_timeline_elements, composite_timeline_elements_color_frame,
     composite_timeline_elements_into, is_identity_transform, quantize_transform_signature,
     TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer, TimelineSolidColorLayer,

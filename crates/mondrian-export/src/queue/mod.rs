@@ -19,7 +19,7 @@ use mondrian_media::audio::{
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
-    composite_timeline_elements_float_linear, evaluate_timeline_render_plan,
+    composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
     TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
     TimelineRenderPlanElement, TimelineSolidColorLayer,
@@ -1101,7 +1101,7 @@ fn render_sequence_frame_into(
     }
 
     let mut scratch = TimelineCompositeScratch::default();
-    let rendered = composite_timeline_elements_float_linear(
+    let rendered = composite_timeline_elements_color_frame(
         width,
         height,
         &composite_elements,
@@ -1110,7 +1110,7 @@ fn render_sequence_frame_into(
         &mut scratch,
     );
     canvas.clear();
-    canvas.extend_from_slice(&rendered);
+    canvas.extend_from_slice(&rendered.to_output_rgba8(color_context.working_color_space, false));
     convert_rgba8_in_place(
         canvas,
         ColorPipeline::new(

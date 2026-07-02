@@ -16,7 +16,7 @@ use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, Sequence
 use mondrian_core::{convert_rgba8_in_place, ColorPipeline};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
-    composite_timeline_elements_float_linear, evaluate_timeline_render_plan,
+    composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
     TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
     TimelineRenderPlanElement, TimelineSolidColorLayer,
@@ -1251,7 +1251,7 @@ fn composite_resolved_preview(
             }),
         })
         .collect();
-    let mut rgba = composite_timeline_elements_float_linear(
+    let working_frame = composite_timeline_elements_color_frame(
         width,
         height,
         &elements,
@@ -1259,6 +1259,7 @@ fn composite_resolved_preview(
         color_context.working_color_space,
         scratch,
     );
+    let mut rgba = working_frame.to_output_rgba8(color_context.working_color_space, false);
     convert_rgba8_in_place(
         &mut rgba,
         ColorPipeline::new(
@@ -1685,7 +1686,7 @@ mod tests {
             frame_seed: 0,
         })];
         let mut export_scratch = TimelineCompositeScratch::default();
-        let mut expected = composite_timeline_elements_float_linear(
+        let expected_frame = composite_timeline_elements_color_frame(
             1,
             1,
             &export_elements,
@@ -1693,6 +1694,11 @@ mod tests {
             color_context.working_color_space,
             &mut export_scratch,
         );
+        assert_eq!(
+            expected_frame.descriptor().color_space,
+            color_context.working_color_space
+        );
+        let mut expected = expected_frame.to_output_rgba8(color_context.working_color_space, false);
         convert_rgba8_in_place(
             &mut expected,
             ColorPipeline::new(

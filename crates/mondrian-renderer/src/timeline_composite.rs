@@ -1,3 +1,4 @@
+use crate::CpuColorFrame;
 use mondrian_core::{
     types::{BlendMode, Color, ColorSpace},
     RgbaF32Frame,
@@ -69,21 +70,54 @@ pub fn composite_timeline_elements(
     out
 }
 
-pub fn composite_timeline_elements_float_linear(
+/// Composite timeline elements into a typed color-managed working frame.
+pub fn composite_timeline_elements_color_frame(
     width: u32,
     height: u32,
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
     working_color_space: ColorSpace,
     scratch: &mut TimelineCompositeScratch,
-) -> Vec<u8> {
-    if !can_float_linear_composite(elements) {
-        return composite_timeline_elements(width, height, elements, options, scratch);
-    }
+) -> CpuColorFrame {
+    let frame = if !can_float_linear_composite(elements) {
+        let rgba = composite_timeline_elements(width, height, elements, options, scratch);
+        RgbaF32Frame::from_rgba8(
+            width,
+            height,
+            &rgba,
+            working_color_space,
+            working_color_space,
+            false,
+        )
+    } else {
+        composite_supported_elements_to_working_frame(
+            width,
+            height,
+            elements,
+            options,
+            working_color_space,
+            scratch,
+        )
+    };
+    CpuColorFrame::working(frame)
+}
 
+fn composite_supported_elements_to_working_frame(
+    width: u32,
+    height: u32,
+    elements: &[TimelineCompositeElement<'_>],
+    options: TimelineCompositeOptions,
+    working_color_space: ColorSpace,
+    scratch: &mut TimelineCompositeScratch,
+) -> RgbaF32Frame {
     let pixel_count = width as usize * height as usize;
     if pixel_count == 0 {
-        return Vec::new();
+        return RgbaF32Frame {
+            width,
+            height,
+            data: Vec::new(),
+            color_space: working_color_space,
+        };
     }
 
     let mut canvas = vec![[0.0, 0.0, 0.0, 1.0]; pixel_count];
@@ -135,7 +169,6 @@ pub fn composite_timeline_elements_float_linear(
         data: canvas,
         color_space: working_color_space,
     }
-    .to_rgba8(working_color_space, false)
 }
 
 fn can_float_linear_composite(elements: &[TimelineCompositeElement<'_>]) -> bool {
@@ -607,7 +640,7 @@ mod tests {
     #[test]
     fn float_linear_compositor_matches_normal_single_layer_and_preserves_alpha() {
         let mut scratch = TimelineCompositeScratch::default();
-        let output = composite_timeline_elements_float_linear(
+        let frame = composite_timeline_elements_color_frame(
             1,
             1,
             &[TimelineCompositeElement::Media(TimelineMediaLayer {
@@ -625,6 +658,8 @@ mod tests {
             mondrian_core::types::ColorSpace::Rec709,
             &mut scratch,
         );
+        assert_eq!(frame.descriptor().domain, crate::ColorFrameDomain::Working);
+        let output = frame.to_output_rgba8(mondrian_core::types::ColorSpace::Rec709, false);
 
         assert_eq!(output[3], 255);
         assert!((output[0] as i16 - 64).abs() <= 1);
@@ -652,14 +687,15 @@ mod tests {
                 frame_seed: 0,
             }),
         ];
-        let float_output = composite_timeline_elements_float_linear(
+        let float_output = composite_timeline_elements_color_frame(
             1,
             1,
             &elements,
             TimelineCompositeOptions::default(),
             mondrian_core::types::ColorSpace::Rec709,
             &mut float_scratch,
-        );
+        )
+        .to_output_rgba8(mondrian_core::types::ColorSpace::Rec709, false);
         let legacy_output = composite_timeline_elements(
             1,
             1,

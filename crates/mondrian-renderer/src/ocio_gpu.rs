@@ -99,6 +99,36 @@ impl OcioGpuShaderPlan {
     }
 }
 
+/// Renderer-side preparation result for native wgpu OCIO execution.
+#[derive(Debug, Clone)]
+pub struct OcioGpuWgpuExecutionPlan {
+    /// Cached OCIO shader plan this execution preparation is based on.
+    pub shader_plan: Arc<OcioGpuShaderPlan>,
+    /// Native wgpu blockers that must be cleared before this plan can execute.
+    pub blockers: Vec<OcioGpuWgpuBlocker>,
+}
+
+impl OcioGpuWgpuExecutionPlan {
+    /// Whether this plan can be executed by the current native wgpu backend.
+    pub fn can_execute(&self) -> bool {
+        self.blockers.is_empty()
+    }
+}
+
+/// Missing pieces before an OCIO GPU shader plan can run in wgpu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuBlocker {
+    /// OCIO emitted a language that is not directly consumable by wgpu.
+    ShaderLanguageRequiresTranslation { language: GpuLanguage },
+    /// OCIO referenced LUT textures that have not yet been uploaded/bound.
+    TextureUploadNotImplemented {
+        texture_2d_count: u32,
+        texture_3d_count: u32,
+    },
+    /// OCIO referenced uniforms that have not yet been packed into a wgpu buffer.
+    UniformUploadNotImplemented { uniform_count: u32 },
+}
+
 /// Bounded cache for OCIO GPU shader extraction results.
 pub struct OcioGpuShaderCache {
     entries: LruCache<u64, Arc<OcioGpuShaderPlan>>,
@@ -137,6 +167,37 @@ impl OcioGpuShaderCache {
         let plan = Arc::new(plan_from_bundle(request, Arc::new(bundle)));
         self.entries.put(request_key, Arc::clone(&plan));
         Ok(plan)
+    }
+
+    /// Prepare an OCIO GPU shader plan for native wgpu execution.
+    ///
+    /// This currently exposes the exact blockers that keep Mondrian on the CPU
+    /// correctness path for OCIO color transforms. The render graph should only
+    /// schedule a native pass once `can_execute()` is true.
+    pub fn prepare_wgpu_execution(
+        &mut self,
+        request: OcioGpuShaderRequest,
+    ) -> Result<OcioGpuWgpuExecutionPlan, OcioGpuShaderError> {
+        let shader_plan = self.get_or_extract(request)?;
+        let mut blockers = Vec::new();
+
+        blockers.push(OcioGpuWgpuBlocker::ShaderLanguageRequiresTranslation {
+            language: shader_plan.request.language(),
+        });
+
+        if shader_plan.texture_2d_count > 0 || shader_plan.texture_3d_count > 0 {
+            blockers.push(OcioGpuWgpuBlocker::TextureUploadNotImplemented {
+                texture_2d_count: shader_plan.texture_2d_count,
+                texture_3d_count: shader_plan.texture_3d_count,
+            });
+        }
+        if shader_plan.uniform_count > 0 {
+            blockers.push(OcioGpuWgpuBlocker::UniformUploadNotImplemented {
+                uniform_count: shader_plan.uniform_count,
+            });
+        }
+
+        Ok(OcioGpuWgpuExecutionPlan { shader_plan, blockers })
     }
 
     /// Return cache health counters.
@@ -292,5 +353,32 @@ mod tests {
         assert_eq!(plan.bundle().dst_color_space, format!("{display}/{view}"));
         assert_eq!(plan.bundle().language, GpuLanguage::Glsl4_0);
         assert!(plan.shader_hash != 0);
+    }
+
+    #[test]
+    fn wgpu_execution_preparation_reports_native_blockers_without_fallback() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut cache = OcioGpuShaderCache::default();
+
+        let prepared = cache
+            .prepare_wgpu_execution(OcioGpuShaderRequest::ColorSpace {
+                src: ColorSpace::AppleLog,
+                dst: ColorSpace::Rec709,
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("prepare wgpu execution");
+
+        assert!(!prepared.can_execute());
+        assert!(prepared.blockers.iter().any(|blocker| matches!(
+            blocker,
+            OcioGpuWgpuBlocker::ShaderLanguageRequiresTranslation {
+                language: GpuLanguage::Glsl4_0
+            }
+        )));
+
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.misses, 1);
+        assert_eq!(diagnostics.extraction_failures, 0);
     }
 }
