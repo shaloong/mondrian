@@ -17,9 +17,10 @@ use mondrian_core::{convert_rgba8_in_place, ColorPipeline};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    CpuColorTransformExecutor, RenderColorTransform, TimelineAdjustmentLayer,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence};
 use mondrian_ui_widgets::ViewerFrameImage;
@@ -1259,19 +1260,14 @@ fn composite_resolved_preview(
         color_context.working_color_space,
         scratch,
     );
-    let mut rgba = working_frame.to_output_rgba8(color_context.working_color_space, false);
-    convert_rgba8_in_place(
-        &mut rgba,
-        ColorPipeline::new(
-            color_context.working_color_space,
-            color_context.working_color_space,
-            color_context.output_color_space,
-            color_context.tone_map,
-        )
-        .with_engine(color_context.engine.clone()),
-    )
-    .map_err(|err| format!("viewer preview final color transform failed: {err}"))?;
-    Ok(rgba)
+    let transform = RenderColorTransform::display(
+        color_context.output_color_space,
+        color_context.tone_map,
+        color_context.engine.clone(),
+    );
+    CpuColorTransformExecutor::transform(&working_frame, &transform)
+        .map(|frame| frame.into_rgba())
+        .map_err(|err| format!("viewer preview final color transform failed: {err}"))
 }
 
 fn preview_cache_key(frame: i64, width: u32, height: u32, rgba: &[u8]) -> String {
@@ -1698,18 +1694,16 @@ mod tests {
             expected_frame.descriptor().color_space,
             color_context.working_color_space
         );
-        let mut expected = expected_frame.to_output_rgba8(color_context.working_color_space, false);
-        convert_rgba8_in_place(
-            &mut expected,
-            ColorPipeline::new(
-                color_context.working_color_space,
-                color_context.working_color_space,
+        let expected = CpuColorTransformExecutor::transform(
+            &expected_frame,
+            &RenderColorTransform::display(
                 color_context.output_color_space,
                 color_context.tone_map,
-            )
-            .with_engine(color_context.engine.clone()),
+                color_context.engine.clone(),
+            ),
         )
-        .expect("export color transform");
+        .expect("preview color transform")
+        .into_rgba();
 
         assert_eq!(preview, expected);
     }

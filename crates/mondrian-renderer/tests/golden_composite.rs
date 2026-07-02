@@ -9,9 +9,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mondrian_core::types::{BlendMode, ColorSpace};
+use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, TimelineCompositeElement, TimelineCompositeOptions,
+    composite_timeline_elements_color_frame, CpuColorFrame, CpuColorTransformExecutor,
+    RenderColorTransform, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
 };
 
@@ -40,6 +41,15 @@ fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
     mondrian_effects::get_or_compile_scheduled_render_graph(g).expect("compile identity graph")
 }
 
+fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {
+    CpuColorTransformExecutor::transform(
+        frame,
+        &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+    )
+    .expect("encode golden frame")
+    .into_rgba()
+}
+
 fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: BlendMode) -> Vec<u8> {
     let elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
         rgba,
@@ -52,15 +62,15 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         frame_seed: 0,
     })];
     let mut scratch = TimelineCompositeScratch::default();
-    composite_timeline_elements_color_frame(
+    let frame = composite_timeline_elements_color_frame(
         w,
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
         ColorSpace::Rec709,
         &mut scratch,
-    )
-    .to_output_rgba8(ColorSpace::Rec709, false)
+    );
+    encode_rec709(&frame)
 }
 
 fn assert_rgba8_equal(actual: &[u8], expected: &[u8], w: u32, _h: u32, name: &str) {
@@ -117,15 +127,15 @@ fn golden_transparent_canvas() {
     let h = 64;
     let elements: Vec<TimelineCompositeElement> = vec![];
     let mut scratch = TimelineCompositeScratch::default();
-    let result = composite_timeline_elements_color_frame(
+    let frame = composite_timeline_elements_color_frame(
         w,
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
         ColorSpace::Rec709,
         &mut scratch,
-    )
-    .to_output_rgba8(ColorSpace::Rec709, false);
+    );
+    let result = encode_rec709(&frame);
     check_golden("transparent_canvas_64x64.png", w, h, &result);
 }
 
@@ -185,14 +195,14 @@ fn golden_two_layers_normal() {
         }),
     ];
     let mut scratch = TimelineCompositeScratch::default();
-    let result = composite_timeline_elements_color_frame(
+    let frame = composite_timeline_elements_color_frame(
         w,
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
         ColorSpace::Rec709,
         &mut scratch,
-    )
-    .to_output_rgba8(ColorSpace::Rec709, false);
+    );
+    let result = encode_rec709(&frame);
     check_golden("two_layers_normal_64x64.png", w, h, &result);
 }

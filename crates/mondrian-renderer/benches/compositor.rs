@@ -4,10 +4,11 @@
 //! at common resolutions with varying layer counts.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mondrian_core::types::{BlendMode, ColorSpace};
+use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineMediaLayer,
+    composite_timeline_elements_color_frame, CpuColorTransformExecutor, RenderColorTransform,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineMediaLayer,
 };
 use std::sync::Arc;
 
@@ -55,15 +56,24 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
     let mut scratch = TimelineCompositeScratch::default();
     c.bench_function(name, |b| {
         b.iter(|| {
-            composite_timeline_elements_color_frame(
+            let frame = composite_timeline_elements_color_frame(
                 black_box(w),
                 black_box(h),
                 black_box(&elements),
                 TimelineCompositeOptions { empty_canvas_transparent: true },
                 ColorSpace::Rec709,
                 &mut scratch,
+            );
+            CpuColorTransformExecutor::transform(
+                &frame,
+                &RenderColorTransform::display(
+                    ColorSpace::Rec709,
+                    false,
+                    ColorEngine::MondrianSmart,
+                ),
             )
-            .to_output_rgba8(ColorSpace::Rec709, false)
+            .expect("benchmark color transform")
+            .into_rgba()
         })
     });
 }

@@ -85,7 +85,50 @@ impl CpuColorFrame {
     }
 
     /// Encode this frame to RGBA8 for a specific output color space.
-    pub fn to_output_rgba8(&self, output: ColorSpace, tone_map: bool) -> Vec<u8> {
+    pub(crate) fn to_output_rgba8(&self, output: ColorSpace, tone_map: bool) -> Vec<u8> {
         self.frame.to_rgba8(output, tone_map)
+    }
+}
+
+/// CPU-resident encoded RGBA8 frame at an explicit graph boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuEncodedColorFrame {
+    descriptor: ColorFrameDescriptor,
+    rgba: Vec<u8>,
+}
+
+impl CpuEncodedColorFrame {
+    /// Create a CPU RGBA8 boundary frame.
+    pub fn rgba8(
+        width: u32,
+        height: u32,
+        color_space: ColorSpace,
+        domain: ColorFrameDomain,
+        rgba: Vec<u8>,
+    ) -> Self {
+        let descriptor = ColorFrameDescriptor {
+            width,
+            height,
+            color_space,
+            domain,
+            encoding: ColorFrameEncoding::EncodedRgba8,
+            residency: ColorFrameResidency::Cpu,
+        };
+        Self { descriptor, rgba }
+    }
+
+    /// Return the frame metadata contract.
+    pub fn descriptor(&self) -> ColorFrameDescriptor {
+        self.descriptor
+    }
+
+    /// Borrow RGBA8 pixels.
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+
+    /// Consume this wrapper and return RGBA8 pixels.
+    pub fn into_rgba(self) -> Vec<u8> {
+        self.rgba
     }
 }

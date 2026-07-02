@@ -10,6 +10,7 @@
 
 pub mod batched_pipeline;
 pub mod color_frame;
+pub mod color_transform;
 pub mod compositor;
 pub mod context;
 pub mod gpu_backend;
@@ -23,6 +24,11 @@ pub mod timeline_render_plan;
 
 pub use color_frame::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
+    CpuEncodedColorFrame,
+};
+pub use color_transform::{
+    CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,
+    RenderColorTransformError,
 };
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;

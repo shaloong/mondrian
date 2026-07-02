@@ -20,9 +20,10 @@ use mondrian_media::audio::{
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    CpuColorTransformExecutor, RenderColorTransform, TimelineAdjustmentLayer,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, ExportBitDepth, SequenceSettings, VideoRange};
 use parking_lot::{Condvar, Mutex};
@@ -1109,19 +1110,17 @@ fn render_sequence_frame_into(
         color_context.working_color_space,
         &mut scratch,
     );
-    canvas.clear();
-    canvas.extend_from_slice(&rendered.to_output_rgba8(color_context.working_color_space, false));
-    convert_rgba8_in_place(
-        canvas,
-        ColorPipeline::new(
-            color_context.working_color_space,
-            color_context.working_color_space,
+    let encoded = CpuColorTransformExecutor::transform(
+        &rendered,
+        &RenderColorTransform::export(
             color_context.output_color_space,
             color_context.tone_map,
-        )
-        .with_engine(color_context.engine.clone()),
+            color_context.engine.clone(),
+        ),
     )
     .map_err(|err| format!("final color transform failed: {err}"))?;
+    canvas.clear();
+    canvas.extend_from_slice(encoded.rgba());
     Ok(())
 }
 

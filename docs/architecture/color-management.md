@@ -59,6 +59,11 @@ CPU-resident linear working-frame contract; future GPU frames must expose the
 same domain/encoding/residency/color-space descriptor. RGBA8 is a boundary
 format, not an intermediate color-management contract.
 
+Preview and export final transforms are renderer execution concerns. App and
+export crates build a `RenderColorTransform` from their `ColorContext` and pass
+typed frames to `CpuColorTransformExecutor` or a future GPU executor; they must
+not duplicate working -> output conversion logic locally.
+
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative
 delivery, HDR, and camera-log processor pairs must create real CPU processors.

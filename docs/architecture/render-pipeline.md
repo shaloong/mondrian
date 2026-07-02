@@ -51,7 +51,8 @@ Each element carries opacity, blend mode, transforms where applicable, effect gr
 `composite_timeline_elements_color_frame(...)`. It returns a typed
 `CpuColorFrame` whose descriptor records domain, encoding, residency, dimensions,
 and color space. Viewer preview and export must consume this typed working-frame
-contract, then explicitly apply their respective working -> output transform.
+contract, then apply their respective working -> output transform through
+`CpuColorTransformExecutor` and `RenderColorTransform`.
 Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
