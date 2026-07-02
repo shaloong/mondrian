@@ -209,7 +209,10 @@ executors. It emits an ordered `RenderColorStagePlan` containing CPU transform,
 GPU color transform, upload, and readback nodes. Preview and export scheduling
 should consume this stage plan instead of branching independently on CPU/GPU
 state, so transfer cost and GPU blockers remain visible to diagnostics and
-performance budgets.
+performance budgets. Once a planned GPU stage has concrete source/target
+`GpuColorFrameHandle` values and a matching backend render-pass node,
+`RenderGpuColorPassSchedule` validates those pieces before preview/export can
+hand the command encoder to `OcioGpuWgpuRenderPassRecorder`.
 
 ## Allowed Readback
 

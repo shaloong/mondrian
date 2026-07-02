@@ -1,9 +1,10 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    CpuColorTransformExecutor, CpuEncodedColorFrame, OcioGpuShaderCache, RenderColorTransform,
-    RenderColorTransformError, RenderColorTransformGpuOptions, RenderColorTransformGpuPlan,
-    RenderColorTransformGpuPlanner, RenderInputTransform, RenderInputTransformResult,
-    RenderOutputTransformResult,
+    CpuColorTransformExecutor, CpuEncodedColorFrame, GpuColorFrameHandle,
+    GpuColorFrameTextureFormat, OcioGpuShaderCache, OcioGpuWgpuColorTargetFormat,
+    OcioGpuWgpuRenderPassNodePlan, RenderColorTransform, RenderColorTransformError,
+    RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
+    RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
 };
 
 /// Preferred execution mode for a renderer color transform stage.
@@ -195,6 +196,147 @@ pub struct RenderColorStageExecution<T> {
     pub result: T,
     /// Diagnostics for the stage plan that was executed.
     pub stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+/// Schedulable GPU OCIO color pass with resolved source/target frame handles.
+#[derive(Debug, Clone)]
+pub struct RenderGpuColorPassSchedule {
+    /// GPU source frame consumed by the OCIO pass.
+    pub input: GpuColorFrameHandle,
+    /// GPU target frame produced by the OCIO pass.
+    pub output: GpuColorFrameHandle,
+    /// Renderer GPU transform plan for this color boundary.
+    pub transform: RenderColorTransformGpuPlan,
+    /// Backend render-pass node that records the fullscreen OCIO draw.
+    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+}
+
+impl RenderGpuColorPassSchedule {
+    /// Build a schedulable GPU OCIO color pass after descriptor and backend-node validation.
+    pub fn new(
+        input: GpuColorFrameHandle,
+        output: GpuColorFrameHandle,
+        transform: RenderColorTransformGpuPlan,
+        pass_node: OcioGpuWgpuRenderPassNodePlan,
+    ) -> Result<Self, RenderGpuColorPassScheduleError> {
+        if transform.requires_source_upload {
+            return Err(RenderGpuColorPassScheduleError::UploadStillRequired);
+        }
+        if transform.requires_output_readback {
+            return Err(RenderGpuColorPassScheduleError::ReadbackStillRequired);
+        }
+        if !transform.wgpu.can_execute() {
+            return Err(RenderGpuColorPassScheduleError::NativeBlockersRemaining {
+                blockers: transform.wgpu.blockers.len(),
+            });
+        }
+        if input.descriptor() != transform.diagnostics.input {
+            return Err(RenderGpuColorPassScheduleError::InputDescriptorMismatch {
+                expected: transform.diagnostics.input,
+                actual: input.descriptor(),
+            });
+        }
+        if output.descriptor() != transform.diagnostics.output {
+            return Err(RenderGpuColorPassScheduleError::OutputDescriptorMismatch {
+                expected: transform.diagnostics.output,
+                actual: output.descriptor(),
+            });
+        }
+        if input.descriptor().residency != ColorFrameResidency::Gpu {
+            return Err(RenderGpuColorPassScheduleError::InputNotGpuResident {
+                actual: input.descriptor().residency,
+            });
+        }
+        if output.descriptor().residency != ColorFrameResidency::Gpu {
+            return Err(RenderGpuColorPassScheduleError::OutputNotGpuResident {
+                actual: output.descriptor().residency,
+            });
+        }
+        if input.descriptor().width != output.descriptor().width
+            || input.descriptor().height != output.descriptor().height
+        {
+            return Err(RenderGpuColorPassScheduleError::ExtentMismatch {
+                input: input.descriptor(),
+                output: output.descriptor(),
+            });
+        }
+        if pass_node.resource_key != transform.wgpu.resources.resource_key {
+            return Err(RenderGpuColorPassScheduleError::PassResourceKeyMismatch {
+                expected: transform.wgpu.resources.resource_key,
+                actual: pass_node.resource_key,
+            });
+        }
+        let output_format = color_target_format_for_gpu_frame(&output);
+        if pass_node.output_format != output_format {
+            return Err(
+                RenderGpuColorPassScheduleError::TargetTextureFormatMismatch {
+                    expected: pass_node.output_format,
+                    actual: output.texture_format(),
+                },
+            );
+        }
+
+        Ok(Self { input, output, transform, pass_node })
+    }
+}
+
+/// Error returned when a GPU OCIO color pass cannot be scheduled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuColorPassScheduleError {
+    /// The stage still requires an upload before GPU execution.
+    UploadStillRequired,
+    /// The stage still requires a readback after GPU execution.
+    ReadbackStillRequired,
+    /// Native backend blockers remain.
+    NativeBlockersRemaining {
+        /// Number of blockers in the GPU execution plan.
+        blockers: usize,
+    },
+    /// The source frame descriptor does not match the transform input.
+    InputDescriptorMismatch {
+        /// Expected transform input descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual source frame descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The target frame descriptor does not match the transform output.
+    OutputDescriptorMismatch {
+        /// Expected transform output descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual target frame descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The source frame is not GPU-resident.
+    InputNotGpuResident {
+        /// Actual source residency.
+        actual: ColorFrameResidency,
+    },
+    /// The target frame is not GPU-resident.
+    OutputNotGpuResident {
+        /// Actual target residency.
+        actual: ColorFrameResidency,
+    },
+    /// Source and target frame extents differ.
+    ExtentMismatch {
+        /// Source frame descriptor.
+        input: ColorFrameDescriptor,
+        /// Target frame descriptor.
+        output: ColorFrameDescriptor,
+    },
+    /// Backend render-pass node belongs to a different OCIO resource plan.
+    PassResourceKeyMismatch {
+        /// Expected resource key from the transform's wgpu plan.
+        expected: u64,
+        /// Actual resource key from the pass node.
+        actual: u64,
+    },
+    /// Backend render-pass target format differs from the target frame format.
+    TargetTextureFormatMismatch {
+        /// Expected render-pass output format.
+        expected: OcioGpuWgpuColorTargetFormat,
+        /// Actual target frame texture format.
+        actual: GpuColorFrameTextureFormat,
+    },
 }
 
 impl CpuRenderColorStageExecutor {
@@ -420,9 +562,18 @@ fn validate_descriptor(
     Ok(())
 }
 
+fn color_target_format_for_gpu_frame(frame: &GpuColorFrameHandle) -> OcioGpuWgpuColorTargetFormat {
+    match frame.texture_format() {
+        GpuColorFrameTextureFormat::Rgba8Unorm => OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
+        GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{GpuColorFrameId, GpuColorFrameTextureFormat};
     use mondrian_core::ensure_mondrian_default_ocio_loaded;
     use mondrian_core::types::{ColorEngine, ColorSpace};
     use mondrian_core::RgbaF32Frame;
@@ -636,6 +787,105 @@ mod tests {
         assert_eq!(plan.final_descriptor.domain, ColorFrameDomain::Export);
     }
 
+    #[test]
+    fn gpu_color_pass_schedule_binds_handles_transform_and_pass_node() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(1, transform.diagnostics.input, "working-input");
+        let output = gpu_handle(2, transform.diagnostics.output, "display-output");
+        let pass_node = pass_node_for_resource(transform.wgpu.resources.resource_key);
+
+        let schedule = RenderGpuColorPassSchedule::new(
+            input.clone(),
+            output.clone(),
+            transform.clone(),
+            pass_node,
+        )
+        .expect("schedulable GPU color pass");
+
+        assert_eq!(schedule.input, input);
+        assert_eq!(schedule.output, output);
+        assert_eq!(schedule.transform.diagnostics, transform.diagnostics);
+        assert_eq!(
+            schedule.pass_node.resource_key,
+            transform.wgpu.resources.resource_key
+        );
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_remaining_native_blockers() {
+        let transform = blocked_gpu_output_plan();
+        let input = gpu_handle(3, transform.diagnostics.input, "working-input");
+        let output = gpu_handle(4, transform.diagnostics.output, "display-output");
+        let pass_node = pass_node_for_resource(transform.wgpu.resources.resource_key);
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("blocked GPU plan must not schedule");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::NativeBlockersRemaining { blockers } if blockers > 0
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_mismatched_target_descriptor() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(5, transform.diagnostics.input, "working-input");
+        let mut wrong_output_descriptor = transform.diagnostics.output;
+        wrong_output_descriptor.color_space = ColorSpace::Rec2020;
+        let output = gpu_handle(6, wrong_output_descriptor, "wrong-display-output");
+        let pass_node = pass_node_for_resource(transform.wgpu.resources.resource_key);
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("output descriptor mismatch must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::OutputDescriptorMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_mismatched_pass_resource_key() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(7, transform.diagnostics.input, "working-input");
+        let output = gpu_handle(8, transform.diagnostics.output, "display-output");
+        let pass_node =
+            pass_node_for_resource(transform.wgpu.resources.resource_key.wrapping_add(1));
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("pass resource mismatch must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::PassResourceKeyMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_mismatched_target_texture_format() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(9, transform.diagnostics.input, "working-input");
+        let output = gpu_handle_with_format(
+            10,
+            transform.diagnostics.output,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+            "display-output-rgba8",
+        );
+        let pass_node = pass_node_for_resource(transform.wgpu.resources.resource_key);
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("target texture format mismatch must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::TargetTextureFormatMismatch {
+                expected: crate::OcioGpuWgpuColorTargetFormat::Rgba16Float,
+                actual: GpuColorFrameTextureFormat::Rgba8Unorm
+            }
+        ));
+    }
+
     fn assert_stage_chain_is_contiguous(plan: &RenderColorStagePlan) {
         for pair in plan.stages.windows(2) {
             assert_eq!(pair[0].output(), pair[1].input());
@@ -644,5 +894,66 @@ mod tests {
             plan.stages.last().expect("stage plan should not be empty").output(),
             plan.final_descriptor
         );
+    }
+
+    fn blocked_gpu_output_plan() -> RenderColorTransformGpuPlan {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let transform =
+            RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        planner
+            .plan_output_transform(working_descriptor(ColorFrameResidency::Gpu), &transform)
+            .expect("GPU output plan")
+    }
+
+    fn executable_gpu_output_plan() -> RenderColorTransformGpuPlan {
+        let mut plan = blocked_gpu_output_plan();
+        plan.wgpu.blockers.clear();
+        plan
+    }
+
+    fn gpu_handle(
+        id: u64,
+        descriptor: ColorFrameDescriptor,
+        label: &'static str,
+    ) -> GpuColorFrameHandle {
+        gpu_handle_with_format(
+            id,
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            label,
+        )
+    }
+
+    fn gpu_handle_with_format(
+        id: u64,
+        descriptor: ColorFrameDescriptor,
+        texture_format: GpuColorFrameTextureFormat,
+        label: &'static str,
+    ) -> GpuColorFrameHandle {
+        GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(id),
+            descriptor,
+            texture_format,
+            label,
+        )
+        .expect("GPU frame handle")
+    }
+
+    fn pass_node_for_resource(resource_key: u64) -> OcioGpuWgpuRenderPassNodePlan {
+        OcioGpuWgpuRenderPassNodePlan {
+            resource_key,
+            render_pipeline_cache_key: 11,
+            render_descriptor_hash: 12,
+            ocio_layout_hash: 13,
+            wrapper_layout_hash: 14,
+            output_format: crate::OcioGpuWgpuColorTargetFormat::Rgba16Float,
+            vertex_count: 4,
+            node_hash: 15,
+        }
     }
 }

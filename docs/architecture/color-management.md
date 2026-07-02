@@ -63,6 +63,11 @@ GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are
 scheduled explicitly by `RenderColorStagePlan` nodes rather than hidden inside
 color conversion helpers.
+When a GPU OCIO stage has no upload/readback requirements and no native
+blockers, `RenderGpuColorPassSchedule` binds the source `GpuColorFrameHandle`,
+target `GpuColorFrameHandle`, `RenderColorTransformGpuPlan`, and
+`OcioGpuWgpuRenderPassNodePlan` into a schedulable unit. It fails closed if the
+frame descriptors, residency, extents, or OCIO resource keys differ.
 
 Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderColorTransform` from their `ColorContext` and pass

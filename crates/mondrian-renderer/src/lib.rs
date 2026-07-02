@@ -31,7 +31,8 @@ pub use color_frame::{
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_output_stage, CpuRenderColorStageExecutor,
     RenderColorStage, RenderColorStageDiagnostics, RenderColorStageExecution, RenderColorStageMode,
-    RenderColorStagePlan, RenderColorStagePlanner,
+    RenderColorStagePlan, RenderColorStagePlanner, RenderGpuColorPassSchedule,
+    RenderGpuColorPassScheduleError,
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,
