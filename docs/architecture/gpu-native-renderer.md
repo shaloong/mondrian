@@ -60,9 +60,9 @@ preview performance work can distinguish shader planning cost from actual frame
 execution cost.
 
 `OcioGpuShaderCache::prepare_wgpu_execution(...)` reports native execution
-blockers explicitly, including shader-language translation, LUT texture upload,
-and uniform packing. Render scheduling must treat those blockers as diagnostics,
-not as silent fallback.
+blockers explicitly, including shader-language translation, LUT/uniform
+bind-group integration, and final pipeline execution. Render scheduling must
+treat those blockers as diagnostics, not as silent fallback.
 
 The same preparation step also returns an `OcioGpuWgpuResourcePlan`. This plan
 is the renderer contract for the future native pass: the OCIO binding contract
@@ -92,8 +92,8 @@ as debug/diagnostic output; it is not the canonical execution artifact. Future
 execution should prefer `wgpu::ShaderSource::Naga` while translation failures
 remain structured diagnostics, not fallbacks. This allows real OCIO shader
 compatibility work to proceed incrementally while keeping `can_execute()` false
-until shader translation, LUT upload, uniform packing, bind-group creation, and
-pipeline creation are all proven.
+until shader translation, resource uploads, bind-group creation, and pipeline
+execution are all proven.
 
 `OcioGpuWgpuLutUploadPlan` is the texture-upload handoff. It carries OCIO LUT
 payloads copied from the GPU shader descriptor as-is, including texture/sampler
@@ -110,13 +110,20 @@ boundary that creates `wgpu::Texture`, `wgpu::TextureView`, and
 interpolation-aware `wgpu::Sampler` objects from that packed plan, but upload
 success alone still does not make the color pass executable.
 
+`OcioGpuWgpuUniformUploadPlan` is the uniform-buffer handoff. It carries OCIO
+uniform names, types, offsets, value counts, and copied values. The packed
+uniform buffer uses OCIO's reported `buffer_offset` and `uniform_buffer_size`
+rather than inferred shader layout, and `OcioGpuWgpuUniformUploader` creates the
+matching `wgpu::Buffer`. Unsupported uniform payloads, offset overflows, and
+out-of-bounds writes fail closed before a GPU object is created.
+
 `OcioGpuWgpuShaderModuleCache` is the first concrete backend-object boundary.
 It validates that an `OcioGpuTranslatedShader` and `OcioGpuWgpuResourcePlan`
 share the same shader hash and expanded OCIO binding contract before creating a
 `wgpu::ShaderModule` with `wgpu::ShaderSource::Naga`. It deliberately does not
-create bind groups, upload textures, pack uniforms, or create the final
-fullscreen render pipeline; those remain explicit native blockers until the
-resource upload and wrapper shader contract are implemented and verified.
+create bind groups or the final fullscreen render pipeline; those remain
+explicit native blockers until the wrapper shader contract and render pass are
+implemented and verified.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /

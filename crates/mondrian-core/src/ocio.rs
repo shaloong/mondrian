@@ -17,7 +17,8 @@ pub use ocio_rs::GpuLanguage;
 use ocio_rs::{
     BuiltinConfigRegistry, CPUProcessor, Config, GpuShaderDesc,
     GpuTextureChannel as OcioRsGpuTextureChannel,
-    GpuTextureDimensions as OcioRsGpuTextureDimensions, Interpolation as OcioRsInterpolation,
+    GpuTextureDimensions as OcioRsGpuTextureDimensions, GpuUniformType as OcioRsGpuUniformType,
+    GpuUniformValue as OcioRsGpuUniformValue, Interpolation as OcioRsInterpolation,
 };
 use std::path::{Path, PathBuf};
 
@@ -333,6 +334,8 @@ pub struct OcioGpuShaderBundle {
     pub textures_2d: Vec<OcioGpuTexture2DBinding>,
     /// OCIO 3D LUT resource binding metadata.
     pub textures_3d: Vec<OcioGpuTexture3DBinding>,
+    /// OCIO uniform metadata and current values.
+    pub uniforms: Vec<OcioGpuUniformBinding>,
     /// Stable OCIO processor cache id for renderer-side shader caching.
     pub cache_id: Option<String>,
 }
@@ -422,6 +425,51 @@ pub struct OcioGpuTexture3DBinding {
     pub values: Vec<f32>,
 }
 
+/// Uniform value encoding reported by OCIO GPU shader extraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuUniformType {
+    /// Scalar double uniform. OCIO exposes packed values through f32 helper payloads.
+    Double,
+    /// Boolean uniform.
+    Bool,
+    /// Three-component floating-point uniform.
+    Float3,
+    /// Floating-point vector uniform.
+    VectorFloat,
+    /// Integer vector uniform.
+    VectorInt,
+    /// Unsupported or unknown uniform type.
+    Unknown,
+}
+
+/// Uniform value payload copied from OCIO.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OcioGpuUniformValue {
+    /// Floating-point uniform payload.
+    F32(Vec<f32>),
+    /// Integer uniform payload.
+    I32(Vec<i32>),
+    /// Payload could not be copied by the current OCIO binding.
+    Unsupported,
+}
+
+/// OCIO uniform metadata and current value payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcioGpuUniformBinding {
+    /// Uniform index in the OCIO descriptor.
+    pub index: u32,
+    /// Uniform symbol name used in the emitted shader.
+    pub name: String,
+    /// OCIO-reported uniform type.
+    pub uniform_type: OcioGpuUniformType,
+    /// Byte offset into OCIO's packed uniform buffer layout.
+    pub buffer_offset: usize,
+    /// Logical scalar count for this payload.
+    pub value_count: usize,
+    /// Typed payload copied from OCIO.
+    pub value: OcioGpuUniformValue,
+}
+
 impl OcioGpuShaderBundle {
     fn for_color_space(
         src: ColorSpace,
@@ -445,6 +493,7 @@ impl OcioGpuShaderBundle {
             uniform_count: desc.num_uniforms(),
             textures_2d: ocio_texture_2d_bindings(desc),
             textures_3d: ocio_texture_3d_bindings(desc),
+            uniforms: ocio_uniform_bindings(desc),
             cache_id,
         }
     }
@@ -472,6 +521,7 @@ impl OcioGpuShaderBundle {
             uniform_count: desc.num_uniforms(),
             textures_2d: ocio_texture_2d_bindings(desc),
             textures_3d: ocio_texture_3d_bindings(desc),
+            uniforms: ocio_uniform_bindings(desc),
             cache_id,
         }
     }
@@ -537,6 +587,40 @@ fn ocio_texture_interpolation(interpolation: OcioRsInterpolation) -> OcioGpuText
         OcioRsInterpolation::Cubic => OcioGpuTextureInterpolation::Cubic,
         OcioRsInterpolation::Default => OcioGpuTextureInterpolation::Default,
         OcioRsInterpolation::Best => OcioGpuTextureInterpolation::Best,
+    }
+}
+
+fn ocio_uniform_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuUniformBinding> {
+    desc.uniforms()
+        .into_iter()
+        .enumerate()
+        .map(|(index, uniform)| OcioGpuUniformBinding {
+            index: index as u32,
+            name: uniform.name,
+            uniform_type: ocio_uniform_type(uniform.uniform_type),
+            buffer_offset: uniform.buffer_offset,
+            value_count: uniform.value_count,
+            value: ocio_uniform_value(uniform.value),
+        })
+        .collect()
+}
+
+fn ocio_uniform_type(uniform_type: OcioRsGpuUniformType) -> OcioGpuUniformType {
+    match uniform_type {
+        OcioRsGpuUniformType::Double => OcioGpuUniformType::Double,
+        OcioRsGpuUniformType::Bool => OcioGpuUniformType::Bool,
+        OcioRsGpuUniformType::Float3 => OcioGpuUniformType::Float3,
+        OcioRsGpuUniformType::VectorFloat => OcioGpuUniformType::VectorFloat,
+        OcioRsGpuUniformType::VectorInt => OcioGpuUniformType::VectorInt,
+        OcioRsGpuUniformType::Unknown => OcioGpuUniformType::Unknown,
+    }
+}
+
+fn ocio_uniform_value(value: OcioRsGpuUniformValue) -> OcioGpuUniformValue {
+    match value {
+        OcioRsGpuUniformValue::F32(values) => OcioGpuUniformValue::F32(values),
+        OcioRsGpuUniformValue::I32(values) => OcioGpuUniformValue::I32(values),
+        OcioRsGpuUniformValue::Unsupported => OcioGpuUniformValue::Unsupported,
     }
 }
 
@@ -927,8 +1011,18 @@ mod tests {
         assert_eq!(bundle.descriptor_set_index, 0);
         assert_eq!(bundle.texture_binding_start, 1);
         assert_eq!(bundle.uniform_buffer_binding, 0);
+        assert_eq!(bundle.uniforms.len() as u32, bundle.uniform_count);
         assert_eq!(bundle.textures_2d.len() as u32, bundle.texture_2d_count);
         assert_eq!(bundle.textures_3d.len() as u32, bundle.texture_3d_count);
+        for uniform in &bundle.uniforms {
+            assert!(!uniform.name.trim().is_empty());
+            assert!(uniform.buffer_offset <= bundle.uniform_buffer_size);
+            match &uniform.value {
+                OcioGpuUniformValue::F32(values) => assert_eq!(values.len(), uniform.value_count),
+                OcioGpuUniformValue::I32(values) => assert_eq!(values.len(), uniform.value_count),
+                OcioGpuUniformValue::Unsupported => {}
+            }
+        }
         for texture in &bundle.textures_2d {
             assert!(!texture.texture_name.trim().is_empty());
             assert!(!texture.sampler_name.trim().is_empty());

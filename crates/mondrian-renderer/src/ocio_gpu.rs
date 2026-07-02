@@ -2,7 +2,7 @@ use lru::LruCache;
 use mondrian_core::{
     extract_ocio_display_gpu_shader_bundle, extract_ocio_gpu_shader_bundle, ColorSpace,
     GpuLanguage, OcioGpuShaderBundle, OcioGpuTextureChannel, OcioGpuTextureDimensions,
-    OcioGpuTextureInterpolation,
+    OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
 };
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
@@ -189,6 +189,8 @@ pub struct OcioGpuBindingContract {
     pub uniform_buffer_size: usize,
     /// Number of uniform symbols reported by OCIO.
     pub uniform_count: u32,
+    /// OCIO uniform resources.
+    pub uniforms: Vec<OcioGpuUniformBindingContract>,
     /// OCIO 1D/2D texture resources.
     pub textures_2d: Vec<OcioGpuTexture2DBindingContract>,
     /// OCIO 3D texture resources.
@@ -200,6 +202,23 @@ impl OcioGpuBindingContract {
     pub fn stable_hash(&self) -> u64 {
         hash_value(self)
     }
+}
+
+/// OCIO uniform binding contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuUniformBindingContract {
+    /// Uniform index in the OCIO descriptor.
+    pub index: u32,
+    /// Uniform symbol name used in emitted shader code.
+    pub name: String,
+    /// OCIO-reported uniform type.
+    pub uniform_type: OcioGpuUniformType,
+    /// Byte offset into OCIO's packed uniform buffer layout.
+    pub buffer_offset: usize,
+    /// Logical scalar count for this payload.
+    pub value_count: usize,
+    /// Stable hash of the copied uniform payload.
+    pub value_hash: u64,
 }
 
 /// OCIO 1D/2D texture binding contract.
@@ -1088,6 +1107,239 @@ pub struct OcioGpuWgpuUploadedLuts {
     pub textures_3d: Vec<OcioGpuWgpuUploadedLutTexture>,
 }
 
+/// Uniform buffer payload plan for an OCIO shader.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcioGpuWgpuUniformUploadPlan {
+    /// Stable resource key this upload plan belongs to.
+    pub resource_key: u64,
+    /// Binding slot reserved for OCIO uniform data.
+    pub binding: u32,
+    /// OCIO-reported uniform buffer size in bytes.
+    pub buffer_size: usize,
+    /// Uniform metadata and values copied from OCIO.
+    pub uniforms: Vec<OcioGpuWgpuUniformUpload>,
+}
+
+/// Upload payload for one OCIO uniform.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcioGpuWgpuUniformUpload {
+    /// Uniform index in the OCIO descriptor.
+    pub index: u32,
+    /// Uniform symbol name.
+    pub name: String,
+    /// OCIO-reported uniform type.
+    pub uniform_type: OcioGpuUniformType,
+    /// Byte offset in OCIO's packed uniform buffer.
+    pub buffer_offset: usize,
+    /// Logical scalar count.
+    pub value_count: usize,
+    /// Stable hash of the copied uniform payload.
+    pub value_hash: u64,
+    /// Typed uniform payload.
+    pub value: OcioGpuUniformValue,
+}
+
+impl OcioGpuWgpuUniformUploadPlan {
+    /// Build a uniform upload plan from OCIO shader bundle metadata.
+    pub fn for_shader_plan(
+        shader_plan: &OcioGpuShaderPlan,
+        resources: &OcioGpuWgpuResourcePlan,
+    ) -> Self {
+        let uniforms = shader_plan
+            .bundle()
+            .uniforms
+            .iter()
+            .map(|uniform| OcioGpuWgpuUniformUpload {
+                index: uniform.index,
+                name: uniform.name.clone(),
+                uniform_type: uniform.uniform_type,
+                buffer_offset: uniform.buffer_offset,
+                value_count: uniform.value_count,
+                value_hash: hash_uniform_value(&uniform.value),
+                value: uniform.value.clone(),
+            })
+            .collect();
+        Self {
+            resource_key: resources.resource_key,
+            binding: resources.binding_contract.uniform_buffer_binding,
+            buffer_size: resources.binding_contract.uniform_buffer_size,
+            uniforms,
+        }
+    }
+
+    /// Validate and pack OCIO uniforms into a single uniform-buffer payload.
+    pub fn pack_buffer(
+        &self,
+    ) -> Result<OcioGpuWgpuPackedUniformBuffer, OcioGpuWgpuUniformUploadError> {
+        if self.buffer_size == 0 && !self.uniforms.is_empty() {
+            return Err(OcioGpuWgpuUniformUploadError::MissingUniformBuffer {
+                uniform_count: self.uniforms.len(),
+            });
+        }
+        let mut bytes = vec![0u8; self.buffer_size];
+        for uniform in &self.uniforms {
+            let uniform_bytes = uniform_value_to_bytes(
+                OcioGpuWgpuUniformUploadResource {
+                    index: uniform.index,
+                    name: uniform.name.clone(),
+                },
+                &uniform.value,
+            )?;
+            if uniform.value_count != uniform_value_scalar_count(&uniform.value) {
+                return Err(OcioGpuWgpuUniformUploadError::ValueCountMismatch {
+                    resource: OcioGpuWgpuUniformUploadResource {
+                        index: uniform.index,
+                        name: uniform.name.clone(),
+                    },
+                    actual: uniform_value_scalar_count(&uniform.value),
+                    expected: uniform.value_count,
+                });
+            }
+            let end = uniform.buffer_offset.checked_add(uniform_bytes.len()).ok_or_else(|| {
+                OcioGpuWgpuUniformUploadError::UniformRangeOverflow {
+                    resource: OcioGpuWgpuUniformUploadResource {
+                        index: uniform.index,
+                        name: uniform.name.clone(),
+                    },
+                }
+            })?;
+            if end > bytes.len() {
+                return Err(OcioGpuWgpuUniformUploadError::UniformOutOfBounds {
+                    resource: OcioGpuWgpuUniformUploadResource {
+                        index: uniform.index,
+                        name: uniform.name.clone(),
+                    },
+                    offset: uniform.buffer_offset,
+                    byte_len: uniform_bytes.len(),
+                    buffer_size: bytes.len(),
+                });
+            }
+            bytes[uniform.buffer_offset..end].copy_from_slice(&uniform_bytes);
+        }
+        Ok(OcioGpuWgpuPackedUniformBuffer {
+            resource_key: self.resource_key,
+            binding: self.binding,
+            byte_len: bytes.len(),
+            bytes_hash: hash_bytes(&bytes),
+            bytes,
+        })
+    }
+}
+
+/// Packed OCIO uniform buffer bytes ready for wgpu upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuWgpuPackedUniformBuffer {
+    /// Stable resource key this buffer belongs to.
+    pub resource_key: u64,
+    /// Binding slot reserved for OCIO uniform data.
+    pub binding: u32,
+    /// Buffer length in bytes.
+    pub byte_len: usize,
+    /// Stable hash of packed bytes.
+    pub bytes_hash: u64,
+    /// Packed buffer bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Uploaded OCIO uniform buffer.
+pub struct OcioGpuWgpuUploadedUniformBuffer {
+    /// Stable resource key this buffer belongs to.
+    pub resource_key: u64,
+    /// Binding slot reserved for OCIO uniform data.
+    pub binding: u32,
+    /// Buffer length in bytes.
+    pub byte_len: usize,
+    /// Stable hash of packed bytes.
+    pub bytes_hash: u64,
+    /// Uploaded wgpu buffer.
+    pub buffer: wgpu::Buffer,
+}
+
+/// Resource identifier for uniform upload errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuWgpuUniformUploadResource {
+    /// Uniform index in the OCIO descriptor.
+    pub index: u32,
+    /// Uniform symbol name.
+    pub name: String,
+}
+
+/// Error returned when OCIO uniforms cannot be packed or uploaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuUniformUploadError {
+    /// OCIO reported uniforms but no backing uniform buffer size.
+    MissingUniformBuffer { uniform_count: usize },
+    /// OCIO reported a uniform value type the current uploader cannot encode.
+    UnsupportedUniformValue {
+        /// Uniform resource that failed.
+        resource: OcioGpuWgpuUniformUploadResource,
+    },
+    /// Uniform scalar count does not match the copied payload.
+    ValueCountMismatch {
+        /// Uniform resource that failed.
+        resource: OcioGpuWgpuUniformUploadResource,
+        /// Actual scalar count.
+        actual: usize,
+        /// Expected scalar count.
+        expected: usize,
+    },
+    /// Offset + payload size overflowed.
+    UniformRangeOverflow {
+        /// Uniform resource that failed.
+        resource: OcioGpuWgpuUniformUploadResource,
+    },
+    /// Uniform payload does not fit inside OCIO's packed buffer.
+    UniformOutOfBounds {
+        /// Uniform resource that failed.
+        resource: OcioGpuWgpuUniformUploadResource,
+        /// Byte offset in the packed buffer.
+        offset: usize,
+        /// Payload length in bytes.
+        byte_len: usize,
+        /// Uniform buffer length in bytes.
+        buffer_size: usize,
+    },
+}
+
+/// Stateless uploader for OCIO uniform buffers.
+pub struct OcioGpuWgpuUniformUploader;
+
+impl OcioGpuWgpuUniformUploader {
+    /// Upload a validated OCIO uniform plan into a wgpu uniform buffer.
+    pub fn upload(
+        device: &wgpu::Device,
+        plan: &OcioGpuWgpuUniformUploadPlan,
+    ) -> Result<Option<OcioGpuWgpuUploadedUniformBuffer>, OcioGpuWgpuUniformUploadError> {
+        let packed = plan.pack_buffer()?;
+        Ok(Self::upload_packed(device, &packed))
+    }
+
+    /// Upload an already packed OCIO uniform buffer.
+    pub fn upload_packed(
+        device: &wgpu::Device,
+        packed: &OcioGpuWgpuPackedUniformBuffer,
+    ) -> Option<OcioGpuWgpuUploadedUniformBuffer> {
+        if packed.bytes.is_empty() {
+            return None;
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ocio_uniform_buffer"),
+            size: packed.bytes.len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        buffer.slice(..).get_mapped_range_mut().copy_from_slice(&packed.bytes);
+        buffer.unmap();
+        Some(OcioGpuWgpuUploadedUniformBuffer {
+            resource_key: packed.resource_key,
+            binding: packed.binding,
+            byte_len: packed.byte_len,
+            bytes_hash: packed.bytes_hash,
+            buffer,
+        })
+    }
+}
+
 /// Stateless uploader for OCIO LUT texture payloads.
 pub struct OcioGpuWgpuLutUploader;
 
@@ -1310,13 +1562,13 @@ impl Default for OcioGpuWgpuShaderModuleCache {
 pub enum OcioGpuWgpuBlocker {
     /// OCIO emitted a language that is not directly consumable by wgpu.
     ShaderLanguageRequiresTranslation { language: GpuLanguage },
-    /// OCIO referenced LUT textures that have not yet been uploaded/bound.
-    TextureUploadNotImplemented {
+    /// OCIO referenced LUT textures that do not yet have bind-group integration.
+    LutBindGroupNotImplemented {
         texture_2d_count: u32,
         texture_3d_count: u32,
     },
-    /// OCIO referenced uniforms that have not yet been packed into a wgpu buffer.
-    UniformUploadNotImplemented { uniform_count: u32 },
+    /// OCIO referenced uniforms that do not yet have bind-group integration.
+    UniformBindGroupNotImplemented { uniform_count: u32 },
 }
 
 /// Bounded cache for OCIO GPU shader extraction results.
@@ -1376,13 +1628,13 @@ impl OcioGpuShaderCache {
         });
 
         if shader_plan.texture_2d_count > 0 || shader_plan.texture_3d_count > 0 {
-            blockers.push(OcioGpuWgpuBlocker::TextureUploadNotImplemented {
+            blockers.push(OcioGpuWgpuBlocker::LutBindGroupNotImplemented {
                 texture_2d_count: shader_plan.texture_2d_count,
                 texture_3d_count: shader_plan.texture_3d_count,
             });
         }
         if shader_plan.uniform_count > 0 {
-            blockers.push(OcioGpuWgpuBlocker::UniformUploadNotImplemented {
+            blockers.push(OcioGpuWgpuBlocker::UniformBindGroupNotImplemented {
                 uniform_count: shader_plan.uniform_count,
             });
         }
@@ -1551,6 +1803,18 @@ fn binding_contract_for_plan(plan: &OcioGpuShaderPlan) -> OcioGpuBindingContract
         texture_binding_start: bundle.texture_binding_start,
         uniform_buffer_size: bundle.uniform_buffer_size,
         uniform_count: bundle.uniform_count,
+        uniforms: bundle
+            .uniforms
+            .iter()
+            .map(|uniform| OcioGpuUniformBindingContract {
+                index: uniform.index,
+                name: uniform.name.clone(),
+                uniform_type: uniform.uniform_type,
+                buffer_offset: uniform.buffer_offset,
+                value_count: uniform.value_count,
+                value_hash: hash_uniform_value(&uniform.value),
+            })
+            .collect(),
         textures_2d: bundle
             .textures_2d
             .iter()
@@ -1791,6 +2055,27 @@ fn checked_rgb_value_count(
         .ok_or(OcioGpuWgpuLutUploadError::TexelCountOverflow { resource })
 }
 
+fn uniform_value_to_bytes(
+    resource: OcioGpuWgpuUniformUploadResource,
+    value: &OcioGpuUniformValue,
+) -> Result<Vec<u8>, OcioGpuWgpuUniformUploadError> {
+    match value {
+        OcioGpuUniformValue::F32(values) => Ok(f32_values_to_bytes(values)),
+        OcioGpuUniformValue::I32(values) => Ok(bytemuck::cast_slice(values).to_vec()),
+        OcioGpuUniformValue::Unsupported => {
+            Err(OcioGpuWgpuUniformUploadError::UnsupportedUniformValue { resource })
+        }
+    }
+}
+
+fn uniform_value_scalar_count(value: &OcioGpuUniformValue) -> usize {
+    match value {
+        OcioGpuUniformValue::F32(values) => values.len(),
+        OcioGpuUniformValue::I32(values) => values.len(),
+        OcioGpuUniformValue::Unsupported => 0,
+    }
+}
+
 fn f32_values_to_bytes(values: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(values).to_vec()
 }
@@ -1862,6 +2147,33 @@ fn hash_f32_values(values: &[f32]) -> u64 {
     hasher.finish()
 }
 
+fn hash_i32_values(values: &[i32]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    values.len().hash(&mut hasher);
+    for value in values {
+        value.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn hash_uniform_value(value: &OcioGpuUniformValue) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match value {
+        OcioGpuUniformValue::F32(values) => {
+            0u8.hash(&mut hasher);
+            hash_f32_values(values).hash(&mut hasher);
+        }
+        OcioGpuUniformValue::I32(values) => {
+            1u8.hash(&mut hasher);
+            hash_i32_values(values).hash(&mut hasher);
+        }
+        OcioGpuUniformValue::Unsupported => {
+            2u8.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -1911,6 +2223,30 @@ mod tests {
             edge_len,
             values_hash: hash_f32_values(&values),
             values,
+        }
+    }
+
+    fn f32_uniform(index: u32, offset: usize, values: Vec<f32>) -> OcioGpuWgpuUniformUpload {
+        OcioGpuWgpuUniformUpload {
+            index,
+            name: format!("uniform_f32_{index}"),
+            uniform_type: OcioGpuUniformType::VectorFloat,
+            buffer_offset: offset,
+            value_count: values.len(),
+            value_hash: hash_uniform_value(&OcioGpuUniformValue::F32(values.clone())),
+            value: OcioGpuUniformValue::F32(values),
+        }
+    }
+
+    fn i32_uniform(index: u32, offset: usize, values: Vec<i32>) -> OcioGpuWgpuUniformUpload {
+        OcioGpuWgpuUniformUpload {
+            index,
+            name: format!("uniform_i32_{index}"),
+            uniform_type: OcioGpuUniformType::VectorInt,
+            buffer_offset: offset,
+            value_count: values.len(),
+            value_hash: hash_uniform_value(&OcioGpuUniformValue::I32(values.clone())),
+            value: OcioGpuUniformValue::I32(values),
         }
     }
 
@@ -2009,6 +2345,96 @@ mod tests {
                 resource: OcioGpuWgpuLutUploadResource::Texture2D { index: 7 },
                 actual: 2,
                 expected: 3
+            }
+        );
+    }
+
+    #[test]
+    fn uniform_upload_pack_writes_f32_and_i32_values_at_offsets() {
+        let plan = OcioGpuWgpuUniformUploadPlan {
+            resource_key: 21,
+            binding: 0,
+            buffer_size: 24,
+            uniforms: vec![
+                f32_uniform(0, 0, vec![0.25, 0.5]),
+                i32_uniform(1, 16, vec![7, -3]),
+            ],
+        };
+
+        let packed = plan.pack_buffer().expect("pack uniform buffer");
+
+        assert_eq!(packed.resource_key, 21);
+        assert_eq!(packed.binding, 0);
+        assert_eq!(packed.byte_len, 24);
+        assert_ne!(packed.bytes_hash, 0);
+        assert_eq!(f32s_from_bytes(&packed.bytes[0..8]), vec![0.25, 0.5]);
+        assert_eq!(&packed.bytes[8..16], &[0u8; 8]);
+        let first_i32 = i32::from_ne_bytes([
+            packed.bytes[16],
+            packed.bytes[17],
+            packed.bytes[18],
+            packed.bytes[19],
+        ]);
+        let second_i32 = i32::from_ne_bytes([
+            packed.bytes[20],
+            packed.bytes[21],
+            packed.bytes[22],
+            packed.bytes[23],
+        ]);
+        assert_eq!((first_i32, second_i32), (7, -3));
+    }
+
+    #[test]
+    fn uniform_upload_pack_rejects_out_of_bounds_uniform() {
+        let plan = OcioGpuWgpuUniformUploadPlan {
+            resource_key: 22,
+            binding: 0,
+            buffer_size: 4,
+            uniforms: vec![f32_uniform(2, 2, vec![1.0])],
+        };
+
+        let err = plan.pack_buffer().expect_err("uniform payload must fit inside OCIO buffer");
+
+        assert_eq!(
+            err,
+            OcioGpuWgpuUniformUploadError::UniformOutOfBounds {
+                resource: OcioGpuWgpuUniformUploadResource {
+                    index: 2,
+                    name: "uniform_f32_2".to_owned()
+                },
+                offset: 2,
+                byte_len: 4,
+                buffer_size: 4
+            }
+        );
+    }
+
+    #[test]
+    fn uniform_upload_pack_rejects_unsupported_uniform_value() {
+        let plan = OcioGpuWgpuUniformUploadPlan {
+            resource_key: 23,
+            binding: 0,
+            buffer_size: 4,
+            uniforms: vec![OcioGpuWgpuUniformUpload {
+                index: 3,
+                name: "unsupported".to_owned(),
+                uniform_type: OcioGpuUniformType::Unknown,
+                buffer_offset: 0,
+                value_count: 1,
+                value_hash: hash_uniform_value(&OcioGpuUniformValue::Unsupported),
+                value: OcioGpuUniformValue::Unsupported,
+            }],
+        };
+
+        let err = plan.pack_buffer().expect_err("unsupported uniform value must fail closed");
+
+        assert_eq!(
+            err,
+            OcioGpuWgpuUniformUploadError::UnsupportedUniformValue {
+                resource: OcioGpuWgpuUniformUploadResource {
+                    index: 3,
+                    name: "unsupported".to_owned()
+                }
             }
         );
     }
@@ -2276,6 +2702,7 @@ mod tests {
             uniform_count: 0,
             textures_2d: Vec::new(),
             textures_3d: Vec::new(),
+            uniforms: Vec::new(),
             cache_id: Some("test-cache".to_owned()),
         });
         let plan = plan_from_bundle(request, bundle);
@@ -2334,6 +2761,7 @@ mod tests {
             uniform_count: 0,
             textures_2d: Vec::new(),
             textures_3d: Vec::new(),
+            uniforms: Vec::new(),
             cache_id: Some("test-cache".to_owned()),
         });
         let plan = plan_from_bundle(request, bundle);
@@ -2384,6 +2812,7 @@ mod tests {
             uniform_count: 0,
             textures_2d: Vec::new(),
             textures_3d: Vec::new(),
+            uniforms: Vec::new(),
             cache_id: Some("test-hlsl-cache".to_owned()),
         });
         let plan = plan_from_bundle(request, bundle);
