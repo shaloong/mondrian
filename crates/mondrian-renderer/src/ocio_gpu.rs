@@ -104,6 +104,8 @@ impl OcioGpuShaderPlan {
 pub struct OcioGpuWgpuExecutionPlan {
     /// Cached OCIO shader plan this execution preparation is based on.
     pub shader_plan: Arc<OcioGpuShaderPlan>,
+    /// Renderer resource contract required before native wgpu execution.
+    pub resources: OcioGpuWgpuResourcePlan,
     /// Native wgpu blockers that must be cleared before this plan can execute.
     pub blockers: Vec<OcioGpuWgpuBlocker>,
 }
@@ -112,6 +114,91 @@ impl OcioGpuWgpuExecutionPlan {
     /// Whether this plan can be executed by the current native wgpu backend.
     pub fn can_execute(&self) -> bool {
         self.blockers.is_empty()
+    }
+}
+
+/// Renderer-side resource contract for a native wgpu OCIO color pass.
+///
+/// This describes the resources that must be materialized by the render graph.
+/// It does not claim those resources have already been created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuResourcePlan {
+    /// Stable key for caching pipeline/resource layout preparation.
+    pub resource_key: u64,
+    /// Shader hash this resource contract belongs to.
+    pub shader_hash: u64,
+    /// Input frame texture bindings.
+    pub input_textures: u32,
+    /// Output frame render targets or storage textures.
+    pub output_textures: u32,
+    /// OCIO 1D/2D LUT texture bindings.
+    pub ocio_texture_2d_bindings: u32,
+    /// OCIO 3D LUT texture bindings.
+    pub ocio_texture_3d_bindings: u32,
+    /// Uniform buffers required for OCIO dynamic properties.
+    pub uniform_buffers: u32,
+    /// Samplers required for input/LUT texture sampling.
+    pub samplers: u32,
+    /// Bind group entries implied by this resource contract.
+    pub bind_group_entries: u32,
+    /// Bind groups implied by this resource contract.
+    pub bind_groups: u32,
+    /// Stable signature for a future wgpu pipeline layout.
+    pub pipeline_layout_hash: u64,
+}
+
+impl OcioGpuWgpuResourcePlan {
+    /// Build a renderer resource contract from a cached OCIO shader plan.
+    pub fn for_shader_plan(shader_plan: &OcioGpuShaderPlan) -> Self {
+        let input_textures = 1;
+        let output_textures = 1;
+        let uniform_buffers = u32::from(shader_plan.uniform_count > 0);
+        let sampled_textures =
+            input_textures + shader_plan.texture_2d_count + shader_plan.texture_3d_count;
+        let samplers = u32::from(sampled_textures > 0);
+        let bind_group_entries = input_textures
+            + shader_plan.texture_2d_count
+            + shader_plan.texture_3d_count
+            + uniform_buffers
+            + samplers;
+        let bind_groups = 1;
+        let pipeline_layout_hash = hash_resource_layout(ResourceLayoutSignature {
+            language: shader_plan.request.language(),
+            input_textures,
+            output_textures,
+            texture_2d_count: shader_plan.texture_2d_count,
+            texture_3d_count: shader_plan.texture_3d_count,
+            uniform_buffers,
+            samplers,
+            bind_group_entries,
+            bind_groups,
+        });
+        let resource_key = hash_resource_key(
+            shader_plan.cache_key,
+            shader_plan.shader_hash,
+            pipeline_layout_hash,
+        );
+        Self {
+            resource_key,
+            shader_hash: shader_plan.shader_hash,
+            input_textures,
+            output_textures,
+            ocio_texture_2d_bindings: shader_plan.texture_2d_count,
+            ocio_texture_3d_bindings: shader_plan.texture_3d_count,
+            uniform_buffers,
+            samplers,
+            bind_group_entries,
+            bind_groups,
+            pipeline_layout_hash,
+        }
+    }
+
+    /// Total texture resources referenced by this plan.
+    pub fn total_textures(&self) -> u32 {
+        self.input_textures
+            .saturating_add(self.output_textures)
+            .saturating_add(self.ocio_texture_2d_bindings)
+            .saturating_add(self.ocio_texture_3d_bindings)
     }
 }
 
@@ -197,7 +284,8 @@ impl OcioGpuShaderCache {
             });
         }
 
-        Ok(OcioGpuWgpuExecutionPlan { shader_plan, blockers })
+        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&shader_plan);
+        Ok(OcioGpuWgpuExecutionPlan { shader_plan, resources, blockers })
     }
 
     /// Return cache health counters.
@@ -296,6 +384,40 @@ fn hash_request_and_processor(
     hasher.finish()
 }
 
+fn hash_resource_key(shader_cache_key: u64, shader_hash: u64, pipeline_layout_hash: u64) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    shader_cache_key.hash(&mut hasher);
+    shader_hash.hash(&mut hasher);
+    pipeline_layout_hash.hash(&mut hasher);
+    hasher.finish()
+}
+
+struct ResourceLayoutSignature {
+    language: GpuLanguage,
+    input_textures: u32,
+    output_textures: u32,
+    texture_2d_count: u32,
+    texture_3d_count: u32,
+    uniform_buffers: u32,
+    samplers: u32,
+    bind_group_entries: u32,
+    bind_groups: u32,
+}
+
+fn hash_resource_layout(signature: ResourceLayoutSignature) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (signature.language as i32).hash(&mut hasher);
+    signature.input_textures.hash(&mut hasher);
+    signature.output_textures.hash(&mut hasher);
+    signature.texture_2d_count.hash(&mut hasher);
+    signature.texture_3d_count.hash(&mut hasher);
+    signature.uniform_buffers.hash(&mut hasher);
+    signature.samplers.hash(&mut hasher);
+    signature.bind_group_entries.hash(&mut hasher);
+    signature.bind_groups.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn hash_value<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
@@ -325,6 +447,28 @@ mod tests {
         assert_eq!(first.bundle().src_color_space, "S-Log3 S-Gamut3.Cine");
         assert_eq!(first.bundle().dst_color_space, "Camera Rec.709");
         assert!(first.processor_cache_id.as_deref().is_some_and(|id| !id.is_empty()));
+        let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&first);
+        assert_eq!(resources.input_textures, 1);
+        assert_eq!(resources.output_textures, 1);
+        assert_eq!(resources.ocio_texture_2d_bindings, first.texture_2d_count);
+        assert_eq!(resources.ocio_texture_3d_bindings, first.texture_3d_count);
+        assert_eq!(
+            resources.uniform_buffers,
+            u32::from(first.uniform_count > 0)
+        );
+        assert_eq!(
+            resources.bind_group_entries,
+            1 + first.texture_2d_count
+                + first.texture_3d_count
+                + u32::from(first.uniform_count > 0)
+                + resources.samplers
+        );
+        assert_eq!(
+            resources.total_textures(),
+            2 + first.texture_2d_count + first.texture_3d_count
+        );
+        assert_ne!(resources.resource_key, 0);
+        assert_ne!(resources.pipeline_layout_hash, 0);
 
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);
@@ -369,6 +513,20 @@ mod tests {
             .expect("prepare wgpu execution");
 
         assert!(!prepared.can_execute());
+        assert_eq!(prepared.resources.input_textures, 1);
+        assert_eq!(prepared.resources.output_textures, 1);
+        assert_eq!(
+            prepared.resources.ocio_texture_2d_bindings,
+            prepared.shader_plan.texture_2d_count
+        );
+        assert_eq!(
+            prepared.resources.ocio_texture_3d_bindings,
+            prepared.shader_plan.texture_3d_count
+        );
+        assert_eq!(
+            prepared.resources.uniform_buffers,
+            u32::from(prepared.shader_plan.uniform_count > 0)
+        );
         assert!(prepared.blockers.iter().any(|blocker| matches!(
             blocker,
             OcioGpuWgpuBlocker::ShaderLanguageRequiresTranslation {

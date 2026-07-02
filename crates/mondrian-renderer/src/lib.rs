@@ -46,7 +46,7 @@ pub use gpu_backend::{
 };
 pub use ocio_gpu::{
     OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuShaderError, OcioGpuShaderPlan,
-    OcioGpuShaderRequest, OcioGpuWgpuBlocker, OcioGpuWgpuExecutionPlan,
+    OcioGpuShaderRequest, OcioGpuWgpuBlocker, OcioGpuWgpuExecutionPlan, OcioGpuWgpuResourcePlan,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{

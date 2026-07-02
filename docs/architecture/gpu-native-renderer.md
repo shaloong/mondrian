@@ -64,14 +64,24 @@ blockers explicitly, including shader-language translation, LUT texture upload,
 and uniform packing. Render scheduling must treat those blockers as diagnostics,
 not as silent fallback.
 
+The same preparation step also returns an `OcioGpuWgpuResourcePlan`. This plan
+is the renderer contract for the future native pass: input/output frame
+textures, OCIO 1D/2D and 3D LUT texture bindings, uniform buffers, samplers,
+bind group entries, bind groups, and stable resource/pipeline-layout hashes.
+It is not a fake resource allocation layer; concrete `wgpu::ShaderModule`,
+`wgpu::Texture`, `wgpu::BindGroupLayout`, `wgpu::BindGroup`, and pipeline
+objects must still be created by the backend compiler/upload layer before
+`can_execute()` can become true.
+
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
 `RenderColorTransform` requests to the OCIO shader cache. It produces a
-descriptor-level GPU plan with the OCIO request, prepared wgpu blockers,
-transform diagnostics, and explicit CPU upload/readback boundary flags. This is
-the only place color-transform scheduling should ask whether a GPU OCIO path is
-ready; CPU execution remains the correctness executor until the plan reports no
-native blockers and the render graph owns GPU-resident frame handles.
+descriptor-level GPU plan with the OCIO request, prepared wgpu resource
+contract, native blockers, transform diagnostics, and explicit CPU
+upload/readback boundary flags. This is the only place color-transform
+scheduling should ask whether a GPU OCIO path is ready; CPU execution remains
+the correctness executor until the plan reports no native blockers and the
+render graph owns GPU-resident frame handles.
 
 `RenderColorStagePlanner` is the scheduling layer above CPU and GPU color
 executors. It emits an ordered `RenderColorStagePlan` containing CPU transform,
