@@ -79,6 +79,7 @@ pub use ocio_gpu::{
     OcioGpuWgpuWrapperBindingEntry, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperBindingResource, OcioGpuWgpuWrapperInputResources,
     OcioGpuWgpuWrapperLinkBlocker, OcioGpuWgpuWrapperLinkPlan,
+    OcioGpuWgpuWrapperShaderArtifactError, OcioGpuWgpuWrapperShaderSourceArtifact,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{

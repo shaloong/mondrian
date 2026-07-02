@@ -170,8 +170,16 @@ structured blockers such as missing function names, missing pixel variables, or
 complete fragment shaders that must be split before wrapping.
 `OcioGpuWgpuRenderPipelineDescriptorPlan` consumes the wrapper-link plan and
 captures the output target format plus render-pipeline descriptor hash. It
-remains a contract rather than an executable pipeline until Mondrian generates
-and validates the final wrapper shader module and render-pass node.
+remains a contract rather than an executable pipeline until Mondrian validates
+the final wrapper shader module and render-pass node.
+`OcioGpuWgpuWrapperShaderSourceArtifact` is the next boundary in that chain: it
+generates stage-split GLSL source artifacts from a linkable OCIO callable
+program plus Mondrian's wrapper contract, strips duplicate GLSL version
+directives from the fragment source, carries stable stage/link hashes, and fails
+closed when the link plan still reports blockers. The combined source is
+diagnostic text only; the canonical execution artifact should become validated
+Naga IR (with WGSL as debug output only) before any preview/export render pass
+treats the GPU OCIO path as executable.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /

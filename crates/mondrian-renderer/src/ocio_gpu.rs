@@ -287,6 +287,89 @@ impl OcioGpuWgpuWrapperLinkPlan {
     }
 }
 
+/// Error returned when a wrapper shader source artifact cannot be generated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuWrapperShaderArtifactError {
+    /// The wrapper link plan still has blockers.
+    LinkPlanBlocked {
+        /// Blockers reported by the link plan.
+        blockers: Vec<OcioGpuWgpuWrapperLinkBlocker>,
+    },
+    /// The shader plan does not match the wrapper link plan's shader hash.
+    ShaderHashMismatch { expected: u64, actual: u64 },
+}
+
+/// GLSL source artifact for the future OCIO fullscreen wrapper shader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuWgpuWrapperShaderSourceArtifact {
+    /// Stable resource key this shader belongs to.
+    pub resource_key: u64,
+    /// Hash of the wrapper-link plan.
+    pub link_hash: u64,
+    /// Hash of the OCIO-generated program source.
+    pub ocio_shader_hash: u64,
+    /// Hash of the stage-split wrapper shader sources.
+    pub source_hash: u64,
+    /// Hash of the fullscreen vertex shader source.
+    pub vertex_source_hash: u64,
+    /// Hash of the OCIO fragment wrapper shader source.
+    pub fragment_source_hash: u64,
+    /// Fullscreen vertex shader source.
+    pub vertex_source: String,
+    /// Fragment shader source that calls the OCIO-generated program.
+    pub fragment_source: String,
+    /// Combined source text for diagnostics only. This is not an execution artifact.
+    pub debug_combined_source: String,
+    /// Vertex entry point expected by the render pipeline.
+    pub vertex_entry_point: String,
+    /// Fragment entry point expected by the render pipeline.
+    pub fragment_entry_point: String,
+    /// Output location written by the fragment shader.
+    pub output_location: u32,
+    /// Non-fatal diagnostics recorded while generating the artifact.
+    pub diagnostics: Vec<OcioGpuShaderDiagnostic>,
+}
+
+impl OcioGpuWgpuWrapperShaderSourceArtifact {
+    /// Generate stage-split fullscreen wrapper GLSL source from a linkable OCIO program.
+    pub fn generate(
+        shader_plan: &OcioGpuShaderPlan,
+        link_plan: &OcioGpuWgpuWrapperLinkPlan,
+    ) -> Result<Self, OcioGpuWgpuWrapperShaderArtifactError> {
+        if !link_plan.blockers.is_empty() {
+            return Err(OcioGpuWgpuWrapperShaderArtifactError::LinkPlanBlocked {
+                blockers: link_plan.blockers.clone(),
+            });
+        }
+        if shader_plan.shader_hash != link_plan.shader_hash {
+            return Err(OcioGpuWgpuWrapperShaderArtifactError::ShaderHashMismatch {
+                expected: link_plan.shader_hash,
+                actual: shader_plan.shader_hash,
+            });
+        }
+
+        let sources = build_wrapper_shader_sources(shader_plan.bundle(), link_plan);
+        let vertex_source_hash = hash_value(&sources.vertex_source);
+        let fragment_source_hash = hash_value(&sources.fragment_source);
+        let source_hash = hash_value(&(vertex_source_hash, fragment_source_hash));
+        Ok(Self {
+            resource_key: link_plan.resource_key,
+            link_hash: link_plan.link_hash,
+            ocio_shader_hash: shader_plan.shader_hash,
+            source_hash,
+            vertex_source_hash,
+            fragment_source_hash,
+            vertex_source: sources.vertex_source,
+            fragment_source: sources.fragment_source,
+            debug_combined_source: sources.debug_combined_source,
+            vertex_entry_point: link_plan.shader_contract.vertex_entry_point.clone(),
+            fragment_entry_point: link_plan.shader_contract.fragment_entry_point.clone(),
+            output_location: link_plan.shader_contract.output_location,
+            diagnostics: Vec::new(),
+        })
+    }
+}
+
 /// Request used to translate an OCIO-generated shader into a native wgpu target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OcioGpuShaderTranslationRequest {
@@ -1642,6 +1725,12 @@ impl OcioGpuWgpuPipelineLayoutPreparer {
 /// Fullscreen wrapper shader contract for an OCIO render pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OcioGpuWgpuFullscreenShaderContract {
+    /// Bind group used by wrapper input resources.
+    pub wrapper_bind_group: u32,
+    /// Input frame texture binding inside the wrapper bind group.
+    pub input_texture_binding: u32,
+    /// Input frame sampler binding inside the wrapper bind group.
+    pub input_sampler_binding: u32,
     /// Vertex entry point owned by Mondrian.
     pub vertex_entry_point: String,
     /// Fragment entry point owned by Mondrian.
@@ -1658,6 +1747,9 @@ impl OcioGpuWgpuFullscreenShaderContract {
     /// Build the default fullscreen wrapper shader contract.
     pub fn for_wrapper_contract(contract: &OcioGpuFullscreenWrapperContract) -> Self {
         Self {
+            wrapper_bind_group: contract.bind_group,
+            input_texture_binding: contract.input_texture_binding,
+            input_sampler_binding: contract.input_sampler_binding,
             vertex_entry_point: "vs_main".to_owned(),
             fragment_entry_point: "fs_main".to_owned(),
             topology: OcioGpuWgpuFullscreenTopology::TriangleStrip,
@@ -3380,6 +3472,84 @@ fn wrapper_link_blockers(
     blockers
 }
 
+struct OcioGpuWgpuWrapperShaderSources {
+    vertex_source: String,
+    fragment_source: String,
+    debug_combined_source: String,
+}
+
+fn build_wrapper_shader_sources(
+    bundle: &OcioGpuShaderBundle,
+    link_plan: &OcioGpuWgpuWrapperLinkPlan,
+) -> OcioGpuWgpuWrapperShaderSources {
+    let wrapper = &link_plan.shader_contract;
+    let vertex_source = format!(
+        r#"#version 450 core
+
+layout(location = 0) out vec2 mondrian_wrapper_uv;
+
+void {vertex_entry}() {{
+    vec2 positions[4] = vec2[](
+        vec2(-1.0, -1.0),
+        vec2( 1.0, -1.0),
+        vec2(-1.0,  1.0),
+        vec2( 1.0,  1.0)
+    );
+    vec2 uvs[4] = vec2[](
+        vec2(0.0, 1.0),
+        vec2(1.0, 1.0),
+        vec2(0.0, 0.0),
+        vec2(1.0, 0.0)
+    );
+    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+    mondrian_wrapper_uv = uvs[gl_VertexIndex];
+}}
+"#,
+        vertex_entry = wrapper.vertex_entry_point,
+    );
+    let fragment_source = format!(
+        r#"#version 450 core
+
+{ocio_program}
+
+layout(location = 0) in vec2 mondrian_fragment_uv;
+layout(location = {output_location}) out vec4 mondrian_fragment_color;
+
+layout(set = {wrapper_set}, binding = {input_texture_binding}) uniform texture2D mondrian_wrapper_input_texture;
+layout(set = {wrapper_set}, binding = {input_sampler_binding}) uniform sampler mondrian_wrapper_input_sampler;
+
+void {fragment_entry}() {{
+    vec4 {pixel_name} = texture(sampler2D(mondrian_wrapper_input_texture, mondrian_wrapper_input_sampler), mondrian_fragment_uv);
+    {function_name}({pixel_name});
+    mondrian_fragment_color = {pixel_name};
+}}
+"#,
+        ocio_program = strip_glsl_version_directives(&bundle.shader_text),
+        wrapper_set = wrapper.wrapper_bind_group,
+        input_texture_binding = wrapper.input_texture_binding,
+        input_sampler_binding = wrapper.input_sampler_binding,
+        fragment_entry = wrapper.fragment_entry_point,
+        output_location = wrapper.output_location,
+        pixel_name = &link_plan.program_contract.pixel_name,
+        function_name = &link_plan.program_contract.function_name,
+    );
+    let debug_combined_source =
+        format!("{vertex_source}\n/* ---- fragment ---- */\n{fragment_source}");
+    OcioGpuWgpuWrapperShaderSources {
+        vertex_source,
+        fragment_source,
+        debug_combined_source,
+    }
+}
+
+fn strip_glsl_version_directives(shader_text: &str) -> String {
+    shader_text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("#version"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn pipeline_layout_bind_group_layouts<'a>(
     plan: &OcioGpuWgpuPipelineLayoutPlan,
     ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
@@ -4252,6 +4422,8 @@ mod tests {
 
     fn callable_ocio_program_text() -> &'static str {
         r#"
+            #version 450 core
+
             void mondrian_ocio_main(inout vec4 mondrian_ocio_pixel) {
                 mondrian_ocio_pixel.rgb = clamp(mondrian_ocio_pixel.rgb, vec3(0.0), vec3(1.0));
             }
@@ -4688,8 +4860,112 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_layout_and_render_descriptor_preserve_fullscreen_contract() {
+    fn wrapper_shader_artifact_generates_stage_split_fullscreen_sources() {
         let resources = bind_resource_test_plan(45);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+
+        let artifact = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
+            .expect("generate wrapper shader source");
+
+        assert_eq!(artifact.resource_key, resources.resource_key);
+        assert_eq!(artifact.link_hash, link_plan.link_hash);
+        assert_eq!(artifact.ocio_shader_hash, shader_plan.shader_hash);
+        assert_eq!(artifact.vertex_entry_point, "vs_main");
+        assert_eq!(artifact.fragment_entry_point, "fs_main");
+        assert_eq!(
+            artifact.output_location,
+            resources.wrapper_contract.output_location
+        );
+        assert_ne!(artifact.source_hash, 0);
+        assert_ne!(artifact.vertex_source_hash, 0);
+        assert_ne!(artifact.fragment_source_hash, 0);
+        assert_ne!(artifact.vertex_source_hash, artifact.fragment_source_hash);
+        assert_eq!(artifact.vertex_source.matches("#version").count(), 1);
+        assert_eq!(artifact.fragment_source.matches("#version").count(), 1);
+        assert_eq!(
+            artifact.debug_combined_source.matches("#version").count(),
+            2
+        );
+        assert!(artifact.vertex_source.contains("void vs_main()"));
+        assert!(!artifact.vertex_source.contains("mondrian_ocio_main"));
+        assert!(artifact
+            .fragment_source
+            .contains("layout(set = 1, binding = 0) uniform texture2D"));
+        assert!(artifact
+            .fragment_source
+            .contains("layout(set = 1, binding = 1) uniform sampler"));
+        assert!(artifact.fragment_source.contains("void fs_main()"));
+        assert!(artifact.fragment_source.contains("mondrian_ocio_main(mondrian_ocio_pixel);"));
+    }
+
+    #[test]
+    fn wrapper_shader_artifact_fragment_translation_is_structured_success_or_failure() {
+        let resources = bind_resource_test_plan(46);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+        let artifact = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
+            .expect("generate wrapper shader source");
+        let required_bindings = binding_contract_for_plan(&shader_plan);
+        let request = OcioGpuShaderTranslationRequest {
+            source_language: GpuLanguage::Glsl4_0,
+            target_language: OcioGpuShaderTargetLanguage::NagaIr,
+            stage: OcioGpuShaderStage::Fragment,
+            source_shader_hash: artifact.fragment_source_hash,
+            binding_contract_hash: required_bindings.stable_hash(),
+        };
+
+        match translate_shader_text(request, &artifact.fragment_source, required_bindings) {
+            Ok(translated) => {
+                assert_eq!(translated.request, request);
+                assert_eq!(translated.entry_point_count, 1);
+            }
+            Err(err) => match err.reason {
+                OcioGpuShaderTranslationFailure::ParseFailed { .. }
+                | OcioGpuShaderTranslationFailure::ValidationFailed { .. } => {
+                    assert_eq!(err.request, request);
+                }
+                other => panic!("unexpected wrapper fragment translation failure: {other:?}"),
+            },
+        }
+    }
+
+    #[test]
+    fn wrapper_shader_artifact_rejects_blocked_link_plan() {
+        let resources = bind_resource_test_plan(47);
+        let shader_plan = shader_plan_with_text("void main() {}");
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+
+        let err = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
+            .expect_err("blocked link plan should not generate wrapper source");
+
+        assert!(matches!(
+            err,
+            OcioGpuWgpuWrapperShaderArtifactError::LinkPlanBlocked { .. }
+        ));
+    }
+
+    #[test]
+    fn wrapper_shader_artifact_rejects_shader_hash_mismatch() {
+        let resources = bind_resource_test_plan(48);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let other_shader_plan = shader_plan_with_text(
+            "void mondrian_ocio_main(inout vec4 mondrian_ocio_pixel) { mondrian_ocio_pixel *= 0.5; }",
+        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+
+        let err = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&other_shader_plan, &link_plan)
+            .expect_err("shader hash mismatch should fail");
+
+        assert!(matches!(
+            err,
+            OcioGpuWgpuWrapperShaderArtifactError::ShaderHashMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn pipeline_layout_and_render_descriptor_preserve_fullscreen_contract() {
+        let resources = bind_resource_test_plan(49);
         let shader_plan = shader_plan_with_text(callable_ocio_program_text());
         let ocio_layout =
             resources.binding_layout_plan().expect("binding layout with separated samplers");
