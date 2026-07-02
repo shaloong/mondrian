@@ -729,6 +729,8 @@ pub struct RenderGpuOutputStageMaterializedResources {
 pub struct RenderGpuOutputStageRecord {
     /// Resources materialized into the shared GPU frame table.
     pub materialized: RenderGpuOutputStageMaterializedResources,
+    /// Diagnostics for the GPU color stage shape that was recorded.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
     /// Optional readback buffer recorded for CPU output boundaries.
     pub readback_buffer: Option<wgpu::Buffer>,
 }
@@ -777,6 +779,30 @@ impl<'a> From<RenderGpuOutputBoundaryBackendContext<'a>>
 }
 
 impl RenderGpuOutputStageResourcePlan {
+    /// Return the stage diagnostics represented by this executable GPU output resource plan.
+    pub fn stage_diagnostics(&self) -> RenderColorStageDiagnostics {
+        let mut diagnostics = RenderColorStageDiagnostics {
+            total_stages: 2,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            stage_pixels: self
+                .input
+                .descriptor()
+                .pixel_count()
+                .saturating_add(self.output.descriptor().pixel_count())
+                as u64,
+            ..RenderColorStageDiagnostics::default()
+        };
+        if let Some(readback) = &self.readback {
+            diagnostics.total_stages = diagnostics.total_stages.saturating_add(1);
+            diagnostics.readback_stages = diagnostics.readback_stages.saturating_add(1);
+            diagnostics.stage_pixels = diagnostics
+                .stage_pixels
+                .saturating_add(readback.output_descriptor.pixel_count() as u64);
+        }
+        diagnostics
+    }
+
     /// Build resource plans for a CPU working frame entering a planned native GPU output transform.
     pub fn from_cpu_working_frame(
         ids: &mut GpuColorFrameIdAllocator,
@@ -937,7 +963,11 @@ impl RenderGpuOutputStageResourcePlan {
         let readback_buffer = self
             .record_readback_wgpu(backend.device, backend.encoder, backend.table)
             .map_err(RenderGpuOutputStageRecordError::Readback)?;
-        Ok(RenderGpuOutputStageRecord { materialized, readback_buffer })
+        Ok(RenderGpuOutputStageRecord {
+            materialized,
+            stage_diagnostics: self.stage_diagnostics(),
+            readback_buffer,
+        })
     }
 
     /// Resolve the materialized output resource used by this stage's optional readback.
@@ -2058,6 +2088,15 @@ mod tests {
         assert!(record.readback_buffer.is_some());
         assert_eq!(record.materialized.input.id().raw(), 1_000);
         assert_eq!(record.materialized.output.id().raw(), 1_001);
+        assert_eq!(record.stage_diagnostics.total_stages, 3);
+        assert_eq!(record.stage_diagnostics.upload_stages, 1);
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 1);
+        assert_eq!(record.stage_diagnostics.cpu_output_stages, 0);
+        assert_eq!(
+            record.stage_diagnostics.stage_pixels,
+            frame.descriptor().pixel_count() as u64 * 3
+        );
 
         context.queue.submit(std::iter::once(encoder.finish()));
         let _ = context
@@ -2593,6 +2632,7 @@ mod tests {
         );
         assert!(!resources.transform.requires_source_upload);
         assert!(!resources.transform.requires_output_readback);
+        assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
         assert_eq!(
             resources.transform.diagnostics.input,
             resources.input.descriptor()
@@ -2814,6 +2854,7 @@ mod tests {
             ColorFrameResidency::Cpu
         );
         assert!(!resources.transform.requires_output_readback);
+        assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
     }
 
     #[test]

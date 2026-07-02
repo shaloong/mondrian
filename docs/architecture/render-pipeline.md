@@ -139,8 +139,11 @@ should use
 `RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`;
 the runtime owns planning, resource-plan derivation, backend-object
 preparation, materialization, schedule validation, pass recording, and optional
-readback in renderer-owned order. Lower-level renderer code that already owns a
-validated
+readback in renderer-owned order. The returned `RenderGpuOutputStageRecord`
+must carry `RenderColorStageDiagnostics` for the recorded upload, GPU color
+pass, optional readback, blockers, and pixel budget so preview/export telemetry
+does not infer GPU execution after the fact. Lower-level renderer code that
+already owns a validated
 `RenderOutputColorBoundaryStagePlan` or `RenderGpuOutputStageResourcePlan` may
 call the matching stage/resource recorder with renderer backend contexts.
 GPU-to-CPU output for encode, thumbnails, tests, or debug captures must use one

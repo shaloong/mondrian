@@ -263,6 +263,10 @@ planned frames, schedules the matching `RenderGpuColorPassSchedule`, records
 the OCIO fullscreen pass, and records the optional readback copy. Lower-level
 renderer code may still call the stage or resource recorder with explicit
 backend contexts after it already owns the validated backend objects.
+The returned `RenderGpuOutputStageRecord` carries the same
+`RenderColorStageDiagnostics` shape as the planned stage graph so app/export
+telemetry can prove whether a frame used upload, native GPU OCIO, readback, and
+which pixel budget was touched without reconstructing the plan externally.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
 the surface/backend lifetime and traces its cache/resource diagnostics with the
 frame renderer diagnostics. The current viewer preview service remains the CPU

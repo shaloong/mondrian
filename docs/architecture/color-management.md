@@ -255,6 +255,9 @@ per-submission inputs are grouped in
 `RenderGpuOutputBoundaryRuntimeOwnedBackendContext` so app/export code passes
 device, queue, encoder, and load operation without hand-threading wgpu
 pipelines, bind groups, pass nodes, or the frame table through each layer.
+The record result carries `RenderColorStageDiagnostics`; preview and export
+must use that diagnostics payload as the authoritative evidence for native GPU
+OCIO usage, transfer/readback counts, and color-stage pixel budgets.
 Callers that already hold a stage or resource plan may use the lower-level
 recorders, but app/export scheduling should prefer the runtime-owned boundary API so
 final-output policy remains renderer-owned. `GpuColorFrameReadbackPlan`
