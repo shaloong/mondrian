@@ -279,6 +279,21 @@ impl RenderOutputColorBoundaryStagePlan {
     pub fn diagnostics(&self) -> RenderColorStageDiagnostics {
         self.stage_plan.diagnostics()
     }
+
+    /// Build GPU resources for a blocker-free GPU output boundary stage plan.
+    pub fn gpu_resource_plan(
+        &self,
+        ids: &mut GpuColorFrameIdAllocator,
+        frame: &CpuColorFrame,
+        output_texture_format: GpuColorFrameTextureFormat,
+    ) -> Result<RenderGpuOutputStageResourcePlan, RenderGpuOutputStageResourcePlanError> {
+        RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            ids,
+            frame,
+            &self.stage_plan,
+            output_texture_format,
+        )
+    }
 }
 
 /// Strategy-aware planner for preview/export final output color boundaries.
@@ -1637,6 +1652,89 @@ mod tests {
         assert_eq!(diagnostics.gpu_color_stages, 1);
         assert_eq!(diagnostics.readback_stages, 1);
         assert!(diagnostics.gpu_blockers > 0);
+    }
+
+    #[test]
+    fn output_boundary_cpu_stage_plan_rejects_gpu_resource_bridge() {
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
+        let plan = planner.plan(&frame, &boundary).expect("CPU output boundary plan");
+        let mut ids = GpuColorFrameIdAllocator::new(700);
+
+        let err = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba16Float)
+            .expect_err("CPU output boundary cannot build GPU resources");
+
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan { .. }
+        ));
+    }
+
+    #[test]
+    fn output_boundary_gpu_stage_plan_reports_blockers_before_resource_bridge() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+        let plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        let mut ids = GpuColorFrameIdAllocator::new(710);
+
+        let err = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
+            .expect_err("blocked GPU output boundary cannot build resources");
+
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining { blockers } if blockers > 0
+        ));
+    }
+
+    #[test]
+    fn output_boundary_gpu_stage_plan_builds_resource_plan_when_blockers_clear() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+        let mut plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        clear_gpu_stage_blockers(&mut plan.stage_plan);
+        let mut ids = GpuColorFrameIdAllocator::new(720);
+
+        let resources = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
+            .expect("blocker-free GPU output boundary resources");
+
+        assert_eq!(
+            resources.transform.diagnostics.input,
+            resources.input.descriptor()
+        );
+        assert_eq!(
+            resources.transform.diagnostics.output,
+            resources.output.descriptor()
+        );
+        assert_eq!(
+            resources.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba8Unorm
+        );
+        assert!(resources.readback.is_some());
     }
 
     #[test]

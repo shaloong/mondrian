@@ -98,10 +98,13 @@ preparation, output target construction, and recorder invocation stay in one
 renderer-owned path. CPU boundary frames and empty GPU targets must enter that
 resource table through `GpuColorFrameUploadPlan` / `GpuColorFrameAllocationPlan`
 and `GpuColorFrameUploader`, not ad hoc texture creation in preview or export.
-Use `RenderGpuOutputStageResourcePlan` to derive those upload/allocation plans
-from the stage plan so transfer descriptors, frame ids, and the scheduled GPU
-transform stay consistent, then call its materialization helper to fill the
-resource table. If the same stage plan ends in `ReadbackToCpu`,
+Use `RenderOutputColorBoundaryStagePlan::gpu_resource_plan(...)` to bridge a
+blocker-free final-output GPU stage plan into `RenderGpuOutputStageResourcePlan`
+so transfer descriptors, frame ids, and the scheduled GPU transform stay
+consistent. CPU-only plans and GPU plans with native blockers must fail
+structurally at this bridge instead of falling back to CPU execution. Then call
+the resource plan's materialization helper to fill the resource table. If the
+same stage plan ends in `ReadbackToCpu`,
 `RenderGpuOutputStageResourcePlan` carries the `GpuColorFrameReadbackPlan` and
 owns resource-table lookup plus readback-copy recording. Once a backend
 pipeline node and OCIO bind group are prepared, callers should use

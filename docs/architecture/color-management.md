@@ -75,7 +75,9 @@ pass typed working frames to renderer stage execution helpers; they must not
 construct display/export `RenderColorTransform` values or duplicate
 working -> output conversion logic locally. `RenderOutputColorBoundaryPlanner`
 owns CPU-only versus PreferGpu stage selection for that boundary, and PreferGpu
-planning reports native blockers instead of falling back to CPU stages.
+planning reports native blockers instead of falling back to CPU stages. The
+resulting `RenderOutputColorBoundaryStagePlan` is also the only supported bridge
+from final-output planning into `RenderGpuOutputStageResourcePlan`.
 
 Input transforms follow the same rule. Decode/import code wraps source pixels in
 `CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks
