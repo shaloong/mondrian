@@ -276,14 +276,6 @@ pub fn collect_timeline_color_diagnostics(
         .collect()
 }
 
-pub fn build_timeline_render_plan(
-    source: &dyn RenderPlanSource,
-    timeline_frame: i64,
-) -> Vec<TimelineRenderPlanElement> {
-    evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))
-        .elements
-}
-
 /// Evaluate one timeline frame into a typed render plan and diagnostics.
 pub fn evaluate_timeline_render_plan(
     source: &dyn RenderPlanSource,
@@ -444,6 +436,14 @@ mod tests {
     use mondrian_timeline::sequence::Sequence;
     use mondrian_timeline::track::Track;
 
+    fn analysis_elements(
+        source: &dyn RenderPlanSource,
+        timeline_frame: i64,
+    ) -> Vec<TimelineRenderPlanElement> {
+        evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))
+            .elements
+    }
+
     #[test]
     fn evaluation_request_preview_carries_interactive_contract() {
         let request = TimelineEvaluationRequest::preview(42, 0.5);
@@ -487,7 +487,7 @@ mod tests {
         seq.video_tracks[0].add_clip(media).expect("add media");
         seq.video_tracks[1].add_clip(adjustment).expect("add adjustment");
 
-        let plan = build_timeline_render_plan(&seq, 5);
+        let plan = analysis_elements(&seq, 5);
         assert_eq!(plan.len(), 2);
 
         match &plan[0] {
@@ -515,7 +515,7 @@ mod tests {
         media.blend_mode = Some(BlendMode::HardLight);
         seq.video_tracks[0].add_clip(media).expect("add media");
 
-        let plan = build_timeline_render_plan(&seq, 5);
+        let plan = analysis_elements(&seq, 5);
         assert_eq!(plan.len(), 1);
         match &plan[0] {
             TimelineRenderPlanElement::Media(media) => {
@@ -536,7 +536,7 @@ mod tests {
         clip.interpretation.alpha = AlphaInterpretation::Premultiplied;
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
-        let plan = build_timeline_render_plan(&seq, 0);
+        let plan = analysis_elements(&seq, 0);
         let TimelineRenderPlanElement::Media(media) = &plan[0] else {
             panic!("expected media plan");
         };
@@ -564,7 +564,7 @@ mod tests {
         clip.interpretation.frame_rate_override = Some(Rational::FPS_30);
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
-        let plan = build_timeline_render_plan(&seq, 15);
+        let plan = analysis_elements(&seq, 15);
         let TimelineRenderPlanElement::Media(media) = &plan[0] else {
             panic!("expected media plan");
         };
@@ -646,7 +646,7 @@ mod tests {
             ))
             .expect("add nested sequence");
 
-        let plan = build_timeline_render_plan(&seq, 0);
+        let plan = analysis_elements(&seq, 0);
         let TimelineRenderPlanElement::NestedSequence(nested) = &plan[0] else {
             panic!("expected nested sequence plan");
         };

@@ -47,6 +47,7 @@ fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {
         &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )
     .expect("encode golden frame")
+    .frame
     .into_rgba()
 }
 
@@ -57,6 +58,7 @@ fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
         &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )
     .expect("input transform golden frame")
+    .frame
 }
 
 fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: BlendMode) -> Vec<u8> {

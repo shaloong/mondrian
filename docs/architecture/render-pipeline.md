@@ -35,8 +35,9 @@ space, and output space together with their canonical `ColorEncodingSpec`
 values. Renderer diagnostics must consume `ColorSpace::encoding()` rather than
 duplicating color-space metadata.
 
-The legacy `build_timeline_render_plan` helper delegates to the evaluation API
-and exists only for compatibility with code that needs the element list.
+`evaluate_timeline_render_plan(...)` is the render-plan entry point. Callers
+must choose an explicit `TimelineEvaluationRequest` intent so preview, export,
+thumbnail, and analysis paths cannot accidentally share ambiguous defaults.
 
 `TimelineRenderPlanElement` variants are:
 
@@ -60,8 +61,14 @@ exchange format.
 Decoded media enters the graph as a typed source/import RGBA8 boundary
 (`CpuEncodedColorFrame::source_rgba8`). Preview and export must use
 `RenderInputTransform` plus `CpuColorTransformExecutor::input_to_working(...)`
-to produce `CpuColorFrame` before building `TimelineMediaLayer`. Timeline media
-layers therefore carry typed working frames, not naked RGBA slices.
+to produce a result carrying both `CpuColorFrame` and execution diagnostics
+before building `TimelineMediaLayer`. Timeline media layers therefore carry
+typed working frames, not naked RGBA slices.
+
+Color-transform executors emit `RenderColorTransformDiagnostics` for input and
+output boundaries. Preview diagnostics aggregate transform calls, transformed
+pixels, and temporary RGBA8 boundary crossings so performance smoke tests can
+catch accidental CPU-bound color work as the GPU path comes online.
 
 `FrameCompositor` supports GPU batched compositing with texture pooling and can
 return either RGBA readback or a GPU texture. Long-term render graph nodes should

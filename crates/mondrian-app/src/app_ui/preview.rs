@@ -16,7 +16,8 @@ use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, Sequence
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan, CpuColorFrame,
-    CpuColorTransformExecutor, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
+    CpuColorTransformExecutor, CpuEncodedColorFrame, RenderColorTransform,
+    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
     TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
     TimelineRenderPlanElement, TimelineSolidColorLayer,
@@ -112,6 +113,11 @@ impl AppUiPreviewService {
             viewer_frame_cache_entries: self.viewer_frame_cache.borrow().len(),
             media_cache_entries: self.media_cache.borrow().len(),
             media_failure_entries: self.media_failures.borrow().len(),
+            color_input_transform_calls: self.metrics.color_input_transform_calls.get(),
+            color_input_transform_pixels: self.metrics.color_input_transform_pixels.get(),
+            color_output_transform_calls: self.metrics.color_output_transform_calls.get(),
+            color_output_transform_pixels: self.metrics.color_output_transform_pixels.get(),
+            color_rgba8_boundary_calls: self.metrics.color_rgba8_boundary_calls.get(),
         }
     }
 
@@ -123,6 +129,9 @@ impl AppUiPreviewService {
             match result.frame {
                 Some(frame) => {
                     bump(&self.metrics.decode_successes);
+                    if let Some(diagnostics) = result.color_diagnostics {
+                        self.record_color_transform(diagnostics);
+                    }
                     self.media_cache.borrow_mut().insert(result.key.clone(), frame);
                     self.media_failures.borrow_mut().remove(&result.key);
                     changed |= is_current;
@@ -184,7 +193,7 @@ impl AppUiPreviewService {
                     }));
                     ViewerPreviewState::Ready(frame)
                 } else {
-                    let rgba = match composite_resolved_preview(
+                    let output = match composite_resolved_preview(
                         width,
                         height,
                         &resolved.elements,
@@ -197,6 +206,8 @@ impl AppUiPreviewService {
                             return ViewerPreviewState::Unavailable;
                         }
                     };
+                    self.record_color_transform(output.color_diagnostics);
+                    let rgba = output.rgba;
                     let key = preview_cache_key(frame, width, height, &rgba);
                     match ViewerFrameImage::new(key, width, height, rgba) {
                         Some(frame) => {
@@ -248,6 +259,28 @@ impl AppUiPreviewService {
         }
     }
 
+    fn record_color_transform(&self, diagnostics: RenderColorTransformDiagnostics) {
+        match diagnostics.direction {
+            RenderColorTransformDirection::InputToWorking => {
+                bump(&self.metrics.color_input_transform_calls);
+                add_cell(
+                    &self.metrics.color_input_transform_pixels,
+                    diagnostics.pixel_count as u64,
+                );
+            }
+            RenderColorTransformDirection::WorkingToOutput => {
+                bump(&self.metrics.color_output_transform_calls);
+                add_cell(
+                    &self.metrics.color_output_transform_pixels,
+                    diagnostics.pixel_count as u64,
+                );
+            }
+        }
+        if diagnostics.used_rgba8_boundary {
+            bump(&self.metrics.color_rgba8_boundary_calls);
+        }
+    }
+
     fn stale_frame_for_sequence(
         &self,
         sequence: &Sequence,
@@ -285,9 +318,11 @@ impl AppUiPreviewService {
             )?
             .elements;
         let mut scratch = TimelineCompositeScratch::default();
-        let rgba =
+        let output =
             composite_resolved_preview(width, height, &resolved, &color_context, &mut scratch)
                 .ok()?;
+        self.record_color_transform(output.color_diagnostics);
+        let rgba = output.rgba;
         let signature =
             nested_preview_frame_signature(sequence.id, frame.max(0), width, height, &rgba);
         let source = CpuEncodedColorFrame::source_rgba8(
@@ -305,7 +340,8 @@ impl AppUiPreviewService {
             ),
         )
         .ok()?;
-        Some(MediaPreviewFrame { frame, signature })
+        self.record_color_transform(frame.diagnostics);
+        Some(MediaPreviewFrame { frame: frame.frame, signature })
     }
 
     fn resolve_sequence_elements(
@@ -453,6 +489,16 @@ pub struct AppUiPreviewDiagnostics {
     pub media_cache_entries: usize,
     /// Current number of keys in the media preview failure LRU cache.
     pub media_failure_entries: usize,
+    /// Source/media color transforms into the timeline working space.
+    pub color_input_transform_calls: u64,
+    /// Pixels processed by source/media color transforms into the timeline working space.
+    pub color_input_transform_pixels: u64,
+    /// Timeline working-space transforms into preview/output encoding.
+    pub color_output_transform_calls: u64,
+    /// Pixels processed by timeline working-space transforms into preview/output encoding.
+    pub color_output_transform_pixels: u64,
+    /// Color transforms that crossed the temporary RGBA8 CPU boundary.
+    pub color_rgba8_boundary_calls: u64,
 }
 
 enum ResolvedPreviewElement {
@@ -854,6 +900,7 @@ struct MediaPreviewResult {
     frame: Option<MediaPreviewFrame>,
     error: Option<String>,
     generation: u64,
+    color_diagnostics: Option<RenderColorTransformDiagnostics>,
 }
 
 impl AppUiPreviewService {
@@ -1114,10 +1161,19 @@ struct AppUiPreviewMetrics {
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
+    color_input_transform_calls: Cell<u64>,
+    color_input_transform_pixels: Cell<u64>,
+    color_output_transform_calls: Cell<u64>,
+    color_output_transform_pixels: Cell<u64>,
+    color_rgba8_boundary_calls: Cell<u64>,
 }
 
 fn bump(counter: &Cell<u64>) {
     counter.set(counter.get().saturating_add(1));
+}
+
+fn add_cell(counter: &Cell<u64>, delta: u64) {
+    counter.set(counter.get().saturating_add(delta));
 }
 
 fn bump_value(counter: &mut u64) {
@@ -1239,13 +1295,18 @@ fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
     (width, height)
 }
 
+struct PreviewCompositeOutput {
+    rgba: Vec<u8>,
+    color_diagnostics: RenderColorTransformDiagnostics,
+}
+
 fn composite_resolved_preview(
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
     color_context: &ColorContext,
     scratch: &mut TimelineCompositeScratch,
-) -> Result<Vec<u8>, String> {
+) -> Result<PreviewCompositeOutput, String> {
     let elements: Vec<_> = resolved
         .iter()
         .map(|element| match element {
@@ -1286,7 +1347,10 @@ fn composite_resolved_preview(
         color_context.engine.clone(),
     );
     CpuColorTransformExecutor::transform(&working_frame, &transform)
-        .map(|frame| frame.into_rgba())
+        .map(|frame| PreviewCompositeOutput {
+            rgba: frame.frame.into_rgba(),
+            color_diagnostics: frame.diagnostics,
+        })
         .map_err(|err| format!("viewer preview final color transform failed: {err}"))
 }
 
@@ -1362,15 +1426,18 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                             "viewer preview input color transform failed: {err}"
                         )),
                         generation: job.generation,
+                        color_diagnostics: None,
                     };
                 }
             };
+            let color_diagnostics = Some(working.diagnostics);
 
             MediaPreviewResult {
                 key: job.key,
-                frame: Some(MediaPreviewFrame { frame: working, signature }),
+                frame: Some(MediaPreviewFrame { frame: working.frame, signature }),
                 error: None,
                 generation: job.generation,
+                color_diagnostics,
             }
         }
         Err(err) => MediaPreviewResult {
@@ -1378,6 +1445,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
             frame: None,
             error: Some(err.to_string()),
             generation: job.generation,
+            color_diagnostics: None,
         },
     }
 }
@@ -1458,6 +1526,11 @@ mod tests {
         assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
         assert_eq!(diagnostics.media_cache_entries, 0);
         assert_eq!(diagnostics.media_failure_entries, 0);
+        assert_eq!(diagnostics.color_input_transform_calls, 0);
+        assert_eq!(diagnostics.color_input_transform_pixels, 0);
+        assert_eq!(diagnostics.color_output_transform_calls, 1);
+        assert_eq!(diagnostics.color_output_transform_pixels, 960_u64 * 540);
+        assert_eq!(diagnostics.color_rgba8_boundary_calls, 1);
     }
 
     #[test]
@@ -1567,6 +1640,8 @@ mod tests {
         assert_eq!(diagnostics.viewer_frame_cache_misses, 1);
         assert_eq!(diagnostics.viewer_frame_cache_hits, 1);
         assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
+        assert_eq!(diagnostics.color_output_transform_calls, 1);
+        assert_eq!(diagnostics.color_output_transform_pixels, 960_u64 * 540);
     }
 
     #[test]
@@ -1676,7 +1751,8 @@ mod tests {
         let mut preview_scratch = TimelineCompositeScratch::default();
         let preview =
             composite_resolved_preview(1, 1, &resolved, &color_context, &mut preview_scratch)
-                .expect("preview color composite");
+                .expect("preview color composite")
+                .rgba;
 
         let export_elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &frame.frame,
@@ -1708,6 +1784,7 @@ mod tests {
             ),
         )
         .expect("preview color transform")
+        .frame
         .into_rgba();
 
         assert_eq!(preview, expected);
@@ -1759,6 +1836,7 @@ mod tests {
         assert!(result.frame.is_none());
         assert!(result.error.is_some());
         assert_eq!(result.generation, 7);
+        assert!(result.color_diagnostics.is_none());
     }
 
     fn test_media_key(source_frame: i64) -> MediaPreviewKey {
@@ -1813,6 +1891,7 @@ mod tests {
             ),
         )
         .expect("test media input transform");
+        let frame = frame.frame;
         MediaPreviewFrame { frame, signature }
     }
 
@@ -1822,6 +1901,7 @@ mod tests {
             &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
         )
         .expect("test media output transform")
+        .frame
         .into_rgba()
     }
 

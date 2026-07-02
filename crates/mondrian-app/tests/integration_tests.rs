@@ -79,10 +79,13 @@ fn build_render_plan_from_sequence() {
 
     let _ = seq.video_tracks[0].add_clip(clip);
 
-    let plan = mondrian_renderer::timeline_render_plan::build_timeline_render_plan(&seq, 30);
+    let plan = mondrian_renderer::timeline_render_plan::evaluate_timeline_render_plan(
+        &seq,
+        mondrian_renderer::timeline_render_plan::TimelineEvaluationRequest::analysis(30),
+    );
 
     assert!(
-        !plan.is_empty(),
+        !plan.elements.is_empty(),
         "Render plan should include the solid color clip at frame 30"
     );
 }

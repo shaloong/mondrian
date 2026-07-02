@@ -117,7 +117,8 @@ fn generate_layer(width: u32, height: u32, seed: u8) -> Arc<DecodedVideoLayer> {
         &source,
         &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )
-    .expect("perf input transform");
+    .expect("perf input transform")
+    .frame;
     Arc::new(DecodedVideoLayer { frame })
 }
 

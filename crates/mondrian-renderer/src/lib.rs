@@ -28,7 +28,8 @@ pub use color_frame::{
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,
-    RenderColorTransformError, RenderInputTransform,
+    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderColorTransformError,
+    RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
 };
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
@@ -47,8 +48,8 @@ pub use timeline_composite::{
     TimelineCompositeScratch, TimelineMediaLayer, TimelineSolidColorLayer,
 };
 pub use timeline_render_plan::{
-    build_timeline_render_plan, collect_timeline_color_diagnostics, evaluate_timeline_render_plan,
-    mat3_to_affine, TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineEvaluationDiagnostics,
+    collect_timeline_color_diagnostics, evaluate_timeline_render_plan, mat3_to_affine,
+    TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineEvaluationDiagnostics,
     TimelineEvaluationRequest, TimelineMediaPlan, TimelineNestedSequencePlan,
     TimelineRenderColorTarget, TimelineRenderIntent, TimelineRenderPlan, TimelineRenderPlanElement,
     TimelineRenderQuality, TimelineRenderSettings, TimelineSolidColorPlan,

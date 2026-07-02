@@ -70,6 +70,12 @@ the renderer executor for a `CpuColorFrame` in timeline working space. App and
 export crates must not perform source -> working color conversion with local
 `ColorPipeline` calls.
 
+Renderer color-transform executors provide detailed diagnostics for both input
+and output boundaries: backend, direction, typed input/output descriptors,
+pixel count, and whether a temporary RGBA8 CPU boundary was crossed. Product
+preview/export diagnostics should aggregate these records instead of inferring
+color workload from UI or encoder code.
+
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative
 delivery, HDR, and camera-log processor pairs must create real CPU processors.

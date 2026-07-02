@@ -1038,7 +1038,8 @@ fn render_sequence_frame_into(
             &nested_source,
             &RenderInputTransform::to_working(nested_output_color_space, false, nested_engine),
         )
-        .map_err(|err| format!("nested sequence input color transform failed: {err}"))?;
+        .map_err(|err| format!("nested sequence input color transform failed: {err}"))?
+        .frame;
         nested_media[index] = Some(nested_frame);
     }
 
@@ -1122,7 +1123,8 @@ fn render_sequence_frame_into(
             color_context.engine.clone(),
         ),
     )
-    .map_err(|err| format!("final color transform failed: {err}"))?;
+    .map_err(|err| format!("final color transform failed: {err}"))?
+    .frame;
     canvas.clear();
     canvas.extend_from_slice(encoded.rgba());
     Ok(())
@@ -1152,7 +1154,8 @@ fn decode_video_layer_scaled(
         &source,
         &RenderInputTransform::to_working(working_color_space, tone_map, engine.clone()),
     )
-    .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
+    .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?
+    .frame;
     Ok(Arc::new(DecodedVideoLayer { frame }))
 }
 
@@ -1440,6 +1443,7 @@ mod tests {
             ),
         )
         .expect("test input transform")
+        .frame
     }
 
     struct FakeExecutor {
