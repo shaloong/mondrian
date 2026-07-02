@@ -6120,6 +6120,48 @@ mod tests {
         plan_from_bundle(request, bundle)
     }
 
+    fn fragment_shader_plan_with_single_2d_texture_binding(
+        shader_text: &str,
+        binding_index: u32,
+    ) -> OcioGpuShaderPlan {
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: ColorSpace::Rec709,
+            dst: ColorSpace::Srgb,
+            language: GpuLanguage::Glsl4_0,
+        };
+        let values = vec![0.0, 0.5, 1.0];
+        let bundle = Arc::new(OcioGpuShaderBundle {
+            src_color_space: "test-src".to_owned(),
+            dst_color_space: "test-dst".to_owned(),
+            language: GpuLanguage::Glsl4_0,
+            shader_text: shader_text.to_owned(),
+            descriptor_set_index: 0,
+            texture_binding_start: 1,
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: 0,
+            texture_2d_count: 1,
+            texture_3d_count: 0,
+            uniform_count: 0,
+            textures_2d: vec![mondrian_core::OcioGpuTexture2DBinding {
+                index: 0,
+                texture_name: "lut2d".to_owned(),
+                sampler_name: "lut2d_sampler".to_owned(),
+                binding_index,
+                channel: OcioGpuTextureChannel::Rgb,
+                dimensions: OcioGpuTextureDimensions::Texture2D,
+                interpolation: OcioGpuTextureInterpolation::Linear,
+                width: 1,
+                height: 1,
+                value_count: values.len(),
+                values,
+            }],
+            textures_3d: Vec::new(),
+            uniforms: Vec::new(),
+            cache_id: Some("test-cache".to_owned()),
+        });
+        plan_from_bundle(request, bundle)
+    }
+
     fn shader_plan_with_single_uniform_buffer_size(buffer_size: usize) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
             src: ColorSpace::Rec709,
@@ -7715,6 +7757,44 @@ mod tests {
         assert_eq!(diagnostics.entries, 1);
         assert_eq!(diagnostics.hits, 1);
         assert_eq!(diagnostics.misses, 1);
+        assert_eq!(diagnostics.failures, 0);
+    }
+
+    #[test]
+    fn shader_translation_cache_keys_identical_source_by_binding_contract() {
+        let shader_text = r#"
+            #version 450 core
+            layout(location = 0) out vec4 frag_color;
+
+            void main() {
+                frag_color = vec4(1.0, 0.5, 0.25, 1.0);
+            }
+        "#;
+        let first_plan = fragment_shader_plan_with_single_2d_texture_binding(shader_text, 1);
+        let second_plan = fragment_shader_plan_with_single_2d_texture_binding(shader_text, 2);
+        let mut cache = OcioGpuShaderTranslationCache::default();
+
+        let first = cache.translate(&first_plan).expect("translate first contract");
+        let second = cache.translate(&second_plan).expect("translate second contract");
+        let first_again = cache.translate(&first_plan).expect("reuse first contract");
+
+        assert_eq!(
+            first.request.source_shader_hash,
+            second.request.source_shader_hash
+        );
+        assert_ne!(
+            first.request.binding_contract_hash,
+            second.request.binding_contract_hash
+        );
+        assert_eq!(first.required_bindings.textures_2d[0].binding_index, 1);
+        assert_eq!(second.required_bindings.textures_2d[0].binding_index, 2);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &first_again));
+
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 2);
+        assert_eq!(diagnostics.hits, 1);
+        assert_eq!(diagnostics.misses, 2);
         assert_eq!(diagnostics.failures, 0);
     }
 
