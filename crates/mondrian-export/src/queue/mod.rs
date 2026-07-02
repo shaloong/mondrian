@@ -1039,6 +1039,7 @@ fn render_sequence_frame_into(
             &RenderInputTransform::to_working(nested_output_color_space, false, nested_engine),
         )
         .map_err(|err| format!("nested sequence input color transform failed: {err}"))?
+        .result
         .frame;
         nested_media[index] = Some(nested_frame);
     }
@@ -1124,6 +1125,7 @@ fn render_sequence_frame_into(
         ),
     )
     .map_err(|err| format!("final color transform failed: {err}"))?
+    .result
     .frame;
     canvas.clear();
     canvas.extend_from_slice(encoded.rgba());
@@ -1155,6 +1157,7 @@ fn decode_video_layer_scaled(
         &RenderInputTransform::to_working(working_color_space, tone_map, engine.clone()),
     )
     .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?
+    .result
     .frame;
     Ok(Arc::new(DecodedVideoLayer { frame }))
 }
@@ -1443,6 +1446,7 @@ mod tests {
             ),
         )
         .expect("test input transform")
+        .result
         .frame
     }
 

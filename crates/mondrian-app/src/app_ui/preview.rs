@@ -17,10 +17,11 @@ use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
     execute_cpu_input_stage, execute_cpu_output_stage, CpuColorFrame, CpuEncodedColorFrame,
-    RenderColorTransform, RenderColorTransformDiagnostics, RenderColorTransformDirection,
-    RenderInputTransform, TimelineAdjustmentLayer, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    RenderColorStageDiagnostics, RenderColorTransform, RenderColorTransformDiagnostics,
+    RenderColorTransformDirection, RenderInputTransform, TimelineAdjustmentLayer,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence};
 use mondrian_ui_widgets::ViewerFrameImage;
@@ -118,6 +119,15 @@ impl AppUiPreviewService {
             color_output_transform_calls: self.metrics.color_output_transform_calls.get(),
             color_output_transform_pixels: self.metrics.color_output_transform_pixels.get(),
             color_rgba8_boundary_calls: self.metrics.color_rgba8_boundary_calls.get(),
+            color_stage_plans: self.metrics.color_stage_plans.get(),
+            color_stage_total_stages: self.metrics.color_stage_total_stages.get(),
+            color_stage_cpu_input_stages: self.metrics.color_stage_cpu_input_stages.get(),
+            color_stage_cpu_output_stages: self.metrics.color_stage_cpu_output_stages.get(),
+            color_stage_gpu_color_stages: self.metrics.color_stage_gpu_color_stages.get(),
+            color_stage_upload_stages: self.metrics.color_stage_upload_stages.get(),
+            color_stage_readback_stages: self.metrics.color_stage_readback_stages.get(),
+            color_stage_gpu_blockers: self.metrics.color_stage_gpu_blockers.get(),
+            color_stage_pixels: self.metrics.color_stage_pixels.get(),
         }
     }
 
@@ -131,6 +141,9 @@ impl AppUiPreviewService {
                     bump(&self.metrics.decode_successes);
                     if let Some(diagnostics) = result.color_diagnostics {
                         self.record_color_transform(diagnostics);
+                    }
+                    if let Some(diagnostics) = result.color_stage_diagnostics {
+                        self.record_color_stage(diagnostics);
                     }
                     self.media_cache.borrow_mut().insert(result.key.clone(), frame);
                     self.media_failures.borrow_mut().remove(&result.key);
@@ -207,6 +220,7 @@ impl AppUiPreviewService {
                         }
                     };
                     self.record_color_transform(output.color_diagnostics);
+                    self.record_color_stage(output.color_stage_diagnostics);
                     let rgba = output.rgba;
                     let key = preview_cache_key(frame, width, height, &rgba);
                     match ViewerFrameImage::new(key, width, height, rgba) {
@@ -281,6 +295,39 @@ impl AppUiPreviewService {
         }
     }
 
+    fn record_color_stage(&self, diagnostics: RenderColorStageDiagnostics) {
+        bump(&self.metrics.color_stage_plans);
+        add_cell(
+            &self.metrics.color_stage_total_stages,
+            diagnostics.total_stages,
+        );
+        add_cell(
+            &self.metrics.color_stage_cpu_input_stages,
+            diagnostics.cpu_input_stages,
+        );
+        add_cell(
+            &self.metrics.color_stage_cpu_output_stages,
+            diagnostics.cpu_output_stages,
+        );
+        add_cell(
+            &self.metrics.color_stage_gpu_color_stages,
+            diagnostics.gpu_color_stages,
+        );
+        add_cell(
+            &self.metrics.color_stage_upload_stages,
+            diagnostics.upload_stages,
+        );
+        add_cell(
+            &self.metrics.color_stage_readback_stages,
+            diagnostics.readback_stages,
+        );
+        add_cell(
+            &self.metrics.color_stage_gpu_blockers,
+            diagnostics.gpu_blockers,
+        );
+        add_cell(&self.metrics.color_stage_pixels, diagnostics.stage_pixels);
+    }
+
     fn stale_frame_for_sequence(
         &self,
         sequence: &Sequence,
@@ -322,6 +369,7 @@ impl AppUiPreviewService {
             composite_resolved_preview(width, height, &resolved, &color_context, &mut scratch)
                 .ok()?;
         self.record_color_transform(output.color_diagnostics);
+        self.record_color_stage(output.color_stage_diagnostics);
         let rgba = output.rgba;
         let signature =
             nested_preview_frame_signature(sequence.id, frame.max(0), width, height, &rgba);
@@ -340,8 +388,9 @@ impl AppUiPreviewService {
             ),
         )
         .ok()?;
-        self.record_color_transform(frame.diagnostics);
-        Some(MediaPreviewFrame { frame: frame.frame, signature })
+        self.record_color_transform(frame.result.diagnostics);
+        self.record_color_stage(frame.stage_diagnostics);
+        Some(MediaPreviewFrame { frame: frame.result.frame, signature })
     }
 
     fn resolve_sequence_elements(
@@ -499,6 +548,24 @@ pub struct AppUiPreviewDiagnostics {
     pub color_output_transform_pixels: u64,
     /// Color transforms that crossed the temporary RGBA8 CPU boundary.
     pub color_rgba8_boundary_calls: u64,
+    /// Render color stage plans executed by preview.
+    pub color_stage_plans: u64,
+    /// Render color stages executed by preview.
+    pub color_stage_total_stages: u64,
+    /// CPU source/media input stages executed by preview.
+    pub color_stage_cpu_input_stages: u64,
+    /// CPU working-to-output stages executed by preview.
+    pub color_stage_cpu_output_stages: u64,
+    /// GPU color stages planned by preview.
+    pub color_stage_gpu_color_stages: u64,
+    /// CPU-to-GPU upload stages planned by preview.
+    pub color_stage_upload_stages: u64,
+    /// GPU-to-CPU readback stages planned by preview.
+    pub color_stage_readback_stages: u64,
+    /// GPU color stage blockers surfaced by preview.
+    pub color_stage_gpu_blockers: u64,
+    /// Pixels covered by preview color stage plans.
+    pub color_stage_pixels: u64,
 }
 
 enum ResolvedPreviewElement {
@@ -901,6 +968,7 @@ struct MediaPreviewResult {
     error: Option<String>,
     generation: u64,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
+    color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
 }
 
 impl AppUiPreviewService {
@@ -1166,6 +1234,15 @@ struct AppUiPreviewMetrics {
     color_output_transform_calls: Cell<u64>,
     color_output_transform_pixels: Cell<u64>,
     color_rgba8_boundary_calls: Cell<u64>,
+    color_stage_plans: Cell<u64>,
+    color_stage_total_stages: Cell<u64>,
+    color_stage_cpu_input_stages: Cell<u64>,
+    color_stage_cpu_output_stages: Cell<u64>,
+    color_stage_gpu_color_stages: Cell<u64>,
+    color_stage_upload_stages: Cell<u64>,
+    color_stage_readback_stages: Cell<u64>,
+    color_stage_gpu_blockers: Cell<u64>,
+    color_stage_pixels: Cell<u64>,
 }
 
 fn bump(counter: &Cell<u64>) {
@@ -1298,6 +1375,7 @@ fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
 struct PreviewCompositeOutput {
     rgba: Vec<u8>,
     color_diagnostics: RenderColorTransformDiagnostics,
+    color_stage_diagnostics: RenderColorStageDiagnostics,
 }
 
 fn composite_resolved_preview(
@@ -1348,8 +1426,9 @@ fn composite_resolved_preview(
     );
     execute_cpu_output_stage(&working_frame, &transform)
         .map(|frame| PreviewCompositeOutput {
-            rgba: frame.frame.into_rgba(),
-            color_diagnostics: frame.diagnostics,
+            rgba: frame.result.frame.into_rgba(),
+            color_diagnostics: frame.result.diagnostics,
+            color_stage_diagnostics: frame.stage_diagnostics,
         })
         .map_err(|err| format!("viewer preview final color transform failed: {err}"))
 }
@@ -1427,17 +1506,20 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                         )),
                         generation: job.generation,
                         color_diagnostics: None,
+                        color_stage_diagnostics: None,
                     };
                 }
             };
-            let color_diagnostics = Some(working.diagnostics);
+            let color_diagnostics = Some(working.result.diagnostics);
+            let color_stage_diagnostics = Some(working.stage_diagnostics);
 
             MediaPreviewResult {
                 key: job.key,
-                frame: Some(MediaPreviewFrame { frame: working.frame, signature }),
+                frame: Some(MediaPreviewFrame { frame: working.result.frame, signature }),
                 error: None,
                 generation: job.generation,
                 color_diagnostics,
+                color_stage_diagnostics,
             }
         }
         Err(err) => MediaPreviewResult {
@@ -1446,6 +1528,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
             error: Some(err.to_string()),
             generation: job.generation,
             color_diagnostics: None,
+            color_stage_diagnostics: None,
         },
     }
 }
@@ -1531,6 +1614,15 @@ mod tests {
         assert_eq!(diagnostics.color_output_transform_calls, 1);
         assert_eq!(diagnostics.color_output_transform_pixels, 960_u64 * 540);
         assert_eq!(diagnostics.color_rgba8_boundary_calls, 1);
+        assert_eq!(diagnostics.color_stage_plans, 1);
+        assert_eq!(diagnostics.color_stage_total_stages, 1);
+        assert_eq!(diagnostics.color_stage_cpu_input_stages, 0);
+        assert_eq!(diagnostics.color_stage_cpu_output_stages, 1);
+        assert_eq!(diagnostics.color_stage_gpu_color_stages, 0);
+        assert_eq!(diagnostics.color_stage_upload_stages, 0);
+        assert_eq!(diagnostics.color_stage_readback_stages, 0);
+        assert_eq!(diagnostics.color_stage_gpu_blockers, 0);
+        assert_eq!(diagnostics.color_stage_pixels, 960_u64 * 540);
     }
 
     #[test]
@@ -1642,6 +1734,10 @@ mod tests {
         assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
         assert_eq!(diagnostics.color_output_transform_calls, 1);
         assert_eq!(diagnostics.color_output_transform_pixels, 960_u64 * 540);
+        assert_eq!(diagnostics.color_stage_plans, 1);
+        assert_eq!(diagnostics.color_stage_total_stages, 1);
+        assert_eq!(diagnostics.color_stage_cpu_output_stages, 1);
+        assert_eq!(diagnostics.color_stage_pixels, 960_u64 * 540);
     }
 
     #[test]
@@ -1784,6 +1880,7 @@ mod tests {
             ),
         )
         .expect("preview color transform")
+        .result
         .frame
         .into_rgba();
 
@@ -1837,6 +1934,7 @@ mod tests {
         assert!(result.error.is_some());
         assert_eq!(result.generation, 7);
         assert!(result.color_diagnostics.is_none());
+        assert!(result.color_stage_diagnostics.is_none());
     }
 
     fn test_media_key(source_frame: i64) -> MediaPreviewKey {
@@ -1891,7 +1989,7 @@ mod tests {
             ),
         )
         .expect("test media input transform");
-        let frame = frame.frame;
+        let frame = frame.result.frame;
         MediaPreviewFrame { frame, signature }
     }
 
@@ -1901,6 +1999,7 @@ mod tests {
             &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
         )
         .expect("test media output transform")
+        .result
         .frame
         .into_rgba()
     }

@@ -48,6 +48,7 @@ fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {
         &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )
     .expect("encode golden frame")
+    .result
     .frame
     .into_rgba()
 }
@@ -59,6 +60,7 @@ fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
         &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )
     .expect("input transform golden frame")
+    .result
     .frame
 }
 

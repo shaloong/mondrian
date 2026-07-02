@@ -81,6 +81,13 @@ pixel count, and whether a temporary RGBA8 CPU boundary was crossed. Product
 preview/export diagnostics should aggregate these records instead of inferring
 color workload from UI or encoder code.
 
+Renderer color-stage diagnostics sit one layer higher than transform
+diagnostics. A `RenderColorStagePlan` records the scheduled CPU, GPU, upload,
+and readback stages for a color boundary; `RenderColorStageExecution<T>` carries
+the transform result plus that stage summary. Preview and export performance
+smokes should report both layers: transform diagnostics prove color semantics,
+while stage diagnostics prove scheduling, residency, and GPU-readiness.
+
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative
 delivery, HDR, and camera-log processor pairs must create real CPU processors.

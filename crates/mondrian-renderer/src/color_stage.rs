@@ -94,6 +94,41 @@ pub struct RenderColorStagePlan {
     pub final_descriptor: ColorFrameDescriptor,
 }
 
+/// Aggregated diagnostics for a color stage plan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderColorStageDiagnostics {
+    /// Total stages in the plan.
+    pub total_stages: u64,
+    /// CPU source/import -> working-space stages.
+    pub cpu_input_stages: u64,
+    /// CPU working-space -> display/export stages.
+    pub cpu_output_stages: u64,
+    /// GPU OCIO color transform stages.
+    pub gpu_color_stages: u64,
+    /// CPU -> GPU upload stages.
+    pub upload_stages: u64,
+    /// GPU -> CPU readback stages.
+    pub readback_stages: u64,
+    /// Native GPU blockers exposed by planned GPU stages.
+    pub gpu_blockers: u64,
+    /// Sum of pixels touched by scheduled stages.
+    pub stage_pixels: u64,
+}
+
+impl RenderColorStageDiagnostics {
+    /// Add another diagnostics summary into this one.
+    pub fn accumulate(&mut self, other: Self) {
+        self.total_stages = self.total_stages.saturating_add(other.total_stages);
+        self.cpu_input_stages = self.cpu_input_stages.saturating_add(other.cpu_input_stages);
+        self.cpu_output_stages = self.cpu_output_stages.saturating_add(other.cpu_output_stages);
+        self.gpu_color_stages = self.gpu_color_stages.saturating_add(other.gpu_color_stages);
+        self.upload_stages = self.upload_stages.saturating_add(other.upload_stages);
+        self.readback_stages = self.readback_stages.saturating_add(other.readback_stages);
+        self.gpu_blockers = self.gpu_blockers.saturating_add(other.gpu_blockers);
+        self.stage_pixels = self.stage_pixels.saturating_add(other.stage_pixels);
+    }
+}
+
 impl RenderColorStagePlan {
     /// Whether the plan contains a GPU transform stage.
     pub fn contains_gpu_transform(&self) -> bool {
@@ -111,6 +146,36 @@ impl RenderColorStagePlan {
             )
         })
     }
+
+    /// Return an aggregated stage diagnostics summary.
+    pub fn diagnostics(&self) -> RenderColorStageDiagnostics {
+        let mut diagnostics = RenderColorStageDiagnostics::default();
+        for stage in &self.stages {
+            diagnostics.total_stages = diagnostics.total_stages.saturating_add(1);
+            diagnostics.stage_pixels =
+                diagnostics.stage_pixels.saturating_add(stage.output().pixel_count() as u64);
+            match stage {
+                RenderColorStage::UploadToGpu { .. } => {
+                    diagnostics.upload_stages = diagnostics.upload_stages.saturating_add(1);
+                }
+                RenderColorStage::CpuInputTransform { .. } => {
+                    diagnostics.cpu_input_stages = diagnostics.cpu_input_stages.saturating_add(1);
+                }
+                RenderColorStage::CpuOutputTransform { .. } => {
+                    diagnostics.cpu_output_stages = diagnostics.cpu_output_stages.saturating_add(1);
+                }
+                RenderColorStage::GpuColorTransform { plan, .. } => {
+                    diagnostics.gpu_color_stages = diagnostics.gpu_color_stages.saturating_add(1);
+                    diagnostics.gpu_blockers =
+                        diagnostics.gpu_blockers.saturating_add(plan.wgpu.blockers.len() as u64);
+                }
+                RenderColorStage::ReadbackToCpu { .. } => {
+                    diagnostics.readback_stages = diagnostics.readback_stages.saturating_add(1);
+                }
+            }
+        }
+        diagnostics
+    }
 }
 
 /// Plans renderer color transform stages without executing them.
@@ -123,12 +188,22 @@ pub struct RenderColorStagePlanner<'a> {
 /// Executes CPU-only color stage plans.
 pub struct CpuRenderColorStageExecutor;
 
+/// Result of executing a renderer color stage plan.
+#[derive(Debug, Clone)]
+pub struct RenderColorStageExecution<T> {
+    /// Value produced by the selected executor.
+    pub result: T,
+    /// Diagnostics for the stage plan that was executed.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+}
+
 impl CpuRenderColorStageExecutor {
     /// Execute a CPU source/import -> working-space stage plan.
     pub fn input_to_working(
         frame: &CpuEncodedColorFrame,
         plan: &RenderColorStagePlan,
-    ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+    ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
+    {
         let [stage] = plan.stages.as_slice() else {
             return Err(RenderColorTransformError::UnsupportedStagePlan {
                 reason: "input stage execution requires exactly one CPU stage",
@@ -143,14 +218,15 @@ impl CpuRenderColorStageExecutor {
         let result = CpuColorTransformExecutor::input_to_working(frame, transform)?;
         validate_descriptor(*output, result.frame.descriptor())?;
         validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
-        Ok(result)
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
     }
 
     /// Execute a CPU working-space -> display/export stage plan.
     pub fn output_transform(
         frame: &CpuColorFrame,
         plan: &RenderColorStagePlan,
-    ) -> Result<RenderOutputTransformResult, RenderColorTransformError> {
+    ) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError>
+    {
         let [stage] = plan.stages.as_slice() else {
             return Err(RenderColorTransformError::UnsupportedStagePlan {
                 reason: "output stage execution requires exactly one CPU stage",
@@ -165,7 +241,7 @@ impl CpuRenderColorStageExecutor {
         let result = CpuColorTransformExecutor::transform(frame, transform)?;
         validate_descriptor(*output, result.frame.descriptor())?;
         validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
-        Ok(result)
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
     }
 }
 
@@ -173,7 +249,7 @@ impl CpuRenderColorStageExecutor {
 pub fn execute_cpu_input_stage(
     frame: &CpuEncodedColorFrame,
     transform: &RenderInputTransform,
-) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
     let mut planner = RenderColorStagePlanner::cpu_only();
     let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
     CpuRenderColorStageExecutor::input_to_working(frame, &plan)
@@ -183,7 +259,7 @@ pub fn execute_cpu_input_stage(
 pub fn execute_cpu_output_stage(
     frame: &CpuColorFrame,
     transform: &RenderColorTransform,
-) -> Result<RenderOutputTransformResult, RenderColorTransformError> {
+) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError> {
     let mut planner = RenderColorStagePlanner::cpu_only();
     let plan = planner.plan_output_transform(frame.descriptor(), transform)?;
     CpuRenderColorStageExecutor::output_transform(frame, &plan)
@@ -408,9 +484,10 @@ mod tests {
         let result = CpuRenderColorStageExecutor::input_to_working(&source, &plan)
             .expect("execute CPU input plan");
 
-        assert_eq!(result.frame.descriptor(), plan.final_descriptor);
-        assert_eq!(result.diagnostics.input, source.descriptor());
-        assert_eq!(result.diagnostics.output, plan.final_descriptor);
+        assert_eq!(result.result.frame.descriptor(), plan.final_descriptor);
+        assert_eq!(result.result.diagnostics.input, source.descriptor());
+        assert_eq!(result.result.diagnostics.output, plan.final_descriptor);
+        assert_eq!(result.stage_diagnostics, plan.diagnostics());
     }
 
     #[test]
@@ -460,9 +537,10 @@ mod tests {
         let result = CpuRenderColorStageExecutor::output_transform(&frame, &plan)
             .expect("execute CPU output plan");
 
-        assert_eq!(result.frame.descriptor(), plan.final_descriptor);
-        assert_eq!(result.diagnostics.input, frame.descriptor());
-        assert_eq!(result.diagnostics.output, plan.final_descriptor);
+        assert_eq!(result.result.frame.descriptor(), plan.final_descriptor);
+        assert_eq!(result.result.diagnostics.input, frame.descriptor());
+        assert_eq!(result.result.diagnostics.output, plan.final_descriptor);
+        assert_eq!(result.stage_diagnostics, plan.diagnostics());
     }
 
     #[test]
@@ -473,17 +551,25 @@ mod tests {
             RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
         let working = execute_cpu_input_stage(&source, &input_transform)
             .expect("helper should execute input stage");
-        assert_eq!(working.frame.descriptor().domain, ColorFrameDomain::Working);
+        assert_eq!(
+            working.result.frame.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(working.stage_diagnostics.cpu_input_stages, 1);
 
         let output_transform =
             RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
-        let output = execute_cpu_output_stage(&working.frame, &output_transform)
+        let output = execute_cpu_output_stage(&working.result.frame, &output_transform)
             .expect("helper should execute output stage");
-        assert_eq!(output.frame.descriptor().domain, ColorFrameDomain::Display);
         assert_eq!(
-            output.frame.descriptor().residency,
+            output.result.frame.descriptor().domain,
+            ColorFrameDomain::Display
+        );
+        assert_eq!(
+            output.result.frame.descriptor().residency,
             ColorFrameResidency::Cpu
         );
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
     }
 
     #[test]

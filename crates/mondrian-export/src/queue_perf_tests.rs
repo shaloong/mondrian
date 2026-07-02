@@ -3,8 +3,8 @@ use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 use mondrian_renderer::{
     composite_timeline_elements_into, execute_cpu_input_stage, CpuEncodedColorFrame,
-    RenderInputTransform, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineMediaLayer,
+    RenderColorStageDiagnostics, RenderInputTransform, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
 };
 use serde::Serialize;
 use std::cmp;
@@ -41,6 +41,15 @@ struct ExportPerfSimReport {
     fps_max_threshold: f64,
     passthrough_frames: usize,
     passthrough_ratio_pct: f64,
+    color_stage_plans: u64,
+    color_stage_total_stages: u64,
+    color_stage_cpu_input_stages: u64,
+    color_stage_cpu_output_stages: u64,
+    color_stage_gpu_color_stages: u64,
+    color_stage_upload_stages: u64,
+    color_stage_readback_stages: u64,
+    color_stage_gpu_blockers: u64,
+    color_stage_pixels: u64,
     passed: bool,
 }
 
@@ -100,7 +109,11 @@ fn percentile_ms(values: &[u128], percentile: f64) -> u128 {
     sorted[idx]
 }
 
-fn generate_layer(width: u32, height: u32, seed: u8) -> Arc<DecodedVideoLayer> {
+fn generate_layer(
+    width: u32,
+    height: u32,
+    seed: u8,
+) -> (Arc<DecodedVideoLayer>, RenderColorStageDiagnostics) {
     let pixel_count = (width as usize) * (height as usize);
     let mut data = vec![0u8; pixel_count * 4];
     for i in 0..pixel_count {
@@ -117,9 +130,12 @@ fn generate_layer(width: u32, height: u32, seed: u8) -> Arc<DecodedVideoLayer> {
         &source,
         &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )
-    .expect("perf input transform")
-    .frame;
-    Arc::new(DecodedVideoLayer { frame })
+    .expect("perf input transform");
+    let diagnostics = frame.stage_diagnostics;
+    (
+        Arc::new(DecodedVideoLayer { frame: frame.result.frame }),
+        diagnostics,
+    )
 }
 
 fn build_frame_layers(
@@ -191,12 +207,11 @@ fn run_export_render_simulation(
     let frame_budget_ms = 1000.0 / target_fps;
     let layer_count = layer_count.max(1);
     let mut layers = Vec::with_capacity(layer_count);
+    let mut color_stage_diagnostics = RenderColorStageDiagnostics::default();
     for i in 0..layer_count {
-        layers.push(generate_layer(
-            width,
-            height,
-            (17 + i as u8).wrapping_mul(9),
-        ));
+        let (layer, diagnostics) = generate_layer(width, height, (17 + i as u8).wrapping_mul(9));
+        color_stage_diagnostics.accumulate(diagnostics);
+        layers.push(layer);
     }
 
     let mut canvas = vec![0u8; (width as usize) * (height as usize) * 4];
@@ -286,6 +301,15 @@ fn run_export_render_simulation(
         fps_max_threshold,
         passthrough_frames,
         passthrough_ratio_pct,
+        color_stage_plans: layer_count as u64,
+        color_stage_total_stages: color_stage_diagnostics.total_stages,
+        color_stage_cpu_input_stages: color_stage_diagnostics.cpu_input_stages,
+        color_stage_cpu_output_stages: color_stage_diagnostics.cpu_output_stages,
+        color_stage_gpu_color_stages: color_stage_diagnostics.gpu_color_stages,
+        color_stage_upload_stages: color_stage_diagnostics.upload_stages,
+        color_stage_readback_stages: color_stage_diagnostics.readback_stages,
+        color_stage_gpu_blockers: color_stage_diagnostics.gpu_blockers,
+        color_stage_pixels: color_stage_diagnostics.stage_pixels,
         passed,
     })
 }

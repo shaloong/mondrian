@@ -53,17 +53,17 @@ Each element carries opacity, blend mode, transforms where applicable, effect gr
 `CpuColorFrame` whose descriptor records domain, encoding, residency, dimensions,
 and color space. Viewer preview and export must consume this typed working-frame
 contract, then apply their respective working -> output transform through
-`CpuColorTransformExecutor` and `RenderColorTransform`.
+renderer color stage execution helpers and `RenderColorTransform`.
 Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
 Decoded media enters the graph as a typed source/import RGBA8 boundary
 (`CpuEncodedColorFrame::source_rgba8`). Preview and export must use
-`RenderInputTransform` plus `CpuColorTransformExecutor::input_to_working(...)`
-to produce a result carrying both `CpuColorFrame` and execution diagnostics
-before building `TimelineMediaLayer`. Timeline media layers therefore carry
-typed working frames, not naked RGBA slices.
+`RenderInputTransform` plus `execute_cpu_input_stage(...)` or a future GPU-capable
+stage executor to produce a result carrying both `CpuColorFrame` and stage
+diagnostics before building `TimelineMediaLayer`. Timeline media layers
+therefore carry typed working frames, not naked RGBA slices.
 
 Color-transform executors emit `RenderColorTransformDiagnostics` for input and
 output boundaries. Preview diagnostics aggregate transform calls, transformed
@@ -83,6 +83,14 @@ Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
 `execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
 through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage
 is limited to renderer internals and its focused unit tests.
+
+Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
+result. App, export, tests, and benches must read frames from `.result` and
+aggregate `.stage_diagnostics` where they expose observability. Preview
+diagnostics and export performance smoke reports record stage-plan counts,
+CPU/GPU stage mix, transfer stages, GPU blockers, and touched pixels so later
+GPU execution work can prove it removed CPU bottlenecks instead of merely
+moving code around.
 
 ## Required Semantics
 
