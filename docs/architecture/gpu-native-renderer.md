@@ -168,18 +168,22 @@ shaders or unknown source shapes. `OcioGpuWgpuWrapperLinkPlan` combines that
 program contract with Mondrian's fullscreen wrapper contract and reports
 structured blockers such as missing function names, missing pixel variables, or
 complete fragment shaders that must be split before wrapping.
-`OcioGpuWgpuRenderPipelineDescriptorPlan` consumes the wrapper-link plan and
-captures the output target format plus render-pipeline descriptor hash. It
-remains a contract rather than an executable pipeline until Mondrian validates
-the final wrapper shader module and render-pass node.
 `OcioGpuWgpuWrapperShaderSourceArtifact` is the next boundary in that chain: it
 generates stage-split GLSL source artifacts from a linkable OCIO callable
 program plus Mondrian's wrapper contract, strips duplicate GLSL version
 directives from the fragment source, carries stable stage/link hashes, and fails
 closed when the link plan still reports blockers. The combined source is
-diagnostic text only; the canonical execution artifact should become validated
-Naga IR (with WGSL as debug output only) before any preview/export render pass
-treats the GPU OCIO path as executable.
+diagnostic text only. Because these are stage-split GLSL artifacts parsed by
+Naga, the backend entry point for each stage is `main`; vertex and fragment
+stages live in separate modules.
+`OcioGpuWgpuRenderPipelineDescriptorPlan` consumes the wrapper-link plan and
+captures the output target format plus render-pipeline descriptor hash.
+`OcioGpuWgpuWrapperShaderModuleArtifactCache` translates the wrapper source
+artifact into validated vertex and fragment Naga modules, keyed by wrapper
+source hash, link hash, pipeline-layout hash, render-descriptor hash, and output
+format. WGSL remains diagnostic output only. The path is still not executable
+until a concrete render pipeline and render-pass node consume the prepared
+pipeline layout, bind groups, wrapper Naga modules, and target frame.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /

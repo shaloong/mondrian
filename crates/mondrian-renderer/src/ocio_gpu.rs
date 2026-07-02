@@ -15,6 +15,8 @@ use std::sync::Arc;
 /// Shader stage used when translating OCIO GPU shader text for wgpu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OcioGpuShaderStage {
+    /// Vertex shader stage.
+    Vertex,
     /// Fragment shader stage.
     Fragment,
 }
@@ -22,6 +24,7 @@ pub enum OcioGpuShaderStage {
 impl OcioGpuShaderStage {
     fn to_naga(self) -> naga::ShaderStage {
         match self {
+            Self::Vertex => naga::ShaderStage::Vertex,
             Self::Fragment => naga::ShaderStage::Fragment,
         }
     }
@@ -370,6 +373,190 @@ impl OcioGpuWgpuWrapperShaderSourceArtifact {
     }
 }
 
+/// Error returned when wrapper shader sources cannot become validated Naga modules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuWrapperShaderModuleArtifactError {
+    /// The wrapper source artifact hash does not match its stage source hashes.
+    SourceHashMismatch { expected: u64, actual: u64 },
+    /// The pipeline layout belongs to a different resource key.
+    PipelineLayoutResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The render descriptor belongs to a different resource key.
+    RenderDescriptorResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The render descriptor does not reference the provided pipeline layout.
+    PipelineLayoutHashMismatch { expected: u64, actual: u64 },
+    /// The wrapper vertex entry point differs from the render descriptor contract.
+    VertexEntryPointMismatch { expected: String, actual: String },
+    /// The wrapper fragment entry point differs from the render descriptor contract.
+    FragmentEntryPointMismatch { expected: String, actual: String },
+    /// The wrapper output location differs from the render descriptor contract.
+    OutputLocationMismatch { expected: u32, actual: u32 },
+    /// Naga could not translate or validate the generated vertex wrapper source.
+    VertexTranslationFailed {
+        reason: OcioGpuShaderTranslationFailure,
+    },
+    /// Naga could not translate or validate the generated fragment wrapper source.
+    FragmentTranslationFailed {
+        reason: OcioGpuShaderTranslationFailure,
+    },
+}
+
+/// Validated Naga module artifact for Mondrian's OCIO fullscreen wrapper pass.
+#[derive(Debug, Clone)]
+pub struct OcioGpuWgpuWrapperShaderModuleArtifact {
+    /// Stable resource key this wrapper belongs to.
+    pub resource_key: u64,
+    /// Hash of the wrapper-link plan.
+    pub link_hash: u64,
+    /// Hash of the stage-split wrapper shader sources.
+    pub source_hash: u64,
+    /// Hash of the pipeline layout contract.
+    pub pipeline_layout_hash: u64,
+    /// Hash of the render-pipeline descriptor contract.
+    pub render_descriptor_hash: u64,
+    /// Output target format bound to this module artifact.
+    pub output_format: OcioGpuWgpuColorTargetFormat,
+    /// Stable cache key for this wrapper module artifact.
+    pub module_key: u64,
+    /// Validated fullscreen vertex shader module.
+    pub vertex: OcioGpuNagaShaderStageArtifact,
+    /// Validated fragment shader module that calls the OCIO-generated function.
+    pub fragment: OcioGpuNagaShaderStageArtifact,
+}
+
+impl OcioGpuWgpuWrapperShaderModuleArtifact {
+    /// Translate a wrapper source artifact into validated stage-split Naga modules.
+    pub fn translate(
+        source: &OcioGpuWgpuWrapperShaderSourceArtifact,
+        pipeline_layout: &OcioGpuWgpuPipelineLayoutPlan,
+        render_descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
+    ) -> Result<Self, OcioGpuWgpuWrapperShaderModuleArtifactError> {
+        let module_key =
+            wrapper_shader_module_artifact_key(source, pipeline_layout, render_descriptor)?;
+        let vertex = translate_naga_shader_stage(
+            GpuLanguage::Glsl4_0,
+            OcioGpuShaderTargetLanguage::NagaIr,
+            OcioGpuShaderStage::Vertex,
+            source.vertex_source_hash,
+            &source.vertex_source,
+        )
+        .map_err(|reason| {
+            OcioGpuWgpuWrapperShaderModuleArtifactError::VertexTranslationFailed { reason }
+        })?;
+        let fragment = translate_naga_shader_stage(
+            GpuLanguage::Glsl4_0,
+            OcioGpuShaderTargetLanguage::NagaIr,
+            OcioGpuShaderStage::Fragment,
+            source.fragment_source_hash,
+            &source.fragment_source,
+        )
+        .map_err(|reason| {
+            OcioGpuWgpuWrapperShaderModuleArtifactError::FragmentTranslationFailed { reason }
+        })?;
+
+        Ok(Self {
+            resource_key: source.resource_key,
+            link_hash: source.link_hash,
+            source_hash: source.source_hash,
+            pipeline_layout_hash: pipeline_layout.layout_hash,
+            render_descriptor_hash: render_descriptor.descriptor_hash,
+            output_format: render_descriptor.output_format,
+            module_key,
+            vertex,
+            fragment,
+        })
+    }
+}
+
+/// Point-in-time wrapper shader module artifact cache diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics {
+    /// Cached wrapper module artifacts.
+    pub entries: usize,
+    /// Cache hits.
+    pub hits: u64,
+    /// Cache misses.
+    pub misses: u64,
+    /// Contract or translation failures before caching.
+    pub failures: u64,
+}
+
+/// Bounded cache for stage-split wrapper shader Naga artifacts.
+pub struct OcioGpuWgpuWrapperShaderModuleArtifactCache {
+    entries: LruCache<u64, Arc<OcioGpuWgpuWrapperShaderModuleArtifact>>,
+    hits: u64,
+    misses: u64,
+    failures: u64,
+}
+
+impl OcioGpuWgpuWrapperShaderModuleArtifactCache {
+    /// Create a cache with a fixed non-zero capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            entries: LruCache::new(capacity),
+            hits: 0,
+            misses: 0,
+            failures: 0,
+        }
+    }
+
+    /// Translate and cache a wrapper source artifact for a specific pipeline contract.
+    pub fn translate(
+        &mut self,
+        source: &OcioGpuWgpuWrapperShaderSourceArtifact,
+        pipeline_layout: &OcioGpuWgpuPipelineLayoutPlan,
+        render_descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
+    ) -> Result<
+        Arc<OcioGpuWgpuWrapperShaderModuleArtifact>,
+        OcioGpuWgpuWrapperShaderModuleArtifactError,
+    > {
+        let key =
+            match wrapper_shader_module_artifact_key(source, pipeline_layout, render_descriptor) {
+                Ok(key) => key,
+                Err(err) => {
+                    self.failures = self.failures.saturating_add(1);
+                    return Err(err);
+                }
+            };
+        if let Some(hit) = self.entries.get(&key) {
+            self.hits = self.hits.saturating_add(1);
+            return Ok(Arc::clone(hit));
+        }
+
+        self.misses = self.misses.saturating_add(1);
+        match OcioGpuWgpuWrapperShaderModuleArtifact::translate(
+            source,
+            pipeline_layout,
+            render_descriptor,
+        ) {
+            Ok(module) => {
+                let module = Arc::new(module);
+                self.entries.put(key, Arc::clone(&module));
+                Ok(module)
+            }
+            Err(err) => {
+                self.failures = self.failures.saturating_add(1);
+                Err(err)
+            }
+        }
+    }
+
+    /// Return wrapper shader module artifact cache diagnostics.
+    pub fn diagnostics(&self) -> OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics {
+        OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics {
+            entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+            failures: self.failures,
+        }
+    }
+}
+
+impl Default for OcioGpuWgpuWrapperShaderModuleArtifactCache {
+    fn default() -> Self {
+        Self::new(NonZeroUsize::new(64).expect("default cache capacity is non-zero"))
+    }
+}
+
 /// Request used to translate an OCIO-generated shader into a native wgpu target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OcioGpuShaderTranslationRequest {
@@ -410,6 +597,31 @@ pub struct OcioGpuTranslatedShader {
     pub debug_wgsl_hash: Option<u64>,
     /// Required OCIO resource binding contract.
     pub required_bindings: OcioGpuBindingContract,
+    /// Non-fatal diagnostics observed while building debug artifacts.
+    pub diagnostics: Vec<OcioGpuShaderDiagnostic>,
+    /// Number of entry points visible after translation.
+    pub entry_point_count: usize,
+}
+
+/// One validated Naga shader stage produced from generated GPU source.
+#[derive(Debug, Clone)]
+pub struct OcioGpuNagaShaderStageArtifact {
+    /// Source language parsed by Naga.
+    pub source_language: GpuLanguage,
+    /// Target language consumed by the renderer.
+    pub target_language: OcioGpuShaderTargetLanguage,
+    /// Shader stage represented by this module.
+    pub stage: OcioGpuShaderStage,
+    /// Stable hash of the parsed source text.
+    pub source_hash: u64,
+    /// Canonical Naga module used by `wgpu::ShaderSource::Naga`.
+    pub naga_module: naga::Module,
+    /// Canonical Naga validation info for the module.
+    pub module_info: naga::valid::ModuleInfo,
+    /// Optional WGSL debug output. This is not the execution artifact.
+    pub debug_wgsl: Option<String>,
+    /// Stable hash of the optional WGSL debug output.
+    pub debug_wgsl_hash: Option<u64>,
     /// Non-fatal diagnostics observed while building debug artifacts.
     pub diagnostics: Vec<OcioGpuShaderDiagnostic>,
     /// Number of entry points visible after translation.
@@ -1750,8 +1962,8 @@ impl OcioGpuWgpuFullscreenShaderContract {
             wrapper_bind_group: contract.bind_group,
             input_texture_binding: contract.input_texture_binding,
             input_sampler_binding: contract.input_sampler_binding,
-            vertex_entry_point: "vs_main".to_owned(),
-            fragment_entry_point: "fs_main".to_owned(),
+            vertex_entry_point: "main".to_owned(),
+            fragment_entry_point: "main".to_owned(),
             topology: OcioGpuWgpuFullscreenTopology::TriangleStrip,
             output_location: contract.output_location,
             requires_ocio_program_link: true,
@@ -3122,41 +3334,56 @@ fn translate_shader_text(
     shader_text: &str,
     required_bindings: OcioGpuBindingContract,
 ) -> Result<OcioGpuTranslatedShader, OcioGpuShaderTranslationError> {
-    if !is_glsl_language(request.source_language) {
-        return Err(translation_error(
-            request,
-            OcioGpuShaderTranslationFailure::UnsupportedSourceLanguage {
-                language: request.source_language,
-            },
-        ));
+    let stage = translate_naga_shader_stage(
+        request.source_language,
+        request.target_language,
+        request.stage,
+        request.source_shader_hash,
+        shader_text,
+    )
+    .map_err(|reason| translation_error(request, reason))?;
+    Ok(OcioGpuTranslatedShader {
+        request,
+        naga_module: stage.naga_module,
+        module_info: stage.module_info,
+        debug_wgsl: stage.debug_wgsl,
+        debug_wgsl_hash: stage.debug_wgsl_hash,
+        required_bindings,
+        diagnostics: stage.diagnostics,
+        entry_point_count: stage.entry_point_count,
+    })
+}
+
+fn translate_naga_shader_stage(
+    source_language: GpuLanguage,
+    target_language: OcioGpuShaderTargetLanguage,
+    stage: OcioGpuShaderStage,
+    source_hash: u64,
+    shader_text: &str,
+) -> Result<OcioGpuNagaShaderStageArtifact, OcioGpuShaderTranslationFailure> {
+    if !is_glsl_language(source_language) {
+        return Err(OcioGpuShaderTranslationFailure::UnsupportedSourceLanguage {
+            language: source_language,
+        });
     }
-    if request.target_language != OcioGpuShaderTargetLanguage::NagaIr {
-        return Err(translation_error(
-            request,
-            OcioGpuShaderTranslationFailure::UnsupportedTargetLanguage {
-                language: request.target_language,
-            },
-        ));
+    if target_language != OcioGpuShaderTargetLanguage::NagaIr {
+        return Err(OcioGpuShaderTranslationFailure::UnsupportedTargetLanguage {
+            language: target_language,
+        });
     }
 
     let mut frontend = naga::front::glsl::Frontend::default();
-    let options = naga::front::glsl::Options::from(request.stage.to_naga());
-    let module = frontend.parse(&options, shader_text).map_err(|err| {
-        translation_error(
-            request,
-            OcioGpuShaderTranslationFailure::ParseFailed { message: err.to_string() },
-        )
-    })?;
+    let options = naga::front::glsl::Options::from(stage.to_naga());
+    let module = frontend
+        .parse(&options, shader_text)
+        .map_err(|err| OcioGpuShaderTranslationFailure::ParseFailed { message: err.to_string() })?;
 
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),
     );
     let info = validator.validate(&module).map_err(|err| {
-        translation_error(
-            request,
-            OcioGpuShaderTranslationFailure::ValidationFailed { message: err.to_string() },
-        )
+        OcioGpuShaderTranslationFailure::ValidationFailed { message: err.to_string() }
     })?;
 
     let mut diagnostics = Vec::new();
@@ -3175,13 +3402,15 @@ fn translate_shader_text(
     };
     let debug_wgsl_hash = debug_wgsl.as_ref().map(hash_value);
     let entry_point_count = module.entry_points.len();
-    Ok(OcioGpuTranslatedShader {
-        request,
+    Ok(OcioGpuNagaShaderStageArtifact {
+        source_language,
+        target_language,
+        stage,
+        source_hash,
         naga_module: module,
         module_info: info,
         debug_wgsl,
         debug_wgsl_hash,
-        required_bindings,
         diagnostics,
         entry_point_count,
     })
@@ -3973,6 +4202,79 @@ fn texture_contract_mismatch(
     reason: OcioGpuWgpuTextureContractMismatch,
 ) -> OcioGpuWgpuBindResourcePlanError {
     OcioGpuWgpuBindResourcePlanError::TextureContractMismatch { dimension, index, reason }
+}
+
+fn wrapper_shader_module_artifact_key(
+    source: &OcioGpuWgpuWrapperShaderSourceArtifact,
+    pipeline_layout: &OcioGpuWgpuPipelineLayoutPlan,
+    render_descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
+) -> Result<u64, OcioGpuWgpuWrapperShaderModuleArtifactError> {
+    let actual_source_hash = hash_value(&(source.vertex_source_hash, source.fragment_source_hash));
+    if source.source_hash != actual_source_hash {
+        return Err(
+            OcioGpuWgpuWrapperShaderModuleArtifactError::SourceHashMismatch {
+                expected: source.source_hash,
+                actual: actual_source_hash,
+            },
+        );
+    }
+    if source.resource_key != pipeline_layout.resource_key {
+        return Err(
+            OcioGpuWgpuWrapperShaderModuleArtifactError::PipelineLayoutResourceKeyMismatch {
+                expected: source.resource_key,
+                actual: pipeline_layout.resource_key,
+            },
+        );
+    }
+    if source.resource_key != render_descriptor.resource_key {
+        return Err(
+            OcioGpuWgpuWrapperShaderModuleArtifactError::RenderDescriptorResourceKeyMismatch {
+                expected: source.resource_key,
+                actual: render_descriptor.resource_key,
+            },
+        );
+    }
+    if pipeline_layout.layout_hash != render_descriptor.pipeline_layout_hash {
+        return Err(
+            OcioGpuWgpuWrapperShaderModuleArtifactError::PipelineLayoutHashMismatch {
+                expected: pipeline_layout.layout_hash,
+                actual: render_descriptor.pipeline_layout_hash,
+            },
+        );
+    }
+    if source.vertex_entry_point != render_descriptor.shader_contract.vertex_entry_point {
+        return Err(
+            OcioGpuWgpuWrapperShaderModuleArtifactError::VertexEntryPointMismatch {
+                expected: source.vertex_entry_point.clone(),
+                actual: render_descriptor.shader_contract.vertex_entry_point.clone(),
+            },
+        );
+    }
+    if source.fragment_entry_point != render_descriptor.shader_contract.fragment_entry_point {
+        return Err(
+            OcioGpuWgpuWrapperShaderModuleArtifactError::FragmentEntryPointMismatch {
+                expected: source.fragment_entry_point.clone(),
+                actual: render_descriptor.shader_contract.fragment_entry_point.clone(),
+            },
+        );
+    }
+    if source.output_location != render_descriptor.shader_contract.output_location {
+        return Err(
+            OcioGpuWgpuWrapperShaderModuleArtifactError::OutputLocationMismatch {
+                expected: source.output_location,
+                actual: render_descriptor.shader_contract.output_location,
+            },
+        );
+    }
+
+    let mut hasher = DefaultHasher::new();
+    source.resource_key.hash(&mut hasher);
+    source.link_hash.hash(&mut hasher);
+    source.source_hash.hash(&mut hasher);
+    pipeline_layout.layout_hash.hash(&mut hasher);
+    render_descriptor.descriptor_hash.hash(&mut hasher);
+    render_descriptor.output_format.hash(&mut hasher);
+    Ok(hasher.finish())
 }
 
 fn backend_shader_module_cache_key(
@@ -4871,8 +5173,8 @@ mod tests {
         assert_eq!(artifact.resource_key, resources.resource_key);
         assert_eq!(artifact.link_hash, link_plan.link_hash);
         assert_eq!(artifact.ocio_shader_hash, shader_plan.shader_hash);
-        assert_eq!(artifact.vertex_entry_point, "vs_main");
-        assert_eq!(artifact.fragment_entry_point, "fs_main");
+        assert_eq!(artifact.vertex_entry_point, "main");
+        assert_eq!(artifact.fragment_entry_point, "main");
         assert_eq!(
             artifact.output_location,
             resources.wrapper_contract.output_location
@@ -4887,7 +5189,7 @@ mod tests {
             artifact.debug_combined_source.matches("#version").count(),
             2
         );
-        assert!(artifact.vertex_source.contains("void vs_main()"));
+        assert!(artifact.vertex_source.contains("void main()"));
         assert!(!artifact.vertex_source.contains("mondrian_ocio_main"));
         assert!(artifact
             .fragment_source
@@ -4895,7 +5197,7 @@ mod tests {
         assert!(artifact
             .fragment_source
             .contains("layout(set = 1, binding = 1) uniform sampler"));
-        assert!(artifact.fragment_source.contains("void fs_main()"));
+        assert!(artifact.fragment_source.contains("void main()"));
         assert!(artifact.fragment_source.contains("mondrian_ocio_main(mondrian_ocio_pixel);"));
     }
 
@@ -5024,6 +5326,117 @@ mod tests {
             render_descriptor.color_target_state().format,
             wgpu::TextureFormat::Rgba16Float
         );
+    }
+
+    #[test]
+    fn wrapper_shader_module_artifact_cache_reuses_validated_stage_split_naga_modules() {
+        let resources = bind_resource_test_plan(50);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let ocio_layout =
+            resources.binding_layout_plan().expect("binding layout with separated samplers");
+        let wrapper_layout =
+            OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
+        let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
+            &resources,
+            &ocio_layout,
+            &wrapper_layout,
+        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+        let source = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
+            .expect("generate wrapper shader source");
+        let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
+            &resources,
+            &pipeline_layout,
+            &link_plan,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        );
+        let mut cache = OcioGpuWgpuWrapperShaderModuleArtifactCache::default();
+
+        let first = cache
+            .translate(&source, &pipeline_layout, &render_descriptor)
+            .expect("translate wrapper sources to Naga modules");
+        let second = cache
+            .translate(&source, &pipeline_layout, &render_descriptor)
+            .expect("reuse wrapper Naga modules");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.resource_key, resources.resource_key);
+        assert_eq!(first.link_hash, link_plan.link_hash);
+        assert_eq!(first.source_hash, source.source_hash);
+        assert_eq!(first.pipeline_layout_hash, pipeline_layout.layout_hash);
+        assert_eq!(
+            first.render_descriptor_hash,
+            render_descriptor.descriptor_hash
+        );
+        assert_eq!(
+            first.output_format,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float
+        );
+        assert_ne!(first.module_key, 0);
+        assert_eq!(first.vertex.stage, OcioGpuShaderStage::Vertex);
+        assert_eq!(first.fragment.stage, OcioGpuShaderStage::Fragment);
+        assert_eq!(first.vertex.source_hash, source.vertex_source_hash);
+        assert_eq!(first.fragment.source_hash, source.fragment_source_hash);
+        assert_eq!(first.vertex.entry_point_count, 1);
+        assert_eq!(first.fragment.entry_point_count, 1);
+        assert!(first
+            .vertex
+            .naga_module
+            .entry_points
+            .iter()
+            .any(|entry| entry.name == source.vertex_entry_point));
+        assert!(first
+            .fragment
+            .naga_module
+            .entry_points
+            .iter()
+            .any(|entry| entry.name == source.fragment_entry_point));
+
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.hits, 1);
+        assert_eq!(diagnostics.misses, 1);
+        assert_eq!(diagnostics.failures, 0);
+    }
+
+    #[test]
+    fn wrapper_shader_module_artifact_rejects_mismatched_pipeline_contracts() {
+        let resources = bind_resource_test_plan(51);
+        let shader_plan = shader_plan_with_text(callable_ocio_program_text());
+        let ocio_layout =
+            resources.binding_layout_plan().expect("binding layout with separated samplers");
+        let wrapper_layout =
+            OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
+        let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
+            &resources,
+            &ocio_layout,
+            &wrapper_layout,
+        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
+        let source = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
+            .expect("generate wrapper shader source");
+        let mut render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
+            &resources,
+            &pipeline_layout,
+            &link_plan,
+            OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        );
+        render_descriptor.pipeline_layout_hash =
+            render_descriptor.pipeline_layout_hash.wrapping_add(1);
+        let mut cache = OcioGpuWgpuWrapperShaderModuleArtifactCache::default();
+
+        let err = cache
+            .translate(&source, &pipeline_layout, &render_descriptor)
+            .expect_err("pipeline layout mismatch must fail before translation");
+
+        assert!(matches!(
+            err,
+            OcioGpuWgpuWrapperShaderModuleArtifactError::PipelineLayoutHashMismatch { .. }
+        ));
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 0);
+        assert_eq!(diagnostics.misses, 0);
+        assert_eq!(diagnostics.failures, 1);
     }
 
     #[test]
