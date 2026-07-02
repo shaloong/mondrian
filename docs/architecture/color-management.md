@@ -199,13 +199,16 @@ preflights resource-table slots before inserting, so preview/export does not
 hand-assemble table entries. When the stage plan ends in `ReadbackToCpu`, the
 resource plan carries the matching `GpuColorFrameReadbackPlan`; preview/export
 must resolve and record that readback through the resource-plan API instead of
-deriving it from texture format at the call site. `GpuColorFrameReadbackPlan`
+deriving it from texture format at the call site. `record_wgpu_output_stage`
+is the renderer-owned sequencing point for this output boundary: it schedules
+the pass, materializes resources, records the OCIO fullscreen draw, and records
+the optional readback copy in one command encoder. `GpuColorFrameReadbackPlan`
 and `GpuColorFrameReadback` are the only renderer-owned GPU-to-CPU boundary for
 encoded output frames; they currently read back only explicit `Rgba8Unorm` /
 `EncodedRgba8` contracts and do not reinterpret float targets. Until
-preview/export frame evaluation calls these entries and then records through
-`record_wgpu_from_resources`, CPU processor execution is the correctness path
-and the cached shader/module/upload/bind-resource/layout/bind-group/wrapper-
+preview/export frame evaluation calls this output-stage recorder, CPU
+processor execution is the correctness path and the cached
+shader/module/upload/bind-resource/layout/bind-group/wrapper-
 link/pipeline-contract plans are the production boundary for GPU integration
 work.
 

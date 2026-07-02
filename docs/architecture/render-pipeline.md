@@ -99,10 +99,13 @@ from the stage plan so transfer descriptors, frame ids, and the scheduled GPU
 transform stay consistent, then call its materialization helper to fill the
 resource table. If the same stage plan ends in `ReadbackToCpu`,
 `RenderGpuOutputStageResourcePlan` carries the `GpuColorFrameReadbackPlan` and
-owns resource-table lookup plus readback-copy recording. GPU-to-CPU output for
-encode, thumbnails, tests, or debug captures must use that path; readback is
-valid only for explicit encoded RGBA8 output contracts unless a future
-conversion stage says otherwise.
+owns resource-table lookup plus readback-copy recording. Once a backend
+pipeline node and OCIO bind group are prepared, callers should use
+`record_wgpu_output_stage` so materialization, schedule validation, pass
+recording, and optional readback stay in renderer-owned order. GPU-to-CPU
+output for encode, thumbnails, tests, or debug captures must use that path;
+readback is valid only for explicit encoded RGBA8 output contracts unless a
+future conversion stage says otherwise.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
 `execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
 through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage

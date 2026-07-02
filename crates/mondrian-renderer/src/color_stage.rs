@@ -273,6 +273,34 @@ pub struct RenderGpuOutputStageMaterializedResources {
     pub output: GpuColorFrameHandle,
 }
 
+/// Result of recording one materialized GPU output color stage.
+pub struct RenderGpuOutputStageRecord {
+    /// Resources materialized into the shared GPU frame table.
+    pub materialized: RenderGpuOutputStageMaterializedResources,
+    /// Optional readback buffer recorded for CPU output boundaries.
+    pub readback_buffer: Option<wgpu::Buffer>,
+}
+
+/// Borrowed backend objects required to record one GPU output color stage.
+pub struct RenderGpuOutputStageRecordRequest<'a> {
+    /// wgpu device used for resource materialization and bind-group creation.
+    pub device: &'a wgpu::Device,
+    /// wgpu queue used for upload writes.
+    pub queue: &'a wgpu::Queue,
+    /// Command encoder receiving the color pass and optional readback copy.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Prepared OCIO fullscreen render pipeline.
+    pub pipeline: &'a OcioGpuWgpuRenderPipeline,
+    /// Prepared OCIO resource bind group.
+    pub ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    /// Backend render-pass node for this color transform.
+    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+    /// Shared GPU color frame resource table.
+    pub table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    /// Load operation for the output color attachment.
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
 impl RenderGpuOutputStageResourcePlan {
     /// Build resource plans for a CPU working frame entering a planned native GPU output transform.
     pub fn from_cpu_working_frame(
@@ -396,6 +424,46 @@ impl RenderGpuOutputStageResourcePlan {
         self.insert_resources(table, input, output)
     }
 
+    /// Build a schedulable color pass for these materialized frame handles.
+    pub fn schedule_pass(
+        &self,
+        pass_node: OcioGpuWgpuRenderPassNodePlan,
+    ) -> Result<RenderGpuColorPassSchedule, RenderGpuColorPassScheduleError> {
+        RenderGpuColorPassSchedule::new(
+            self.input.clone(),
+            self.output.clone(),
+            self.transform.clone(),
+            pass_node,
+        )
+    }
+
+    /// Materialize resources, record the GPU color pass, then record optional readback.
+    pub fn record_wgpu_output_stage(
+        &self,
+        request: RenderGpuOutputStageRecordRequest<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputStageRecordError> {
+        let schedule = self
+            .schedule_pass(request.pass_node)
+            .map_err(RenderGpuOutputStageRecordError::Schedule)?;
+        let materialized = self
+            .materialize_wgpu(request.device, request.queue, request.table)
+            .map_err(RenderGpuOutputStageRecordError::Materialize)?;
+        schedule
+            .record_wgpu_from_resources(
+                request.device,
+                request.encoder,
+                request.pipeline,
+                request.ocio_bind_group,
+                request.table,
+                request.load_op,
+            )
+            .map_err(RenderGpuOutputStageRecordError::Pass)?;
+        let readback_buffer = self
+            .record_readback_wgpu(request.device, request.encoder, request.table)
+            .map_err(RenderGpuOutputStageRecordError::Readback)?;
+        Ok(RenderGpuOutputStageRecord { materialized, readback_buffer })
+    }
+
     /// Resolve the materialized output resource used by this stage's optional readback.
     pub fn resolve_readback_resource<'a, R>(
         &self,
@@ -493,6 +561,19 @@ pub enum RenderGpuOutputStageMaterializeError {
 pub enum RenderGpuOutputStageReadbackError {
     /// Resource table rejected the readback target lookup.
     ResourceTable(GpuColorFrameResourceTableError),
+}
+
+/// Error returned when a full GPU output stage cannot be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputStageRecordError {
+    /// The pass could not be scheduled from the planned handles and backend node.
+    Schedule(RenderGpuColorPassScheduleError),
+    /// The stage resources could not be materialized.
+    Materialize(RenderGpuOutputStageMaterializeError),
+    /// The color pass could not be recorded.
+    Pass(RenderGpuColorPassExecutionError),
+    /// The optional readback could not be recorded.
+    Readback(RenderGpuOutputStageReadbackError),
 }
 
 impl RenderGpuColorPassSchedule {
@@ -1782,6 +1863,39 @@ mod tests {
             table.get(&resources.output).expect("output").resource(),
             &"output-resource"
         );
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_builds_pass_schedule() {
+        let resources = executable_gpu_output_stage_resources(605);
+        let pass_node = pass_node_for_transform(&resources.transform);
+
+        let schedule = resources
+            .schedule_pass(pass_node)
+            .expect("stage resources should schedule pass");
+
+        assert_eq!(schedule.input, resources.input);
+        assert_eq!(schedule.output, resources.output);
+        assert_eq!(
+            schedule.transform.wgpu.resources.resource_key,
+            resources.transform.wgpu.resources.resource_key
+        );
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_rejects_mismatched_pass_schedule() {
+        let resources = executable_gpu_output_stage_resources(606);
+        let mut pass_node = pass_node_for_transform(&resources.transform);
+        pass_node.resource_key = pass_node.resource_key.wrapping_add(1);
+
+        let err = resources
+            .schedule_pass(pass_node)
+            .expect_err("mismatched pass node must not schedule");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::PassResourceKeyMismatch { .. }
+        ));
     }
 
     #[test]
