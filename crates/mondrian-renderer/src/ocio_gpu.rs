@@ -1302,6 +1302,197 @@ pub enum OcioGpuWgpuTextureContractMismatch {
     },
 }
 
+/// Wrapper input resources borrowed while creating the fullscreen wrapper bind group.
+pub struct OcioGpuWgpuWrapperInputResources<'a> {
+    /// GPU view for the input frame texture.
+    pub input_texture_view: &'a wgpu::TextureView,
+    /// Sampler used to read the input frame.
+    pub input_sampler: &'a wgpu::Sampler,
+}
+
+/// Concrete OCIO resource bind group created from validated uploaded resources.
+pub struct OcioGpuWgpuOcioBindGroup {
+    /// Stable resource key this bind group belongs to.
+    pub resource_key: u64,
+    /// Hash of the bind-resource plan used to create it.
+    pub bind_resource_plan_hash: u64,
+    /// Hash of the OCIO bind-group layout.
+    pub layout_hash: u64,
+    /// Concrete wgpu bind-group layout.
+    pub layout: wgpu::BindGroupLayout,
+    /// Concrete wgpu bind group.
+    pub bind_group: wgpu::BindGroup,
+}
+
+/// Concrete wrapper input bind group for the fullscreen OCIO pass.
+pub struct OcioGpuWgpuWrapperBindGroup {
+    /// Wrapper bind group index.
+    pub bind_group_index: u32,
+    /// Hash of the wrapper bind-group layout.
+    pub layout_hash: u64,
+    /// Concrete wgpu bind-group layout.
+    pub layout: wgpu::BindGroupLayout,
+    /// Concrete wgpu bind group.
+    pub bind_group: wgpu::BindGroup,
+}
+
+/// Error returned when actual wgpu bind-group creation cannot satisfy the contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuBindGroupError {
+    /// Uploaded LUT resources belong to a different resource plan.
+    LutResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Uploaded uniform resources belong to a different resource plan.
+    UniformResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The uploaded uniform buffer required by the bind-resource plan is missing.
+    MissingUploadedUniformBuffer { binding: u32 },
+    /// The bind-resource plan did not contain an entry required by the layout.
+    MissingBindResourceEntry { binding: u32 },
+    /// A 1D/2D LUT texture required by the bind-resource plan is missing.
+    MissingUploadedTexture2D { index: u32 },
+    /// A 3D LUT texture required by the bind-resource plan is missing.
+    MissingUploadedTexture3D { index: u32 },
+    /// Uploaded uniform buffer metadata does not match the bind-resource plan.
+    UniformMetadataMismatch {
+        /// Binding index.
+        binding: u32,
+        /// Human-readable mismatch reason.
+        reason: OcioGpuWgpuUploadedUniformMismatch,
+    },
+    /// Uploaded LUT texture metadata does not match the bind-resource plan.
+    TextureMetadataMismatch {
+        /// Texture index.
+        index: u32,
+        /// Human-readable mismatch reason.
+        reason: OcioGpuWgpuUploadedTextureMismatch,
+    },
+}
+
+/// Field-level uploaded uniform mismatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuUploadedUniformMismatch {
+    /// Byte length mismatch.
+    ByteLen { expected: usize, actual: usize },
+    /// Packed bytes hash mismatch.
+    BytesHash { expected: u64, actual: u64 },
+}
+
+/// Field-level uploaded texture mismatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuUploadedTextureMismatch {
+    /// Binding index mismatch.
+    BindingIndex { expected: u32, actual: u32 },
+    /// Texture symbol mismatch.
+    TextureName { expected: String, actual: String },
+    /// Sampler symbol mismatch.
+    SamplerName { expected: String, actual: String },
+    /// Texture format mismatch.
+    Format {
+        expected: OcioGpuWgpuLutTextureFormat,
+        actual: OcioGpuWgpuLutTextureFormat,
+    },
+    /// Texture dimension mismatch.
+    Dimension {
+        expected: OcioGpuWgpuLutTextureDimension,
+        actual: OcioGpuWgpuLutTextureDimension,
+    },
+    /// Texture extent mismatch.
+    Extent {
+        expected: OcioGpuWgpuLutTextureExtent,
+        actual: OcioGpuWgpuLutTextureExtent,
+    },
+    /// Source values hash mismatch.
+    SourceValuesHash { expected: u64, actual: u64 },
+    /// Packed bytes hash mismatch.
+    PackedBytesHash { expected: u64, actual: u64 },
+}
+
+/// Stateless backend preparer for OCIO wgpu bind groups.
+pub struct OcioGpuWgpuBindGroupPreparer;
+
+impl OcioGpuWgpuBindGroupPreparer {
+    /// Create the concrete OCIO resource bind group from uploaded LUT/uniform resources.
+    pub fn prepare_ocio_bind_group(
+        device: &wgpu::Device,
+        layout_plan: &OcioGpuWgpuBindingLayoutPlan,
+        bind_resource_plan: &OcioGpuWgpuBindResourcePlan,
+        uploaded_luts: &OcioGpuWgpuUploadedLuts,
+        uploaded_uniform: Option<&OcioGpuWgpuUploadedUniformBuffer>,
+    ) -> Result<OcioGpuWgpuOcioBindGroup, OcioGpuWgpuBindGroupError> {
+        if bind_resource_plan.resource_key != uploaded_luts.resource_key {
+            return Err(OcioGpuWgpuBindGroupError::LutResourceKeyMismatch {
+                expected: bind_resource_plan.resource_key,
+                actual: uploaded_luts.resource_key,
+            });
+        }
+        if let Some(uniform) = uploaded_uniform {
+            if bind_resource_plan.resource_key != uniform.resource_key {
+                return Err(OcioGpuWgpuBindGroupError::UniformResourceKeyMismatch {
+                    expected: bind_resource_plan.resource_key,
+                    actual: uniform.resource_key,
+                });
+            }
+        }
+
+        let descriptor = OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_ocio_resources(layout_plan);
+        let layout = descriptor.create_bind_group_layout(device);
+        let entries = layout_plan
+            .entries
+            .iter()
+            .map(|entry| {
+                ocio_bind_group_entry(*entry, bind_resource_plan, uploaded_luts, uploaded_uniform)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ocio_resource_bind_group"),
+            layout: &layout,
+            entries: &entries,
+        });
+        Ok(OcioGpuWgpuOcioBindGroup {
+            resource_key: bind_resource_plan.resource_key,
+            bind_resource_plan_hash: bind_resource_plan.plan_hash,
+            layout_hash: descriptor.layout_hash,
+            layout,
+            bind_group,
+        })
+    }
+
+    /// Create the concrete fullscreen wrapper input bind group.
+    pub fn prepare_wrapper_bind_group(
+        device: &wgpu::Device,
+        wrapper_layout: &OcioGpuWgpuWrapperBindingPlan,
+        input: OcioGpuWgpuWrapperInputResources<'_>,
+    ) -> OcioGpuWgpuWrapperBindGroup {
+        let descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(wrapper_layout);
+        let layout = descriptor.create_bind_group_layout(device);
+        let entries = wrapper_layout
+            .entries
+            .iter()
+            .map(|entry| match entry.resource {
+                OcioGpuWgpuWrapperBindingResource::InputFrameTexture => wgpu::BindGroupEntry {
+                    binding: entry.binding,
+                    resource: wgpu::BindingResource::TextureView(input.input_texture_view),
+                },
+                OcioGpuWgpuWrapperBindingResource::InputFrameSampler => wgpu::BindGroupEntry {
+                    binding: entry.binding,
+                    resource: wgpu::BindingResource::Sampler(input.input_sampler),
+                },
+            })
+            .collect::<Vec<_>>();
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ocio_wrapper_input_bind_group"),
+            layout: &layout,
+            entries: &entries,
+        });
+        OcioGpuWgpuWrapperBindGroup {
+            bind_group_index: wrapper_layout.bind_group,
+            layout_hash: descriptor.layout_hash,
+            layout,
+            bind_group,
+        }
+    }
+}
+
 /// One binding entry in the future wgpu OCIO bind group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OcioGpuWgpuBindingPlan {
@@ -2667,6 +2858,253 @@ fn hash_bind_resource_plan(
     ocio_layout_hash.hash(&mut hasher);
     entries.hash(&mut hasher);
     hasher.finish()
+}
+
+fn ocio_bind_group_entry<'a>(
+    layout_entry: OcioGpuWgpuBindingPlan,
+    bind_resource_plan: &OcioGpuWgpuBindResourcePlan,
+    uploaded_luts: &'a OcioGpuWgpuUploadedLuts,
+    uploaded_uniform: Option<&'a OcioGpuWgpuUploadedUniformBuffer>,
+) -> Result<wgpu::BindGroupEntry<'a>, OcioGpuWgpuBindGroupError> {
+    let resource_entry = bind_resource_entry_for_binding(bind_resource_plan, layout_entry.binding)?;
+    match (layout_entry.resource, &resource_entry.resource) {
+        (
+            OcioGpuWgpuBindingResource::OcioUniformBuffer { .. },
+            OcioGpuWgpuBindResource::UniformBuffer { byte_len, bytes_hash },
+        ) => {
+            let uniform = uploaded_uniform.ok_or(
+                OcioGpuWgpuBindGroupError::MissingUploadedUniformBuffer {
+                    binding: layout_entry.binding,
+                },
+            )?;
+            validate_uploaded_uniform(layout_entry.binding, *byte_len, *bytes_hash, uniform)?;
+            Ok(wgpu::BindGroupEntry {
+                binding: layout_entry.binding,
+                resource: uniform.buffer.as_entire_binding(),
+            })
+        }
+        (
+            OcioGpuWgpuBindingResource::OcioLutTexture2d { index },
+            OcioGpuWgpuBindResource::LutTexture { .. },
+        ) => {
+            let texture = uploaded_luts
+                .textures_2d
+                .iter()
+                .find(|texture| texture.index == index)
+                .ok_or(OcioGpuWgpuBindGroupError::MissingUploadedTexture2D { index })?;
+            validate_uploaded_texture(layout_entry.binding, &resource_entry.resource, texture)?;
+            Ok(wgpu::BindGroupEntry {
+                binding: layout_entry.binding,
+                resource: wgpu::BindingResource::TextureView(&texture.view),
+            })
+        }
+        (
+            OcioGpuWgpuBindingResource::OcioLutTexture3d { index },
+            OcioGpuWgpuBindResource::LutTexture { .. },
+        ) => {
+            let texture = uploaded_luts
+                .textures_3d
+                .iter()
+                .find(|texture| texture.index == index)
+                .ok_or(OcioGpuWgpuBindGroupError::MissingUploadedTexture3D { index })?;
+            validate_uploaded_texture(layout_entry.binding, &resource_entry.resource, texture)?;
+            Ok(wgpu::BindGroupEntry {
+                binding: layout_entry.binding,
+                resource: wgpu::BindingResource::TextureView(&texture.view),
+            })
+        }
+        (
+            OcioGpuWgpuBindingResource::OcioLutSampler2d { index },
+            OcioGpuWgpuBindResource::LutSampler { sampler_name, .. },
+        ) => {
+            let texture = uploaded_luts
+                .textures_2d
+                .iter()
+                .find(|texture| texture.index == index)
+                .ok_or(OcioGpuWgpuBindGroupError::MissingUploadedTexture2D { index })?;
+            validate_uploaded_sampler(index, sampler_name, texture)?;
+            Ok(wgpu::BindGroupEntry {
+                binding: layout_entry.binding,
+                resource: wgpu::BindingResource::Sampler(&texture.sampler),
+            })
+        }
+        (
+            OcioGpuWgpuBindingResource::OcioLutSampler3d { index },
+            OcioGpuWgpuBindResource::LutSampler { sampler_name, .. },
+        ) => {
+            let texture = uploaded_luts
+                .textures_3d
+                .iter()
+                .find(|texture| texture.index == index)
+                .ok_or(OcioGpuWgpuBindGroupError::MissingUploadedTexture3D { index })?;
+            validate_uploaded_sampler(index, sampler_name, texture)?;
+            Ok(wgpu::BindGroupEntry {
+                binding: layout_entry.binding,
+                resource: wgpu::BindingResource::Sampler(&texture.sampler),
+            })
+        }
+        _ => Err(OcioGpuWgpuBindGroupError::MissingBindResourceEntry {
+            binding: layout_entry.binding,
+        }),
+    }
+}
+
+fn bind_resource_entry_for_binding(
+    bind_resource_plan: &OcioGpuWgpuBindResourcePlan,
+    binding: u32,
+) -> Result<&OcioGpuWgpuBindResourceEntry, OcioGpuWgpuBindGroupError> {
+    bind_resource_plan
+        .ocio_entries
+        .iter()
+        .find(|entry| entry.binding == binding)
+        .ok_or(OcioGpuWgpuBindGroupError::MissingBindResourceEntry { binding })
+}
+
+fn validate_uploaded_uniform(
+    binding: u32,
+    byte_len: usize,
+    bytes_hash: u64,
+    uniform: &OcioGpuWgpuUploadedUniformBuffer,
+) -> Result<(), OcioGpuWgpuBindGroupError> {
+    if uniform.binding != binding {
+        return Err(OcioGpuWgpuBindGroupError::MissingUploadedUniformBuffer { binding });
+    }
+    if uniform.byte_len != byte_len {
+        return Err(OcioGpuWgpuBindGroupError::UniformMetadataMismatch {
+            binding,
+            reason: OcioGpuWgpuUploadedUniformMismatch::ByteLen {
+                expected: byte_len,
+                actual: uniform.byte_len,
+            },
+        });
+    }
+    if uniform.bytes_hash != bytes_hash {
+        return Err(OcioGpuWgpuBindGroupError::UniformMetadataMismatch {
+            binding,
+            reason: OcioGpuWgpuUploadedUniformMismatch::BytesHash {
+                expected: bytes_hash,
+                actual: uniform.bytes_hash,
+            },
+        });
+    }
+    Ok(())
+}
+
+fn validate_uploaded_texture(
+    binding: u32,
+    expected: &OcioGpuWgpuBindResource,
+    texture: &OcioGpuWgpuUploadedLutTexture,
+) -> Result<(), OcioGpuWgpuBindGroupError> {
+    let OcioGpuWgpuBindResource::LutTexture {
+        index,
+        texture_name,
+        sampler_name,
+        dimension,
+        format,
+        extent,
+        source_values_hash,
+        packed_bytes_hash,
+    } = expected
+    else {
+        return Err(OcioGpuWgpuBindGroupError::MissingBindResourceEntry { binding });
+    };
+    if texture.binding_index != binding {
+        return Err(texture_mismatch(
+            *index,
+            OcioGpuWgpuUploadedTextureMismatch::BindingIndex {
+                expected: binding,
+                actual: texture.binding_index,
+            },
+        ));
+    }
+    if texture.texture_name != *texture_name {
+        return Err(texture_mismatch(
+            *index,
+            OcioGpuWgpuUploadedTextureMismatch::TextureName {
+                expected: texture_name.clone(),
+                actual: texture.texture_name.clone(),
+            },
+        ));
+    }
+    if texture.sampler_name != *sampler_name {
+        return Err(texture_mismatch(
+            *index,
+            OcioGpuWgpuUploadedTextureMismatch::SamplerName {
+                expected: sampler_name.clone(),
+                actual: texture.sampler_name.clone(),
+            },
+        ));
+    }
+    if texture.format != *format {
+        return Err(texture_mismatch(
+            *index,
+            OcioGpuWgpuUploadedTextureMismatch::Format {
+                expected: *format,
+                actual: texture.format,
+            },
+        ));
+    }
+    if texture.dimension != *dimension {
+        return Err(texture_mismatch(
+            *index,
+            OcioGpuWgpuUploadedTextureMismatch::Dimension {
+                expected: *dimension,
+                actual: texture.dimension,
+            },
+        ));
+    }
+    if texture.extent != *extent {
+        return Err(texture_mismatch(
+            *index,
+            OcioGpuWgpuUploadedTextureMismatch::Extent {
+                expected: *extent,
+                actual: texture.extent,
+            },
+        ));
+    }
+    if texture.source_values_hash != *source_values_hash {
+        return Err(texture_mismatch(
+            *index,
+            OcioGpuWgpuUploadedTextureMismatch::SourceValuesHash {
+                expected: *source_values_hash,
+                actual: texture.source_values_hash,
+            },
+        ));
+    }
+    if texture.packed_bytes_hash != *packed_bytes_hash {
+        return Err(texture_mismatch(
+            *index,
+            OcioGpuWgpuUploadedTextureMismatch::PackedBytesHash {
+                expected: *packed_bytes_hash,
+                actual: texture.packed_bytes_hash,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_uploaded_sampler(
+    index: u32,
+    sampler_name: &str,
+    texture: &OcioGpuWgpuUploadedLutTexture,
+) -> Result<(), OcioGpuWgpuBindGroupError> {
+    if texture.sampler_name != sampler_name {
+        return Err(texture_mismatch(
+            index,
+            OcioGpuWgpuUploadedTextureMismatch::SamplerName {
+                expected: sampler_name.to_owned(),
+                actual: texture.sampler_name.clone(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn texture_mismatch(
+    index: u32,
+    reason: OcioGpuWgpuUploadedTextureMismatch,
+) -> OcioGpuWgpuBindGroupError {
+    OcioGpuWgpuBindGroupError::TextureMetadataMismatch { index, reason }
 }
 
 fn validate_uniform_bind_resource(

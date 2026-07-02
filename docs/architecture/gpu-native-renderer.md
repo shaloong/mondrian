@@ -143,10 +143,17 @@ packed OCIO payloads and concrete bind-group creation. It validates that packed
 LUT textures and packed uniform buffers share the resource key, binding indices,
 texture/sampler symbols, extents, dimensions, and source-value hashes required
 by `OcioGpuWgpuResourcePlan`. The plan also keeps Mondrian's fullscreen wrapper
-input texture/sampler bindings in a separate wrapper bind group. It still does
-not fabricate a concrete `wgpu::BindGroup`; the uploaded texture views, uploaded
-samplers, wrapper input frame view, and wrapper input sampler must be connected
-by the render graph once the fullscreen wrapper shader contract is implemented.
+input texture/sampler bindings in a separate wrapper bind group.
+
+`OcioGpuWgpuBindGroupPreparer` is the concrete backend-object boundary for bind
+groups. It validates uploaded LUT textures, uploaded samplers, and uploaded
+uniform buffers against `OcioGpuWgpuBindResourcePlan` before creating the OCIO
+resource `wgpu::BindGroup`, and it creates the separate fullscreen wrapper
+input bind group from a GPU frame texture view and sampler. Creating these bind
+groups is necessary but still not sufficient for native execution:
+`can_execute()` must remain false until the fullscreen wrapper shader and render
+pipeline/render-pass node consume those bind groups and prove preview/export
+consistency.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /
