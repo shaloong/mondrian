@@ -6,9 +6,10 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, CpuColorFrame, CpuColorTransformExecutor,
-    CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
+    composite_timeline_elements_color_frame, execute_cpu_input_stage, execute_cpu_output_stage,
+    CpuColorFrame, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineMediaLayer,
 };
 use std::sync::Arc;
 
@@ -29,7 +30,7 @@ fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
 
 fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
     let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec709, rgba);
-    CpuColorTransformExecutor::input_to_working(
+    execute_cpu_input_stage(
         &source,
         &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )
@@ -75,7 +76,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 ColorSpace::Rec709,
                 &mut scratch,
             );
-            CpuColorTransformExecutor::transform(
+            execute_cpu_output_stage(
                 &frame,
                 &RenderColorTransform::display(
                     ColorSpace::Rec709,

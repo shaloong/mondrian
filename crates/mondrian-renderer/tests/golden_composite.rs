@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, CpuColorFrame, CpuColorTransformExecutor,
-    CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
+    composite_timeline_elements_color_frame, execute_cpu_input_stage, execute_cpu_output_stage,
+    CpuColorFrame, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineMediaLayer,
 };
 
 const IDENTITY_TRANSFORM: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -42,7 +43,7 @@ fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
 }
 
 fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {
-    CpuColorTransformExecutor::transform(
+    execute_cpu_output_stage(
         frame,
         &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )
@@ -53,7 +54,7 @@ fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {
 
 fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
     let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec709, rgba);
-    CpuColorTransformExecutor::input_to_working(
+    execute_cpu_input_stage(
         &source,
         &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )

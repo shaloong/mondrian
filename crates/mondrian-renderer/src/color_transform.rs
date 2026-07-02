@@ -385,6 +385,20 @@ pub enum RenderColorTransformError {
     /// GPU planning was requested without an OCIO GPU shader cache.
     #[error("render GPU color transform planning requested without a GPU planner")]
     GpuPlannerUnavailable,
+    /// A color stage plan cannot be executed by the selected executor.
+    #[error("render color stage plan cannot execute on this executor: {reason}")]
+    UnsupportedStagePlan {
+        /// Diagnostic reason.
+        reason: &'static str,
+    },
+    /// A color stage descriptor did not match the executor input/output.
+    #[error("render color stage descriptor mismatch: expected {expected:?}, actual {actual:?}")]
+    StageDescriptorMismatch {
+        /// Expected descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual descriptor.
+        actual: ColorFrameDescriptor,
+    },
 }
 
 #[cfg(test)]

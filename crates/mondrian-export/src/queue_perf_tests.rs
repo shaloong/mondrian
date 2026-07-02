@@ -2,7 +2,7 @@ use super::*;
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 use mondrian_renderer::{
-    composite_timeline_elements_into, CpuColorTransformExecutor, CpuEncodedColorFrame,
+    composite_timeline_elements_into, execute_cpu_input_stage, CpuEncodedColorFrame,
     RenderInputTransform, TimelineCompositeElement, TimelineCompositeOptions,
     TimelineCompositeScratch, TimelineMediaLayer,
 };
@@ -113,7 +113,7 @@ fn generate_layer(width: u32, height: u32, seed: u8) -> Arc<DecodedVideoLayer> {
         data[base + 3] = 240;
     }
     let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, data);
-    let frame = CpuColorTransformExecutor::input_to_working(
+    let frame = execute_cpu_input_stage(
         &source,
         &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
     )

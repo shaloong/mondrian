@@ -79,6 +79,10 @@ frames, rather than naked textures or byte vectors.
 CPU/GPU color executors. It produces ordered stage plans for CPU transforms,
 GPU OCIO transforms, upload, and readback. App and export crates should consume
 renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
+Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
+`execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
+through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage
+is limited to renderer internals and its focused unit tests.
 
 ## Required Semantics
 

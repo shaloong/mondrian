@@ -29,6 +29,7 @@ pub use color_frame::{
     GpuColorFrameTextureFormat,
 };
 pub use color_stage::{
+    execute_cpu_input_stage, execute_cpu_output_stage, CpuRenderColorStageExecutor,
     RenderColorStage, RenderColorStageMode, RenderColorStagePlan, RenderColorStagePlanner,
 };
 pub use color_transform::{

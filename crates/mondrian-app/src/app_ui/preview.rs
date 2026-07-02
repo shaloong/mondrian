@@ -15,12 +15,12 @@ use mondrian_assets::AssetKind;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, evaluate_timeline_render_plan, CpuColorFrame,
-    CpuColorTransformExecutor, CpuEncodedColorFrame, RenderColorTransform,
-    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
-    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
+    execute_cpu_input_stage, execute_cpu_output_stage, CpuColorFrame, CpuEncodedColorFrame,
+    RenderColorTransform, RenderColorTransformDiagnostics, RenderColorTransformDirection,
+    RenderInputTransform, TimelineAdjustmentLayer, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence};
 use mondrian_ui_widgets::ViewerFrameImage;
@@ -331,7 +331,7 @@ impl AppUiPreviewService {
             color_context.output_color_space,
             rgba,
         );
-        let frame = CpuColorTransformExecutor::input_to_working(
+        let frame = execute_cpu_input_stage(
             &source,
             &RenderInputTransform::to_working(
                 color_context.output_color_space,
@@ -1346,7 +1346,7 @@ fn composite_resolved_preview(
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    CpuColorTransformExecutor::transform(&working_frame, &transform)
+    execute_cpu_output_stage(&working_frame, &transform)
         .map(|frame| PreviewCompositeOutput {
             rgba: frame.frame.into_rgba(),
             color_diagnostics: frame.diagnostics,
@@ -1409,7 +1409,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                 job.key.input_color_space,
                 frame.data,
             );
-            let working = match CpuColorTransformExecutor::input_to_working(
+            let working = match execute_cpu_input_stage(
                 &source,
                 &RenderInputTransform::to_working(
                     job.key.working_color_space,
@@ -1775,7 +1775,7 @@ mod tests {
             expected_frame.descriptor().color_space,
             color_context.working_color_space
         );
-        let expected = CpuColorTransformExecutor::transform(
+        let expected = execute_cpu_output_stage(
             &expected_frame,
             &RenderColorTransform::display(
                 color_context.output_color_space,
@@ -1882,7 +1882,7 @@ mod tests {
         signature: u64,
     ) -> MediaPreviewFrame {
         let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, rgba);
-        let frame = CpuColorTransformExecutor::input_to_working(
+        let frame = execute_cpu_input_stage(
             &source,
             &RenderInputTransform::to_working(
                 ColorSpace::Rec709,
@@ -1896,7 +1896,7 @@ mod tests {
     }
 
     fn test_media_frame_rgba8(frame: &MediaPreviewFrame) -> Vec<u8> {
-        CpuColorTransformExecutor::transform(
+        execute_cpu_output_stage(
             &frame.frame,
             &RenderColorTransform::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
         )

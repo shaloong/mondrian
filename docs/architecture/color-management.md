@@ -66,14 +66,14 @@ color conversion helpers.
 
 Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderColorTransform` from their `ColorContext` and pass
-typed frames to `CpuColorTransformExecutor` or a future GPU executor; they must
-not duplicate working -> output conversion logic locally.
+typed frames to renderer stage execution helpers; they must not duplicate
+working -> output conversion logic locally.
 
 Input transforms follow the same rule. Decode/import code wraps source pixels in
 `CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks
-the renderer executor for a `CpuColorFrame` in timeline working space. App and
-export crates must not perform source -> working color conversion with local
-`ColorPipeline` calls.
+the renderer stage executor for a `CpuColorFrame` in timeline working space.
+App and export crates must not perform source -> working color conversion with
+local `ColorPipeline` calls or direct low-level transform executor calls.
 
 Renderer color-transform executors provide detailed diagnostics for both input
 and output boundaries: backend, direction, typed input/output descriptors,

@@ -1,8 +1,9 @@
 use crate::{
-    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
-    OcioGpuShaderCache, RenderColorTransform, RenderColorTransformError,
-    RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
-    RenderInputTransform,
+    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
+    CpuColorTransformExecutor, CpuEncodedColorFrame, OcioGpuShaderCache, RenderColorTransform,
+    RenderColorTransformError, RenderColorTransformGpuOptions, RenderColorTransformGpuPlan,
+    RenderColorTransformGpuPlanner, RenderInputTransform, RenderInputTransformResult,
+    RenderOutputTransformResult,
 };
 
 /// Preferred execution mode for a renderer color transform stage.
@@ -117,6 +118,75 @@ pub struct RenderColorStagePlanner<'a> {
     mode: RenderColorStageMode,
     gpu_cache: Option<&'a mut OcioGpuShaderCache>,
     gpu_options: RenderColorTransformGpuOptions,
+}
+
+/// Executes CPU-only color stage plans.
+pub struct CpuRenderColorStageExecutor;
+
+impl CpuRenderColorStageExecutor {
+    /// Execute a CPU source/import -> working-space stage plan.
+    pub fn input_to_working(
+        frame: &CpuEncodedColorFrame,
+        plan: &RenderColorStagePlan,
+    ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuInputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution only supports CPU input transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result = CpuColorTransformExecutor::input_to_working(frame, transform)?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(result)
+    }
+
+    /// Execute a CPU working-space -> display/export stage plan.
+    pub fn output_transform(
+        frame: &CpuColorFrame,
+        plan: &RenderColorStagePlan,
+    ) -> Result<RenderOutputTransformResult, RenderColorTransformError> {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "output stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuOutputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "output stage execution only supports CPU output transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result = CpuColorTransformExecutor::transform(frame, transform)?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(result)
+    }
+}
+
+/// Plan and execute a CPU source/import -> working-space color stage.
+pub fn execute_cpu_input_stage(
+    frame: &CpuEncodedColorFrame,
+    transform: &RenderInputTransform,
+) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+    let mut planner = RenderColorStagePlanner::cpu_only();
+    let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
+    CpuRenderColorStageExecutor::input_to_working(frame, &plan)
+}
+
+/// Plan and execute a CPU working-space -> display/export color stage.
+pub fn execute_cpu_output_stage(
+    frame: &CpuColorFrame,
+    transform: &RenderColorTransform,
+) -> Result<RenderOutputTransformResult, RenderColorTransformError> {
+    let mut planner = RenderColorStagePlanner::cpu_only();
+    let plan = planner.plan_output_transform(frame.descriptor(), transform)?;
+    CpuRenderColorStageExecutor::output_transform(frame, &plan)
 }
 
 impl<'a> RenderColorStagePlanner<'a> {
@@ -264,11 +334,22 @@ impl<'a> RenderColorStagePlanner<'a> {
     }
 }
 
+fn validate_descriptor(
+    expected: ColorFrameDescriptor,
+    actual: ColorFrameDescriptor,
+) -> Result<(), RenderColorTransformError> {
+    if expected != actual {
+        return Err(RenderColorTransformError::StageDescriptorMismatch { expected, actual });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_core::ensure_mondrian_default_ocio_loaded;
     use mondrian_core::types::{ColorEngine, ColorSpace};
+    use mondrian_core::RgbaF32Frame;
 
     fn source_descriptor(residency: ColorFrameResidency) -> ColorFrameDescriptor {
         ColorFrameDescriptor {
@@ -307,6 +388,102 @@ mod tests {
         assert!(!plan.contains_transfer());
         assert_eq!(plan.final_descriptor.residency, ColorFrameResidency::Cpu);
         assert_eq!(plan.final_descriptor.domain, ColorFrameDomain::Working);
+    }
+
+    #[test]
+    fn cpu_stage_executor_runs_input_plan_and_validates_descriptors() {
+        let source = CpuEncodedColorFrame::source_rgba8(
+            1280,
+            720,
+            ColorSpace::SLog3,
+            vec![128; 1280 * 720 * 4],
+        );
+        let transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let mut planner = RenderColorStagePlanner::cpu_only();
+        let plan = planner
+            .plan_input_to_working(source.descriptor(), &transform)
+            .expect("CPU input plan");
+
+        let result = CpuRenderColorStageExecutor::input_to_working(&source, &plan)
+            .expect("execute CPU input plan");
+
+        assert_eq!(result.frame.descriptor(), plan.final_descriptor);
+        assert_eq!(result.diagnostics.input, source.descriptor());
+        assert_eq!(result.diagnostics.output, plan.final_descriptor);
+    }
+
+    #[test]
+    fn cpu_stage_executor_rejects_gpu_plan() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let source = CpuEncodedColorFrame::source_rgba8(
+            1280,
+            720,
+            ColorSpace::SLog3,
+            vec![128; 1280 * 720 * 4],
+        );
+        let transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let plan = planner
+            .plan_input_to_working(source.descriptor(), &transform)
+            .expect("GPU input plan");
+
+        let err = CpuRenderColorStageExecutor::input_to_working(&source, &plan)
+            .expect_err("CPU executor must reject GPU plans");
+
+        assert!(matches!(
+            err,
+            RenderColorTransformError::UnsupportedStagePlan { .. }
+        ));
+    }
+
+    #[test]
+    fn cpu_stage_executor_runs_output_plan_and_validates_descriptors() {
+        let frame = CpuColorFrame::working(RgbaF32Frame {
+            width: 1920,
+            height: 1080,
+            data: vec![[0.25, 0.5, 0.75, 1.0]; 1920 * 1080],
+            color_space: ColorSpace::Rec709,
+        });
+        let transform =
+            RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut planner = RenderColorStagePlanner::cpu_only();
+        let plan = planner
+            .plan_output_transform(frame.descriptor(), &transform)
+            .expect("CPU output plan");
+
+        let result = CpuRenderColorStageExecutor::output_transform(&frame, &plan)
+            .expect("execute CPU output plan");
+
+        assert_eq!(result.frame.descriptor(), plan.final_descriptor);
+        assert_eq!(result.diagnostics.input, frame.descriptor());
+        assert_eq!(result.diagnostics.output, plan.final_descriptor);
+    }
+
+    #[test]
+    fn cpu_stage_helpers_plan_and_execute_transforms() {
+        let source =
+            CpuEncodedColorFrame::source_rgba8(2, 2, ColorSpace::Rec709, vec![96; 2 * 2 * 4]);
+        let input_transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let working = execute_cpu_input_stage(&source, &input_transform)
+            .expect("helper should execute input stage");
+        assert_eq!(working.frame.descriptor().domain, ColorFrameDomain::Working);
+
+        let output_transform =
+            RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let output = execute_cpu_output_stage(&working.frame, &output_transform)
+            .expect("helper should execute output stage");
+        assert_eq!(output.frame.descriptor().domain, ColorFrameDomain::Display);
+        assert_eq!(
+            output.frame.descriptor().residency,
+            ColorFrameResidency::Cpu
+        );
     }
 
     #[test]

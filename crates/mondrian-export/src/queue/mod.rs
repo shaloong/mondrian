@@ -15,11 +15,11 @@ use mondrian_media::audio::{
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, evaluate_timeline_render_plan, CpuColorFrame,
-    CpuColorTransformExecutor, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
-    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
+    execute_cpu_input_stage, execute_cpu_output_stage, CpuColorFrame, CpuEncodedColorFrame,
+    RenderColorTransform, RenderInputTransform, TimelineAdjustmentLayer, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, ExportBitDepth, SequenceSettings, VideoRange};
 use parking_lot::{Condvar, Mutex};
@@ -1034,7 +1034,7 @@ fn render_sequence_frame_into(
             nested_output_color_space,
             nested_canvas,
         );
-        let nested_frame = CpuColorTransformExecutor::input_to_working(
+        let nested_frame = execute_cpu_input_stage(
             &nested_source,
             &RenderInputTransform::to_working(nested_output_color_space, false, nested_engine),
         )
@@ -1115,7 +1115,7 @@ fn render_sequence_frame_into(
         color_context.working_color_space,
         &mut scratch,
     );
-    let encoded = CpuColorTransformExecutor::transform(
+    let encoded = execute_cpu_output_stage(
         &rendered,
         &RenderColorTransform::export(
             color_context.output_color_space,
@@ -1150,7 +1150,7 @@ fn decode_video_layer_scaled(
         input_color_space,
         decoded.data,
     );
-    let frame = CpuColorTransformExecutor::input_to_working(
+    let frame = execute_cpu_input_stage(
         &source,
         &RenderInputTransform::to_working(working_color_space, tone_map, engine.clone()),
     )
@@ -1434,7 +1434,7 @@ mod tests {
             ColorSpace::Rec709,
             rgba.to_vec(),
         );
-        mondrian_renderer::CpuColorTransformExecutor::input_to_working(
+        mondrian_renderer::execute_cpu_input_stage(
             &source,
             &mondrian_renderer::RenderInputTransform::to_working(
                 ColorSpace::Rec709,
