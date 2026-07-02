@@ -33,8 +33,8 @@ pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_output_stage, CpuRenderColorStageExecutor,
     RenderColorStage, RenderColorStageDiagnostics, RenderColorStageExecution, RenderColorStageMode,
     RenderColorStagePlan, RenderColorStagePlanner, RenderGpuColorPassExecutionError,
-    RenderGpuColorPassInputView, RenderGpuColorPassSchedule, RenderGpuColorPassScheduleError,
-    RenderGpuColorPassTargetView,
+    RenderGpuColorPassInputView, RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
+    RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView,
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,

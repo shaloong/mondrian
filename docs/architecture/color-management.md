@@ -185,11 +185,14 @@ execution artifact. Mondrian validates/owns stage-split Naga IR for the wrapper
 and keeps generated WGSL as diagnostics only. Preview/export frame evaluation
 must resolve GPU frame handles through `GpuColorFrameResourceTable`; the table
 revalidates descriptor and texture-format contracts for every lookup before
-exposing backend resources such as `GpuColorFrameWgpuResource`. Until the frame
-evaluation path allocates/uploads real entries into that shared table, CPU
-processor execution is the correctness path and the cached shader/module/upload/
-bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are the
-production boundary for GPU integration work.
+exposing backend resources such as `GpuColorFrameWgpuResource`.
+`RenderGpuColorPassSchedule::record_wgpu_from_resources` is the single
+preview/export-facing entry point that resolves those table entries, prepares
+the wrapper bind group, and records the pass. Until the frame evaluation path
+allocates/uploads real entries into that shared table and calls this entry point,
+CPU processor execution is the correctness path and the cached shader/module/
+upload/bind-resource/layout/bind-group/wrapper-link/pipeline-contract plans are
+the production boundary for GPU integration work.
 
 Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,

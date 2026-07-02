@@ -88,7 +88,10 @@ and record the output target through `OcioGpuWgpuRenderPassRecorder`; preview
 and export callers must not duplicate OCIO pass assembly. Resolved GPU frame
 views must come from `GpuColorFrameResourceTable`, which validates the
 `GpuColorFrameHandle` contract before exposing the backend texture/view/sampler
-payload.
+payload. Callers that already have concrete wgpu resources should use
+`record_wgpu_from_resources` so resource resolution, wrapper bind-group
+preparation, output target construction, and recorder invocation stay in one
+renderer-owned path.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` and
 `execute_cpu_output_stage(...)`, which plan a CPU-only stage and then execute it
 through `CpuRenderColorStageExecutor`. Direct `CpuColorTransformExecutor` usage

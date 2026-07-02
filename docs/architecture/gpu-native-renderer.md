@@ -194,10 +194,10 @@ command encoder. `RenderGpuColorPassSchedule` is the renderer-facing execution
 binding above that recorder. It validates concrete input/output
 `GpuColorFrameHandle` values, creates the wrapper input bind group from the
 scheduled transform's wrapper contract, converts the output frame view into the
-OCIO render-pass target, and records through the shared recorder. The remaining
-integration work is the shared GPU frame resource table used by preview/export
-frame evaluation; app and export code must not reassemble OCIO bind groups or
-render-pass targets independently.
+OCIO render-pass target, and records through the shared recorder.
+`record_wgpu_from_resources` is the resource-table-backed entry point for
+preview/export frame evaluation. App and export code must not reassemble OCIO
+bind groups or render-pass targets independently.
 
 `GpuColorFrameResourceTable` is the shared resolver for GPU-resident color
 frames. It maps typed `GpuColorFrameHandle` ids to backend payloads, and every

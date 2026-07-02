@@ -1,13 +1,15 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuColorTransformExecutor, CpuEncodedColorFrame, GpuColorFrameHandle, GpuColorFrameId,
-    GpuColorFrameTextureFormat, OcioGpuShaderCache, OcioGpuWgpuBindGroupPreparer,
-    OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup, OcioGpuWgpuRenderPassError,
-    OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
-    OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
-    OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
-    RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
-    RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
+    GpuColorFrameResource, GpuColorFrameResourceTable, GpuColorFrameResourceTableError,
+    GpuColorFrameTextureFormat, GpuColorFrameWgpuResource, OcioGpuShaderCache,
+    OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
+    OcioGpuWgpuRenderPassError, OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder,
+    OcioGpuWgpuRenderPassTarget, OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup,
+    OcioGpuWgpuWrapperBindingPlan, OcioGpuWgpuWrapperInputResources, RenderColorTransform,
+    RenderColorTransformError, RenderColorTransformGpuOptions, RenderColorTransformGpuPlan,
+    RenderColorTransformGpuPlanner, RenderInputTransform, RenderInputTransformResult,
+    RenderOutputTransformResult,
 };
 
 /// Preferred execution mode for a renderer color transform stage.
@@ -234,6 +236,15 @@ pub struct RenderGpuColorPassTargetView<'a> {
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
 
+/// Resolved resource-table entries for a scheduled GPU OCIO color pass.
+#[derive(Debug)]
+pub struct RenderGpuColorPassResolvedResources<'a, R> {
+    /// Resolved input frame entry.
+    pub input: &'a GpuColorFrameResource<R>,
+    /// Resolved output frame entry.
+    pub output: &'a GpuColorFrameResource<R>,
+}
+
 impl RenderGpuColorPassSchedule {
     /// Build a schedulable GPU OCIO color pass after descriptor and backend-node validation.
     pub fn new(
@@ -341,6 +352,20 @@ impl RenderGpuColorPassSchedule {
         )
     }
 
+    /// Resolve source and target entries from a shared GPU frame resource table.
+    pub fn resolve_resources<'a, R>(
+        &self,
+        resources: &'a GpuColorFrameResourceTable<R>,
+    ) -> Result<RenderGpuColorPassResolvedResources<'a, R>, RenderGpuColorPassExecutionError> {
+        let input = resources
+            .get(&self.input)
+            .map_err(RenderGpuColorPassExecutionError::ResourceTable)?;
+        let output = resources
+            .get(&self.output)
+            .map_err(RenderGpuColorPassExecutionError::ResourceTable)?;
+        Ok(RenderGpuColorPassResolvedResources { input, output })
+    }
+
     /// Create the wrapper input bind group for this scheduled pass from a resolved input view.
     pub fn prepare_wrapper_bind_group(
         &self,
@@ -391,6 +416,40 @@ impl RenderGpuColorPassSchedule {
             },
         )
         .map_err(RenderGpuColorPassExecutionError::RenderPass)
+    }
+
+    /// Resolve GPU frame resources, prepare the wrapper bind group, and record this pass.
+    pub fn record_wgpu_from_resources(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &OcioGpuWgpuRenderPipeline,
+        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        resources: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        load_op: wgpu::LoadOp<wgpu::Color>,
+    ) -> Result<(), RenderGpuColorPassExecutionError> {
+        let resolved = self.resolve_resources(resources)?;
+        let input = resolved.input.resource();
+        let wrapper_bind_group = self.prepare_wrapper_bind_group(
+            device,
+            RenderGpuColorPassInputView {
+                frame: resolved.input.handle(),
+                texture_view: &input.texture_view,
+                sampler: &input.sampler,
+            },
+        )?;
+        let output = resolved.output.resource();
+        self.record_wgpu(
+            encoder,
+            pipeline,
+            ocio_bind_group,
+            &wrapper_bind_group,
+            RenderGpuColorPassTargetView {
+                frame: resolved.output.handle(),
+                texture_view: &output.texture_view,
+                load_op,
+            },
+        )
     }
 }
 
@@ -512,6 +571,8 @@ pub enum RenderGpuColorPassExecutionError {
         /// Actual wrapper layout hash from the transform resource contract.
         actual: u64,
     },
+    /// Source or target frame resolution failed against the shared GPU resource table.
+    ResourceTable(GpuColorFrameResourceTableError),
     /// The backend render-pass recorder rejected the concrete wgpu resources.
     RenderPass(OcioGpuWgpuRenderPassError),
 }
@@ -1175,6 +1236,87 @@ mod tests {
             err,
             RenderGpuColorPassExecutionError::OutputTextureFormatMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_resolves_matching_frame_resources() {
+        let schedule = executable_gpu_output_schedule(18, 19);
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(
+                schedule.input.clone(),
+                "input-texture",
+            ))
+            .expect("insert input");
+        table
+            .insert(GpuColorFrameResource::new(
+                schedule.output.clone(),
+                "output-texture",
+            ))
+            .expect("insert output");
+
+        let resolved = schedule.resolve_resources(&table).expect("resolve scheduled resources");
+
+        assert_eq!(resolved.input.resource(), &"input-texture");
+        assert_eq!(resolved.output.resource(), &"output-texture");
+        assert_eq!(resolved.input.handle(), &schedule.input);
+        assert_eq!(resolved.output.handle(), &schedule.output);
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_reports_missing_resource_table_frame() {
+        let schedule = executable_gpu_output_schedule(20, 21);
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(schedule.input.clone(), "input"))
+            .expect("insert input");
+
+        let err = schedule
+            .resolve_resources(&table)
+            .expect_err("missing output must fail before recording");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassExecutionError::ResourceTable(
+                GpuColorFrameResourceTableError::MissingFrame { id }
+            ) if id == schedule.output.id()
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_reports_stale_resource_table_contract() {
+        let schedule = executable_gpu_output_schedule(22, 23);
+        let stale_output = gpu_handle_with_format(
+            23,
+            schedule.output.descriptor(),
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "stale-output",
+        );
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(schedule.input.clone(), "input"))
+            .expect("insert input");
+        table
+            .insert(GpuColorFrameResource::new(
+                stale_output.clone(),
+                "stale-output",
+            ))
+            .expect("insert stale output");
+
+        let err = schedule
+            .resolve_resources(&table)
+            .expect_err("stale output contract must fail before recording");
+
+        assert_eq!(
+            err,
+            RenderGpuColorPassExecutionError::ResourceTable(
+                GpuColorFrameResourceTableError::ContractMismatch {
+                    id: schedule.output.id(),
+                    expected: schedule.output.contract(),
+                    actual: stale_output.contract()
+                }
+            )
+        );
     }
 
     fn assert_stage_chain_is_contiguous(plan: &RenderColorStagePlan) {
