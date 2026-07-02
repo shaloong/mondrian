@@ -65,20 +65,35 @@ and uniform packing. Render scheduling must treat those blockers as diagnostics,
 not as silent fallback.
 
 The same preparation step also returns an `OcioGpuWgpuResourcePlan`. This plan
-is the renderer contract for the future native pass: input/output frame
-textures, OCIO 1D/2D and 3D LUT texture bindings, uniform buffers, samplers,
-bind group entries, bind groups, and stable resource/pipeline-layout hashes.
+is the renderer contract for the future native pass: the OCIO binding contract
+reported by the GPU shader descriptor, the separate Mondrian fullscreen wrapper
+contract for input sampling/output location, input/output frame resource counts,
+LUT texture counts, uniform buffers, samplers, bind group entries, bind groups,
+and stable resource/pipeline-layout hashes.
 It is not a fake resource allocation layer; concrete `wgpu::ShaderModule`,
 `wgpu::Texture`, `wgpu::BindGroupLayout`, `wgpu::BindGroup`, and pipeline
 objects must still be created by the backend compiler/upload layer before
 `can_execute()` can become true.
 
 `OcioGpuWgpuResourceCache` prepares and caches the backend binding-layout
-contract derived from that resource plan. It assigns deterministic binding
-slots for the input frame texture, shared sampler, OCIO 2D LUTs, OCIO 3D LUTs,
-and OCIO uniform buffers, and reports cache hits/misses independently from OCIO
-shader extraction. This is the handoff point for the future object-creation
-layer; it still does not allocate `wgpu` objects or bypass native blockers.
+contract derived from that resource plan. OCIO bind-group entries use the
+descriptor set, uniform-buffer binding, texture binding start, and LUT binding
+indices reported by OCIO rather than inferred WGSL text or count-based slot
+assignment. Mondrian wrapper resources stay in a separate wrapper contract.
+This cache reports hits/misses independently from OCIO shader extraction. It is
+the handoff point for the future object-creation layer; it still does not
+allocate `wgpu` objects or bypass native blockers.
+
+`OcioGpuShaderTranslationCache` is the next boundary toward native execution.
+It parses OCIO GLSL-family shader text through Naga, validates the module, and
+caches successful Naga IR artifacts by source shader hash, OCIO binding-contract
+hash, stage, source language, and target language. Optional WGSL is emitted only
+as debug/diagnostic output; it is not the canonical execution artifact. Future
+execution should prefer `wgpu::ShaderSource::Naga` while translation failures
+remain structured diagnostics, not fallbacks. This allows real OCIO shader
+compatibility work to proceed incrementally while keeping `can_execute()` false
+until shader translation, LUT upload, uniform packing, bind-group creation, and
+pipeline creation are all proven.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /

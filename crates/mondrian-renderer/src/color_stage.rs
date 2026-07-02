@@ -50,7 +50,7 @@ pub enum RenderColorStage {
         /// GPU descriptor produced by the color transform.
         output: ColorFrameDescriptor,
         /// GPU transform plan and blockers.
-        plan: RenderColorTransformGpuPlan,
+        plan: Box<RenderColorTransformGpuPlan>,
     },
     /// Read back a GPU-resident boundary frame to CPU memory.
     ReadbackToCpu {
@@ -396,7 +396,7 @@ impl<'a> RenderColorStagePlanner<'a> {
         stages.push(RenderColorStage::GpuColorTransform {
             input: gpu_input,
             output: gpu_output,
-            plan,
+            plan: Box::new(plan),
         });
 
         if final_descriptor.residency == ColorFrameResidency::Cpu {

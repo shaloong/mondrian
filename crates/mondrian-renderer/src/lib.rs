@@ -45,11 +45,16 @@ pub use gpu_backend::{
     gpu_enabled, set_gpu_enabled, GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason,
 };
 pub use ocio_gpu::{
-    OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuShaderError, OcioGpuShaderPlan,
-    OcioGpuShaderRequest, OcioGpuWgpuBindingLayoutPlan, OcioGpuWgpuBindingPlan,
-    OcioGpuWgpuBindingResource, OcioGpuWgpuBlocker, OcioGpuWgpuExecutionPlan,
-    OcioGpuWgpuPreparedResources, OcioGpuWgpuResourceCache, OcioGpuWgpuResourceCacheDiagnostics,
-    OcioGpuWgpuResourcePlan,
+    OcioGpuBindingContract, OcioGpuFullscreenWrapperContract, OcioGpuShaderCache,
+    OcioGpuShaderCacheDiagnostics, OcioGpuShaderDiagnostic, OcioGpuShaderError, OcioGpuShaderPlan,
+    OcioGpuShaderRequest, OcioGpuShaderStage, OcioGpuShaderTargetLanguage,
+    OcioGpuShaderTranslationCache, OcioGpuShaderTranslationCacheDiagnostics,
+    OcioGpuShaderTranslationError, OcioGpuShaderTranslationFailure,
+    OcioGpuShaderTranslationRequest, OcioGpuShaderTranslator, OcioGpuTexture2DBindingContract,
+    OcioGpuTexture3DBindingContract, OcioGpuTranslatedShader, OcioGpuWgpuBindingLayoutPlan,
+    OcioGpuWgpuBindingPlan, OcioGpuWgpuBindingResource, OcioGpuWgpuBlocker,
+    OcioGpuWgpuExecutionPlan, OcioGpuWgpuPreparedResources, OcioGpuWgpuResourceCache,
+    OcioGpuWgpuResourceCacheDiagnostics, OcioGpuWgpuResourcePlan,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{

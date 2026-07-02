@@ -8,6 +8,28 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+/// Shader stage used when translating OCIO GPU shader text for wgpu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuShaderStage {
+    /// Fragment shader stage.
+    Fragment,
+}
+
+impl OcioGpuShaderStage {
+    fn to_naga(self) -> naga::ShaderStage {
+        match self {
+            Self::Fragment => naga::ShaderStage::Fragment,
+        }
+    }
+}
+
+/// Target shader language for native wgpu execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuShaderTargetLanguage {
+    /// Naga IR consumed by `wgpu::ShaderSource::Naga`.
+    NagaIr,
+}
+
 /// Renderer-facing OCIO GPU request.
 ///
 /// This is intentionally independent from wgpu resource objects. OCIO emits
@@ -99,6 +121,281 @@ impl OcioGpuShaderPlan {
     }
 }
 
+/// Request used to translate an OCIO-generated shader into a native wgpu target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuShaderTranslationRequest {
+    /// Source shader language emitted by OCIO.
+    pub source_language: GpuLanguage,
+    /// Target shader language consumed by the renderer.
+    pub target_language: OcioGpuShaderTargetLanguage,
+    /// Shader stage used for frontend parsing/validation.
+    pub stage: OcioGpuShaderStage,
+    /// Hash of the OCIO source shader text.
+    pub source_shader_hash: u64,
+    /// Hash of the OCIO binding contract used with this shader.
+    pub binding_contract_hash: u64,
+}
+
+impl Hash for OcioGpuShaderTranslationRequest {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.source_language as i32).hash(state);
+        self.target_language.hash(state);
+        self.stage.hash(state);
+        self.source_shader_hash.hash(state);
+        self.binding_contract_hash.hash(state);
+    }
+}
+
+/// A shader translated into a native wgpu artifact.
+#[derive(Debug, Clone)]
+pub struct OcioGpuTranslatedShader {
+    /// Translation request.
+    pub request: OcioGpuShaderTranslationRequest,
+    /// Canonical Naga module used by `wgpu::ShaderSource::Naga`.
+    pub naga_module: naga::Module,
+    /// Canonical Naga validation info for the module.
+    pub module_info: naga::valid::ModuleInfo,
+    /// Optional WGSL debug output. This is not the execution artifact.
+    pub debug_wgsl: Option<String>,
+    /// Stable hash of the optional WGSL debug output.
+    pub debug_wgsl_hash: Option<u64>,
+    /// Required OCIO resource binding contract.
+    pub required_bindings: OcioGpuBindingContract,
+    /// Non-fatal diagnostics observed while building debug artifacts.
+    pub diagnostics: Vec<OcioGpuShaderDiagnostic>,
+    /// Number of entry points visible after translation.
+    pub entry_point_count: usize,
+}
+
+/// Non-fatal shader translation diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuShaderDiagnostic {
+    /// Human-readable diagnostic message.
+    pub message: String,
+}
+
+/// Resource binding contract paired with an OCIO shader.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuBindingContract {
+    /// Descriptor set index reported by OCIO.
+    pub descriptor_set_index: u32,
+    /// Uniform buffer binding slot reserved by Mondrian's OCIO descriptor policy.
+    pub uniform_buffer_binding: u32,
+    /// First OCIO texture binding slot.
+    pub texture_binding_start: u32,
+    /// Packed uniform buffer size in bytes.
+    pub uniform_buffer_size: usize,
+    /// Number of uniform symbols reported by OCIO.
+    pub uniform_count: u32,
+    /// OCIO 1D/2D texture resources.
+    pub textures_2d: Vec<OcioGpuTexture2DBindingContract>,
+    /// OCIO 3D texture resources.
+    pub textures_3d: Vec<OcioGpuTexture3DBindingContract>,
+}
+
+impl OcioGpuBindingContract {
+    /// Stable hash of the contract.
+    pub fn stable_hash(&self) -> u64 {
+        hash_value(self)
+    }
+}
+
+/// OCIO 1D/2D texture binding contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuTexture2DBindingContract {
+    /// Texture index in the OCIO descriptor.
+    pub index: u32,
+    /// OCIO-generated texture symbol name.
+    pub texture_name: String,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO-reported binding slot.
+    pub binding_index: u32,
+    /// Logical texture width.
+    pub width: u32,
+    /// Logical texture height.
+    pub height: u32,
+    /// Logical texel payload length in f32 values.
+    pub value_count: usize,
+}
+
+/// OCIO 3D texture binding contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuTexture3DBindingContract {
+    /// Texture index in the OCIO descriptor.
+    pub index: u32,
+    /// OCIO-generated texture symbol name.
+    pub texture_name: String,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO-reported binding slot.
+    pub binding_index: u32,
+    /// Cube edge length.
+    pub edge_len: u32,
+    /// Logical texel payload length in f32 values.
+    pub value_count: usize,
+}
+
+/// Error returned when shader translation cannot produce a native wgpu shader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuShaderTranslationError {
+    /// Translation request that failed.
+    pub request: OcioGpuShaderTranslationRequest,
+    /// Diagnostic reason.
+    pub reason: OcioGpuShaderTranslationFailure,
+}
+
+impl std::fmt::Display for OcioGpuShaderTranslationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OCIO GPU shader translation failed: {:?}", self.reason)
+    }
+}
+
+impl std::error::Error for OcioGpuShaderTranslationError {}
+
+/// Fine-grained shader translation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuShaderTranslationFailure {
+    /// The OCIO source language is not supported by the current translator.
+    UnsupportedSourceLanguage { language: GpuLanguage },
+    /// The requested target shader language is not supported.
+    UnsupportedTargetLanguage {
+        language: OcioGpuShaderTargetLanguage,
+    },
+    /// Naga could not parse the source shader.
+    ParseFailed { message: String },
+    /// Naga validation failed after parsing.
+    ValidationFailed { message: String },
+}
+
+/// Stateless OCIO shader translator.
+pub struct OcioGpuShaderTranslator {
+    target_language: OcioGpuShaderTargetLanguage,
+    stage: OcioGpuShaderStage,
+}
+
+impl OcioGpuShaderTranslator {
+    /// Create a translator for wgpu-compatible Naga IR fragment shaders.
+    pub fn naga_ir_fragment() -> Self {
+        Self {
+            target_language: OcioGpuShaderTargetLanguage::NagaIr,
+            stage: OcioGpuShaderStage::Fragment,
+        }
+    }
+
+    /// Translate an extracted OCIO shader plan into the configured target.
+    pub fn translate_plan(
+        &self,
+        plan: &OcioGpuShaderPlan,
+    ) -> Result<OcioGpuTranslatedShader, OcioGpuShaderTranslationError> {
+        let request = OcioGpuShaderTranslationRequest {
+            source_language: plan.request.language(),
+            target_language: self.target_language,
+            stage: self.stage,
+            source_shader_hash: plan.shader_hash,
+            binding_contract_hash: binding_contract_for_plan(plan).stable_hash(),
+        };
+
+        translate_shader_text(
+            request,
+            &plan.bundle().shader_text,
+            binding_contract_for_plan(plan),
+        )
+    }
+}
+
+impl Default for OcioGpuShaderTranslator {
+    fn default() -> Self {
+        Self::naga_ir_fragment()
+    }
+}
+
+/// Bounded cache for OCIO shader translation results.
+pub struct OcioGpuShaderTranslationCache {
+    translator: OcioGpuShaderTranslator,
+    entries: LruCache<u64, Arc<OcioGpuTranslatedShader>>,
+    hits: u64,
+    misses: u64,
+    failures: u64,
+}
+
+impl OcioGpuShaderTranslationCache {
+    /// Create a translation cache with a fixed non-zero capacity.
+    pub fn new(capacity: NonZeroUsize, translator: OcioGpuShaderTranslator) -> Self {
+        Self {
+            translator,
+            entries: LruCache::new(capacity),
+            hits: 0,
+            misses: 0,
+            failures: 0,
+        }
+    }
+
+    /// Translate a shader plan, using the cache when possible.
+    pub fn translate(
+        &mut self,
+        plan: &OcioGpuShaderPlan,
+    ) -> Result<Arc<OcioGpuTranslatedShader>, OcioGpuShaderTranslationError> {
+        let request = OcioGpuShaderTranslationRequest {
+            source_language: plan.request.language(),
+            target_language: self.translator.target_language,
+            stage: self.translator.stage,
+            source_shader_hash: plan.shader_hash,
+            binding_contract_hash: binding_contract_for_plan(plan).stable_hash(),
+        };
+        let key = hash_value(&request);
+        if let Some(hit) = self.entries.get(&key) {
+            self.hits = self.hits.saturating_add(1);
+            return Ok(Arc::clone(hit));
+        }
+
+        self.misses = self.misses.saturating_add(1);
+        match self.translator.translate_plan(plan) {
+            Ok(translated) => {
+                let translated = Arc::new(translated);
+                self.entries.put(key, Arc::clone(&translated));
+                Ok(translated)
+            }
+            Err(err) => {
+                self.failures = self.failures.saturating_add(1);
+                Err(err)
+            }
+        }
+    }
+
+    /// Return translation cache diagnostics.
+    pub fn diagnostics(&self) -> OcioGpuShaderTranslationCacheDiagnostics {
+        OcioGpuShaderTranslationCacheDiagnostics {
+            entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+            failures: self.failures,
+        }
+    }
+}
+
+impl Default for OcioGpuShaderTranslationCache {
+    fn default() -> Self {
+        Self::new(
+            NonZeroUsize::new(64).expect("default cache capacity is non-zero"),
+            OcioGpuShaderTranslator::default(),
+        )
+    }
+}
+
+/// Point-in-time OCIO shader translation cache diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuShaderTranslationCacheDiagnostics {
+    /// Cached translated shaders.
+    pub entries: usize,
+    /// Cache hits.
+    pub hits: u64,
+    /// Cache misses.
+    pub misses: u64,
+    /// Translation failures.
+    pub failures: u64,
+}
+
 /// Renderer-side preparation result for native wgpu OCIO execution.
 #[derive(Debug, Clone)]
 pub struct OcioGpuWgpuExecutionPlan {
@@ -117,16 +414,39 @@ impl OcioGpuWgpuExecutionPlan {
     }
 }
 
+/// Fullscreen wrapper contract paired with an OCIO-generated shader program.
+///
+/// OCIO emits the color transform program and its own LUT/uniform resources.
+/// Mondrian still owns the fullscreen fragment wrapper that samples the input
+/// frame, calls the OCIO function, and writes the output color.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuFullscreenWrapperContract {
+    /// Bind group reserved for Mondrian wrapper resources.
+    pub bind_group: u32,
+    /// Input frame texture binding in the wrapper bind group.
+    pub input_texture_binding: u32,
+    /// Input frame sampler binding in the wrapper bind group.
+    pub input_sampler_binding: u32,
+    /// Fragment output location.
+    pub output_location: u32,
+}
+
 /// Renderer-side resource contract for a native wgpu OCIO color pass.
 ///
 /// This describes the resources that must be materialized by the render graph.
 /// It does not claim those resources have already been created.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OcioGpuWgpuResourcePlan {
     /// Stable key for caching pipeline/resource layout preparation.
     pub resource_key: u64,
     /// Shader hash this resource contract belongs to.
     pub shader_hash: u64,
+    /// Stable hash of the OCIO binding contract paired with this shader.
+    pub binding_contract_hash: u64,
+    /// OCIO resource binding contract reported by the shader descriptor.
+    pub binding_contract: OcioGpuBindingContract,
+    /// Mondrian fullscreen wrapper contract.
+    pub wrapper_contract: OcioGpuFullscreenWrapperContract,
     /// Input frame texture bindings.
     pub input_textures: u32,
     /// Output frame render targets or storage textures.
@@ -150,20 +470,27 @@ pub struct OcioGpuWgpuResourcePlan {
 impl OcioGpuWgpuResourcePlan {
     /// Build a renderer resource contract from a cached OCIO shader plan.
     pub fn for_shader_plan(shader_plan: &OcioGpuShaderPlan) -> Self {
+        let binding_contract = binding_contract_for_plan(shader_plan);
+        let binding_contract_hash = binding_contract.stable_hash();
+        let wrapper_contract = fullscreen_wrapper_contract_for(&binding_contract);
+        let wrapper_contract_hash = hash_value(&wrapper_contract);
         let input_textures = 1;
         let output_textures = 1;
-        let uniform_buffers = u32::from(shader_plan.uniform_count > 0);
+        let uniform_buffers =
+            u32::from(shader_plan.uniform_count > 0 || binding_contract.uniform_buffer_size > 0);
         let sampled_textures =
             input_textures + shader_plan.texture_2d_count + shader_plan.texture_3d_count;
         let samplers = u32::from(sampled_textures > 0);
-        let bind_group_entries = input_textures
-            + shader_plan.texture_2d_count
-            + shader_plan.texture_3d_count
-            + uniform_buffers
-            + samplers;
-        let bind_groups = 1;
+        let bind_group_entries =
+            shader_plan.texture_2d_count + shader_plan.texture_3d_count + uniform_buffers;
+        let bind_groups = binding_contract
+            .descriptor_set_index
+            .max(wrapper_contract.bind_group)
+            .saturating_add(1);
         let pipeline_layout_hash = hash_resource_layout(ResourceLayoutSignature {
             language: shader_plan.request.language(),
+            binding_contract_hash,
+            wrapper_contract_hash,
             input_textures,
             output_textures,
             texture_2d_count: shader_plan.texture_2d_count,
@@ -176,11 +503,15 @@ impl OcioGpuWgpuResourcePlan {
         let resource_key = hash_resource_key(
             shader_plan.cache_key,
             shader_plan.shader_hash,
+            binding_contract_hash,
             pipeline_layout_hash,
         );
         Self {
             resource_key,
             shader_hash: shader_plan.shader_hash,
+            binding_contract_hash,
+            binding_contract,
+            wrapper_contract,
             input_textures,
             output_textures,
             ocio_texture_2d_bindings: shader_plan.texture_2d_count,
@@ -223,52 +554,33 @@ pub struct OcioGpuWgpuBindingLayoutPlan {
 impl OcioGpuWgpuBindingLayoutPlan {
     fn for_resource_plan(plan: &OcioGpuWgpuResourcePlan) -> Self {
         let mut entries = Vec::with_capacity(plan.bind_group_entries as usize);
-        let mut binding = 0u32;
 
-        for index in 0..plan.input_textures {
+        if plan.uniform_buffers > 0 {
             entries.push(OcioGpuWgpuBindingPlan {
-                binding,
-                resource: OcioGpuWgpuBindingResource::InputFrameTexture { index },
+                binding: plan.binding_contract.uniform_buffer_binding,
+                resource: OcioGpuWgpuBindingResource::OcioUniformBuffer { index: 0 },
             });
-            binding = binding.saturating_add(1);
         }
 
-        if plan.samplers > 0 {
+        for texture in &plan.binding_contract.textures_2d {
             entries.push(OcioGpuWgpuBindingPlan {
-                binding,
-                resource: OcioGpuWgpuBindingResource::FilteringSampler,
+                binding: texture.binding_index,
+                resource: OcioGpuWgpuBindingResource::OcioLutTexture2d { index: texture.index },
             });
-            binding = binding.saturating_add(1);
         }
 
-        for index in 0..plan.ocio_texture_2d_bindings {
+        for texture in &plan.binding_contract.textures_3d {
             entries.push(OcioGpuWgpuBindingPlan {
-                binding,
-                resource: OcioGpuWgpuBindingResource::OcioLutTexture2d { index },
+                binding: texture.binding_index,
+                resource: OcioGpuWgpuBindingResource::OcioLutTexture3d { index: texture.index },
             });
-            binding = binding.saturating_add(1);
         }
 
-        for index in 0..plan.ocio_texture_3d_bindings {
-            entries.push(OcioGpuWgpuBindingPlan {
-                binding,
-                resource: OcioGpuWgpuBindingResource::OcioLutTexture3d { index },
-            });
-            binding = binding.saturating_add(1);
-        }
-
-        for index in 0..plan.uniform_buffers {
-            entries.push(OcioGpuWgpuBindingPlan {
-                binding,
-                resource: OcioGpuWgpuBindingResource::OcioUniformBuffer { index },
-            });
-            binding = binding.saturating_add(1);
-        }
-
+        entries.sort_by_key(|entry| entry.binding);
         let layout_hash = hash_binding_layout(&entries);
         Self {
             resource_key: plan.resource_key,
-            bind_group: 0,
+            bind_group: plan.binding_contract.descriptor_set_index,
             entries,
             layout_hash,
         }
@@ -532,6 +844,131 @@ fn extract_bundle(request: &OcioGpuShaderRequest) -> Result<OcioGpuShaderBundle,
     }
 }
 
+fn translate_shader_text(
+    request: OcioGpuShaderTranslationRequest,
+    shader_text: &str,
+    required_bindings: OcioGpuBindingContract,
+) -> Result<OcioGpuTranslatedShader, OcioGpuShaderTranslationError> {
+    if !is_glsl_language(request.source_language) {
+        return Err(translation_error(
+            request,
+            OcioGpuShaderTranslationFailure::UnsupportedSourceLanguage {
+                language: request.source_language,
+            },
+        ));
+    }
+    if request.target_language != OcioGpuShaderTargetLanguage::NagaIr {
+        return Err(translation_error(
+            request,
+            OcioGpuShaderTranslationFailure::UnsupportedTargetLanguage {
+                language: request.target_language,
+            },
+        ));
+    }
+
+    let mut frontend = naga::front::glsl::Frontend::default();
+    let options = naga::front::glsl::Options::from(request.stage.to_naga());
+    let module = frontend.parse(&options, shader_text).map_err(|err| {
+        translation_error(
+            request,
+            OcioGpuShaderTranslationFailure::ParseFailed { message: err.to_string() },
+        )
+    })?;
+
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    );
+    let info = validator.validate(&module).map_err(|err| {
+        translation_error(
+            request,
+            OcioGpuShaderTranslationFailure::ValidationFailed { message: err.to_string() },
+        )
+    })?;
+
+    let mut diagnostics = Vec::new();
+    let debug_wgsl = match naga::back::wgsl::write_string(
+        &module,
+        &info,
+        naga::back::wgsl::WriterFlags::empty(),
+    ) {
+        Ok(wgsl) => Some(wgsl),
+        Err(err) => {
+            diagnostics.push(OcioGpuShaderDiagnostic {
+                message: format!("WGSL debug output failed: {err}"),
+            });
+            None
+        }
+    };
+    let debug_wgsl_hash = debug_wgsl.as_ref().map(hash_value);
+    let entry_point_count = module.entry_points.len();
+    Ok(OcioGpuTranslatedShader {
+        request,
+        naga_module: module,
+        module_info: info,
+        debug_wgsl,
+        debug_wgsl_hash,
+        required_bindings,
+        diagnostics,
+        entry_point_count,
+    })
+}
+
+fn translation_error(
+    request: OcioGpuShaderTranslationRequest,
+    reason: OcioGpuShaderTranslationFailure,
+) -> OcioGpuShaderTranslationError {
+    OcioGpuShaderTranslationError { request, reason }
+}
+
+fn is_glsl_language(language: GpuLanguage) -> bool {
+    matches!(
+        language,
+        GpuLanguage::Glsl1_2
+            | GpuLanguage::Glsl1_3
+            | GpuLanguage::Glsl4_0
+            | GpuLanguage::GlslVk4_6
+            | GpuLanguage::GlslEs1_0
+            | GpuLanguage::GlslEs3_0
+    )
+}
+
+fn binding_contract_for_plan(plan: &OcioGpuShaderPlan) -> OcioGpuBindingContract {
+    let bundle = plan.bundle();
+    OcioGpuBindingContract {
+        descriptor_set_index: bundle.descriptor_set_index,
+        uniform_buffer_binding: bundle.uniform_buffer_binding,
+        texture_binding_start: bundle.texture_binding_start,
+        uniform_buffer_size: bundle.uniform_buffer_size,
+        uniform_count: bundle.uniform_count,
+        textures_2d: bundle
+            .textures_2d
+            .iter()
+            .map(|texture| OcioGpuTexture2DBindingContract {
+                index: texture.index,
+                texture_name: texture.texture_name.clone(),
+                sampler_name: texture.sampler_name.clone(),
+                binding_index: texture.binding_index,
+                width: texture.width,
+                height: texture.height,
+                value_count: texture.value_count,
+            })
+            .collect(),
+        textures_3d: bundle
+            .textures_3d
+            .iter()
+            .map(|texture| OcioGpuTexture3DBindingContract {
+                index: texture.index,
+                texture_name: texture.texture_name.clone(),
+                sampler_name: texture.sampler_name.clone(),
+                binding_index: texture.binding_index,
+                edge_len: texture.edge_len,
+                value_count: texture.value_count,
+            })
+            .collect(),
+    }
+}
+
 fn plan_from_bundle(
     request: OcioGpuShaderRequest,
     bundle: Arc<OcioGpuShaderBundle>,
@@ -565,10 +1002,16 @@ fn hash_request_and_processor(
     hasher.finish()
 }
 
-fn hash_resource_key(shader_cache_key: u64, shader_hash: u64, pipeline_layout_hash: u64) -> u64 {
+fn hash_resource_key(
+    shader_cache_key: u64,
+    shader_hash: u64,
+    binding_contract_hash: u64,
+    pipeline_layout_hash: u64,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     shader_cache_key.hash(&mut hasher);
     shader_hash.hash(&mut hasher);
+    binding_contract_hash.hash(&mut hasher);
     pipeline_layout_hash.hash(&mut hasher);
     hasher.finish()
 }
@@ -579,6 +1022,8 @@ fn hash_binding_layout(entries: &[OcioGpuWgpuBindingPlan]) -> u64 {
 
 struct ResourceLayoutSignature {
     language: GpuLanguage,
+    binding_contract_hash: u64,
+    wrapper_contract_hash: u64,
     input_textures: u32,
     output_textures: u32,
     texture_2d_count: u32,
@@ -592,6 +1037,8 @@ struct ResourceLayoutSignature {
 fn hash_resource_layout(signature: ResourceLayoutSignature) -> u64 {
     let mut hasher = DefaultHasher::new();
     (signature.language as i32).hash(&mut hasher);
+    signature.binding_contract_hash.hash(&mut hasher);
+    signature.wrapper_contract_hash.hash(&mut hasher);
     signature.input_textures.hash(&mut hasher);
     signature.output_textures.hash(&mut hasher);
     signature.texture_2d_count.hash(&mut hasher);
@@ -601,6 +1048,17 @@ fn hash_resource_layout(signature: ResourceLayoutSignature) -> u64 {
     signature.bind_group_entries.hash(&mut hasher);
     signature.bind_groups.hash(&mut hasher);
     hasher.finish()
+}
+
+fn fullscreen_wrapper_contract_for(
+    binding_contract: &OcioGpuBindingContract,
+) -> OcioGpuFullscreenWrapperContract {
+    OcioGpuFullscreenWrapperContract {
+        bind_group: binding_contract.descriptor_set_index.saturating_add(1),
+        input_texture_binding: 0,
+        input_sampler_binding: 1,
+        output_location: 0,
+    }
 }
 
 fn hash_value<T: Hash>(value: &T) -> u64 {
@@ -643,10 +1101,23 @@ mod tests {
         );
         assert_eq!(
             resources.bind_group_entries,
-            1 + first.texture_2d_count
-                + first.texture_3d_count
-                + u32::from(first.uniform_count > 0)
-                + resources.samplers
+            first.texture_2d_count + first.texture_3d_count + u32::from(first.uniform_count > 0)
+        );
+        assert_eq!(
+            resources.binding_contract_hash,
+            resources.binding_contract.stable_hash()
+        );
+        assert_eq!(
+            resources.binding_contract.descriptor_set_index,
+            first.bundle().descriptor_set_index
+        );
+        assert_eq!(
+            resources.binding_contract.texture_binding_start,
+            first.bundle().texture_binding_start
+        );
+        assert_eq!(
+            resources.wrapper_contract.bind_group,
+            resources.binding_contract.descriptor_set_index.saturating_add(1)
         );
         assert_eq!(
             resources.total_textures(),
@@ -660,13 +1131,23 @@ mod tests {
             resources.bind_group_entries as usize
         );
         assert_eq!(
-            binding_layout.entries.first().map(|entry| entry.resource),
-            Some(OcioGpuWgpuBindingResource::InputFrameTexture { index: 0 })
+            binding_layout.bind_group,
+            resources.binding_contract.descriptor_set_index
         );
-        assert_eq!(
-            binding_layout.entries.get(1).map(|entry| entry.resource),
-            Some(OcioGpuWgpuBindingResource::FilteringSampler)
-        );
+        for texture in &first.bundle().textures_2d {
+            assert!(binding_layout.entries.iter().any(|entry| {
+                entry.binding == texture.binding_index
+                    && entry.resource
+                        == OcioGpuWgpuBindingResource::OcioLutTexture2d { index: texture.index }
+            }));
+        }
+        for texture in &first.bundle().textures_3d {
+            assert!(binding_layout.entries.iter().any(|entry| {
+                entry.binding == texture.binding_index
+                    && entry.resource
+                        == OcioGpuWgpuBindingResource::OcioLutTexture3d { index: texture.index }
+            }));
+        }
         assert_ne!(binding_layout.layout_hash, 0);
 
         let diagnostics = cache.diagnostics();
@@ -752,8 +1233,8 @@ mod tests {
             .expect("prepare shader execution");
 
         let mut resource_cache = OcioGpuWgpuResourceCache::default();
-        let first = resource_cache.prepare(prepared.resources);
-        let second = resource_cache.prepare(prepared.resources);
+        let first = resource_cache.prepare(prepared.resources.clone());
+        let second = resource_cache.prepare(prepared.resources.clone());
 
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(
@@ -773,5 +1254,193 @@ mod tests {
         assert_eq!(diagnostics.entries, 1);
         assert_eq!(diagnostics.hits, 1);
         assert_eq!(diagnostics.misses, 1);
+    }
+
+    #[test]
+    fn shader_translation_cache_reuses_valid_glsl_to_naga_ir_translation() {
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: ColorSpace::Rec709,
+            dst: ColorSpace::Srgb,
+            language: GpuLanguage::Glsl4_0,
+        };
+        let bundle = Arc::new(OcioGpuShaderBundle {
+            src_color_space: "test-src".to_owned(),
+            dst_color_space: "test-dst".to_owned(),
+            language: GpuLanguage::Glsl4_0,
+            shader_text: r#"
+                #version 450 core
+                layout(location = 0) out vec4 frag_color;
+
+                void main() {
+                    frag_color = vec4(1.0, 0.5, 0.25, 1.0);
+                }
+            "#
+            .to_owned(),
+            descriptor_set_index: 0,
+            texture_binding_start: 1,
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: 0,
+            texture_2d_count: 0,
+            texture_3d_count: 0,
+            uniform_count: 0,
+            textures_2d: Vec::new(),
+            textures_3d: Vec::new(),
+            cache_id: Some("test-cache".to_owned()),
+        });
+        let plan = plan_from_bundle(request, bundle);
+        let mut cache = OcioGpuShaderTranslationCache::default();
+
+        let first = cache.translate(&plan).expect("translate GLSL to Naga IR");
+        let second = cache.translate(&plan).expect("reuse translated Naga IR");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.naga_module.entry_points.len(), 1);
+        assert!(first.debug_wgsl.as_deref().is_some_and(|wgsl| wgsl.contains("@fragment")));
+        assert_eq!(first.entry_point_count, 1);
+        assert_eq!(first.request.source_language, GpuLanguage::Glsl4_0);
+        assert_eq!(first.required_bindings.descriptor_set_index, 0);
+        assert_eq!(first.required_bindings.uniform_buffer_binding, 0);
+        assert_eq!(first.required_bindings.texture_binding_start, 1);
+        assert_eq!(
+            first.request.binding_contract_hash,
+            first.required_bindings.stable_hash()
+        );
+        assert_ne!(first.debug_wgsl_hash.unwrap_or_default(), 0);
+
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.hits, 1);
+        assert_eq!(diagnostics.misses, 1);
+        assert_eq!(diagnostics.failures, 0);
+    }
+
+    #[test]
+    fn shader_translation_rejects_non_glsl_source_without_panic() {
+        let request = OcioGpuShaderRequest::ColorSpace {
+            src: ColorSpace::Rec709,
+            dst: ColorSpace::Srgb,
+            language: GpuLanguage::HlslSm5_0,
+        };
+        let bundle = Arc::new(OcioGpuShaderBundle {
+            src_color_space: "test-src".to_owned(),
+            dst_color_space: "test-dst".to_owned(),
+            language: GpuLanguage::HlslSm5_0,
+            shader_text: "float4 main() : SV_Target { return float4(1, 1, 1, 1); }".to_owned(),
+            descriptor_set_index: 0,
+            texture_binding_start: 1,
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: 0,
+            texture_2d_count: 0,
+            texture_3d_count: 0,
+            uniform_count: 0,
+            textures_2d: Vec::new(),
+            textures_3d: Vec::new(),
+            cache_id: Some("test-hlsl-cache".to_owned()),
+        });
+        let plan = plan_from_bundle(request, bundle);
+        let mut cache = OcioGpuShaderTranslationCache::default();
+
+        let err = cache.translate(&plan).expect_err("HLSL is not translated by this path");
+        assert!(matches!(
+            err.reason,
+            OcioGpuShaderTranslationFailure::UnsupportedSourceLanguage {
+                language: GpuLanguage::HlslSm5_0
+            }
+        ));
+
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 0);
+        assert_eq!(diagnostics.misses, 1);
+        assert_eq!(diagnostics.failures, 1);
+    }
+
+    #[test]
+    fn actual_ocio_shader_translation_is_structured_success_or_failure() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut shader_cache = OcioGpuShaderCache::default();
+        let plan = shader_cache
+            .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                src: ColorSpace::SLog3,
+                dst: ColorSpace::Rec709,
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("extract OCIO shader");
+        let mut translation_cache = OcioGpuShaderTranslationCache::default();
+
+        match translation_cache.translate(&plan) {
+            Ok(translated) => {
+                assert_eq!(translated.request.source_shader_hash, plan.shader_hash);
+                assert_eq!(
+                    translated.request.binding_contract_hash,
+                    translated.required_bindings.stable_hash()
+                );
+                assert_eq!(
+                    translated.required_bindings.descriptor_set_index,
+                    plan.bundle().descriptor_set_index
+                );
+                assert_eq!(
+                    translated.required_bindings.texture_binding_start,
+                    plan.bundle().texture_binding_start
+                );
+                assert_eq!(
+                    translated.naga_module.entry_points.len(),
+                    translated.entry_point_count
+                );
+                let diagnostics = translation_cache.diagnostics();
+                assert_eq!(diagnostics.entries, 1);
+                assert_eq!(diagnostics.failures, 0);
+            }
+            Err(err) => {
+                assert_eq!(err.request.source_shader_hash, plan.shader_hash);
+                assert!(matches!(
+                    err.reason,
+                    OcioGpuShaderTranslationFailure::ParseFailed { .. }
+                        | OcioGpuShaderTranslationFailure::ValidationFailed { .. }
+                ));
+                let diagnostics = translation_cache.diagnostics();
+                assert_eq!(diagnostics.entries, 0);
+                assert_eq!(diagnostics.failures, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn actual_ocio_glsl_vk_shader_translation_is_structured_success_or_failure() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut shader_cache = OcioGpuShaderCache::default();
+        let plan = shader_cache
+            .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                src: ColorSpace::SLog3,
+                dst: ColorSpace::Rec709,
+                language: GpuLanguage::GlslVk4_6,
+            })
+            .expect("extract OCIO GLSL VK shader");
+        let mut translation_cache = OcioGpuShaderTranslationCache::default();
+
+        match translation_cache.translate(&plan) {
+            Ok(translated) => {
+                assert_eq!(translated.request.source_language, GpuLanguage::GlslVk4_6);
+                assert_eq!(
+                    translated.request.binding_contract_hash,
+                    translated.required_bindings.stable_hash()
+                );
+                assert_eq!(
+                    translated.naga_module.entry_points.len(),
+                    translated.entry_point_count
+                );
+            }
+            Err(err) => {
+                assert_eq!(err.request.source_language, GpuLanguage::GlslVk4_6);
+                assert_eq!(err.request.source_shader_hash, plan.shader_hash);
+                assert!(matches!(
+                    err.reason,
+                    OcioGpuShaderTranslationFailure::ParseFailed { .. }
+                        | OcioGpuShaderTranslationFailure::ValidationFailed { .. }
+                ));
+                let diagnostics = translation_cache.diagnostics();
+                assert_eq!(diagnostics.entries, 0);
+                assert_eq!(diagnostics.failures, 1);
+            }
+        }
     }
 }

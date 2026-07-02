@@ -10,6 +10,7 @@ mondrian-core     = { workspace = true }
 mondrian-effects  = { workspace = true }
 mondrian-media    = { workspace = true }
 wgpu       = { workspace = true }
+naga       = { workspace = true }
 bytemuck   = { workspace = true }
 glam       = { workspace = true }
 

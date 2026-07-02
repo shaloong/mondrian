@@ -311,14 +311,62 @@ pub struct OcioGpuShaderBundle {
     pub language: GpuLanguage,
     /// OCIO-generated shader source.
     pub shader_text: String,
+    /// OCIO descriptor set index used by generated resource declarations.
+    pub descriptor_set_index: u32,
+    /// First OCIO texture binding slot. Binding 0 is reserved for uniform data by convention.
+    pub texture_binding_start: u32,
+    /// Uniform buffer binding slot used by Mondrian's OCIO descriptor policy.
+    pub uniform_buffer_binding: u32,
+    /// Packed OCIO uniform buffer size in bytes.
+    pub uniform_buffer_size: usize,
     /// Number of 1D/2D texture resources referenced by the shader.
     pub texture_2d_count: u32,
     /// Number of 3D texture resources referenced by the shader.
     pub texture_3d_count: u32,
     /// Number of uniforms referenced by the shader.
     pub uniform_count: u32,
+    /// OCIO 1D/2D LUT resource binding metadata.
+    pub textures_2d: Vec<OcioGpuTexture2DBinding>,
+    /// OCIO 3D LUT resource binding metadata.
+    pub textures_3d: Vec<OcioGpuTexture3DBinding>,
     /// Stable OCIO processor cache id for renderer-side shader caching.
     pub cache_id: Option<String>,
+}
+
+/// OCIO 1D/2D LUT resource binding metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuTexture2DBinding {
+    /// Texture index in the OCIO descriptor.
+    pub index: u32,
+    /// OCIO-generated texture symbol name.
+    pub texture_name: String,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO-reported binding slot.
+    pub binding_index: u32,
+    /// Logical texture width.
+    pub width: u32,
+    /// Logical texture height.
+    pub height: u32,
+    /// Logical texel payload length in f32 values.
+    pub value_count: usize,
+}
+
+/// OCIO 3D LUT resource binding metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcioGpuTexture3DBinding {
+    /// Texture index in the OCIO descriptor.
+    pub index: u32,
+    /// OCIO-generated texture symbol name.
+    pub texture_name: String,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO-reported binding slot.
+    pub binding_index: u32,
+    /// Cube edge length.
+    pub edge_len: u32,
+    /// Logical texel payload length in f32 values.
+    pub value_count: usize,
 }
 
 impl OcioGpuShaderBundle {
@@ -335,9 +383,15 @@ impl OcioGpuShaderBundle {
             dst_color_space: ocio_color_space_name(dst).to_string(),
             language,
             shader_text,
+            descriptor_set_index: desc.descriptor_set_index(),
+            texture_binding_start: desc.texture_binding_start(),
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: desc.uniform_buffer_size(),
             texture_2d_count: desc.num_textures(),
             texture_3d_count: desc.num_3d_textures(),
             uniform_count: desc.num_uniforms(),
+            textures_2d: ocio_texture_2d_bindings(desc),
+            textures_3d: ocio_texture_3d_bindings(desc),
             cache_id,
         }
     }
@@ -356,12 +410,49 @@ impl OcioGpuShaderBundle {
             dst_color_space: format!("{display}/{view}"),
             language,
             shader_text,
+            descriptor_set_index: desc.descriptor_set_index(),
+            texture_binding_start: desc.texture_binding_start(),
+            uniform_buffer_binding: 0,
+            uniform_buffer_size: desc.uniform_buffer_size(),
             texture_2d_count: desc.num_textures(),
             texture_3d_count: desc.num_3d_textures(),
             uniform_count: desc.num_uniforms(),
+            textures_2d: ocio_texture_2d_bindings(desc),
+            textures_3d: ocio_texture_3d_bindings(desc),
             cache_id,
         }
     }
+}
+
+fn ocio_texture_2d_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuTexture2DBinding> {
+    desc.textures_2d()
+        .into_iter()
+        .enumerate()
+        .map(|(index, texture)| OcioGpuTexture2DBinding {
+            index: index as u32,
+            texture_name: texture.texture_name,
+            sampler_name: texture.sampler_name,
+            binding_index: texture.binding_index,
+            width: texture.width,
+            height: texture.height,
+            value_count: texture.values.len(),
+        })
+        .collect()
+}
+
+fn ocio_texture_3d_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuTexture3DBinding> {
+    desc.textures_3d()
+        .into_iter()
+        .enumerate()
+        .map(|(index, texture)| OcioGpuTexture3DBinding {
+            index: index as u32,
+            texture_name: texture.texture_name,
+            sampler_name: texture.sampler_name,
+            binding_index: texture.binding_index,
+            edge_len: texture.edge_len,
+            value_count: texture.values.len(),
+        })
+        .collect()
 }
 
 // ── CPU transform helpers ──────────────────────────────────────────────────────
@@ -569,6 +660,7 @@ fn configured_gpu_shader_desc(language: GpuLanguage) -> Result<GpuShaderDesc, St
         .map_err(|e| format!("OCIO GPU shader pixel name: {e}"))?;
     desc.set_resource_prefix("mondrian_ocio_")
         .map_err(|e| format!("OCIO GPU shader resource prefix: {e}"))?;
+    desc.set_descriptor_set_index(0, 1);
     Ok(desc)
 }
 
