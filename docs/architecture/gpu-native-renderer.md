@@ -79,10 +79,22 @@ objects must still be created by the backend compiler/upload layer before
 contract derived from that resource plan. OCIO bind-group entries use the
 descriptor set, uniform-buffer binding, texture binding start, and LUT binding
 indices reported by OCIO rather than inferred WGSL text or count-based slot
-assignment. Mondrian wrapper resources stay in a separate wrapper contract.
-This cache reports hits/misses independently from OCIO shader extraction. It is
-the handoff point for the future object-creation layer; it still does not
-allocate `wgpu` objects or bypass native blockers.
+assignment. Because wgpu separates texture-view and sampler bindings,
+`OcioGpuWgpuSamplerBindingPolicy` derives deterministic sampler bindings after
+the OCIO texture/uniform range and keeps the mapping by OCIO texture index,
+dimension, sampler symbol, and interpolation policy. Mondrian wrapper resources
+stay in a separate wrapper contract. This cache reports hits/misses
+independently from OCIO shader extraction. It is the handoff point for backend
+layout/object creation; it still does not bypass native blockers.
+
+`OcioGpuWgpuBindGroupLayoutDescriptorPlan` turns the pure OCIO and wrapper
+layout contracts into wgpu-ready bind-group layout descriptors. OCIO LUT
+textures are declared as non-filterable 32-bit float sampled textures and their
+paired samplers are non-filtering for portability; hardware linear filtering of
+`R32Float` / `RGBA32Float` LUT textures must be enabled only through an explicit
+device-feature policy. The fullscreen wrapper shader therefore remains
+responsible for honoring OCIO's nearest/linear/tetrahedral/cubic interpolation
+semantics, either manually or through a feature-gated hardware-filtering path.
 
 `OcioGpuShaderTranslationCache` is the next boundary toward native execution.
 It parses OCIO GLSL-family shader text through Naga, validates the module, and
@@ -107,8 +119,9 @@ metadata, preserves single-channel LUTs as `R32Float`, and expands RGB LUTs to
 `Rgba32Float` with alpha set to `1.0` because wgpu has no portable RGB32Float
 sampled texture format. `OcioGpuWgpuLutUploader` is the concrete backend
 boundary that creates `wgpu::Texture`, `wgpu::TextureView`, and
-interpolation-aware `wgpu::Sampler` objects from that packed plan, but upload
-success alone still does not make the color pass executable.
+portable non-filtering `wgpu::Sampler` objects from that packed plan while
+preserving OCIO interpolation metadata in the resource plans. Upload success
+alone still does not make the color pass executable.
 
 `OcioGpuWgpuUniformUploadPlan` is the uniform-buffer handoff. It carries OCIO
 uniform names, types, offsets, value counts, and copied values. The packed
@@ -131,10 +144,9 @@ LUT textures and packed uniform buffers share the resource key, binding indices,
 texture/sampler symbols, extents, dimensions, and source-value hashes required
 by `OcioGpuWgpuResourcePlan`. The plan also keeps Mondrian's fullscreen wrapper
 input texture/sampler bindings in a separate wrapper bind group. It still does
-not fabricate a concrete `wgpu::BindGroup`: OCIO's GLSL contract exposes
-texture and sampler symbols together while wgpu separates texture-view and
-sampler bindings, so the sampler-binding policy must be resolved explicitly in
-the wrapper/backend layer before native execution can become true.
+not fabricate a concrete `wgpu::BindGroup`; the uploaded texture views, uploaded
+samplers, wrapper input frame view, and wrapper input sampler must be connected
+by the render graph once the fullscreen wrapper shader contract is implemented.
 
 `RenderColorTransformGpuPlanner` is the renderer color-boundary planner that
 connects typed frame descriptors and `RenderInputTransform` /

@@ -511,11 +511,9 @@ impl OcioGpuWgpuResourcePlan {
         let output_textures = 1;
         let uniform_buffers =
             u32::from(shader_plan.uniform_count > 0 || binding_contract.uniform_buffer_size > 0);
-        let sampled_textures =
-            input_textures + shader_plan.texture_2d_count + shader_plan.texture_3d_count;
-        let samplers = u32::from(sampled_textures > 0);
-        let bind_group_entries =
-            shader_plan.texture_2d_count + shader_plan.texture_3d_count + uniform_buffers;
+        let lut_texture_count = shader_plan.texture_2d_count + shader_plan.texture_3d_count;
+        let samplers = input_textures + lut_texture_count;
+        let bind_group_entries = uniform_buffers + lut_texture_count.saturating_mul(2);
         let bind_groups = binding_contract
             .descriptor_set_index
             .max(wrapper_contract.bind_group)
@@ -558,7 +556,9 @@ impl OcioGpuWgpuResourcePlan {
     }
 
     /// Build the bind-group layout contract implied by this resource plan.
-    pub fn binding_layout_plan(&self) -> OcioGpuWgpuBindingLayoutPlan {
+    pub fn binding_layout_plan(
+        &self,
+    ) -> Result<OcioGpuWgpuBindingLayoutPlan, OcioGpuWgpuBindingLayoutPlanError> {
         OcioGpuWgpuBindingLayoutPlan::for_resource_plan(self)
     }
 
@@ -580,13 +580,18 @@ pub struct OcioGpuWgpuBindingLayoutPlan {
     pub bind_group: u32,
     /// Ordered binding entries.
     pub entries: Vec<OcioGpuWgpuBindingPlan>,
+    /// Policy used to derive separated LUT sampler bindings.
+    pub sampler_policy: OcioGpuWgpuSamplerBindingPolicy,
     /// Stable hash of the ordered entries.
     pub layout_hash: u64,
 }
 
 impl OcioGpuWgpuBindingLayoutPlan {
-    fn for_resource_plan(plan: &OcioGpuWgpuResourcePlan) -> Self {
+    fn for_resource_plan(
+        plan: &OcioGpuWgpuResourcePlan,
+    ) -> Result<Self, OcioGpuWgpuBindingLayoutPlanError> {
         let mut entries = Vec::with_capacity(plan.bind_group_entries as usize);
+        let sampler_policy = OcioGpuWgpuSamplerBindingPolicy::for_contract(&plan.binding_contract)?;
 
         if plan.uniform_buffers > 0 {
             entries.push(OcioGpuWgpuBindingPlan {
@@ -600,6 +605,13 @@ impl OcioGpuWgpuBindingLayoutPlan {
                 binding: texture.binding_index,
                 resource: OcioGpuWgpuBindingResource::OcioLutTexture2d { index: texture.index },
             });
+            entries.push(OcioGpuWgpuBindingPlan {
+                binding: sampler_policy.sampler_binding_for_texture(
+                    OcioGpuWgpuLutTextureDimension::D2,
+                    texture.index,
+                )?,
+                resource: OcioGpuWgpuBindingResource::OcioLutSampler2d { index: texture.index },
+            });
         }
 
         for texture in &plan.binding_contract.textures_3d {
@@ -607,15 +619,340 @@ impl OcioGpuWgpuBindingLayoutPlan {
                 binding: texture.binding_index,
                 resource: OcioGpuWgpuBindingResource::OcioLutTexture3d { index: texture.index },
             });
+            entries.push(OcioGpuWgpuBindingPlan {
+                binding: sampler_policy.sampler_binding_for_texture(
+                    OcioGpuWgpuLutTextureDimension::D3,
+                    texture.index,
+                )?,
+                resource: OcioGpuWgpuBindingResource::OcioLutSampler3d { index: texture.index },
+            });
         }
 
         entries.sort_by_key(|entry| entry.binding);
+        validate_unique_bindings(&entries)?;
         let layout_hash = hash_binding_layout(&entries);
-        Self {
+        Ok(Self {
             resource_key: plan.resource_key,
             bind_group: plan.binding_contract.descriptor_set_index,
             entries,
+            sampler_policy,
             layout_hash,
+        })
+    }
+}
+
+/// Error returned when a wgpu bind-group layout plan cannot be built safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcioGpuWgpuBindingLayoutPlanError {
+    /// A binding index overflowed while deriving separated sampler bindings.
+    BindingIndexOverflow {
+        /// First binding used for the derived range.
+        start: u32,
+        /// Number of bindings requested from the range.
+        count: usize,
+    },
+    /// A derived binding collides with another resource binding.
+    BindingCollision { binding: u32 },
+    /// No sampler binding was found for a required LUT texture.
+    MissingSamplerBinding {
+        /// Texture dimension.
+        dimension: OcioGpuWgpuLutTextureDimension,
+        /// Texture index from the OCIO shader descriptor.
+        index: u32,
+    },
+}
+
+/// Deterministic policy for separating OCIO texture/sampler symbols in wgpu.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuSamplerBindingPolicy {
+    /// First binding reserved for derived LUT samplers.
+    pub sampler_binding_start: u32,
+    /// Per-texture sampler bindings.
+    pub mappings: Vec<OcioGpuWgpuSamplerBinding>,
+}
+
+impl OcioGpuWgpuSamplerBindingPolicy {
+    /// Derive sampler bindings from the OCIO descriptor contract.
+    pub fn for_contract(
+        contract: &OcioGpuBindingContract,
+    ) -> Result<Self, OcioGpuWgpuBindingLayoutPlanError> {
+        let texture_count = contract.textures_2d.len().saturating_add(contract.textures_3d.len());
+        let sampler_binding_start = first_free_binding_after_ocio_resources(contract)?;
+        let _exclusive_end =
+            checked_binding_offset(sampler_binding_start, texture_count, texture_count)?;
+
+        let mut mappings = Vec::with_capacity(texture_count);
+        for (offset, texture) in contract.textures_2d.iter().enumerate() {
+            let sampler_binding =
+                checked_binding_offset(sampler_binding_start, offset, texture_count)?;
+            mappings.push(OcioGpuWgpuSamplerBinding {
+                texture_index: texture.index,
+                texture_dimension: OcioGpuWgpuLutTextureDimension::D2,
+                texture_binding: texture.binding_index,
+                sampler_binding,
+                sampler_name: texture.sampler_name.clone(),
+                interpolation: texture.interpolation,
+            });
+        }
+        let texture_2d_count = contract.textures_2d.len();
+        for (offset, texture) in contract.textures_3d.iter().enumerate() {
+            let sampler_binding = checked_binding_offset(
+                sampler_binding_start,
+                texture_2d_count.saturating_add(offset),
+                texture_count,
+            )?;
+            mappings.push(OcioGpuWgpuSamplerBinding {
+                texture_index: texture.index,
+                texture_dimension: OcioGpuWgpuLutTextureDimension::D3,
+                texture_binding: texture.binding_index,
+                sampler_binding,
+                sampler_name: texture.sampler_name.clone(),
+                interpolation: texture.interpolation,
+            });
+        }
+
+        Ok(Self { sampler_binding_start, mappings })
+    }
+
+    fn sampler_binding_for_texture(
+        &self,
+        dimension: OcioGpuWgpuLutTextureDimension,
+        index: u32,
+    ) -> Result<u32, OcioGpuWgpuBindingLayoutPlanError> {
+        self.mappings
+            .iter()
+            .find(|mapping| {
+                mapping.texture_dimension == dimension && mapping.texture_index == index
+            })
+            .map(|mapping| mapping.sampler_binding)
+            .ok_or(OcioGpuWgpuBindingLayoutPlanError::MissingSamplerBinding { dimension, index })
+    }
+}
+
+/// One derived sampler binding for an OCIO LUT texture.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuSamplerBinding {
+    /// Texture index from the OCIO shader descriptor.
+    pub texture_index: u32,
+    /// Texture dimensionality.
+    pub texture_dimension: OcioGpuWgpuLutTextureDimension,
+    /// OCIO-reported texture binding.
+    pub texture_binding: u32,
+    /// Derived wgpu sampler binding.
+    pub sampler_binding: u32,
+    /// OCIO-generated sampler symbol name.
+    pub sampler_name: String,
+    /// OCIO interpolation policy that the wrapper shader must honor.
+    pub interpolation: OcioGpuTextureInterpolation,
+}
+
+/// Backend bind-group layout descriptor plan for wgpu object creation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuBindGroupLayoutDescriptorPlan {
+    /// Bind group index in the future pipeline layout.
+    pub bind_group: u32,
+    /// Human-readable layout label.
+    pub label: String,
+    /// Ordered layout entries.
+    pub entries: Vec<OcioGpuWgpuBindGroupLayoutEntryPlan>,
+    /// Stable hash of the descriptor plan.
+    pub layout_hash: u64,
+}
+
+impl OcioGpuWgpuBindGroupLayoutDescriptorPlan {
+    /// Build the OCIO resource bind-group layout descriptor.
+    pub fn for_ocio_resources(layout: &OcioGpuWgpuBindingLayoutPlan) -> Self {
+        let entries = layout
+            .entries
+            .iter()
+            .map(|entry| OcioGpuWgpuBindGroupLayoutEntryPlan {
+                binding: entry.binding,
+                visibility: OcioGpuWgpuShaderVisibility::Fragment,
+                resource: OcioGpuWgpuLayoutBindingResource::from_ocio_binding_resource(
+                    entry.resource,
+                ),
+            })
+            .collect::<Vec<_>>();
+        let layout_hash = hash_value(&entries);
+        Self {
+            bind_group: layout.bind_group,
+            label: "ocio_resource_bind_group_layout".to_owned(),
+            entries,
+            layout_hash,
+        }
+    }
+
+    /// Build the Mondrian fullscreen wrapper bind-group layout descriptor.
+    pub fn for_wrapper_input(layout: &OcioGpuWgpuWrapperBindingPlan) -> Self {
+        let entries = layout
+            .entries
+            .iter()
+            .map(|entry| OcioGpuWgpuBindGroupLayoutEntryPlan {
+                binding: entry.binding,
+                visibility: OcioGpuWgpuShaderVisibility::Fragment,
+                resource: OcioGpuWgpuLayoutBindingResource::from_wrapper_binding_resource(
+                    entry.resource,
+                ),
+            })
+            .collect::<Vec<_>>();
+        let layout_hash = hash_value(&entries);
+        Self {
+            bind_group: layout.bind_group,
+            label: "ocio_wrapper_input_bind_group_layout".to_owned(),
+            entries,
+            layout_hash,
+        }
+    }
+
+    /// Create a concrete wgpu bind-group layout from this validated plan.
+    pub fn create_bind_group_layout(&self, device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        let entries = self.entries.iter().map(|entry| entry.to_wgpu()).collect::<Vec<_>>();
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(&self.label),
+            entries: &entries,
+        })
+    }
+}
+
+/// One backend bind-group layout entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OcioGpuWgpuBindGroupLayoutEntryPlan {
+    /// Binding index.
+    pub binding: u32,
+    /// Shader stages allowed to access this resource.
+    pub visibility: OcioGpuWgpuShaderVisibility,
+    /// Binding resource type.
+    pub resource: OcioGpuWgpuLayoutBindingResource,
+}
+
+impl OcioGpuWgpuBindGroupLayoutEntryPlan {
+    fn to_wgpu(self) -> wgpu::BindGroupLayoutEntry {
+        wgpu::BindGroupLayoutEntry {
+            binding: self.binding,
+            visibility: self.visibility.to_wgpu(),
+            ty: self.resource.to_wgpu(),
+            count: None,
+        }
+    }
+}
+
+/// Shader visibility for an OCIO backend layout entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuShaderVisibility {
+    /// Fragment shader visibility.
+    Fragment,
+}
+
+impl OcioGpuWgpuShaderVisibility {
+    fn to_wgpu(self) -> wgpu::ShaderStages {
+        match self {
+            Self::Fragment => wgpu::ShaderStages::FRAGMENT,
+        }
+    }
+}
+
+/// Resource binding type for a backend layout entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuLayoutBindingResource {
+    /// Uniform buffer binding.
+    UniformBuffer { min_binding_size: Option<u64> },
+    /// Sampled texture binding.
+    SampledTexture {
+        dimension: OcioGpuWgpuLutTextureDimension,
+        sample_type: OcioGpuWgpuTextureSampleType,
+    },
+    /// Sampler binding.
+    Sampler {
+        filtering: OcioGpuWgpuSamplerFiltering,
+    },
+}
+
+impl OcioGpuWgpuLayoutBindingResource {
+    fn from_ocio_binding_resource(resource: OcioGpuWgpuBindingResource) -> Self {
+        match resource {
+            OcioGpuWgpuBindingResource::OcioUniformBuffer { .. } => {
+                Self::UniformBuffer { min_binding_size: None }
+            }
+            OcioGpuWgpuBindingResource::OcioLutTexture2d { .. } => Self::SampledTexture {
+                dimension: OcioGpuWgpuLutTextureDimension::D2,
+                sample_type: OcioGpuWgpuTextureSampleType::Float32,
+            },
+            OcioGpuWgpuBindingResource::OcioLutTexture3d { .. } => Self::SampledTexture {
+                dimension: OcioGpuWgpuLutTextureDimension::D3,
+                sample_type: OcioGpuWgpuTextureSampleType::Float32,
+            },
+            OcioGpuWgpuBindingResource::OcioLutSampler2d { .. }
+            | OcioGpuWgpuBindingResource::OcioLutSampler3d { .. } => Self::Sampler {
+                filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+            },
+            OcioGpuWgpuBindingResource::InputFrameTexture { .. } => Self::SampledTexture {
+                dimension: OcioGpuWgpuLutTextureDimension::D2,
+                sample_type: OcioGpuWgpuTextureSampleType::Float32,
+            },
+            OcioGpuWgpuBindingResource::FilteringSampler => {
+                Self::Sampler { filtering: OcioGpuWgpuSamplerFiltering::Filtering }
+            }
+        }
+    }
+
+    fn from_wrapper_binding_resource(resource: OcioGpuWgpuWrapperBindingResource) -> Self {
+        match resource {
+            OcioGpuWgpuWrapperBindingResource::InputFrameTexture => Self::SampledTexture {
+                dimension: OcioGpuWgpuLutTextureDimension::D2,
+                sample_type: OcioGpuWgpuTextureSampleType::Float32,
+            },
+            OcioGpuWgpuWrapperBindingResource::InputFrameSampler => {
+                Self::Sampler { filtering: OcioGpuWgpuSamplerFiltering::Filtering }
+            }
+        }
+    }
+
+    fn to_wgpu(self) -> wgpu::BindingType {
+        match self {
+            Self::UniformBuffer { min_binding_size } => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: min_binding_size.and_then(wgpu::BufferSize::new),
+            },
+            Self::SampledTexture { dimension, sample_type } => wgpu::BindingType::Texture {
+                sample_type: sample_type.to_wgpu(),
+                view_dimension: dimension.view_dimension(),
+                multisampled: false,
+            },
+            Self::Sampler { filtering } => wgpu::BindingType::Sampler(filtering.to_wgpu()),
+        }
+    }
+}
+
+/// Texture sample type used in an OCIO backend layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuTextureSampleType {
+    /// 32-bit float sampled texture. This is non-filterable without device features.
+    Float32,
+}
+
+impl OcioGpuWgpuTextureSampleType {
+    fn to_wgpu(self) -> wgpu::TextureSampleType {
+        match self {
+            Self::Float32 => wgpu::TextureSampleType::Float { filterable: false },
+        }
+    }
+}
+
+/// Sampler filtering mode used in an OCIO backend layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OcioGpuWgpuSamplerFiltering {
+    /// Filtering sampler.
+    Filtering,
+    /// Non-filtering sampler. Required for portable 32-bit float LUT textures.
+    NonFiltering,
+}
+
+impl OcioGpuWgpuSamplerFiltering {
+    fn to_wgpu(self) -> wgpu::SamplerBindingType {
+        match self {
+            Self::Filtering => wgpu::SamplerBindingType::Filtering,
+            Self::NonFiltering => wgpu::SamplerBindingType::NonFiltering,
         }
     }
 }
@@ -659,6 +996,10 @@ impl OcioGpuWgpuBindResourcePlan {
                 actual: packed_luts.resource_key,
             });
         }
+        let binding_layout = resources
+            .binding_layout_plan()
+            .map_err(OcioGpuWgpuBindResourcePlanError::BindingLayout)?;
+        let sampler_policy = &binding_layout.sampler_policy;
 
         let mut ocio_entries = Vec::new();
         if resources.uniform_buffers > 0 {
@@ -704,6 +1045,8 @@ impl OcioGpuWgpuBindResourcePlan {
                     index: contract.index,
                 })?;
             validate_texture_2d_bind_resource(contract, texture)?;
+            let sampler_binding = sampler_policy
+                .sampler_binding_for_texture(OcioGpuWgpuLutTextureDimension::D2, texture.index)?;
             ocio_entries.push(OcioGpuWgpuBindResourceEntry {
                 binding: texture.binding_index,
                 resource: OcioGpuWgpuBindResource::LutTexture {
@@ -715,6 +1058,15 @@ impl OcioGpuWgpuBindResourcePlan {
                     extent: texture.extent,
                     source_values_hash: texture.source_values_hash,
                     packed_bytes_hash: texture.packed_bytes_hash,
+                },
+            });
+            ocio_entries.push(OcioGpuWgpuBindResourceEntry {
+                binding: sampler_binding,
+                resource: OcioGpuWgpuBindResource::LutSampler {
+                    index: texture.index,
+                    sampler_name: texture.sampler_name.clone(),
+                    interpolation: texture.interpolation,
+                    filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
                 },
             });
         }
@@ -728,6 +1080,8 @@ impl OcioGpuWgpuBindResourcePlan {
                     index: contract.index,
                 })?;
             validate_texture_3d_bind_resource(contract, texture)?;
+            let sampler_binding = sampler_policy
+                .sampler_binding_for_texture(OcioGpuWgpuLutTextureDimension::D3, texture.index)?;
             ocio_entries.push(OcioGpuWgpuBindResourceEntry {
                 binding: texture.binding_index,
                 resource: OcioGpuWgpuBindResource::LutTexture {
@@ -741,12 +1095,21 @@ impl OcioGpuWgpuBindResourcePlan {
                     packed_bytes_hash: texture.packed_bytes_hash,
                 },
             });
+            ocio_entries.push(OcioGpuWgpuBindResourceEntry {
+                binding: sampler_binding,
+                resource: OcioGpuWgpuBindResource::LutSampler {
+                    index: texture.index,
+                    sampler_name: texture.sampler_name.clone(),
+                    interpolation: texture.interpolation,
+                    filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                },
+            });
         }
 
         ocio_entries.sort_by_key(|entry| entry.binding);
         let wrapper_layout =
             OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
-        let ocio_layout_hash = resources.binding_layout_plan().layout_hash;
+        let ocio_layout_hash = binding_layout.layout_hash;
         let plan_hash = hash_bind_resource_plan(
             resources.resource_key,
             resources.binding_contract.descriptor_set_index,
@@ -856,11 +1219,24 @@ pub enum OcioGpuWgpuBindResource {
         /// Hash of packed texture bytes.
         packed_bytes_hash: u64,
     },
+    /// Sampler paired with an OCIO LUT texture.
+    LutSampler {
+        /// Texture index from the OCIO shader descriptor.
+        index: u32,
+        /// OCIO-generated sampler symbol name.
+        sampler_name: String,
+        /// OCIO interpolation policy that the wrapper shader must honor.
+        interpolation: OcioGpuTextureInterpolation,
+        /// Backend sampler filtering mode.
+        filtering: OcioGpuWgpuSamplerFiltering,
+    },
 }
 
 /// Error returned when packed OCIO resources do not match a resource contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OcioGpuWgpuBindResourcePlanError {
+    /// The binding layout plan could not derive a safe wgpu layout.
+    BindingLayout(OcioGpuWgpuBindingLayoutPlanError),
     /// Packed LUT resources belong to a different shader/resource plan.
     LutResourceKeyMismatch { expected: u64, actual: u64 },
     /// Packed uniform resources belong to a different shader/resource plan.
@@ -895,6 +1271,12 @@ pub enum OcioGpuWgpuBindResourcePlanError {
         /// Human-readable mismatch reason.
         reason: OcioGpuWgpuTextureContractMismatch,
     },
+}
+
+impl From<OcioGpuWgpuBindingLayoutPlanError> for OcioGpuWgpuBindResourcePlanError {
+    fn from(reason: OcioGpuWgpuBindingLayoutPlanError) -> Self {
+        Self::BindingLayout(reason)
+    }
 }
 
 /// Field-level texture contract mismatch.
@@ -944,8 +1326,18 @@ pub enum OcioGpuWgpuBindingResource {
         /// LUT texture index from the OCIO shader descriptor.
         index: u32,
     },
+    /// OCIO 1D/2D LUT sampler.
+    OcioLutSampler2d {
+        /// LUT texture index from the OCIO shader descriptor.
+        index: u32,
+    },
     /// OCIO 3D LUT texture.
     OcioLutTexture3d {
+        /// LUT texture index from the OCIO shader descriptor.
+        index: u32,
+    },
+    /// OCIO 3D LUT sampler.
+    OcioLutSampler3d {
         /// LUT texture index from the OCIO shader descriptor.
         index: u32,
     },
@@ -1699,19 +2091,19 @@ impl OcioGpuWgpuResourceCache {
     pub fn prepare(
         &mut self,
         resources: OcioGpuWgpuResourcePlan,
-    ) -> Arc<OcioGpuWgpuPreparedResources> {
+    ) -> Result<Arc<OcioGpuWgpuPreparedResources>, OcioGpuWgpuBindingLayoutPlanError> {
         if let Some(hit) = self.entries.get(&resources.resource_key) {
             self.hits = self.hits.saturating_add(1);
-            return Arc::clone(hit);
+            return Ok(Arc::clone(hit));
         }
 
         self.misses = self.misses.saturating_add(1);
         let prepared = Arc::new(OcioGpuWgpuPreparedResources {
-            binding_layout: resources.binding_layout_plan(),
+            binding_layout: resources.binding_layout_plan()?,
             resources,
         });
         self.entries.put(prepared.resources.resource_key, Arc::clone(&prepared));
-        prepared
+        Ok(prepared)
     }
 
     /// Return backend resource preparation cache diagnostics.
@@ -2207,6 +2599,60 @@ fn hash_binding_layout(entries: &[OcioGpuWgpuBindingPlan]) -> u64 {
     hash_value(&entries)
 }
 
+fn first_free_binding_after_ocio_resources(
+    contract: &OcioGpuBindingContract,
+) -> Result<u32, OcioGpuWgpuBindingLayoutPlanError> {
+    let mut max_binding = if contract.uniform_buffer_size > 0 || contract.uniform_count > 0 {
+        Some(contract.uniform_buffer_binding)
+    } else {
+        None
+    };
+    for texture in &contract.textures_2d {
+        max_binding =
+            Some(max_binding.map_or(texture.binding_index, |max| max.max(texture.binding_index)));
+    }
+    for texture in &contract.textures_3d {
+        max_binding =
+            Some(max_binding.map_or(texture.binding_index, |max| max.max(texture.binding_index)));
+    }
+    match max_binding {
+        Some(binding) => {
+            binding
+                .checked_add(1)
+                .ok_or(OcioGpuWgpuBindingLayoutPlanError::BindingIndexOverflow {
+                    start: binding,
+                    count: 1,
+                })
+        }
+        None => Ok(contract.texture_binding_start),
+    }
+}
+
+fn checked_binding_offset(
+    start: u32,
+    offset: usize,
+    count: usize,
+) -> Result<u32, OcioGpuWgpuBindingLayoutPlanError> {
+    let offset = u32::try_from(offset)
+        .map_err(|_| OcioGpuWgpuBindingLayoutPlanError::BindingIndexOverflow { start, count })?;
+    start
+        .checked_add(offset)
+        .ok_or(OcioGpuWgpuBindingLayoutPlanError::BindingIndexOverflow { start, count })
+}
+
+fn validate_unique_bindings(
+    entries: &[OcioGpuWgpuBindingPlan],
+) -> Result<(), OcioGpuWgpuBindingLayoutPlanError> {
+    for pair in entries.windows(2) {
+        if pair[0].binding == pair[1].binding {
+            return Err(OcioGpuWgpuBindingLayoutPlanError::BindingCollision {
+                binding: pair[0].binding,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn hash_bind_resource_plan(
     resource_key: u64,
     ocio_bind_group: u32,
@@ -2465,25 +2911,16 @@ fn upload_lut_texture(
 }
 
 fn sampler_descriptor_for_interpolation(
-    interpolation: OcioGpuTextureInterpolation,
+    _interpolation: OcioGpuTextureInterpolation,
     label: &str,
 ) -> wgpu::SamplerDescriptor<'_> {
-    let filter = match interpolation {
-        OcioGpuTextureInterpolation::Nearest => wgpu::FilterMode::Nearest,
-        OcioGpuTextureInterpolation::Unknown
-        | OcioGpuTextureInterpolation::Linear
-        | OcioGpuTextureInterpolation::Tetrahedral
-        | OcioGpuTextureInterpolation::Cubic
-        | OcioGpuTextureInterpolation::Default
-        | OcioGpuTextureInterpolation::Best => wgpu::FilterMode::Linear,
-    };
     wgpu::SamplerDescriptor {
         label: Some(label),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: filter,
-        min_filter: filter,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
         ..Default::default()
     }
@@ -2796,8 +3233,8 @@ mod tests {
             ocio_texture_2d_bindings: 1,
             ocio_texture_3d_bindings: 1,
             uniform_buffers: 1,
-            samplers: 1,
-            bind_group_entries: 3,
+            samplers: 3,
+            bind_group_entries: 5,
             bind_groups: 2,
             pipeline_layout_hash: 202,
         }
@@ -3039,7 +3476,7 @@ mod tests {
         assert_eq!(bind_plan.resource_key, resources.resource_key);
         assert_eq!(bind_plan.ocio_bind_group, 0);
         assert_eq!(bind_plan.wrapper_bind_group, 1);
-        assert_eq!(bind_plan.ocio_entries.len(), 3);
+        assert_eq!(bind_plan.ocio_entries.len(), 5);
         assert_eq!(bind_plan.wrapper_layout.bind_group, 1);
         assert_eq!(bind_plan.wrapper_layout.entries.len(), 2);
         assert!(bind_plan.wrapper_layout.entries.iter().any(|entry| {
@@ -3079,9 +3516,90 @@ mod tests {
                     }
                 )
         }));
+        assert!(bind_plan.ocio_entries.iter().any(|entry| {
+            entry.binding == 5
+                && matches!(
+                    entry.resource,
+                    OcioGpuWgpuBindResource::LutSampler {
+                        index: 7,
+                        interpolation: OcioGpuTextureInterpolation::Linear,
+                        filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                        ..
+                    }
+                )
+        }));
+        assert!(bind_plan.ocio_entries.iter().any(|entry| {
+            entry.binding == 6
+                && matches!(
+                    entry.resource,
+                    OcioGpuWgpuBindResource::LutSampler {
+                        index: 9,
+                        interpolation: OcioGpuTextureInterpolation::Tetrahedral,
+                        filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                        ..
+                    }
+                )
+        }));
         assert_ne!(bind_plan.ocio_layout_hash, 0);
         assert_ne!(bind_plan.wrapper_layout.layout_hash, 0);
         assert_ne!(bind_plan.plan_hash, 0);
+    }
+
+    #[test]
+    fn binding_layout_descriptor_separates_lut_textures_and_samplers() {
+        let resources = bind_resource_test_plan(41);
+
+        let binding_layout =
+            resources.binding_layout_plan().expect("binding layout with separated samplers");
+        let ocio_descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_ocio_resources(&binding_layout);
+        let wrapper_descriptor = OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(
+            &OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract),
+        );
+
+        assert_eq!(binding_layout.sampler_policy.sampler_binding_start, 5);
+        assert_eq!(binding_layout.sampler_policy.mappings.len(), 2);
+        assert_eq!(binding_layout.entries.len(), 5);
+        assert!(binding_layout.entries.iter().any(|entry| {
+            entry.binding == 5
+                && entry.resource == OcioGpuWgpuBindingResource::OcioLutSampler2d { index: 7 }
+        }));
+        assert!(binding_layout.entries.iter().any(|entry| {
+            entry.binding == 6
+                && entry.resource == OcioGpuWgpuBindingResource::OcioLutSampler3d { index: 9 }
+        }));
+        assert!(ocio_descriptor.entries.iter().any(|entry| {
+            entry.binding == 3
+                && entry.resource
+                    == OcioGpuWgpuLayoutBindingResource::SampledTexture {
+                        dimension: OcioGpuWgpuLutTextureDimension::D2,
+                        sample_type: OcioGpuWgpuTextureSampleType::Float32,
+                    }
+        }));
+        assert!(ocio_descriptor.entries.iter().any(|entry| {
+            entry.binding == 5
+                && entry.resource
+                    == OcioGpuWgpuLayoutBindingResource::Sampler {
+                        filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                    }
+        }));
+        assert_eq!(wrapper_descriptor.bind_group, 1);
+        assert!(wrapper_descriptor.entries.iter().any(|entry| {
+            entry.binding == 0
+                && entry.resource
+                    == OcioGpuWgpuLayoutBindingResource::SampledTexture {
+                        dimension: OcioGpuWgpuLutTextureDimension::D2,
+                        sample_type: OcioGpuWgpuTextureSampleType::Float32,
+                    }
+        }));
+        assert!(wrapper_descriptor.entries.iter().any(|entry| {
+            entry.binding == 1
+                && entry.resource
+                    == OcioGpuWgpuLayoutBindingResource::Sampler {
+                        filtering: OcioGpuWgpuSamplerFiltering::Filtering,
+                    }
+        }));
+        assert_ne!(ocio_descriptor.layout_hash, wrapper_descriptor.layout_hash);
     }
 
     #[test]
@@ -3199,7 +3717,8 @@ mod tests {
         );
         assert_eq!(
             resources.bind_group_entries,
-            first.texture_2d_count + first.texture_3d_count + u32::from(first.uniform_count > 0)
+            (first.texture_2d_count + first.texture_3d_count) * 2
+                + u32::from(first.uniform_count > 0)
         );
         assert_eq!(
             resources.binding_contract_hash,
@@ -3223,7 +3742,8 @@ mod tests {
         );
         assert_ne!(resources.resource_key, 0);
         assert_ne!(resources.pipeline_layout_hash, 0);
-        let binding_layout = resources.binding_layout_plan();
+        let binding_layout =
+            resources.binding_layout_plan().expect("binding layout with separated samplers");
         assert_eq!(
             binding_layout.entries.len(),
             resources.bind_group_entries as usize
@@ -3237,6 +3757,10 @@ mod tests {
                 entry.binding == texture.binding_index
                     && entry.resource
                         == OcioGpuWgpuBindingResource::OcioLutTexture2d { index: texture.index }
+            }));
+            assert!(binding_layout.entries.iter().any(|entry| {
+                entry.resource
+                    == OcioGpuWgpuBindingResource::OcioLutSampler2d { index: texture.index }
             }));
             let contract = resources
                 .binding_contract
@@ -3256,6 +3780,10 @@ mod tests {
                     && entry.resource
                         == OcioGpuWgpuBindingResource::OcioLutTexture3d { index: texture.index }
             }));
+            assert!(binding_layout.entries.iter().any(|entry| {
+                entry.resource
+                    == OcioGpuWgpuBindingResource::OcioLutSampler3d { index: texture.index }
+            }));
             let contract = resources
                 .binding_contract
                 .textures_3d
@@ -3267,6 +3795,21 @@ mod tests {
             assert_eq!(contract.values_hash, hash_f32_values(&texture.values));
         }
         assert_ne!(binding_layout.layout_hash, 0);
+        let ocio_descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_ocio_resources(&binding_layout);
+        assert_eq!(ocio_descriptor.bind_group, binding_layout.bind_group);
+        assert_eq!(ocio_descriptor.entries.len(), binding_layout.entries.len());
+        if first.texture_2d_count > 0 || first.texture_3d_count > 0 {
+            assert!(ocio_descriptor.entries.iter().any(|entry| {
+                matches!(
+                    entry.resource,
+                    OcioGpuWgpuLayoutBindingResource::Sampler {
+                        filtering: OcioGpuWgpuSamplerFiltering::NonFiltering
+                    }
+                )
+            }));
+        }
+        assert_ne!(ocio_descriptor.layout_hash, 0);
         let upload_plan = OcioGpuWgpuLutUploadPlan::for_shader_plan(&first, &resources);
         assert_eq!(upload_plan.resource_key, resources.resource_key);
         assert_eq!(upload_plan.textures_2d.len() as u32, first.texture_2d_count);
@@ -3385,8 +3928,12 @@ mod tests {
             .expect("prepare shader execution");
 
         let mut resource_cache = OcioGpuWgpuResourceCache::default();
-        let first = resource_cache.prepare(prepared.resources.clone());
-        let second = resource_cache.prepare(prepared.resources.clone());
+        let first = resource_cache
+            .prepare(prepared.resources.clone())
+            .expect("prepare binding layout");
+        let second = resource_cache
+            .prepare(prepared.resources.clone())
+            .expect("reuse binding layout");
 
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(
@@ -3399,7 +3946,7 @@ mod tests {
         );
         assert_eq!(
             first.binding_layout.layout_hash,
-            prepared.resources.binding_layout_plan().layout_hash
+            prepared.resources.binding_layout_plan().expect("binding layout").layout_hash
         );
 
         let diagnostics = resource_cache.diagnostics();
