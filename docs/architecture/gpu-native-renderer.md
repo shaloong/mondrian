@@ -235,6 +235,10 @@ optional readback copy. The backend objects for that operation travel as
 `RenderGpuOutputBoundaryBackendContext`; lower-level renderer code may call the
 stage or resource recorder with renderer backend contexts after it already owns
 the validated plan.
+`RenderGpuOutputBoundaryRuntime` is the app/export owner for this path's
+long-lived renderer state. It combines the OCIO shader cache, GPU color frame id
+allocator, and `GpuColorFrameResourceTable<GpuColorFrameWgpuResource>` so
+callers do not split those contracts across unrelated services.
 `GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
 encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
 unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only

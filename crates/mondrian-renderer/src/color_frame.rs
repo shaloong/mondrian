@@ -325,6 +325,11 @@ impl<R> GpuColorFrameResourceTable<R> {
         self.entries.remove(&id)
     }
 
+    /// Remove every resource entry from the table.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     /// Return the number of entries in the table.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -1100,6 +1105,30 @@ mod tests {
                 actual: handle.contract()
             }
         );
+    }
+
+    #[test]
+    fn gpu_color_frame_resource_table_clear_removes_all_entries() {
+        let first = gpu_handle(
+            104,
+            working_descriptor(),
+            GpuColorFrameTextureFormat::Rgba16Float,
+        );
+        let second = gpu_handle(
+            105,
+            working_descriptor(),
+            GpuColorFrameTextureFormat::Rgba16Float,
+        );
+        let mut table = GpuColorFrameResourceTable::new();
+        table.insert(GpuColorFrameResource::new(first, "first")).expect("insert first");
+        table
+            .insert(GpuColorFrameResource::new(second, "second"))
+            .expect("insert second");
+
+        table.clear();
+
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
     }
 
     #[test]

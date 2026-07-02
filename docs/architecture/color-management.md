@@ -226,6 +226,9 @@ Its backend inputs are grouped in `RenderGpuOutputBoundaryBackendContext` so
 app/export code passes one renderer-owned backend contract rather than
 hand-threading wgpu objects, bind groups, pass nodes, and the frame table
 through each layer.
+`RenderGpuOutputBoundaryRuntime` is the intended owner for long-lived preview
+or export GPU output state: it keeps the OCIO shader cache, GPU frame id
+allocator, and GPU frame table together for the backend lifetime.
 Callers that already hold a stage or resource plan may use the lower-level
 recorders, but app/export scheduling should prefer the executor-level API so
 final-output policy remains renderer-owned. `GpuColorFrameReadbackPlan`

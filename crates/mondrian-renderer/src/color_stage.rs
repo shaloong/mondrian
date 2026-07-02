@@ -5,13 +5,14 @@ use crate::{
     GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, OcioGpuShaderCache, OcioGpuWgpuBindGroupPreparer,
-    OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup, OcioGpuWgpuRenderPassError,
-    OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
-    OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
-    OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
-    RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
-    RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
+    GpuColorFrameWgpuResource, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
+    OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
+    OcioGpuWgpuRenderPassError, OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder,
+    OcioGpuWgpuRenderPassTarget, OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup,
+    OcioGpuWgpuWrapperBindingPlan, OcioGpuWgpuWrapperInputResources, RenderColorTransform,
+    RenderColorTransformError, RenderColorTransformGpuOptions, RenderColorTransformGpuPlan,
+    RenderColorTransformGpuPlanner, RenderInputTransform, RenderInputTransformResult,
+    RenderOutputTransformResult,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
 
@@ -331,6 +332,28 @@ pub struct RenderGpuOutputBoundaryBackendContext<'a> {
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
 
+/// Per-record backend context supplied to [`RenderGpuOutputBoundaryRuntime`].
+///
+/// The runtime owns the shader cache, GPU frame id allocator, and frame resource
+/// table. This context only carries backend objects whose lifetime belongs to
+/// the current render submission.
+pub struct RenderGpuOutputBoundaryRuntimeBackendContext<'a> {
+    /// wgpu device used for resource materialization and bind-group creation.
+    pub device: &'a wgpu::Device,
+    /// wgpu queue used for upload writes.
+    pub queue: &'a wgpu::Queue,
+    /// Command encoder receiving the color pass and optional readback copy.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Prepared OCIO fullscreen render pipeline.
+    pub pipeline: &'a OcioGpuWgpuRenderPipeline,
+    /// Prepared OCIO resource bind group.
+    pub ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    /// Backend render-pass node for this color transform.
+    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+    /// Load operation for the output color attachment.
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
 /// Borrowed inputs required to record one final-output GPU color boundary.
 pub struct RenderGpuOutputBoundaryRecordRequest<'a> {
     /// GPU frame id allocator for upload/output handles.
@@ -350,6 +373,118 @@ pub enum RenderGpuOutputBoundaryRecordError {
     ResourcePlan(RenderGpuOutputStageResourcePlanError),
     /// Resource materialization, pass recording, or readback recording failed.
     Record(RenderGpuOutputStageRecordError),
+}
+
+/// Renderer-owned state for native GPU final-output color boundaries.
+///
+/// App/export code should hold one runtime per render backend lifetime. The
+/// runtime owns renderer-internal color resources and exposes executor-level
+/// recording so callers do not manage shader caches, frame ids, or frame tables
+/// directly.
+pub struct RenderGpuOutputBoundaryRuntime {
+    shader_cache: OcioGpuShaderCache,
+    frame_ids: GpuColorFrameIdAllocator,
+    frame_table: GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+}
+
+impl RenderGpuOutputBoundaryRuntime {
+    /// Create a runtime with default cache capacity and frame ids starting at 1.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a runtime with default cache capacity and a custom first frame id.
+    pub fn with_first_frame_id(first_frame_id: u64) -> Self {
+        Self {
+            shader_cache: OcioGpuShaderCache::default(),
+            frame_ids: GpuColorFrameIdAllocator::new(first_frame_id),
+            frame_table: GpuColorFrameResourceTable::new(),
+        }
+    }
+
+    /// Return point-in-time runtime diagnostics.
+    pub fn diagnostics(&self) -> RenderGpuOutputBoundaryRuntimeDiagnostics {
+        RenderGpuOutputBoundaryRuntimeDiagnostics {
+            shader_cache: self.shader_cache.diagnostics(),
+            next_frame_id: self.frame_ids.next_raw(),
+            frame_table_entries: self.frame_table.len(),
+        }
+    }
+
+    /// Remove all materialized frame resources owned by this runtime.
+    pub fn clear_frame_resources(&mut self) {
+        self.frame_table.clear();
+    }
+
+    /// Borrow the runtime-owned GPU frame resource table.
+    pub fn frame_table(&self) -> &GpuColorFrameResourceTable<GpuColorFrameWgpuResource> {
+        &self.frame_table
+    }
+
+    /// Mutably borrow the runtime-owned GPU frame resource table.
+    pub fn frame_table_mut(
+        &mut self,
+    ) -> &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource> {
+        &mut self.frame_table
+    }
+
+    /// Borrow the runtime-owned OCIO shader cache.
+    pub fn shader_cache(&self) -> &OcioGpuShaderCache {
+        &self.shader_cache
+    }
+
+    /// Mutably borrow the runtime-owned OCIO shader cache.
+    pub fn shader_cache_mut(&mut self) -> &mut OcioGpuShaderCache {
+        &mut self.shader_cache
+    }
+
+    /// Plan and record a native GPU final display/export output boundary.
+    pub fn record_wgpu_output_boundary(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        frame: &CpuColorFrame,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeBackendContext<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderOutputColorBoundaryGpuRecordError> {
+        let Self { shader_cache, frame_ids, frame_table } = self;
+        let mut executor = RenderOutputColorBoundaryExecutor::prefer_gpu(shader_cache, gpu_options);
+        executor.record_wgpu_output_boundary(
+            boundary,
+            RenderGpuOutputBoundaryRecordRequest {
+                ids: frame_ids,
+                frame,
+                output_texture_format,
+                backend: RenderGpuOutputBoundaryBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: backend.pipeline,
+                    ocio_bind_group: backend.ocio_bind_group,
+                    pass_node: backend.pass_node,
+                    table: frame_table,
+                    load_op: backend.load_op,
+                },
+            },
+        )
+    }
+}
+
+impl Default for RenderGpuOutputBoundaryRuntime {
+    fn default() -> Self {
+        Self::with_first_frame_id(1)
+    }
+}
+
+/// Point-in-time diagnostics for a GPU output boundary runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderGpuOutputBoundaryRuntimeDiagnostics {
+    /// OCIO shader extraction cache diagnostics.
+    pub shader_cache: OcioGpuShaderCacheDiagnostics,
+    /// Next GPU color frame id that will be allocated.
+    pub next_frame_id: u64,
+    /// Number of materialized frame resources currently retained.
+    pub frame_table_entries: usize,
 }
 
 /// Strategy-aware planner for preview/export final output color boundaries.
@@ -1587,10 +1722,12 @@ fn validate_execution_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameTextureFormat};
-    use mondrian_core::ensure_mondrian_default_ocio_loaded;
+    use crate::{
+        GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameTextureFormat, OcioGpuShaderRequest,
+    };
     use mondrian_core::types::{ColorEngine, ColorSpace};
     use mondrian_core::RgbaF32Frame;
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, GpuLanguage};
 
     fn source_descriptor(residency: ColorFrameResidency) -> ColorFrameDescriptor {
         ColorFrameDescriptor {
@@ -1776,6 +1913,39 @@ mod tests {
         );
         assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
         assert_eq!(output.stage_diagnostics.gpu_color_stages, 0);
+    }
+
+    #[test]
+    fn gpu_output_boundary_runtime_owns_shader_cache_and_frame_ids() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(900);
+
+        assert_eq!(
+            runtime.diagnostics(),
+            RenderGpuOutputBoundaryRuntimeDiagnostics {
+                shader_cache: OcioGpuShaderCache::default().diagnostics(),
+                next_frame_id: 900,
+                frame_table_entries: 0
+            }
+        );
+
+        runtime
+            .shader_cache_mut()
+            .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                src: ColorSpace::SLog3,
+                dst: ColorSpace::Rec709,
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("shader extraction");
+
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.shader_cache.entries, 1);
+        assert_eq!(diagnostics.shader_cache.misses, 1);
+        assert_eq!(diagnostics.next_frame_id, 900);
+        assert_eq!(diagnostics.frame_table_entries, 0);
+
+        runtime.clear_frame_resources();
+        assert_eq!(runtime.diagnostics().frame_table_entries, 0);
     }
 
     #[test]
