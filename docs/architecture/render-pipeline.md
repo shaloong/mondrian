@@ -116,12 +116,14 @@ owns resource-table lookup plus readback-copy recording. Once a backend
 pipeline node and OCIO bind group are prepared, preview/export callers should
 use `RenderOutputColorBoundaryStagePlan::record_wgpu_output_boundary(...)` so
 resource-plan derivation, materialization, schedule validation, pass recording,
-and optional readback stay in renderer-owned order. Lower-level renderer code
-that already owns a validated `RenderGpuOutputStageResourcePlan` may call
-`record_wgpu_output_stage`. GPU-to-CPU output for encode, thumbnails, tests, or
-debug captures must use one of those renderer-owned paths; readback is valid
-only for explicit encoded RGBA8 output contracts unless a future conversion
-stage says otherwise.
+and optional readback stay in renderer-owned order. The required wgpu backend
+objects are grouped in `RenderGpuOutputBoundaryBackendContext`, not duplicated
+as ad hoc app/export parameters. Lower-level renderer code that already owns a
+validated `RenderGpuOutputStageResourcePlan` may call `record_wgpu_output_stage`
+with `RenderGpuOutputStageBackendContext`. GPU-to-CPU output for encode,
+thumbnails, tests, or debug captures must use one of those renderer-owned paths;
+readback is valid only for explicit encoded RGBA8 output contracts unless a
+future conversion stage says otherwise.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
 source boundaries and `RenderOutputColorBoundaryExecutor::cpu_only()` for final
 display or export output. The compatibility helper

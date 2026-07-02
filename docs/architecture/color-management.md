@@ -221,6 +221,10 @@ boundary API instead of deriving it from texture format at the call site.
 preview/export-facing sequencing point for this output boundary: it derives the
 resource plan, materializes resources, schedules the pass, records the OCIO
 fullscreen draw, and records the optional readback copy in one command encoder.
+Its backend inputs are grouped in `RenderGpuOutputBoundaryBackendContext` so
+app/export code passes one renderer-owned backend contract rather than
+hand-threading wgpu objects, bind groups, pass nodes, and the frame table
+through each layer.
 Callers that already hold a resource plan may use `record_wgpu_output_stage`,
 but app/export scheduling should prefer the boundary-level API so final-output
 policy remains renderer-owned. `GpuColorFrameReadbackPlan`

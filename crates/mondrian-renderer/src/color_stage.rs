@@ -300,45 +300,19 @@ impl RenderOutputColorBoundaryStagePlan {
         &self,
         request: RenderGpuOutputBoundaryRecordRequest<'_>,
     ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRecordError> {
-        let RenderGpuOutputBoundaryRecordRequest {
-            ids,
-            frame,
-            output_texture_format,
-            device,
-            queue,
-            encoder,
-            pipeline,
-            ocio_bind_group,
-            pass_node,
-            table,
-            load_op,
-        } = request;
+        let RenderGpuOutputBoundaryRecordRequest { ids, frame, output_texture_format, backend } =
+            request;
         let resources = self
             .gpu_resource_plan(ids, frame, output_texture_format)
             .map_err(RenderGpuOutputBoundaryRecordError::ResourcePlan)?;
         resources
-            .record_wgpu_output_stage(RenderGpuOutputStageRecordRequest {
-                device,
-                queue,
-                encoder,
-                pipeline,
-                ocio_bind_group,
-                pass_node,
-                table,
-                load_op,
-            })
+            .record_wgpu_output_stage(RenderGpuOutputStageRecordRequest { backend: backend.into() })
             .map_err(RenderGpuOutputBoundaryRecordError::Record)
     }
 }
 
-/// Borrowed inputs required to record one final-output GPU color boundary.
-pub struct RenderGpuOutputBoundaryRecordRequest<'a> {
-    /// GPU frame id allocator for upload/output handles.
-    pub ids: &'a mut GpuColorFrameIdAllocator,
-    /// CPU working frame entering the output boundary.
-    pub frame: &'a CpuColorFrame,
-    /// Texture format for the GPU output target.
-    pub output_texture_format: GpuColorFrameTextureFormat,
+/// Borrowed backend context required to record a final-output GPU color boundary.
+pub struct RenderGpuOutputBoundaryBackendContext<'a> {
     /// wgpu device used for resource materialization and bind-group creation.
     pub device: &'a wgpu::Device,
     /// wgpu queue used for upload writes.
@@ -355,6 +329,18 @@ pub struct RenderGpuOutputBoundaryRecordRequest<'a> {
     pub table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     /// Load operation for the output color attachment.
     pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// Borrowed inputs required to record one final-output GPU color boundary.
+pub struct RenderGpuOutputBoundaryRecordRequest<'a> {
+    /// GPU frame id allocator for upload/output handles.
+    pub ids: &'a mut GpuColorFrameIdAllocator,
+    /// CPU working frame entering the output boundary.
+    pub frame: &'a CpuColorFrame,
+    /// Texture format for the GPU output target.
+    pub output_texture_format: GpuColorFrameTextureFormat,
+    /// Backend context used to materialize resources and record the pass.
+    pub backend: RenderGpuOutputBoundaryBackendContext<'a>,
 }
 
 /// Error returned when a final-output GPU boundary cannot be recorded.
@@ -510,7 +496,7 @@ pub struct RenderGpuOutputStageRecord {
 }
 
 /// Borrowed backend objects required to record one GPU output color stage.
-pub struct RenderGpuOutputStageRecordRequest<'a> {
+pub struct RenderGpuOutputStageBackendContext<'a> {
     /// wgpu device used for resource materialization and bind-group creation.
     pub device: &'a wgpu::Device,
     /// wgpu queue used for upload writes.
@@ -527,6 +513,29 @@ pub struct RenderGpuOutputStageRecordRequest<'a> {
     pub table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     /// Load operation for the output color attachment.
     pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// Borrowed inputs required to record one GPU output color stage.
+pub struct RenderGpuOutputStageRecordRequest<'a> {
+    /// Backend context used to materialize resources and record the pass.
+    pub backend: RenderGpuOutputStageBackendContext<'a>,
+}
+
+impl<'a> From<RenderGpuOutputBoundaryBackendContext<'a>>
+    for RenderGpuOutputStageBackendContext<'a>
+{
+    fn from(context: RenderGpuOutputBoundaryBackendContext<'a>) -> Self {
+        Self {
+            device: context.device,
+            queue: context.queue,
+            encoder: context.encoder,
+            pipeline: context.pipeline,
+            ocio_bind_group: context.ocio_bind_group,
+            pass_node: context.pass_node,
+            table: context.table,
+            load_op: context.load_op,
+        }
+    }
 }
 
 impl RenderGpuOutputStageResourcePlan {
@@ -670,24 +679,25 @@ impl RenderGpuOutputStageResourcePlan {
         &self,
         request: RenderGpuOutputStageRecordRequest<'_>,
     ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputStageRecordError> {
+        let RenderGpuOutputStageRecordRequest { backend } = request;
         let schedule = self
-            .schedule_pass(request.pass_node)
+            .schedule_pass(backend.pass_node)
             .map_err(RenderGpuOutputStageRecordError::Schedule)?;
         let materialized = self
-            .materialize_wgpu(request.device, request.queue, request.table)
+            .materialize_wgpu(backend.device, backend.queue, backend.table)
             .map_err(RenderGpuOutputStageRecordError::Materialize)?;
         schedule
             .record_wgpu_from_resources(
-                request.device,
-                request.encoder,
-                request.pipeline,
-                request.ocio_bind_group,
-                request.table,
-                request.load_op,
+                backend.device,
+                backend.encoder,
+                backend.pipeline,
+                backend.ocio_bind_group,
+                backend.table,
+                backend.load_op,
             )
             .map_err(RenderGpuOutputStageRecordError::Pass)?;
         let readback_buffer = self
-            .record_readback_wgpu(request.device, request.encoder, request.table)
+            .record_readback_wgpu(backend.device, backend.encoder, backend.table)
             .map_err(RenderGpuOutputStageRecordError::Readback)?;
         Ok(RenderGpuOutputStageRecord { materialized, readback_buffer })
     }
