@@ -23,6 +23,9 @@ use crate::app_ui::runtime::{
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_platform::SystemPlatformService;
+use mondrian_renderer::{
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
+};
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
 use mondrian_ui_core::types::*;
@@ -90,6 +93,7 @@ struct AppUiWindowSession {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     frame_renderer: AppUiFrameRenderer,
+    color_output_runtime: RenderGpuOutputBoundaryRuntime,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
     router: EventRouter,
     ui_runtime: WinitUiRuntime,
@@ -337,6 +341,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             log_frame_pressure(pressure);
                         }
+                        trace_color_output_runtime(session.color_output_runtime.diagnostics());
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
                         }
@@ -744,6 +749,23 @@ fn log_frame_pressure(pressure: AppUiFramePressure) {
     );
 }
 
+fn trace_color_output_runtime(diagnostics: RenderGpuOutputBoundaryRuntimeDiagnostics) {
+    tracing::trace!(
+        shader_cache_entries = diagnostics.shader_cache.entries,
+        shader_cache_hits = diagnostics.shader_cache.hits,
+        shader_cache_misses = diagnostics.shader_cache.misses,
+        shader_cache_extraction_failures = diagnostics.shader_cache.extraction_failures,
+        backend_prep_resource_entries = diagnostics.backend_prep.resources.entries,
+        backend_object_entries = diagnostics.backend_objects.entries,
+        backend_object_hits = diagnostics.backend_objects.hits,
+        backend_object_misses = diagnostics.backend_objects.misses,
+        backend_object_failures = diagnostics.backend_objects.failures,
+        frame_table_entries = diagnostics.frame_table_entries,
+        next_frame_id = diagnostics.next_frame_id,
+        "app UI GPU output color runtime diagnostics"
+    );
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeFileDndDiagnostic {
     HoverUnhandled,
@@ -904,6 +926,7 @@ impl AppUiWindowSession {
             surface,
             config: config.clone(),
             frame_renderer: AppUiFrameRenderer::new(device, config.format),
+            color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
             router: build_event_router(
                 host.active_root().id(),

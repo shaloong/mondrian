@@ -264,6 +264,11 @@ planned frames, schedules the matching `RenderGpuColorPassSchedule`, records
 the OCIO fullscreen pass, and records the optional readback copy. Lower-level
 renderer code may still call the stage or resource recorder with explicit
 backend contexts after it already owns the validated backend objects.
+The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
+the surface/backend lifetime and traces its cache/resource diagnostics with the
+frame renderer diagnostics. The current viewer preview service remains the CPU
+reference path until preview frame evaluation records through this runtime; it
+must not create short-lived GPU output runtimes inside CPU media workers.
 `GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
 encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
 unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only
