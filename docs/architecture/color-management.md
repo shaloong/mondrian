@@ -274,7 +274,11 @@ Evidence distinguishes metadata hints, exact CICP triplets, partial CICP
 matches, unsupported CICP tags, and decoder unavailability. Warnings must
 surface ambiguity such as multiple camera metadata hints, hint-vs-CICP
 conflicts, partial CICP inference, missing/unsupported tags, or decoder
-unavailability.
+unavailability. Warning payloads must preserve the original metadata source:
+multiple-hint warnings keep selected and ignored hint key/value/scope records,
+and hint-vs-CICP warnings keep the selected hint plus the raw CICP tag triplet.
+Logs and export failures should consume `VideoColorDiagnostic::summary()` so
+this provenance remains visible without duplicating formatter logic.
 Preview rejection logs and export failures must include the media asset id,
 path, missing-metadata policy, and `VideoColorDiagnostic` summary so users can
 identify whether the problem was missing tags, unsupported tags, or decoder

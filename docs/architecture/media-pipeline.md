@@ -31,6 +31,12 @@ index. `VideoStreamInfo.color_interpretation` is the diagnostic/UI-facing
 interpretation with confidence, evidence, warnings, and a user-overridable flag.
 Evidence records whether a result came from a camera/log metadata hint, exact
 CICP tags, partial CICP tags, unsupported CICP tags, or decoder unavailability.
+Warnings preserve machine-readable provenance, not only a resolved color-space
+enum: multiple-hint warnings keep the selected and ignored metadata keys,
+values, and scopes; hint-vs-CICP warnings keep the selected hint and the raw
+CICP triplet that conflicted with it. `VideoColorDiagnostic::summary()` is the
+stable compact form for logs/export errors and should include those warning
+details.
 Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.
 
 Asset library records store persistent user intent separately as
