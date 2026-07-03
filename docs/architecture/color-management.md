@@ -46,6 +46,11 @@ invalid instead of scanning machine-specific standard paths.
 ## Project and Sequence
 
 `ProjectColorManagement` stores the project-level engine. `SequenceColorManagement` can inherit from the project or override its own engine and policies.
+Sequence editing-mode presets may update editing format defaults such as
+resolution, frame rate, display format, and working color space, but they must
+not reset `SequenceColorManagement`, HDR metadata preservation payloads, or
+tone-map policy. Color-management state is explicit user/project intent and is
+validated fail-closed after the preset is applied.
 
 Important fields:
 

@@ -4131,12 +4131,11 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
-        AppShellRevealInFileManagerPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-        AssetsRenameAssetPayload, AssetsSetProxyModePayload, ImportMediaDialogPayload,
-        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_NAMESPACE,
-        APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
+        AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+        AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsRenameAssetPayload,
+        AssetsSetProxyModePayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
+        APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_RELINK_ASSET_DIALOG,
         ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
         ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
@@ -5199,7 +5198,7 @@ mod tests {
     }
 
     #[test]
-    fn assets_panel_file_card_context_menu_dispatches_reveal_first() {
+    fn assets_panel_file_card_context_menu_dispatches_interpret_first() {
         let asset_id = AssetId::new();
         let path = PathBuf::from("E:/media/shot.mov");
         let item =
@@ -5253,13 +5252,14 @@ mod tests {
         let actions = actions.borrow();
         assert_eq!(actions.len(), 1);
         let Action::Custom { namespace, name, payload } = &actions[0] else {
-            panic!("expected reveal action");
+            panic!("expected interpret action");
         };
         assert_eq!(namespace, APP_SHELL_NAMESPACE);
-        assert_eq!(name, APP_SHELL_REVEAL_IN_FILE_MANAGER);
-        let payload: AppShellRevealInFileManagerPayload =
-            serde_json::from_value(payload.clone()).expect("reveal payload");
-        assert_eq!(payload.path, path);
+        assert_eq!(name, APP_SHELL_INTERPRET_ASSET_DIALOG);
+        let payload: AppShellInterpretAssetDialogPayload =
+            serde_json::from_value(payload.clone()).expect("interpret payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.asset_name, "shot.mov");
     }
 
     #[test]

@@ -3336,6 +3336,20 @@ mod tests {
                     supports_bt2100_pq: false,
                     supports_bt2100_hlg: false,
                 }),
+                display_issue_summary: Some(AppUiDisplayIssueSummary {
+                    reason: AppUiDisplayIssueReason::OutputColorSpaceRequiresSurfaceColorSpace,
+                    output_color_space: ColorSpace::DciP3,
+                    current_surface_format: None,
+                    current_surface_color_space: None,
+                    selected_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
+                    surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
+                    desired_surface_format: None,
+                    desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3,),
+                    desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
+                    payload_blocker: None,
+                    supported_surface_color_space_count: Some(2),
+                    target_surface_color_space_supported: Some(true),
+                }),
                 last_outcome: Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked),
                 ..AppUiViewerGpuOutputDiagnostics::default()
             }
@@ -3368,6 +3382,24 @@ mod tests {
                 display_presentation_reconfigure_candidates: 1,
                 display_presentation_payload_blockers: 1,
                 last_display_presentation_readiness: Some(readiness),
+                display_issue_summary: Some(AppUiDisplayIssueSummary {
+                    reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
+                    output_color_space: ColorSpace::DciP3,
+                    current_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
+                    current_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
+                    selected_surface_color_space: None,
+                    surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
+                    desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
+                    desired_surface_color_space: Some(
+                        AppUiSurfaceColorSpaceDiagnostic::DisplayP3,
+                    ),
+                    desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
+                    payload_blocker: Some(
+                        AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
+                    ),
+                    supported_surface_color_space_count: None,
+                    target_surface_color_space_supported: Some(true),
+                }),
                 ..AppUiViewerGpuOutputDiagnostics::default()
             }
         );

@@ -1839,7 +1839,9 @@ mod tests {
     use glam::Vec2;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::AssetId;
-    use mondrian_core::{ColorSpace, Rational, Resolution};
+    use mondrian_core::{
+        ColorSpace, Rational, Resolution, VideoContentLightMetadata, VideoMasteringDisplayMetadata,
+    };
     use mondrian_platform::ClipboardError;
     use mondrian_timeline::sequence::{
         AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, EditingMode, ExportBitDepth,
@@ -2802,7 +2804,11 @@ mod tests {
     fn app_root_handles_sequence_settings_draft_and_confirm() {
         let platform = FakePlatform::default();
         let mut state = AppState::new();
-        let sequence = Sequence::new("Scene 01");
+        let mut sequence = Sequence::new("Scene 01");
+        sequence.settings.color_management.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+        sequence.settings.color_management.hdr_content_light =
+            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
         let sequence_id = sequence.id;
         state.active_sequence_id = Some(sequence_id);
         state.sequence = Some(sequence.clone());
