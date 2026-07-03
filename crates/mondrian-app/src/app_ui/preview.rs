@@ -14,6 +14,7 @@ use std::time::UNIX_EPOCH;
 use mondrian_assets::AssetKind;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
+use mondrian_media::VideoColorDiagnostic;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
@@ -1145,11 +1146,29 @@ impl AppUiPreviewService {
             .video_streams
             .first()
             .and_then(|video| video.detected_color_space);
-        let input_color_space = resolve_preview_input_color_space(
+        let input_color_space = match resolve_preview_input_color_space(
             color_space_override,
             detected_color_space,
             color_context,
-        )?;
+        ) {
+            Some(color_space) => color_space,
+            None => {
+                let diagnostic = asset
+                    .media_info
+                    .primary_video()
+                    .map(VideoColorDiagnostic::from_stream)
+                    .map(|diagnostic| diagnostic.summary())
+                    .unwrap_or_else(|| "unavailable".to_string());
+                tracing::warn!(
+                    asset_id = %asset_id,
+                    path = %asset.path.display(),
+                    missing_metadata_policy = ?color_context.missing_metadata_policy,
+                    color_diagnostic = %diagnostic,
+                    "viewer preview rejected media with missing color metadata"
+                );
+                return None;
+            }
+        };
         Some((
             MediaPreviewKey {
                 asset_id: *asset_id,

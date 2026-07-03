@@ -162,6 +162,10 @@ specified/unspecified state. Diagnostics, future UI warnings, and camera-log
 identification should consume this raw metadata instead of parsing free-form
 FFmpeg strings or inferring whether metadata existed from a resolved
 `ColorSpace`.
+Preview rejection logs and export failures must include the media asset id,
+path, missing-metadata policy, and `VideoColorDiagnostic` summary so users can
+identify whether the problem was missing tags, unsupported tags, or decoder
+unavailability.
 
 When detected media color space is missing, `MissingColorMetadataPolicy` resolves it as:
 
@@ -173,7 +177,9 @@ Clip-level `MediaInterpretation.color_space_override` takes precedence over dete
 Preview and export both follow override -> detected metadata -> missing-policy
 resolution. Export `TimelineExportInput.asset_color_spaces` is a detected-only
 metadata table; absence of an asset id means "resolve via policy", not
-"fallback to Rec.709".
+"fallback to Rec.709". Export `asset_color_diagnostics` carries the matching
+per-asset diagnostic snapshot and must be used for failure messages and reports,
+not for choosing the transform.
 
 ## Display and Export
 

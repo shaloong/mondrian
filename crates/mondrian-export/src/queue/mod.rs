@@ -964,9 +964,17 @@ fn render_sequence_frame_into(
                     .resolve_input(None, color_context.working_color_space)
             })
             .ok_or_else(|| {
+                let diagnostic = timeline
+                    .asset_color_diagnostics
+                    .get(&media.asset_id)
+                    .map(mondrian_media::VideoColorDiagnostic::summary)
+                    .unwrap_or_else(|| "unavailable".to_string());
                 format!(
-                    "asset={} missing color metadata rejected by sequence policy",
-                    media.asset_id
+                    "asset={} path={} missing color metadata rejected by sequence policy {:?}; {}",
+                    media.asset_id,
+                    path.display(),
+                    color_context.missing_metadata_policy,
+                    diagnostic
                 )
             })?;
         let cache_key = (
@@ -1510,6 +1518,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         }
@@ -1644,6 +1653,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -1667,6 +1677,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::EntireSequence,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -1693,6 +1704,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths,
             asset_color_spaces: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -1758,6 +1770,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -1796,11 +1809,33 @@ mod tests {
 
         let mut asset_paths = HashMap::new();
         asset_paths.insert(asset_id, temp_path.clone());
+        let mut asset_color_diagnostics = HashMap::new();
+        asset_color_diagnostics.insert(
+            asset_id,
+            mondrian_media::VideoColorDiagnostic {
+                detected_color_space: None,
+                source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                metadata: Some(mondrian_media::VideoColorMetadata {
+                    primaries: mondrian_media::VideoColorTag {
+                        code: 2,
+                        name: None,
+                        specified: false,
+                    },
+                    transfer: mondrian_media::VideoColorTag {
+                        code: 2,
+                        name: None,
+                        specified: false,
+                    },
+                    matrix: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
+                }),
+            },
+        );
         let timeline = TimelineExportInput {
             sequence: seq,
             sequences: Vec::new(),
             asset_paths,
             asset_color_spaces: HashMap::new(),
+            asset_color_diagnostics,
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -1810,6 +1845,9 @@ mod tests {
             .expect_err("missing color metadata should be rejected before decode");
 
         assert!(err.contains("missing color metadata"));
+        assert!(err.contains(temp_path.to_string_lossy().as_ref()));
+        assert!(err.contains("source=MissingMetadata"));
+        assert!(err.contains("primaries=unspecified"));
         let _ = std::fs::remove_file(temp_path);
     }
 

@@ -111,6 +111,65 @@ pub struct VideoColorMetadata {
     pub matrix: VideoColorTag,
 }
 
+/// Diagnostic snapshot of a video stream's color metadata interpretation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoColorDiagnostic {
+    /// Explicitly detected Mondrian color space, if one was identified.
+    pub detected_color_space: Option<ColorSpace>,
+    /// Source state for the color metadata decision.
+    pub source: VideoColorSpaceSource,
+    /// Raw CICP-style metadata captured from FFmpeg, when available.
+    pub metadata: Option<VideoColorMetadata>,
+}
+
+impl VideoColorTag {
+    /// Compact diagnostic representation for logs and export errors.
+    pub fn summary(&self) -> String {
+        let name = self.name.as_deref().unwrap_or("unspecified");
+        format!("{name}(code={},specified={})", self.code, self.specified)
+    }
+}
+
+impl VideoColorMetadata {
+    /// Compact diagnostic representation for logs and export errors.
+    pub fn summary(&self) -> String {
+        format!(
+            "primaries={},transfer={},matrix={}",
+            self.primaries.summary(),
+            self.transfer.summary(),
+            self.matrix.summary()
+        )
+    }
+}
+
+impl VideoColorDiagnostic {
+    /// Build a color diagnostic snapshot from probed stream metadata.
+    pub fn from_stream(stream: &VideoStreamInfo) -> Self {
+        Self {
+            detected_color_space: stream.detected_color_space,
+            source: stream.color_space_source,
+            metadata: stream.color_metadata.clone(),
+        }
+    }
+
+    /// Compact diagnostic representation for logs and export errors.
+    pub fn summary(&self) -> String {
+        let detected = self
+            .detected_color_space
+            .map(|color_space| format!("{color_space:?}"))
+            .unwrap_or_else(|| "None".to_string());
+        let metadata = self
+            .metadata
+            .as_ref()
+            .map(VideoColorMetadata::summary)
+            .unwrap_or_else(|| "unavailable".to_string());
+        format!(
+            "source={:?},detected={},metadata={}",
+            self.source, detected, metadata
+        )
+    }
+}
+
 // ─── 声道布局 ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,5 +708,27 @@ mod tests {
         assert_eq!(metadata.primaries.name, None);
         assert_eq!(metadata.transfer.name, None);
         assert_eq!(metadata.matrix.name, None);
+    }
+
+    #[test]
+    fn video_color_diagnostic_summary_includes_source_detection_and_raw_tags() {
+        let metadata = capture_color_metadata(
+            Primaries::BT2020,
+            TransferCharacteristic::SMPTE2084,
+            Space::BT2020NCL,
+        );
+        let diagnostic = VideoColorDiagnostic {
+            detected_color_space: Some(ColorSpace::Rec2100Pq),
+            source: VideoColorSpaceSource::Metadata,
+            metadata: Some(metadata),
+        };
+
+        let summary = diagnostic.summary();
+
+        assert!(summary.contains("source=Metadata"));
+        assert!(summary.contains("detected=Rec2100Pq"));
+        assert!(summary.contains("primaries=bt2020"));
+        assert!(summary.contains("transfer=smpte2084"));
+        assert!(summary.contains("matrix=bt2020nc"));
     }
 }

@@ -124,7 +124,7 @@ impl AppState {
             return Err(export_error("enqueue_timeline_export", reason));
         };
 
-        let (asset_paths, asset_color_spaces) =
+        let (asset_paths, asset_color_spaces, asset_color_diagnostics) =
             collect_timeline_asset_paths(self, &sequence, &sequences).map_err(|reason| {
                 self.set_status_hint(format!("导出失败：{reason}"), true);
                 export_error("enqueue_timeline_export", reason)
@@ -137,6 +137,7 @@ impl AppState {
                 sequences,
                 asset_paths,
                 asset_color_spaces,
+                asset_color_diagnostics,
                 range: request.range,
                 project_color_management: self.project_settings.color_management.clone(),
             })),
@@ -153,6 +154,7 @@ impl AppState {
 pub(crate) type TimelineAssetPaths = (
     HashMap<mondrian_core::types::AssetId, PathBuf>,
     HashMap<mondrian_core::types::AssetId, mondrian_core::types::ColorSpace>,
+    HashMap<mondrian_core::types::AssetId, mondrian_media::VideoColorDiagnostic>,
 );
 
 pub(crate) fn collect_timeline_asset_paths(
@@ -168,6 +170,7 @@ pub(crate) fn collect_timeline_asset_paths(
 
     let mut paths = HashMap::new();
     let mut color_spaces = HashMap::new();
+    let mut color_diagnostics = HashMap::new();
     for asset_id in asset_ids {
         let asset = library
             .get_asset(asset_id)
@@ -186,10 +189,17 @@ pub(crate) fn collect_timeline_asset_paths(
         {
             color_spaces.insert(asset_id, color_space);
         }
+        if let Some(diagnostic) = asset
+            .media_info
+            .primary_video()
+            .map(mondrian_media::VideoColorDiagnostic::from_stream)
+        {
+            color_diagnostics.insert(asset_id, diagnostic);
+        }
         paths.insert(asset_id, asset.path);
     }
 
-    Ok((paths, color_spaces))
+    Ok((paths, color_spaces, color_diagnostics))
 }
 
 pub(crate) fn collect_sequence_asset_ids(
@@ -269,11 +279,12 @@ mod tests {
         }
 
         let seq = state.sequence.as_ref().expect("sequence should exist");
-        let (paths, color_spaces) =
+        let (paths, color_spaces, color_diagnostics) =
             collect_timeline_asset_paths(&state, seq, std::slice::from_ref(seq))
                 .expect("collect asset paths");
         assert!(!paths.contains_key(&asset_id));
         assert!(!color_spaces.contains_key(&asset_id));
+        assert!(!color_diagnostics.contains_key(&asset_id));
 
         let _ = std::fs::remove_dir_all(temp_root);
     }

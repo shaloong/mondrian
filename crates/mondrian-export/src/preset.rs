@@ -1,6 +1,7 @@
 //! 导出格式预设
 
 use mondrian_core::types::{AssetId, ColorSpace};
+use mondrian_media::VideoColorDiagnostic;
 use mondrian_timeline::sequence::Sequence;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -122,6 +123,9 @@ pub struct TimelineExportInput {
     /// must resolve them through the sequence missing-metadata policy.
     #[serde(default)]
     pub asset_color_spaces: HashMap<AssetId, ColorSpace>,
+    /// Per-asset media color diagnostics captured during app-side asset lookup.
+    #[serde(default)]
+    pub asset_color_diagnostics: HashMap<AssetId, VideoColorDiagnostic>,
     #[serde(default)]
     pub range: TimelineExportRange,
     /// 项目级色彩管理设置（所有序列默认继承）。
