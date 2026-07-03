@@ -1850,7 +1850,7 @@ fn validate_execution_frame(
 mod tests {
     use super::*;
     use crate::{
-        GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameTextureFormat, GpuContext,
+        GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameTextureFormat,
         OcioGpuShaderRequest, OcioGpuWgpuBlocker,
     };
     use mondrian_core::types::{ColorEngine, ColorSpace};
@@ -2104,65 +2104,50 @@ mod tests {
         assert_eq!(runtime.diagnostics().frame_table_entries, 0);
     }
 
-    #[tokio::test]
-    async fn gpu_output_boundary_runtime_records_with_real_wgpu_device() {
+    #[test]
+    fn gpu_output_boundary_rejects_linear_working_output_until_wrapper_is_linear_aware() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let Ok(context) = GpuContext::new().await else {
-            eprintln!("skipping real wgpu output boundary test: no GPU adapter available");
-            return;
-        };
         let frame = cpu_working_frame();
         let boundary =
             RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
         let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000);
-        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("mondrian-test-gpu-output-boundary"),
-        });
-
-        let record = runtime
-            .record_wgpu_output_boundary_owned_backend(
-                &boundary,
-                &frame,
-                GpuColorFrameTextureFormat::Rgba8Unorm,
-                RenderColorTransformGpuOptions {
-                    output_residency: ColorFrameResidency::Cpu,
-                    ..RenderColorTransformGpuOptions::default()
-                },
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device: &context.device,
-                    queue: &context.queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                },
-            )
-            .expect("runtime-owned GPU output boundary should record");
-
-        assert!(record.readback_buffer.is_some());
-        assert_eq!(record.materialized.input.id().raw(), 1_000);
-        assert_eq!(record.materialized.output.id().raw(), 1_001);
-        assert_eq!(record.stage_diagnostics.total_stages, 3);
-        assert_eq!(record.stage_diagnostics.upload_stages, 1);
-        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
-        assert_eq!(record.stage_diagnostics.readback_stages, 1);
-        assert_eq!(record.stage_diagnostics.cpu_output_stages, 0);
-        assert_eq!(
-            record.stage_diagnostics.stage_pixels,
-            frame.descriptor().pixel_count() as u64 * 3
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            runtime.shader_cache_mut(),
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
         );
 
-        context.queue.submit(std::iter::once(encoder.finish()));
-        let _ = context
-            .device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let plan = planner
+            .plan(&frame, &boundary)
+            .expect("linear working GPU output boundary should plan diagnostics");
+        assert_eq!(
+            plan.stage_plan.diagnostics().gpu_color_stages,
+            1,
+            "the stage remains visible for diagnostics even though native execution is blocked"
+        );
+        let RenderColorStage::GpuColorTransform { plan: gpu_plan, .. } = &plan.stage_plan.stages[1]
+        else {
+            panic!("expected upload -> GPU transform -> readback stage shape");
+        };
+        assert_eq!(
+            gpu_plan.wgpu.blockers,
+            vec![OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared {
+                input: ColorSpace::Rec709,
+                output: ColorSpace::Srgb,
+            }]
+        );
+        assert!(!gpu_plan.wgpu.can_execute());
 
-        let diagnostics = runtime.diagnostics();
-        assert_eq!(diagnostics.shader_cache.entries, 1);
-        assert_eq!(diagnostics.shader_cache.misses, 1);
-        assert_eq!(diagnostics.backend_prep.resources.entries, 1);
-        assert_eq!(diagnostics.backend_objects.entries, 1);
-        assert_eq!(diagnostics.backend_objects.misses, 1);
-        assert_eq!(diagnostics.frame_table_entries, 2);
-        assert_eq!(diagnostics.next_frame_id, 1_002);
+        let mut ids = GpuColorFrameIdAllocator::new(1_000);
+        let err = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
+            .expect_err("blocked linear working GPU output must not materialize resources");
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining { blockers: 1 }
+        ));
     }
 
     #[test]
@@ -2209,7 +2194,7 @@ mod tests {
         assert_eq!(diagnostics.upload_stages, 1);
         assert_eq!(diagnostics.gpu_color_stages, 1);
         assert_eq!(diagnostics.readback_stages, 1);
-        assert_eq!(diagnostics.gpu_blockers, 0);
+        assert_eq!(diagnostics.gpu_blockers, 1);
     }
 
     #[test]
@@ -2273,7 +2258,8 @@ mod tests {
                 ..RenderColorTransformGpuOptions::default()
             },
         );
-        let plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        let mut plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        clear_linear_working_output_blocker(&mut plan.stage_plan);
         let mut ids = GpuColorFrameIdAllocator::new(720);
 
         let resources = plan
@@ -3040,9 +3026,11 @@ mod tests {
             &mut cache,
             RenderColorTransformGpuOptions::default(),
         );
-        planner
+        let mut plan = planner
             .plan_output_transform(frame.descriptor(), &transform)
-            .expect("GPU output stage plan")
+            .expect("GPU output stage plan");
+        clear_linear_working_output_blocker(&mut plan);
+        plan
     }
 
     fn gpu_output_stage_plan_for_cpu_output(frame: &CpuColorFrame) -> RenderColorStagePlan {
@@ -3057,15 +3045,30 @@ mod tests {
                 ..RenderColorTransformGpuOptions::default()
             },
         );
-        planner
+        let mut plan = planner
             .plan_output_transform(frame.descriptor(), &transform)
-            .expect("GPU output stage plan")
+            .expect("GPU output stage plan");
+        clear_linear_working_output_blocker(&mut plan);
+        plan
     }
 
     fn add_gpu_stage_blocker(stage_plan: &mut RenderColorStagePlan) {
         for stage in &mut stage_plan.stages {
             if let RenderColorStage::GpuColorTransform { plan, .. } = stage {
                 plan.wgpu.blockers.push(OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+            }
+        }
+    }
+
+    fn clear_linear_working_output_blocker(stage_plan: &mut RenderColorStagePlan) {
+        for stage in &mut stage_plan.stages {
+            if let RenderColorStage::GpuColorTransform { plan, .. } = stage {
+                plan.wgpu.blockers.retain(|blocker| {
+                    !matches!(
+                        blocker,
+                        OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared { .. }
+                    )
+                });
             }
         }
     }

@@ -1,7 +1,7 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuEncodedColorFrame, OcioGpuShaderCache, OcioGpuShaderError, OcioGpuShaderRequest,
-    OcioGpuWgpuExecutionPlan,
+    OcioGpuWgpuBlocker, OcioGpuWgpuExecutionPlan,
 };
 use mondrian_core::{
     convert_rgba8_in_place,
@@ -358,12 +358,19 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             dst: transform.output_color_space,
             language: self.options.language,
         };
-        self.plan(
+        let mut plan = self.plan(
             RenderColorTransformDirection::WorkingToOutput,
             input,
             output,
             request,
-        )
+        )?;
+        if input.encoding == ColorFrameEncoding::LinearFloat {
+            plan.wgpu.blockers.push(OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared {
+                input: input.color_space,
+                output: transform.output_color_space,
+            });
+        }
+        Ok(plan)
     }
 
     fn plan(
@@ -633,6 +640,14 @@ mod tests {
         assert_eq!(plan.diagnostics.pixel_count, 20);
         assert!(plan.requires_source_upload);
         assert!(!plan.requires_output_readback);
+        assert_eq!(
+            plan.wgpu.blockers,
+            vec![OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared {
+                input: ColorSpace::Rec709,
+                output: ColorSpace::Srgb,
+            }]
+        );
+        assert!(!plan.wgpu.can_execute());
     }
 
     #[test]
@@ -661,5 +676,13 @@ mod tests {
 
         assert_eq!(plan.diagnostics.output.residency, ColorFrameResidency::Cpu);
         assert!(plan.requires_output_readback);
+        assert_eq!(
+            plan.wgpu.blockers,
+            vec![OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared {
+                input: ColorSpace::Rec709,
+                output: ColorSpace::Rec709,
+            }]
+        );
+        assert!(!plan.wgpu.can_execute());
     }
 }

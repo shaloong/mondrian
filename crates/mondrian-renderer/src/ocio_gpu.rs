@@ -4385,6 +4385,14 @@ pub enum OcioGpuWgpuBlocker {
     FullscreenWrapperNotPrepared,
     /// The final render pipeline/render-pass node is not implemented yet.
     RenderPipelineNotPrepared,
+    /// Linear working-frame output needs a wrapper stage that encodes the sampled
+    /// linear values before invoking the OCIO generated program.
+    LinearWorkingOutputNotPrepared {
+        /// Linear working frame color space.
+        input: ColorSpace,
+        /// Requested display/export color space.
+        output: ColorSpace,
+    },
 }
 
 /// Bounded cache for OCIO GPU shader extraction results.
