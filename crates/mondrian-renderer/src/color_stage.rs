@@ -1891,6 +1891,98 @@ mod tests {
     use mondrian_core::{
         ensure_mondrian_default_ocio_loaded, ocio_default_display_view, GpuLanguage,
     };
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    #[derive(Debug, serde::Serialize)]
+    struct GpuOutputBoundarySmokeReport {
+        scenario: &'static str,
+        skipped: Option<String>,
+        adapter: Option<GpuOutputAdapterReport>,
+        frame: GpuOutputFrameReport,
+        output_texture_format: &'static str,
+        stage: GpuOutputStageDiagnosticsReport,
+        runtime: GpuOutputRuntimeDiagnosticsReport,
+        readback_bytes: usize,
+        max_rgba_delta: u8,
+        tolerance: u8,
+        passed: bool,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    struct GpuOutputAdapterReport {
+        name: String,
+        backend: String,
+        device_type: String,
+        driver: String,
+        driver_info: String,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    struct GpuOutputFrameReport {
+        width: usize,
+        height: usize,
+        pixel_count: usize,
+        input_color_space: ColorSpace,
+        output_color_space: ColorSpace,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    struct GpuOutputStageDiagnosticsReport {
+        total_stages: u64,
+        upload_stages: u64,
+        gpu_color_stages: u64,
+        readback_stages: u64,
+        gpu_blockers: u64,
+        stage_pixels: u64,
+    }
+
+    impl From<RenderColorStageDiagnostics> for GpuOutputStageDiagnosticsReport {
+        fn from(diagnostics: RenderColorStageDiagnostics) -> Self {
+            Self {
+                total_stages: diagnostics.total_stages,
+                upload_stages: diagnostics.upload_stages,
+                gpu_color_stages: diagnostics.gpu_color_stages,
+                readback_stages: diagnostics.readback_stages,
+                gpu_blockers: diagnostics.gpu_blockers,
+                stage_pixels: diagnostics.stage_pixels,
+            }
+        }
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    struct GpuOutputRuntimeDiagnosticsReport {
+        shader_cache_entries: usize,
+        shader_cache_hits: u64,
+        shader_cache_misses: u64,
+        shader_cache_extraction_failures: u64,
+        backend_prep_resource_entries: usize,
+        backend_object_entries: usize,
+        backend_object_hits: u64,
+        backend_object_misses: u64,
+        backend_object_failures: u64,
+        frame_table_entries: usize,
+        next_frame_id: u64,
+    }
+
+    impl From<RenderGpuOutputBoundaryRuntimeDiagnostics> for GpuOutputRuntimeDiagnosticsReport {
+        fn from(diagnostics: RenderGpuOutputBoundaryRuntimeDiagnostics) -> Self {
+            Self {
+                shader_cache_entries: diagnostics.shader_cache.entries,
+                shader_cache_hits: diagnostics.shader_cache.hits,
+                shader_cache_misses: diagnostics.shader_cache.misses,
+                shader_cache_extraction_failures: diagnostics.shader_cache.extraction_failures,
+                backend_prep_resource_entries: diagnostics.backend_prep.resources.entries,
+                backend_object_entries: diagnostics.backend_objects.entries,
+                backend_object_hits: diagnostics.backend_objects.hits,
+                backend_object_misses: diagnostics.backend_objects.misses,
+                backend_object_failures: diagnostics.backend_objects.failures,
+                frame_table_entries: diagnostics.frame_table_entries,
+                next_frame_id: diagnostics.next_frame_id,
+            }
+        }
+    }
 
     fn source_descriptor(residency: ColorFrameResidency) -> ColorFrameDescriptor {
         ColorFrameDescriptor {
@@ -2293,6 +2385,119 @@ mod tests {
         assert_rgba_close(&expected.rgba, actual.rgba(), 3);
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "manual renderer GPU output boundary smoke report; requires a real wgpu adapter"]
+    async fn gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device() -> anyhow::Result<()> {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let tolerance = 3;
+        let context = match GpuContext::new().await {
+            Ok(context) => context,
+            Err(err) => {
+                let skipped_runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000);
+                let report = GpuOutputBoundarySmokeReport {
+                    scenario: "renderer_gpu_output_boundary",
+                    skipped: Some(format!("no GPU adapter available: {err}")),
+                    adapter: None,
+                    frame: GpuOutputFrameReport {
+                        width: 0,
+                        height: 0,
+                        pixel_count: 0,
+                        input_color_space: ColorSpace::Rec709,
+                        output_color_space: ColorSpace::Srgb,
+                    },
+                    output_texture_format: "Rgba8Unorm",
+                    stage: RenderColorStageDiagnostics::default().into(),
+                    runtime: skipped_runtime.diagnostics().into(),
+                    readback_bytes: 0,
+                    max_rgba_delta: 0,
+                    tolerance,
+                    passed: false,
+                };
+                emit_gpu_output_smoke_report(&report)?;
+                return Ok(());
+            }
+        };
+        let adapter_info = context.adapter.get_info();
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
+            .expect("CPU display boundary should encode RGBA8");
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-smoke-gpu-output-boundary"),
+        });
+
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        let readback_buffer = record
+            .readback_buffer
+            .as_ref()
+            .expect("CPU-resident GPU output boundary should record readback");
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let readback_plan =
+            GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output.clone())
+                .expect("GPU output should be readable as RGBA8");
+        let mapped = map_readback_buffer(&context.device, readback_buffer);
+        let actual = readback_plan
+            .unpack_mapped_rgba8(&mapped)
+            .expect("readback should unpack into encoded frame");
+        readback_buffer.unmap();
+
+        let max_rgba_delta = max_rgba_delta(&expected.rgba, actual.rgba());
+        let stage_diagnostics = record.stage_diagnostics;
+        let runtime_diagnostics = runtime.diagnostics();
+        let passed = max_rgba_delta <= tolerance
+            && stage_diagnostics.upload_stages == 1
+            && stage_diagnostics.gpu_color_stages == 1
+            && stage_diagnostics.readback_stages == 1
+            && stage_diagnostics.gpu_blockers == 0;
+        let report = GpuOutputBoundarySmokeReport {
+            scenario: "renderer_gpu_output_boundary",
+            skipped: None,
+            adapter: Some(GpuOutputAdapterReport {
+                name: adapter_info.name,
+                backend: format!("{:?}", adapter_info.backend),
+                device_type: format!("{:?}", adapter_info.device_type),
+                driver: adapter_info.driver,
+                driver_info: adapter_info.driver_info,
+            }),
+            frame: GpuOutputFrameReport {
+                width: frame.descriptor().width as usize,
+                height: frame.descriptor().height as usize,
+                pixel_count: frame.descriptor().pixel_count(),
+                input_color_space: frame.descriptor().color_space,
+                output_color_space: boundary.output_color_space,
+            },
+            output_texture_format: "Rgba8Unorm",
+            stage: stage_diagnostics.into(),
+            runtime: runtime_diagnostics.into(),
+            readback_bytes: actual.rgba().len(),
+            max_rgba_delta,
+            tolerance,
+            passed,
+        };
+        emit_gpu_output_smoke_report(&report)?;
+
+        assert!(passed, "GPU output boundary smoke failed: {report:?}");
+        Ok(())
     }
 
     #[test]
@@ -3213,6 +3418,15 @@ mod tests {
         slice.get_mapped_range().expect("gpu readback mapped range").to_vec()
     }
 
+    fn max_rgba_delta(expected: &[u8], actual: &[u8]) -> u8 {
+        expected
+            .iter()
+            .zip(actual)
+            .map(|(&expected, &actual)| expected.abs_diff(actual))
+            .max()
+            .unwrap_or(0)
+    }
+
     fn assert_rgba_close(expected: &[u8], actual: &[u8], tolerance: u8) {
         assert_eq!(expected.len(), actual.len());
         for (index, (&expected, &actual)) in expected.iter().zip(actual).enumerate() {
@@ -3222,6 +3436,23 @@ mod tests {
                 "rgba byte {index}: expected {expected}, got {actual}, tolerance {tolerance}"
             );
         }
+    }
+
+    fn emit_gpu_output_smoke_report(report: &GpuOutputBoundarySmokeReport) -> anyhow::Result<()> {
+        let report_json = serde_json::to_string(report)?;
+        eprintln!("MONDRIAN_RENDERER_GPU_OUTPUT_JSON={report_json}");
+        if let Some(path) = renderer_gpu_output_smoke_output_path() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            writeln!(file, "{report_json}")?;
+        }
+        Ok(())
+    }
+
+    fn renderer_gpu_output_smoke_output_path() -> Option<PathBuf> {
+        std::env::var_os("MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT").map(PathBuf::from)
     }
 
     fn executable_gpu_output_stage_resources(first_id: u64) -> RenderGpuOutputStageResourcePlan {

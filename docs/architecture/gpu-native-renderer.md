@@ -267,6 +267,16 @@ The returned `RenderGpuOutputStageRecord` carries the same
 `RenderColorStageDiagnostics` shape as the planned stage graph so app/export
 telemetry can prove whether a frame used upload, native GPU OCIO, readback, and
 which pixel budget was touched without reconstructing the plan externally.
+Renderer owns a manual ignored smoke for this exact boundary:
+`cargo test -p mondrian-renderer gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture`.
+It requests a real headless wgpu adapter, records a working -> display output
+boundary through `RenderGpuOutputBoundaryRuntime`, reads back the encoded
+texture, compares it with the CPU reference path, and emits
+`MONDRIAN_RENDERER_GPU_OUTPUT_JSON`. Setting
+`MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT` appends the same JSON as a JSONL
+record for perf dashboards. This smoke proves renderer-side upload + native GPU
+OCIO + readback sequencing; it does not prove OS swapchain/display-management
+correctness, which remains the app-window display contract's responsibility.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
 the surface/backend lifetime and traces its cache/resource diagnostics with the
 frame renderer diagnostics. The same session also owns the display-output

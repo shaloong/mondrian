@@ -178,6 +178,10 @@ CPU/GPU stage mix, transfer stages, GPU blockers, and touched pixels so later
 GPU execution work can prove it removed CPU bottlenecks instead of merely
 moving code around. `RenderColorTransformError::ExecutionFailed` must keep the
 transform direction plus typed input/output descriptors with the backend reason;
+renderer GPU output smoke additionally records a real wgpu upload + GPU color
+pass + readback boundary and emits `MONDRIAN_RENDERER_GPU_OUTPUT_JSON` (or JSONL
+via `MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT`) so dashboards can verify the
+native final-output path without launching the app window.
 callers should surface that structured context instead of reducing failures to
 plain strings.
 
