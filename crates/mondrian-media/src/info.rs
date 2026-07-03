@@ -316,16 +316,13 @@ impl MediaInfo {
                             pixel_format = map_pixel_format(decoder.format());
                             bit_depth = pixel_format.bit_depth();
                             has_alpha = pixel_format.has_alpha();
-                            let color_metadata = detect_color_space(
-                                decoder.color_primaries(),
-                                decoder.color_transfer_characteristic(),
-                                decoder.color_space(),
-                            );
                             let raw_color_metadata = capture_color_metadata(
                                 decoder.color_primaries(),
                                 decoder.color_transfer_characteristic(),
                                 decoder.color_space(),
                             );
+                            let color_metadata =
+                                detect_color_space_from_metadata(&raw_color_metadata);
                             video_streams.push(VideoStreamInfo {
                                 index: stream.index() as u32,
                                 codec: map_video_codec(params.id()),
@@ -457,33 +454,22 @@ struct VideoColorSpaceDetection {
     source: VideoColorSpaceSource,
 }
 
+#[cfg(test)]
 fn detect_color_space(
     primaries: ffmpeg::util::color::Primaries,
     transfer: ffmpeg::util::color::TransferCharacteristic,
     matrix: ffmpeg::util::color::Space,
 ) -> VideoColorSpaceDetection {
-    use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
+    let metadata = capture_color_metadata(primaries, transfer, matrix);
+    detect_color_space_from_metadata(&metadata)
+}
 
-    let detected = match transfer {
-        TransferCharacteristic::SMPTE2084 => Some(ColorSpace::Rec2100Pq),
-        TransferCharacteristic::ARIB_STD_B67 => Some(ColorSpace::Rec2100Hlg),
-        TransferCharacteristic::IEC61966_2_1 => Some(ColorSpace::Srgb),
-        _ => match primaries {
-            Primaries::BT2020 => Some(ColorSpace::Rec2020),
-            Primaries::SMPTE431 | Primaries::SMPTE432 => Some(ColorSpace::DciP3),
-            Primaries::BT709 => Some(if matrix == Space::RGB {
-                ColorSpace::Srgb
-            } else {
-                ColorSpace::Rec709
-            }),
-            _ => match matrix {
-                Space::BT709 => Some(ColorSpace::Rec709),
-                Space::BT2020NCL | Space::BT2020CL => Some(ColorSpace::Rec2020),
-                Space::RGB => Some(ColorSpace::Srgb),
-                _ => None,
-            },
-        },
-    };
+fn detect_color_space_from_metadata(metadata: &VideoColorMetadata) -> VideoColorSpaceDetection {
+    let detected = ColorSpace::from_ffmpeg_tag_hints(
+        metadata.primaries.name.as_deref(),
+        metadata.transfer.name.as_deref(),
+        metadata.matrix.name.as_deref(),
+    );
 
     if let Some(color_space) = detected {
         VideoColorSpaceDetection {

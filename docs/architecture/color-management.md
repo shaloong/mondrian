@@ -142,6 +142,12 @@ of maintaining separate ad hoc mappings.
 for standardized delivery/monitoring spaces. Camera-log acquisition spaces such
 as Apple Log, S-Log3, and ARRI LogC4 currently do not emit FFmpeg delivery tags,
 because writing guessed Rec.709 tags would mislabel the exported media.
+Reverse media identification also lives on the same contract:
+`ColorSpace::from_ffmpeg_tags(...)` resolves exact delivery tag triplets, and
+`ColorSpace::from_ffmpeg_tag_hints(...)` contains the centralized partial-tag
+interpretation rules used by media probing. `mondrian-media` must capture raw
+FFmpeg/CICP tags and call those core helpers rather than maintaining a separate
+color-space mapping table.
 
 Camera-log output is treated as a professional intermediate path. Export
 validation rejects consumer delivery codecs for camera-log output and only

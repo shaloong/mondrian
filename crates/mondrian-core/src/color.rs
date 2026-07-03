@@ -814,6 +814,19 @@ pub fn compute_color_scopes(
 }
 
 impl ColorSpace {
+    /// All product-supported Mondrian color spaces.
+    pub const ALL: [Self; 9] = [
+        Self::Rec709,
+        Self::Rec2100Hlg,
+        Self::Rec2100Pq,
+        Self::Srgb,
+        Self::Rec2020,
+        Self::DciP3,
+        Self::AppleLog,
+        Self::SLog3,
+        Self::ArriLogC4,
+    ];
+
     /// Canonical encoding metadata used by preview diagnostics and export tagging.
     pub fn encoding(self) -> ColorEncodingSpec {
         match self {
@@ -885,6 +898,71 @@ impl ColorSpace {
     pub fn ffmpeg_tags(self) -> Option<FfmpegColorTags> {
         self.encoding().ffmpeg_tags()
     }
+
+    /// Resolve a color space from an exact FFmpeg color-tag triplet.
+    ///
+    /// Camera-log acquisition spaces intentionally do not match here because
+    /// Mondrian does not emit trustworthy delivery tags for them.
+    pub fn from_ffmpeg_tags(
+        color_primaries: &str,
+        color_trc: &str,
+        colorspace: &str,
+    ) -> Option<Self> {
+        Self::ALL.into_iter().find(|color_space| {
+            color_space.ffmpeg_tags().is_some_and(|tags| {
+                ffmpeg_tag_eq(tags.color_primaries, color_primaries)
+                    && ffmpeg_tag_eq(tags.color_trc, color_trc)
+                    && ffmpeg_tag_eq(tags.colorspace, colorspace)
+            })
+        })
+    }
+
+    /// Resolve a color space from partial FFmpeg tag hints.
+    ///
+    /// This is used for media metadata interpretation where some containers
+    /// provide only transfer, primaries, or matrix tags. Exact triplets win;
+    /// partial matches are deliberately centralized here so media probing does
+    /// not carry its own color-space knowledge table.
+    pub fn from_ffmpeg_tag_hints(
+        color_primaries: Option<&str>,
+        color_trc: Option<&str>,
+        colorspace: Option<&str>,
+    ) -> Option<Self> {
+        if let (Some(primaries), Some(transfer), Some(matrix)) =
+            (color_primaries, color_trc, colorspace)
+        {
+            if let Some(color_space) = Self::from_ffmpeg_tags(primaries, transfer, matrix) {
+                return Some(color_space);
+            }
+        }
+
+        match color_trc {
+            Some("smpte2084") => Some(Self::Rec2100Pq),
+            Some("arib-std-b67") => Some(Self::Rec2100Hlg),
+            Some("iec61966-2-1") => Some(Self::Srgb),
+            _ => match color_primaries {
+                Some("bt2020") => Some(Self::Rec2020),
+                Some("smpte431") | Some("smpte432") => Some(Self::DciP3),
+                Some("bt709") => {
+                    if colorspace.is_some_and(|tag| ffmpeg_tag_eq(tag, "rgb")) {
+                        Some(Self::Srgb)
+                    } else {
+                        Some(Self::Rec709)
+                    }
+                }
+                _ => match colorspace {
+                    Some("bt709") => Some(Self::Rec709),
+                    Some("bt2020nc") | Some("bt2020c") => Some(Self::Rec2020),
+                    Some(tag) if ffmpeg_tag_eq(tag, "rgb") => Some(Self::Srgb),
+                    _ => None,
+                },
+            },
+        }
+    }
+}
+
+fn ffmpeg_tag_eq(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right) || matches!((left, right), ("rgb", "gbr") | ("gbr", "rgb"))
 }
 
 pub fn convert_rgba8_in_place(data: &mut [u8], pipeline: ColorPipeline) -> Result<(), String> {
@@ -1169,6 +1247,40 @@ mod tests {
         assert_eq!(ColorSpace::AppleLog.ffmpeg_tags(), None);
         assert_eq!(ColorSpace::SLog3.ffmpeg_tags(), None);
         assert_eq!(ColorSpace::ArriLogC4.ffmpeg_tags(), None);
+    }
+
+    #[test]
+    fn color_space_can_resolve_exact_ffmpeg_tag_triplets() {
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tags("bt2020", "smpte2084", "bt2020nc"),
+            Some(ColorSpace::Rec2100Pq)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tags("bt709", "iec61966-2-1", "rgb"),
+            Some(ColorSpace::Srgb)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tags("bt709", "iec61966-2-1", "gbr"),
+            Some(ColorSpace::Srgb)
+        );
+        assert_eq!(ColorSpace::from_ffmpeg_tags("bt709", "bt709", "rgb"), None);
+    }
+
+    #[test]
+    fn color_space_resolves_partial_ffmpeg_tag_hints_centrally() {
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(None, Some("smpte2084"), None),
+            Some(ColorSpace::Rec2100Pq)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(Some("bt709"), None, Some("rgb")),
+            Some(ColorSpace::Srgb)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(None, None, Some("bt709")),
+            Some(ColorSpace::Rec709)
+        );
+        assert_eq!(ColorSpace::from_ffmpeg_tag_hints(None, None, None), None);
     }
 
     #[derive(Debug, Clone, Copy)]
