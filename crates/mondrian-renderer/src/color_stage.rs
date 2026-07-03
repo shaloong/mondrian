@@ -15,7 +15,8 @@ use crate::{
     OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
     RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
-    RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
+    RenderInputTransform, RenderInputTransformResult, RenderOcioDisplayView,
+    RenderOutputTransformResult,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
 
@@ -239,6 +240,8 @@ pub struct RenderOutputColorBoundary {
     pub target: RenderOutputColorBoundaryTarget,
     /// Destination color space.
     pub output_color_space: ColorSpace,
+    /// OCIO display/view pair for presentation output.
+    pub display_view: Option<RenderOcioDisplayView>,
     /// Whether tone mapping is requested.
     pub tone_map: bool,
     /// Color engine selected for this output boundary.
@@ -251,6 +254,24 @@ impl RenderOutputColorBoundary {
         Self {
             target: RenderOutputColorBoundaryTarget::Display,
             output_color_space,
+            display_view: None,
+            tone_map,
+            engine,
+        }
+    }
+
+    /// Build a display/viewer output boundary through an explicit OCIO display/view pair.
+    pub fn display_view(
+        output_color_space: ColorSpace,
+        display: impl Into<String>,
+        view: impl Into<String>,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::Display,
+            output_color_space,
+            display_view: Some(RenderOcioDisplayView::new(display, view)),
             tone_map,
             engine,
         }
@@ -261,6 +282,7 @@ impl RenderOutputColorBoundary {
         Self {
             target: RenderOutputColorBoundaryTarget::Export,
             output_color_space,
+            display_view: None,
             tone_map,
             engine,
         }
@@ -268,11 +290,20 @@ impl RenderOutputColorBoundary {
 
     fn transform(&self) -> RenderColorTransform {
         match self.target {
-            RenderOutputColorBoundaryTarget::Display => RenderColorTransform::display(
-                self.output_color_space,
-                self.tone_map,
-                self.engine.clone(),
-            ),
+            RenderOutputColorBoundaryTarget::Display => match &self.display_view {
+                Some(display_view) => RenderColorTransform::display_view(
+                    self.output_color_space,
+                    display_view.display.clone(),
+                    display_view.view.clone(),
+                    self.tone_map,
+                    self.engine.clone(),
+                ),
+                None => RenderColorTransform::display(
+                    self.output_color_space,
+                    self.tone_map,
+                    self.engine.clone(),
+                ),
+            },
             RenderOutputColorBoundaryTarget::Export => RenderColorTransform::export(
                 self.output_color_space,
                 self.tone_map,
@@ -1857,7 +1888,9 @@ mod tests {
     };
     use mondrian_core::types::{ColorEngine, ColorSpace};
     use mondrian_core::RgbaF32Frame;
-    use mondrian_core::{ensure_mondrian_default_ocio_loaded, GpuLanguage};
+    use mondrian_core::{
+        ensure_mondrian_default_ocio_loaded, ocio_default_display_view, GpuLanguage,
+    };
 
     fn source_descriptor(residency: ColorFrameResidency) -> ColorFrameDescriptor {
         ColorFrameDescriptor {
@@ -2202,6 +2235,46 @@ mod tests {
         assert_eq!(record.stage_diagnostics.upload_stages, 1);
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
+    }
+
+    #[test]
+    fn gpu_output_boundary_blocks_display_view_until_shader_qualifiers_are_lowered() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display_view(
+            ColorSpace::Srgb,
+            display.clone(),
+            view.clone(),
+            false,
+            ColorEngine::MondrianSmart,
+        );
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_200);
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            runtime.shader_cache_mut(),
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+        let plan = planner.plan(&frame, &boundary).expect("display/view GPU boundary plan");
+        let RenderColorStage::GpuColorTransform { plan: gpu_plan, .. } = &plan.stage_plan.stages[1]
+        else {
+            panic!("expected upload -> GPU transform -> readback stage shape");
+        };
+        assert_eq!(
+            gpu_plan.wgpu.blockers,
+            vec![OcioGpuWgpuBlocker::DisplayViewShaderTranslationNotPrepared { display, view }]
+        );
+
+        let mut ids = GpuColorFrameIdAllocator::new(1_200);
+        let err = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
+            .expect_err("blocked display/view GPU output must not materialize resources");
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining { blockers: 1 }
+        ));
     }
 
     #[test]

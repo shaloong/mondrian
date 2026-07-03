@@ -1,7 +1,7 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuEncodedColorFrame, OcioGpuShaderCache, OcioGpuShaderError, OcioGpuShaderRequest,
-    OcioGpuWgpuExecutionPlan, OcioGpuWgpuWrapperColorContract,
+    OcioGpuWgpuBlocker, OcioGpuWgpuExecutionPlan, OcioGpuWgpuWrapperColorContract,
 };
 use mondrian_core::{
     convert_rgba8_in_place,
@@ -62,6 +62,22 @@ pub struct RenderOutputTransformResult {
     pub diagnostics: RenderColorTransformDiagnostics,
 }
 
+/// OCIO display/view pair used for viewer/display output transforms.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RenderOcioDisplayView {
+    /// OCIO display name.
+    pub display: String,
+    /// OCIO view name under the display.
+    pub view: String,
+}
+
+impl RenderOcioDisplayView {
+    /// Build an explicit OCIO display/view pair.
+    pub fn new(display: impl Into<String>, view: impl Into<String>) -> Self {
+        Self { display: display.into(), view: view.into() }
+    }
+}
+
 /// GPU color-transform planning options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderColorTransformGpuOptions {
@@ -111,6 +127,8 @@ pub struct RenderColorTransform {
     pub output_color_space: ColorSpace,
     /// Destination frame domain.
     pub output_domain: ColorFrameDomain,
+    /// OCIO display/view pair for presentation transforms.
+    pub display_view: Option<RenderOcioDisplayView>,
     /// Whether HDR/scene data should be tone-mapped for the destination.
     pub tone_map: bool,
     /// Color engine used to execute the transform.
@@ -154,6 +172,7 @@ impl RenderColorTransform {
         Self {
             output_color_space,
             output_domain: ColorFrameDomain::Display,
+            display_view: None,
             tone_map,
             engine,
             backend: RenderColorTransformBackend::CpuOcioRgba8Boundary,
@@ -165,6 +184,25 @@ impl RenderColorTransform {
         Self {
             output_color_space,
             output_domain: ColorFrameDomain::Export,
+            display_view: None,
+            tone_map,
+            engine,
+            backend: RenderColorTransformBackend::CpuOcioRgba8Boundary,
+        }
+    }
+
+    /// Build a display transform through an explicit OCIO display/view pair.
+    pub fn display_view(
+        output_color_space: ColorSpace,
+        display: impl Into<String>,
+        view: impl Into<String>,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            output_color_space,
+            output_domain: ColorFrameDomain::Display,
+            display_view: Some(RenderOcioDisplayView::new(display, view)),
             tone_map,
             engine,
             backend: RenderColorTransformBackend::CpuOcioRgba8Boundary,
@@ -255,22 +293,39 @@ impl CpuColorTransformExecutor {
         };
 
         let mut rgba = frame.to_output_rgba8(descriptor.color_space, false);
-        convert_rgba8_in_place(
-            &mut rgba,
-            ColorPipeline::new(
-                descriptor.color_space,
-                descriptor.color_space,
-                transform.output_color_space,
-                transform.tone_map,
+        if let Some(display_view) = &transform.display_view {
+            transform
+                .engine
+                .display_transform(
+                    &mut rgba,
+                    descriptor.color_space,
+                    &display_view.display,
+                    &display_view.view,
+                )
+                .map_err(|reason| RenderColorTransformError::ExecutionFailed {
+                    direction: RenderColorTransformDirection::WorkingToOutput,
+                    input: descriptor,
+                    output: output_descriptor,
+                    reason,
+                })?;
+        } else {
+            convert_rgba8_in_place(
+                &mut rgba,
+                ColorPipeline::new(
+                    descriptor.color_space,
+                    descriptor.color_space,
+                    transform.output_color_space,
+                    transform.tone_map,
+                )
+                .with_engine(transform.engine.clone()),
             )
-            .with_engine(transform.engine.clone()),
-        )
-        .map_err(|reason| RenderColorTransformError::ExecutionFailed {
-            direction: RenderColorTransformDirection::WorkingToOutput,
-            input: descriptor,
-            output: output_descriptor,
-            reason,
-        })?;
+            .map_err(|reason| RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::WorkingToOutput,
+                input: descriptor,
+                output: output_descriptor,
+                reason,
+            })?;
+        }
 
         let frame = CpuEncodedColorFrame::rgba8(
             descriptor.width,
@@ -360,10 +415,19 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: self.options.output_residency,
         };
-        let request = OcioGpuShaderRequest::ColorSpace {
-            src: input.color_space,
-            dst: transform.output_color_space,
-            language: self.options.language,
+        let request = if let Some(display_view) = &transform.display_view {
+            OcioGpuShaderRequest::DisplayView {
+                src: input.color_space,
+                display: display_view.display.clone(),
+                view: display_view.view.clone(),
+                language: self.options.language,
+            }
+        } else {
+            OcioGpuShaderRequest::ColorSpace {
+                src: input.color_space,
+                dst: transform.output_color_space,
+                language: self.options.language,
+            }
         };
         let mut plan = self.plan(
             RenderColorTransformDirection::WorkingToOutput,
@@ -376,6 +440,14 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
                 OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(
                     input.color_space,
                 );
+        }
+        if let Some(display_view) = &transform.display_view {
+            plan.wgpu.blockers.push(
+                OcioGpuWgpuBlocker::DisplayViewShaderTranslationNotPrepared {
+                    display: display_view.display.clone(),
+                    view: display_view.view.clone(),
+                },
+            );
         }
         Ok(plan)
     }
@@ -454,7 +526,9 @@ pub enum RenderColorTransformError {
 mod tests {
     use super::*;
     use mondrian_core::types::OcioConfigSource;
-    use mondrian_core::{ensure_mondrian_default_ocio_loaded, RgbaF32Frame};
+    use mondrian_core::{
+        ensure_mondrian_default_ocio_loaded, ocio_default_display_view, RgbaF32Frame,
+    };
 
     #[test]
     fn cpu_transform_returns_typed_display_boundary_frame() {
@@ -483,6 +557,32 @@ mod tests {
         assert_eq!(output.diagnostics.output.domain, ColorFrameDomain::Display);
         assert_eq!(output.diagnostics.pixel_count, 1);
         assert!(output.diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn cpu_transform_executes_explicit_display_view_boundary() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let source = CpuColorFrame::working(RgbaF32Frame {
+            width: 1,
+            height: 1,
+            data: vec![[0.25, 0.5, 0.75, 1.0]],
+            color_space: ColorSpace::Rec709,
+        });
+        let transform = RenderColorTransform::display_view(
+            ColorSpace::Srgb,
+            display,
+            view,
+            false,
+            ColorEngine::MondrianSmart,
+        );
+
+        let output = CpuColorTransformExecutor::transform(&source, &transform)
+            .expect("display/view transform");
+
+        assert_eq!(output.frame.descriptor().domain, ColorFrameDomain::Display);
+        assert_eq!(output.frame.descriptor().color_space, ColorSpace::Srgb);
+        assert_eq!(output.frame.rgba().len(), 4);
     }
 
     #[test]
@@ -657,6 +757,53 @@ mod tests {
         );
         assert!(plan.wgpu.blockers.is_empty());
         assert!(plan.wgpu.can_execute());
+    }
+
+    #[test]
+    fn gpu_planner_builds_display_view_shader_plan_from_working_descriptor() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let source = CpuColorFrame::working(RgbaF32Frame {
+            width: 4,
+            height: 5,
+            data: vec![[0.5, 0.25, 0.125, 1.0]; 20],
+            color_space: ColorSpace::Rec709,
+        });
+        let transform = RenderColorTransform::display_view(
+            ColorSpace::Srgb,
+            display.clone(),
+            view.clone(),
+            false,
+            ColorEngine::MondrianSmart,
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+
+        let plan = planner
+            .plan_output_transform(source.descriptor(), &transform)
+            .expect("display/view GPU plan");
+
+        assert_eq!(
+            plan.request,
+            OcioGpuShaderRequest::DisplayView {
+                src: ColorSpace::Rec709,
+                display: display.clone(),
+                view: view.clone(),
+                language: GpuLanguage::Glsl4_0,
+            }
+        );
+        assert_eq!(
+            plan.wgpu.wrapper_color,
+            OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
+        );
+        assert_eq!(
+            plan.wgpu.blockers,
+            vec![OcioGpuWgpuBlocker::DisplayViewShaderTranslationNotPrepared { display, view }]
+        );
+        assert!(!plan.wgpu.can_execute());
     }
 
     #[test]

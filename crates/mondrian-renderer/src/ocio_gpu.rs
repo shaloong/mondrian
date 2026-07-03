@@ -4472,6 +4472,14 @@ pub enum OcioGpuWgpuBlocker {
     FullscreenWrapperNotPrepared,
     /// The final render pipeline/render-pass node is not implemented yet.
     RenderPipelineNotPrepared,
+    /// OCIO display/view GPU shaders can contain GLSL qualifiers the current
+    /// Naga wrapper path cannot lower safely yet.
+    DisplayViewShaderTranslationNotPrepared {
+        /// OCIO display name.
+        display: String,
+        /// OCIO view name.
+        view: String,
+    },
 }
 
 /// Bounded cache for OCIO GPU shader extraction results.

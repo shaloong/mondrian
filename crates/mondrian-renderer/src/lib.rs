@@ -55,7 +55,8 @@ pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,
     RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderColorTransformError,
     RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
-    RenderInputTransform, RenderInputTransformResult, RenderOutputTransformResult,
+    RenderInputTransform, RenderInputTransformResult, RenderOcioDisplayView,
+    RenderOutputTransformResult,
 };
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;

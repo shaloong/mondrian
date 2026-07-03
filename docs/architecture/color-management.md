@@ -92,6 +92,14 @@ working passes decode OCIO output into `LinearFloat`; working -> output passes
 encode sampled linear values before invoking the OCIO program. The wrapper color
 contract participates in the wrapper link/source/render-pipeline hashes, so
 pipelines with different color-domain semantics cannot share the same shader.
+Display/view output boundaries carry an explicit `RenderOcioDisplayView` when
+the caller wants OCIO presentation semantics instead of a color-space delivery
+transform. CPU display/view boundaries execute through the OCIO display
+processor. GPU display/view shader extraction is modeled with
+`OcioGpuShaderRequest::DisplayView`, but native execution remains fail-closed
+with `OcioGpuWgpuBlocker::DisplayViewShaderTranslationNotPrepared` until the
+wrapper lowering path handles the GLSL qualifiers emitted by OCIO display/view
+programs.
 
 Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderOutputColorBoundary` from their `ColorContext` and
