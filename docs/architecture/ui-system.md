@@ -45,11 +45,13 @@ Menus, shortcut preferences, command palette, and future plugins should consume 
 Opening an editor dialog is a shell action because it mutates transient UI state,
 not the undoable domain model. The dialog's committed payload must flow through a
 domain/app action owned by the target subsystem. For example, Asset Library →
-Interpret Footage opens an app-shell modal, but applying Auto/Override/Data is
+Interpret Footage opens an app-shell modal, but applying Auto/Override is
 an asset-library mutation that persists `AssetMediaInterpretation`.
-The modal is a compact settings form: interpretation mode uses a segmented
-control, manual color space selection uses a dropdown, and Auto displays the
-current resolved/detected result instead of explanatory copy.
+The modal is a compact settings form with a single input color-space dropdown:
+Auto is the default option, explicit color spaces persist as overrides, and Auto
+displays the current resolved/detected result instead of explanatory copy.
+Non-color/data interpretation is reserved for asset classification or future
+advanced utility-channel workflows, not for the primary color-space picker.
 
 ## Playback Tick Ownership
 
