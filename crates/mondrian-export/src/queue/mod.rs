@@ -958,7 +958,17 @@ fn render_sequence_frame_into(
         let input_color_space = media
             .color_space_override
             .or_else(|| timeline.asset_color_spaces.get(&media.asset_id).copied())
-            .unwrap_or(ColorSpace::Rec709);
+            .or_else(|| {
+                color_context
+                    .missing_metadata_policy
+                    .resolve_input(None, color_context.working_color_space)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "asset={} missing color metadata rejected by sequence policy",
+                    media.asset_id
+                )
+            })?;
         let cache_key = (
             media.asset_id,
             media.source_frame,
@@ -1419,7 +1429,7 @@ mod tests {
     use mondrian_core::types::{AssetId, BlendMode, TimeCode};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_timeline::clip::Clip;
-    use mondrian_timeline::sequence::Sequence;
+    use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
 
@@ -1758,6 +1768,49 @@ mod tests {
         for px in canvas.chunks_exact(4) {
             assert_eq!(px, &[0, 0, 0, 255]);
         }
+    }
+
+    #[test]
+    fn render_timeline_frame_respects_reject_missing_media_color_metadata() {
+        let mut seq = Sequence::new("missing-media-color");
+        seq.settings.color_management.missing_metadata_policy =
+            MissingColorMetadataPolicy::RejectMedia;
+        let tb = seq.time_base();
+        let asset_id = AssetId::new();
+        seq.video_tracks[0]
+            .add_clip(Clip::new(
+                asset_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(1, tb),
+            ))
+            .expect("add clip");
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-color-{}.mov",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::write(&temp_path, []).expect("create placeholder media path");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert(asset_id, temp_path.clone());
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths,
+            asset_color_spaces: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+
+        let mut canvas = Vec::new();
+        let err = render_timeline_frame_into(&timeline, 0, 1, 1, &mut canvas)
+            .expect_err("missing color metadata should be rejected before decode");
+
+        assert!(err.contains("missing color metadata"));
+        let _ = std::fs::remove_file(temp_path);
     }
 
     #[test]

@@ -150,6 +150,13 @@ carriage is implemented.
 
 ## Unknown Media
 
+Media probing must preserve the distinction between explicit metadata and
+policy assumptions. `mondrian-media::VideoStreamInfo.detected_color_space` is
+the only field that means container/codec metadata identified a color space.
+`VideoColorSpaceSource::MissingMetadata` and
+`VideoColorSpaceSource::DecoderUnavailable` are diagnostic source states, not
+permission for callers to bypass missing-metadata policy.
+
 When detected media color space is missing, `MissingColorMetadataPolicy` resolves it as:
 
 - Assume Rec.709
@@ -157,6 +164,10 @@ When detected media color space is missing, `MissingColorMetadataPolicy` resolve
 - Reject media
 
 Clip-level `MediaInterpretation.color_space_override` takes precedence over detected metadata.
+Preview and export both follow override -> detected metadata -> missing-policy
+resolution. Export `TimelineExportInput.asset_color_spaces` is a detected-only
+metadata table; absence of an asset id means "resolve via policy", not
+"fallback to Rec.709".
 
 ## Display and Export
 

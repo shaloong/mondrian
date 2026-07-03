@@ -78,6 +78,17 @@ impl PixelFormat {
     }
 }
 
+/// How a video stream's input color metadata was resolved by media probing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoColorSpaceSource {
+    /// Container/codec metadata explicitly identified the color space.
+    Metadata,
+    /// Metadata was missing or unsupported; callers must apply missing-metadata policy.
+    MissingMetadata,
+    /// FFmpeg could not open a decoder; callers must apply missing-metadata policy.
+    DecoderUnavailable,
+}
+
 // ─── 声道布局 ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +110,10 @@ pub struct VideoStreamInfo {
     pub height: u32,
     pub frame_rate: Rational,
     pub pixel_format: PixelFormat,
-    pub color_space: ColorSpace,
+    /// Color space explicitly detected from container/codec metadata, if present.
+    pub detected_color_space: Option<ColorSpace>,
+    /// Source of the detected color-space result.
+    pub color_space_source: VideoColorSpaceSource,
     pub bit_depth: u8,
     pub has_alpha: bool,
     pub avg_bitrate: u64, // bits/s
@@ -219,7 +233,7 @@ impl MediaInfo {
                             pixel_format = map_pixel_format(decoder.format());
                             bit_depth = pixel_format.bit_depth();
                             has_alpha = pixel_format.has_alpha();
-                            let color_space = map_color_space(
+                            let color_metadata = detect_color_space(
                                 decoder.color_primaries(),
                                 decoder.color_transfer_characteristic(),
                                 decoder.color_space(),
@@ -231,7 +245,8 @@ impl MediaInfo {
                                 height,
                                 frame_rate: map_rational(stream.avg_frame_rate()),
                                 pixel_format,
-                                color_space,
+                                detected_color_space: color_metadata.detected,
+                                color_space_source: color_metadata.source,
                                 bit_depth,
                                 has_alpha,
                                 avg_bitrate: 0,
@@ -259,7 +274,8 @@ impl MediaInfo {
                         height,
                         frame_rate,
                         pixel_format,
-                        color_space: ColorSpace::Rec709,
+                        detected_color_space: None,
+                        color_space_source: VideoColorSpaceSource::DecoderUnavailable,
                         bit_depth,
                         has_alpha,
                         avg_bitrate: 0,
@@ -345,35 +361,50 @@ impl MediaInfo {
     }
 }
 
-fn map_color_space(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VideoColorSpaceDetection {
+    detected: Option<ColorSpace>,
+    source: VideoColorSpaceSource,
+}
+
+fn detect_color_space(
     primaries: ffmpeg::util::color::Primaries,
     transfer: ffmpeg::util::color::TransferCharacteristic,
     matrix: ffmpeg::util::color::Space,
-) -> ColorSpace {
+) -> VideoColorSpaceDetection {
     use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
 
-    match transfer {
-        TransferCharacteristic::SMPTE2084 => return ColorSpace::Rec2100Pq,
-        TransferCharacteristic::ARIB_STD_B67 => return ColorSpace::Rec2100Hlg,
-        TransferCharacteristic::IEC61966_2_1 => return ColorSpace::Srgb,
-        _ => {}
-    }
-
-    match primaries {
-        Primaries::BT2020 => ColorSpace::Rec2020,
-        Primaries::SMPTE431 | Primaries::SMPTE432 => ColorSpace::DciP3,
-        Primaries::BT709 => {
-            if matrix == Space::RGB {
+    let detected = match transfer {
+        TransferCharacteristic::SMPTE2084 => Some(ColorSpace::Rec2100Pq),
+        TransferCharacteristic::ARIB_STD_B67 => Some(ColorSpace::Rec2100Hlg),
+        TransferCharacteristic::IEC61966_2_1 => Some(ColorSpace::Srgb),
+        _ => match primaries {
+            Primaries::BT2020 => Some(ColorSpace::Rec2020),
+            Primaries::SMPTE431 | Primaries::SMPTE432 => Some(ColorSpace::DciP3),
+            Primaries::BT709 => Some(if matrix == Space::RGB {
                 ColorSpace::Srgb
             } else {
                 ColorSpace::Rec709
-            }
-        }
-        _ => match matrix {
-            Space::BT2020NCL | Space::BT2020CL => ColorSpace::Rec2020,
-            Space::RGB => ColorSpace::Srgb,
-            _ => ColorSpace::Rec709,
+            }),
+            _ => match matrix {
+                Space::BT709 => Some(ColorSpace::Rec709),
+                Space::BT2020NCL | Space::BT2020CL => Some(ColorSpace::Rec2020),
+                Space::RGB => Some(ColorSpace::Srgb),
+                _ => None,
+            },
         },
+    };
+
+    if let Some(color_space) = detected {
+        VideoColorSpaceDetection {
+            detected: Some(color_space),
+            source: VideoColorSpaceSource::Metadata,
+        }
+    } else {
+        VideoColorSpaceDetection {
+            detected: None,
+            source: VideoColorSpaceSource::MissingMetadata,
+        }
     }
 }
 
@@ -455,5 +486,66 @@ fn map_audio_codec(id: ffmpeg::codec::Id) -> AudioCodec {
         Id::PCM_S24LE => AudioCodec::Pcm { bit_depth: 24 },
         Id::PCM_S32LE => AudioCodec::Pcm { bit_depth: 32 },
         other => AudioCodec::Other(format!("{other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
+
+    #[test]
+    fn detect_color_space_marks_hdr_transfer_metadata() {
+        let pq = detect_color_space(
+            Primaries::BT2020,
+            TransferCharacteristic::SMPTE2084,
+            Space::BT2020NCL,
+        );
+        assert_eq!(pq.detected, Some(ColorSpace::Rec2100Pq));
+        assert_eq!(pq.source, VideoColorSpaceSource::Metadata);
+
+        let hlg = detect_color_space(
+            Primaries::BT2020,
+            TransferCharacteristic::ARIB_STD_B67,
+            Space::BT2020NCL,
+        );
+        assert_eq!(hlg.detected, Some(ColorSpace::Rec2100Hlg));
+        assert_eq!(hlg.source, VideoColorSpaceSource::Metadata);
+    }
+
+    #[test]
+    fn detect_color_space_marks_rgb_bt709_as_srgb_metadata() {
+        let detection = detect_color_space(
+            Primaries::BT709,
+            TransferCharacteristic::Unspecified,
+            Space::RGB,
+        );
+
+        assert_eq!(detection.detected, Some(ColorSpace::Srgb));
+        assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
+    }
+
+    #[test]
+    fn detect_color_space_uses_matrix_metadata_when_primaries_are_missing() {
+        let detection = detect_color_space(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::BT709,
+        );
+
+        assert_eq!(detection.detected, Some(ColorSpace::Rec709));
+        assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
+    }
+
+    #[test]
+    fn detect_color_space_does_not_claim_missing_metadata_as_rec709() {
+        let detection = detect_color_space(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+
+        assert_eq!(detection.detected, None);
+        assert_eq!(detection.source, VideoColorSpaceSource::MissingMetadata);
     }
 }

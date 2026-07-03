@@ -181,13 +181,12 @@ pub(crate) fn collect_timeline_asset_paths(
         if !asset.path.exists() {
             return Err(format!("素材离线: {}", asset.path.display()));
         }
-        let color_space = asset
-            .media_info
-            .primary_video()
-            .map(|video| video.color_space)
-            .unwrap_or(mondrian_core::types::ColorSpace::Rec709);
+        if let Some(color_space) =
+            asset.media_info.primary_video().and_then(|video| video.detected_color_space)
+        {
+            color_spaces.insert(asset_id, color_space);
+        }
         paths.insert(asset_id, asset.path);
-        color_spaces.insert(asset_id, color_space);
     }
 
     Ok((paths, color_spaces))

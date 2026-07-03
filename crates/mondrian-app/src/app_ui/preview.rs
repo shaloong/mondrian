@@ -1140,8 +1140,11 @@ impl AppUiPreviewService {
         }
 
         let modified = modified_stamp(&asset.path);
-        let detected_color_space =
-            asset.media_info.video_streams.first().map(|video| video.color_space);
+        let detected_color_space = asset
+            .media_info
+            .video_streams
+            .first()
+            .and_then(|video| video.detected_color_space);
         let input_color_space = resolve_preview_input_color_space(
             color_space_override,
             detected_color_space,

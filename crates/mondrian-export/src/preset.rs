@@ -116,6 +116,10 @@ pub struct TimelineExportInput {
     #[serde(default)]
     pub sequences: Vec<Sequence>,
     pub asset_paths: HashMap<AssetId, PathBuf>,
+    /// Asset color spaces explicitly detected from media metadata.
+    ///
+    /// Missing entries mean the media was untagged or unsupported; render code
+    /// must resolve them through the sequence missing-metadata policy.
     #[serde(default)]
     pub asset_color_spaces: HashMap<AssetId, ColorSpace>,
     #[serde(default)]

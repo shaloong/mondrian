@@ -187,7 +187,10 @@ Preview and export may use different scheduling, cache lifetime, and readback st
 
 Preview media decoding must convert source media into the sequence working
 color space before compositing. The source color space resolves from clip
-override first, then media metadata, then the configured missing-metadata policy.
+override first, then explicitly detected media metadata, then the configured
+missing-metadata policy. Resolved or assumed probe values are not media metadata;
+callers must use `VideoStreamInfo.detected_color_space` and let
+`MissingColorMetadataPolicy` handle absent metadata.
 Preview final-frame cache keys must include the effective color context so a
 monitor/output transform change cannot reuse stale pixels from a previous view.
 For OCIO-backed preview this includes the resolved display and view names, not

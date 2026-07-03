@@ -22,7 +22,7 @@ pub use audio::{
 };
 pub use cache::FrameCache;
 pub use decoder::DecoderPool;
-pub use info::{AudioStreamInfo, MediaInfo, VideoStreamInfo};
+pub use info::{AudioStreamInfo, MediaInfo, VideoColorSpaceSource, VideoStreamInfo};
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
     clear_global_preview_frame_cache, decode_first_video_frame_rgba,
