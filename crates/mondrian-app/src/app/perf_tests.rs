@@ -76,13 +76,14 @@ struct PreviewMediaPlaybackPerfReport {
     cases: Vec<PerfCaseReport>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct PreviewColorPathReport {
     composite_plans: u64,
     composite_elements: u64,
     float_linear_composites: u64,
     legacy_rgba8_composites: u64,
-    legacy_reasons: u64,
+    legacy_reason_total: u64,
+    legacy_reason_details: Vec<PreviewLegacyReasonReport>,
     gpu_color_stages: u64,
     gpu_blockers: u64,
     rgba8_boundary_calls: u64,
@@ -90,17 +91,67 @@ struct PreviewColorPathReport {
     gpu_path_ready: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct PreviewLegacyReasonReport {
+    layer: &'static str,
+    reason: &'static str,
+    count: u64,
+}
+
 impl PreviewColorPathReport {
     fn from_diagnostics(diagnostics: AppUiPreviewDiagnostics) -> Self {
-        let legacy_reasons = diagnostics
-            .color_composite_legacy_media_blend_mode
-            .saturating_add(diagnostics.color_composite_legacy_media_transform)
-            .saturating_add(diagnostics.color_composite_legacy_media_effect)
-            .saturating_add(diagnostics.color_composite_legacy_solid_blend_mode)
-            .saturating_add(diagnostics.color_composite_legacy_solid_transform)
-            .saturating_add(diagnostics.color_composite_legacy_solid_effect)
-            .saturating_add(diagnostics.color_composite_legacy_adjustment_blend_mode)
-            .saturating_add(diagnostics.color_composite_legacy_adjustment_effect);
+        let mut legacy_reason_details = Vec::new();
+        push_legacy_reason(
+            &mut legacy_reason_details,
+            "media",
+            "blend_mode",
+            diagnostics.color_composite_legacy_media_blend_mode,
+        );
+        push_legacy_reason(
+            &mut legacy_reason_details,
+            "media",
+            "transform",
+            diagnostics.color_composite_legacy_media_transform,
+        );
+        push_legacy_reason(
+            &mut legacy_reason_details,
+            "media",
+            "effect",
+            diagnostics.color_composite_legacy_media_effect,
+        );
+        push_legacy_reason(
+            &mut legacy_reason_details,
+            "solid",
+            "blend_mode",
+            diagnostics.color_composite_legacy_solid_blend_mode,
+        );
+        push_legacy_reason(
+            &mut legacy_reason_details,
+            "solid",
+            "transform",
+            diagnostics.color_composite_legacy_solid_transform,
+        );
+        push_legacy_reason(
+            &mut legacy_reason_details,
+            "solid",
+            "effect",
+            diagnostics.color_composite_legacy_solid_effect,
+        );
+        push_legacy_reason(
+            &mut legacy_reason_details,
+            "adjustment",
+            "blend_mode",
+            diagnostics.color_composite_legacy_adjustment_blend_mode,
+        );
+        push_legacy_reason(
+            &mut legacy_reason_details,
+            "adjustment",
+            "effect",
+            diagnostics.color_composite_legacy_adjustment_effect,
+        );
+        let legacy_reason_total = legacy_reason_details
+            .iter()
+            .fold(0u64, |total, reason| total.saturating_add(reason.count));
         let fully_float_linear = diagnostics.color_composite_plans > 0
             && diagnostics.color_composite_legacy_rgba8 == 0
             && diagnostics.color_composite_float_linear == diagnostics.color_composite_plans;
@@ -113,13 +164,25 @@ impl PreviewColorPathReport {
             composite_elements: diagnostics.color_composite_elements,
             float_linear_composites: diagnostics.color_composite_float_linear,
             legacy_rgba8_composites: diagnostics.color_composite_legacy_rgba8,
-            legacy_reasons,
+            legacy_reason_total,
+            legacy_reason_details,
             gpu_color_stages: diagnostics.color_stage_gpu_color_stages,
             gpu_blockers: diagnostics.color_stage_gpu_blockers,
             rgba8_boundary_calls: diagnostics.color_rgba8_boundary_calls,
             fully_float_linear,
             gpu_path_ready,
         }
+    }
+}
+
+fn push_legacy_reason(
+    reasons: &mut Vec<PreviewLegacyReasonReport>,
+    layer: &'static str,
+    reason: &'static str,
+    count: u64,
+) {
+    if count > 0 {
+        reasons.push(PreviewLegacyReasonReport { layer, reason, count });
     }
 }
 
@@ -861,7 +924,14 @@ fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
     assert_eq!(report.composite_elements, 7);
     assert_eq!(report.float_linear_composites, 2);
     assert_eq!(report.legacy_rgba8_composites, 1);
-    assert_eq!(report.legacy_reasons, 3);
+    assert_eq!(report.legacy_reason_total, 3);
+    assert_eq!(
+        report.legacy_reason_details,
+        vec![
+            PreviewLegacyReasonReport { layer: "media", reason: "transform", count: 1 },
+            PreviewLegacyReasonReport { layer: "solid", reason: "effect", count: 2 },
+        ]
+    );
     assert_eq!(report.gpu_color_stages, 4);
     assert_eq!(report.gpu_blockers, 1);
     assert_eq!(report.rgba8_boundary_calls, 3);
@@ -880,7 +950,8 @@ fn preview_color_path_report_marks_clean_float_linear_path() {
 
     let report = PreviewColorPathReport::from_diagnostics(diagnostics);
 
-    assert_eq!(report.legacy_reasons, 0);
+    assert_eq!(report.legacy_reason_total, 0);
+    assert!(report.legacy_reason_details.is_empty());
     assert!(report.fully_float_linear);
     assert!(report.gpu_path_ready);
 }

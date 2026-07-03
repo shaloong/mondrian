@@ -147,6 +147,11 @@ and readback stages for a color boundary; `RenderColorStageExecution<T>` carries
 the transform result plus that stage summary. Preview and export performance
 smokes should report both layers: transform diagnostics prove color semantics,
 while stage diagnostics prove scheduling, residency, and GPU-readiness.
+Preview performance smoke reports must also include structured legacy RGBA8
+composite reasons (`layer`, `reason`, `count`) derived from renderer composite
+diagnostics. These reason details are the migration contract for removing old
+blend/effect/transform paths; dashboards and CI budgets should consume them
+directly instead of re-inferring fallback causes from aggregate counters.
 
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative
