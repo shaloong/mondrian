@@ -131,6 +131,10 @@ struct AppUiViewerGpuOutputDiagnostics {
     stage_gpu_color_stages: u64,
     stage_readback_stages: u64,
     stage_gpu_blockers: u64,
+    stage_gpu_shader_module_blockers: u64,
+    stage_gpu_ocio_resource_blockers: u64,
+    stage_gpu_wrapper_blockers: u64,
+    stage_gpu_render_pipeline_blockers: u64,
     stage_pixels: u64,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
@@ -208,6 +212,22 @@ impl AppUiViewerGpuOutputTelemetry {
             stage_gpu_color_stages: self.accumulated_stage_diagnostics.gpu_color_stages,
             stage_readback_stages: self.accumulated_stage_diagnostics.readback_stages,
             stage_gpu_blockers: self.accumulated_stage_diagnostics.gpu_blockers,
+            stage_gpu_shader_module_blockers: self
+                .accumulated_stage_diagnostics
+                .gpu_blocker_breakdown
+                .shader_module_not_prepared,
+            stage_gpu_ocio_resource_blockers: self
+                .accumulated_stage_diagnostics
+                .gpu_blocker_breakdown
+                .ocio_resource_bind_group_not_prepared,
+            stage_gpu_wrapper_blockers: self
+                .accumulated_stage_diagnostics
+                .gpu_blocker_breakdown
+                .fullscreen_wrapper_not_prepared,
+            stage_gpu_render_pipeline_blockers: self
+                .accumulated_stage_diagnostics
+                .gpu_blocker_breakdown
+                .render_pipeline_not_prepared,
             stage_pixels: self.accumulated_stage_diagnostics.stage_pixels,
             last_display_contract_blocker: self.last_display_contract_blocker,
             last_display_presentation_readiness: self.last_display_presentation_readiness,
@@ -1894,6 +1914,10 @@ fn trace_viewer_gpu_output_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) {
         stage_gpu_color_stages = diagnostics.stage_gpu_color_stages,
         stage_readback_stages = diagnostics.stage_readback_stages,
         stage_gpu_blockers = diagnostics.stage_gpu_blockers,
+        stage_gpu_shader_module_blockers = diagnostics.stage_gpu_shader_module_blockers,
+        stage_gpu_ocio_resource_blockers = diagnostics.stage_gpu_ocio_resource_blockers,
+        stage_gpu_wrapper_blockers = diagnostics.stage_gpu_wrapper_blockers,
+        stage_gpu_render_pipeline_blockers = diagnostics.stage_gpu_render_pipeline_blockers,
         stage_pixels = diagnostics.stage_pixels,
         last_display_contract_blocker = ?diagnostics.last_display_contract_blocker,
         last_display_presentation_readiness = ?diagnostics.last_display_presentation_readiness,
@@ -3438,6 +3462,11 @@ mod tests {
             upload_stages: 1,
             gpu_color_stages: 1,
             readback_stages: 1,
+            gpu_blockers: 1,
+            gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
+                render_pipeline_not_prepared: 1,
+                ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
+            },
             stage_pixels: 30,
             ..RenderColorStageDiagnostics::default()
         };
@@ -3458,6 +3487,11 @@ mod tests {
                 upload_stages: 2,
                 gpu_color_stages: 2,
                 readback_stages: 1,
+                gpu_blockers: 1,
+                gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
+                    render_pipeline_not_prepared: 1,
+                    ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
+                },
                 stage_pixels: 50,
                 ..RenderColorStageDiagnostics::default()
             }
@@ -3471,6 +3505,8 @@ mod tests {
                 stage_upload_stages: 2,
                 stage_gpu_color_stages: 2,
                 stage_readback_stages: 1,
+                stage_gpu_blockers: 1,
+                stage_gpu_render_pipeline_blockers: 1,
                 stage_pixels: 50,
                 last_outcome: Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected),
                 ..AppUiViewerGpuOutputDiagnostics::default()

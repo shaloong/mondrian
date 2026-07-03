@@ -87,6 +87,7 @@ struct PreviewColorPathReport {
     input_color_resolution: PreviewInputColorResolutionReport,
     gpu_color_stages: u64,
     gpu_blockers: u64,
+    gpu_blocker_breakdown: PreviewGpuBlockerBreakdownReport,
     rgba8_boundary_calls: u64,
     fully_float_linear: bool,
     gpu_path_ready: bool,
@@ -102,6 +103,14 @@ struct PreviewInputColorResolutionReport {
     missing_rejected: u64,
     policy_assumptions: u64,
     explicit_metadata_or_override: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct PreviewGpuBlockerBreakdownReport {
+    shader_module_not_prepared: u64,
+    ocio_resource_bind_group_not_prepared: u64,
+    fullscreen_wrapper_not_prepared: u64,
+    render_pipeline_not_prepared: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -191,6 +200,13 @@ impl PreviewColorPathReport {
             },
             gpu_color_stages: diagnostics.color_stage_gpu_color_stages,
             gpu_blockers: diagnostics.color_stage_gpu_blockers,
+            gpu_blocker_breakdown: PreviewGpuBlockerBreakdownReport {
+                shader_module_not_prepared: diagnostics.color_stage_gpu_shader_module_blockers,
+                ocio_resource_bind_group_not_prepared: diagnostics
+                    .color_stage_gpu_ocio_resource_blockers,
+                fullscreen_wrapper_not_prepared: diagnostics.color_stage_gpu_wrapper_blockers,
+                render_pipeline_not_prepared: diagnostics.color_stage_gpu_render_pipeline_blockers,
+            },
             rgba8_boundary_calls: diagnostics.color_rgba8_boundary_calls,
             fully_float_linear,
             gpu_path_ready,
@@ -965,6 +981,7 @@ fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
         color_composite_legacy_solid_effect: 2,
         color_stage_gpu_color_stages: 4,
         color_stage_gpu_blockers: 1,
+        color_stage_gpu_render_pipeline_blockers: 1,
         color_rgba8_boundary_calls: 3,
         input_color_resolution_override: 2,
         input_color_resolution_data_texture: 13,
@@ -1004,6 +1021,15 @@ fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
     );
     assert_eq!(report.gpu_color_stages, 4);
     assert_eq!(report.gpu_blockers, 1);
+    assert_eq!(
+        report.gpu_blocker_breakdown,
+        PreviewGpuBlockerBreakdownReport {
+            shader_module_not_prepared: 0,
+            ocio_resource_bind_group_not_prepared: 0,
+            fullscreen_wrapper_not_prepared: 0,
+            render_pipeline_not_prepared: 1,
+        }
+    );
     assert_eq!(report.rgba8_boundary_calls, 3);
     assert!(!report.fully_float_linear);
     assert!(!report.gpu_path_ready);

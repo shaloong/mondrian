@@ -266,7 +266,11 @@ backend contexts after it already owns the validated backend objects.
 The returned `RenderGpuOutputStageRecord` carries the same
 `RenderColorStageDiagnostics` shape as the planned stage graph so app/export
 telemetry can prove whether a frame used upload, native GPU OCIO, readback, and
-which pixel budget was touched without reconstructing the plan externally.
+which pixel budget was touched without reconstructing the plan externally. The
+diagnostics include native blocker breakdowns for shader module preparation,
+OCIO resource bind groups, fullscreen wrapper generation, and render-pipeline
+preparation, so GPU readiness reporting does not collapse into a single opaque
+blocker count.
 Renderer owns a manual ignored smoke for this exact boundary:
 `cargo test -p mondrian-renderer gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture`.
 It requests a real headless wgpu adapter, records a working -> display output
