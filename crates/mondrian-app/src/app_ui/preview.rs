@@ -141,6 +141,10 @@ impl AppUiPreviewService {
                 .metrics
                 .input_color_resolution_missing_rejected
                 .get(),
+            input_color_resolution_data_texture: self
+                .metrics
+                .input_color_resolution_data_texture
+                .get(),
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
             media_failure_hits: self.metrics.media_failure_hits.get(),
@@ -494,7 +498,7 @@ impl AppUiPreviewService {
                 bump(&self.metrics.input_color_resolution_override);
             }
             InputColorResolutionSource::DataTexture => {
-                bump(&self.metrics.input_color_resolution_override);
+                bump(&self.metrics.input_color_resolution_data_texture);
             }
             InputColorResolutionSource::DetectedMetadata => {
                 bump(&self.metrics.input_color_resolution_detected_metadata);
@@ -822,6 +826,8 @@ pub struct AppUiPreviewDiagnostics {
     pub input_color_resolution_missing_assume_working: u64,
     /// Media input color resolutions rejected by missing-metadata policy.
     pub input_color_resolution_missing_rejected: u64,
+    /// Media input color resolutions that treated the asset as non-color data.
+    pub input_color_resolution_data_texture: u64,
     /// Media preview cache hits.
     pub media_cache_hits: u64,
     /// Media preview cache misses.
@@ -1646,6 +1652,7 @@ struct AppUiPreviewMetrics {
     input_color_resolution_missing_assume_rec709: Cell<u64>,
     input_color_resolution_missing_assume_working: Cell<u64>,
     input_color_resolution_missing_rejected: Cell<u64>,
+    input_color_resolution_data_texture: Cell<u64>,
     viewer_frame_cache_hits: Cell<u64>,
     viewer_frame_cache_misses: Cell<u64>,
     media_cache_hits: Cell<u64>,
@@ -2215,6 +2222,7 @@ mod tests {
         assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 0);
         assert_eq!(diagnostics.input_color_resolution_missing_assume_working, 0);
         assert_eq!(diagnostics.input_color_resolution_missing_rejected, 0);
+        assert_eq!(diagnostics.input_color_resolution_data_texture, 0);
         assert_eq!(diagnostics.viewer_frame_cache_hits, 0);
         assert_eq!(diagnostics.viewer_frame_cache_misses, 1);
         assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
@@ -2245,6 +2253,7 @@ mod tests {
         let service = AppUiPreviewService::new();
 
         service.record_input_color_resolution(InputColorResolutionSource::Override);
+        service.record_input_color_resolution(InputColorResolutionSource::DataTexture);
         service.record_input_color_resolution(InputColorResolutionSource::DetectedMetadata);
         service
             .record_input_color_resolution(InputColorResolutionSource::MissingPolicyAssumeRec709);
@@ -2256,6 +2265,7 @@ mod tests {
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.input_color_resolution_override, 1);
+        assert_eq!(diagnostics.input_color_resolution_data_texture, 1);
         assert_eq!(diagnostics.input_color_resolution_detected_metadata, 2);
         assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 1);
         assert_eq!(diagnostics.input_color_resolution_missing_assume_working, 1);

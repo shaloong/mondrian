@@ -296,6 +296,8 @@ smoke reports derive both `explicit_metadata_or_override` and
 `policy_assumptions` totals from those counters. A production color-path report
 therefore distinguishes "metadata was known" from "the missing-metadata policy
 kept playback moving" instead of hiding both behind one resolved color space.
+The non-color `DataTexture` branch is reported separately from overrides so
+utility/data-channel assets cannot be mistaken for user color-space overrides.
 
 ## Display and Export
 

@@ -95,6 +95,7 @@ struct PreviewColorPathReport {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct PreviewInputColorResolutionReport {
     override_count: u64,
+    data_texture: u64,
     detected_metadata: u64,
     missing_assume_rec709: u64,
     missing_assume_working: u64,
@@ -180,6 +181,7 @@ impl PreviewColorPathReport {
             legacy_reason_details,
             input_color_resolution: PreviewInputColorResolutionReport {
                 override_count: diagnostics.input_color_resolution_override,
+                data_texture: diagnostics.input_color_resolution_data_texture,
                 detected_metadata: diagnostics.input_color_resolution_detected_metadata,
                 missing_assume_rec709: diagnostics.input_color_resolution_missing_assume_rec709,
                 missing_assume_working: diagnostics.input_color_resolution_missing_assume_working,
@@ -969,6 +971,7 @@ fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
         color_stage_gpu_blockers: 1,
         color_rgba8_boundary_calls: 3,
         input_color_resolution_override: 2,
+        input_color_resolution_data_texture: 13,
         input_color_resolution_detected_metadata: 3,
         input_color_resolution_missing_assume_rec709: 5,
         input_color_resolution_missing_assume_working: 7,
@@ -994,6 +997,7 @@ fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
         report.input_color_resolution,
         PreviewInputColorResolutionReport {
             override_count: 2,
+            data_texture: 13,
             detected_metadata: 3,
             missing_assume_rec709: 5,
             missing_assume_working: 7,
