@@ -278,9 +278,14 @@ boundary through `RenderGpuOutputBoundaryRuntime`, reads back the encoded
 texture, compares it with the CPU reference path, and emits
 `MONDRIAN_RENDERER_GPU_OUTPUT_JSON`. Setting
 `MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT` appends the same JSON as a JSONL
-record for perf dashboards. This smoke proves renderer-side upload + native GPU
-OCIO + readback sequencing; it does not prove OS swapchain/display-management
-correctness, which remains the app-window display contract's responsibility.
+record for perf dashboards. The JSON includes a `health` summary derived from
+the raw stage/runtime diagnostics: native GPU output readiness, upload + GPU
+OCIO + readback stage completeness, blocker-free execution, shader/backend
+runtime readiness, readback byte completeness, expected readback bytes, and
+CPU/GPU parity within tolerance. This smoke proves renderer-side upload +
+native GPU OCIO + readback sequencing; it does not prove OS
+swapchain/display-management correctness, which remains the app-window display
+contract's responsibility.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
 the surface/backend lifetime and traces its cache/resource diagnostics with the
 frame renderer diagnostics. The same session also owns the display-output
