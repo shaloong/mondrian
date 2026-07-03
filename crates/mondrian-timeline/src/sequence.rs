@@ -7,6 +7,14 @@ use mondrian_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Maximum supported nested-sequence recursion depth for preview, export, and
+/// diagnostics.
+///
+/// The root sequence is depth 0. Nested renderers should reject or stop
+/// recursing only when `depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH`, so preview and
+/// export share the same practical nesting contract.
+pub const MAX_NESTED_SEQUENCE_RENDER_DEPTH: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EditingMode {
     #[default]

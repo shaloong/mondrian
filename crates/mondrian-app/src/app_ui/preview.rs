@@ -27,7 +27,7 @@ use mondrian_renderer::{
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
-    InputColorResolutionSourceCounts, Sequence,
+    InputColorResolutionSourceCounts, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
@@ -35,7 +35,6 @@ use crate::app::AppState;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
-const MAX_NESTED_PREVIEW_DEPTH: usize = 4;
 const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
 const MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY: usize = MEDIA_PREVIEW_CACHE_CAPACITY * 2;
 const VIEWER_PREVIEW_FRAME_CACHE_CAPACITY: usize = 48;
@@ -636,7 +635,7 @@ impl AppUiPreviewService {
         depth: usize,
         parent_color_context: ColorContext,
     ) -> Option<MediaPreviewFrame> {
-        if depth >= MAX_NESTED_PREVIEW_DEPTH {
+        if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
             return None;
         }
         let (width, height) = preview_dimensions_for_sequence(sequence);
@@ -1414,7 +1413,7 @@ impl AppUiPreviewService {
         depth: usize,
         color_context: ColorContext,
     ) {
-        if depth >= MAX_NESTED_PREVIEW_DEPTH {
+        if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
             return;
         }
         let evaluation = evaluate_timeline_render_plan(
@@ -1684,7 +1683,7 @@ fn preview_sequence_input_color_resolution_counts(
     color_context: ColorContext,
     depth: usize,
 ) -> Result<InputColorResolutionSourceCounts, String> {
-    if depth >= MAX_NESTED_PREVIEW_DEPTH {
+    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return Err("预览序列嵌套层级过深，已停止统计输入色彩解析".to_string());
     }
 
@@ -2865,6 +2864,132 @@ mod tests {
         assert_eq!(
             preview_counts
                 .count(mondrian_timeline::sequence::InputColorResolutionSource::DataTexture),
+            1
+        );
+    }
+
+    #[test]
+    fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
+        let mut parent = Sequence::new("parent-color-resolution-parity");
+        parent.settings.color_space = ColorSpace::Rec2020;
+        parent.settings.color_management.missing_metadata_policy =
+            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+        let mut nested = Sequence::new("nested-color-resolution-parity");
+        nested.settings.color_space = ColorSpace::Rec2020;
+        nested.settings.color_management.missing_metadata_policy =
+            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+
+        let parent_tb = parent.time_base();
+        let nested_tb = nested.time_base();
+        let parent_override_id = AssetId::new();
+        let nested_detected_id = AssetId::new();
+        let nested_data_id = AssetId::new();
+        let nested_missing_id = AssetId::new();
+
+        parent.video_tracks[0]
+            .add_clip(Clip::new(
+                parent_override_id,
+                TimeCode::new(0, parent_tb),
+                TimeCode::new(10, parent_tb),
+            ))
+            .expect("add parent media clip");
+        let mut nested_track = Track::new_video("nested");
+        nested_track
+            .add_clip(Clip::new_nested_sequence(
+                nested.id,
+                TimeCode::new(0, parent_tb),
+                TimeCode::new(10, parent_tb),
+                Some("Nested".to_owned()),
+            ))
+            .expect("add nested sequence clip");
+        parent.video_tracks.push(nested_track);
+
+        nested.video_tracks[0]
+            .add_clip(Clip::new(
+                nested_detected_id,
+                TimeCode::new(0, nested_tb),
+                TimeCode::new(10, nested_tb),
+            ))
+            .expect("add nested detected clip");
+        for (name, asset_id) in [("data", nested_data_id), ("missing", nested_missing_id)] {
+            let mut track = Track::new_video(name);
+            track
+                .add_clip(Clip::new(
+                    asset_id,
+                    TimeCode::new(0, nested_tb),
+                    TimeCode::new(10, nested_tb),
+                ))
+                .expect("add nested media clip");
+            nested.video_tracks.push(track);
+        }
+
+        let mut asset_color_spaces = HashMap::new();
+        asset_color_spaces.insert(nested_detected_id, ColorSpace::Srgb);
+        let mut asset_interpretations = HashMap::new();
+        asset_interpretations.insert(
+            parent_override_id,
+            AssetMediaInterpretation {
+                color: mondrian_core::timeline_data::MediaColorInterpretation::Override {
+                    color_space: ColorSpace::SLog3,
+                },
+                ..AssetMediaInterpretation::default()
+            },
+        );
+        asset_interpretations.insert(
+            nested_data_id,
+            AssetMediaInterpretation {
+                payload: mondrian_core::timeline_data::AssetColorPayload::NonColorData,
+                ..AssetMediaInterpretation::default()
+            },
+        );
+        let project_color_management = ProjectColorManagement::default();
+        let nested_sequences = vec![nested.clone()];
+
+        let preview_counts = preview_input_color_resolution_counts_for_frame(
+            &parent,
+            &nested_sequences,
+            &asset_color_spaces,
+            &asset_interpretations,
+            &project_color_management,
+            ColorSpace::Rec709,
+            0,
+        )
+        .expect("preview nested counts");
+        let export_counts = mondrian_export::queue::export_input_color_resolution_counts_for_frame(
+            &mondrian_export::preset::TimelineExportInput {
+                sequence: parent,
+                sequences: nested_sequences,
+                asset_paths: HashMap::new(),
+                asset_color_spaces,
+                asset_interpretations,
+                asset_color_diagnostics: HashMap::new(),
+                range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
+                project_color_management,
+            },
+            0,
+        )
+        .expect("export nested counts");
+
+        assert_eq!(preview_counts, export_counts);
+        assert_eq!(preview_counts.total(), 4);
+        assert_eq!(
+            preview_counts.count(mondrian_timeline::sequence::InputColorResolutionSource::Override),
+            1
+        );
+        assert_eq!(
+            preview_counts
+                .count(mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata),
+            1
+        );
+        assert_eq!(
+            preview_counts
+                .count(mondrian_timeline::sequence::InputColorResolutionSource::DataTexture),
+            1
+        );
+        assert_eq!(
+            preview_counts.count(
+                mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
+            ),
             1
         );
     }
