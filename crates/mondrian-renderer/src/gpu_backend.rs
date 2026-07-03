@@ -563,7 +563,8 @@ impl GpuBackend {
 
         match rx.recv().unwrap_or(Err(wgpu::BufferAsyncError)) {
             Ok(()) => {
-                let mapped = readback.slice(..).get_mapped_range();
+                let mapped =
+                    readback.slice(..).get_mapped_range().expect("gpu readback mapped range");
                 let result = mapped.to_vec();
                 drop(mapped);
                 readback.unmap();
@@ -728,7 +729,8 @@ impl GpuBackend {
 
         match rx.recv().unwrap_or(Err(wgpu::BufferAsyncError)) {
             Ok(()) => {
-                let mapped = readback.slice(..).get_mapped_range();
+                let mapped =
+                    readback.slice(..).get_mapped_range().expect("gpu readback mapped range");
                 let result = mapped.to_vec();
                 drop(mapped);
                 readback.unmap();

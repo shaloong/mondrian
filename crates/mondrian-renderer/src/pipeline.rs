@@ -450,7 +450,7 @@ impl RenderPipeline {
             }
         }
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice.get_mapped_range().expect("gpu readback mapped range");
         let mut out = vec![0u8; (width as usize) * (height as usize) * 4];
         for row in 0..height as usize {
             let src_start = row * padded_bytes_per_row as usize;

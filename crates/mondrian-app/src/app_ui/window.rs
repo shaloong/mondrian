@@ -680,11 +680,13 @@ fn app_ui_display_output_contract(
     adapter: &wgpu::Adapter,
 ) -> Result<AppUiDisplayOutputContract, AppUiSurfaceColorContractError> {
     let capabilities = surface.get_capabilities(adapter);
-    let surface_color = choose_app_ui_surface_format(&capabilities.formats)?;
+    let surface_color = choose_app_ui_surface_format(&capabilities)?;
     Ok(AppUiDisplayOutputContract {
         surface_color,
         display_target: app_ui_display_target_for_window(window),
-        available_formats: capabilities.formats,
+        display_hdr_info: surface.display_hdr_info(adapter),
+        available_formats: capabilities.formats.clone(),
+        format_color_spaces: app_ui_surface_format_color_spaces(&capabilities),
         present_modes: capabilities.present_modes,
         alpha_modes: capabilities.alpha_modes,
     })
@@ -693,6 +695,7 @@ fn app_ui_display_output_contract(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppUiSurfaceColorContract {
     format: wgpu::TextureFormat,
+    color_space: wgpu::SurfaceColorSpace,
     encoding: AppUiSurfaceEncoding,
     hdr_mode: AppUiSurfaceHdrMode,
 }
@@ -707,13 +710,27 @@ enum AppUiSurfaceHdrMode {
     SdrOnly,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct AppUiDisplayOutputContract {
     surface_color: AppUiSurfaceColorContract,
     display_target: AppUiDisplayTarget,
+    display_hdr_info: wgpu::DisplayHdrInfo,
     available_formats: Vec<wgpu::TextureFormat>,
+    format_color_spaces: Vec<AppUiSurfaceFormatColorSpaces>,
     present_modes: Vec<wgpu::PresentMode>,
     alpha_modes: Vec<wgpu::CompositeAlphaMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppUiSurfaceFormatColorSpaces {
+    format: wgpu::TextureFormat,
+    srgb: bool,
+    extended_srgb_linear: bool,
+    display_p3: bool,
+    bt2100_pq: bool,
+    bt2100_hlg: bool,
+    extended_srgb: bool,
+    extended_display_p3: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -757,6 +774,7 @@ fn display_output_contract_requires_renderer_rebuild(
     next: &AppUiDisplayOutputContract,
 ) -> bool {
     previous.surface_color.format != next.surface_color.format
+        || previous.surface_color.color_space != next.surface_color.color_space
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -785,17 +803,29 @@ impl std::fmt::Display for AppUiSurfaceColorContractError {
 impl std::error::Error for AppUiSurfaceColorContractError {}
 
 fn choose_app_ui_surface_format(
-    formats: &[wgpu::TextureFormat],
+    capabilities: &wgpu::SurfaceCapabilities,
 ) -> Result<AppUiSurfaceColorContract, AppUiSurfaceColorContractError> {
-    if let Some(format) = formats.iter().copied().find(|format| is_srgb_surface_format(*format)) {
+    if let Some(format) = capabilities
+        .formats
+        .iter()
+        .copied()
+        .find(|format| is_srgb_surface_format(*format))
+    {
+        let color_spaces = capabilities.color_spaces(format);
+        if !color_spaces.contains(wgpu::SurfaceColorSpaces::SRGB) {
+            return Err(AppUiSurfaceColorContractError {
+                available_formats: capabilities.formats.clone(),
+            });
+        }
         return Ok(AppUiSurfaceColorContract {
             format,
+            color_space: wgpu::SurfaceColorSpace::Srgb,
             encoding: AppUiSurfaceEncoding::Srgb,
             hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
         });
     }
 
-    Err(AppUiSurfaceColorContractError { available_formats: formats.to_vec() })
+    Err(AppUiSurfaceColorContractError { available_formats: capabilities.formats.clone() })
 }
 
 fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
@@ -803,6 +833,30 @@ fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
         format,
         wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
     )
+}
+
+fn app_ui_surface_format_color_spaces(
+    capabilities: &wgpu::SurfaceCapabilities,
+) -> Vec<AppUiSurfaceFormatColorSpaces> {
+    capabilities
+        .format_capabilities
+        .iter()
+        .map(|capability| {
+            let color_spaces = capability.color_spaces;
+            AppUiSurfaceFormatColorSpaces {
+                format: capability.format,
+                srgb: color_spaces.contains(wgpu::SurfaceColorSpaces::SRGB),
+                extended_srgb_linear: color_spaces
+                    .contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR),
+                display_p3: color_spaces.contains(wgpu::SurfaceColorSpaces::DISPLAY_P3),
+                bt2100_pq: color_spaces.contains(wgpu::SurfaceColorSpaces::BT2100_PQ),
+                bt2100_hlg: color_spaces.contains(wgpu::SurfaceColorSpaces::BT2100_HLG),
+                extended_srgb: color_spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB),
+                extended_display_p3: color_spaces
+                    .contains(wgpu::SurfaceColorSpaces::EXTENDED_DISPLAY_P3),
+            }
+        })
+        .collect()
 }
 
 fn app_ui_display_target_for_window(window: &winit::window::Window) -> AppUiDisplayTarget {
@@ -903,6 +957,7 @@ fn trace_color_output_runtime(
     let surface_color_contract = display_output_contract.surface_color;
     tracing::trace!(
         surface_format = ?surface_color_contract.format,
+        surface_color_space = ?surface_color_contract.color_space,
         surface_encoding = ?surface_color_contract.encoding,
         surface_hdr_mode = ?surface_color_contract.hdr_mode,
         display_name = ?display_output_contract.display_target.name,
@@ -911,7 +966,12 @@ fn trace_color_output_runtime(
         display_scale_factor_ppm = display_output_contract.display_target.scale_factor_ppm,
         display_refresh_rate_millihertz =
             ?display_output_contract.display_target.refresh_rate_millihertz,
+        display_hdr_info = ?display_output_contract.display_hdr_info,
+        display_tone_map_headroom =
+            ?display_output_contract.display_hdr_info.tone_map_headroom(),
         available_surface_format_count = display_output_contract.available_formats.len(),
+        format_color_space_count = display_output_contract.format_color_spaces.len(),
+        format_color_spaces = ?display_output_contract.format_color_spaces,
         present_modes = ?display_output_contract.present_modes,
         alpha_modes = ?display_output_contract.alpha_modes,
         shader_cache_entries = diagnostics.shader_cache.entries,
@@ -962,6 +1022,7 @@ fn prepare_viewer_gpu_preview(
             output_color_space = ?frame.boundary.output_color_space,
             display_target = ?session.display_output_contract.display_target,
             surface_format = ?session.display_output_contract.surface_color.format,
+            surface_color_space = ?session.display_output_contract.surface_color.color_space,
             surface_hdr_mode = ?session.display_output_contract.surface_color.hdr_mode,
             blocker = ?blocker,
             "viewer GPU preview output boundary blocked by display output contract"
@@ -1199,6 +1260,7 @@ fn refresh_display_output_contract(
         display_output_contract_requires_renderer_rebuild(&previous, &next);
     session.display_output_contract = next;
     session.config.format = session.display_output_contract.surface_color.format;
+    session.config.color_space = session.display_output_contract.surface_color.color_space;
     if surface_format_changed {
         session.surface.configure(device, &session.config);
         session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
@@ -1209,6 +1271,7 @@ fn refresh_display_output_contract(
         surface_format_changed,
         display_target = ?session.display_output_contract.display_target,
         surface_format = ?session.display_output_contract.surface_color.format,
+        surface_color_space = ?session.display_output_contract.surface_color.color_space,
         surface_hdr_mode = ?session.display_output_contract.surface_color.hdr_mode,
         "app UI display output contract refreshed"
     );
@@ -1242,13 +1305,19 @@ impl AppUiWindowSession {
         let display_output_contract = app_ui_display_output_contract(&window, &surface, adapter)?;
         let surface_color_contract = display_output_contract.surface_color;
         config.format = surface_color_contract.format;
+        config.color_space = surface_color_contract.color_space;
         surface.configure(device, &config);
         tracing::info!(
             format = ?surface_color_contract.format,
+            color_space = ?surface_color_contract.color_space,
             encoding = ?surface_color_contract.encoding,
             hdr_mode = ?surface_color_contract.hdr_mode,
             display_target = ?display_output_contract.display_target,
+            display_hdr_info = ?display_output_contract.display_hdr_info,
+            display_tone_map_headroom =
+                ?display_output_contract.display_hdr_info.tone_map_headroom(),
             available_formats = ?display_output_contract.available_formats,
+            format_color_spaces = ?display_output_contract.format_color_spaces,
             present_modes = ?display_output_contract.present_modes,
             alpha_modes = ?display_output_contract.alpha_modes,
             "app UI surface color contract"
@@ -1621,16 +1690,45 @@ mod tests {
         assert!(!is_srgb_surface_format(wgpu::TextureFormat::Rgba8Unorm));
     }
 
+    fn test_surface_capabilities(
+        formats: Vec<wgpu::TextureFormat>,
+        format_capabilities: Vec<wgpu::SurfaceFormatCapabilities>,
+    ) -> wgpu::SurfaceCapabilities {
+        wgpu::SurfaceCapabilities {
+            formats,
+            format_capabilities,
+            present_modes: vec![wgpu::PresentMode::Fifo],
+            alpha_modes: vec![wgpu::CompositeAlphaMode::Auto],
+            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        }
+    }
+
     #[test]
     fn surface_format_choice_prefers_srgb_without_fallback() {
-        assert_eq!(
-            choose_app_ui_surface_format(&[
+        let capabilities = test_surface_capabilities(
+            vec![
                 wgpu::TextureFormat::Bgra8Unorm,
                 wgpu::TextureFormat::Rgba8UnormSrgb,
                 wgpu::TextureFormat::Bgra8UnormSrgb,
-            ]),
+            ],
+            vec![
+                wgpu::SurfaceFormatCapabilities {
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    color_spaces: wgpu::SurfaceColorSpaces::SRGB
+                        | wgpu::SurfaceColorSpaces::DISPLAY_P3,
+                },
+                wgpu::SurfaceFormatCapabilities {
+                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    color_spaces: wgpu::SurfaceColorSpaces::SRGB,
+                },
+            ],
+        );
+
+        assert_eq!(
+            choose_app_ui_surface_format(&capabilities),
             Ok(AppUiSurfaceColorContract {
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                color_space: wgpu::SurfaceColorSpace::Srgb,
                 encoding: AppUiSurfaceEncoding::Srgb,
                 hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
             })
@@ -1639,11 +1737,16 @@ mod tests {
 
     #[test]
     fn surface_format_choice_rejects_non_srgb_formats() {
-        assert_eq!(
-            choose_app_ui_surface_format(&[
+        let capabilities = test_surface_capabilities(
+            vec![
                 wgpu::TextureFormat::Bgra8Unorm,
-                wgpu::TextureFormat::Rgba8Unorm
-            ]),
+                wgpu::TextureFormat::Rgba8Unorm,
+            ],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            choose_app_ui_surface_format(&capabilities),
             Err(AppUiSurfaceColorContractError {
                 available_formats: vec![
                     wgpu::TextureFormat::Bgra8Unorm,
@@ -1653,10 +1756,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn surface_format_choice_rejects_srgb_format_without_srgb_color_space() {
+        let capabilities = test_surface_capabilities(
+            vec![wgpu::TextureFormat::Bgra8UnormSrgb],
+            vec![wgpu::SurfaceFormatCapabilities {
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                color_spaces: wgpu::SurfaceColorSpaces::DISPLAY_P3,
+            }],
+        );
+
+        assert_eq!(
+            choose_app_ui_surface_format(&capabilities),
+            Err(AppUiSurfaceColorContractError {
+                available_formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
+            })
+        );
+    }
+
     fn test_display_output_contract() -> AppUiDisplayOutputContract {
         AppUiDisplayOutputContract {
             surface_color: AppUiSurfaceColorContract {
                 format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                color_space: wgpu::SurfaceColorSpace::Srgb,
                 encoding: AppUiSurfaceEncoding::Srgb,
                 hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
             },
@@ -1667,7 +1789,18 @@ mod tests {
                 scale_factor_ppm: 1_000_000,
                 refresh_rate_millihertz: Some(60_000),
             },
+            display_hdr_info: wgpu::DisplayHdrInfo::default(),
             available_formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
+            format_color_spaces: vec![AppUiSurfaceFormatColorSpaces {
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                srgb: true,
+                extended_srgb_linear: false,
+                display_p3: false,
+                bt2100_pq: false,
+                bt2100_hlg: false,
+                extended_srgb: false,
+                extended_display_p3: false,
+            }],
             present_modes: vec![wgpu::PresentMode::Fifo],
             alpha_modes: vec![wgpu::CompositeAlphaMode::Auto],
         }
@@ -1722,6 +1855,20 @@ mod tests {
         let first = test_display_output_contract();
         let mut second = first.clone();
         second.surface_color.format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        assert!(display_output_contract_requires_gpu_preview_invalidation(
+            &first, &second
+        ));
+        assert!(display_output_contract_requires_renderer_rebuild(
+            &first, &second
+        ));
+    }
+
+    #[test]
+    fn display_output_contract_surface_color_space_change_rebuilds_renderer() {
+        let first = test_display_output_contract();
+        let mut second = first.clone();
+        second.surface_color.color_space = wgpu::SurfaceColorSpace::DisplayP3;
 
         assert!(display_output_contract_requires_gpu_preview_invalidation(
             &first, &second

@@ -3406,7 +3406,11 @@ impl OcioGpuWgpuUniformUploader {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: true,
         });
-        buffer.slice(..).get_mapped_range_mut().copy_from_slice(&packed.bytes);
+        buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("OCIO LUT upload mapped range")
+            .copy_from_slice(&packed.bytes);
         buffer.unmap();
         Some(OcioGpuWgpuUploadedUniformBuffer {
             resource_key: packed.resource_key,

@@ -3210,7 +3210,7 @@ mod tests {
         rx.recv()
             .expect("readback map callback should run")
             .expect("readback map should succeed");
-        slice.get_mapped_range().to_vec()
+        slice.get_mapped_range().expect("gpu readback mapped range").to_vec()
     }
 
     fn assert_rgba_close(expected: &[u8], actual: &[u8], tolerance: u8) {

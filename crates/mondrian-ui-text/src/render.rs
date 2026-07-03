@@ -1056,6 +1056,7 @@ mod tests {
                     compatible_surface: None,
                     power_preference: wgpu::PowerPreference::LowPower,
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 }))
                 .ok()?;
             let (device, queue) =
@@ -1144,7 +1145,7 @@ mod tests {
                 .expect("readback map callback should run")
                 .expect("readback map should succeed");
 
-            let mapped = slice.get_mapped_range();
+            let mapped = slice.get_mapped_range().expect("text readback mapped range");
             let mut out = vec![0u8; width as usize * height as usize * 4];
             for row in 0..height as usize {
                 let src_start = row * padded_bytes_per_row as usize;

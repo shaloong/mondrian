@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &cmds,
                             (sz.width, sz.height),
                         );
-                        f.present();
+                        q.present(f);
                     }
                     _ => {}
                 }

@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &cmds,
                             (sz.width, sz.height),
                         );
-                        f.present();
+                        q.present(f);
                     }
                     wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                         surf.configure(&dev, &cfg);

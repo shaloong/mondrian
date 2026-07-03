@@ -376,7 +376,7 @@ impl AppUiFrameRenderer {
                     &commands,
                     screen_size,
                 );
-                output.present();
+                queue.present(output);
                 presented_result(
                     frame_started,
                     glyph_upload_stats.upload_bytes,
@@ -395,7 +395,7 @@ impl AppUiFrameRenderer {
                     &commands,
                     screen_size,
                 );
-                output.present();
+                queue.present(output);
                 presented_result(
                     frame_started,
                     glyph_upload_stats.upload_bytes,

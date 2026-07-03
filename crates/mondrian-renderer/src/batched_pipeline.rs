@@ -891,7 +891,7 @@ impl BatchedCompositor {
             unpadded.div_ceil(align) * align
         };
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice.get_mapped_range().expect("gpu readback mapped range");
         let mut out = vec![0u8; width as usize * height as usize * 4];
         for row in 0..height as usize {
             let src = row * padded as usize;

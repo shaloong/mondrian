@@ -270,9 +270,11 @@ which pixel budget was touched without reconstructing the plan externally.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
 the surface/backend lifetime and traces its cache/resource diagnostics with the
 frame renderer diagnostics. The same session also owns the display-output
-contract for the current wgpu surface and monitor: selected sRGB surface format,
-SDR/HDR mode, available surface formats, present modes, alpha modes, and monitor
-fingerprint. Viewer preview evaluation now splits at the correct boundary:
+contract for the current wgpu 30 surface and monitor: selected sRGB surface
+format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
+per-format surface color-space capabilities, `display_hdr_info` and tone-map
+headroom diagnostics, present modes, alpha modes, and monitor fingerprint.
+Viewer preview evaluation now splits at the correct boundary:
 `AppUiPreviewService` resolves the timeline and composites a working-space
 `CpuColorFrame`, while the app window validates the requested display boundary
 against that contract and records the display/output boundary through the
@@ -282,10 +284,11 @@ fallbacks. Window resize, scale-factor, and move events refresh the
 display-output contract. When that contract changes, the window unregisters the
 previous external preview texture, clears output-runtime frame resources, and
 marks the viewer frame dirty; if the selected surface format changes, it also
-reconfigures the surface and rebuilds the frame renderer for the new format. The
-preview service may keep a CPU `RasterImage` as the correctness/fallback path,
-but it does not own wgpu objects and must not create short-lived GPU output
-runtimes inside CPU media workers.
+reconfigures the surface and rebuilds the frame renderer for the new format. A
+selected surface color-space change follows the same rebuild path. The preview
+service may keep a CPU `RasterImage` as the correctness/fallback path, but it
+does not own wgpu objects and must not create short-lived GPU output runtimes
+inside CPU media workers.
 The self-hosted UI renderer has an external GPU texture plane for that preview
 path. `DrawCommand::ExternalTexture` carries only a stable renderer-owned key,
 bounds, UVs, and tint; widgets and panel models do not own wgpu objects.

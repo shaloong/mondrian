@@ -88,7 +88,7 @@ impl UiPipeline {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("main"),
-                buffers: &[RectVertex::layout()],
+                buffers: &[Some(RectVertex::layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {

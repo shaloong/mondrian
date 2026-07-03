@@ -78,23 +78,28 @@ float pixel blend contract; any temporary RGBA8 path inside legacy effects or
 transforms must remain explicit and visible in tests until that subsystem has
 its own float/linear contract.
 
-The app UI presentation surface is also part of the color contract. The wgpu
-window session must select an explicit sRGB SDR surface format and fail closed
-when the backend exposes only non-sRGB presentation formats. It must not fall
-back to a non-sRGB swapchain, because that would hide OS/backend display
-management errors behind a visually plausible but untrusted viewer path.
+The app UI presentation surface is also part of the color contract. Mondrian
+targets wgpu 30 or newer for presentation because surface color space selection
+and `Surface::display_hdr_info(...)` are required display-management evidence.
+The wgpu window session must select an explicit sRGB SDR surface format and
+`SurfaceColorSpace::Srgb`, failing closed when the backend exposes only
+non-sRGB presentation formats or the chosen format cannot be configured with
+sRGB color space. It must not fall back to a non-sRGB swapchain, because that
+would hide OS/backend display management errors behind a visually plausible but
+untrusted viewer path.
 Preview display color space is resolved from the sequence/project
 `DisplayManagementPolicy` before building `RenderOutputColorBoundary`; the app
 window then validates that boundary against its real display-output contract
-(surface format, SDR/HDR mode, present modes, alpha modes, and current monitor
-fingerprint). HDR preview output is blocked on an SDR-only surface instead of
-silently presenting through SDR. Window resize, scale-factor changes, and moves
-refresh the display-output contract; any contract change invalidates the GPU
-viewer output texture and output-boundary runtime frame resources, and surface
-format changes rebuild the UI frame renderer before presenting again. EDR,
-monitor ICC correction, true HDR swapchains, and dynamic per-monitor profile
-switching require additional platform-specific contracts before they can be
-enabled.
+(surface format, selected `SurfaceColorSpace`, SDR/HDR mode, per-format color
+space capabilities, `display_hdr_info` snapshot, present modes, alpha modes, and
+current monitor fingerprint). HDR preview output is blocked on an SDR-only
+surface instead of silently presenting through SDR. Window resize, scale-factor
+changes, and moves refresh the display-output contract; any contract change
+invalidates the GPU viewer output texture and output-boundary runtime frame
+resources, and surface format or color-space changes rebuild the UI frame
+renderer before presenting again. EDR, monitor ICC correction, true HDR
+swapchains, and dynamic per-monitor profile switching require additional
+platform-specific contracts before they can be enabled.
 
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are
