@@ -21,7 +21,7 @@ use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
-use mondrian_export::queue::JobStatus;
+use mondrian_export::queue::{ExportJobColorDiagnostics, JobStatus};
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
@@ -1253,6 +1253,7 @@ pub struct ExportJobModel {
     pub id: JobId,
     pub title: String,
     pub status: String,
+    pub color_diagnostics: Option<String>,
     pub progress_percent: u8,
     pub can_cancel: bool,
     pub is_completed: bool,
@@ -1412,6 +1413,7 @@ impl ExportPanelModel {
                 id: job.id,
                 title: export_job_title(job.config.output_path.as_path()),
                 status: export_job_status_label(&job.status),
+                color_diagnostics: export_job_color_diagnostics_label(job.diagnostics.color),
                 progress_percent: (job.progress.clamp(0.0, 1.0) * 100.0).round() as u8,
                 can_cancel: matches!(
                     job.status,
@@ -3116,7 +3118,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
 }
 
 fn export_job_row(job: &ExportJobModel) -> PropertyRow {
-    let summary = FlexContainer::column(vec![
+    let mut summary_children = vec![
         FlexChild::fixed(Box::new(
             Label::new(job.title.clone()).with_padding(0.0, 0.0),
         )),
@@ -3126,8 +3128,13 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
                 .wrapped()
                 .with_padding(0.0, 0.0),
         )),
-    ])
-    .with_gap(4.0);
+    ];
+    if let Some(color_diagnostics) = &job.color_diagnostics {
+        summary_children.push(FlexChild::fixed(Box::new(
+            Label::new(color_diagnostics.clone()).muted().wrapped().with_padding(0.0, 0.0),
+        )));
+    }
+    let summary = FlexContainer::column(summary_children).with_gap(4.0);
 
     let content: Box<dyn Widget> = if job.can_cancel {
         let cancel = AppIcon::Trash.text_button_or_label("取消").on_click(
@@ -3144,7 +3151,29 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
         Box::new(summary)
     };
 
-    PropertyRow::new("任务", content).with_height(if job.can_cancel { 48.0 } else { 42.0 })
+    let base_height = if job.can_cancel { 48.0 } else { 42.0 };
+    let height = if job.color_diagnostics.is_some() {
+        base_height + 18.0
+    } else {
+        base_height
+    };
+    PropertyRow::new("任务", content).with_height(height)
+}
+
+fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {
+    let counts = diagnostics.input_resolution_source_counts;
+    if diagnostics.diagnosed_frames == 0 && counts.total() == 0 {
+        return None;
+    }
+    Some(format!(
+        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {}",
+        diagnostics.diagnosed_frames,
+        counts.detected_metadata,
+        counts.override_count,
+        counts.policy_assumptions(),
+        counts.data_textures(),
+        counts.policy_rejections()
+    ))
 }
 
 fn export_default_file_name(preset: Option<&ExportPreset>) -> String {
@@ -4624,6 +4653,14 @@ mod tests {
         let mut encoding = render_job("E:/renders/encoding.mp4");
         encoding.status = JobStatus::Encoding;
         encoding.progress = 0.82;
+        encoding.diagnostics.color.record_input_resolution_counts({
+            let mut counts =
+                mondrian_timeline::sequence::InputColorResolutionSourceCounts::default();
+            counts
+                .record(mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata);
+            counts.record(mondrian_timeline::sequence::InputColorResolutionSource::Override);
+            counts
+        });
         let encoding_id = state.render_queue.enqueue(encoding);
         let mut failed = render_job("E:/renders/failed.mp4");
         failed.status = JobStatus::Failed("disk full".to_owned());
@@ -4647,6 +4684,10 @@ mod tests {
             model.jobs.iter().find(|job| job.id == encoding_id).expect("encoding job model");
         assert_eq!(encoding.title, "encoding.mp4");
         assert_eq!(encoding.status, "Encoding");
+        assert_eq!(
+            encoding.color_diagnostics.as_deref(),
+            Some("色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0")
+        );
         assert_eq!(encoding.progress_percent, 82);
         assert!(encoding.can_cancel);
         assert!(!encoding.is_completed);
