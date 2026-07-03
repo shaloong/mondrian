@@ -184,6 +184,12 @@ composite reasons (`layer`, `reason`, `count`) derived from renderer composite
 diagnostics. These reason details are the migration contract for removing old
 blend/effect/transform paths; dashboards and CI budgets should consume them
 directly instead of re-inferring fallback causes from aggregate counters.
+Headless preview smoke reports must also carry GPU preview candidate counters:
+request, ready/current/loading/unavailable outcomes, candidate pixels, and
+external texture registration handoff counters. These counters prove that the
+preview service produced a working-space candidate for the app-window GPU
+output boundary; the window-session GPU output telemetry remains the authority
+for whether wgpu recording and external texture registration actually succeeded.
 
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative

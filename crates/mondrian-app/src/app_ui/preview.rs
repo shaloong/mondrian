@@ -103,6 +103,24 @@ impl AppUiPreviewService {
             loading_frames: self.metrics.loading_frames.get(),
             stale_frames: self.metrics.stale_frames.get(),
             unavailable_frames: self.metrics.unavailable_frames.get(),
+            gpu_preview_candidate_requests: self.metrics.gpu_preview_candidate_requests.get(),
+            gpu_preview_candidate_ready: self.metrics.gpu_preview_candidate_ready.get(),
+            gpu_preview_candidate_current: self.metrics.gpu_preview_candidate_current.get(),
+            gpu_preview_candidate_loading: self.metrics.gpu_preview_candidate_loading.get(),
+            gpu_preview_candidate_unavailable: self.metrics.gpu_preview_candidate_unavailable.get(),
+            gpu_preview_candidate_pixels: self.metrics.gpu_preview_candidate_pixels.get(),
+            gpu_preview_external_frames_registered: self
+                .metrics
+                .gpu_preview_external_frames_registered
+                .get(),
+            gpu_preview_external_frames_rejected: self
+                .metrics
+                .gpu_preview_external_frames_rejected
+                .get(),
+            gpu_preview_external_frames_cleared: self
+                .metrics
+                .gpu_preview_external_frames_cleared
+                .get(),
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
             media_failure_hits: self.metrics.media_failure_hits.get(),
@@ -310,12 +328,14 @@ impl AppUiPreviewService {
         &self,
         state: &AppState,
     ) -> AppUiGpuPreviewFrameState {
+        bump(&self.metrics.gpu_preview_candidate_requests);
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
         self.current_frame_pending.set(false);
         let Some(sequence) = state.sequence.as_ref() else {
             self.scheduler.prune_obsolete();
             self.external_viewer_frame.replace(None);
+            bump(&self.metrics.gpu_preview_candidate_unavailable);
             return AppUiGpuPreviewFrameState::Unavailable;
         };
         let frame = state.current_frame().max(0);
@@ -339,22 +359,26 @@ impl AppUiPreviewService {
             None if self.current_frame_pending.get() => {
                 self.schedule_media_prefetches(state, sequence, frame, width, height);
                 self.scheduler.prune_obsolete();
+                bump(&self.metrics.gpu_preview_candidate_loading);
                 return AppUiGpuPreviewFrameState::Loading;
             }
             None => {
                 self.scheduler.prune_obsolete();
                 self.external_viewer_frame.replace(None);
+                bump(&self.metrics.gpu_preview_candidate_unavailable);
                 return AppUiGpuPreviewFrameState::Unavailable;
             }
         };
         let Some(cache_key) = resolved.cache_key.clone() else {
             self.scheduler.prune_obsolete();
             self.external_viewer_frame.replace(None);
+            bump(&self.metrics.gpu_preview_candidate_unavailable);
             return AppUiGpuPreviewFrameState::Unavailable;
         };
         if self.external_viewer_frame_for_key(&cache_key).is_some() {
             self.schedule_media_prefetches(state, sequence, frame, width, height);
             self.scheduler.prune_obsolete();
+            bump(&self.metrics.gpu_preview_candidate_current);
             return AppUiGpuPreviewFrameState::Current;
         }
         let output = match composite_resolved_preview_working(
@@ -368,12 +392,18 @@ impl AppUiPreviewService {
             Err(err) => {
                 tracing::warn!("viewer GPU preview working composite failed: {err}");
                 self.scheduler.prune_obsolete();
+                bump(&self.metrics.gpu_preview_candidate_unavailable);
                 return AppUiGpuPreviewFrameState::Unavailable;
             }
         };
         self.record_composite(output.composite_diagnostics);
         self.schedule_media_prefetches(state, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
+        bump(&self.metrics.gpu_preview_candidate_ready);
+        add_cell(
+            &self.metrics.gpu_preview_candidate_pixels,
+            (width as u64).saturating_mul(height as u64),
+        );
         AppUiGpuPreviewFrameState::Ready(Box::new(AppUiGpuPreviewFrame {
             cache_key,
             sequence_id: sequence.id,
@@ -393,18 +423,21 @@ impl AppUiPreviewService {
     ) -> bool {
         let Some(content) = ViewerExternalTextureFrame::new(texture_key, frame.width, frame.height)
         else {
+            bump(&self.metrics.gpu_preview_external_frames_rejected);
             return false;
         };
         self.external_viewer_frame.replace(Some(ScopedExternalViewerFrame {
             cache_key: frame.cache_key.clone(),
             content,
         }));
+        bump(&self.metrics.gpu_preview_external_frames_registered);
         true
     }
 
     /// Clear any external GPU viewer frame currently advertised by the service.
     pub(crate) fn clear_external_viewer_frame(&self) {
         self.external_viewer_frame.replace(None);
+        bump(&self.metrics.gpu_preview_external_frames_cleared);
     }
 
     fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
@@ -718,6 +751,24 @@ pub struct AppUiPreviewDiagnostics {
     pub stale_frames: u64,
     /// Requests with no renderable preview frame.
     pub unavailable_frames: u64,
+    /// Requests for a CPU working-frame candidate for the app-window GPU output path.
+    pub gpu_preview_candidate_requests: u64,
+    /// GPU preview candidate requests that produced a working-frame candidate.
+    pub gpu_preview_candidate_ready: u64,
+    /// GPU preview candidate requests skipped because the matching external texture is current.
+    pub gpu_preview_candidate_current: u64,
+    /// GPU preview candidate requests waiting on pending media.
+    pub gpu_preview_candidate_loading: u64,
+    /// GPU preview candidate requests with no renderable frame.
+    pub gpu_preview_candidate_unavailable: u64,
+    /// Pixels in working-frame candidates handed to the app-window GPU output path.
+    pub gpu_preview_candidate_pixels: u64,
+    /// External GPU preview frames accepted into the preview service.
+    pub gpu_preview_external_frames_registered: u64,
+    /// External GPU preview frames rejected before becoming viewer content.
+    pub gpu_preview_external_frames_rejected: u64,
+    /// External GPU preview frames cleared by the app-window output path.
+    pub gpu_preview_external_frames_cleared: u64,
     /// Media preview cache hits.
     pub media_cache_hits: u64,
     /// Media preview cache misses.
@@ -1519,6 +1570,15 @@ struct AppUiPreviewMetrics {
     loading_frames: Cell<u64>,
     stale_frames: Cell<u64>,
     unavailable_frames: Cell<u64>,
+    gpu_preview_candidate_requests: Cell<u64>,
+    gpu_preview_candidate_ready: Cell<u64>,
+    gpu_preview_candidate_current: Cell<u64>,
+    gpu_preview_candidate_loading: Cell<u64>,
+    gpu_preview_candidate_unavailable: Cell<u64>,
+    gpu_preview_candidate_pixels: Cell<u64>,
+    gpu_preview_external_frames_registered: Cell<u64>,
+    gpu_preview_external_frames_rejected: Cell<u64>,
+    gpu_preview_external_frames_cleared: Cell<u64>,
     viewer_frame_cache_hits: Cell<u64>,
     viewer_frame_cache_misses: Cell<u64>,
     media_cache_hits: Cell<u64>,
@@ -2015,6 +2075,14 @@ mod tests {
         assert_eq!(frame.working_frame.descriptor().width, 960);
         assert_eq!(frame.working_frame.descriptor().height, 540);
         assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.gpu_preview_candidate_requests, 1);
+        assert_eq!(diagnostics.gpu_preview_candidate_ready, 1);
+        assert_eq!(diagnostics.gpu_preview_candidate_current, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_loading, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_unavailable, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_pixels, 960_u64 * 540);
     }
 
     #[test]
@@ -2040,6 +2108,13 @@ mod tests {
             }
             other => panic!("expected external GPU preview frame, got {other:?}"),
         }
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.gpu_preview_candidate_requests, 2);
+        assert_eq!(diagnostics.gpu_preview_candidate_ready, 1);
+        assert_eq!(diagnostics.gpu_preview_candidate_current, 1);
+        assert_eq!(diagnostics.gpu_preview_external_frames_registered, 1);
+        assert_eq!(diagnostics.gpu_preview_external_frames_rejected, 0);
+        assert_eq!(diagnostics.gpu_preview_external_frames_cleared, 0);
     }
 
     #[test]
@@ -2059,6 +2134,15 @@ mod tests {
         assert_eq!(diagnostics.loading_frames, 0);
         assert_eq!(diagnostics.stale_frames, 0);
         assert_eq!(diagnostics.unavailable_frames, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_requests, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_ready, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_current, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_loading, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_unavailable, 0);
+        assert_eq!(diagnostics.gpu_preview_candidate_pixels, 0);
+        assert_eq!(diagnostics.gpu_preview_external_frames_registered, 0);
+        assert_eq!(diagnostics.gpu_preview_external_frames_rejected, 0);
+        assert_eq!(diagnostics.gpu_preview_external_frames_cleared, 0);
         assert_eq!(diagnostics.viewer_frame_cache_hits, 0);
         assert_eq!(diagnostics.viewer_frame_cache_misses, 1);
         assert_eq!(diagnostics.viewer_frame_cache_entries, 1);

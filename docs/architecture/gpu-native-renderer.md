@@ -300,6 +300,12 @@ rejected registrations accumulate the actual `RenderColorStageDiagnostics`
 returned by `RenderGpuOutputStageRecord`, so logs and smoke tests can prove the
 main preview path used upload + native GPU color + optional readback rather than
 inferring it from model state.
+Headless smoke tests cannot create this window/session boundary, so
+`AppUiPreviewService::diagnostics()` separately reports GPU preview candidate
+requests, ready/current/loading/unavailable outcomes, candidate pixels, and
+external-frame handoff counters. Those counters prove the service produced a
+working-frame candidate for the window path; they do not replace the
+window-session telemetry for actual wgpu output recording.
 The self-hosted UI renderer has an external GPU texture plane for that preview
 path. `DrawCommand::ExternalTexture` carries only a stable renderer-owned key,
 bounds, UVs, and tint; widgets and panel models do not own wgpu objects.

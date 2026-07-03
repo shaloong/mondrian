@@ -107,18 +107,23 @@ worker queue/pending set are bounded. When playback outruns decode, obsolete or
 excess preview jobs are dropped instead of back-pressuring the UI thread.
 `AppUiPreviewService::diagnostics()` exposes render, cache, queue, decode, and
 scheduler counters so performance tooling can distinguish cache misses,
-backpressure drops, stale completions, and decode failures without changing
-timeline evaluation. The app UI scale smoke test serializes a preview diagnostics
-probe into its JSON report and includes a separate preview-playback refresh case
-without changing the existing UI-only refresh benchmark paths.
+backpressure drops, stale completions, decode failures, and GPU preview
+candidate readiness without changing timeline evaluation. GPU preview candidate
+counters are intentionally scoped to the headless service boundary: they prove
+that a working-space frame was produced for the app-window GPU output path, not
+that wgpu presentation recording succeeded. The app UI scale smoke test
+serializes a preview diagnostics probe into its JSON report and includes a
+separate preview-playback refresh case without changing the existing UI-only
+refresh benchmark paths.
 `preview_media_decode_cache_smoke` extends this coverage with a generated
 FFmpeg fixture and exercises real media import, decode readiness, cache-hit
-refreshes, and sequential-frame preview readiness as an ignored/manual perf
-probe.
+refreshes, sequential-frame preview readiness, and a GPU preview candidate probe
+as an ignored/manual perf probe.
 `preview_media_continuous_playback_smoke` uses the same generated media path to
 simulate a 30fps playback window and records `Ready`/`Loading`/`Stale`/
-`Unavailable` counts, with the contract that steady playback keeps a current or
-stale frame visible instead of falling through to an unavailable viewer.
+`Unavailable` counts plus a GPU preview candidate probe, with the contract that
+steady playback keeps a current or stale frame visible instead of falling
+through to an unavailable viewer.
 
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`

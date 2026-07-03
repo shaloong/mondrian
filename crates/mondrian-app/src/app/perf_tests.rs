@@ -428,6 +428,7 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
             preview_probe_threshold_ms,
             || {
                 let _ = preview_service.viewer_preview_for_state(&state);
+                let _ = preview_service.gpu_preview_frame_for_state(&state);
                 preview_diagnostics = preview_service.diagnostics();
                 Ok(())
             },
@@ -510,6 +511,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
     let cache_iterations = env_usize_clamped("MONDRIAN_PREVIEW_MEDIA_CACHE_ITERS", 30, 1, 500);
     let first_frame_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_FIRST_READY_MS", 10_000);
     let cache_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_CACHE_REFRESH_MS", 1_000);
+    let gpu_candidate_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_GPU_CANDIDATE_MS", 1_000);
     let sequential_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_SEQUENCE_READY_MS", 8_000);
     let ready_timeout =
         Duration::from_millis(env_u128("MONDRIAN_PREVIEW_MEDIA_READY_TIMEOUT_MS", 10_000) as u64);
@@ -566,6 +568,16 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             },
         )?;
 
+        let gpu_candidate_case = run_case(
+            "preview_media.gpu_candidate_ready",
+            1,
+            gpu_candidate_threshold_ms,
+            || {
+                let _ = preview_service.gpu_preview_frame_for_state(&state);
+                Ok(())
+            },
+        )?;
+
         let preview_diagnostics = preview_service.diagnostics();
         Ok(PreviewMediaPerfReport {
             scenario: "preview_media_decode_cache",
@@ -573,7 +585,12 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             cache_iterations,
             preview_diagnostics,
             preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
-            cases: vec![first_frame_case, cached_frame_case, sequential_case],
+            cases: vec![
+                first_frame_case,
+                cached_frame_case,
+                sequential_case,
+                gpu_candidate_case,
+            ],
         })
     })();
 
@@ -606,6 +623,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
     let frame_interval_ms =
         env_usize_clamped("MONDRIAN_PREVIEW_PLAYBACK_FRAME_MS", 33, 1, 250) as u64;
     let playback_threshold_ms = env_u128("MONDRIAN_PREVIEW_PLAYBACK_WINDOW_MS", 8_000);
+    let gpu_candidate_threshold_ms = env_u128("MONDRIAN_PREVIEW_PLAYBACK_GPU_CANDIDATE_MS", 1_000);
     let ready_timeout = Duration::from_millis(env_u128(
         "MONDRIAN_PREVIEW_PLAYBACK_READY_TIMEOUT_MS",
         10_000,
@@ -653,6 +671,16 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         )?;
         state.pause();
 
+        let gpu_candidate_case = run_case(
+            "preview_media.playback_gpu_candidate_ready",
+            1,
+            gpu_candidate_threshold_ms,
+            || {
+                let _ = preview_service.gpu_preview_frame_for_state(&state);
+                Ok(())
+            },
+        )?;
+
         anyhow::ensure!(
             readiness.unavailable == 0,
             "continuous playback returned unavailable frames: {:?}; diagnostics: {:?}",
@@ -674,7 +702,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             readiness,
             preview_diagnostics,
             preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
-            cases: vec![playback_case],
+            cases: vec![playback_case, gpu_candidate_case],
         })
     })();
 

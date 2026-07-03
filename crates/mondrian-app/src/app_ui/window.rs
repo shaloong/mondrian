@@ -101,7 +101,29 @@ struct AppUiViewerGpuOutputTelemetry {
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+struct AppUiViewerGpuOutputDiagnostics {
+    invocations: u64,
+    non_workspace_skips: u64,
+    current_skips: u64,
+    loading_skips: u64,
+    unavailable_skips: u64,
+    invalid_texture_keys: u64,
+    display_contract_blockers: u64,
+    record_failures: u64,
+    missing_output_textures: u64,
+    registered_frames: u64,
+    rejected_external_frames: u64,
+    stage_total_stages: u64,
+    stage_upload_stages: u64,
+    stage_gpu_color_stages: u64,
+    stage_readback_stages: u64,
+    stage_gpu_blockers: u64,
+    stage_pixels: u64,
+    last_outcome: Option<AppUiViewerGpuOutputOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiViewerGpuOutputOutcome {
     NonWorkspace,
     Current,
@@ -116,6 +138,29 @@ enum AppUiViewerGpuOutputOutcome {
 }
 
 impl AppUiViewerGpuOutputTelemetry {
+    fn diagnostics(self) -> AppUiViewerGpuOutputDiagnostics {
+        AppUiViewerGpuOutputDiagnostics {
+            invocations: self.invocations,
+            non_workspace_skips: self.non_workspace_skips,
+            current_skips: self.current_skips,
+            loading_skips: self.loading_skips,
+            unavailable_skips: self.unavailable_skips,
+            invalid_texture_keys: self.invalid_texture_keys,
+            display_contract_blockers: self.display_contract_blockers,
+            record_failures: self.record_failures,
+            missing_output_textures: self.missing_output_textures,
+            registered_frames: self.registered_frames,
+            rejected_external_frames: self.rejected_external_frames,
+            stage_total_stages: self.accumulated_stage_diagnostics.total_stages,
+            stage_upload_stages: self.accumulated_stage_diagnostics.upload_stages,
+            stage_gpu_color_stages: self.accumulated_stage_diagnostics.gpu_color_stages,
+            stage_readback_stages: self.accumulated_stage_diagnostics.readback_stages,
+            stage_gpu_blockers: self.accumulated_stage_diagnostics.gpu_blockers,
+            stage_pixels: self.accumulated_stage_diagnostics.stage_pixels,
+            last_outcome: self.last_outcome,
+        }
+    }
+
     fn record_invocation(&mut self) {
         self.invocations = self.invocations.saturating_add(1);
     }
@@ -1168,25 +1213,26 @@ fn trace_color_output_runtime(
 }
 
 fn trace_viewer_gpu_output_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) {
+    let diagnostics = telemetry.diagnostics();
     tracing::trace!(
-        invocations = telemetry.invocations,
-        non_workspace_skips = telemetry.non_workspace_skips,
-        current_skips = telemetry.current_skips,
-        loading_skips = telemetry.loading_skips,
-        unavailable_skips = telemetry.unavailable_skips,
-        invalid_texture_keys = telemetry.invalid_texture_keys,
-        display_contract_blockers = telemetry.display_contract_blockers,
-        record_failures = telemetry.record_failures,
-        missing_output_textures = telemetry.missing_output_textures,
-        registered_frames = telemetry.registered_frames,
-        rejected_external_frames = telemetry.rejected_external_frames,
-        stage_total_stages = telemetry.accumulated_stage_diagnostics.total_stages,
-        stage_upload_stages = telemetry.accumulated_stage_diagnostics.upload_stages,
-        stage_gpu_color_stages = telemetry.accumulated_stage_diagnostics.gpu_color_stages,
-        stage_readback_stages = telemetry.accumulated_stage_diagnostics.readback_stages,
-        stage_gpu_blockers = telemetry.accumulated_stage_diagnostics.gpu_blockers,
-        stage_pixels = telemetry.accumulated_stage_diagnostics.stage_pixels,
-        last_outcome = ?telemetry.last_outcome,
+        invocations = diagnostics.invocations,
+        non_workspace_skips = diagnostics.non_workspace_skips,
+        current_skips = diagnostics.current_skips,
+        loading_skips = diagnostics.loading_skips,
+        unavailable_skips = diagnostics.unavailable_skips,
+        invalid_texture_keys = diagnostics.invalid_texture_keys,
+        display_contract_blockers = diagnostics.display_contract_blockers,
+        record_failures = diagnostics.record_failures,
+        missing_output_textures = diagnostics.missing_output_textures,
+        registered_frames = diagnostics.registered_frames,
+        rejected_external_frames = diagnostics.rejected_external_frames,
+        stage_total_stages = diagnostics.stage_total_stages,
+        stage_upload_stages = diagnostics.stage_upload_stages,
+        stage_gpu_color_stages = diagnostics.stage_gpu_color_stages,
+        stage_readback_stages = diagnostics.stage_readback_stages,
+        stage_gpu_blockers = diagnostics.stage_gpu_blockers,
+        stage_pixels = diagnostics.stage_pixels,
+        last_outcome = ?diagnostics.last_outcome,
         "app UI viewer GPU output telemetry"
     );
 }
@@ -2266,6 +2312,20 @@ mod tests {
                 readback_stages: 1,
                 stage_pixels: 50,
                 ..RenderColorStageDiagnostics::default()
+            }
+        );
+        assert_eq!(
+            telemetry.diagnostics(),
+            AppUiViewerGpuOutputDiagnostics {
+                registered_frames: 1,
+                rejected_external_frames: 1,
+                stage_total_stages: 5,
+                stage_upload_stages: 2,
+                stage_gpu_color_stages: 2,
+                stage_readback_stages: 1,
+                stage_pixels: 50,
+                last_outcome: Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected),
+                ..AppUiViewerGpuOutputDiagnostics::default()
             }
         );
     }
