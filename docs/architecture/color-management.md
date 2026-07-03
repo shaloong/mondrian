@@ -92,14 +92,22 @@ Preview display color space is resolved from the sequence/project
 window then validates that boundary against its real display-output contract
 (surface format, selected `SurfaceColorSpace`, SDR/HDR mode, per-format color
 space capabilities, `display_hdr_info` snapshot, present modes, alpha modes, and
-current monitor fingerprint). HDR preview output is blocked on an SDR-only
-surface instead of silently presenting through SDR. Window resize, scale-factor
-changes, and moves refresh the display-output contract; any contract change
-invalidates the GPU viewer output texture and output-boundary runtime frame
-resources, and surface format or color-space changes rebuild the UI frame
-renderer before presenting again. EDR, monitor ICC correction, true HDR
-swapchains, and dynamic per-monitor profile switching require additional
-platform-specific contracts before they can be enabled.
+current monitor fingerprint). Display preview output is accepted only when the
+requested output color space has a direct presentation contract on the selected
+surface color space. Rec.709/sRGB requires `SurfaceColorSpace::Srgb`, DCI-P3
+requires `DisplayP3`, Rec.2100 PQ requires `Bt2100Pq`, and Rec.2100 HLG
+requires `Bt2100Hlg`; Rec.2020 SDR and camera-log acquisition spaces are not
+presentation surfaces and are blocked until the viewer resolves them through an
+explicit display transform. HDR preview output is therefore blocked on an
+SDR-only surface instead of silently presenting through SDR, and wide-gamut
+preview output is blocked on an sRGB surface instead of relying on OS/backend
+implicit conversion. Window resize, scale-factor changes, and moves refresh the
+display-output contract; any contract change invalidates the GPU viewer output
+texture and output-boundary runtime frame resources, and surface format or
+color-space changes rebuild the UI frame renderer before presenting again. EDR,
+monitor ICC correction, true HDR swapchains, and dynamic per-monitor profile
+switching require additional platform-specific contracts before they can be
+enabled.
 
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are

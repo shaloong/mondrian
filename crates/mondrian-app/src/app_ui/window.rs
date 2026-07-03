@@ -750,15 +750,49 @@ impl AppUiDisplayOutputContract {
         if boundary.target != RenderOutputColorBoundaryTarget::Display {
             return None;
         }
+        let supported_surface_color_spaces =
+            self.supported_surface_color_spaces_for_selected_format();
         if boundary.output_color_space.is_hdr()
             && self.surface_color.hdr_mode == AppUiSurfaceHdrMode::SdrOnly
         {
             return Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
                 output_color_space: boundary.output_color_space,
+                selected_surface_color_space: self.surface_color.color_space,
                 surface_hdr_mode: self.surface_color.hdr_mode,
+                supported_surface_color_spaces,
             });
         }
-        None
+
+        if app_ui_surface_color_space_matches_display_output(
+            self.surface_color.color_space,
+            boundary.output_color_space,
+        ) {
+            return None;
+        }
+
+        if boundary.output_color_space.is_hdr() {
+            return Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
+                output_color_space: boundary.output_color_space,
+                selected_surface_color_space: self.surface_color.color_space,
+                surface_hdr_mode: self.surface_color.hdr_mode,
+                supported_surface_color_spaces,
+            });
+        }
+        Some(
+            AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
+                output_color_space: boundary.output_color_space,
+                selected_surface_color_space: self.surface_color.color_space,
+                supported_surface_color_spaces,
+            },
+        )
+    }
+
+    fn supported_surface_color_spaces_for_selected_format(&self) -> Vec<wgpu::SurfaceColorSpace> {
+        self.format_color_spaces
+            .iter()
+            .find(|format_color_spaces| format_color_spaces.format == self.surface_color.format)
+            .map(AppUiSurfaceFormatColorSpaces::supported_surface_color_spaces)
+            .unwrap_or_default()
     }
 }
 
@@ -781,8 +815,60 @@ fn display_output_contract_requires_renderer_rebuild(
 enum AppUiDisplayBoundaryBlocker {
     HdrOutputRequiresHdrSurface {
         output_color_space: ColorSpace,
+        selected_surface_color_space: wgpu::SurfaceColorSpace,
         surface_hdr_mode: AppUiSurfaceHdrMode,
+        supported_surface_color_spaces: Vec<wgpu::SurfaceColorSpace>,
     },
+    OutputColorSpaceRequiresSurfaceColorSpace {
+        output_color_space: ColorSpace,
+        selected_surface_color_space: wgpu::SurfaceColorSpace,
+        supported_surface_color_spaces: Vec<wgpu::SurfaceColorSpace>,
+    },
+}
+
+impl AppUiSurfaceFormatColorSpaces {
+    fn supported_surface_color_spaces(&self) -> Vec<wgpu::SurfaceColorSpace> {
+        let mut color_spaces = Vec::with_capacity(7);
+        if self.srgb {
+            color_spaces.push(wgpu::SurfaceColorSpace::Srgb);
+        }
+        if self.display_p3 {
+            color_spaces.push(wgpu::SurfaceColorSpace::DisplayP3);
+        }
+        if self.extended_srgb_linear {
+            color_spaces.push(wgpu::SurfaceColorSpace::ExtendedSrgbLinear);
+        }
+        if self.extended_srgb {
+            color_spaces.push(wgpu::SurfaceColorSpace::ExtendedSrgb);
+        }
+        if self.extended_display_p3 {
+            color_spaces.push(wgpu::SurfaceColorSpace::ExtendedDisplayP3);
+        }
+        if self.bt2100_pq {
+            color_spaces.push(wgpu::SurfaceColorSpace::Bt2100Pq);
+        }
+        if self.bt2100_hlg {
+            color_spaces.push(wgpu::SurfaceColorSpace::Bt2100Hlg);
+        }
+        color_spaces
+    }
+}
+
+fn app_ui_surface_color_space_matches_display_output(
+    surface_color_space: wgpu::SurfaceColorSpace,
+    output_color_space: ColorSpace,
+) -> bool {
+    match output_color_space {
+        ColorSpace::Rec709 | ColorSpace::Srgb => {
+            surface_color_space == wgpu::SurfaceColorSpace::Srgb
+        }
+        ColorSpace::DciP3 => surface_color_space == wgpu::SurfaceColorSpace::DisplayP3,
+        ColorSpace::Rec2100Pq => surface_color_space == wgpu::SurfaceColorSpace::Bt2100Pq,
+        ColorSpace::Rec2100Hlg => surface_color_space == wgpu::SurfaceColorSpace::Bt2100Hlg,
+        ColorSpace::Rec2020 | ColorSpace::AppleLog | ColorSpace::SLog3 | ColorSpace::ArriLogC4 => {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1014,6 +1100,9 @@ fn prepare_viewer_gpu_preview(
         return;
     };
     if let Some(blocker) = session.display_output_contract.boundary_blocker(&frame.boundary) {
+        let supported_surface_color_spaces = session
+            .display_output_contract
+            .supported_surface_color_spaces_for_selected_format();
         tracing::warn!(
             sequence_id = %frame.sequence_id,
             frame = frame.frame,
@@ -1024,6 +1113,7 @@ fn prepare_viewer_gpu_preview(
             surface_format = ?session.display_output_contract.surface_color.format,
             surface_color_space = ?session.display_output_contract.surface_color.color_space,
             surface_hdr_mode = ?session.display_output_contract.surface_color.hdr_mode,
+            supported_surface_color_spaces = ?supported_surface_color_spaces,
             blocker = ?blocker,
             "viewer GPU preview output boundary blocked by display output contract"
         );
@@ -1819,7 +1909,9 @@ mod tests {
             contract.boundary_blocker(&boundary),
             Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
                 output_color_space: ColorSpace::Rec2100Pq,
+                selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
                 surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+                supported_surface_color_spaces: vec![wgpu::SurfaceColorSpace::Srgb],
             })
         );
     }
@@ -1834,6 +1926,134 @@ mod tests {
         );
 
         assert_eq!(contract.boundary_blocker(&boundary), None);
+    }
+
+    #[test]
+    fn display_output_contract_accepts_srgb_boundary_on_srgb_surface() {
+        let contract = test_display_output_contract();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            mondrian_core::ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(contract.boundary_blocker(&boundary), None);
+    }
+
+    #[test]
+    fn display_output_contract_blocks_dci_p3_boundary_on_srgb_surface() {
+        let mut contract = test_display_output_contract();
+        contract.format_color_spaces[0].display_p3 = true;
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::DciP3,
+            false,
+            mondrian_core::ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(
+            contract.boundary_blocker(&boundary),
+            Some(
+                AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
+                    output_color_space: ColorSpace::DciP3,
+                    selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                    supported_surface_color_spaces: vec![
+                        wgpu::SurfaceColorSpace::Srgb,
+                        wgpu::SurfaceColorSpace::DisplayP3,
+                    ],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn display_output_contract_accepts_dci_p3_boundary_on_display_p3_surface() {
+        let mut contract = test_display_output_contract();
+        contract.surface_color.color_space = wgpu::SurfaceColorSpace::DisplayP3;
+        contract.format_color_spaces[0].display_p3 = true;
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::DciP3,
+            false,
+            mondrian_core::ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(contract.boundary_blocker(&boundary), None);
+    }
+
+    #[test]
+    fn display_output_contract_blocks_rec2020_boundary_without_surface_contract() {
+        let mut contract = test_display_output_contract();
+        contract.format_color_spaces[0].display_p3 = true;
+        contract.format_color_spaces[0].bt2100_pq = true;
+        contract.format_color_spaces[0].bt2100_hlg = true;
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec2020,
+            false,
+            mondrian_core::ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(
+            contract.boundary_blocker(&boundary),
+            Some(
+                AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
+                    output_color_space: ColorSpace::Rec2020,
+                    selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                    supported_surface_color_spaces: vec![
+                        wgpu::SurfaceColorSpace::Srgb,
+                        wgpu::SurfaceColorSpace::DisplayP3,
+                        wgpu::SurfaceColorSpace::Bt2100Pq,
+                        wgpu::SurfaceColorSpace::Bt2100Hlg,
+                    ],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn display_output_contract_blocks_log_boundary_without_surface_contract() {
+        let contract = test_display_output_contract();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::SLog3,
+            false,
+            mondrian_core::ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(
+            contract.boundary_blocker(&boundary),
+            Some(
+                AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
+                    output_color_space: ColorSpace::SLog3,
+                    selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                    supported_surface_color_spaces: vec![wgpu::SurfaceColorSpace::Srgb],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn surface_format_supported_color_spaces_have_deterministic_order() {
+        let color_spaces = AppUiSurfaceFormatColorSpaces {
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            srgb: true,
+            extended_srgb_linear: true,
+            display_p3: true,
+            bt2100_pq: true,
+            bt2100_hlg: true,
+            extended_srgb: true,
+            extended_display_p3: true,
+        };
+
+        assert_eq!(
+            color_spaces.supported_surface_color_spaces(),
+            vec![
+                wgpu::SurfaceColorSpace::Srgb,
+                wgpu::SurfaceColorSpace::DisplayP3,
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                wgpu::SurfaceColorSpace::ExtendedSrgb,
+                wgpu::SurfaceColorSpace::ExtendedDisplayP3,
+                wgpu::SurfaceColorSpace::Bt2100Pq,
+                wgpu::SurfaceColorSpace::Bt2100Hlg,
+            ]
+        );
     }
 
     #[test]

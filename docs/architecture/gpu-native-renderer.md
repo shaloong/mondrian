@@ -279,7 +279,9 @@ Viewer preview evaluation now splits at the correct boundary:
 `CpuColorFrame`, while the app window validates the requested display boundary
 against that contract and records the display/output boundary through the
 session-owned GPU runtime. Unsupported presentation requests, such as HDR output
-on an SDR-only surface, are structured blockers rather than implicit SDR
+on an SDR-only surface, DCI-P3 output on an sRGB surface, Rec.2020 SDR output
+with no direct wgpu presentation color space, or camera-log output treated as a
+display space, are structured blockers rather than implicit SDR or OS/backend
 fallbacks. Window resize, scale-factor, and move events refresh the
 display-output contract. When that contract changes, the window unregisters the
 previous external preview texture, clears output-runtime frame resources, and
