@@ -839,6 +839,8 @@ impl SequenceSettings {
         let audio_channel_layout = self.audio_channel_layout;
         let start_timecode_frame = self.start_timecode_frame;
         let preview = self.preview.clone();
+        let color_management = self.color_management.clone();
+        let auto_tone_map_media = self.auto_tone_map_media;
         *self = Self::from_editing_mode(mode);
         self.audio_sample_rate = audio_sample_rate;
         self.audio_channels = audio_channels;
@@ -846,6 +848,8 @@ impl SequenceSettings {
         self.audio_channel_layout = audio_channel_layout;
         self.start_timecode_frame = start_timecode_frame;
         self.preview = preview;
+        self.color_management = color_management;
+        self.auto_tone_map_media = auto_tone_map_media;
     }
 }
 
@@ -1645,6 +1649,41 @@ mod tests {
             },
             ..Default::default()
         };
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn editing_mode_preserves_color_management_policy() {
+        let mut settings = SequenceSettings {
+            color_space: ColorSpace::Rec2100Pq,
+            color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::SceneReferred,
+                output_color_space: ColorSpace::Rec2100Pq,
+                preserve_hdr_metadata: true,
+                hdr_mastering_display: Some(
+                    VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+                ),
+                hdr_content_light: Some(VideoContentLightMetadata::hdr10_1000_nit_reference()),
+                ..Default::default()
+            },
+            auto_tone_map_media: false,
+            ..Default::default()
+        };
+
+        settings.apply_editing_mode_preset(EditingMode::Custom);
+
+        assert_eq!(
+            settings.color_management.workflow,
+            ColorWorkflow::SceneReferred
+        );
+        assert_eq!(
+            settings.color_management.output_color_space,
+            ColorSpace::Rec2100Pq
+        );
+        assert!(settings.color_management.preserve_hdr_metadata);
+        assert!(settings.color_management.hdr_mastering_display.is_some());
+        assert!(settings.color_management.hdr_content_light.is_some());
+        assert!(!settings.auto_tone_map_media);
         assert!(settings.validate().is_ok());
     }
 
