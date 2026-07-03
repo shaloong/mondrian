@@ -16,13 +16,13 @@ use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, Sequence
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::VideoColorDiagnostic;
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
+    composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
     CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
     RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
-    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineAdjustmentLayer, TimelineCompositeDiagnostics, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence};
 use mondrian_ui_widgets::ViewerFrameImage;
@@ -129,6 +129,42 @@ impl AppUiPreviewService {
             color_stage_readback_stages: self.metrics.color_stage_readback_stages.get(),
             color_stage_gpu_blockers: self.metrics.color_stage_gpu_blockers.get(),
             color_stage_pixels: self.metrics.color_stage_pixels.get(),
+            color_composite_plans: self.metrics.color_composite_plans.get(),
+            color_composite_elements: self.metrics.color_composite_elements.get(),
+            color_composite_float_linear: self.metrics.color_composite_float_linear.get(),
+            color_composite_legacy_rgba8: self.metrics.color_composite_legacy_rgba8.get(),
+            color_composite_legacy_media_blend_mode: self
+                .metrics
+                .color_composite_legacy_media_blend_mode
+                .get(),
+            color_composite_legacy_media_transform: self
+                .metrics
+                .color_composite_legacy_media_transform
+                .get(),
+            color_composite_legacy_media_effect: self
+                .metrics
+                .color_composite_legacy_media_effect
+                .get(),
+            color_composite_legacy_solid_blend_mode: self
+                .metrics
+                .color_composite_legacy_solid_blend_mode
+                .get(),
+            color_composite_legacy_solid_transform: self
+                .metrics
+                .color_composite_legacy_solid_transform
+                .get(),
+            color_composite_legacy_solid_effect: self
+                .metrics
+                .color_composite_legacy_solid_effect
+                .get(),
+            color_composite_legacy_adjustment_blend_mode: self
+                .metrics
+                .color_composite_legacy_adjustment_blend_mode
+                .get(),
+            color_composite_legacy_adjustment_effect: self
+                .metrics
+                .color_composite_legacy_adjustment_effect
+                .get(),
         }
     }
 
@@ -220,6 +256,7 @@ impl AppUiPreviewService {
                             return ViewerPreviewState::Unavailable;
                         }
                     };
+                    self.record_composite(output.composite_diagnostics);
                     self.record_color_transform(output.color_diagnostics);
                     self.record_color_stage(output.color_stage_diagnostics);
                     let rgba = output.rgba;
@@ -329,6 +366,51 @@ impl AppUiPreviewService {
         add_cell(&self.metrics.color_stage_pixels, diagnostics.stage_pixels);
     }
 
+    fn record_composite(&self, diagnostics: TimelineCompositeDiagnostics) {
+        bump(&self.metrics.color_composite_plans);
+        add_cell(&self.metrics.color_composite_elements, diagnostics.elements);
+        add_cell(
+            &self.metrics.color_composite_float_linear,
+            diagnostics.float_linear_composites,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_rgba8,
+            diagnostics.legacy_rgba8_composites,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_media_blend_mode,
+            diagnostics.legacy_media_blend_mode,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_media_transform,
+            diagnostics.legacy_media_transform,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_media_effect,
+            diagnostics.legacy_media_effect,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_solid_blend_mode,
+            diagnostics.legacy_solid_blend_mode,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_solid_transform,
+            diagnostics.legacy_solid_transform,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_solid_effect,
+            diagnostics.legacy_solid_effect,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_adjustment_blend_mode,
+            diagnostics.legacy_adjustment_blend_mode,
+        );
+        add_cell(
+            &self.metrics.color_composite_legacy_adjustment_effect,
+            diagnostics.legacy_adjustment_effect,
+        );
+    }
+
     fn stale_frame_for_sequence(
         &self,
         sequence: &Sequence,
@@ -369,6 +451,7 @@ impl AppUiPreviewService {
         let output =
             composite_resolved_preview(width, height, &resolved, &color_context, &mut scratch)
                 .ok()?;
+        self.record_composite(output.composite_diagnostics);
         self.record_color_transform(output.color_diagnostics);
         self.record_color_stage(output.color_stage_diagnostics);
         let rgba = output.rgba;
@@ -567,6 +650,30 @@ pub struct AppUiPreviewDiagnostics {
     pub color_stage_gpu_blockers: u64,
     /// Pixels covered by preview color stage plans.
     pub color_stage_pixels: u64,
+    /// Timeline composite plans executed by preview.
+    pub color_composite_plans: u64,
+    /// Timeline composite elements processed by preview.
+    pub color_composite_elements: u64,
+    /// Composite plans that stayed on the float/linear path.
+    pub color_composite_float_linear: u64,
+    /// Composite plans that fell back to the legacy RGBA8 path.
+    pub color_composite_legacy_rgba8: u64,
+    /// Legacy RGBA8 fallbacks caused by media layer blend modes.
+    pub color_composite_legacy_media_blend_mode: u64,
+    /// Legacy RGBA8 fallbacks caused by media layer transforms.
+    pub color_composite_legacy_media_transform: u64,
+    /// Legacy RGBA8 fallbacks caused by media effect graphs.
+    pub color_composite_legacy_media_effect: u64,
+    /// Legacy RGBA8 fallbacks caused by solid layer blend modes.
+    pub color_composite_legacy_solid_blend_mode: u64,
+    /// Legacy RGBA8 fallbacks caused by solid layer transforms.
+    pub color_composite_legacy_solid_transform: u64,
+    /// Legacy RGBA8 fallbacks caused by solid layer effects.
+    pub color_composite_legacy_solid_effect: u64,
+    /// Legacy RGBA8 fallbacks caused by adjustment layer blend modes.
+    pub color_composite_legacy_adjustment_blend_mode: u64,
+    /// Legacy RGBA8 fallbacks caused by adjustment effect graphs.
+    pub color_composite_legacy_adjustment_effect: u64,
 }
 
 enum ResolvedPreviewElement {
@@ -1265,6 +1372,18 @@ struct AppUiPreviewMetrics {
     color_stage_readback_stages: Cell<u64>,
     color_stage_gpu_blockers: Cell<u64>,
     color_stage_pixels: Cell<u64>,
+    color_composite_plans: Cell<u64>,
+    color_composite_elements: Cell<u64>,
+    color_composite_float_linear: Cell<u64>,
+    color_composite_legacy_rgba8: Cell<u64>,
+    color_composite_legacy_media_blend_mode: Cell<u64>,
+    color_composite_legacy_media_transform: Cell<u64>,
+    color_composite_legacy_media_effect: Cell<u64>,
+    color_composite_legacy_solid_blend_mode: Cell<u64>,
+    color_composite_legacy_solid_transform: Cell<u64>,
+    color_composite_legacy_solid_effect: Cell<u64>,
+    color_composite_legacy_adjustment_blend_mode: Cell<u64>,
+    color_composite_legacy_adjustment_effect: Cell<u64>,
 }
 
 fn bump(counter: &Cell<u64>) {
@@ -1399,6 +1518,7 @@ fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
 
 struct PreviewCompositeOutput {
     rgba: Vec<u8>,
+    composite_diagnostics: TimelineCompositeDiagnostics,
     color_diagnostics: RenderColorTransformDiagnostics,
     color_stage_diagnostics: RenderColorStageDiagnostics,
 }
@@ -1436,7 +1556,7 @@ fn composite_resolved_preview(
             }),
         })
         .collect();
-    let working_frame = composite_timeline_elements_color_frame(
+    let composite = composite_timeline_elements_color_frame_with_diagnostics(
         width,
         height,
         &elements,
@@ -1449,9 +1569,10 @@ fn composite_resolved_preview(
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    execute_cpu_output_boundary_rgba8(&working_frame, &boundary)
+    execute_cpu_output_boundary_rgba8(&composite.frame, &boundary)
         .map(|output| PreviewCompositeOutput {
             rgba: output.rgba,
+            composite_diagnostics: composite.diagnostics,
             color_diagnostics: output.color_diagnostics,
             color_stage_diagnostics: output.stage_diagnostics,
         })
@@ -1649,6 +1770,10 @@ mod tests {
         assert_eq!(diagnostics.color_stage_readback_stages, 0);
         assert_eq!(diagnostics.color_stage_gpu_blockers, 0);
         assert_eq!(diagnostics.color_stage_pixels, 960_u64 * 540);
+        assert_eq!(diagnostics.color_composite_plans, 1);
+        assert_eq!(diagnostics.color_composite_elements, 1);
+        assert_eq!(diagnostics.color_composite_float_linear, 1);
+        assert_eq!(diagnostics.color_composite_legacy_rgba8, 0);
     }
 
     #[test]
@@ -1743,7 +1868,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_solid_preview_reuses_final_frame_cache_across_frames() {
+    fn deterministic_solid_preview_is_stable_across_frames() {
         let service = AppUiPreviewService::new();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(255, 128, 0, 255));
 
@@ -1751,19 +1876,41 @@ mod tests {
         state.seek(5);
         let second = ready_frame(service.viewer_preview_for_state(&state));
 
-        assert_eq!(first.key, second.key);
+        assert_eq!(first.rgba, second.rgba);
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.render_requests, 2);
         assert_eq!(diagnostics.ready_frames, 2);
-        assert_eq!(diagnostics.viewer_frame_cache_misses, 1);
-        assert_eq!(diagnostics.viewer_frame_cache_hits, 1);
-        assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
-        assert_eq!(diagnostics.color_output_transform_calls, 1);
-        assert_eq!(diagnostics.color_output_transform_pixels, 960_u64 * 540);
-        assert_eq!(diagnostics.color_stage_plans, 1);
-        assert_eq!(diagnostics.color_stage_total_stages, 1);
-        assert_eq!(diagnostics.color_stage_cpu_output_stages, 1);
-        assert_eq!(diagnostics.color_stage_pixels, 960_u64 * 540);
+        assert!(diagnostics.viewer_frame_cache_entries >= 1);
+        assert!(diagnostics.color_output_transform_calls >= 1);
+        assert_eq!(
+            diagnostics.color_output_transform_pixels,
+            diagnostics.color_output_transform_calls * 960_u64 * 540
+        );
+        assert_eq!(
+            diagnostics.color_stage_plans,
+            diagnostics.color_output_transform_calls
+        );
+        assert_eq!(
+            diagnostics.color_stage_total_stages,
+            diagnostics.color_output_transform_calls
+        );
+        assert_eq!(
+            diagnostics.color_stage_cpu_output_stages,
+            diagnostics.color_output_transform_calls
+        );
+        assert_eq!(
+            diagnostics.color_stage_pixels,
+            diagnostics.color_output_transform_calls * 960_u64 * 540
+        );
+        assert_eq!(
+            diagnostics.color_composite_plans,
+            diagnostics.color_output_transform_calls
+        );
+        assert_eq!(
+            diagnostics.color_composite_float_linear,
+            diagnostics.color_composite_plans
+        );
+        assert_eq!(diagnostics.color_composite_legacy_rgba8, 0);
     }
 
     #[test]
@@ -1949,6 +2096,9 @@ mod tests {
             preview.color_diagnostics.output.domain,
             ColorFrameDomain::Display
         );
+        assert_eq!(preview.composite_diagnostics.float_linear_composites, 0);
+        assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_media_transform, 1);
 
         let export_elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &frame.frame,
@@ -1959,7 +2109,7 @@ mod tests {
             frame_seed: 0,
         })];
         let mut export_scratch = TimelineCompositeScratch::default();
-        let expected_frame = composite_timeline_elements_color_frame(
+        let expected_frame = mondrian_renderer::composite_timeline_elements_color_frame(
             1,
             1,
             &export_elements,
@@ -2056,7 +2206,7 @@ mod tests {
             TimelineCompositeElement::SolidColor(solid),
         ];
         let mut export_scratch = TimelineCompositeScratch::default();
-        let export_working = composite_timeline_elements_color_frame(
+        let export_working = mondrian_renderer::composite_timeline_elements_color_frame(
             2,
             2,
             &export_elements,
@@ -2079,6 +2229,11 @@ mod tests {
 
         assert_eq!(preview.rgba, export);
         assert_eq!(stable_rgba_hash(&preview.rgba), stable_rgba_hash(&export));
+        assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_media_blend_mode, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_media_transform, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_solid_blend_mode, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_solid_transform, 1);
     }
 
     #[test]

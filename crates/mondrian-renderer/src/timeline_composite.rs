@@ -58,6 +58,76 @@ pub struct TimelineCompositeScratch {
     solid_fill: Vec<u8>,
 }
 
+/// A CPU composite result paired with color-path diagnostics for the plan.
+#[derive(Debug, Clone)]
+pub struct TimelineCompositeFrame {
+    /// The composited frame in the requested working color context.
+    pub frame: CpuColorFrame,
+    /// Per-plan diagnostics describing whether compositing stayed float/linear
+    /// or fell back to the legacy RGBA8 path.
+    pub diagnostics: TimelineCompositeDiagnostics,
+}
+
+/// Counters describing which timeline composite path was used and why.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TimelineCompositeDiagnostics {
+    /// Number of timeline elements evaluated for the composite plan.
+    pub elements: u64,
+    /// Composite plans that stayed on the float/linear path.
+    pub float_linear_composites: u64,
+    /// Composite plans that fell back to the legacy RGBA8 path.
+    pub legacy_rgba8_composites: u64,
+    /// Media layers that required legacy RGBA8 because of blend mode support.
+    pub legacy_media_blend_mode: u64,
+    /// Media layers that required legacy RGBA8 because of transform support.
+    pub legacy_media_transform: u64,
+    /// Media layers that required legacy RGBA8 because of effect graph support.
+    pub legacy_media_effect: u64,
+    /// Solid layers that required legacy RGBA8 because of blend mode support.
+    pub legacy_solid_blend_mode: u64,
+    /// Solid layers that required legacy RGBA8 because of transform support.
+    pub legacy_solid_transform: u64,
+    /// Solid layers that required legacy RGBA8 because of effect graph support.
+    pub legacy_solid_effect: u64,
+    /// Adjustment layers that required legacy RGBA8 because of blend mode support.
+    pub legacy_adjustment_blend_mode: u64,
+    /// Adjustment layers that required legacy RGBA8 because of effect graph support.
+    pub legacy_adjustment_effect: u64,
+}
+
+impl TimelineCompositeDiagnostics {
+    /// Merge another diagnostic snapshot into this one using saturating counters.
+    pub fn accumulate(&mut self, other: Self) {
+        self.elements = self.elements.saturating_add(other.elements);
+        self.float_linear_composites =
+            self.float_linear_composites.saturating_add(other.float_linear_composites);
+        self.legacy_rgba8_composites =
+            self.legacy_rgba8_composites.saturating_add(other.legacy_rgba8_composites);
+        self.legacy_media_blend_mode =
+            self.legacy_media_blend_mode.saturating_add(other.legacy_media_blend_mode);
+        self.legacy_media_transform =
+            self.legacy_media_transform.saturating_add(other.legacy_media_transform);
+        self.legacy_media_effect =
+            self.legacy_media_effect.saturating_add(other.legacy_media_effect);
+        self.legacy_solid_blend_mode =
+            self.legacy_solid_blend_mode.saturating_add(other.legacy_solid_blend_mode);
+        self.legacy_solid_transform =
+            self.legacy_solid_transform.saturating_add(other.legacy_solid_transform);
+        self.legacy_solid_effect =
+            self.legacy_solid_effect.saturating_add(other.legacy_solid_effect);
+        self.legacy_adjustment_blend_mode = self
+            .legacy_adjustment_blend_mode
+            .saturating_add(other.legacy_adjustment_blend_mode);
+        self.legacy_adjustment_effect =
+            self.legacy_adjustment_effect.saturating_add(other.legacy_adjustment_effect);
+    }
+
+    /// Returns true when the composite plan used any legacy RGBA8 fallback.
+    pub fn uses_legacy_rgba8(self) -> bool {
+        self.legacy_rgba8_composites > 0
+    }
+}
+
 pub fn composite_timeline_elements(
     width: u32,
     height: u32,
@@ -79,7 +149,29 @@ pub fn composite_timeline_elements_color_frame(
     working_color_space: ColorSpace,
     scratch: &mut TimelineCompositeScratch,
 ) -> CpuColorFrame {
-    let frame = if !can_float_linear_composite(elements) {
+    composite_timeline_elements_color_frame_with_diagnostics(
+        width,
+        height,
+        elements,
+        options,
+        working_color_space,
+        scratch,
+    )
+    .frame
+}
+
+/// Composite timeline elements and return both the working frame and
+/// diagnostics for the selected color path.
+pub fn composite_timeline_elements_color_frame_with_diagnostics(
+    width: u32,
+    height: u32,
+    elements: &[TimelineCompositeElement<'_>],
+    options: TimelineCompositeOptions,
+    working_color_space: ColorSpace,
+    scratch: &mut TimelineCompositeScratch,
+) -> TimelineCompositeFrame {
+    let diagnostics = composite_path_diagnostics(elements);
+    let frame = if diagnostics.uses_legacy_rgba8() {
         let rgba = composite_timeline_elements(width, height, elements, options, scratch);
         RgbaF32Frame::from_rgba8(
             width,
@@ -99,7 +191,7 @@ pub fn composite_timeline_elements_color_frame(
             scratch,
         )
     };
-    CpuColorFrame::working(frame)
+    TimelineCompositeFrame { frame: CpuColorFrame::working(frame), diagnostics }
 }
 
 fn composite_supported_elements_to_working_frame(
@@ -193,23 +285,71 @@ fn composite_supported_elements_to_working_frame(
     }
 }
 
-fn can_float_linear_composite(elements: &[TimelineCompositeElement<'_>]) -> bool {
-    elements.iter().all(|element| match element {
-        TimelineCompositeElement::Media(layer) => {
-            layer.blend_mode == BlendMode::Normal
-                && is_identity_transform(layer.transform)
-                && compiled_effect_graph_supports_rgba_f32(&layer.effect_graph)
+/// Diagnose whether a set of timeline elements can stay on the float/linear
+/// compositor path, or which capabilities force legacy RGBA8 fallback.
+pub fn composite_path_diagnostics(
+    elements: &[TimelineCompositeElement<'_>],
+) -> TimelineCompositeDiagnostics {
+    let mut diagnostics = TimelineCompositeDiagnostics {
+        elements: elements.len() as u64,
+        ..TimelineCompositeDiagnostics::default()
+    };
+    for element in elements {
+        match element {
+            TimelineCompositeElement::Media(layer) => {
+                if layer.blend_mode != BlendMode::Normal {
+                    diagnostics.legacy_media_blend_mode =
+                        diagnostics.legacy_media_blend_mode.saturating_add(1);
+                }
+                if !is_identity_transform(layer.transform) {
+                    diagnostics.legacy_media_transform =
+                        diagnostics.legacy_media_transform.saturating_add(1);
+                }
+                if !compiled_effect_graph_supports_rgba_f32(&layer.effect_graph) {
+                    diagnostics.legacy_media_effect =
+                        diagnostics.legacy_media_effect.saturating_add(1);
+                }
+            }
+            TimelineCompositeElement::SolidColor(layer) => {
+                if layer.blend_mode != BlendMode::Normal {
+                    diagnostics.legacy_solid_blend_mode =
+                        diagnostics.legacy_solid_blend_mode.saturating_add(1);
+                }
+                if !is_identity_transform(layer.transform) {
+                    diagnostics.legacy_solid_transform =
+                        diagnostics.legacy_solid_transform.saturating_add(1);
+                }
+                if !layer.effect_graph.graph.is_identity() {
+                    diagnostics.legacy_solid_effect =
+                        diagnostics.legacy_solid_effect.saturating_add(1);
+                }
+            }
+            TimelineCompositeElement::Adjustment(layer) => {
+                if layer.blend_mode.unwrap_or(BlendMode::Normal) != BlendMode::Normal {
+                    diagnostics.legacy_adjustment_blend_mode =
+                        diagnostics.legacy_adjustment_blend_mode.saturating_add(1);
+                }
+                if !compiled_effect_graph_supports_rgba_f32(&layer.effect_graph) {
+                    diagnostics.legacy_adjustment_effect =
+                        diagnostics.legacy_adjustment_effect.saturating_add(1);
+                }
+            }
         }
-        TimelineCompositeElement::SolidColor(layer) => {
-            layer.blend_mode == BlendMode::Normal
-                && is_identity_transform(layer.transform)
-                && layer.effect_graph.graph.is_identity()
-        }
-        TimelineCompositeElement::Adjustment(layer) => {
-            layer.blend_mode.unwrap_or(BlendMode::Normal) == BlendMode::Normal
-                && compiled_effect_graph_supports_rgba_f32(&layer.effect_graph)
-        }
-    })
+    }
+    let legacy_reasons = diagnostics.legacy_media_blend_mode
+        + diagnostics.legacy_media_transform
+        + diagnostics.legacy_media_effect
+        + diagnostics.legacy_solid_blend_mode
+        + diagnostics.legacy_solid_transform
+        + diagnostics.legacy_solid_effect
+        + diagnostics.legacy_adjustment_blend_mode
+        + diagnostics.legacy_adjustment_effect;
+    if legacy_reasons == 0 {
+        diagnostics.float_linear_composites = 1;
+    } else {
+        diagnostics.legacy_rgba8_composites = 1;
+    }
+    diagnostics
 }
 
 fn alpha_blend_f32_solid(dst: &mut [[f32; 4]], color: [f32; 4], opacity: f32) {
@@ -883,6 +1023,11 @@ mod tests {
             &mut legacy_scratch,
         );
         assert_eq!(float_output, legacy_output);
+        let diagnostics = composite_path_diagnostics(&elements);
+        assert_eq!(diagnostics.legacy_rgba8_composites, 1);
+        assert_eq!(diagnostics.float_linear_composites, 0);
+        assert_eq!(diagnostics.legacy_adjustment_blend_mode, 1);
+        assert!(diagnostics.uses_legacy_rgba8());
     }
 
     #[test]
@@ -920,5 +1065,30 @@ mod tests {
         );
 
         assert_eq!(float_output, legacy_output);
+        let diagnostics = composite_path_diagnostics(&elements);
+        assert_eq!(diagnostics.legacy_rgba8_composites, 1);
+        assert_eq!(diagnostics.legacy_media_effect, 1);
+    }
+
+    #[test]
+    fn float_linear_compositor_reports_clean_float_path_diagnostics() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let media = working_frame(&[64, 128, 192, 255], 1, 1);
+        let elements = [identity_media(&media)];
+
+        let output = composite_timeline_elements_color_frame_with_diagnostics(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch,
+        );
+
+        assert_eq!(output.diagnostics.elements, 1);
+        assert_eq!(output.diagnostics.float_linear_composites, 1);
+        assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
+        assert!(!output.diagnostics.uses_legacy_rgba8());
+        assert!(scratch.media_source.is_empty());
     }
 }

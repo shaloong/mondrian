@@ -69,6 +69,12 @@ and white balance may also run in this path through the
 is float-capable also stay in the typed working frame. Non-normal blend modes,
 geometric transforms, and legacy-only effects currently use the RGBA8 compositor
 path until their own float/linear execution contracts are implemented.
+`TimelineCompositeDiagnostics` makes that fallback explicit: preview/export
+callers can see whether a composite stayed on the float/linear path or fell back
+to legacy RGBA8 because of media blend mode, media transform, media effect,
+solid blend/transform/effect, adjustment blend mode, or adjustment effect
+support. Preview diagnostics must aggregate these counters so performance smoke
+reports can identify which legacy color path blocked a fully float/linear frame.
 
 Decoded media enters the graph as a typed source/import RGBA8 boundary
 (`CpuEncodedColorFrame::source_rgba8`). Preview and export must use
