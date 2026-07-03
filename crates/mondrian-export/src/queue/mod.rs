@@ -1026,6 +1026,30 @@ pub fn export_input_color_resolution_counts_for_frame(
     )
 }
 
+/// Collect timeline composite color-path diagnostics for one export frame.
+///
+/// This executes the same frame render path used by export jobs and is intended
+/// for preview/export parity tests, telemetry probes, and performance budgets.
+pub fn export_composite_diagnostics_for_frame(
+    timeline: &TimelineExportInput,
+    timeline_frame: i64,
+    width: u32,
+    height: u32,
+) -> Result<TimelineCompositeDiagnostics, String> {
+    let mut canvas = Vec::new();
+    let mut composite_diagnostics = TimelineCompositeDiagnostics::default();
+    render_timeline_frame_into(
+        timeline,
+        timeline_frame,
+        width,
+        height,
+        &mut canvas,
+        None,
+        Some(&mut composite_diagnostics),
+    )?;
+    Ok(composite_diagnostics)
+}
+
 fn export_sequence_input_color_resolution_counts(
     timeline: &TimelineExportInput,
     sequence: &mondrian_timeline::sequence::Sequence,
