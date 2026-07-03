@@ -24,7 +24,9 @@ use mondrian_renderer::{
     TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
-use mondrian_timeline::sequence::{ColorContext, InputColorResolution, Sequence};
+use mondrian_timeline::sequence::{
+    ColorContext, InputColorResolution, InputColorResolutionSource, Sequence,
+};
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
 use crate::app::AppState;
@@ -120,6 +122,23 @@ impl AppUiPreviewService {
             gpu_preview_external_frames_cleared: self
                 .metrics
                 .gpu_preview_external_frames_cleared
+                .get(),
+            input_color_resolution_override: self.metrics.input_color_resolution_override.get(),
+            input_color_resolution_detected_metadata: self
+                .metrics
+                .input_color_resolution_detected_metadata
+                .get(),
+            input_color_resolution_missing_assume_rec709: self
+                .metrics
+                .input_color_resolution_missing_assume_rec709
+                .get(),
+            input_color_resolution_missing_assume_working: self
+                .metrics
+                .input_color_resolution_missing_assume_working
+                .get(),
+            input_color_resolution_missing_rejected: self
+                .metrics
+                .input_color_resolution_missing_rejected
                 .get(),
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
@@ -468,6 +487,26 @@ impl AppUiPreviewService {
         }
     }
 
+    fn record_input_color_resolution(&self, source: InputColorResolutionSource) {
+        match source {
+            InputColorResolutionSource::Override => {
+                bump(&self.metrics.input_color_resolution_override);
+            }
+            InputColorResolutionSource::DetectedMetadata => {
+                bump(&self.metrics.input_color_resolution_detected_metadata);
+            }
+            InputColorResolutionSource::MissingPolicyAssumeRec709 => {
+                bump(&self.metrics.input_color_resolution_missing_assume_rec709);
+            }
+            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace => {
+                bump(&self.metrics.input_color_resolution_missing_assume_working);
+            }
+            InputColorResolutionSource::MissingPolicyRejectMedia => {
+                bump(&self.metrics.input_color_resolution_missing_rejected);
+            }
+        }
+    }
+
     fn record_color_transform(&self, diagnostics: RenderColorTransformDiagnostics) {
         match diagnostics.direction {
             RenderColorTransformDirection::InputToWorking => {
@@ -769,6 +808,16 @@ pub struct AppUiPreviewDiagnostics {
     pub gpu_preview_external_frames_rejected: u64,
     /// External GPU preview frames cleared by the app-window output path.
     pub gpu_preview_external_frames_cleared: u64,
+    /// Media input color resolutions that used a clip/media override.
+    pub input_color_resolution_override: u64,
+    /// Media input color resolutions that used detected media metadata.
+    pub input_color_resolution_detected_metadata: u64,
+    /// Media input color resolutions that assumed Rec.709 through missing-metadata policy.
+    pub input_color_resolution_missing_assume_rec709: u64,
+    /// Media input color resolutions that assumed the sequence working space through policy.
+    pub input_color_resolution_missing_assume_working: u64,
+    /// Media input color resolutions rejected by missing-metadata policy.
+    pub input_color_resolution_missing_rejected: u64,
     /// Media preview cache hits.
     pub media_cache_hits: u64,
     /// Media preview cache misses.
@@ -1480,6 +1529,7 @@ impl AppUiPreviewService {
             detected_color_space,
             color_context,
         );
+        self.record_input_color_resolution(input_color_resolution.source);
         let input_color_space = match input_color_resolution.color_space {
             Some(color_space) => color_space,
             None => {
@@ -1584,6 +1634,11 @@ struct AppUiPreviewMetrics {
     gpu_preview_external_frames_registered: Cell<u64>,
     gpu_preview_external_frames_rejected: Cell<u64>,
     gpu_preview_external_frames_cleared: Cell<u64>,
+    input_color_resolution_override: Cell<u64>,
+    input_color_resolution_detected_metadata: Cell<u64>,
+    input_color_resolution_missing_assume_rec709: Cell<u64>,
+    input_color_resolution_missing_assume_working: Cell<u64>,
+    input_color_resolution_missing_rejected: Cell<u64>,
     viewer_frame_cache_hits: Cell<u64>,
     viewer_frame_cache_misses: Cell<u64>,
     media_cache_hits: Cell<u64>,
@@ -2148,6 +2203,11 @@ mod tests {
         assert_eq!(diagnostics.gpu_preview_external_frames_registered, 0);
         assert_eq!(diagnostics.gpu_preview_external_frames_rejected, 0);
         assert_eq!(diagnostics.gpu_preview_external_frames_cleared, 0);
+        assert_eq!(diagnostics.input_color_resolution_override, 0);
+        assert_eq!(diagnostics.input_color_resolution_detected_metadata, 0);
+        assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 0);
+        assert_eq!(diagnostics.input_color_resolution_missing_assume_working, 0);
+        assert_eq!(diagnostics.input_color_resolution_missing_rejected, 0);
         assert_eq!(diagnostics.viewer_frame_cache_hits, 0);
         assert_eq!(diagnostics.viewer_frame_cache_misses, 1);
         assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
@@ -2171,6 +2231,28 @@ mod tests {
         assert_eq!(diagnostics.color_composite_elements, 1);
         assert_eq!(diagnostics.color_composite_float_linear, 1);
         assert_eq!(diagnostics.color_composite_legacy_rgba8, 0);
+    }
+
+    #[test]
+    fn preview_diagnostics_count_input_color_resolution_sources() {
+        let service = AppUiPreviewService::new();
+
+        service.record_input_color_resolution(InputColorResolutionSource::Override);
+        service.record_input_color_resolution(InputColorResolutionSource::DetectedMetadata);
+        service
+            .record_input_color_resolution(InputColorResolutionSource::MissingPolicyAssumeRec709);
+        service.record_input_color_resolution(
+            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace,
+        );
+        service.record_input_color_resolution(InputColorResolutionSource::MissingPolicyRejectMedia);
+        service.record_input_color_resolution(InputColorResolutionSource::DetectedMetadata);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.input_color_resolution_override, 1);
+        assert_eq!(diagnostics.input_color_resolution_detected_metadata, 2);
+        assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 1);
+        assert_eq!(diagnostics.input_color_resolution_missing_assume_working, 1);
+        assert_eq!(diagnostics.input_color_resolution_missing_rejected, 1);
     }
 
     #[test]

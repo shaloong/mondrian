@@ -84,11 +84,23 @@ struct PreviewColorPathReport {
     legacy_rgba8_composites: u64,
     legacy_reason_total: u64,
     legacy_reason_details: Vec<PreviewLegacyReasonReport>,
+    input_color_resolution: PreviewInputColorResolutionReport,
     gpu_color_stages: u64,
     gpu_blockers: u64,
     rgba8_boundary_calls: u64,
     fully_float_linear: bool,
     gpu_path_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct PreviewInputColorResolutionReport {
+    override_count: u64,
+    detected_metadata: u64,
+    missing_assume_rec709: u64,
+    missing_assume_working: u64,
+    missing_rejected: u64,
+    policy_assumptions: u64,
+    explicit_metadata_or_override: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -166,6 +178,19 @@ impl PreviewColorPathReport {
             legacy_rgba8_composites: diagnostics.color_composite_legacy_rgba8,
             legacy_reason_total,
             legacy_reason_details,
+            input_color_resolution: PreviewInputColorResolutionReport {
+                override_count: diagnostics.input_color_resolution_override,
+                detected_metadata: diagnostics.input_color_resolution_detected_metadata,
+                missing_assume_rec709: diagnostics.input_color_resolution_missing_assume_rec709,
+                missing_assume_working: diagnostics.input_color_resolution_missing_assume_working,
+                missing_rejected: diagnostics.input_color_resolution_missing_rejected,
+                policy_assumptions: diagnostics
+                    .input_color_resolution_missing_assume_rec709
+                    .saturating_add(diagnostics.input_color_resolution_missing_assume_working),
+                explicit_metadata_or_override: diagnostics
+                    .input_color_resolution_override
+                    .saturating_add(diagnostics.input_color_resolution_detected_metadata),
+            },
             gpu_color_stages: diagnostics.color_stage_gpu_color_stages,
             gpu_blockers: diagnostics.color_stage_gpu_blockers,
             rgba8_boundary_calls: diagnostics.color_rgba8_boundary_calls,
@@ -943,6 +968,11 @@ fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
         color_stage_gpu_color_stages: 4,
         color_stage_gpu_blockers: 1,
         color_rgba8_boundary_calls: 3,
+        input_color_resolution_override: 2,
+        input_color_resolution_detected_metadata: 3,
+        input_color_resolution_missing_assume_rec709: 5,
+        input_color_resolution_missing_assume_working: 7,
+        input_color_resolution_missing_rejected: 11,
         ..AppUiPreviewDiagnostics::default()
     };
 
@@ -959,6 +989,18 @@ fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
             PreviewLegacyReasonReport { layer: "media", reason: "transform", count: 1 },
             PreviewLegacyReasonReport { layer: "solid", reason: "effect", count: 2 },
         ]
+    );
+    assert_eq!(
+        report.input_color_resolution,
+        PreviewInputColorResolutionReport {
+            override_count: 2,
+            detected_metadata: 3,
+            missing_assume_rec709: 5,
+            missing_assume_working: 7,
+            missing_rejected: 11,
+            policy_assumptions: 12,
+            explicit_metadata_or_override: 5,
+        }
     );
     assert_eq!(report.gpu_color_stages, 4);
     assert_eq!(report.gpu_blockers, 1);

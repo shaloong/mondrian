@@ -211,6 +211,11 @@ raw CICP tags rather than rebuilding diagnostics from path or decoder text.
 Export jobs carry this as `TimelineExportInput.asset_color_diagnostics`, and
 preview emits the same diagnostic summary when missing-metadata policy rejects a
 media asset.
+Preview perf smoke reports also expose the per-branch input color-resolution
+counters, including override, detected metadata, missing-policy assumptions, and
+missing-policy rejects. These counters are part of the render-path health
+contract: preview can remain real-time while still reporting whether it was
+driven by authoritative media interpretation or by project policy.
 Preview final-frame cache keys must include the effective color context so a
 monitor/output transform change cannot reuse stale pixels from a previous view.
 For OCIO-backed preview this includes the resolved display and view names, not

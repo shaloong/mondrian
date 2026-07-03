@@ -291,6 +291,11 @@ metadata table; absence of an asset id means "resolve via policy", not
 "fallback to Rec.709". Export `asset_color_diagnostics` carries the matching
 per-asset diagnostic snapshot, including `color_interpretation`, and must be
 used for failure messages and reports, not for choosing the transform.
+Preview diagnostics count every `InputColorResolutionSource` branch and perf
+smoke reports derive both `explicit_metadata_or_override` and
+`policy_assumptions` totals from those counters. A production color-path report
+therefore distinguishes "metadata was known" from "the missing-metadata policy
+kept playback moving" instead of hiding both behind one resolved color space.
 
 ## Display and Export
 
