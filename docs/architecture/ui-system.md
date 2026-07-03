@@ -51,7 +51,10 @@ The modal is a compact settings form with a single input color-space dropdown:
 Auto is the default option, explicit color spaces persist as overrides, and Auto
 displays the current resolved/detected result instead of explanatory copy.
 Non-color data is an asset payload classification for advanced utility-channel
-workflows, not an option in the primary color-space picker.
+workflows, not an option in the primary color-space picker. A future payload or
+channel-role control may edit that classification, but the Interpret Footage
+color-space dropdown must preserve the existing payload value while changing
+only `MediaColorInterpretation`.
 
 ## Playback Tick Ownership
 
