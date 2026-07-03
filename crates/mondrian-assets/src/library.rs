@@ -862,6 +862,7 @@ mod tests {
         let id = lib.create_solid_color_asset(Some("Plate")).expect("create");
         let interpretation = AssetMediaInterpretation {
             color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            ..AssetMediaInterpretation::default()
         };
 
         lib.set_asset_interpretation(id, interpretation).expect("set interpretation");
@@ -882,6 +883,7 @@ mod tests {
             id,
             AssetMediaInterpretation {
                 color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                ..AssetMediaInterpretation::default()
             },
         )
         .expect("set interpretation");
@@ -896,10 +898,7 @@ mod tests {
     fn set_asset_interpretation_rejects_missing_asset() {
         let lib = open_test_library();
         let err = lib
-            .set_asset_interpretation(
-                AssetId::new(),
-                AssetMediaInterpretation { color: MediaColorInterpretation::Data },
-            )
+            .set_asset_interpretation(AssetId::new(), AssetMediaInterpretation::default())
             .unwrap_err();
 
         assert!(matches!(err, MondrianError::AssetNotFound { .. }));

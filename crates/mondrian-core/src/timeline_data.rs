@@ -48,9 +48,6 @@ pub enum MediaColorInterpretation {
     /// project color management policy.
     #[default]
     Auto,
-    /// Treat the asset as data/non-color content. Color transforms must not be
-    /// applied to the asset payload.
-    Data,
     /// Use this explicit user override instead of detected media metadata.
     Override {
         /// The color space selected by the user.
@@ -63,15 +60,38 @@ impl MediaColorInterpretation {
     pub fn override_color_space(self) -> Option<ColorSpace> {
         match self {
             Self::Override { color_space } => Some(color_space),
-            Self::Auto | Self::Data => None,
+            Self::Auto => None,
         }
+    }
+}
+
+/// Whether an asset payload represents color-managed picture data.
+///
+/// This is intentionally separate from `MediaColorInterpretation`: "non-color
+/// data" is an asset/workflow property, not a color-space choice in the
+/// Interpret Footage dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetColorPayload {
+    /// Normal picture media that participates in color management.
+    #[default]
+    ColorManaged,
+    /// Data payload such as masks, mattes, height/normal maps, or technical
+    /// textures. Color transforms must not be applied to the payload.
+    NonColorData,
+}
+
+impl AssetColorPayload {
+    /// Whether this payload must bypass color-managed interpretation.
+    pub fn is_non_color_data(self) -> bool {
+        matches!(self, Self::NonColorData)
     }
 }
 
 /// Persistent media interpretation stored on an asset library record.
 ///
 /// This is deliberately separated from probe results. Asset records keep the
-/// user's mode (`Auto`, `Override`, or `Data`); resolved diagnostics remain
+/// user's color mode (`Auto` or `Override`) plus payload kind; resolved diagnostics remain
 /// runtime data so detector/config upgrades can improve Auto behavior without
 /// rewriting library state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -79,6 +99,9 @@ pub struct AssetMediaInterpretation {
     /// Color interpretation intent for the asset.
     #[serde(default)]
     pub color: MediaColorInterpretation,
+    /// Payload kind that decides whether color management applies at all.
+    #[serde(default)]
+    pub payload: AssetColorPayload,
 }
 
 /// Overrides for media asset metadata.

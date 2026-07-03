@@ -183,7 +183,7 @@ fn color_space_dropdown_for(
     );
     let mut items = vec![MenuItem::new(
         auto_option_label(auto_interpretation),
-        draft_update_action(MediaColorInterpretation::Auto),
+        draft_update_action(interpretation, MediaColorInterpretation::Auto),
     )
     .checked(matches!(
         interpretation.color,
@@ -192,7 +192,10 @@ fn color_space_dropdown_for(
     items.extend(OVERRIDE_COLOR_SPACES.iter().map(|&color_space| {
         MenuItem::new(
             color_space_label(color_space),
-            draft_update_action(MediaColorInterpretation::Override { color_space }),
+            draft_update_action(
+                interpretation,
+                MediaColorInterpretation::Override { color_space },
+            ),
         )
         .checked(
             matches!(
@@ -204,7 +207,6 @@ fn color_space_dropdown_for(
 
     let label = match interpretation.color {
         MediaColorInterpretation::Auto => auto_option_label(auto_interpretation),
-        MediaColorInterpretation::Data => "非色彩数据".to_owned(),
         MediaColorInterpretation::Override { color_space } => {
             color_space_label(color_space).to_owned()
         }
@@ -212,9 +214,12 @@ fn color_space_dropdown_for(
     Dropdown::new(label, items).with_max_visible_items(8)
 }
 
-fn draft_update_action(color: MediaColorInterpretation) -> mondrian_editor_state::Action {
+fn draft_update_action(
+    interpretation: AssetMediaInterpretation,
+    color: MediaColorInterpretation,
+) -> mondrian_editor_state::Action {
     app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
-        interpretation: AssetMediaInterpretation { color },
+        interpretation: AssetMediaInterpretation { color, ..interpretation },
     })
 }
 
@@ -274,7 +279,6 @@ fn method_label(method: VideoColorDetectionMethod) -> &'static str {
 fn interpretation_status(draft: &AppUiInterpretAssetDraft) -> String {
     match draft.interpretation.color {
         MediaColorInterpretation::Auto => auto_option_label(draft.auto_interpretation.as_ref()),
-        MediaColorInterpretation::Data => "非色彩数据 — 绕过色彩管理".to_owned(),
         MediaColorInterpretation::Override { color_space } => {
             format!("手动 — {}", color_space_label(color_space))
         }
@@ -425,6 +429,7 @@ mod tests {
             "Shot",
             AssetMediaInterpretation {
                 color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                ..AssetMediaInterpretation::default()
             },
             Some(detected_interpretation(ColorSpace::Rec2020)),
         );
@@ -468,9 +473,10 @@ mod tests {
 
         assert!(dialog.color_space_dropdown.is_enabled());
         assert_eq!(
-            dialog
-                .color_space_dropdown
-                .checked_for_action(&draft_update_action(MediaColorInterpretation::Auto)),
+            dialog.color_space_dropdown.checked_for_action(&draft_update_action(
+                AssetMediaInterpretation::default(),
+                MediaColorInterpretation::Auto,
+            )),
             Some(true)
         );
     }
@@ -482,6 +488,7 @@ mod tests {
             "Shot",
             AssetMediaInterpretation {
                 color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+                ..AssetMediaInterpretation::default()
             },
             Some(detected_interpretation(ColorSpace::Rec2020)),
         ));
@@ -489,6 +496,12 @@ mod tests {
         assert!(dialog.color_space_dropdown.is_enabled());
         assert_eq!(
             dialog.color_space_dropdown.checked_for_action(&draft_update_action(
+                AssetMediaInterpretation {
+                    color: MediaColorInterpretation::Override {
+                        color_space: ColorSpace::Rec2100Pq
+                    },
+                    ..AssetMediaInterpretation::default()
+                },
                 MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
             )),
             Some(true)

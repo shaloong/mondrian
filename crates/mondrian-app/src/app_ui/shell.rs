@@ -3308,6 +3308,7 @@ mod tests {
             app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
                 interpretation: AssetMediaInterpretation {
                     color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                    ..AssetMediaInterpretation::default()
                 },
             }),
             &platform,
