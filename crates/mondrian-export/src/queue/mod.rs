@@ -17,11 +17,12 @@ use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
-    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics, TimelineCompositeElement,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, ExportBitDepth, InputColorResolutionSourceCounts, SequenceSettings, VideoRange,
@@ -105,6 +106,8 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub gpu_color_stages: u64,
     /// GPU scheduling blockers across native GPU color stages.
     pub gpu_blockers: u64,
+    /// Structured native GPU blocker reasons.
+    pub gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
     /// Upload/readback transfer stages around color work.
     pub transfer_stages: u64,
     /// Float/linear timeline composites.
@@ -113,6 +116,8 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub legacy_rgba8_composites: u64,
     /// Structured legacy RGBA8 fallback reason count.
     pub legacy_reason_total: u64,
+    /// Structured legacy RGBA8 fallback reasons.
+    pub legacy_breakdown: TimelineCompositeLegacyBreakdown,
     /// Whether all diagnosed composites stayed in the float/linear path.
     pub fully_float_linear: bool,
     /// Whether native GPU color scheduling was free of upload/readback and blockers.
@@ -168,10 +173,12 @@ impl ExportJobColorDiagnostics {
             cpu_output_stages: stages.cpu_output_stages,
             gpu_color_stages: stages.gpu_color_stages,
             gpu_blockers: stages.gpu_blockers,
+            gpu_blocker_breakdown: stages.gpu_blocker_breakdown,
             transfer_stages: stages.upload_stages.saturating_add(stages.readback_stages),
             float_linear_composites: composite.float_linear_composites,
             legacy_rgba8_composites: composite.legacy_rgba8_composites,
             legacy_reason_total: composite.legacy_breakdown.total(),
+            legacy_breakdown: composite.legacy_breakdown,
             fully_float_linear: composite.is_fully_float_linear(),
             gpu_path_ready: stages.gpu_blockers == 0
                 && stages.upload_stages == 0
@@ -2015,6 +2022,10 @@ mod tests {
                 cpu_input_stages: 1,
                 cpu_output_stages: 1,
                 gpu_blockers: 1,
+                gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                    render_pipeline_not_prepared: 1,
+                    ..RenderColorStageGpuBlockerBreakdown::default()
+                },
                 stage_pixels: 8,
                 ..RenderColorStageDiagnostics::default()
             },
@@ -2051,6 +2062,14 @@ mod tests {
         assert_eq!(job.diagnostics.color.stage_diagnostics.cpu_input_stages, 1);
         assert_eq!(job.diagnostics.color.stage_diagnostics.cpu_output_stages, 1);
         assert_eq!(job.diagnostics.color.stage_diagnostics.gpu_blockers, 1);
+        assert_eq!(
+            job.diagnostics
+                .color
+                .stage_diagnostics
+                .gpu_blocker_breakdown
+                .render_pipeline_not_prepared,
+            1
+        );
         assert_eq!(job.diagnostics.color.stage_diagnostics.stage_pixels, 8);
         let composite_summary = job.diagnostics.color.composite_color_path_summary();
         assert_eq!(composite_summary.elements, 3);
@@ -2065,11 +2084,19 @@ mod tests {
                 override_count: 1,
                 explicit_metadata_or_override: 2,
                 gpu_blockers: 1,
+                gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                    render_pipeline_not_prepared: 1,
+                    ..RenderColorStageGpuBlockerBreakdown::default()
+                },
                 cpu_input_stages: 1,
                 cpu_output_stages: 1,
                 float_linear_composites: 1,
                 legacy_rgba8_composites: 1,
                 legacy_reason_total: 1,
+                legacy_breakdown: TimelineCompositeLegacyBreakdown {
+                    media_transform: 1,
+                    ..TimelineCompositeLegacyBreakdown::default()
+                },
                 ..ExportJobColorDiagnosticsSummary::default()
             })
         );
@@ -2098,6 +2125,12 @@ mod tests {
             RenderColorStageDiagnostics {
                 total_stages: 2,
                 gpu_color_stages: 2,
+                gpu_blockers: 2,
+                gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                    shader_module_not_prepared: 1,
+                    ocio_resource_bind_group_not_prepared: 1,
+                    ..RenderColorStageGpuBlockerBreakdown::default()
+                },
                 stage_pixels: 16,
                 ..RenderColorStageDiagnostics::default()
             },
@@ -2119,9 +2152,14 @@ mod tests {
                 policy_rejections: 1,
                 explicit_metadata_or_override: 2,
                 gpu_color_stages: 2,
+                gpu_blockers: 2,
+                gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                    shader_module_not_prepared: 1,
+                    ocio_resource_bind_group_not_prepared: 1,
+                    ..RenderColorStageGpuBlockerBreakdown::default()
+                },
                 float_linear_composites: 2,
                 fully_float_linear: true,
-                gpu_path_ready: true,
                 ..ExportJobColorDiagnosticsSummary::default()
             })
         );

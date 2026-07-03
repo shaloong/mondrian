@@ -241,7 +241,7 @@ of re-evaluating timeline state or rebuilding derived counters in UI code.
 The summary carries the same health concepts used by preview reports:
 explicit metadata/override totals, policy assumptions/rejections, data-texture
 bypasses, legacy RGBA8 reason totals, float/linear completeness, GPU blockers,
-and GPU path readiness.
+GPU blocker breakdowns, legacy RGBA8 reason breakdowns, and GPU path readiness.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from

@@ -193,6 +193,10 @@ These reason details are the migration contract for removing old
 blend/effect/transform paths; dashboards, job panels, and CI budgets should
 consume the summary directly instead of re-inferring fallback causes from
 aggregate counters.
+Export job color summaries also carry the renderer-owned GPU blocker breakdown
+and legacy RGBA8 breakdown next to the health booleans (`fully_float_linear`,
+`gpu_path_ready`). UI labels, JSONL reports, and future CI budgets must read
+those structured fields rather than parsing totals or rebuilding reason lists.
 Headless preview smoke reports must also carry GPU preview candidate counters:
 request, ready/current/loading/unavailable outcomes, candidate pixels, and
 external texture registration handoff counters. These counters prove that the
