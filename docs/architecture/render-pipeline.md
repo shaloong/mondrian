@@ -284,3 +284,6 @@ preview and export cannot silently diverge in float/linear versus legacy RGBA8
 composite routing. The renderer golden suite includes a stable RGBA hash for
 this preview/export Rec.709 boundary parity contract; intentional color-pipeline
 changes must update that hash with the same care as image golden references.
+The app preview suite also pins a stable Rec.2020-working to sRGB-output
+multilayer preview/export RGBA hash, so preview and export cannot drift together
+without an explicit golden update.
