@@ -3861,6 +3861,7 @@ mod tests {
         let events = state.event_bus.subscribe();
         let interpretation = AssetMediaInterpretation {
             color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            ..AssetMediaInterpretation::default()
         };
 
         state

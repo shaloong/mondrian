@@ -345,6 +345,7 @@ mod tests {
         let asset_id = library.import_media_file(&media_path).expect("import media");
         let interpretation = AssetMediaInterpretation {
             color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+            ..AssetMediaInterpretation::default()
         };
         library
             .set_asset_interpretation(asset_id, interpretation)

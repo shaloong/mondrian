@@ -39,13 +39,15 @@ from current metadata, detector, and project color policy" and must not persist
 the currently resolved color space. User changes from the asset-library
 Interpret Footage dialog are stored as `Override { color_space }` and must
 remain stable across metadata re-probes, relinks, and detector upgrades.
-Non-color `Data` interpretation is reserved for asset classification or
-advanced utility channel workflows, not for the primary input color-space
-picker. UI may display the current resolved result, confidence, method, and
-warnings beside Auto, but that resolved value comes from probe/color-management
-diagnostics rather than the asset record.
-Preview and export resolve input color with the same precedence: clip-level
-override, then asset-library interpretation, then detected metadata, then the
-sequence missing-metadata policy.
+Non-color data is represented as asset payload classification, not as an
+Interpret Footage color-space mode. It is reserved for masks, mattes, technical
+textures, and advanced utility-channel workflows, not the primary input
+color-space picker. UI may display the current resolved result, confidence,
+method, and warnings beside Auto, but that resolved value comes from
+probe/color-management diagnostics rather than the asset record.
+Preview and export resolve input color with the same precedence: non-color
+asset payload classification first, then clip-level override, then
+asset-library interpretation, then detected metadata, then the sequence
+missing-metadata policy.
 
 Unknown/missing metadata policy is resolved at sequence color-management time, not by UI panels.

@@ -204,6 +204,18 @@ impl InputColorResolutionSourceCounts {
         }
     }
 
+    /// Add counts from another input color-resolution counter.
+    pub fn accumulate(&mut self, other: Self) {
+        self.override_count = self.override_count.saturating_add(other.override_count);
+        self.data_texture = self.data_texture.saturating_add(other.data_texture);
+        self.detected_metadata = self.detected_metadata.saturating_add(other.detected_metadata);
+        self.missing_assume_rec709 =
+            self.missing_assume_rec709.saturating_add(other.missing_assume_rec709);
+        self.missing_assume_working =
+            self.missing_assume_working.saturating_add(other.missing_assume_working);
+        self.missing_rejected = self.missing_rejected.saturating_add(other.missing_rejected);
+    }
+
     /// Count for one exact branch.
     pub fn count(self, source: InputColorResolutionSource) -> u64 {
         match source {
@@ -353,6 +365,16 @@ impl MissingColorMetadataPolicy {
         detected: Option<ColorSpace>,
         working: ColorSpace,
     ) -> InputColorResolution {
+        if asset_interpretation.payload.is_non_color_data() {
+            return InputColorResolution {
+                color_space: Some(working),
+                source: InputColorResolutionSource::DataTexture,
+                override_color_space: None,
+                detected_color_space: detected,
+                missing_metadata_policy: self,
+                working_color_space: working,
+            };
+        }
         if clip_override_color_space.is_some() {
             return self.resolve_input_decision(clip_override_color_space, detected, working);
         }
@@ -361,14 +383,6 @@ impl MissingColorMetadataPolicy {
             MediaColorInterpretation::Override { color_space } => {
                 self.resolve_input_decision(Some(color_space), detected, working)
             }
-            MediaColorInterpretation::Data => InputColorResolution {
-                color_space: Some(working),
-                source: InputColorResolutionSource::DataTexture,
-                override_color_space: None,
-                detected_color_space: detected,
-                missing_metadata_policy: self,
-                working_color_space: working,
-            },
         }
     }
 }
@@ -1343,6 +1357,7 @@ mod tests {
             None,
             AssetMediaInterpretation {
                 color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                ..AssetMediaInterpretation::default()
             },
             Some(ColorSpace::Rec709),
             working,
@@ -1352,7 +1367,10 @@ mod tests {
 
         let data = MissingColorMetadataPolicy::RejectMedia.resolve_asset_input_decision(
             None,
-            AssetMediaInterpretation { color: MediaColorInterpretation::Data },
+            AssetMediaInterpretation {
+                payload: mondrian_core::timeline_data::AssetColorPayload::NonColorData,
+                ..AssetMediaInterpretation::default()
+            },
             None,
             working,
         );
@@ -1363,6 +1381,7 @@ mod tests {
             Some(ColorSpace::AppleLog),
             AssetMediaInterpretation {
                 color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                ..AssetMediaInterpretation::default()
             },
             Some(ColorSpace::Rec709),
             working,
@@ -1416,6 +1435,16 @@ mod tests {
         assert_eq!(counts.policy_rejections(), 1);
         assert_eq!(counts.data_textures(), 1);
         assert_eq!(counts.total(), 7);
+
+        let mut accumulated = InputColorResolutionSourceCounts::default();
+        accumulated.record(InputColorResolutionSource::Override);
+        accumulated.accumulate(counts);
+        assert_eq!(accumulated.count(InputColorResolutionSource::Override), 2);
+        assert_eq!(
+            accumulated.count(InputColorResolutionSource::DetectedMetadata),
+            2
+        );
+        assert_eq!(accumulated.total(), 8);
     }
 
     #[test]

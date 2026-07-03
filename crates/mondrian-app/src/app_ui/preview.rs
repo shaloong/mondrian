@@ -2624,6 +2624,7 @@ mod tests {
                 color: mondrian_core::timeline_data::MediaColorInterpretation::Override {
                     color_space: ColorSpace::AppleLog,
                 },
+                ..AssetMediaInterpretation::default()
             },
             Some(ColorSpace::Srgb),
             &color_context,
@@ -2637,7 +2638,8 @@ mod tests {
         let data = resolve_preview_input_color_space(
             None,
             AssetMediaInterpretation {
-                color: mondrian_core::timeline_data::MediaColorInterpretation::Data,
+                payload: mondrian_core::timeline_data::AssetColorPayload::NonColorData,
+                ..AssetMediaInterpretation::default()
             },
             Some(ColorSpace::Srgb),
             &color_context,

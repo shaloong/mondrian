@@ -211,12 +211,14 @@ raw CICP tags rather than rebuilding diagnostics from path or decoder text.
 Export jobs carry this as `TimelineExportInput.asset_color_diagnostics`, and
 preview emits the same diagnostic summary when missing-metadata policy rejects a
 media asset.
-Preview perf smoke reports also expose the per-branch input color-resolution
-counters, including override, detected metadata, missing-policy assumptions, and
-missing-policy rejects. Data/non-color texture resolution is reported as its own
-branch instead of being merged into overrides. These counters are part of the
-render-path health contract: preview can remain real-time while still reporting
-whether it was driven by authoritative media interpretation, non-color asset
+Preview perf smoke reports and export frame diagnostics expose the same
+per-branch input color-resolution counters, including override, detected
+metadata, missing-policy assumptions, and missing-policy rejects. Data/non-color
+texture resolution is reported as its own branch instead of being merged into
+overrides, and it must come from asset payload classification rather than the
+Interpret Footage color-space picker. These counters are part of the render-path
+health contract: preview can remain real-time while still reporting whether it
+was driven by authoritative media interpretation, non-color asset
 classification, or by project policy. Aggregated report fields such as
 `policy_assumptions` and `explicit_metadata_or_override` must be derived from
 `InputColorResolutionSourceCounts` in `mondrian-timeline`, not hand-maintained
