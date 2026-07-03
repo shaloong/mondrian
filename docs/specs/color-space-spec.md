@@ -18,6 +18,9 @@ Supported color spaces currently include:
 MondrianSmart loads Mondrian's embedded `mondrian_default_ocio_v1` config and
 must fail closed if that asset cannot parse or cannot produce the requested
 OCIO processor.
+Explicit OCIO sources must not fall back to another source. In particular,
+`OcioConfigSource::Environment` means the `OCIO` environment variable itself;
+if it is unset or points to a missing file, the selected source is invalid.
 
 The embedded Standard config is also exposed through
 `mondrian_default_ocio_contract()`. That contract is the authoritative list of

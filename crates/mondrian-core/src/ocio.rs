@@ -10,7 +10,7 @@
 //! 1. **MondrianDefault** — Mondrian Standard/Simple built-in config
 //! 2. **Builtin** — named built-in config (e.g. `"aces_1.2"`)
 //! 3. **Path** — explicit `config.ocio` file path
-//! 4. **Environment** — `$OCIO` env var → standard system paths
+//! 4. **Environment** — explicit `$OCIO` env var
 
 use crate::types::{ColorSpace, OcioConfigSource};
 pub use ocio_rs::GpuLanguage;
@@ -574,7 +574,7 @@ pub fn ocio_available() -> bool {
     OCIO_CONFIG_PATH.lock().map(|g| g.is_some()).unwrap_or(false)
 }
 
-// ── Resolver (env var + standard paths + builtin) ──────────────────────────────
+// ── Resolver (explicit source only) ─────────────────────────────────────────────
 
 /// Resolve an [`OcioConfigSource`] and load the corresponding config.
 ///
@@ -638,77 +638,21 @@ fn already_loaded_with(path: &Path) -> bool {
     OCIO_CONFIG_PATH.lock().map(|g| g.as_deref() == Some(path)).unwrap_or(false)
 }
 
-/// Resolve an OCIO config path from environment / standard locations.
-///
-/// Priority:
-/// 1. `OCIO` environment variable
-/// 2. Standard system paths (per platform)
+/// Resolve an OCIO config path from the explicit `OCIO` environment variable.
 fn resolve_from_environment() -> Result<PathBuf, String> {
-    // 1. `$OCIO` environment variable (industry standard)
-    if let Ok(env_path) = std::env::var("OCIO") {
-        let p = PathBuf::from(&env_path);
-        if p.exists() {
-            tracing::info!(path=%p.display(), "using OCIO config from $OCIO");
-            return Ok(p);
-        }
-        tracing::warn!(path=%env_path, "$OCIO points to a non-existent file");
+    let env_path = std::env::var("OCIO").map_err(|_| {
+        "OCIO environment source selected, but the OCIO environment variable is not set. \
+         Set OCIO to a config.ocio path, choose Mondrian Standard, or choose an explicit config path."
+            .to_string()
+    })?;
+    let p = PathBuf::from(&env_path);
+    if p.exists() {
+        tracing::info!(path=%p.display(), "using OCIO config from $OCIO");
+        return Ok(p);
     }
-
-    // 2. Standard system paths
-    for candidate in standard_ocio_paths() {
-        if candidate.exists() {
-            tracing::info!(path=%candidate.display(), "using OCIO config from standard path");
-            return Ok(candidate);
-        }
-    }
-
-    Err(
-        "no OCIO config found — set the OCIO environment variable or place a config.ocio in:\n\
-         • $OCIO (environment variable)\n\
-         • ~/.config/ocio/config.ocio (Linux)\n\
-         • %APPDATA%/ocio/config.ocio (Windows)\n\
-         • ~/Library/Preferences/ocio/config.ocio (macOS)"
-            .to_string(),
-    )
-}
-
-/// Standard OCIO config search paths for the current platform.
-fn standard_ocio_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(home) = std::env::var("HOME") {
-            paths.push(PathBuf::from(&home).join("Library/Preferences/ocio/config.ocio"));
-        }
-        paths.push(PathBuf::from(
-            "/Library/Application Support/ocio/config.ocio",
-        ));
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(home) = std::env::var("HOME") {
-            paths.push(PathBuf::from(&home).join(".config/ocio/config.ocio"));
-        }
-        paths.push(PathBuf::from("/etc/ocio/config.ocio"));
-        paths.push(PathBuf::from("/usr/share/ocio/config.ocio"));
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            paths.push(PathBuf::from(&appdata).join("ocio/config.ocio"));
-        }
-        if let Ok(programdata) = std::env::var("PROGRAMDATA") {
-            paths.push(PathBuf::from(&programdata).join("ocio/config.ocio"));
-        }
-        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-            paths.push(PathBuf::from(&localappdata).join("ocio/config.ocio"));
-        }
-    }
-
-    paths
+    Err(format!(
+        "OCIO environment source selected, but $OCIO points to a non-existent config file: {env_path}"
+    ))
 }
 
 // ── Built-in config listing (for UI presets) ───────────────────────────────────
@@ -1362,6 +1306,22 @@ pub fn ocio_default_display_view() -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn ocio_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().expect("OCIO env test lock")
+    }
+
+    fn set_ocio_env_for_test(value: Option<&std::path::Path>) {
+        // Process environment mutation is serialized by `ocio_env_test_lock`.
+        unsafe {
+            match value {
+                Some(path) => std::env::set_var("OCIO", path),
+                None => std::env::remove_var("OCIO"),
+            }
+        }
+    }
 
     #[test]
     fn mondrian_default_config_asset_parses_and_is_named() {
@@ -1415,6 +1375,29 @@ mod tests {
                 display_view.view
             );
         }
+    }
+
+    #[test]
+    fn environment_ocio_source_fails_closed_when_env_path_is_missing() {
+        let _guard = ocio_env_test_lock();
+        let original = std::env::var_os("OCIO");
+        let missing_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-env-ocio-config-{}.ocio",
+            std::process::id()
+        ));
+        if missing_path.exists() {
+            std::fs::remove_file(&missing_path).expect("remove stale missing OCIO test file");
+        }
+        set_ocio_env_for_test(Some(&missing_path));
+
+        let err = ensure_ocio_loaded(&OcioConfigSource::Environment)
+            .expect_err("environment OCIO source must not fall back from a missing $OCIO path");
+
+        assert!(err.contains("OCIO environment source selected"));
+        assert!(err.contains("$OCIO points to a non-existent config file"));
+        assert!(err.contains(missing_path.to_string_lossy().as_ref()));
+
+        set_ocio_env_for_test(original.as_deref().map(std::path::Path::new));
     }
 
     #[test]

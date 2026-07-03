@@ -369,8 +369,8 @@ pub enum ColorEngine {
 
 /// 如何定位 OCIO 配置。
 ///
-/// 类似达芬奇的色彩科学选择器（预设）和 Nuke 的 OCIO 解析顺序
-///（`$OCIO` → 内置 → 自定义路径）。
+/// 类似达芬奇的色彩科学选择器（预设）和 Nuke 的显式 OCIO 来源。
+/// 每个来源都必须独立解析成功，不能静默回退到其他来源。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OcioConfigSource {
@@ -381,7 +381,7 @@ pub enum OcioConfigSource {
     #[serde(rename = "mondrian_default")]
     MondrianDefault,
     /// 使用 `OCIO` 环境变量（行业标准）。
-    /// 未设置时自动回退到系统标准路径。
+    /// 未设置或指向缺失文件时必须显式报错，不能扫描系统路径回退。
     #[default]
     #[serde(rename = "environment")]
     Environment,
