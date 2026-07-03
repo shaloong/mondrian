@@ -21,12 +21,12 @@ use mondrian_renderer::TimelineCompositeColorPath;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
-    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
-    RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
-    TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -983,6 +983,51 @@ pub struct AppUiPreviewColorRejection {
     pub diagnostic_summary: String,
 }
 
+/// Stable preview color-path health summary for perf JSONL and diagnostics tooling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewColorHealthSummary {
+    /// Preview composite plans represented by this snapshot.
+    pub composite_plans: u64,
+    /// Inputs resolved from detected media metadata.
+    pub detected_metadata: u64,
+    /// Inputs resolved from user overrides.
+    pub override_count: u64,
+    /// Inputs resolved by missing-metadata policy assumptions.
+    pub policy_assumptions: u64,
+    /// Inputs bypassing color management as data/utility textures.
+    pub data_textures: u64,
+    /// Inputs rejected by missing-metadata policy.
+    pub policy_rejections: u64,
+    /// Inputs resolved from explicit metadata or user overrides.
+    pub explicit_metadata_or_override: u64,
+    /// CPU input color-transform stages.
+    pub cpu_input_stages: u64,
+    /// CPU output/display color-transform stages.
+    pub cpu_output_stages: u64,
+    /// Native GPU color-transform stages.
+    pub gpu_color_stages: u64,
+    /// GPU scheduling blockers across native GPU color stages.
+    pub gpu_blockers: u64,
+    /// Structured native GPU blocker reasons.
+    pub gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
+    /// Upload/readback transfer stages around color work.
+    pub transfer_stages: u64,
+    /// Temporary RGBA8 CPU boundary crossings observed by preview transforms.
+    pub rgba8_boundary_calls: u64,
+    /// Float/linear timeline composites.
+    pub float_linear_composites: u64,
+    /// Legacy RGBA8 timeline composites.
+    pub legacy_rgba8_composites: u64,
+    /// Structured legacy RGBA8 fallback reason count.
+    pub legacy_reason_total: u64,
+    /// Structured legacy RGBA8 fallback reasons.
+    pub legacy_breakdown: TimelineCompositeLegacyBreakdown,
+    /// Whether all diagnosed composites stayed in the float/linear path.
+    pub fully_float_linear: bool,
+    /// Whether native GPU color scheduling was free of upload/readback and blockers.
+    pub gpu_path_ready: bool,
+}
+
 impl AppUiPreviewColorRejection {
     fn new(
         asset_id: AssetId,
@@ -1032,6 +1077,66 @@ impl AppUiPreviewDiagnostics {
             legacy_adjustment_effect: self.color_composite_legacy_adjustment_effect,
         }
         .color_path_summary()
+    }
+
+    /// Return color-stage scheduling diagnostics using the shared renderer model.
+    pub fn color_stage_diagnostics(self) -> RenderColorStageDiagnostics {
+        RenderColorStageDiagnostics {
+            total_stages: self.color_stage_total_stages,
+            cpu_input_stages: self.color_stage_cpu_input_stages,
+            cpu_output_stages: self.color_stage_cpu_output_stages,
+            gpu_color_stages: self.color_stage_gpu_color_stages,
+            upload_stages: self.color_stage_upload_stages,
+            readback_stages: self.color_stage_readback_stages,
+            gpu_blockers: self.color_stage_gpu_blockers,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                shader_module_not_prepared: self.color_stage_gpu_shader_module_blockers,
+                ocio_resource_bind_group_not_prepared: self.color_stage_gpu_ocio_resource_blockers,
+                fullscreen_wrapper_not_prepared: self.color_stage_gpu_wrapper_blockers,
+                render_pipeline_not_prepared: self.color_stage_gpu_render_pipeline_blockers,
+            },
+            stage_pixels: self.color_stage_pixels,
+        }
+    }
+
+    /// Return the stable preview color-path health summary when diagnostics have evidence.
+    pub fn color_health_summary(self) -> Option<AppUiPreviewColorHealthSummary> {
+        let counts = self.input_color_resolution_counts();
+        let stages = self.color_stage_diagnostics();
+        let composite = self.composite_color_path_summary();
+        if counts.total() == 0
+            && stages.total_stages == 0
+            && composite.composite_plans() == 0
+            && self.color_rgba8_boundary_calls == 0
+        {
+            return None;
+        }
+
+        Some(AppUiPreviewColorHealthSummary {
+            composite_plans: composite.composite_plans(),
+            detected_metadata: counts.detected_metadata,
+            override_count: counts.override_count,
+            policy_assumptions: counts.policy_assumptions(),
+            data_textures: counts.data_textures(),
+            policy_rejections: counts.policy_rejections(),
+            explicit_metadata_or_override: counts.explicit_metadata_or_override(),
+            cpu_input_stages: stages.cpu_input_stages,
+            cpu_output_stages: stages.cpu_output_stages,
+            gpu_color_stages: stages.gpu_color_stages,
+            gpu_blockers: stages.gpu_blockers,
+            gpu_blocker_breakdown: stages.gpu_blocker_breakdown,
+            transfer_stages: stages.upload_stages.saturating_add(stages.readback_stages),
+            rgba8_boundary_calls: self.color_rgba8_boundary_calls,
+            float_linear_composites: composite.float_linear_composites,
+            legacy_rgba8_composites: composite.legacy_rgba8_composites,
+            legacy_reason_total: composite.legacy_breakdown.total(),
+            legacy_breakdown: composite.legacy_breakdown,
+            fully_float_linear: composite.is_fully_float_linear()
+                && self.color_composite_plans == composite.composite_plans(),
+            gpu_path_ready: stages.gpu_blockers == 0
+                && stages.upload_stages == 0
+                && stages.readback_stages == 0,
+        })
     }
 }
 
@@ -2568,6 +2673,65 @@ mod tests {
         assert_eq!(summary.legacy_breakdown.media_transform, 1);
         assert_eq!(summary.legacy_breakdown.adjustment_effect, 2);
         assert_eq!(summary.legacy_breakdown.total(), 3);
+    }
+
+    #[test]
+    fn preview_diagnostics_derives_color_health_summary() {
+        assert_eq!(
+            AppUiPreviewDiagnostics::default().color_health_summary(),
+            None
+        );
+
+        let diagnostics = AppUiPreviewDiagnostics {
+            input_color_resolution_override: 2,
+            input_color_resolution_data_texture: 3,
+            input_color_resolution_detected_metadata: 5,
+            input_color_resolution_missing_assume_rec709: 7,
+            input_color_resolution_missing_rejected: 11,
+            color_stage_total_stages: 4,
+            color_stage_cpu_input_stages: 1,
+            color_stage_cpu_output_stages: 1,
+            color_stage_gpu_color_stages: 2,
+            color_stage_upload_stages: 1,
+            color_stage_gpu_blockers: 2,
+            color_stage_gpu_shader_module_blockers: 1,
+            color_stage_gpu_render_pipeline_blockers: 1,
+            color_stage_pixels: 128,
+            color_rgba8_boundary_calls: 1,
+            color_composite_plans: 3,
+            color_composite_elements: 9,
+            color_composite_float_linear: 2,
+            color_composite_legacy_rgba8: 1,
+            color_composite_legacy_media_transform: 1,
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let summary = diagnostics.color_health_summary().expect("preview color health");
+
+        assert_eq!(summary.composite_plans, 3);
+        assert_eq!(summary.detected_metadata, 5);
+        assert_eq!(summary.override_count, 2);
+        assert_eq!(summary.policy_assumptions, 7);
+        assert_eq!(summary.data_textures, 3);
+        assert_eq!(summary.policy_rejections, 11);
+        assert_eq!(summary.explicit_metadata_or_override, 7);
+        assert_eq!(summary.cpu_input_stages, 1);
+        assert_eq!(summary.cpu_output_stages, 1);
+        assert_eq!(summary.gpu_color_stages, 2);
+        assert_eq!(summary.gpu_blockers, 2);
+        assert_eq!(summary.gpu_blocker_breakdown.shader_module_not_prepared, 1);
+        assert_eq!(
+            summary.gpu_blocker_breakdown.render_pipeline_not_prepared,
+            1
+        );
+        assert_eq!(summary.transfer_stages, 1);
+        assert_eq!(summary.rgba8_boundary_calls, 1);
+        assert_eq!(summary.float_linear_composites, 2);
+        assert_eq!(summary.legacy_rgba8_composites, 1);
+        assert_eq!(summary.legacy_reason_total, 1);
+        assert_eq!(summary.legacy_breakdown.media_transform, 1);
+        assert!(!summary.fully_float_linear);
+        assert!(!summary.gpu_path_ready);
     }
 
     #[test]

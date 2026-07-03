@@ -1,6 +1,8 @@
 use super::*;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
-use crate::app_ui::preview::{AppUiPreviewDiagnostics, AppUiPreviewService};
+use crate::app_ui::preview::{
+    AppUiPreviewColorHealthSummary, AppUiPreviewDiagnostics, AppUiPreviewService,
+};
 use crate::app_ui::shell::AppUiAppRoot;
 use serde::Serialize;
 use std::cmp;
@@ -41,8 +43,10 @@ struct AppUiScaleReport {
     initial_paint_commands: usize,
     playback_paint_commands_max: usize,
     preview_diagnostics: AppUiPreviewDiagnostics,
+    preview_color_health: Option<AppUiPreviewColorHealthSummary>,
     preview_color_path: PreviewColorPathReport,
     preview_playback_diagnostics: AppUiPreviewDiagnostics,
+    preview_playback_color_health: Option<AppUiPreviewColorHealthSummary>,
     preview_playback_color_path: PreviewColorPathReport,
     cases: Vec<PerfCaseReport>,
 }
@@ -53,6 +57,7 @@ struct PreviewMediaPerfReport {
     frames: usize,
     cache_iterations: usize,
     preview_diagnostics: AppUiPreviewDiagnostics,
+    preview_color_health: Option<AppUiPreviewColorHealthSummary>,
     preview_color_path: PreviewColorPathReport,
     cases: Vec<PerfCaseReport>,
 }
@@ -72,6 +77,7 @@ struct PreviewMediaPlaybackPerfReport {
     frame_interval_ms: u64,
     readiness: PreviewReadinessCounts,
     preview_diagnostics: AppUiPreviewDiagnostics,
+    preview_color_health: Option<AppUiPreviewColorHealthSummary>,
     preview_color_path: PreviewColorPathReport,
     cases: Vec<PerfCaseReport>,
 }
@@ -504,8 +510,10 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
             initial_paint_commands,
             playback_paint_commands_max,
             preview_diagnostics,
+            preview_color_health: preview_diagnostics.color_health_summary(),
             preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
             preview_playback_diagnostics,
+            preview_playback_color_health: preview_playback_diagnostics.color_health_summary(),
             preview_playback_color_path: PreviewColorPathReport::from_diagnostics(
                 preview_playback_diagnostics,
             ),
@@ -623,6 +631,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             frames: frame_count,
             cache_iterations,
             preview_diagnostics,
+            preview_color_health: preview_diagnostics.color_health_summary(),
             preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
             cases: vec![
                 first_frame_case,
@@ -740,6 +749,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             frame_interval_ms,
             readiness,
             preview_diagnostics,
+            preview_color_health: preview_diagnostics.color_health_summary(),
             preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
             cases: vec![playback_case, gpu_candidate_case],
         })
@@ -1050,6 +1060,46 @@ fn preview_color_path_report_marks_clean_float_linear_path() {
     assert!(report.legacy_reason_details.is_empty());
     assert!(report.fully_float_linear);
     assert!(report.gpu_path_ready);
+}
+
+#[test]
+fn preview_perf_report_serializes_color_health_summary() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        color_composite_plans: 1,
+        color_composite_elements: 1,
+        color_composite_float_linear: 1,
+        color_stage_total_stages: 1,
+        color_stage_cpu_output_stages: 1,
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = PreviewMediaPerfReport {
+        scenario: "preview-color-health-test",
+        frames: 1,
+        cache_iterations: 1,
+        preview_diagnostics: diagnostics,
+        preview_color_health: diagnostics.color_health_summary(),
+        preview_color_path: PreviewColorPathReport::from_diagnostics(diagnostics),
+        cases: Vec::new(),
+    };
+
+    let json = serde_json::to_value(&report).expect("serialize report");
+
+    assert_eq!(
+        json["preview_color_health"]["fully_float_linear"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        json["preview_color_health"]["gpu_path_ready"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        json["preview_color_health"]["gpu_blocker_breakdown"]["render_pipeline_not_prepared"],
+        0
+    );
+    assert_eq!(
+        json["preview_color_health"]["legacy_breakdown"]["media_transform"],
+        0
+    );
 }
 
 fn paint_command_count(

@@ -201,6 +201,11 @@ Export simulation performance reports written through `MONDRIAN_EXPORT_SIM_OUTPU
 include this same summary as `color_health` while retaining legacy flat stage
 counters for dashboard continuity. The nested summary is the authoritative
 machine-readable color health contract.
+Preview performance JSONL reports written through `MONDRIAN_PERF_OUTPUT` expose
+the same idea as `preview_color_health` and, for playback probes,
+`preview_playback_color_health`. Older `preview_color_path` fields remain during
+dashboard migration, but new tooling should budget against the structured
+health summary instead of reconstructing it from flat preview counters.
 Headless preview smoke reports must also carry GPU preview candidate counters:
 request, ready/current/loading/unavailable outcomes, candidate pixels, and
 external texture registration handoff counters. These counters prove that the
