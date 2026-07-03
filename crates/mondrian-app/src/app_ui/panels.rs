@@ -3212,21 +3212,38 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
 
 fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {
     let summary = diagnostics.summary()?;
+    let float_health = if summary.fully_float_linear {
+        "float-ready"
+    } else {
+        "legacy-rgba8"
+    };
+    let gpu_health = if summary.gpu_path_ready {
+        "gpu-ready"
+    } else {
+        "gpu-blocked"
+    };
     Some(format!(
-        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / stages cpu-in {} cpu-out {} gpu {} blockers {} transfer {} / composite float {} legacy {}",
+        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / health {} {} / stages cpu-in {} cpu-out {} gpu {} blockers {} transfer {} / gpu blockers shader {} resource {} wrapper {} pipeline {} / composite float {} legacy {} reasons {}",
         summary.diagnosed_frames,
         summary.detected_metadata,
         summary.override_count,
         summary.policy_assumptions,
         summary.data_textures,
         summary.policy_rejections,
+        float_health,
+        gpu_health,
         summary.cpu_input_stages,
         summary.cpu_output_stages,
         summary.gpu_color_stages,
         summary.gpu_blockers,
         summary.transfer_stages,
+        summary.gpu_blocker_breakdown.shader_module_not_prepared,
+        summary.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared,
+        summary.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
+        summary.gpu_blocker_breakdown.render_pipeline_not_prepared,
         summary.float_linear_composites,
-        summary.legacy_rgba8_composites
+        summary.legacy_rgba8_composites,
+        summary.legacy_reason_total
     ))
 }
 
@@ -4719,6 +4736,10 @@ mod tests {
                 cpu_input_stages: 1,
                 cpu_output_stages: 1,
                 gpu_blockers: 1,
+                gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
+                    render_pipeline_not_prepared: 1,
+                    ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
+                },
                 stage_pixels: 960 * 540 * 2,
                 ..mondrian_renderer::RenderColorStageDiagnostics::default()
             },
@@ -4757,7 +4778,7 @@ mod tests {
         assert_eq!(
             encoding.color_diagnostics.as_deref(),
             Some(
-                "色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0 / stages cpu-in 1 cpu-out 1 gpu 0 blockers 1 transfer 0 / composite float 1 legacy 0"
+                "色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0 / health float-ready gpu-blocked / stages cpu-in 1 cpu-out 1 gpu 0 blockers 1 transfer 0 / gpu blockers shader 0 resource 0 wrapper 0 pipeline 1 / composite float 1 legacy 0 reasons 0"
             )
         );
         assert_eq!(encoding.progress_percent, 82);
