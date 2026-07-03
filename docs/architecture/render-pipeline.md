@@ -229,6 +229,10 @@ actually rendered, so app panels, logs, and future JSONL reports read the same
 source of truth instead of re-evaluating timeline state from UI code. Export
 diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
+Preview exposes the same frame-level input color-resolution source counts from
+its preview-intent evaluation path. Tests compare preview and export source
+counts for the same timeline frame so display/output differences cannot hide a
+divergence in media input interpretation.
 Preview final-frame cache keys must include the effective color context so a
 monitor/output transform change cannot reuse stale pixels from a previous view.
 For OCIO-backed preview this includes the resolved display and view names, not
