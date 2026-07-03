@@ -3037,6 +3037,71 @@ mod tests {
     }
 
     #[test]
+    fn preview_and_export_composite_color_path_summaries_match_for_frame() {
+        let mut sequence = Sequence::new("preview-export-composite-diagnostics-parity");
+        let tb = sequence.time_base();
+        let mut solid = Clip::new_solid_color(
+            AssetId::new(),
+            Color::from_rgba8(64, 96, 220, 255),
+            TimeCode::new(0, tb),
+            TimeCode::new(10, tb),
+        );
+        solid.transform.set_scale(glam::Vec2::new(0.75, 0.75));
+        sequence.video_tracks[0]
+            .add_clip(solid)
+            .expect("add transformed solid color clip");
+
+        let mut state = AppState::new();
+        state.sequence = Some(sequence.clone());
+        state.seek(0);
+        let preview_service = AppUiPreviewService::new();
+        let preview_frame = preview_service.viewer_preview_for_state(&state);
+        let preview_frame = ready_frame(preview_frame);
+        let preview_summary = preview_service.diagnostics().composite_color_path_summary();
+
+        let export_diagnostics = mondrian_export::queue::export_composite_diagnostics_for_frame(
+            &mondrian_export::preset::TimelineExportInput {
+                sequence,
+                sequences: Vec::new(),
+                asset_paths: HashMap::new(),
+                asset_color_spaces: HashMap::new(),
+                asset_interpretations: HashMap::new(),
+                asset_color_diagnostics: HashMap::new(),
+                range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
+                project_color_management: ProjectColorManagement::default(),
+            },
+            0,
+            preview_frame.width,
+            preview_frame.height,
+        )
+        .expect("export composite diagnostics");
+        let export_summary = export_diagnostics.color_path_summary();
+
+        assert_eq!(
+            preview_summary.path,
+            TimelineCompositeColorPath::LegacyRgba8
+        );
+        assert_eq!(preview_summary.path, export_summary.path);
+        assert_eq!(preview_summary.elements, export_summary.elements);
+        assert_eq!(
+            preview_summary.float_linear_composites,
+            export_summary.float_linear_composites
+        );
+        assert_eq!(
+            preview_summary.legacy_rgba8_composites,
+            export_summary.legacy_rgba8_composites
+        );
+        assert_eq!(
+            preview_summary.legacy_breakdown.solid_transform,
+            export_summary.legacy_breakdown.solid_transform
+        );
+        assert_eq!(
+            preview_summary.legacy_breakdown.total(),
+            export_summary.legacy_breakdown.total()
+        );
+    }
+
+    #[test]
     fn preview_single_media_color_output_matches_export_composite_contract() {
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
