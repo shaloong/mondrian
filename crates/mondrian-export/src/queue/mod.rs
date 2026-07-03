@@ -80,6 +80,37 @@ pub struct ExportJobColorDiagnostics {
     pub diagnosed_frames: u64,
 }
 
+/// Stable summary of export color-path diagnostics for UI, telemetry, and reports.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExportJobColorDiagnosticsSummary {
+    /// Timeline video frames that contributed color diagnostics.
+    pub diagnosed_frames: u64,
+    /// Inputs resolved from detected media metadata.
+    pub detected_metadata: u64,
+    /// Inputs resolved from user overrides.
+    pub override_count: u64,
+    /// Inputs resolved by missing-metadata policy assumptions.
+    pub policy_assumptions: u64,
+    /// Inputs bypassing color management as data/utility textures.
+    pub data_textures: u64,
+    /// Inputs rejected by missing-metadata policy.
+    pub policy_rejections: u64,
+    /// CPU input color-transform stages.
+    pub cpu_input_stages: u64,
+    /// CPU output/display/export color-transform stages.
+    pub cpu_output_stages: u64,
+    /// Native GPU color-transform stages.
+    pub gpu_color_stages: u64,
+    /// GPU scheduling blockers across native GPU color stages.
+    pub gpu_blockers: u64,
+    /// Upload/readback transfer stages around color work.
+    pub transfer_stages: u64,
+    /// Float/linear timeline composites.
+    pub float_linear_composites: u64,
+    /// Legacy RGBA8 timeline composites.
+    pub legacy_rgba8_composites: u64,
+}
+
 impl ExportJobColorDiagnostics {
     /// Record color-resolution counts observed while rendering one frame.
     pub fn record_input_resolution_counts(&mut self, counts: InputColorResolutionSourceCounts) {
@@ -103,6 +134,35 @@ impl ExportJobColorDiagnostics {
     /// Return the renderer-owned composite color-path summary for this export job.
     pub fn composite_color_path_summary(self) -> TimelineCompositeColorPathSummary {
         self.composite_diagnostics.color_path_summary()
+    }
+
+    /// Return a stable export color diagnostics summary when this job has color evidence.
+    pub fn summary(self) -> Option<ExportJobColorDiagnosticsSummary> {
+        let counts = self.input_resolution_source_counts;
+        let stages = self.stage_diagnostics;
+        let composite = self.composite_color_path_summary();
+        if self.diagnosed_frames == 0
+            && counts.total() == 0
+            && stages.total_stages == 0
+            && composite.composite_plans() == 0
+        {
+            return None;
+        }
+        Some(ExportJobColorDiagnosticsSummary {
+            diagnosed_frames: self.diagnosed_frames,
+            detected_metadata: counts.detected_metadata,
+            override_count: counts.override_count,
+            policy_assumptions: counts.policy_assumptions(),
+            data_textures: counts.data_textures(),
+            policy_rejections: counts.policy_rejections(),
+            cpu_input_stages: stages.cpu_input_stages,
+            cpu_output_stages: stages.cpu_output_stages,
+            gpu_color_stages: stages.gpu_color_stages,
+            gpu_blockers: stages.gpu_blockers,
+            transfer_stages: stages.upload_stages.saturating_add(stages.readback_stages),
+            float_linear_composites: composite.float_linear_composites,
+            legacy_rgba8_composites: composite.legacy_rgba8_composites,
+        })
     }
 }
 
@@ -1940,6 +2000,7 @@ mod tests {
                 total_stages: 2,
                 cpu_input_stages: 1,
                 cpu_output_stages: 1,
+                gpu_blockers: 1,
                 stage_pixels: 8,
                 ..RenderColorStageDiagnostics::default()
             },
@@ -1975,12 +2036,27 @@ mod tests {
         assert_eq!(job.diagnostics.color.stage_diagnostics.total_stages, 2);
         assert_eq!(job.diagnostics.color.stage_diagnostics.cpu_input_stages, 1);
         assert_eq!(job.diagnostics.color.stage_diagnostics.cpu_output_stages, 1);
+        assert_eq!(job.diagnostics.color.stage_diagnostics.gpu_blockers, 1);
         assert_eq!(job.diagnostics.color.stage_diagnostics.stage_pixels, 8);
         let composite_summary = job.diagnostics.color.composite_color_path_summary();
         assert_eq!(composite_summary.elements, 3);
         assert_eq!(composite_summary.float_linear_composites, 1);
         assert_eq!(composite_summary.legacy_rgba8_composites, 1);
         assert_eq!(composite_summary.legacy_breakdown.media_transform, 1);
+        assert_eq!(
+            job.diagnostics.color.summary(),
+            Some(ExportJobColorDiagnosticsSummary {
+                diagnosed_frames: 1,
+                detected_metadata: 1,
+                override_count: 1,
+                gpu_blockers: 1,
+                cpu_input_stages: 1,
+                cpu_output_stages: 1,
+                float_linear_composites: 1,
+                legacy_rgba8_composites: 1,
+                ..ExportJobColorDiagnosticsSummary::default()
+            })
+        );
         assert_eq!(
             job.diagnostics
                 .color

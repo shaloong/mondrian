@@ -3211,30 +3211,22 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
 }
 
 fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {
-    let counts = diagnostics.input_resolution_source_counts;
-    let stages = diagnostics.stage_diagnostics;
-    let composite = diagnostics.composite_color_path_summary();
-    if diagnostics.diagnosed_frames == 0
-        && counts.total() == 0
-        && stages.total_stages == 0
-        && composite.composite_plans() == 0
-    {
-        return None;
-    }
+    let summary = diagnostics.summary()?;
     Some(format!(
-        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / stages cpu-in {} cpu-out {} gpu {} transfer {} / composite float {} legacy {}",
-        diagnostics.diagnosed_frames,
-        counts.detected_metadata,
-        counts.override_count,
-        counts.policy_assumptions(),
-        counts.data_textures(),
-        counts.policy_rejections(),
-        stages.cpu_input_stages,
-        stages.cpu_output_stages,
-        stages.gpu_color_stages,
-        stages.upload_stages.saturating_add(stages.readback_stages),
-        composite.float_linear_composites,
-        composite.legacy_rgba8_composites
+        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / stages cpu-in {} cpu-out {} gpu {} blockers {} transfer {} / composite float {} legacy {}",
+        summary.diagnosed_frames,
+        summary.detected_metadata,
+        summary.override_count,
+        summary.policy_assumptions,
+        summary.data_textures,
+        summary.policy_rejections,
+        summary.cpu_input_stages,
+        summary.cpu_output_stages,
+        summary.gpu_color_stages,
+        summary.gpu_blockers,
+        summary.transfer_stages,
+        summary.float_linear_composites,
+        summary.legacy_rgba8_composites
     ))
 }
 
@@ -4726,6 +4718,7 @@ mod tests {
                 total_stages: 2,
                 cpu_input_stages: 1,
                 cpu_output_stages: 1,
+                gpu_blockers: 1,
                 stage_pixels: 960 * 540 * 2,
                 ..mondrian_renderer::RenderColorStageDiagnostics::default()
             },
@@ -4764,7 +4757,7 @@ mod tests {
         assert_eq!(
             encoding.color_diagnostics.as_deref(),
             Some(
-                "色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0 / stages cpu-in 1 cpu-out 1 gpu 0 transfer 0 / composite float 1 legacy 0"
+                "色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0 / stages cpu-in 1 cpu-out 1 gpu 0 blockers 1 transfer 0 / composite float 1 legacy 0"
             )
         );
         assert_eq!(encoding.progress_percent, 82);
