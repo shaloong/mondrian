@@ -21,19 +21,22 @@ use mondrian_ui_widgets::{
 use std::path::Path;
 
 use crate::app::ui_actions::{
-    assets_import_files_action, assets_relink_asset_action, export_set_draft_action,
-    project_create_with_settings_action, project_recover_from_autosave_action,
-    sequence_update_settings_action, AppShellCopySystemInfoPayload,
+    assets_import_files_action, assets_relink_asset_action, assets_set_interpretation_action,
+    export_set_draft_action, project_create_with_settings_action,
+    project_recover_from_autosave_action, sequence_update_settings_action,
+    AppShellCopySystemInfoPayload, AppShellInterpretAssetDialogPayload,
     AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
     AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
     AssetsRelinkAssetPayload, DockDropAreaPayload, ExportDraftUpdatePayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, NewProjectDraftUpdatePayload,
-    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, SequenceSettingsDraftUpdatePayload,
-    SequenceSettingsTabPayload, ViewerSetZoomScalePayload, APP_SHELL_ABOUT,
-    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
-    APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
-    APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, InterpretAssetDraftUpdatePayload,
+    NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectRecoverFromAutosavePayload,
+    SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload, ViewerSetZoomScalePayload,
+    APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
+    APP_SHELL_CONFIRM_SEQUENCE_SETTINGS, APP_SHELL_COPY_SYSTEM_INFO,
+    APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
+    APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
     APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG,
     APP_SHELL_RELOCATE_PANEL, APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
@@ -42,6 +45,7 @@ use crate::app::ui_actions::{
     VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::AppState;
+use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
@@ -1210,6 +1214,50 @@ impl AppUiAppRoot {
                 }
                 Ok(None)
             }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_INTERPRET_ASSET_DIALOG =>
+            {
+                let payload: AppShellInterpretAssetDialogPayload = serde_json::from_value(payload)
+                    .map_err(|err| app_shell_action_error(&name, err))?;
+                let draft = AppUiInterpretAssetDraft::new(
+                    payload.asset_id,
+                    payload.asset_name,
+                    payload.interpretation,
+                );
+                self.modal = Some(ShellModal::interpret_asset(draft));
+                if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                    self.layout(self.bounds);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED =>
+            {
+                let update: InterpretAssetDraftUpdatePayload = serde_json::from_value(payload)
+                    .map_err(|err| app_shell_action_error(&name, err))?;
+                if let Some(dialog) =
+                    self.modal.as_mut().and_then(ShellModal::as_interpret_asset_mut)
+                {
+                    dialog.apply_update(update);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG =>
+            {
+                let Some(draft) = self
+                    .modal
+                    .as_ref()
+                    .and_then(ShellModal::as_interpret_asset)
+                    .map(|dialog| dialog.draft().clone())
+                else {
+                    return Ok(None);
+                };
+                self.modal = None;
+                Ok(Some(assets_set_interpretation_action(draft.into_payload())))
+            }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
             {
@@ -1761,31 +1809,34 @@ mod tests {
     use super::*;
     use crate::app::ui_actions::{
         app_shell_about_action, app_shell_cancel_new_project_dialog_action,
-        app_shell_close_modal_action, app_shell_confirm_new_project_dialog_action,
-        app_shell_confirm_sequence_settings_action, app_shell_export_output_dialog_action,
-        app_shell_import_media_dialog_action, app_shell_import_media_dialog_action_with_target,
-        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
-        app_shell_open_project_dialog_action, app_shell_open_recent_project_action,
-        app_shell_preferences_action, app_shell_preferences_tab_changed_action,
-        app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
-        app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
-        app_shell_save_project_as_dialog_action, app_shell_sequence_settings_action,
-        app_shell_sequence_settings_draft_changed_action,
+        app_shell_close_modal_action, app_shell_confirm_interpret_asset_dialog_action,
+        app_shell_confirm_new_project_dialog_action, app_shell_confirm_sequence_settings_action,
+        app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
+        app_shell_import_media_dialog_action_with_target, app_shell_interpret_asset_dialog_action,
+        app_shell_interpret_asset_draft_changed_action, app_shell_new_project_dialog_action,
+        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
+        app_shell_open_recent_project_action, app_shell_preferences_action,
+        app_shell_preferences_tab_changed_action, app_shell_recover_project_action,
+        app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
+        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
+        app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
         app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
-        viewer_set_zoom_scale_action, AppShellOpenRecentProjectPayload,
-        AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
-        AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
-        DockDropAreaPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
-        ImportMediaDialogPayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
+        viewer_set_zoom_scale_action, AppShellInterpretAssetDialogPayload,
+        AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
+        AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
+        AssetsRelinkAssetPayload, AssetsSetInterpretationPayload, DockDropAreaPayload,
+        ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+        InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
         SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
         SequenceUpdateSettingsPayload, ViewerSetZoomScalePayload, ASSETS_IMPORT_FILES,
-        ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-        PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
-        SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
+        ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, ASSETS_SET_INTERPRETATION, EXPORT_NAMESPACE,
+        EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
     };
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
+    use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::AssetId;
     use mondrian_core::{ColorSpace, Rational, Resolution};
     use mondrian_platform::ClipboardError;
@@ -3232,6 +3283,53 @@ mod tests {
         let action = root.handle_shell_action(app_shell_close_modal_action(), &platform, None);
 
         assert_eq!(action, None);
+        assert!(root.modal.is_none());
+    }
+
+    #[test]
+    fn app_root_interpret_asset_dialog_confirms_asset_interpretation_action() {
+        let platform = FakePlatform::default();
+        let asset_id = AssetId::new();
+        let mut root = AppUiAppRoot::demo();
+
+        root.handle_shell_action(
+            app_shell_interpret_asset_dialog_action(AppShellInterpretAssetDialogPayload {
+                asset_id,
+                asset_name: "Shot A.mov".to_owned(),
+                interpretation: AssetMediaInterpretation::default(),
+            }),
+            &platform,
+            None,
+        );
+        assert!(root.modal.as_ref().and_then(ShellModal::as_interpret_asset).is_some());
+        root.handle_shell_action(
+            app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
+                interpretation: AssetMediaInterpretation {
+                    color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                },
+            }),
+            &platform,
+            None,
+        );
+
+        let action = root.handle_shell_action(
+            app_shell_confirm_interpret_asset_dialog_action(),
+            &platform,
+            None,
+        );
+
+        let Some(Action::Custom { namespace, name, payload }) = action else {
+            panic!("expected asset interpretation action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_SET_INTERPRETATION);
+        let payload: AssetsSetInterpretationPayload =
+            serde_json::from_value(payload).expect("interpretation payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(
+            payload.interpretation.color.override_color_space(),
+            Some(ColorSpace::SLog3)
+        );
         assert!(root.modal.is_none());
     }
 

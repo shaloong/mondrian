@@ -16,25 +16,26 @@ use crate::app::ui_actions::{
     AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
     AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
     AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
-    AssetsRenameFolderPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
-    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
-    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-    InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-    ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, SequenceTargetPayload,
-    SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekPayload,
-    TimelineSelectClipPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
-    ViewerSetPreviewResolutionScalePayload, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION,
-    ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION,
-    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
-    ASSETS_RENAME_FOLDER, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
+    AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
+    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    ExportJobTargetPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
+    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+    ProjectRecoverFromAutosavePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
+    TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineOpenNestedSequencePayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
+    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
+    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
+    ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER,
+    ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
     EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
     INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
     INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
@@ -475,6 +476,38 @@ impl AppState {
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
         let _ = self.save_project_file();
         self.set_status_hint(format!("已重命名素材：{}", payload.name.trim()), false);
+        Ok(())
+    }
+
+    fn set_asset_interpretation_from_ui(
+        &mut self,
+        payload: AssetsSetInterpretationPayload,
+    ) -> Result<()> {
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("解释素材失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed {
+                step_id: "set_asset_interpretation".to_string(),
+                reason,
+            }
+        })?;
+        let asset_name = library
+            .get_asset(payload.asset_id)?
+            .map(|asset| asset.name)
+            .unwrap_or_else(|| payload.asset_id.to_string());
+        library
+            .set_asset_interpretation(payload.asset_id, payload.interpretation)
+            .map_err(|err| {
+                let reason = err.to_string();
+                self.set_status_hint(format!("解释素材失败：{reason}"), true);
+                MondrianError::WorkflowStepFailed {
+                    step_id: "set_asset_interpretation".to_string(),
+                    reason,
+                }
+            })?;
+        self.event_bus.publish(AppEvent::AssetLibraryReloaded);
+        let _ = self.save_project_file();
+        self.set_status_hint(format!("已更新素材解释：{asset_name}"), false);
         Ok(())
     }
 
@@ -1377,6 +1410,14 @@ impl AppState {
                     payload,
                 )?;
                 self.rename_asset_from_ui(payload)
+            }
+            ASSETS_SET_INTERPRETATION => {
+                let payload = parse_ui_payload::<AssetsSetInterpretationPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_asset_interpretation_from_ui(payload)
             }
             ASSETS_RENAME_FOLDER => {
                 let payload = parse_ui_payload::<AssetsRenameFolderPayload>(
@@ -2399,9 +2440,9 @@ mod tests {
         assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
         assets_move_folder_action, assets_move_selection_action, assets_prepare_drag_action,
         assets_relink_asset_action, assets_rename_asset_action, assets_rename_folder_action,
-        assets_set_proxy_mode_action, effects_add_to_clip_action, export_cancel_job_action,
-        export_clear_completed_action, export_enqueue_action, export_set_draft_action,
-        inspector_remove_effect_action, inspector_select_effect_action,
+        assets_set_interpretation_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
+        export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
+        export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
         inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
@@ -2420,25 +2461,27 @@ mod tests {
         AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
         AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
         AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
-        AssetsRenameFolderPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
-        ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, SequenceTargetPayload,
-        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveTrackPayload,
-        TimelineOpenNestedSequencePayload, TimelineSetInOutPointPayload,
-        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
-        ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
+        AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
+        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+        ExportJobTargetPayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
+        TimelineInOutPointPayloadKind, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+        ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
+        ViewerTransformPositionPayload,
     };
     use mondrian_assets::AssetLibrary;
+    use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
-    use mondrian_core::Color;
+    use mondrian_core::{Color, ColorSpace};
     use mondrian_core::{ProjectSettings, Rational, Resolution};
     use mondrian_effects::EffectType;
     use mondrian_timeline::clip::Clip;
@@ -3803,6 +3846,42 @@ mod tests {
             .status_hint
             .as_ref()
             .is_some_and(|(message, is_error)| { !*is_error && message.contains("New Name") }));
+        assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_set_interpretation_updates_library_and_publishes_reload() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-interpret-action-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = library.create_solid_color_asset(Some("Shot A")).expect("create asset");
+        state.asset_library = Some(library);
+        let events = state.event_bus.subscribe();
+        let interpretation = AssetMediaInterpretation {
+            color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+        };
+
+        state
+            .dispatch_action(assets_set_interpretation_action(
+                AssetsSetInterpretationPayload { asset_id, interpretation },
+            ))
+            .expect("set interpretation");
+
+        let asset = state
+            .asset_library
+            .as_ref()
+            .expect("library")
+            .get_asset(asset_id)
+            .expect("get asset")
+            .expect("asset");
+        assert_eq!(asset.interpretation, interpretation);
+        assert!(
+            state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+                !*is_error && message.contains("已更新素材解释") && message.contains("Shot A")
+            })
+        );
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
 
         remove_temp_path(&library_root);

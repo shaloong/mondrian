@@ -47,15 +47,16 @@ use mondrian_ui_widgets::{
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
-    app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
-    app_shell_reveal_in_file_manager_action, assets_create_adjustment_layer_action,
-    assets_create_folder_action, assets_create_solid_color_action, assets_delete_asset_action,
-    assets_delete_folder_action, assets_delete_selection_action, assets_import_files_action,
-    assets_move_asset_action, assets_move_folder_action, assets_move_selection_action,
-    assets_open_folder_action, assets_prepare_drag_action, assets_rename_asset_action,
-    assets_rename_folder_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
-    export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
-    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
+    app_shell_interpret_asset_dialog_action, app_shell_relink_asset_dialog_action,
+    app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
+    assets_create_adjustment_layer_action, assets_create_folder_action,
+    assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
+    assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
+    assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
+    assets_prepare_drag_action, assets_rename_asset_action, assets_rename_folder_action,
+    assets_set_proxy_mode_action, effects_add_to_clip_action, export_cancel_job_action,
+    export_clear_completed_action, export_enqueue_action, export_set_draft_action,
+    inspector_remove_effect_action, inspector_select_effect_action,
     inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
     inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
@@ -67,17 +68,18 @@ use crate::app::ui_actions::{
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
     viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
-    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
-    AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
-    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-    DockDropAreaPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportJobTargetPayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
+    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
+    AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+    AssetsSetProxyModePayload, DockDropAreaPayload, EffectsAddToClipPayload,
+    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorClipRefPayload,
+    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
+    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
@@ -2042,6 +2044,17 @@ fn asset_grid_item_from_asset(
 fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if asset_has_file_manager_target(asset) {
+        items.push(asset_menu_item(
+            MenuItem::new(
+                "解释素材...",
+                app_shell_interpret_asset_dialog_action(AppShellInterpretAssetDialogPayload {
+                    asset_id: asset.id,
+                    asset_name: asset.name.clone(),
+                    interpretation: asset.interpretation,
+                }),
+            ),
+            AppIcon::Film,
+        ));
         items.push(asset_menu_item(
             MenuItem::new(
                 "在文件管理器中显示",
@@ -4013,12 +4026,13 @@ fn inspector_effect_property_action(
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        AppShellRelinkAssetDialogPayload, AppShellRevealInFileManagerPayload,
-        AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-        AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsRenameAssetPayload,
-        AssetsSetProxyModePayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
-        APP_SHELL_NAMESPACE, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
+        AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
+        AppShellRevealInFileManagerPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
+        AssetsRenameAssetPayload, AssetsSetProxyModePayload, ImportMediaDialogPayload,
+        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_NAMESPACE,
+        APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_REVEAL_IN_FILE_MANAGER,
         ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
         ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
@@ -5179,13 +5193,14 @@ mod tests {
 
         assert_eq!(badge_labels(&item), ["视频", "离线"]);
         assert_eq!(item.badges[1].tone, AssetGridBadgeTone::Warning);
-        assert_eq!(item.context_menu_items.len(), 4);
-        assert_eq!(item.context_menu_items[0].label, "在文件管理器中显示");
-        assert_eq!(item.context_menu_items[1].label, "重新链接媒体...");
-        assert!(item.context_menu_items[2].is_separator());
-        assert_eq!(item.context_menu_items[3].label, "删除素材");
+        assert_eq!(item.context_menu_items.len(), 5);
+        assert_eq!(item.context_menu_items[0].label, "解释素材...");
+        assert_eq!(item.context_menu_items[1].label, "在文件管理器中显示");
+        assert_eq!(item.context_menu_items[2].label, "重新链接媒体...");
+        assert!(item.context_menu_items[3].is_separator());
+        assert_eq!(item.context_menu_items[4].label, "删除素材");
         let Action::Custom { namespace, name, payload } =
-            item.context_menu_items[1].action().expect("relink shell action")
+            item.context_menu_items[2].action().expect("relink shell action")
         else {
             panic!("expected relink shell action");
         };
@@ -5194,6 +5209,18 @@ mod tests {
         let payload: AppShellRelinkAssetDialogPayload =
             serde_json::from_value(payload.clone()).expect("relink payload");
         assert_eq!(payload.asset_id, asset_id);
+
+        let Action::Custom { namespace, name, payload } =
+            item.context_menu_items[0].action().expect("interpret shell action")
+        else {
+            panic!("expected interpret shell action");
+        };
+        assert_eq!(namespace, APP_SHELL_NAMESPACE);
+        assert_eq!(name, APP_SHELL_INTERPRET_ASSET_DIALOG);
+        let payload: AppShellInterpretAssetDialogPayload =
+            serde_json::from_value(payload.clone()).expect("interpret payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.asset_name, "shot.mov");
     }
 
     #[test]
@@ -5207,12 +5234,13 @@ mod tests {
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path.clone()), None, false);
 
         assert_eq!(badge_labels(&item), ["视频"]);
-        assert_eq!(item.context_menu_items.len(), 4);
-        assert_eq!(item.context_menu_items[0].label, "在文件管理器中显示");
-        assert_eq!(item.context_menu_items[1].label, "启用代理模式");
-        assert!(item.context_menu_items[2].is_separator());
+        assert_eq!(item.context_menu_items.len(), 5);
+        assert_eq!(item.context_menu_items[0].label, "解释素材...");
+        assert_eq!(item.context_menu_items[1].label, "在文件管理器中显示");
+        assert_eq!(item.context_menu_items[2].label, "启用代理模式");
+        assert!(item.context_menu_items[3].is_separator());
         let Action::Custom { namespace, name, payload } =
-            item.context_menu_items[1].action().expect("proxy mode action")
+            item.context_menu_items[2].action().expect("proxy mode action")
         else {
             panic!("expected proxy mode custom action");
         };
@@ -5227,9 +5255,9 @@ mod tests {
             asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true);
         assert_eq!(badge_labels(&proxied), ["视频", "代理"]);
         assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
-        assert_eq!(proxied.context_menu_items[1].label, "关闭代理模式");
+        assert_eq!(proxied.context_menu_items[2].label, "关闭代理模式");
         let Action::Custom { payload, .. } =
-            proxied.context_menu_items[1].action().expect("proxy mode action")
+            proxied.context_menu_items[2].action().expect("proxy mode action")
         else {
             panic!("expected proxy mode custom action");
         };

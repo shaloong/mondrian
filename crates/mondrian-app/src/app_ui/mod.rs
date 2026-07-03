@@ -11,6 +11,7 @@ pub mod asset_thumbnails;
 pub mod commands;
 pub mod host;
 pub mod icons;
+pub mod interpret_asset_dialog;
 pub mod menu_bar;
 pub mod modal;
 pub mod new_project_dialog;

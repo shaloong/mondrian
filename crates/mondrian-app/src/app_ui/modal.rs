@@ -9,6 +9,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 
 use crate::app_ui::about_dialog::AboutDialog;
+use crate::app_ui::interpret_asset_dialog::{AppUiInterpretAssetDraft, InterpretAssetDialog};
 use crate::app_ui::new_project_dialog::{AppUiNewProjectDraft, NewProjectDialog};
 use crate::app_ui::pending_close_dialog::{PendingCloseDialog, PendingCloseDialogAction};
 use crate::app_ui::preferences_dialog::{
@@ -19,6 +20,7 @@ use crate::app_ui::sequence_settings_dialog::{AppUiSequenceSettingsDraft, Sequen
 /// Shell-local modal dialog.
 pub enum ShellModal {
     About(Box<AboutDialog>),
+    InterpretAsset(Box<InterpretAssetDialog>),
     NewProject(Box<NewProjectDialog>),
     PendingClose(Box<PendingCloseDialog>),
     Preferences(Box<PreferencesDialog>),
@@ -29,6 +31,11 @@ impl ShellModal {
     /// Build the product about modal.
     pub fn about() -> Self {
         Self::About(Box::default())
+    }
+
+    /// Build the Interpret Footage modal from an initial draft.
+    pub fn interpret_asset(draft: AppUiInterpretAssetDraft) -> Self {
+        Self::InterpretAsset(Box::new(InterpretAssetDialog::new(draft)))
     }
 
     /// Build the new-project modal from an initial draft.
@@ -60,6 +67,22 @@ impl ShellModal {
     pub fn as_about(&self) -> Option<&AboutDialog> {
         match self {
             Self::About(dialog) => Some(dialog.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Access the Interpret Footage modal when it is active.
+    pub fn as_interpret_asset(&self) -> Option<&InterpretAssetDialog> {
+        match self {
+            Self::InterpretAsset(dialog) => Some(dialog.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Mutably access the Interpret Footage modal when it is active.
+    pub fn as_interpret_asset_mut(&mut self) -> Option<&mut InterpretAssetDialog> {
+        match self {
+            Self::InterpretAsset(dialog) => Some(dialog.as_mut()),
             _ => None,
         }
     }
@@ -125,6 +148,7 @@ impl Widget for ShellModal {
     fn id(&self) -> WidgetId {
         match self {
             Self::About(dialog) => dialog.id(),
+            Self::InterpretAsset(dialog) => dialog.id(),
             Self::NewProject(dialog) => dialog.id(),
             Self::PendingClose(dialog) => dialog.id(),
             Self::Preferences(dialog) => dialog.id(),
@@ -135,6 +159,7 @@ impl Widget for ShellModal {
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         match self {
             Self::About(dialog) => dialog.measure(constraint),
+            Self::InterpretAsset(dialog) => dialog.measure(constraint),
             Self::NewProject(dialog) => dialog.measure(constraint),
             Self::PendingClose(dialog) => dialog.measure(constraint),
             Self::Preferences(dialog) => dialog.measure(constraint),
@@ -145,6 +170,7 @@ impl Widget for ShellModal {
     fn layout(&mut self, bounds: Rect) {
         match self {
             Self::About(dialog) => dialog.layout(bounds),
+            Self::InterpretAsset(dialog) => dialog.layout(bounds),
             Self::NewProject(dialog) => dialog.layout(bounds),
             Self::PendingClose(dialog) => dialog.layout(bounds),
             Self::Preferences(dialog) => dialog.layout(bounds),
@@ -155,6 +181,7 @@ impl Widget for ShellModal {
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match self {
             Self::About(dialog) => dialog.event(event, ctx),
+            Self::InterpretAsset(dialog) => dialog.event(event, ctx),
             Self::NewProject(dialog) => dialog.event(event, ctx),
             Self::PendingClose(dialog) => dialog.event(event, ctx),
             Self::Preferences(dialog) => dialog.event(event, ctx),
@@ -165,6 +192,7 @@ impl Widget for ShellModal {
     fn paint(&self, ctx: &mut PaintContext) {
         match self {
             Self::About(dialog) => dialog.paint(ctx),
+            Self::InterpretAsset(dialog) => dialog.paint(ctx),
             Self::NewProject(dialog) => dialog.paint(ctx),
             Self::PendingClose(dialog) => dialog.paint(ctx),
             Self::Preferences(dialog) => dialog.paint(ctx),
@@ -175,6 +203,7 @@ impl Widget for ShellModal {
     fn hit_test(&self, point: Point) -> bool {
         match self {
             Self::About(dialog) => dialog.hit_test(point),
+            Self::InterpretAsset(dialog) => dialog.hit_test(point),
             Self::NewProject(dialog) => dialog.hit_test(point),
             Self::PendingClose(dialog) => dialog.hit_test(point),
             Self::Preferences(dialog) => dialog.hit_test(point),
@@ -189,6 +218,7 @@ impl Widget for ShellModal {
     fn can_focus(&self) -> bool {
         match self {
             Self::About(dialog) => dialog.can_focus(),
+            Self::InterpretAsset(dialog) => dialog.can_focus(),
             Self::NewProject(dialog) => dialog.can_focus(),
             Self::PendingClose(dialog) => dialog.can_focus(),
             Self::Preferences(dialog) => dialog.can_focus(),
@@ -199,6 +229,7 @@ impl Widget for ShellModal {
     fn accepts_text_input(&self) -> bool {
         match self {
             Self::About(dialog) => dialog.accepts_text_input(),
+            Self::InterpretAsset(dialog) => dialog.accepts_text_input(),
             Self::NewProject(dialog) => dialog.accepts_text_input(),
             Self::PendingClose(dialog) => dialog.accepts_text_input(),
             Self::Preferences(dialog) => dialog.accepts_text_input(),
@@ -209,6 +240,7 @@ impl Widget for ShellModal {
     fn child_count(&self) -> usize {
         match self {
             Self::About(dialog) => dialog.child_count(),
+            Self::InterpretAsset(dialog) => dialog.child_count(),
             Self::NewProject(dialog) => dialog.child_count(),
             Self::PendingClose(dialog) => dialog.child_count(),
             Self::Preferences(dialog) => dialog.child_count(),
@@ -219,6 +251,7 @@ impl Widget for ShellModal {
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match self {
             Self::About(dialog) => dialog.child(index),
+            Self::InterpretAsset(dialog) => dialog.child(index),
             Self::NewProject(dialog) => dialog.child(index),
             Self::PendingClose(dialog) => dialog.child(index),
             Self::Preferences(dialog) => dialog.child(index),
@@ -229,6 +262,7 @@ impl Widget for ShellModal {
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         match self {
             Self::About(dialog) => dialog.child_mut(index),
+            Self::InterpretAsset(dialog) => dialog.child_mut(index),
             Self::NewProject(dialog) => dialog.child_mut(index),
             Self::PendingClose(dialog) => dialog.child_mut(index),
             Self::Preferences(dialog) => dialog.child_mut(index),

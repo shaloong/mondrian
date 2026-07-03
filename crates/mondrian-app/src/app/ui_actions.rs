@@ -4,6 +4,7 @@
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
 use mondrian_core::effect_data::EffectType;
+use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
 use mondrian_core::{ColorSpace, ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::state::PanelKind;
@@ -99,6 +100,8 @@ pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
 pub const ASSETS_IMPORT_FILES: &str = "import_files";
 /// Action name for relinking one asset-library record to a new media path.
 pub const ASSETS_RELINK_ASSET: &str = "relink_asset";
+/// Action name for setting one asset-library record's media interpretation.
+pub const ASSETS_SET_INTERPRETATION: &str = "set_interpretation";
 /// Action name for renaming one asset-library record.
 pub const ASSETS_RENAME_ASSET: &str = "rename_asset";
 /// Action name for renaming one asset-library folder/bin.
@@ -191,6 +194,12 @@ pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 pub const APP_SHELL_REVEAL_IN_FILE_MANAGER: &str = "reveal_in_file_manager";
 /// App-shell request to choose a replacement media file for one asset.
 pub const APP_SHELL_RELINK_ASSET_DIALOG: &str = "relink_asset_dialog";
+/// App-shell request to open the Interpret Footage dialog for one asset.
+pub const APP_SHELL_INTERPRET_ASSET_DIALOG: &str = "interpret_asset_dialog";
+/// App-shell request to update the Interpret Footage dialog draft.
+pub const APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED: &str = "interpret_asset_draft_changed";
+/// App-shell request to apply the Interpret Footage dialog.
+pub const APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG: &str = "confirm_interpret_asset_dialog";
 /// App-shell request to open a platform project save-as dialog.
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 /// App-shell request to choose a timeline export output file.
@@ -783,6 +792,15 @@ pub struct AssetsRelinkAssetPayload {
     pub path: PathBuf,
 }
 
+/// Persist one asset-library record's media interpretation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsSetInterpretationPayload {
+    /// Asset to update.
+    pub asset_id: AssetId,
+    /// Persistent user intent to store on the asset.
+    pub interpretation: AssetMediaInterpretation,
+}
+
 /// Rename one asset-library record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsRenameAssetPayload {
@@ -815,6 +833,24 @@ pub struct AssetsSetProxyModePayload {
 pub struct ImportMediaDialogPayload {
     /// Target folder for selected media. `None` imports into the root/unfiled view.
     pub folder_id: Option<String>,
+}
+
+/// Shell-local target for the Interpret Footage dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellInterpretAssetDialogPayload {
+    /// Asset being interpreted.
+    pub asset_id: AssetId,
+    /// User-facing asset name captured from the asset grid model.
+    pub asset_name: String,
+    /// Current persistent interpretation to seed the dialog draft.
+    pub interpretation: AssetMediaInterpretation,
+}
+
+/// Draft update emitted by the Interpret Footage dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterpretAssetDraftUpdatePayload {
+    /// New draft interpretation.
+    pub interpretation: AssetMediaInterpretation,
 }
 
 /// Enqueue a timeline export job from a UI frontend.
@@ -1139,6 +1175,11 @@ pub fn assets_relink_asset_action(payload: AssetsRelinkAssetPayload) -> Action {
     custom_assets_action(ASSETS_RELINK_ASSET, payload)
 }
 
+/// Build an action that persists one asset's media interpretation.
+pub fn assets_set_interpretation_action(payload: AssetsSetInterpretationPayload) -> Action {
+    custom_assets_action(ASSETS_SET_INTERPRETATION, payload)
+}
+
 /// Build an action that renames one asset.
 pub fn assets_rename_asset_action(payload: AssetsRenameAssetPayload) -> Action {
     custom_assets_action(ASSETS_RENAME_ASSET, payload)
@@ -1303,6 +1344,25 @@ pub fn app_shell_reveal_in_file_manager_action(
 /// Build an app-shell request for choosing a replacement file for one asset.
 pub fn app_shell_relink_asset_dialog_action(payload: AppShellRelinkAssetDialogPayload) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_RELINK_ASSET_DIALOG, payload)
+}
+
+/// Build an app-shell request for editing one asset's media interpretation.
+pub fn app_shell_interpret_asset_dialog_action(
+    payload: AppShellInterpretAssetDialogPayload,
+) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_INTERPRET_ASSET_DIALOG, payload)
+}
+
+/// Build an app-shell request for changing the Interpret Footage draft.
+pub fn app_shell_interpret_asset_draft_changed_action(
+    payload: InterpretAssetDraftUpdatePayload,
+) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, payload)
+}
+
+/// Build an app-shell request for applying the Interpret Footage draft.
+pub fn app_shell_confirm_interpret_asset_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG)
 }
 
 /// Build an app-shell request for saving the current project to a chosen path.
