@@ -154,6 +154,10 @@ Hints currently recognize explicit Apple Log, S-Log3/S-Gamut3.Cine, and ARRI
 LogC4 names and take precedence over generic CICP delivery tags. Future
 container-specific side-data parsers should feed the same hint model instead of
 adding another color-space decision path.
+`VideoColorDetectionMethod` records whether the final media decision came from
+a metadata hint, CICP tags, missing metadata, or decoder unavailability; UI,
+logs, and export reports should surface that method instead of asking users to
+infer provenance from raw tags.
 
 Camera-log output is treated as a professional intermediate path. Export
 validation rejects consumer delivery codecs for camera-log output and only

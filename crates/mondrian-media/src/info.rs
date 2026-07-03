@@ -89,6 +89,19 @@ pub enum VideoColorSpaceSource {
     DecoderUnavailable,
 }
 
+/// Method that produced a video stream's color metadata decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoColorDetectionMethod {
+    /// Explicit acquisition/log metadata hint won.
+    MetadataHint,
+    /// Raw CICP/FFmpeg color tags resolved to a supported color space.
+    CicpTags,
+    /// No supported color metadata was found.
+    MissingMetadata,
+    /// Decoder could not be opened, so no color metadata could be inspected.
+    DecoderUnavailable,
+}
+
 /// One raw CICP-style color tag reported by FFmpeg.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoColorTag {
@@ -140,6 +153,8 @@ pub struct VideoColorDiagnostic {
     pub detected_color_space: Option<ColorSpace>,
     /// Source state for the color metadata decision.
     pub source: VideoColorSpaceSource,
+    /// Method that produced the color metadata decision.
+    pub method: VideoColorDetectionMethod,
     /// Raw CICP-style metadata captured from FFmpeg, when available.
     pub metadata: Option<VideoColorMetadata>,
     /// Metadata hints that contributed to identifying acquisition/log color space.
@@ -173,6 +188,7 @@ impl VideoColorDiagnostic {
         Self {
             detected_color_space: stream.detected_color_space,
             source: stream.color_space_source,
+            method: stream.color_detection_method,
             metadata: stream.color_metadata.clone(),
             metadata_hints: stream.color_metadata_hints.clone(),
         }
@@ -199,8 +215,8 @@ impl VideoColorDiagnostic {
                 .join("|")
         };
         format!(
-            "source={:?},detected={},metadata={},hints={}",
-            self.source, detected, metadata, hints
+            "source={:?},method={:?},detected={},metadata={},hints={}",
+            self.source, self.method, detected, metadata, hints
         )
     }
 }
@@ -240,6 +256,8 @@ pub struct VideoStreamInfo {
     pub detected_color_space: Option<ColorSpace>,
     /// Source of the detected color-space result.
     pub color_space_source: VideoColorSpaceSource,
+    /// Method that produced the detected color-space result.
+    pub color_detection_method: VideoColorDetectionMethod,
     /// Raw CICP-style color metadata reported by FFmpeg when the decoder opens.
     pub color_metadata: Option<VideoColorMetadata>,
     /// Acquisition/log metadata hints captured from container and stream metadata.
@@ -389,6 +407,7 @@ impl MediaInfo {
                                 pixel_format,
                                 detected_color_space: color_metadata.detected,
                                 color_space_source: color_metadata.source,
+                                color_detection_method: color_metadata.method,
                                 color_metadata: Some(raw_color_metadata),
                                 color_metadata_hints,
                                 bit_depth,
@@ -420,6 +439,7 @@ impl MediaInfo {
                         pixel_format,
                         detected_color_space: None,
                         color_space_source: VideoColorSpaceSource::DecoderUnavailable,
+                        color_detection_method: VideoColorDetectionMethod::DecoderUnavailable,
                         color_metadata: None,
                         color_metadata_hints,
                         bit_depth,
@@ -511,6 +531,7 @@ impl MediaInfo {
 struct VideoColorSpaceDetection {
     detected: Option<ColorSpace>,
     source: VideoColorSpaceSource,
+    method: VideoColorDetectionMethod,
 }
 
 #[cfg(test)]
@@ -527,25 +548,30 @@ fn detect_color_space_from_metadata(
     metadata: &VideoColorMetadata,
     metadata_hints: &[VideoColorMetadataHint],
 ) -> VideoColorSpaceDetection {
-    let detected =
-        metadata_hints.iter().map(|hint| hint.detected_color_space).next().or_else(|| {
-            ColorSpace::from_ffmpeg_tag_hints(
-                metadata.primaries.name.as_deref(),
-                metadata.transfer.name.as_deref(),
-                metadata.matrix.name.as_deref(),
-            )
-        });
-
-    if let Some(color_space) = detected {
-        VideoColorSpaceDetection {
+    if let Some(color_space) = metadata_hints.iter().map(|hint| hint.detected_color_space).next() {
+        return VideoColorSpaceDetection {
             detected: Some(color_space),
             source: VideoColorSpaceSource::Metadata,
-        }
-    } else {
-        VideoColorSpaceDetection {
-            detected: None,
-            source: VideoColorSpaceSource::MissingMetadata,
-        }
+            method: VideoColorDetectionMethod::MetadataHint,
+        };
+    }
+
+    if let Some(color_space) = ColorSpace::from_ffmpeg_tag_hints(
+        metadata.primaries.name.as_deref(),
+        metadata.transfer.name.as_deref(),
+        metadata.matrix.name.as_deref(),
+    ) {
+        return VideoColorSpaceDetection {
+            detected: Some(color_space),
+            source: VideoColorSpaceSource::Metadata,
+            method: VideoColorDetectionMethod::CicpTags,
+        };
+    }
+
+    VideoColorSpaceDetection {
+        detected: None,
+        source: VideoColorSpaceSource::MissingMetadata,
+        method: VideoColorDetectionMethod::MissingMetadata,
     }
 }
 
@@ -729,6 +755,7 @@ mod tests {
         );
         assert_eq!(pq.detected, Some(ColorSpace::Rec2100Pq));
         assert_eq!(pq.source, VideoColorSpaceSource::Metadata);
+        assert_eq!(pq.method, VideoColorDetectionMethod::CicpTags);
 
         let hlg = detect_color_space(
             Primaries::BT2020,
@@ -737,6 +764,7 @@ mod tests {
         );
         assert_eq!(hlg.detected, Some(ColorSpace::Rec2100Hlg));
         assert_eq!(hlg.source, VideoColorSpaceSource::Metadata);
+        assert_eq!(hlg.method, VideoColorDetectionMethod::CicpTags);
     }
 
     #[test]
@@ -749,6 +777,7 @@ mod tests {
 
         assert_eq!(detection.detected, Some(ColorSpace::Srgb));
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
+        assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
     }
 
     #[test]
@@ -761,6 +790,7 @@ mod tests {
 
         assert_eq!(detection.detected, Some(ColorSpace::Rec709));
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
+        assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
     }
 
     #[test]
@@ -773,6 +803,7 @@ mod tests {
 
         assert_eq!(detection.detected, None);
         assert_eq!(detection.source, VideoColorSpaceSource::MissingMetadata);
+        assert_eq!(detection.method, VideoColorDetectionMethod::MissingMetadata);
     }
 
     #[test]
@@ -828,6 +859,7 @@ mod tests {
 
         assert_eq!(detection.detected, Some(ColorSpace::ArriLogC4));
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
+        assert_eq!(detection.method, VideoColorDetectionMethod::MetadataHint);
     }
 
     #[test]
@@ -872,6 +904,7 @@ mod tests {
         let diagnostic = VideoColorDiagnostic {
             detected_color_space: Some(ColorSpace::Rec2100Pq),
             source: VideoColorSpaceSource::Metadata,
+            method: VideoColorDetectionMethod::CicpTags,
             metadata: Some(metadata),
             metadata_hints: vec![VideoColorMetadataHint {
                 scope: VideoColorMetadataHintScope::Stream,
@@ -884,6 +917,7 @@ mod tests {
         let summary = diagnostic.summary();
 
         assert!(summary.contains("source=Metadata"));
+        assert!(summary.contains("method=CicpTags"));
         assert!(summary.contains("detected=Rec2100Pq"));
         assert!(summary.contains("primaries=bt2020"));
         assert!(summary.contains("transfer=smpte2084"));

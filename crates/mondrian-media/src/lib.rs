@@ -23,8 +23,9 @@ pub use audio::{
 pub use cache::FrameCache;
 pub use decoder::DecoderPool;
 pub use info::{
-    AudioStreamInfo, MediaInfo, VideoColorDiagnostic, VideoColorMetadata, VideoColorMetadataHint,
-    VideoColorMetadataHintScope, VideoColorSpaceSource, VideoColorTag, VideoStreamInfo,
+    AudioStreamInfo, MediaInfo, VideoColorDetectionMethod, VideoColorDiagnostic,
+    VideoColorMetadata, VideoColorMetadataHint, VideoColorMetadataHintScope, VideoColorSpaceSource,
+    VideoColorTag, VideoStreamInfo,
 };
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{

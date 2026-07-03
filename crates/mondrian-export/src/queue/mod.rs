@@ -1815,6 +1815,7 @@ mod tests {
             mondrian_media::VideoColorDiagnostic {
                 detected_color_space: None,
                 source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
                 metadata: Some(mondrian_media::VideoColorMetadata {
                     primaries: mondrian_media::VideoColorTag {
                         code: 2,
