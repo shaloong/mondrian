@@ -107,6 +107,14 @@ use sRGB-encoded surface formats; PQ/HLG require float or 10-bit non-sRGB
 formats so the final color pass, not hardware sRGB conversion, owns the output
 transfer. Camera-log and Rec.2020 working spaces are not presentation contracts
 and must fail closed until mapped through an explicit display/view transform.
+The viewer GPU output path records presentation readiness for each requested
+display boundary. If the current surface already matches the requested display
+space, recording may proceed. If wgpu reports that a better surface contract
+exists but Mondrian would still have to pass the result through the UI external
+texture compositor, the path must report a payload blocker instead of switching
+the surface prematurely. This prevents false HDR/P3 readiness: real promotion
+requires the output texture format, external texture sampling contract, UI
+compositor shader, and swapchain color space to move together.
 Viewer GPU output telemetry reports display-boundary blockers by reason, not
 only as a total. It separates HDR-output-on-SDR-surface blockers from
 surface-color-space blockers and stores the last blocked output color space,
