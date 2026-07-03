@@ -235,9 +235,10 @@ classification, or by project policy. Aggregated report fields such as
 in preview/export reporting code.
 Timeline export writes accumulated render-path color diagnostics into
 `RenderJob.diagnostics.color`. The worker updates this snapshot while frames are
-actually rendered, so app panels, logs, and future JSONL reports read the same
-source of truth instead of re-evaluating timeline state from UI code. Export
-diagnostics may expose additional preflight helpers, but final job-level
+actually rendered. App panels, logs, and future JSONL reports should consume
+`ExportJobColorDiagnostics::summary()` as the stable semantic summary instead
+of re-evaluating timeline state or rebuilding derived counters in UI code.
+Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from
 its preview-intent evaluation path. Tests compare preview and export source
