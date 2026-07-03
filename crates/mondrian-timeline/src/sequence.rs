@@ -162,6 +162,110 @@ impl InputColorResolutionSource {
     }
 }
 
+/// Counts of media input color-resolution branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InputColorResolutionSourceCounts {
+    /// Clip/media interpretation overrides.
+    pub override_count: u64,
+    /// Asset inputs classified as non-color data.
+    pub data_texture: u64,
+    /// Inputs resolved by explicit media metadata.
+    pub detected_metadata: u64,
+    /// Inputs assumed as Rec.709 by missing-metadata policy.
+    pub missing_assume_rec709: u64,
+    /// Inputs assumed as sequence working space by missing-metadata policy.
+    pub missing_assume_working: u64,
+    /// Inputs rejected by missing-metadata policy.
+    pub missing_rejected: u64,
+}
+
+impl InputColorResolutionSourceCounts {
+    /// Record one input color-resolution branch.
+    pub fn record(&mut self, source: InputColorResolutionSource) {
+        match source {
+            InputColorResolutionSource::Override => {
+                self.override_count = self.override_count.saturating_add(1);
+            }
+            InputColorResolutionSource::DataTexture => {
+                self.data_texture = self.data_texture.saturating_add(1);
+            }
+            InputColorResolutionSource::DetectedMetadata => {
+                self.detected_metadata = self.detected_metadata.saturating_add(1);
+            }
+            InputColorResolutionSource::MissingPolicyAssumeRec709 => {
+                self.missing_assume_rec709 = self.missing_assume_rec709.saturating_add(1);
+            }
+            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace => {
+                self.missing_assume_working = self.missing_assume_working.saturating_add(1);
+            }
+            InputColorResolutionSource::MissingPolicyRejectMedia => {
+                self.missing_rejected = self.missing_rejected.saturating_add(1);
+            }
+        }
+    }
+
+    /// Count for one exact branch.
+    pub fn count(self, source: InputColorResolutionSource) -> u64 {
+        match source {
+            InputColorResolutionSource::Override => self.override_count,
+            InputColorResolutionSource::DataTexture => self.data_texture,
+            InputColorResolutionSource::DetectedMetadata => self.detected_metadata,
+            InputColorResolutionSource::MissingPolicyAssumeRec709 => self.missing_assume_rec709,
+            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace => {
+                self.missing_assume_working
+            }
+            InputColorResolutionSource::MissingPolicyRejectMedia => self.missing_rejected,
+        }
+    }
+
+    /// Count of branches resolved from explicit metadata or user override.
+    pub fn explicit_metadata_or_override(self) -> u64 {
+        self.sum_by_source(InputColorResolutionSource::is_explicit_metadata_or_override)
+    }
+
+    /// Count of branches that assumed a color space from missing-metadata policy.
+    pub fn policy_assumptions(self) -> u64 {
+        self.sum_by_source(InputColorResolutionSource::is_policy_assumption)
+    }
+
+    /// Count of branches rejected by missing-metadata policy.
+    pub fn policy_rejections(self) -> u64 {
+        self.sum_by_source(InputColorResolutionSource::is_policy_rejection)
+    }
+
+    /// Count of branches treated as non-color data.
+    pub fn data_textures(self) -> u64 {
+        self.sum_by_source(InputColorResolutionSource::is_data_texture)
+    }
+
+    /// Total counted branches.
+    pub fn total(self) -> u64 {
+        self.override_count
+            .saturating_add(self.data_texture)
+            .saturating_add(self.detected_metadata)
+            .saturating_add(self.missing_assume_rec709)
+            .saturating_add(self.missing_assume_working)
+            .saturating_add(self.missing_rejected)
+    }
+
+    fn sum_by_source(self, predicate: impl Fn(InputColorResolutionSource) -> bool) -> u64 {
+        INPUT_COLOR_RESOLUTION_SOURCES
+            .iter()
+            .copied()
+            .filter_map(|source| predicate(source).then_some(self.count(source)))
+            .fold(0, u64::saturating_add)
+    }
+}
+
+const INPUT_COLOR_RESOLUTION_SOURCES: [InputColorResolutionSource; 6] = [
+    InputColorResolutionSource::Override,
+    InputColorResolutionSource::DataTexture,
+    InputColorResolutionSource::DetectedMetadata,
+    InputColorResolutionSource::MissingPolicyAssumeRec709,
+    InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace,
+    InputColorResolutionSource::MissingPolicyRejectMedia,
+];
+
 /// Result of resolving clip override, detected media metadata, and missing-metadata policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputColorResolution {
@@ -1288,6 +1392,30 @@ mod tests {
 
         assert!(InputColorResolutionSource::DataTexture.is_data_texture());
         assert!(!InputColorResolutionSource::Override.is_data_texture());
+    }
+
+    #[test]
+    fn input_color_resolution_source_counts_derive_diagnostic_totals() {
+        let mut counts = InputColorResolutionSourceCounts::default();
+        counts.record(InputColorResolutionSource::Override);
+        counts.record(InputColorResolutionSource::DataTexture);
+        counts.record(InputColorResolutionSource::DetectedMetadata);
+        counts.record(InputColorResolutionSource::DetectedMetadata);
+        counts.record(InputColorResolutionSource::MissingPolicyAssumeRec709);
+        counts.record(InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace);
+        counts.record(InputColorResolutionSource::MissingPolicyRejectMedia);
+
+        assert_eq!(counts.count(InputColorResolutionSource::Override), 1);
+        assert_eq!(counts.count(InputColorResolutionSource::DataTexture), 1);
+        assert_eq!(
+            counts.count(InputColorResolutionSource::DetectedMetadata),
+            2
+        );
+        assert_eq!(counts.explicit_metadata_or_override(), 3);
+        assert_eq!(counts.policy_assumptions(), 2);
+        assert_eq!(counts.policy_rejections(), 1);
+        assert_eq!(counts.data_textures(), 1);
+        assert_eq!(counts.total(), 7);
     }
 
     #[test]

@@ -217,7 +217,10 @@ missing-policy rejects. Data/non-color texture resolution is reported as its own
 branch instead of being merged into overrides. These counters are part of the
 render-path health contract: preview can remain real-time while still reporting
 whether it was driven by authoritative media interpretation, non-color asset
-classification, or by project policy.
+classification, or by project policy. Aggregated report fields such as
+`policy_assumptions` and `explicit_metadata_or_override` must be derived from
+`InputColorResolutionSourceCounts` in `mondrian-timeline`, not hand-maintained
+in preview/export reporting code.
 Preview final-frame cache keys must include the effective color context so a
 monitor/output transform change cannot reuse stale pixels from a previous view.
 For OCIO-backed preview this includes the resolved display and view names, not

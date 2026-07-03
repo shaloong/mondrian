@@ -26,7 +26,8 @@ use mondrian_renderer::{
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
-    ColorContext, InputColorResolution, InputColorResolutionSource, Sequence,
+    ColorContext, InputColorResolution, InputColorResolutionSource,
+    InputColorResolutionSourceCounts, Sequence,
 };
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
@@ -908,6 +909,20 @@ pub struct AppUiPreviewDiagnostics {
     pub color_composite_legacy_adjustment_blend_mode: u64,
     /// Legacy RGBA8 fallbacks caused by adjustment effect graphs.
     pub color_composite_legacy_adjustment_effect: u64,
+}
+
+impl AppUiPreviewDiagnostics {
+    /// Return input color-resolution branch counters using the shared timeline model.
+    pub fn input_color_resolution_counts(self) -> InputColorResolutionSourceCounts {
+        InputColorResolutionSourceCounts {
+            override_count: self.input_color_resolution_override,
+            data_texture: self.input_color_resolution_data_texture,
+            detected_metadata: self.input_color_resolution_detected_metadata,
+            missing_assume_rec709: self.input_color_resolution_missing_assume_rec709,
+            missing_assume_working: self.input_color_resolution_missing_assume_working,
+            missing_rejected: self.input_color_resolution_missing_rejected,
+        }
+    }
 }
 
 /// Result of asking the preview service for a GPU-output viewer frame candidate.

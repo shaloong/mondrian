@@ -13,7 +13,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
-use mondrian_timeline::sequence::InputColorResolutionSource;
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
 use mondrian_ui_core::types::Rect;
@@ -172,6 +171,7 @@ impl PreviewColorPathReport {
         let gpu_path_ready = diagnostics.color_stage_gpu_blockers == 0
             && diagnostics.color_stage_readback_stages == 0
             && diagnostics.color_stage_upload_stages == 0;
+        let input_counts = diagnostics.input_color_resolution_counts();
 
         Self {
             composite_plans: diagnostics.color_composite_plans,
@@ -187,14 +187,8 @@ impl PreviewColorPathReport {
                 missing_assume_rec709: diagnostics.input_color_resolution_missing_assume_rec709,
                 missing_assume_working: diagnostics.input_color_resolution_missing_assume_working,
                 missing_rejected: diagnostics.input_color_resolution_missing_rejected,
-                policy_assumptions: sum_input_resolution_counts_by_source(
-                    diagnostics,
-                    InputColorResolutionSource::is_policy_assumption,
-                ),
-                explicit_metadata_or_override: sum_input_resolution_counts_by_source(
-                    diagnostics,
-                    InputColorResolutionSource::is_explicit_metadata_or_override,
-                ),
+                policy_assumptions: input_counts.policy_assumptions(),
+                explicit_metadata_or_override: input_counts.explicit_metadata_or_override(),
             },
             gpu_color_stages: diagnostics.color_stage_gpu_color_stages,
             gpu_blockers: diagnostics.color_stage_gpu_blockers,
@@ -203,47 +197,6 @@ impl PreviewColorPathReport {
             gpu_path_ready,
         }
     }
-}
-
-fn sum_input_resolution_counts_by_source(
-    diagnostics: AppUiPreviewDiagnostics,
-    predicate: impl Fn(InputColorResolutionSource) -> bool,
-) -> u64 {
-    input_resolution_source_counts(diagnostics)
-        .into_iter()
-        .filter_map(|(source, count)| predicate(source).then_some(count))
-        .fold(0, u64::saturating_add)
-}
-
-fn input_resolution_source_counts(
-    diagnostics: AppUiPreviewDiagnostics,
-) -> [(InputColorResolutionSource, u64); 6] {
-    [
-        (
-            InputColorResolutionSource::Override,
-            diagnostics.input_color_resolution_override,
-        ),
-        (
-            InputColorResolutionSource::DataTexture,
-            diagnostics.input_color_resolution_data_texture,
-        ),
-        (
-            InputColorResolutionSource::DetectedMetadata,
-            diagnostics.input_color_resolution_detected_metadata,
-        ),
-        (
-            InputColorResolutionSource::MissingPolicyAssumeRec709,
-            diagnostics.input_color_resolution_missing_assume_rec709,
-        ),
-        (
-            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace,
-            diagnostics.input_color_resolution_missing_assume_working,
-        ),
-        (
-            InputColorResolutionSource::MissingPolicyRejectMedia,
-            diagnostics.input_color_resolution_missing_rejected,
-        ),
-    ]
 }
 
 fn push_legacy_reason(
