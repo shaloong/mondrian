@@ -419,7 +419,9 @@ impl Widget for InterpretAssetDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ui_actions::{APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE};
     use mondrian_core::timeline_data::AssetColorPayload;
+    use mondrian_editor_state::Action;
     use mondrian_media::{VideoColorInterpretationWarning, VideoColorSpaceSource};
 
     #[test]
@@ -540,6 +542,42 @@ mod tests {
     }
 
     #[test]
+    fn color_space_dropdown_does_not_offer_data_as_color_interpretation() {
+        let interpretation = AssetMediaInterpretation {
+            payload: AssetColorPayload::NonColorData,
+            ..AssetMediaInterpretation::default()
+        };
+        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Matte",
+            interpretation,
+            Some(detected_interpretation(ColorSpace::Rec2020)),
+        ));
+
+        let items = dialog.color_space_dropdown.items();
+        assert_eq!(items.len(), OVERRIDE_COLOR_SPACES.len() + 1);
+
+        for item in items {
+            let label = item.label.to_ascii_lowercase();
+            assert!(!label.contains("data"), "{label}");
+            assert!(!label.contains("non-color"), "{label}");
+            assert!(!label.contains("非颜色"), "{label}");
+
+            let payload = draft_update_payload_from_action(
+                item.action().expect("color-space rows dispatch draft updates"),
+            );
+            assert_eq!(
+                payload.interpretation.payload,
+                AssetColorPayload::NonColorData
+            );
+            assert!(matches!(
+                payload.interpretation.color,
+                MediaColorInterpretation::Auto | MediaColorInterpretation::Override { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn auto_status_surfaces_detection_warnings() {
         let mut interpretation = detected_interpretation(ColorSpace::Rec2020);
         interpretation.warnings.push(VideoColorInterpretationWarning::PartialCicpTags {
@@ -566,6 +604,17 @@ mod tests {
             evidence: Vec::new(),
             warnings: Vec::new(),
             user_overridable: true,
+        }
+    }
+
+    fn draft_update_payload_from_action(action: &Action) -> InterpretAssetDraftUpdatePayload {
+        match action {
+            Action::Custom { namespace, name, payload } => {
+                assert_eq!(namespace, APP_SHELL_NAMESPACE);
+                assert_eq!(name, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED);
+                serde_json::from_value(payload.clone()).expect("draft update payload")
+            }
+            other => panic!("expected app-shell custom action, got {other:?}"),
         }
     }
 }

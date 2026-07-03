@@ -122,6 +122,11 @@ impl Dropdown {
         self.enabled
     }
 
+    /// Top-level menu rows owned by this dropdown.
+    pub fn items(&self) -> &[MenuItem] {
+        &self.items
+    }
+
     /// Select the visual style for the closed trigger.
     pub fn with_trigger_style(mut self, style: DropdownTriggerStyle) -> Self {
         self.trigger_style = style;

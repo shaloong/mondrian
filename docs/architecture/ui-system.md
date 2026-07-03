@@ -54,7 +54,8 @@ Non-color data is an asset payload classification for advanced utility-channel
 workflows, not an option in the primary color-space picker. A future payload or
 channel-role control may edit that classification, but the Interpret Footage
 color-space dropdown must preserve the existing payload value while changing
-only `MediaColorInterpretation`.
+only `MediaColorInterpretation`; it must never create or clear
+`AssetColorPayload::NonColorData`.
 
 ## Playback Tick Ownership
 
