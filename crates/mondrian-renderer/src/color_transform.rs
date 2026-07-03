@@ -1,7 +1,7 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuEncodedColorFrame, OcioGpuShaderCache, OcioGpuShaderError, OcioGpuShaderRequest,
-    OcioGpuWgpuBlocker, OcioGpuWgpuExecutionPlan, OcioGpuWgpuWrapperColorContract,
+    OcioGpuWgpuExecutionPlan, OcioGpuWgpuWrapperColorContract,
 };
 use mondrian_core::{
     convert_rgba8_in_place,
@@ -441,14 +441,6 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
                     input.color_space,
                 );
         }
-        if let Some(display_view) = &transform.display_view {
-            plan.wgpu.blockers.push(
-                OcioGpuWgpuBlocker::DisplayViewShaderTranslationNotPrepared {
-                    display: display_view.display.clone(),
-                    view: display_view.view.clone(),
-                },
-            );
-        }
         Ok(plan)
     }
 
@@ -799,11 +791,8 @@ mod tests {
             plan.wgpu.wrapper_color,
             OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
         );
-        assert_eq!(
-            plan.wgpu.blockers,
-            vec![OcioGpuWgpuBlocker::DisplayViewShaderTranslationNotPrepared { display, view }]
-        );
-        assert!(!plan.wgpu.can_execute());
+        assert!(plan.wgpu.blockers.is_empty());
+        assert!(plan.wgpu.can_execute());
     }
 
     #[test]

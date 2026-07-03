@@ -323,6 +323,8 @@ pub enum OcioGpuWgpuWrapperShaderArtifactError {
     },
     /// The shader plan does not match the wrapper link plan's shader hash.
     ShaderHashMismatch { expected: u64, actual: u64 },
+    /// The OCIO generated program could not be lowered into wgpu-compatible GLSL.
+    SourceLoweringFailed { reason: String },
 }
 
 /// GLSL source artifact for the future OCIO fullscreen wrapper shader.
@@ -374,7 +376,7 @@ impl OcioGpuWgpuWrapperShaderSourceArtifact {
             });
         }
 
-        let sources = build_wrapper_shader_sources(shader_plan.bundle(), link_plan);
+        let sources = build_wrapper_shader_sources(shader_plan, link_plan)?;
         let vertex_source_hash = hash_value(&sources.vertex_source);
         let fragment_source_hash = hash_value(&sources.fragment_source);
         let source_hash = hash_value(&(vertex_source_hash, fragment_source_hash));
@@ -2211,13 +2213,15 @@ impl OcioGpuWgpuPipelineLayoutPlan {
         ocio_layout: &OcioGpuWgpuBindingLayoutPlan,
         wrapper_layout: &OcioGpuWgpuWrapperBindingPlan,
     ) -> Self {
+        let ocio_layout_descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_ocio_resources(ocio_layout);
         let wrapper_layout_descriptor =
             OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(wrapper_layout);
         let mut bind_groups = vec![
             OcioGpuWgpuPipelineBindGroupSlot {
                 bind_group: ocio_layout.bind_group,
                 resource: OcioGpuWgpuPipelineBindGroupResource::OcioResources,
-                layout_hash: ocio_layout.layout_hash,
+                layout_hash: ocio_layout_descriptor.layout_hash,
             },
             OcioGpuWgpuPipelineBindGroupSlot {
                 bind_group: wrapper_layout.bind_group,
@@ -2228,13 +2232,13 @@ impl OcioGpuWgpuPipelineLayoutPlan {
         bind_groups.sort_by_key(|slot| slot.bind_group);
         let layout_hash = hash_pipeline_layout_plan(
             resources.resource_key,
-            ocio_layout.layout_hash,
+            ocio_layout_descriptor.layout_hash,
             wrapper_layout_descriptor.layout_hash,
             &bind_groups,
         );
         Self {
             resource_key: resources.resource_key,
-            ocio_layout_hash: ocio_layout.layout_hash,
+            ocio_layout_hash: ocio_layout_descriptor.layout_hash,
             wrapper_layout_hash: wrapper_layout_descriptor.layout_hash,
             bind_groups,
             layout_hash,
@@ -4472,14 +4476,6 @@ pub enum OcioGpuWgpuBlocker {
     FullscreenWrapperNotPrepared,
     /// The final render pipeline/render-pass node is not implemented yet.
     RenderPipelineNotPrepared,
-    /// OCIO display/view GPU shaders can contain GLSL qualifiers the current
-    /// Naga wrapper path cannot lower safely yet.
-    DisplayViewShaderTranslationNotPrepared {
-        /// OCIO display name.
-        display: String,
-        /// OCIO view name.
-        view: String,
-    },
 }
 
 /// Bounded cache for OCIO GPU shader extraction results.
@@ -5041,10 +5037,12 @@ struct OcioGpuWgpuWrapperShaderSources {
 }
 
 fn build_wrapper_shader_sources(
-    bundle: &OcioGpuShaderBundle,
+    shader_plan: &OcioGpuShaderPlan,
     link_plan: &OcioGpuWgpuWrapperLinkPlan,
-) -> OcioGpuWgpuWrapperShaderSources {
+) -> Result<OcioGpuWgpuWrapperShaderSources, OcioGpuWgpuWrapperShaderArtifactError> {
     let wrapper = &link_plan.shader_contract;
+    let ocio_program = lower_ocio_program_source_for_wgpu(shader_plan)
+        .map_err(|reason| OcioGpuWgpuWrapperShaderArtifactError::SourceLoweringFailed { reason })?;
     let color_prelude = wrapper_color_transfer_glsl_prelude(&link_plan.wrapper_color);
     let input_transform =
         wrapper_color_transfer_glsl_call(link_plan.wrapper_color.input, "mondrian_ocio_pixel.rgb");
@@ -5096,7 +5094,7 @@ void {fragment_entry}() {{
     mondrian_fragment_color = {pixel_name};
 }}
 "#,
-        ocio_program = strip_glsl_version_directives(&bundle.shader_text),
+        ocio_program = ocio_program,
         color_prelude = color_prelude,
         wrapper_set = wrapper.wrapper_bind_group,
         input_texture_binding = wrapper.input_texture_binding,
@@ -5110,11 +5108,11 @@ void {fragment_entry}() {{
     );
     let debug_combined_source =
         format!("{vertex_source}\n/* ---- fragment ---- */\n{fragment_source}");
-    OcioGpuWgpuWrapperShaderSources {
+    Ok(OcioGpuWgpuWrapperShaderSources {
         vertex_source,
         fragment_source,
         debug_combined_source,
-    }
+    })
 }
 
 fn wrapper_ocio_program_glsl_call(contract: &OcioGpuGeneratedProgramContract) -> String {
@@ -5135,6 +5133,248 @@ fn wrapper_ocio_program_glsl_call(contract: &OcioGpuGeneratedProgramContract) ->
         }
         OcioGpuGeneratedProgramCallStyle::Unknown => String::new(),
     }
+}
+
+fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result<String, String> {
+    let bundle = shader_plan.bundle();
+    let binding_contract = binding_contract_for_plan(shader_plan);
+    let sampler_policy = OcioGpuWgpuSamplerBindingPolicy::for_contract(&binding_contract)
+        .map_err(|err| format!("OCIO sampler binding policy: {err:?}"))?;
+    let source = strip_glsl_version_directives(&bundle.shader_text);
+    let legacy_sampler_1d_names = legacy_sampler_names_for_kind(
+        &source,
+        &binding_contract,
+        LegacySamplerDeclarationKind::Sampler1D,
+    );
+    let source = lower_legacy_sampler_declarations(&source, &binding_contract, &sampler_policy)?;
+    lower_legacy_sampler_texture_calls(&source, &binding_contract, &legacy_sampler_1d_names)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacySamplerDeclarationKind {
+    Sampler1D,
+    Sampler2D,
+    Sampler3D,
+}
+
+fn legacy_sampler_names_for_kind(
+    source: &str,
+    contract: &OcioGpuBindingContract,
+    kind: LegacySamplerDeclarationKind,
+) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            contract
+                .textures_2d
+                .iter()
+                .find(|texture| {
+                    legacy_sampler_declaration_matches(trimmed, kind, &texture.sampler_name)
+                })
+                .map(|texture| texture.sampler_name.clone())
+        })
+        .collect()
+}
+
+fn lower_legacy_sampler_declarations(
+    source: &str,
+    contract: &OcioGpuBindingContract,
+    sampler_policy: &OcioGpuWgpuSamplerBindingPolicy,
+) -> Result<String, String> {
+    let mut lowered = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if legacy_sampler_declaration_match(trimmed, contract).is_some() {
+            continue;
+        }
+        lowered.push(line.to_owned());
+    }
+
+    let mut declarations = Vec::new();
+    for texture in &contract.textures_2d {
+        let sampler_binding = sampler_policy
+            .sampler_binding_for_texture(OcioGpuWgpuLutTextureDimension::D2, texture.index)
+            .map_err(|err| format!("OCIO 1D/2D sampler binding: {err:?}"))?;
+        declarations.push(format!(
+            "layout(set = {set}, binding = {texture_binding}) uniform texture2D {texture_name};",
+            set = contract.descriptor_set_index,
+            texture_binding = texture.binding_index,
+            texture_name = texture.texture_name,
+        ));
+        declarations.push(format!(
+            "layout(set = {set}, binding = {sampler_binding}) uniform sampler {sampler_name};",
+            set = contract.descriptor_set_index,
+            sampler_name = texture.sampler_name,
+        ));
+    }
+    for texture in &contract.textures_3d {
+        let sampler_binding = sampler_policy
+            .sampler_binding_for_texture(OcioGpuWgpuLutTextureDimension::D3, texture.index)
+            .map_err(|err| format!("OCIO 3D sampler binding: {err:?}"))?;
+        declarations.push(format!(
+            "layout(set = {set}, binding = {texture_binding}) uniform texture3D {texture_name};",
+            set = contract.descriptor_set_index,
+            texture_binding = texture.binding_index,
+            texture_name = texture.texture_name,
+        ));
+        declarations.push(format!(
+            "layout(set = {set}, binding = {sampler_binding}) uniform sampler {sampler_name};",
+            set = contract.descriptor_set_index,
+            sampler_name = texture.sampler_name,
+        ));
+    }
+
+    if declarations.is_empty() {
+        Ok(lowered.join("\n"))
+    } else {
+        let mut output = declarations.join("\n");
+        output.push('\n');
+        output.push_str(&lowered.join("\n"));
+        Ok(output)
+    }
+}
+
+fn legacy_sampler_declaration_match<'a>(
+    line: &str,
+    contract: &'a OcioGpuBindingContract,
+) -> Option<&'a str> {
+    contract
+        .textures_2d
+        .iter()
+        .find(|texture| {
+            legacy_sampler_declaration_matches(
+                line,
+                LegacySamplerDeclarationKind::Sampler1D,
+                &texture.sampler_name,
+            ) || legacy_sampler_declaration_matches(
+                line,
+                LegacySamplerDeclarationKind::Sampler2D,
+                &texture.sampler_name,
+            )
+        })
+        .map(|texture| texture.sampler_name.as_str())
+        .or_else(|| {
+            contract
+                .textures_3d
+                .iter()
+                .find(|texture| {
+                    legacy_sampler_declaration_matches(
+                        line,
+                        LegacySamplerDeclarationKind::Sampler3D,
+                        &texture.sampler_name,
+                    )
+                })
+                .map(|texture| texture.sampler_name.as_str())
+        })
+}
+
+fn legacy_sampler_declaration_matches(
+    line: &str,
+    kind: LegacySamplerDeclarationKind,
+    sampler_name: &str,
+) -> bool {
+    let Some(code) = line.split("//").next() else {
+        return false;
+    };
+    let declaration = code.trim();
+    if !declaration.ends_with(';') {
+        return false;
+    }
+    let declaration = declaration.trim_end_matches(';').trim();
+    let mut tokens = declaration.split_whitespace();
+    if !tokens.any(|token| token == "uniform") {
+        return false;
+    }
+    let sampler_type = match kind {
+        LegacySamplerDeclarationKind::Sampler1D => "sampler1D",
+        LegacySamplerDeclarationKind::Sampler2D => "sampler2D",
+        LegacySamplerDeclarationKind::Sampler3D => "sampler3D",
+    };
+    let tokens_after_uniform: Vec<_> = tokens.collect();
+    tokens_after_uniform
+        .windows(2)
+        .any(|window| window[0] == sampler_type && window[1] == sampler_name)
+}
+
+fn lower_legacy_sampler_texture_calls(
+    source: &str,
+    contract: &OcioGpuBindingContract,
+    legacy_sampler_1d_names: &BTreeSet<String>,
+) -> Result<String, String> {
+    let mut lowered = source.to_owned();
+    for texture in &contract.textures_2d {
+        let sampler_constructor = "sampler2D";
+        let wrap_1d_coordinate = texture.dimensions == OcioGpuTextureDimensions::Texture1D
+            || legacy_sampler_1d_names.contains(&texture.sampler_name);
+        lowered = lower_texture_calls_for_sampler(
+            &lowered,
+            &texture.sampler_name,
+            &texture.texture_name,
+            sampler_constructor,
+            wrap_1d_coordinate,
+        )?;
+    }
+    for texture in &contract.textures_3d {
+        lowered = lower_texture_calls_for_sampler(
+            &lowered,
+            &texture.sampler_name,
+            &texture.texture_name,
+            "sampler3D",
+            false,
+        )?;
+    }
+    Ok(lowered)
+}
+
+fn lower_texture_calls_for_sampler(
+    source: &str,
+    sampler_name: &str,
+    texture_name: &str,
+    sampler_constructor: &str,
+    wrap_1d_coordinate: bool,
+) -> Result<String, String> {
+    let pattern = format!("texture({sampler_name},");
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = source[cursor..].find(&pattern) {
+        let start = cursor + relative_start;
+        output.push_str(&source[cursor..start]);
+        let argument_start = start + pattern.len();
+        let call_end = find_matching_texture_call_end(source, start)
+            .ok_or_else(|| format!("unclosed texture() call for sampler '{sampler_name}'"))?;
+        let coordinate = source[argument_start..call_end].trim();
+        if wrap_1d_coordinate {
+            output.push_str(&format!(
+                "texture({sampler_constructor}({texture_name}, {sampler_name}), vec2({coordinate}, 0.5))"
+            ));
+        } else {
+            output.push_str(&format!(
+                "texture({sampler_constructor}({texture_name}, {sampler_name}), {coordinate})"
+            ));
+        }
+        cursor = call_end + 1;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
+fn find_matching_texture_call_end(source: &str, call_start: usize) -> Option<usize> {
+    let open = source[call_start..].find('(')? + call_start;
+    let mut depth = 0usize;
+    for (index, ch) in source[open..].char_indices() {
+        match ch {
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(open + index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn wrapper_color_transfer_glsl_call(
@@ -7443,6 +7683,8 @@ mod tests {
             resources.binding_layout_plan().expect("binding layout with separated samplers");
         let wrapper_layout =
             OcioGpuWgpuWrapperBindingPlan::for_contract(&resources.wrapper_contract);
+        let ocio_descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_ocio_resources(&ocio_layout);
         let wrapper_descriptor =
             OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout);
         let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
@@ -7471,7 +7713,7 @@ mod tests {
             OcioGpuWgpuPipelineBindGroupSlot {
                 bind_group: 0,
                 resource: OcioGpuWgpuPipelineBindGroupResource::OcioResources,
-                layout_hash: ocio_layout.layout_hash,
+                layout_hash: ocio_descriptor.layout_hash,
             }
         );
         assert_eq!(
@@ -8094,6 +8336,77 @@ mod tests {
         assert_eq!(plan.bundle().dst_color_space, format!("{display}/{view}"));
         assert_eq!(plan.bundle().language, GpuLanguage::Glsl4_0);
         assert!(plan.shader_hash != 0);
+    }
+
+    #[test]
+    fn legacy_sampler_declaration_matching_accepts_glsl_qualifiers() {
+        assert!(legacy_sampler_declaration_matches(
+            "uniform sampler1D lut_sampler;",
+            LegacySamplerDeclarationKind::Sampler1D,
+            "lut_sampler"
+        ));
+        assert!(legacy_sampler_declaration_matches(
+            "layout(set = 0, binding = 4) uniform highp sampler2D lut_sampler; // OCIO LUT",
+            LegacySamplerDeclarationKind::Sampler2D,
+            "lut_sampler"
+        ));
+        assert!(legacy_sampler_declaration_matches(
+            "layout(binding = 7) uniform sampler3D cube_sampler;",
+            LegacySamplerDeclarationKind::Sampler3D,
+            "cube_sampler"
+        ));
+        assert!(!legacy_sampler_declaration_matches(
+            "vec4 value = texture(lut_sampler, uv);",
+            LegacySamplerDeclarationKind::Sampler2D,
+            "lut_sampler"
+        ));
+        assert!(!legacy_sampler_declaration_matches(
+            "uniform sampler2D unrelated_sampler;",
+            LegacySamplerDeclarationKind::Sampler2D,
+            "lut_sampler"
+        ));
+    }
+
+    #[test]
+    fn backend_prep_lowers_display_view_legacy_samplers_to_wgpu_glsl() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let mut cache = OcioGpuShaderCache::default();
+        let shader_plan = cache
+            .get_or_extract(OcioGpuShaderRequest::DisplayView {
+                src: ColorSpace::Rec709,
+                display,
+                view,
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("extract display shader");
+        assert!(shader_plan.bundle().shader_text.contains("uniform sampler1D"));
+        let mut prep = OcioGpuWgpuBackendPrepRuntime::default();
+
+        let pipeline = prep
+            .prepare_static_pipeline(
+                &shader_plan,
+                OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(
+                    ColorSpace::Rec709,
+                ),
+                OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
+            )
+            .expect("prepare display/view static GPU pipeline");
+
+        assert!(!pipeline.wrapper_source.fragment_source.contains("uniform sampler1D"));
+        assert!(pipeline.wrapper_source.fragment_source.contains("uniform texture2D"));
+        assert!(pipeline.wrapper_source.fragment_source.contains("sampler2D("));
+        assert_eq!(
+            pipeline.wrapper_module_artifact.fragment.entry_point_count,
+            1
+        );
+        assert_eq!(
+            pipeline.pipeline_layout.ocio_layout_hash,
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_ocio_resources(
+                &pipeline.resources.binding_layout
+            )
+            .layout_hash
+        );
     }
 
     #[test]

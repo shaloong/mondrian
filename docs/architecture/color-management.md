@@ -96,10 +96,11 @@ Display/view output boundaries carry an explicit `RenderOcioDisplayView` when
 the caller wants OCIO presentation semantics instead of a color-space delivery
 transform. CPU display/view boundaries execute through the OCIO display
 processor. GPU display/view shader extraction is modeled with
-`OcioGpuShaderRequest::DisplayView`, but native execution remains fail-closed
-with `OcioGpuWgpuBlocker::DisplayViewShaderTranslationNotPrepared` until the
-wrapper lowering path handles the GLSL qualifiers emitted by OCIO display/view
-programs.
+`OcioGpuShaderRequest::DisplayView`; before Naga translation, Mondrian lowers
+OCIO legacy combined LUT samplers such as `uniform sampler1D` into explicit
+wgpu texture/sampler declarations using the OCIO descriptor binding contract.
+Logical 1D LUT sampling is represented as a 2D texture sample with a fixed
+second coordinate, matching the existing LUT upload contract.
 
 Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderOutputColorBoundary` from their `ColorContext` and

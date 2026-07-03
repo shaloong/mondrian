@@ -2237,44 +2237,62 @@ mod tests {
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
     }
 
-    #[test]
-    fn gpu_output_boundary_blocks_display_view_until_shader_qualifiers_are_lowered() {
+    #[tokio::test]
+    async fn gpu_output_boundary_runtime_matches_cpu_display_view_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu display/view parity test: no GPU adapter available");
+            return;
+        };
         let (display, view) = ocio_default_display_view().expect("default display/view");
         let frame = cpu_working_frame();
         let boundary = RenderOutputColorBoundary::display_view(
             ColorSpace::Srgb,
-            display.clone(),
-            view.clone(),
+            display,
+            view,
             false,
             ColorEngine::MondrianSmart,
         );
+        let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
+            .expect("CPU display/view boundary should encode RGBA8");
         let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_200);
-        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
-            runtime.shader_cache_mut(),
-            RenderColorTransformGpuOptions {
-                output_residency: ColorFrameResidency::Cpu,
-                ..RenderColorTransformGpuOptions::default()
-            },
-        );
-        let plan = planner.plan(&frame, &boundary).expect("display/view GPU boundary plan");
-        let RenderColorStage::GpuColorTransform { plan: gpu_plan, .. } = &plan.stage_plan.stages[1]
-        else {
-            panic!("expected upload -> GPU transform -> readback stage shape");
-        };
-        assert_eq!(
-            gpu_plan.wgpu.blockers,
-            vec![OcioGpuWgpuBlocker::DisplayViewShaderTranslationNotPrepared { display, view }]
-        );
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-display-view-boundary-parity"),
+        });
 
-        let mut ids = GpuColorFrameIdAllocator::new(1_200);
-        let err = plan
-            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
-            .expect_err("blocked display/view GPU output must not materialize resources");
-        assert!(matches!(
-            err,
-            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining { blockers: 1 }
-        ));
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("runtime-owned GPU display/view boundary should record");
+        let readback_buffer = record
+            .readback_buffer
+            .expect("CPU-resident GPU display/view boundary should record readback");
+
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
+            .expect("GPU display/view output should be readable as RGBA8");
+        let mapped = map_readback_buffer(&context.device, &readback_buffer);
+        let actual = readback_plan
+            .unpack_mapped_rgba8(&mapped)
+            .expect("display/view readback should unpack into encoded frame");
+        readback_buffer.unmap();
+
+        assert_rgba_close(&expected.rgba, actual.rgba(), 3);
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 1);
     }
 
     #[test]
