@@ -99,6 +99,13 @@ cannot silently reuse the SDR surface path. Resize, scale-factor, and move
 events refresh that contract; any change invalidates the external GPU viewer
 frame so monitor/output changes cannot reuse a texture produced for the previous
 display target.
+Viewer GPU output telemetry reports display-boundary blockers by reason, not
+only as a total. It separates HDR-output-on-SDR-surface blockers from
+surface-color-space blockers and stores the last blocked output color space,
+selected surface color space, HDR mode, and supported surface-color-space
+capabilities. This is the diagnostic boundary for real monitor/surface issues:
+the model may request HDR, P3, or log output, but the app window must prove that
+the current native wgpu surface can actually present it.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.
