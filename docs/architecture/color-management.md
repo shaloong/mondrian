@@ -86,12 +86,12 @@ blockers, `RenderGpuColorPassSchedule` binds the source `GpuColorFrameHandle`,
 target `GpuColorFrameHandle`, `RenderColorTransformGpuPlan`, and
 `OcioGpuWgpuRenderPassNodePlan` into a schedulable unit. It fails closed if the
 frame descriptors, residency, extents, or OCIO resource keys differ.
-GPU final-output transforms from `LinearFloat` working frames must also fail
-closed until the fullscreen wrapper explicitly encodes sampled linear values
-into the OCIO processor's expected input domain. The blocker is represented as
-`OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared`; clearing it requires a
-linear-aware wrapper or an OCIO config color space that matches the renderer's
-working-frame contract, not a silent CPU fallback or raw texture pass-through.
+GPU transforms that cross an encoded/linear boundary must declare wrapper-side
+transfer operations in `OcioGpuWgpuWrapperColorContract`. Source/import ->
+working passes decode OCIO output into `LinearFloat`; working -> output passes
+encode sampled linear values before invoking the OCIO program. The wrapper color
+contract participates in the wrapper link/source/render-pipeline hashes, so
+pipelines with different color-domain semantics cannot share the same shader.
 
 Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderOutputColorBoundary` from their `ColorContext` and

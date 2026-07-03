@@ -104,14 +104,14 @@ pub use ocio_gpu::{
     OcioGpuWgpuUploadedTextureMismatch, OcioGpuWgpuUploadedUniformBuffer,
     OcioGpuWgpuUploadedUniformMismatch, OcioGpuWgpuWrapperBindGroup,
     OcioGpuWgpuWrapperBindingEntry, OcioGpuWgpuWrapperBindingPlan,
-    OcioGpuWgpuWrapperBindingResource, OcioGpuWgpuWrapperInputResources,
-    OcioGpuWgpuWrapperLinkBlocker, OcioGpuWgpuWrapperLinkPlan,
+    OcioGpuWgpuWrapperBindingResource, OcioGpuWgpuWrapperColorContract,
+    OcioGpuWgpuWrapperInputResources, OcioGpuWgpuWrapperLinkBlocker, OcioGpuWgpuWrapperLinkPlan,
     OcioGpuWgpuWrapperShaderArtifactError, OcioGpuWgpuWrapperShaderModuleArtifact,
     OcioGpuWgpuWrapperShaderModuleArtifactCache,
     OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics,
     OcioGpuWgpuWrapperShaderModuleArtifactError, OcioGpuWgpuWrapperShaderModuleCache,
     OcioGpuWgpuWrapperShaderModuleCacheDiagnostics, OcioGpuWgpuWrapperShaderModules,
-    OcioGpuWgpuWrapperShaderSourceArtifact,
+    OcioGpuWgpuWrapperShaderSourceArtifact, OcioGpuWgpuWrapperTransfer,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
 pub use timeline_composite::{

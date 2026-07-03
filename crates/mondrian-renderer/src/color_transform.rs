@@ -1,7 +1,7 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuEncodedColorFrame, OcioGpuShaderCache, OcioGpuShaderError, OcioGpuShaderRequest,
-    OcioGpuWgpuBlocker, OcioGpuWgpuExecutionPlan,
+    OcioGpuWgpuExecutionPlan, OcioGpuWgpuWrapperColorContract,
 };
 use mondrian_core::{
     convert_rgba8_in_place,
@@ -327,12 +327,19 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             dst: transform.working_color_space,
             language: self.options.language,
         };
-        self.plan(
+        let mut plan = self.plan(
             RenderColorTransformDirection::InputToWorking,
             input,
             output,
             request,
-        )
+        )?;
+        if output.encoding == ColorFrameEncoding::LinearFloat {
+            plan.wgpu.wrapper_color =
+                OcioGpuWgpuWrapperColorContract::encoded_input_to_linear_working(
+                    transform.working_color_space,
+                );
+        }
+        Ok(plan)
     }
 
     /// Plan timeline working-space -> display/export GPU execution.
@@ -365,10 +372,10 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             request,
         )?;
         if input.encoding == ColorFrameEncoding::LinearFloat {
-            plan.wgpu.blockers.push(OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared {
-                input: input.color_space,
-                output: transform.output_color_space,
-            });
+            plan.wgpu.wrapper_color =
+                OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(
+                    input.color_space,
+                );
         }
         Ok(plan)
     }
@@ -606,6 +613,10 @@ mod tests {
         assert!(!plan.can_execute_in_place_on_gpu());
         assert!(plan.wgpu.blockers.is_empty());
         assert!(plan.wgpu.can_execute());
+        assert_eq!(
+            plan.wgpu.wrapper_color,
+            OcioGpuWgpuWrapperColorContract::encoded_input_to_linear_working(ColorSpace::Rec709)
+        );
     }
 
     #[test]
@@ -641,13 +652,11 @@ mod tests {
         assert!(plan.requires_source_upload);
         assert!(!plan.requires_output_readback);
         assert_eq!(
-            plan.wgpu.blockers,
-            vec![OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared {
-                input: ColorSpace::Rec709,
-                output: ColorSpace::Srgb,
-            }]
+            plan.wgpu.wrapper_color,
+            OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
         );
-        assert!(!plan.wgpu.can_execute());
+        assert!(plan.wgpu.blockers.is_empty());
+        assert!(plan.wgpu.can_execute());
     }
 
     #[test]
@@ -677,12 +686,10 @@ mod tests {
         assert_eq!(plan.diagnostics.output.residency, ColorFrameResidency::Cpu);
         assert!(plan.requires_output_readback);
         assert_eq!(
-            plan.wgpu.blockers,
-            vec![OcioGpuWgpuBlocker::LinearWorkingOutputNotPrepared {
-                input: ColorSpace::Rec709,
-                output: ColorSpace::Rec709,
-            }]
+            plan.wgpu.wrapper_color,
+            OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
         );
-        assert!(!plan.wgpu.can_execute());
+        assert!(plan.wgpu.blockers.is_empty());
+        assert!(plan.wgpu.can_execute());
     }
 }
