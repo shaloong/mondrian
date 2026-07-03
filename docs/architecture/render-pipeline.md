@@ -245,6 +245,10 @@ GPU blocker breakdowns, legacy RGBA8 reason breakdowns, and GPU path readiness.
 Export simulation perf JSONL includes this summary as `color_health` so
 continuous perf runs can budget against structured color-path health while old
 flat stage counters remain available during dashboard migration.
+Preview perf JSONL follows the same pattern with `preview_color_health` and
+`preview_playback_color_health`; the app preview service owns the derivation
+from raw counters to summary fields so perf tests do not hand-maintain color
+health semantics.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from
