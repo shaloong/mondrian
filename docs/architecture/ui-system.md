@@ -136,6 +136,11 @@ selected surface color space, HDR mode, and supported surface-color-space
 capabilities. This is the diagnostic boundary for real monitor/surface issues:
 the model may request HDR, P3, or log output, but the app window must prove that
 the current native wgpu surface can actually present it.
+Telemetry must also expose a stable display issue summary that names the reason,
+target output color space, current or selected surface contract, desired surface
+contract, payload blocker, and whether the target surface color space is
+reported as supported. UI, perf JSON, and diagnostics tooling should consume this
+summary rather than parsing Debug-formatted blocker/readiness payloads.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.
