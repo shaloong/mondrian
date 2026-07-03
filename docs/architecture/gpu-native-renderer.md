@@ -291,6 +291,15 @@ selected surface color-space change follows the same rebuild path. The preview
 service may keep a CPU `RasterImage` as the correctness/fallback path, but it
 does not own wgpu objects and must not create short-lived GPU output runtimes
 inside CPU media workers.
+The window session also owns viewer GPU output telemetry next to the runtime:
+each preparation attempt records whether it skipped because the external
+texture was already current, media was loading, the preview was unavailable, the
+display contract blocked presentation, wgpu recording failed, the output
+texture was missing, or the external texture was registered. Successful and
+rejected registrations accumulate the actual `RenderColorStageDiagnostics`
+returned by `RenderGpuOutputStageRecord`, so logs and smoke tests can prove the
+main preview path used upload + native GPU color + optional readback rather than
+inferring it from model state.
 The self-hosted UI renderer has an external GPU texture plane for that preview
 path. `DrawCommand::ExternalTexture` carries only a stable renderer-owned key,
 bounds, UVs, and tint; widgets and panel models do not own wgpu objects.

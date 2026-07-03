@@ -26,9 +26,10 @@ use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
 use mondrian_platform::SystemPlatformService;
 use mondrian_renderer::{
-    GpuColorFrameTextureFormat, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
+    GpuColorFrameTextureFormat, RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderOutputColorBoundary,
+    RenderOutputColorBoundaryTarget,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -83,6 +84,95 @@ enum SurfaceLifecycleReason {
     ScaleFactorChanged,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AppUiViewerGpuOutputTelemetry {
+    invocations: u64,
+    non_workspace_skips: u64,
+    current_skips: u64,
+    loading_skips: u64,
+    unavailable_skips: u64,
+    invalid_texture_keys: u64,
+    display_contract_blockers: u64,
+    record_failures: u64,
+    missing_output_textures: u64,
+    registered_frames: u64,
+    rejected_external_frames: u64,
+    accumulated_stage_diagnostics: RenderColorStageDiagnostics,
+    last_outcome: Option<AppUiViewerGpuOutputOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppUiViewerGpuOutputOutcome {
+    NonWorkspace,
+    Current,
+    Loading,
+    Unavailable,
+    InvalidTextureKey,
+    DisplayContractBlocked,
+    RecordFailed,
+    OutputTextureMissing,
+    Registered,
+    ExternalFrameRejected,
+}
+
+impl AppUiViewerGpuOutputTelemetry {
+    fn record_invocation(&mut self) {
+        self.invocations = self.invocations.saturating_add(1);
+    }
+
+    fn record_non_workspace_skip(&mut self) {
+        self.non_workspace_skips = self.non_workspace_skips.saturating_add(1);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::NonWorkspace);
+    }
+
+    fn record_current_skip(&mut self) {
+        self.current_skips = self.current_skips.saturating_add(1);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Current);
+    }
+
+    fn record_loading_skip(&mut self) {
+        self.loading_skips = self.loading_skips.saturating_add(1);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Loading);
+    }
+
+    fn record_unavailable_skip(&mut self) {
+        self.unavailable_skips = self.unavailable_skips.saturating_add(1);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Unavailable);
+    }
+
+    fn record_invalid_texture_key(&mut self) {
+        self.invalid_texture_keys = self.invalid_texture_keys.saturating_add(1);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::InvalidTextureKey);
+    }
+
+    fn record_display_contract_blocker(&mut self) {
+        self.display_contract_blockers = self.display_contract_blockers.saturating_add(1);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked);
+    }
+
+    fn record_record_failure(&mut self) {
+        self.record_failures = self.record_failures.saturating_add(1);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::RecordFailed);
+    }
+
+    fn record_missing_output_texture(&mut self) {
+        self.missing_output_textures = self.missing_output_textures.saturating_add(1);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::OutputTextureMissing);
+    }
+
+    fn record_registered_frame(&mut self, diagnostics: RenderColorStageDiagnostics) {
+        self.registered_frames = self.registered_frames.saturating_add(1);
+        self.accumulated_stage_diagnostics.accumulate(diagnostics);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Registered);
+    }
+
+    fn record_rejected_external_frame(&mut self, diagnostics: RenderColorStageDiagnostics) {
+        self.rejected_external_frames = self.rejected_external_frames.saturating_add(1);
+        self.accumulated_stage_diagnostics.accumulate(diagnostics);
+        self.last_outcome = Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayOutputContractRefreshReason {
     SurfaceLifecycle(SurfaceLifecycleReason),
@@ -105,6 +195,7 @@ struct AppUiWindowSession {
     display_output_contract: AppUiDisplayOutputContract,
     frame_renderer: AppUiFrameRenderer,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
+    viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
     viewer_gpu_preview_texture_key: Option<ExternalTextureKey>,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
     router: EventRouter,
@@ -360,6 +451,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.color_output_runtime.diagnostics(),
                             &session.display_output_contract,
                         );
+                        trace_viewer_gpu_output_telemetry(session.viewer_gpu_output_telemetry);
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
                         }
@@ -1075,22 +1167,58 @@ fn trace_color_output_runtime(
     );
 }
 
+fn trace_viewer_gpu_output_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) {
+    tracing::trace!(
+        invocations = telemetry.invocations,
+        non_workspace_skips = telemetry.non_workspace_skips,
+        current_skips = telemetry.current_skips,
+        loading_skips = telemetry.loading_skips,
+        unavailable_skips = telemetry.unavailable_skips,
+        invalid_texture_keys = telemetry.invalid_texture_keys,
+        display_contract_blockers = telemetry.display_contract_blockers,
+        record_failures = telemetry.record_failures,
+        missing_output_textures = telemetry.missing_output_textures,
+        registered_frames = telemetry.registered_frames,
+        rejected_external_frames = telemetry.rejected_external_frames,
+        stage_total_stages = telemetry.accumulated_stage_diagnostics.total_stages,
+        stage_upload_stages = telemetry.accumulated_stage_diagnostics.upload_stages,
+        stage_gpu_color_stages = telemetry.accumulated_stage_diagnostics.gpu_color_stages,
+        stage_readback_stages = telemetry.accumulated_stage_diagnostics.readback_stages,
+        stage_gpu_blockers = telemetry.accumulated_stage_diagnostics.gpu_blockers,
+        stage_pixels = telemetry.accumulated_stage_diagnostics.stage_pixels,
+        last_outcome = ?telemetry.last_outcome,
+        "app UI viewer GPU output telemetry"
+    );
+}
+
 fn prepare_viewer_gpu_preview(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
 ) {
+    session.viewer_gpu_output_telemetry.record_invocation();
     if session.role != AppUiWindowRole::Workspace {
+        session.viewer_gpu_output_telemetry.record_non_workspace_skip();
         return;
     }
     let frame = match host.gpu_preview_frame_for_current_state() {
         AppUiGpuPreviewFrameState::Ready(frame) => frame,
-        AppUiGpuPreviewFrameState::Current
-        | AppUiGpuPreviewFrameState::Loading
-        | AppUiGpuPreviewFrameState::Unavailable => return,
+        AppUiGpuPreviewFrameState::Current => {
+            session.viewer_gpu_output_telemetry.record_current_skip();
+            return;
+        }
+        AppUiGpuPreviewFrameState::Loading => {
+            session.viewer_gpu_output_telemetry.record_loading_skip();
+            return;
+        }
+        AppUiGpuPreviewFrameState::Unavailable => {
+            session.viewer_gpu_output_telemetry.record_unavailable_skip();
+            return;
+        }
     };
     let Some(texture_key) = ExternalTextureKey::new(frame.external_texture_key()) else {
+        session.viewer_gpu_output_telemetry.record_invalid_texture_key();
         tracing::warn!(
             sequence_id = %frame.sequence_id,
             frame = frame.frame,
@@ -1100,6 +1228,7 @@ fn prepare_viewer_gpu_preview(
         return;
     };
     if let Some(blocker) = session.display_output_contract.boundary_blocker(&frame.boundary) {
+        session.viewer_gpu_output_telemetry.record_display_contract_blocker();
         let supported_surface_color_spaces = session
             .display_output_contract
             .supported_surface_color_spaces_for_selected_format();
@@ -1144,6 +1273,7 @@ fn prepare_viewer_gpu_preview(
     let record = match record {
         Ok(record) => record,
         Err(err) => {
+            session.viewer_gpu_output_telemetry.record_record_failure();
             tracing::warn!(
                 sequence_id = %frame.sequence_id,
                 frame = frame.frame,
@@ -1159,6 +1289,7 @@ fn prepare_viewer_gpu_preview(
     let view = match session.color_output_runtime.frame_table().get(&output) {
         Ok(resource) => &resource.resource().texture_view,
         Err(err) => {
+            session.viewer_gpu_output_telemetry.record_missing_output_texture();
             tracing::warn!(
                 sequence_id = %frame.sequence_id,
                 frame = frame.frame,
@@ -1173,9 +1304,14 @@ fn prepare_viewer_gpu_preview(
         .frame_renderer
         .register_external_texture_view(device, texture_key.clone(), view);
     queue.submit(std::iter::once(encoder.finish()));
+    let stage_diagnostics = record.stage_diagnostics;
     if host.set_external_viewer_frame(&frame, texture_key.as_str().to_owned()) {
+        session.viewer_gpu_output_telemetry.record_registered_frame(stage_diagnostics);
         session.viewer_gpu_preview_texture_key = Some(texture_key);
     } else {
+        session
+            .viewer_gpu_output_telemetry
+            .record_rejected_external_frame(stage_diagnostics);
         session.frame_renderer.unregister_external_texture(&texture_key);
     }
 }
@@ -1423,6 +1559,7 @@ impl AppUiWindowSession {
             display_output_contract,
             frame_renderer: AppUiFrameRenderer::new(device, config.format),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
+            viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
             viewer_gpu_preview_texture_key: None,
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
             router: build_event_router(
@@ -2053,6 +2190,83 @@ mod tests {
                 wgpu::SurfaceColorSpace::Bt2100Pq,
                 wgpu::SurfaceColorSpace::Bt2100Hlg,
             ]
+        );
+    }
+
+    #[test]
+    fn viewer_gpu_output_telemetry_records_skip_and_failure_outcomes() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+
+        telemetry.record_invocation();
+        telemetry.record_non_workspace_skip();
+        telemetry.record_invocation();
+        telemetry.record_current_skip();
+        telemetry.record_invocation();
+        telemetry.record_loading_skip();
+        telemetry.record_invocation();
+        telemetry.record_unavailable_skip();
+        telemetry.record_invocation();
+        telemetry.record_invalid_texture_key();
+        telemetry.record_invocation();
+        telemetry.record_display_contract_blocker();
+        telemetry.record_invocation();
+        telemetry.record_record_failure();
+        telemetry.record_invocation();
+        telemetry.record_missing_output_texture();
+
+        assert_eq!(telemetry.invocations, 8);
+        assert_eq!(telemetry.non_workspace_skips, 1);
+        assert_eq!(telemetry.current_skips, 1);
+        assert_eq!(telemetry.loading_skips, 1);
+        assert_eq!(telemetry.unavailable_skips, 1);
+        assert_eq!(telemetry.invalid_texture_keys, 1);
+        assert_eq!(telemetry.display_contract_blockers, 1);
+        assert_eq!(telemetry.record_failures, 1);
+        assert_eq!(telemetry.missing_output_textures, 1);
+        assert_eq!(
+            telemetry.last_outcome,
+            Some(AppUiViewerGpuOutputOutcome::OutputTextureMissing)
+        );
+    }
+
+    #[test]
+    fn viewer_gpu_output_telemetry_accumulates_recorded_stage_diagnostics() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        let first = RenderColorStageDiagnostics {
+            total_stages: 2,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            stage_pixels: 20,
+            ..RenderColorStageDiagnostics::default()
+        };
+        let second = RenderColorStageDiagnostics {
+            total_stages: 3,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            readback_stages: 1,
+            stage_pixels: 30,
+            ..RenderColorStageDiagnostics::default()
+        };
+
+        telemetry.record_registered_frame(first);
+        telemetry.record_rejected_external_frame(second);
+
+        assert_eq!(telemetry.registered_frames, 1);
+        assert_eq!(telemetry.rejected_external_frames, 1);
+        assert_eq!(
+            telemetry.last_outcome,
+            Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected)
+        );
+        assert_eq!(
+            telemetry.accumulated_stage_diagnostics,
+            RenderColorStageDiagnostics {
+                total_stages: 5,
+                upload_stages: 2,
+                gpu_color_stages: 2,
+                readback_stages: 1,
+                stage_pixels: 50,
+                ..RenderColorStageDiagnostics::default()
+            }
         );
     }
 

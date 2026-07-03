@@ -148,6 +148,15 @@ selection for that boundary, and PreferGpu planning reports native blockers
 instead of falling back to CPU stages. The resulting
 `RenderOutputColorBoundaryStagePlan` is also the only supported bridge from
 final-output planning into `RenderGpuOutputStageResourcePlan`.
+The app window session owns viewer GPU output telemetry next to that runtime.
+Every preparation attempt records whether the external texture was already
+current, the preview was loading or unavailable, the display contract blocked
+presentation, wgpu recording failed, the output texture was missing, or an
+external texture was registered/rejected. Successful and rejected registration
+paths accumulate the actual `RenderColorStageDiagnostics` returned by the
+recorded GPU output stage, so product logs and smoke tests can prove that the
+main preview path used the intended upload + native GPU color + optional
+readback schedule instead of inferring it from renderer tests.
 
 Input transforms follow the same rule. Decode/import code wraps source pixels in
 `CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks
