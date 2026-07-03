@@ -3162,19 +3162,27 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
 
 fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {
     let counts = diagnostics.input_resolution_source_counts;
+    let stages = diagnostics.stage_diagnostics;
     let composite = diagnostics.composite_color_path_summary();
-    if diagnostics.diagnosed_frames == 0 && counts.total() == 0 && composite.composite_plans() == 0
+    if diagnostics.diagnosed_frames == 0
+        && counts.total() == 0
+        && stages.total_stages == 0
+        && composite.composite_plans() == 0
     {
         return None;
     }
     Some(format!(
-        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / composite float {} legacy {}",
+        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / stages cpu-in {} cpu-out {} gpu {} transfer {} / composite float {} legacy {}",
         diagnostics.diagnosed_frames,
         counts.detected_metadata,
         counts.override_count,
         counts.policy_assumptions(),
         counts.data_textures(),
         counts.policy_rejections(),
+        stages.cpu_input_stages,
+        stages.cpu_output_stages,
+        stages.gpu_color_stages,
+        stages.upload_stages.saturating_add(stages.readback_stages),
         composite.float_linear_composites,
         composite.legacy_rgba8_composites
     ))
@@ -4664,6 +4672,13 @@ mod tests {
         input_counts.record(mondrian_timeline::sequence::InputColorResolutionSource::Override);
         encoding.diagnostics.color.record_frame_diagnostics(
             input_counts,
+            mondrian_renderer::RenderColorStageDiagnostics {
+                total_stages: 2,
+                cpu_input_stages: 1,
+                cpu_output_stages: 1,
+                stage_pixels: 960 * 540 * 2,
+                ..mondrian_renderer::RenderColorStageDiagnostics::default()
+            },
             mondrian_renderer::TimelineCompositeDiagnostics {
                 elements: 2,
                 float_linear_composites: 1,
@@ -4699,7 +4714,7 @@ mod tests {
         assert_eq!(
             encoding.color_diagnostics.as_deref(),
             Some(
-                "色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0 / composite float 1 legacy 0"
+                "色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0 / stages cpu-in 1 cpu-out 1 gpu 0 transfer 0 / composite float 1 legacy 0"
             )
         );
         assert_eq!(encoding.progress_percent, 82);

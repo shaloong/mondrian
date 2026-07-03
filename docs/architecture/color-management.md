@@ -177,8 +177,9 @@ Renderer color-stage diagnostics sit one layer higher than transform
 diagnostics. A `RenderColorStagePlan` records the scheduled CPU, GPU, upload,
 and readback stages for a color boundary; `RenderColorStageExecution<T>` carries
 the transform result plus that stage summary. Preview and export performance
-smokes should report both layers: transform diagnostics prove color semantics,
-while stage diagnostics prove scheduling, residency, and GPU-readiness.
+smokes should report both layers; export jobs also persist the stage summary on
+`ExportJobColorDiagnostics`. Transform diagnostics prove color semantics, while
+stage diagnostics prove scheduling, residency, and GPU-readiness.
 Preview performance smoke reports and export job diagnostics must also include
 structured legacy RGBA8 composite reasons (`layer`, `reason`, `count`) derived
 from renderer composite diagnostics via `TimelineCompositeColorPathSummary`.

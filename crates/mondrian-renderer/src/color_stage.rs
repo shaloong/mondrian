@@ -19,6 +19,7 @@ use crate::{
     RenderOutputTransformResult,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
+use serde::{Deserialize, Serialize};
 
 /// Preferred execution mode for a renderer color transform stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,7 +110,7 @@ pub struct RenderColorStagePlan {
 }
 
 /// Aggregated diagnostics for a color stage plan.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderColorStageDiagnostics {
     /// Total stages in the plan.
     pub total_stages: u64,

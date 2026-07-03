@@ -133,7 +133,10 @@ fn generate_layer(
     .expect("perf input transform");
     let diagnostics = frame.stage_diagnostics;
     (
-        Arc::new(DecodedVideoLayer { frame: frame.result.frame }),
+        Arc::new(DecodedVideoLayer {
+            frame: frame.result.frame,
+            stage_diagnostics: diagnostics,
+        }),
         diagnostics,
     )
 }
