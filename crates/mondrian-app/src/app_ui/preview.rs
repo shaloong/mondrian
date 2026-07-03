@@ -1959,6 +1959,94 @@ mod tests {
     }
 
     #[test]
+    fn preview_multilayer_color_output_matches_export_frame_hash() {
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let source = CpuEncodedColorFrame::source_rgba8(
+            2,
+            2,
+            ColorSpace::Srgb,
+            vec![
+                200, 24, 16, 255, 40, 220, 96, 255, 12, 64, 240, 255, 240, 220, 40, 255,
+            ],
+        );
+        let frame = execute_cpu_input_stage(
+            &source,
+            &RenderInputTransform::to_working(
+                ColorSpace::Rec2020,
+                false,
+                ColorEngine::MondrianSmart,
+            ),
+        )
+        .expect("media input transform")
+        .result
+        .frame;
+        let media = MediaPreviewFrame { frame, signature: 2_020 };
+        let solid = TimelineSolidColorLayer {
+            color: Color::from_rgba8(32, 180, 220, 255),
+            opacity: 0.35,
+            blend_mode: BlendMode::Screen,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            effect_graph: Arc::clone(&effect_graph),
+            frame_seed: 14,
+        };
+        let mut color_context = test_color_context(ColorSpace::Srgb);
+        color_context.working_color_space = ColorSpace::Rec2020;
+
+        let resolved = vec![
+            ResolvedPreviewElement::Media {
+                frame: media.clone(),
+                opacity: 0.85,
+                blend_mode: BlendMode::Multiply,
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                effect_graph: Arc::clone(&effect_graph),
+                frame_seed: 7,
+            },
+            ResolvedPreviewElement::SolidColor(solid.clone()),
+        ];
+        let mut preview_scratch = TimelineCompositeScratch::default();
+        let preview =
+            composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
+                .expect("preview multilayer composite");
+
+        let export_elements = vec![
+            TimelineCompositeElement::Media(TimelineMediaLayer {
+                frame: &media.frame,
+                opacity: 0.85,
+                blend_mode: BlendMode::Multiply,
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                effect_graph,
+                frame_seed: 7,
+            }),
+            TimelineCompositeElement::SolidColor(solid),
+        ];
+        let mut export_scratch = TimelineCompositeScratch::default();
+        let export_working = composite_timeline_elements_color_frame(
+            2,
+            2,
+            &export_elements,
+            TimelineCompositeOptions::default(),
+            color_context.working_color_space,
+            &mut export_scratch,
+        );
+        let export = mondrian_renderer::execute_cpu_output_boundary(
+            &export_working,
+            &RenderOutputColorBoundary::export(
+                color_context.output_color_space,
+                color_context.tone_map,
+                color_context.engine.clone(),
+            ),
+        )
+        .expect("export multilayer color transform")
+        .result
+        .frame
+        .into_rgba();
+
+        assert_eq!(preview.rgba, export);
+        assert_eq!(stable_rgba_hash(&preview.rgba), stable_rgba_hash(&export));
+    }
+
+    #[test]
     fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
         let service = AppUiPreviewService::new();
         let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
@@ -2077,6 +2165,15 @@ mod tests {
         .result
         .frame
         .into_rgba()
+    }
+
+    fn stable_rgba_hash(rgba: &[u8]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in rgba {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
     }
 
     #[test]

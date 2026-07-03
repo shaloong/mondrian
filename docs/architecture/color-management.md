@@ -169,6 +169,11 @@ remain presence/diagnostic records until dedicated parsers are introduced.
 Sequence/export HDR preservation stores these typed core payloads directly and
 fails closed when either ST 2086 mastering-display metadata or MaxCLL/MaxFALL
 content-light metadata is missing; export must not synthesize hidden defaults.
+Preview/export parity is protected by frame-level contracts: app preview tests
+compare multilayer preview compositing against the export output boundary with a
+stable RGBA hash, and renderer golden tests cover lower-level compositing
+fixtures. GPU and float-pipeline changes must keep these contracts green or
+update them only with intentional visual-reference changes.
 
 Camera-log output is treated as a professional intermediate path. Export
 validation rejects consumer delivery codecs for camera-log output and only
