@@ -20,12 +20,16 @@ pub struct AppUiFrameDiagnostics {
     pub text_missing_glyphs: u32,
     /// Raster images that failed upload or image-atlas allocation.
     pub raster_image_failures: u32,
+    /// External texture draw commands whose key was missing from the renderer registry.
+    pub external_texture_failures: u32,
 }
 
 impl AppUiFrameDiagnostics {
     /// Whether the frame rendered with any missing UI resource.
     pub fn has_failures(self) -> bool {
-        self.text_missing_glyphs > 0 || self.raster_image_failures > 0
+        self.text_missing_glyphs > 0
+            || self.raster_image_failures > 0
+            || self.external_texture_failures > 0
     }
 }
 
@@ -61,6 +65,12 @@ pub struct AppUiFrameMetrics {
     pub image_atlas_page_resets_this_frame: u32,
     /// Raster image atlas allocation failures accumulated by the renderer.
     pub image_atlas_failed_allocations: u64,
+    /// External GPU textures registered with the UI renderer.
+    pub external_texture_entries: usize,
+    /// External texture draw commands whose key was missing from the renderer registry.
+    pub external_texture_failures: u32,
+    /// Render batches that sampled an external GPU texture.
+    pub external_texture_batches: usize,
 }
 
 impl AppUiFrameMetrics {
@@ -91,6 +101,9 @@ impl AppUiFrameMetrics {
             image_atlas_largest_free_rect_pixels: render_stats.image_atlas_largest_free_rect_pixels,
             image_atlas_page_resets_this_frame: render_stats.image_atlas_page_resets_this_frame,
             image_atlas_failed_allocations: render_stats.image_atlas_failed_allocations,
+            external_texture_entries: render_stats.external_texture_entries,
+            external_texture_failures: render_stats.failed_external_textures,
+            external_texture_batches: render_stats.submitted_external_texture_batches,
         }
     }
 
@@ -405,6 +418,7 @@ fn presented_result(
         diagnostics: AppUiFrameDiagnostics {
             text_missing_glyphs,
             raster_image_failures: render_stats.failed_raster_images,
+            external_texture_failures: render_stats.failed_external_textures,
         },
         metrics: AppUiFrameMetrics::from_stats(
             frame_cpu_time_micros,
@@ -446,15 +460,20 @@ mod tests {
         }
     }
 
+    fn failures(text_missing_glyphs: u32, raster_image_failures: u32) -> AppUiFrameDiagnostics {
+        AppUiFrameDiagnostics {
+            text_missing_glyphs,
+            raster_image_failures,
+            external_texture_failures: 0,
+        }
+    }
+
     #[test]
     fn frame_result_requests_follow_up_after_resource_upload_or_reconfigure() {
-        assert!(!presented(
-            false,
-            AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
-            AppUiFrameMetrics::default(),
-            None,
-        )
-        .needs_follow_up_redraw());
+        assert!(
+            !presented(false, failures(2, 1), AppUiFrameMetrics::default(), None,)
+                .needs_follow_up_redraw()
+        );
         assert!(presented(
             true,
             AppUiFrameDiagnostics::default(),
@@ -475,15 +494,14 @@ mod tests {
     #[test]
     fn render_diagnostic_reporter_only_reports_changed_failures() {
         let mut reporter = AppUiRenderDiagnosticReporter::default();
-        let failed = presented(
-            false,
-            AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 },
-            AppUiFrameMetrics::default(),
-            None,
-        );
+        let failed = presented(false, failures(2, 1), AppUiFrameMetrics::default(), None);
         let changed = presented(
             false,
-            AppUiFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 },
+            AppUiFrameDiagnostics {
+                text_missing_glyphs: 3,
+                raster_image_failures: 1,
+                external_texture_failures: 1,
+            },
             AppUiFrameMetrics::default(),
             None,
         );
@@ -494,20 +512,18 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            reporter.changed_failure(failed),
-            Some(AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
-        );
+        assert_eq!(reporter.changed_failure(failed), Some(failures(2, 1)));
         assert_eq!(reporter.changed_failure(failed), None);
         assert_eq!(
             reporter.changed_failure(changed),
-            Some(AppUiFrameDiagnostics { text_missing_glyphs: 3, raster_image_failures: 1 })
+            Some(AppUiFrameDiagnostics {
+                text_missing_glyphs: 3,
+                raster_image_failures: 1,
+                external_texture_failures: 1,
+            })
         );
         assert_eq!(reporter.changed_failure(healthy), None);
-        assert_eq!(
-            reporter.changed_failure(failed),
-            Some(AppUiFrameDiagnostics { text_missing_glyphs: 2, raster_image_failures: 1 })
-        );
+        assert_eq!(reporter.changed_failure(failed), Some(failures(2, 1)));
     }
 
     #[test]

@@ -40,6 +40,38 @@ pub(crate) fn raster_image_payload_len(width: u32, height: u32) -> Option<usize>
     width.checked_mul(height)?.checked_mul(4).map(|len| len as usize)
 }
 
+/// Renderer-owned key for a GPU texture registered outside the raster image atlas.
+///
+/// This is the UI-renderer boundary needed by GPU preview/viewer paths: widgets
+/// and app models can reference a stable key without owning wgpu objects.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExternalTextureKey(String);
+
+impl ExternalTextureKey {
+    /// Create a non-empty external texture key.
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.is_empty()).then_some(Self(value))
+    }
+
+    /// Borrow the string form used by renderer resource registries.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ExternalTextureKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<ExternalTextureKey> for String {
+    fn from(key: ExternalTextureKey) -> Self {
+        key.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShapeMask {
     pub bounds: Rect,
@@ -110,6 +142,15 @@ pub enum DrawCommand {
     /// Resolved renderer image-atlas draw. This is produced internally from
     /// [`DrawCommand::RasterImage`] after atlas allocation.
     RasterAtlasImage {
+        bounds: Rect,
+        uv_rect: Rect,
+        tint: Color,
+    },
+
+    /// Draw a texture registered with [`UiRenderer`](crate::UiRenderer) outside
+    /// the renderer-owned raster image atlas.
+    ExternalTexture {
+        key: ExternalTextureKey,
         bounds: Rect,
         uv_rect: Rect,
         tint: Color,
@@ -253,6 +294,7 @@ pub fn diagnose_draw_commands(commands: &[DrawCommand]) -> DrawCommandDiagnostic
             | DrawCommand::GradientRect { .. }
             | DrawCommand::Image { .. }
             | DrawCommand::RasterAtlasImage { .. }
+            | DrawCommand::ExternalTexture { .. }
             | DrawCommand::Line { .. }
             | DrawCommand::Triangles { .. }
             | DrawCommand::ColoredTriangles { .. } => {}
@@ -460,6 +502,17 @@ impl DrawEncoder {
 
     pub fn draw_image(&mut self, bounds: Rect, uv_rect: Rect, tint: Color) {
         self.commands.push(DrawCommand::Image { bounds, uv_rect, tint });
+    }
+
+    /// Record a draw using a GPU texture registered with the renderer.
+    pub fn draw_external_texture(
+        &mut self,
+        key: ExternalTextureKey,
+        bounds: Rect,
+        uv_rect: Rect,
+        tint: Color,
+    ) {
+        self.commands.push(DrawCommand::ExternalTexture { key, bounds, uv_rect, tint });
     }
 
     /// Record an RGBA image that the renderer should upload to its image atlas.
@@ -1015,6 +1068,33 @@ mod tests {
         let mut enc = DrawEncoder::new();
         enc.draw_image(rect(), rect(), color());
         assert_eq!(enc.command_count(), 1);
+    }
+
+    #[test]
+    fn encoder_draw_external_texture_records_key_without_marking_unresolved() {
+        let mut enc = DrawEncoder::new();
+        let key = ExternalTextureKey::new("viewer.preview.gpu").expect("non-empty key");
+        enc.draw_external_texture(key.clone(), rect(), Rect::new(0.0, 0.0, 1.0, 1.0), color());
+
+        let commands = enc.finish();
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            diagnose_draw_commands(&commands).unresolved_raster_images,
+            0
+        );
+        match &commands[0] {
+            DrawCommand::ExternalTexture { key: stored, uv_rect, .. } => {
+                assert_eq!(stored, &key);
+                assert_eq!(*uv_rect, Rect::new(0.0, 0.0, 1.0, 1.0));
+            }
+            other => panic!("expected external texture command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_texture_key_rejects_empty_values() {
+        assert_eq!(ExternalTextureKey::new(""), None);
     }
 
     #[test]

@@ -9,8 +9,10 @@ use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 use crate::atlas::{TextureAtlas, TextureAtlasStats};
-use crate::batch::build_batches;
-use crate::command::{diagnose_draw_commands, raster_image_payload_len, DrawCommand};
+use crate::batch::{build_batches, EXTERNAL_TEXTURE_KEY_PREFIX, IMAGE_TEXTURE_KEY};
+use crate::command::{
+    diagnose_draw_commands, raster_image_payload_len, DrawCommand, ExternalTextureKey,
+};
 use crate::pipeline::UiPipeline;
 use crate::shape::RectVertex;
 use crate::CornerRadii;
@@ -34,6 +36,11 @@ struct MsaaTarget {
 #[derive(Debug, Clone, Copy)]
 struct ImageCacheEntry {
     uv_rect: mondrian_ui_core::types::Rect,
+}
+
+/// Renderer-owned binding for a GPU texture registered outside the image atlas.
+pub struct ExternalTextureRegistration {
+    bind_group: wgpu::BindGroup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,6 +146,12 @@ pub struct UiRenderFrameStats {
     pub image_atlas_page_resets: u64,
     /// Raster image atlas page resets triggered while resolving this frame.
     pub image_atlas_page_resets_this_frame: u32,
+    /// External GPU textures currently registered with the renderer.
+    pub external_texture_entries: usize,
+    /// External texture draw commands whose key was missing from the renderer registry.
+    pub failed_external_textures: u32,
+    /// Submitted batches that sampled an external GPU texture.
+    pub submitted_external_texture_batches: usize,
 }
 
 /// GPU 2D UI 渲染器
@@ -150,6 +163,8 @@ pub struct UiRenderer {
     image_bind_group: wgpu::BindGroup,
     image_atlas: TextureAtlas,
     image_cache: HashMap<String, ImageCacheEntry>,
+    external_texture_sampler: wgpu::Sampler,
+    external_textures: HashMap<String, ExternalTextureRegistration>,
     surface_format: wgpu::TextureFormat,
     msaa_target: Option<MsaaTarget>,
 }
@@ -238,6 +253,19 @@ fn raster_image_failure_fallback(
     }
 }
 
+fn external_texture_failure_fallback(
+    bounds: mondrian_ui_core::types::Rect,
+    tint: Color,
+) -> DrawCommand {
+    let mut color = tint;
+    color.a = (color.a * 0.28).clamp(0.12, 0.34);
+    DrawCommand::Rect {
+        bounds,
+        color,
+        corner_radii: CornerRadii::all(bounds.width.min(bounds.height).min(10.0) * 0.2),
+    }
+}
+
 impl UiRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let pipeline = UiPipeline::new(device, surface_format, UI_SAMPLE_COUNT);
@@ -321,6 +349,15 @@ impl UiRenderer {
                 },
             ],
         });
+        let external_texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui_external_texture_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
         Self {
             pipeline,
@@ -330,6 +367,8 @@ impl UiRenderer {
             image_bind_group,
             image_atlas: TextureAtlas::new(ATLAS_SIZE, ATLAS_SIZE),
             image_cache: HashMap::new(),
+            external_texture_sampler,
+            external_textures: HashMap::new(),
             surface_format,
             msaa_target: None,
         }
@@ -413,6 +452,41 @@ impl UiRenderer {
     /// Return diagnostics for the renderer-owned raster image atlas.
     pub fn image_atlas_stats(&self) -> TextureAtlasStats {
         self.image_atlas.stats()
+    }
+
+    /// Register or replace a GPU texture view for later [`DrawCommand::ExternalTexture`] draws.
+    pub fn register_external_texture_view(
+        &mut self,
+        device: &wgpu::Device,
+        key: ExternalTextureKey,
+        texture_view: &wgpu::TextureView,
+    ) {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui_external_texture_bg"),
+            layout: &self.pipeline.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&self.external_texture_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+            ],
+        });
+        self.external_textures
+            .insert(key.into(), ExternalTextureRegistration { bind_group });
+    }
+
+    /// Remove one external GPU texture binding from the renderer registry.
+    pub fn unregister_external_texture(&mut self, key: &ExternalTextureKey) -> bool {
+        self.external_textures.remove(key.as_str()).is_some()
+    }
+
+    /// Number of external GPU texture bindings currently registered.
+    pub fn external_texture_count(&self) -> usize {
+        self.external_textures.len()
     }
 
     fn resolve_raster_images(
@@ -575,6 +649,42 @@ impl UiRenderer {
         self.image_cache.clear();
     }
 
+    fn resolve_external_textures(
+        &self,
+        commands: &[DrawCommand],
+        stats: &mut UiRenderFrameStats,
+    ) -> Vec<DrawCommand> {
+        let mut resolved = Vec::with_capacity(commands.len());
+        for command in commands {
+            match command {
+                DrawCommand::ExternalTexture { key, bounds, tint, .. }
+                    if !self.external_textures.contains_key(key.as_str()) =>
+                {
+                    stats.failed_external_textures =
+                        stats.failed_external_textures.saturating_add(1);
+                    resolved.push(external_texture_failure_fallback(*bounds, *tint));
+                }
+                other => resolved.push(other.clone()),
+            }
+        }
+        resolved
+    }
+
+    fn texture_bind_group_for_batch_key(
+        &self,
+        texture_key: Option<&str>,
+    ) -> Option<&wgpu::BindGroup> {
+        match texture_key {
+            Some(IMAGE_TEXTURE_KEY) => Some(&self.image_bind_group),
+            Some(key) if key.starts_with(EXTERNAL_TEXTURE_KEY_PREFIX) => {
+                let external_key = &key[EXTERNAL_TEXTURE_KEY_PREFIX.len()..];
+                self.external_textures.get(external_key).map(|entry| &entry.bind_group)
+            }
+            Some(_) => None,
+            None => Some(&self.glyph_bind_group),
+        }
+    }
+
     /// Render draw commands that have already had text commands resolved to
     /// glyph atlas image draws.
     ///
@@ -596,6 +706,7 @@ impl UiRenderer {
             "UiRenderer::render_resolved_commands received unresolved text commands"
         );
         let (commands, mut stats) = self.resolve_raster_images(queue, commands);
+        let commands = self.resolve_external_textures(&commands, &mut stats);
         stats.command_count = command_diagnostics.command_count;
         stats.max_clip_depth = command_diagnostics.max_clip_depth;
         stats.max_transform_depth = command_diagnostics.max_transform_depth;
@@ -614,6 +725,7 @@ impl UiRenderer {
         stats.image_atlas_failed_allocations = image_atlas_stats.failed_allocations;
         stats.image_atlas_generation = image_atlas_stats.generation;
         stats.image_atlas_page_resets = image_atlas_stats.page_resets;
+        stats.external_texture_entries = self.external_textures.len();
         let batches = build_batches(&commands, screen_size);
         stats.batch_count = batches.len();
         stats.vertex_count = batches.iter().map(|batch| batch.vertices.len()).sum();
@@ -681,11 +793,21 @@ impl UiRenderer {
                     continue;
                 };
                 rpass.set_scissor_rect(x, y, width, height);
-                let texture_bind_group = if batch.texture_key.as_deref() == Some("image") {
-                    &self.image_bind_group
-                } else {
-                    &self.glyph_bind_group
+                let Some(texture_bind_group) =
+                    self.texture_bind_group_for_batch_key(batch.texture_key.as_deref())
+                else {
+                    stats.failed_external_textures =
+                        stats.failed_external_textures.saturating_add(1);
+                    continue;
                 };
+                if batch
+                    .texture_key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with(EXTERNAL_TEXTURE_KEY_PREFIX))
+                {
+                    stats.submitted_external_texture_batches =
+                        stats.submitted_external_texture_batches.saturating_add(1);
+                }
                 rpass.set_bind_group(1, texture_bind_group, &[]);
 
                 let vertex_data: &[RectVertex] = &batch.vertices;
@@ -1376,6 +1498,68 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_renderer_samples_registered_external_texture_without_atlas_upload() {
+        let Some(mut harness) = OffscreenHarness::new(32, 32) else {
+            return;
+        };
+        let key = ExternalTextureKey::new("viewer.preview.gpu").expect("external texture key");
+        let texture = harness.external_texture(2, 2, &[255, 0, 0, 255]);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        harness
+            .renderer
+            .register_external_texture_view(&harness.device, key.clone(), &view);
+
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_external_texture(
+            key,
+            Rect::new(8.0, 8.0, 16.0, 16.0),
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Color::WHITE,
+        );
+
+        let pixels = harness.render(encoder.finish());
+        let center = pixel(&pixels, 32, 16, 16);
+
+        assert!(
+            center[0] >= 220 && center[1] <= 32 && center[2] <= 32 && center[3] >= 220,
+            "external texture center should sample red, got {center:?}"
+        );
+        let stats = harness.last_stats.expect("render should record stats");
+        assert_eq!(stats.external_texture_entries, 1);
+        assert_eq!(stats.failed_external_textures, 0);
+        assert_eq!(stats.submitted_external_texture_batches, 1);
+        assert_eq!(stats.raster_image_upload_bytes, 0);
+        assert!(!stats.uploaded_raster_images);
+    }
+
+    #[test]
+    fn offscreen_renderer_reports_missing_external_texture() {
+        let Some(mut harness) = OffscreenHarness::new(32, 32) else {
+            return;
+        };
+        let key = ExternalTextureKey::new("missing.viewer.texture").expect("external texture key");
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_external_texture(
+            key,
+            Rect::new(8.0, 8.0, 16.0, 16.0),
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Color::WHITE,
+        );
+
+        let pixels = harness.render(encoder.finish());
+        let center = pixel(&pixels, 32, 16, 16);
+
+        assert!(
+            center[3] > 0,
+            "missing external texture should render visible diagnostic fallback"
+        );
+        let stats = harness.last_stats.expect("render should record stats");
+        assert_eq!(stats.external_texture_entries, 0);
+        assert_eq!(stats.failed_external_textures, 1);
+        assert_eq!(stats.submitted_external_texture_batches, 0);
+    }
+
+    #[test]
     fn upload_glyphs_reports_submitted_skipped_and_bytes() {
         let Some(harness) = OffscreenHarness::new(16, 16) else {
             return;
@@ -1458,6 +1642,39 @@ mod tests {
             );
             self.last_stats = Some(stats);
             self.readback()
+        }
+
+        fn external_texture(&self, width: u32, height: u32, rgba: &[u8; 4]) -> wgpu::Texture {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ui_offscreen_external_texture"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+            for _ in 0..width.saturating_mul(height) {
+                pixels.extend_from_slice(rgba);
+            }
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            texture
         }
 
         fn readback(&self) -> Vec<u8> {

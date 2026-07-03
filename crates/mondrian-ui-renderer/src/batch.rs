@@ -14,6 +14,8 @@ const LINE_AA_PADDING_PX: f32 = 1.25;
 const MIN_LINE_WIDTH_PX: f32 = 1.0;
 const MIN_LINE_DIRECTION_LEN: f32 = 0.001;
 const MIN_TRIANGLE_AREA_NDC: f32 = 1.0e-12;
+pub(crate) const IMAGE_TEXTURE_KEY: &str = "image";
+pub(crate) const EXTERNAL_TEXTURE_KEY_PREFIX: &str = "external:";
 
 #[cfg(test)]
 pub(crate) const LINE_SHADER_AA_MIN_PX: f32 = 0.75;
@@ -210,116 +212,16 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     clip_stack.last().copied(),
                     None,
                 );
-                let rect = apply_transform(bounds, &transform_stack);
-                if !rect_is_visible(rect) {
-                    continue;
+                if let Some(vertices) = textured_rect_vertices(
+                    bounds,
+                    uv_rect,
+                    *tint,
+                    &transform_stack,
+                    (sx, sy, tx, ty),
+                    RenderMode::Glyph,
+                ) {
+                    current_batch.vertices.extend(vertices);
                 }
-                let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
-                if !rect_is_visible(screen_rect) {
-                    continue;
-                }
-
-                // Generate vertices with UV coords and render_mode=Glyph
-                let x0 = screen_rect.x;
-                let y0 = screen_rect.y;
-                let x1 = screen_rect.x + screen_rect.width;
-                let y1 = screen_rect.y + screen_rect.height;
-                let u0 = uv_rect.x;
-                let v0 = uv_rect.y;
-                let u1 = uv_rect.x + uv_rect.width;
-                let v1 = uv_rect.y + uv_rect.height;
-                let [r, g, b, a] = color_to_gpu_linear(*tint);
-                // NDC Y is flipped (y0=bottom, y1=top), so swap V coords:
-                // bottom vertices → v1 (bottom of glyph), top vertices → v0 (top of glyph)
-                let bw = bounds.width.max(1.0);
-                let bh = bounds.height.max(1.0);
-                let vertices = vec![
-                    RectVertex::new(
-                        x0,
-                        y0,
-                        u0,
-                        v1,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Glyph,
-                    ),
-                    RectVertex::new(
-                        x1,
-                        y0,
-                        u1,
-                        v1,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Glyph,
-                    ),
-                    RectVertex::new(
-                        x0,
-                        y1,
-                        u0,
-                        v0,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Glyph,
-                    ),
-                    RectVertex::new(
-                        x0,
-                        y1,
-                        u0,
-                        v0,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Glyph,
-                    ),
-                    RectVertex::new(
-                        x1,
-                        y0,
-                        u1,
-                        v1,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Glyph,
-                    ),
-                    RectVertex::new(
-                        x1,
-                        y1,
-                        u1,
-                        v0,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Glyph,
-                    ),
-                ];
-                current_batch.vertices.extend(vertices);
             }
             DrawCommand::RasterImage { .. } => {
                 // The renderer resolves these into RasterAtlasImage before batching.
@@ -334,115 +236,41 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     &mut batches,
                     &mut current_batch,
                     clip_stack.last().copied(),
-                    Some("image".to_string()),
+                    Some(IMAGE_TEXTURE_KEY.to_string()),
                 );
-                let rect = apply_transform(bounds, &transform_stack);
-                if !rect_is_visible(rect) {
-                    continue;
+                if let Some(vertices) = textured_rect_vertices(
+                    bounds,
+                    uv_rect,
+                    *tint,
+                    &transform_stack,
+                    (sx, sy, tx, ty),
+                    RenderMode::Image,
+                ) {
+                    current_batch.vertices.extend(vertices);
                 }
-                let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
-                if !rect_is_visible(screen_rect) {
+            }
+            DrawCommand::ExternalTexture { key, bounds, uv_rect, tint } => {
+                if !rect_is_visible(*bounds) || !rect_is_finite(*uv_rect) || !color_is_finite(*tint)
+                {
                     continue;
                 }
 
-                let x0 = screen_rect.x;
-                let y0 = screen_rect.y;
-                let x1 = screen_rect.x + screen_rect.width;
-                let y1 = screen_rect.y + screen_rect.height;
-                let u0 = uv_rect.x;
-                let v0 = uv_rect.y;
-                let u1 = uv_rect.x + uv_rect.width;
-                let v1 = uv_rect.y + uv_rect.height;
-                let [r, g, b, a] = color_to_gpu_linear(*tint);
-                let bw = bounds.width.max(1.0);
-                let bh = bounds.height.max(1.0);
-                let vertices = vec![
-                    RectVertex::new(
-                        x0,
-                        y0,
-                        u0,
-                        v1,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Image,
-                    ),
-                    RectVertex::new(
-                        x1,
-                        y0,
-                        u1,
-                        v1,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Image,
-                    ),
-                    RectVertex::new(
-                        x0,
-                        y1,
-                        u0,
-                        v0,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Image,
-                    ),
-                    RectVertex::new(
-                        x0,
-                        y1,
-                        u0,
-                        v0,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Image,
-                    ),
-                    RectVertex::new(
-                        x1,
-                        y0,
-                        u1,
-                        v1,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Image,
-                    ),
-                    RectVertex::new(
-                        x1,
-                        y1,
-                        u1,
-                        v0,
-                        r,
-                        g,
-                        b,
-                        a,
-                        bw,
-                        bh,
-                        [0.0; 4],
-                        RenderMode::Image,
-                    ),
-                ];
-                current_batch.vertices.extend(vertices);
+                ensure_texture_key(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                    Some(format!("{EXTERNAL_TEXTURE_KEY_PREFIX}{}", key.as_str())),
+                );
+                if let Some(vertices) = textured_rect_vertices(
+                    bounds,
+                    uv_rect,
+                    *tint,
+                    &transform_stack,
+                    (sx, sy, tx, ty),
+                    RenderMode::Image,
+                ) {
+                    current_batch.vertices.extend(vertices);
+                }
             }
             DrawCommand::Line { start, end, width, color } => {
                 let n_start = apply_transform_point(start, &transform_stack);
@@ -534,6 +362,46 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
     }
 
     batches
+}
+
+fn textured_rect_vertices(
+    bounds: &Rect,
+    uv_rect: &Rect,
+    tint: mondrian_core::Color,
+    transform_stack: &[glam::Vec2],
+    transform: (f32, f32, f32, f32),
+    render_mode: RenderMode,
+) -> Option<[RectVertex; 6]> {
+    let (sx, sy, tx, ty) = transform;
+    let rect = apply_transform(bounds, transform_stack);
+    if !rect_is_visible(rect) {
+        return None;
+    }
+    let screen_rect = pixel_to_ndc_rect(rect, sx, sy, tx, ty);
+    if !rect_is_visible(screen_rect) {
+        return None;
+    }
+
+    let x0 = screen_rect.x;
+    let y0 = screen_rect.y;
+    let x1 = screen_rect.x + screen_rect.width;
+    let y1 = screen_rect.y + screen_rect.height;
+    let u0 = uv_rect.x;
+    let v0 = uv_rect.y;
+    let u1 = uv_rect.x + uv_rect.width;
+    let v1 = uv_rect.y + uv_rect.height;
+    let [r, g, b, a] = color_to_gpu_linear(tint);
+    let bw = bounds.width.max(1.0);
+    let bh = bounds.height.max(1.0);
+
+    Some([
+        RectVertex::new(x0, y0, u0, v1, r, g, b, a, bw, bh, [0.0; 4], render_mode),
+        RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, [0.0; 4], render_mode),
+        RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, [0.0; 4], render_mode),
+        RectVertex::new(x0, y1, u0, v0, r, g, b, a, bw, bh, [0.0; 4], render_mode),
+        RectVertex::new(x1, y0, u1, v1, r, g, b, a, bw, bh, [0.0; 4], render_mode),
+        RectVertex::new(x1, y1, u1, v0, r, g, b, a, bw, bh, [0.0; 4], render_mode),
+    ])
 }
 
 fn line_vertices(
@@ -2442,6 +2310,41 @@ mod tests {
                 .iter()
                 .all(|vertex| vertex.render_mode == RenderMode::Image as u32),
             "raster atlas images must preserve full RGBA color instead of glyph alpha tinting"
+        );
+    }
+
+    #[test]
+    fn build_batches_external_textures_use_stable_external_texture_key() {
+        let key = crate::command::ExternalTextureKey::new("viewer.gpu.preview")
+            .expect("non-empty external texture key");
+        let cmds = [
+            DrawCommand::RasterAtlasImage {
+                bounds: Rect::new(0.0, 0.0, 16.0, 16.0),
+                uv_rect: Rect::new(0.0, 0.0, 0.01, 0.01),
+                tint: Color::WHITE,
+            },
+            DrawCommand::ExternalTexture {
+                key,
+                bounds: Rect::new(20.0, 0.0, 16.0, 16.0),
+                uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                tint: Color::WHITE,
+            },
+        ];
+
+        let batches = build_batches(&cmds, (100, 100));
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].texture_key.as_deref(), Some(IMAGE_TEXTURE_KEY));
+        assert_eq!(
+            batches[1].texture_key.as_deref(),
+            Some("external:viewer.gpu.preview")
+        );
+        assert!(
+            batches[1]
+                .vertices
+                .iter()
+                .all(|vertex| vertex.render_mode == RenderMode::Image as u32),
+            "external textures must preserve full RGBA color instead of glyph alpha tinting"
         );
     }
 

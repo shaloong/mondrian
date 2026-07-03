@@ -325,9 +325,10 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.render_diagnostic_reporter.changed_failure(frame_result)
                         {
                             tracing::warn!(
-                                "app UI render resource failures: missing_glyphs={}, raster_image_failures={}",
+                                "app UI render resource failures: missing_glyphs={}, raster_image_failures={}, external_texture_failures={}",
                                 diagnostics.text_missing_glyphs,
-                                diagnostics.raster_image_failures
+                                diagnostics.raster_image_failures,
+                                diagnostics.external_texture_failures
                             );
                             host.mark_dirty();
                             session.window.request_redraw();
@@ -741,6 +742,9 @@ fn log_frame_pressure(pressure: AppUiFramePressure) {
             image_atlas_largest_free_rect_pixels = metrics.image_atlas_largest_free_rect_pixels,
             image_atlas_page_resets_this_frame = metrics.image_atlas_page_resets_this_frame,
             image_atlas_failed_allocations = metrics.image_atlas_failed_allocations,
+            external_texture_entries = metrics.external_texture_entries,
+            external_texture_failures = metrics.external_texture_failures,
+            external_texture_batches = metrics.external_texture_batches,
             "app UI render frame pressure"
         );
         return;
@@ -764,6 +768,9 @@ fn log_frame_pressure(pressure: AppUiFramePressure) {
         image_atlas_largest_free_rect_pixels = metrics.image_atlas_largest_free_rect_pixels,
         image_atlas_page_resets_this_frame = metrics.image_atlas_page_resets_this_frame,
         image_atlas_failed_allocations = metrics.image_atlas_failed_allocations,
+        external_texture_entries = metrics.external_texture_entries,
+        external_texture_failures = metrics.external_texture_failures,
+        external_texture_batches = metrics.external_texture_batches,
         "app UI render frame pressure"
     );
 }
