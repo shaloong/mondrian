@@ -6,7 +6,9 @@ use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
-use mondrian_ui_widgets::{Button, DialogSurface, Label};
+use mondrian_ui_widgets::{
+    Button, DialogSurface, Dropdown, Label, MenuItem, SegmentedButtonGroup, SegmentedButtonItem,
+};
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_confirm_interpret_asset_dialog_action,
@@ -16,17 +18,21 @@ use crate::app::ui_actions::{
 
 const CARD_MIN_WIDTH: f32 = 500.0;
 const CARD_WIDTH: f32 = 620.0;
-const CARD_MIN_HEIGHT: f32 = 430.0;
-const CARD_HEIGHT: f32 = 520.0;
+const CARD_MIN_HEIGHT: f32 = 300.0;
+const CARD_HEIGHT: f32 = 360.0;
 const CONTENT_PADDING: f32 = 24.0;
 const TITLE_FONT_SIZE: f32 = 18.0;
 const BODY_FONT_SIZE: f32 = 13.0;
-const ROW_HEIGHT: f32 = 30.0;
-const ROW_GAP: f32 = 8.0;
+const LABEL_COLUMN_WIDTH: f32 = 112.0;
+const ROW_HEIGHT: f32 = 32.0;
+const ROW_GAP: f32 = 16.0;
 const BUTTON_WIDTH: f32 = 118.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_GAP: f32 = 10.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
+const MODE_AUTO_INDEX: usize = 0;
+const MODE_OVERRIDE_INDEX: usize = 1;
+const MODE_DATA_INDEX: usize = 2;
 
 const OVERRIDE_COLOR_SPACES: [ColorSpace; 9] = [
     ColorSpace::Rec709,
@@ -49,6 +55,8 @@ pub struct AppUiInterpretAssetDraft {
     pub asset_name: String,
     /// Persistent interpretation currently selected in the dialog.
     pub interpretation: AssetMediaInterpretation,
+    /// Current automatic color-space result detected from media metadata.
+    pub detected_color_space: Option<ColorSpace>,
 }
 
 impl AppUiInterpretAssetDraft {
@@ -57,11 +65,13 @@ impl AppUiInterpretAssetDraft {
         asset_id: AssetId,
         asset_name: impl Into<String>,
         interpretation: AssetMediaInterpretation,
+        detected_color_space: Option<ColorSpace>,
     ) -> Self {
         Self {
             asset_id,
             asset_name: asset_name.into(),
             interpretation,
+            detected_color_space,
         }
     }
 
@@ -88,10 +98,12 @@ pub struct InterpretAssetDialog {
     draft: AppUiInterpretAssetDraft,
     title_label: Label,
     asset_label: Label,
-    summary_label: Label,
-    auto_button: Button,
-    data_button: Button,
-    override_buttons: Vec<(ColorSpace, Button)>,
+    status_label: Label,
+    status_value_label: Label,
+    mode_label: Label,
+    mode_group: SegmentedButtonGroup,
+    color_space_label: Label,
+    color_space_dropdown: Dropdown,
     apply_button: Button,
     cancel_button: Button,
 }
@@ -117,31 +129,25 @@ impl InterpretAssetDialog {
                 .with_font_size(BODY_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped(),
-            summary_label: Label::new(String::new())
-                .muted()
+            status_label: row_label("当前解释"),
+            status_value_label: Label::new(String::new())
+                .popover_foreground()
                 .with_font_size(BODY_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped(),
-            auto_button: interpretation_button("自动", MediaColorInterpretation::Auto),
-            data_button: interpretation_button("数据/不做色彩转换", MediaColorInterpretation::Data),
-            override_buttons: OVERRIDE_COLOR_SPACES
-                .iter()
-                .map(|&color_space| {
-                    (
-                        color_space,
-                        interpretation_button(
-                            color_space_label(color_space),
-                            MediaColorInterpretation::Override { color_space },
-                        ),
-                    )
-                })
-                .collect(),
+            mode_label: row_label("解释方式"),
+            mode_group: mode_group_for(AssetMediaInterpretation::default(), None, MODE_AUTO_INDEX),
+            color_space_label: row_label("色彩空间"),
+            color_space_dropdown: color_space_dropdown_for(
+                AssetMediaInterpretation::default(),
+                None,
+            ),
             apply_button: Button::new("应用")
                 .on_click(app_shell_confirm_interpret_asset_dialog_action()),
             cancel_button: Button::new("取消").on_click(app_shell_close_modal_action()),
             draft,
         };
-        dialog.refresh_labels();
+        dialog.refresh_controls();
         dialog
     }
 
@@ -153,32 +159,115 @@ impl InterpretAssetDialog {
     /// Mutate the shell-local draft.
     pub fn apply_update(&mut self, update: InterpretAssetDraftUpdatePayload) {
         self.draft.apply_update(update);
-        self.refresh_labels();
+        self.refresh_controls();
     }
 
-    fn refresh_labels(&mut self) {
-        self.asset_label.set_text(format!("素材：{}", self.draft.asset_name));
-        self.summary_label.set_text(interpretation_summary(self.draft.interpretation));
+    fn refresh_controls(&mut self) {
+        self.asset_label.set_text(self.draft.asset_name.clone());
+        self.status_value_label.set_text(interpretation_status(&self.draft));
+        self.mode_group = mode_group_for(
+            self.draft.interpretation,
+            self.draft.detected_color_space,
+            selected_mode_index(self.draft.interpretation),
+        );
+        self.color_space_dropdown =
+            color_space_dropdown_for(self.draft.interpretation, self.draft.detected_color_space);
     }
 }
 
-fn interpretation_button(label: impl Into<String>, color: MediaColorInterpretation) -> Button {
-    Button::new(label).on_click(app_shell_interpret_asset_draft_changed_action(
-        InterpretAssetDraftUpdatePayload { interpretation: AssetMediaInterpretation { color } },
-    ))
+fn row_label(text: impl Into<String>) -> Label {
+    Label::new(text)
+        .secondary()
+        .with_font_size(BODY_FONT_SIZE)
+        .with_padding(0.0, 0.0)
 }
 
-fn interpretation_summary(interpretation: AssetMediaInterpretation) -> String {
-    match interpretation.color {
-        MediaColorInterpretation::Auto => {
-            "当前：自动解释。导入 metadata、检测器和项目色彩策略会在预览/导出时实时解析。"
-                .to_owned()
-        }
-        MediaColorInterpretation::Data => {
-            "当前：数据素材。预览和导出不应对该素材应用色彩转换。".to_owned()
-        }
+fn mode_group_for(
+    interpretation: AssetMediaInterpretation,
+    detected_color_space: Option<ColorSpace>,
+    selected_index: usize,
+) -> SegmentedButtonGroup {
+    let fallback_color_space = selected_override_color_space(interpretation, detected_color_space);
+    SegmentedButtonGroup::new(
+        vec![
+            SegmentedButtonItem::new("自动", draft_update_action(MediaColorInterpretation::Auto)),
+            SegmentedButtonItem::new(
+                "手动",
+                draft_update_action(MediaColorInterpretation::Override {
+                    color_space: fallback_color_space,
+                }),
+            ),
+            SegmentedButtonItem::new("数据", draft_update_action(MediaColorInterpretation::Data)),
+        ],
+        selected_index,
+    )
+}
+
+fn color_space_dropdown_for(
+    interpretation: AssetMediaInterpretation,
+    detected_color_space: Option<ColorSpace>,
+) -> Dropdown {
+    let selected = selected_override_color_space(interpretation, detected_color_space);
+    let items = OVERRIDE_COLOR_SPACES
+        .iter()
+        .map(|&color_space| {
+            MenuItem::new(
+                color_space_label(color_space),
+                draft_update_action(MediaColorInterpretation::Override { color_space }),
+            )
+            .checked(color_space == selected)
+        })
+        .collect();
+
+    let label = match interpretation.color {
+        MediaColorInterpretation::Auto => "随自动识别".to_owned(),
+        MediaColorInterpretation::Data => "数据素材".to_owned(),
         MediaColorInterpretation::Override { color_space } => {
-            format!("当前：手动覆盖为 {}", color_space_label(color_space))
+            color_space_label(color_space).to_owned()
+        }
+    };
+    let dropdown = Dropdown::new(label, items).with_max_visible_items(6);
+    if interpretation.color.override_color_space().is_some() {
+        dropdown
+    } else {
+        dropdown.disabled()
+    }
+}
+
+fn draft_update_action(color: MediaColorInterpretation) -> mondrian_editor_state::Action {
+    app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
+        interpretation: AssetMediaInterpretation { color },
+    })
+}
+
+fn selected_mode_index(interpretation: AssetMediaInterpretation) -> usize {
+    match interpretation.color {
+        MediaColorInterpretation::Auto => MODE_AUTO_INDEX,
+        MediaColorInterpretation::Override { .. } => MODE_OVERRIDE_INDEX,
+        MediaColorInterpretation::Data => MODE_DATA_INDEX,
+    }
+}
+
+fn selected_override_color_space(
+    interpretation: AssetMediaInterpretation,
+    detected_color_space: Option<ColorSpace>,
+) -> ColorSpace {
+    interpretation
+        .color
+        .override_color_space()
+        .or(detected_color_space)
+        .unwrap_or(ColorSpace::Rec709)
+}
+
+fn interpretation_status(draft: &AppUiInterpretAssetDraft) -> String {
+    match draft.interpretation.color {
+        MediaColorInterpretation::Auto => match draft.detected_color_space {
+            Some(color_space) => format!("自动 — 已识别为 {}", color_space_label(color_space)),
+            None => "自动 — 未明确标记".to_owned(),
+        },
+        MediaColorInterpretation::Data => "数据 — 不做色彩转换".to_owned(),
+        MediaColorInterpretation::Override { color_space } => {
+            format!("手动 — {}", color_space_label(color_space))
         }
     }
 }
@@ -204,37 +293,33 @@ impl Widget for InterpretAssetDialog {
         ));
         self.asset_label.layout(Rect::new(
             content.x,
-            content.y + 54.0,
+            content.y + 48.0,
             content.width,
             BODY_FONT_SIZE * 1.6,
         ));
-        self.summary_label.layout(Rect::new(
-            content.x,
-            content.y + 82.0,
-            content.width,
-            BODY_FONT_SIZE * 3.2,
-        ));
 
-        let option_top = content.y + 136.0;
-        self.auto_button
-            .layout(Rect::new(content.x, option_top, content.width, ROW_HEIGHT));
-        self.data_button.layout(Rect::new(
-            content.x,
-            option_top + ROW_HEIGHT + ROW_GAP,
-            content.width,
+        let control_x = content.x + LABEL_COLUMN_WIDTH;
+        let control_width = (content.width - LABEL_COLUMN_WIDTH).max(160.0);
+        let mut row_y = content.y + 94.0;
+        self.status_label
+            .layout(Rect::new(content.x, row_y, LABEL_COLUMN_WIDTH, ROW_HEIGHT));
+        self.status_value_label
+            .layout(Rect::new(control_x, row_y, control_width, ROW_HEIGHT));
+
+        row_y += ROW_HEIGHT + ROW_GAP;
+        self.mode_label
+            .layout(Rect::new(content.x, row_y, LABEL_COLUMN_WIDTH, ROW_HEIGHT));
+        self.mode_group.layout(Rect::new(control_x, row_y, control_width, ROW_HEIGHT));
+
+        row_y += ROW_HEIGHT + ROW_GAP;
+        self.color_space_label
+            .layout(Rect::new(content.x, row_y, LABEL_COLUMN_WIDTH, ROW_HEIGHT));
+        self.color_space_dropdown.layout(Rect::new(
+            control_x,
+            row_y,
+            control_width.min(280.0),
             ROW_HEIGHT,
         ));
-
-        let column_gap = 12.0;
-        let column_width = (content.width - column_gap) * 0.5;
-        let overrides_top = option_top + (ROW_HEIGHT + ROW_GAP) * 2.0 + 8.0;
-        for (index, (_, button)) in self.override_buttons.iter_mut().enumerate() {
-            let column = index % 2;
-            let row = index / 2;
-            let x = content.x + column as f32 * (column_width + column_gap);
-            let y = overrides_top + row as f32 * (ROW_HEIGHT + ROW_GAP);
-            button.layout(Rect::new(x, y, column_width, ROW_HEIGHT));
-        }
 
         let button_y = self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT;
         let cancel_x = self.card.x + self.card.width - CONTENT_PADDING - BUTTON_WIDTH;
@@ -261,15 +346,11 @@ impl Widget for InterpretAssetDialog {
                 EventResult::Handled
             }
             _ => {
-                for button in [&mut self.auto_button, &mut self.data_button] {
-                    if button.event(event, ctx) == EventResult::Handled {
-                        return EventResult::Handled;
-                    }
+                if self.color_space_dropdown.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
                 }
-                for (_, button) in &mut self.override_buttons {
-                    if button.event(event, ctx) == EventResult::Handled {
-                        return EventResult::Handled;
-                    }
+                if self.mode_group.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
                 }
                 for button in [&mut self.apply_button, &mut self.cancel_button] {
                     if button.event(event, ctx) == EventResult::Handled {
@@ -285,14 +366,14 @@ impl Widget for InterpretAssetDialog {
         self.surface.paint(self.bounds, self.card, ctx);
         self.title_label.paint(ctx);
         self.asset_label.paint(ctx);
-        self.summary_label.paint(ctx);
-        self.auto_button.paint(ctx);
-        self.data_button.paint(ctx);
-        for (_, button) in &self.override_buttons {
-            button.paint(ctx);
-        }
+        self.status_label.paint(ctx);
+        self.status_value_label.paint(ctx);
+        self.mode_label.paint(ctx);
+        self.mode_group.paint(ctx);
+        self.color_space_label.paint(ctx);
         self.apply_button.paint(ctx);
         self.cancel_button.paint(ctx);
+        self.color_space_dropdown.paint(ctx);
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -300,21 +381,21 @@ impl Widget for InterpretAssetDialog {
     }
 
     fn child_count(&self) -> usize {
-        7 + self.override_buttons.len()
+        10
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         match index {
             0 => Some(&self.title_label),
             1 => Some(&self.asset_label),
-            2 => Some(&self.summary_label),
-            3 => Some(&self.auto_button),
-            4 => Some(&self.data_button),
-            index if index < 5 + self.override_buttons.len() => {
-                self.override_buttons.get(index - 5).map(|(_, button)| button as &dyn Widget)
-            }
-            index if index == 5 + self.override_buttons.len() => Some(&self.apply_button),
-            index if index == 6 + self.override_buttons.len() => Some(&self.cancel_button),
+            2 => Some(&self.status_label),
+            3 => Some(&self.status_value_label),
+            4 => Some(&self.mode_label),
+            5 => Some(&self.mode_group),
+            6 => Some(&self.color_space_label),
+            7 => Some(&self.color_space_dropdown),
+            8 => Some(&self.apply_button),
+            9 => Some(&self.cancel_button),
             _ => None,
         }
     }
@@ -323,15 +404,14 @@ impl Widget for InterpretAssetDialog {
         match index {
             0 => Some(&mut self.title_label),
             1 => Some(&mut self.asset_label),
-            2 => Some(&mut self.summary_label),
-            3 => Some(&mut self.auto_button),
-            4 => Some(&mut self.data_button),
-            index if index < 5 + self.override_buttons.len() => self
-                .override_buttons
-                .get_mut(index - 5)
-                .map(|(_, button)| button as &mut dyn Widget),
-            index if index == 5 + self.override_buttons.len() => Some(&mut self.apply_button),
-            index if index == 6 + self.override_buttons.len() => Some(&mut self.cancel_button),
+            2 => Some(&mut self.status_label),
+            3 => Some(&mut self.status_value_label),
+            4 => Some(&mut self.mode_label),
+            5 => Some(&mut self.mode_group),
+            6 => Some(&mut self.color_space_label),
+            7 => Some(&mut self.color_space_dropdown),
+            8 => Some(&mut self.apply_button),
+            9 => Some(&mut self.cancel_button),
             _ => None,
         }
     }
@@ -350,6 +430,7 @@ mod tests {
             AssetMediaInterpretation {
                 color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
             },
+            Some(ColorSpace::Rec2020),
         );
 
         let payload = draft.into_payload();
@@ -362,11 +443,44 @@ mod tests {
     }
 
     #[test]
-    fn summary_distinguishes_auto_and_override() {
-        assert!(interpretation_summary(AssetMediaInterpretation::default()).contains("自动"));
-        assert!(interpretation_summary(AssetMediaInterpretation {
-            color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
-        })
-        .contains("Rec. 2100 PQ"));
+    fn status_reports_auto_detection_without_explainer_copy() {
+        let draft = AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Shot",
+            AssetMediaInterpretation::default(),
+            Some(ColorSpace::Rec2020),
+        );
+
+        let status = interpretation_status(&draft);
+
+        assert!(status.contains("自动"));
+        assert!(status.contains("已识别为"));
+        assert!(status.contains("Rec. 2020"));
+        assert!(!status.contains("预览/导出"));
+        assert!(!status.contains("metadata"));
+    }
+
+    #[test]
+    fn override_mode_uses_dropdown_selection() {
+        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Shot",
+            AssetMediaInterpretation {
+                color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            },
+            Some(ColorSpace::Rec2020),
+        ));
+
+        assert_eq!(
+            dialog.mode_group.selected_index(),
+            Some(MODE_OVERRIDE_INDEX)
+        );
+        assert!(dialog.color_space_dropdown.is_enabled());
+        assert_eq!(
+            dialog.color_space_dropdown.checked_for_action(&draft_update_action(
+                MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            )),
+            Some(true)
+        );
     }
 }

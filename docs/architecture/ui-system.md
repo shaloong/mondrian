@@ -47,6 +47,9 @@ not the undoable domain model. The dialog's committed payload must flow through 
 domain/app action owned by the target subsystem. For example, Asset Library →
 Interpret Footage opens an app-shell modal, but applying Auto/Override/Data is
 an asset-library mutation that persists `AssetMediaInterpretation`.
+The modal is a compact settings form: interpretation mode uses a segmented
+control, manual color space selection uses a dropdown, and Auto displays the
+current resolved/detected result instead of explanatory copy.
 
 ## Playback Tick Ownership
 

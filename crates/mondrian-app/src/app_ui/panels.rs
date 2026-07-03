@@ -2051,6 +2051,10 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) ->
                     asset_id: asset.id,
                     asset_name: asset.name.clone(),
                     interpretation: asset.interpretation,
+                    detected_color_space: asset
+                        .media_info
+                        .primary_video()
+                        .and_then(|video| video.detected_color_space),
                 }),
             ),
             AppIcon::Film,

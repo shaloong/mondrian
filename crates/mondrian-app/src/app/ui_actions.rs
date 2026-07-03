@@ -844,6 +844,8 @@ pub struct AppShellInterpretAssetDialogPayload {
     pub asset_name: String,
     /// Current persistent interpretation to seed the dialog draft.
     pub interpretation: AssetMediaInterpretation,
+    /// Current automatic color-space result detected from media metadata.
+    pub detected_color_space: Option<ColorSpace>,
 }
 
 /// Draft update emitted by the Interpret Footage dialog.

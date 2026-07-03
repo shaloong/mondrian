@@ -1223,6 +1223,7 @@ impl AppUiAppRoot {
                     payload.asset_id,
                     payload.asset_name,
                     payload.interpretation,
+                    payload.detected_color_space,
                 );
                 self.modal = Some(ShellModal::interpret_asset(draft));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -3297,6 +3298,7 @@ mod tests {
                 asset_id,
                 asset_name: "Shot A.mov".to_owned(),
                 interpretation: AssetMediaInterpretation::default(),
+                detected_color_space: Some(ColorSpace::Rec2020),
             }),
             &platform,
             None,
