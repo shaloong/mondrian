@@ -205,10 +205,11 @@ missing-metadata policy. Resolved or assumed probe values are not media metadata
 callers must use `VideoStreamInfo.detected_color_space` and let
 `MissingColorMetadataPolicy` handle absent metadata. When preview/export logs
 or UI need to explain why metadata was rejected or unsupported, they should
-attach `VideoStreamInfo.color_metadata` raw CICP tags rather than rebuilding
-diagnostics from path or decoder text. Export jobs carry this as
-`TimelineExportInput.asset_color_diagnostics`, and preview emits the same
-diagnostic summary when missing-metadata policy rejects a media asset.
+attach `VideoStreamInfo.color_interpretation` and `VideoStreamInfo.color_metadata`
+raw CICP tags rather than rebuilding diagnostics from path or decoder text.
+Export jobs carry this as `TimelineExportInput.asset_color_diagnostics`, and
+preview emits the same diagnostic summary when missing-metadata policy rejects a
+media asset.
 Preview final-frame cache keys must include the effective color context so a
 monitor/output transform change cannot reuse stale pixels from a previous view.
 For OCIO-backed preview this includes the resolved display and view names, not

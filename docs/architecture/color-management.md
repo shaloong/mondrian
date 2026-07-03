@@ -261,6 +261,14 @@ specified/unspecified state. Diagnostics, future UI warnings, and camera-log
 identification should consume this raw metadata instead of parsing free-form
 FFmpeg strings or inferring whether metadata existed from a resolved
 `ColorSpace`.
+`VideoStreamInfo.color_interpretation` is the structured explanation layer for
+automatic detection. It carries the interpreted color space, confidence,
+source/method, evidence, warnings, and whether the result is user-overridable.
+Evidence distinguishes metadata hints, exact CICP triplets, partial CICP
+matches, unsupported CICP tags, and decoder unavailability. Warnings must
+surface ambiguity such as multiple camera metadata hints, hint-vs-CICP
+conflicts, partial CICP inference, missing/unsupported tags, or decoder
+unavailability.
 Preview rejection logs and export failures must include the media asset id,
 path, missing-metadata policy, and `VideoColorDiagnostic` summary so users can
 identify whether the problem was missing tags, unsupported tags, or decoder
@@ -277,8 +285,8 @@ Preview and export both follow override -> detected metadata -> missing-policy
 resolution. Export `TimelineExportInput.asset_color_spaces` is a detected-only
 metadata table; absence of an asset id means "resolve via policy", not
 "fallback to Rec.709". Export `asset_color_diagnostics` carries the matching
-per-asset diagnostic snapshot and must be used for failure messages and reports,
-not for choosing the transform.
+per-asset diagnostic snapshot, including `color_interpretation`, and must be
+used for failure messages and reports, not for choosing the transform.
 
 ## Display and Export
 

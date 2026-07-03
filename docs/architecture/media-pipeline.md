@@ -8,7 +8,7 @@
 
 - container and duration
 - file size
-- video streams: codec, dimensions, frame rate, pixel format, bit depth, alpha, color space, frame count
+- video streams: codec, dimensions, frame rate, pixel format, bit depth, alpha, detected color space, structured color interpretation, frame count
 - audio streams: codec, sample rate, channels, layout, bit depth
 
 The probe runs off the UI thread.
@@ -25,6 +25,12 @@ Synthetic assets use `MediaInfo::synthetic_adjustment_layer()` and `MediaInfo::s
 
 ## Color Metadata
 
-Media probe assigns a stream color space. Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.
+Media probe separates detected metadata from policy assumptions.
+`VideoStreamInfo.detected_color_space` is the transform-facing detected-only
+index. `VideoStreamInfo.color_interpretation` is the diagnostic/UI-facing
+interpretation with confidence, evidence, warnings, and a user-overridable flag.
+Evidence records whether a result came from a camera/log metadata hint, exact
+CICP tags, partial CICP tags, unsupported CICP tags, or decoder unavailability.
+Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.
 
 Unknown/missing metadata policy is resolved at sequence color-management time, not by UI panels.

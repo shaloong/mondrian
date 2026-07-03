@@ -1846,6 +1846,33 @@ mod tests {
             asset_id,
             mondrian_media::VideoColorDiagnostic {
                 detected_color_space: None,
+                interpretation: mondrian_media::DetectedColorInterpretation {
+                    color_space: None,
+                    confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                    source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                    method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                    evidence: vec![mondrian_media::VideoColorInterpretationEvidence::UnsupportedCicpTags {
+                        primaries: mondrian_media::VideoColorTag {
+                            code: 2,
+                            name: None,
+                            specified: false,
+                        },
+                        transfer: mondrian_media::VideoColorTag {
+                            code: 2,
+                            name: None,
+                            specified: false,
+                        },
+                        matrix: mondrian_media::VideoColorTag {
+                            code: 2,
+                            name: None,
+                            specified: false,
+                        },
+                    }],
+                    warnings: vec![
+                        mondrian_media::VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags,
+                    ],
+                    user_overridable: true,
+                },
                 source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
                 method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
                 metadata: Some(mondrian_media::VideoColorMetadata {
