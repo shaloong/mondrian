@@ -33,12 +33,15 @@ color-space transform plus every supported display/view transform.
 
 - `ColorEngine::MondrianSmart`: productized Standard/Simple policy over the
   Mondrian default OCIO source.
-- `ColorEngine::Ocio`: explicit OCIO mode over a selected environment,
-  built-in, or path source.
+- `ColorEngine::Ocio`: explicit OCIO mode over `$OCIO`, a selected built-in,
+  or a path source.
 
 Explicit OCIO mode must load its selected config successfully. It must not
 silently fall back to a different color science. Mondrian Standard follows the
 same rule for the embedded `mondrian_default_ocio_v1` asset.
+The `$OCIO` environment source is intentionally fail-closed: if the variable is
+unset or points to a missing file, Mondrian reports that selected source as
+invalid instead of scanning machine-specific standard paths.
 
 ## Project and Sequence
 
