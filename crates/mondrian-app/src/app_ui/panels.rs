@@ -5,7 +5,7 @@
 //! factories so real `AppState` / `EditorState` adapters can replace it without
 //! changing dock layout or widget construction.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mondrian_assets::library::FolderRecord;
@@ -14,7 +14,7 @@ use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
-    AssetId, ClipId, EffectId, JobId, Rational, SequenceId, TimeCode, TrackId,
+    AssetId, ClipId, ColorSpace, EffectId, JobId, Rational, SequenceId, TimeCode, TrackId,
 };
 use mondrian_core::Color;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
@@ -23,7 +23,9 @@ use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
 use mondrian_export::queue::{ExportJobColorDiagnostics, JobStatus};
 use mondrian_timeline::clip::{Clip, Transform2D};
-use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::sequence::{
+    InputColorResolutionSource, MissingColorMetadataPolicy, Sequence,
+};
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
@@ -114,6 +116,11 @@ pub trait AssetThumbnailSource {
 pub trait ViewerPreviewSource {
     /// Return the current viewer preview lifecycle state.
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState;
+
+    /// Return the latest color-management rejection for the current viewer request.
+    fn viewer_color_rejection(&self) -> Option<ViewerPreviewColorRejectionModel> {
+        None
+    }
 }
 
 /// Current viewer preview lifecycle state for the active frame.
@@ -127,6 +134,27 @@ pub enum ViewerPreviewState {
     Stale(ViewerFrameContent),
     /// A render-ready frame is available for the current playhead frame.
     Ready(ViewerFrameContent),
+}
+
+/// Viewer-facing color-management rejection details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewerPreviewColorRejectionModel {
+    /// Asset that could not be interpreted for preview.
+    pub asset_id: AssetId,
+    /// Media path shown in the viewer diagnostic.
+    pub path: PathBuf,
+    /// Active missing-metadata policy.
+    pub missing_metadata_policy: MissingColorMetadataPolicy,
+    /// Input color-resolution branch that rejected the media.
+    pub source: InputColorResolutionSource,
+    /// Clip/media color-space override in effect, if any.
+    pub override_color_space: Option<ColorSpace>,
+    /// Explicitly detected media color space, if any.
+    pub detected_color_space: Option<ColorSpace>,
+    /// Sequence working color space active during the decision.
+    pub working_color_space: ColorSpace,
+    /// Compact media diagnostic summary.
+    pub diagnostic_summary: String,
 }
 
 /// Current thumbnail lifecycle state for one asset card.
@@ -532,6 +560,7 @@ pub struct ViewerPanelModel {
     pub enabled: bool,
     pub frame_content: Option<ViewerFrameContent>,
     pub empty_message: Option<String>,
+    pub color_rejection: Option<ViewerPreviewColorRejectionModel>,
 }
 
 impl ViewerPanelModel {
@@ -559,6 +588,7 @@ impl ViewerPanelModel {
         let preview_state = preview
             .map(|preview| preview.viewer_preview_for_state(state))
             .unwrap_or(ViewerPreviewState::Unavailable);
+        let color_rejection = preview.and_then(ViewerPreviewSource::viewer_color_rejection);
         let frame_content = match &preview_state {
             ViewerPreviewState::Ready(frame) | ViewerPreviewState::Stale(frame) => {
                 Some(frame.clone())
@@ -572,17 +602,21 @@ impl ViewerPanelModel {
             preview_state,
             ViewerPreviewState::Loading | ViewerPreviewState::Stale(_)
         );
+        let color_rejected =
+            matches!(preview_state, ViewerPreviewState::Unavailable) && color_rejection.is_some();
 
         Self {
             title: sequence.name.clone(),
             status: if preview_waiting {
                 "预览准备中".into()
+            } else if color_rejected {
+                "色彩解释被拒绝".into()
             } else if state.is_playing() {
                 "播放中".into()
             } else {
                 "就绪".into()
             },
-            status_tone: if preview_waiting {
+            status_tone: if preview_waiting || color_rejected {
                 ViewerStatusTone::Warning
             } else if state.is_playing() {
                 ViewerStatusTone::Accent
@@ -605,11 +639,16 @@ impl ViewerPanelModel {
             playing: state.is_playing(),
             enabled: true,
             frame_content,
-            empty_message: if matches!(preview_state, ViewerPreviewState::Loading) {
+            empty_message: if let Some(rejection) =
+                color_rejection.as_ref().filter(|_| color_rejected)
+            {
+                Some(viewer_color_rejection_empty_message(rejection))
+            } else if matches!(preview_state, ViewerPreviewState::Loading) {
                 Some("预览准备中".into())
             } else {
                 None
             },
+            color_rejection,
         }
     }
 
@@ -633,8 +672,19 @@ impl ViewerPanelModel {
             enabled: false,
             frame_content: None,
             empty_message: Some("未载入序列".into()),
+            color_rejection: None,
         }
     }
+}
+
+fn viewer_color_rejection_empty_message(rejection: &ViewerPreviewColorRejectionModel) -> String {
+    format!(
+        "色彩解释被拒绝\n素材：{}\n策略：{:?} / {:?}\n{}",
+        rejection.path.display(),
+        rejection.missing_metadata_policy,
+        rejection.source,
+        rejection.diagnostic_summary
+    )
 }
 
 fn viewer_preview_quality_label(scale: f32) -> String {
@@ -6694,6 +6744,51 @@ mod tests {
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
         assert!(models.viewer.frame_content.is_none());
         assert_eq!(models.viewer.empty_message.as_deref(), Some("预览准备中"));
+    }
+
+    #[test]
+    fn app_state_models_surface_viewer_color_rejection() {
+        struct RejectedPreview;
+
+        impl ViewerPreviewSource for RejectedPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Unavailable
+            }
+
+            fn viewer_color_rejection(&self) -> Option<ViewerPreviewColorRejectionModel> {
+                Some(ViewerPreviewColorRejectionModel {
+                    asset_id: AssetId::new(),
+                    path: PathBuf::from("E:/media/missing-color-tags.mov"),
+                    missing_metadata_policy: MissingColorMetadataPolicy::RejectMedia,
+                    source: InputColorResolutionSource::MissingPolicyRejectMedia,
+                    override_color_space: None,
+                    detected_color_space: None,
+                    working_color_space: ColorSpace::Rec2020,
+                    diagnostic_summary:
+                        "source=MissingMetadata,warnings=missing_or_unsupported_cicp".to_string(),
+                })
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&RejectedPreview),
+        );
+
+        assert_eq!(models.viewer.status, "色彩解释被拒绝");
+        assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
+        assert!(models.viewer.frame_content.is_none());
+        assert!(models.viewer.color_rejection.is_some());
+        let empty = models.viewer.empty_message.as_deref().expect("empty message");
+        assert!(empty.contains("色彩解释被拒绝"));
+        assert!(empty.contains("missing-color-tags.mov"));
+        assert!(empty.contains("MissingPolicyRejectMedia"));
+        assert!(empty.contains("missing_or_unsupported_cicp"));
     }
 
     #[test]

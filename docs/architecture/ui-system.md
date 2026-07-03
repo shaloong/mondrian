@@ -169,3 +169,9 @@ prepared or a failed media key is protected by the bounded failure cache. Stale
 frame reuse is scoped to the same sequence and preview dimensions. These states
 are presentation/adaptor semantics only; they must not mutate timeline playback
 state or affect export evaluation.
+When the preview service returns `Unavailable` because color management rejected
+media, the viewer model must consume `ViewerPreviewColorRejectionModel` instead
+of showing a generic empty viewer. The status should remain warning-toned and
+the empty message should include the rejected media path, missing-metadata
+policy, input-resolution branch, and media diagnostic summary. This keeps
+fail-closed color behavior visible without scraping tracing logs.
