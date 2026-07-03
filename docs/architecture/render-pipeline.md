@@ -176,10 +176,11 @@ focused unit tests.
 Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
 result. App, export, tests, and benches must read frames from `.result` and
 aggregate `.stage_diagnostics` where they expose observability. Preview
-diagnostics and export performance smoke reports record stage-plan counts,
-CPU/GPU stage mix, transfer stages, GPU blockers, and touched pixels so later
-GPU execution work can prove it removed CPU bottlenecks instead of merely
-moving code around. `RenderColorTransformError::ExecutionFailed` must keep the
+diagnostics, export job diagnostics, and export performance smoke reports record
+stage-plan counts, CPU/GPU stage mix, transfer stages, GPU blockers, and touched
+pixels from actual renderer stage executions so later GPU execution work can
+prove it removed CPU bottlenecks instead of merely moving code around.
+`RenderColorTransformError::ExecutionFailed` must keep the
 transform direction plus typed input/output descriptors with the backend reason;
 renderer GPU output smoke additionally records a real wgpu upload + GPU color
 pass + readback boundary and emits `MONDRIAN_RENDERER_GPU_OUTPUT_JSON` (or JSONL
