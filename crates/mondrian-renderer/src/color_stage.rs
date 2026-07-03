@@ -1968,6 +1968,7 @@ mod tests {
         adapter: Option<GpuOutputAdapterReport>,
         frame: GpuOutputFrameReport,
         output_texture_format: &'static str,
+        health: GpuOutputHealthSummary,
         stage: GpuOutputStageDiagnosticsReport,
         runtime: GpuOutputRuntimeDiagnosticsReport,
         readback_bytes: usize,
@@ -2019,6 +2020,74 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+    struct GpuOutputHealthSummary {
+        status: &'static str,
+        native_gpu_output_ready: bool,
+        complete_stage_sequence: bool,
+        no_gpu_blockers: bool,
+        backend_runtime_ready: bool,
+        shader_cache_warmed: bool,
+        readback_complete: bool,
+        parity_within_tolerance: bool,
+        expected_readback_bytes: usize,
+    }
+
+    impl GpuOutputHealthSummary {
+        fn evaluate(
+            skipped: bool,
+            frame: &GpuOutputFrameReport,
+            stage: &GpuOutputStageDiagnosticsReport,
+            runtime: &GpuOutputRuntimeDiagnosticsReport,
+            readback_bytes: usize,
+            max_rgba_delta: u8,
+            tolerance: u8,
+        ) -> Self {
+            let expected_readback_bytes = frame.pixel_count.saturating_mul(4);
+            let complete_stage_sequence = stage.total_stages == 3
+                && stage.upload_stages == 1
+                && stage.gpu_color_stages == 1
+                && stage.readback_stages == 1;
+            let no_gpu_blockers =
+                stage.gpu_blockers == 0 && stage.gpu_blocker_breakdown.total() == 0;
+            let shader_cache_warmed = runtime.shader_cache_entries > 0
+                && runtime.shader_cache_misses > 0
+                && runtime.shader_cache_extraction_failures == 0;
+            let backend_runtime_ready = runtime.backend_prep_resource_entries > 0
+                && runtime.backend_object_entries > 0
+                && runtime.backend_object_misses > 0
+                && runtime.backend_object_failures == 0;
+            let readback_complete =
+                expected_readback_bytes > 0 && readback_bytes == expected_readback_bytes;
+            let parity_within_tolerance = max_rgba_delta <= tolerance;
+            let native_gpu_output_ready = !skipped
+                && complete_stage_sequence
+                && no_gpu_blockers
+                && shader_cache_warmed
+                && backend_runtime_ready
+                && readback_complete;
+            let status = if skipped {
+                "skipped"
+            } else if native_gpu_output_ready && parity_within_tolerance {
+                "passed"
+            } else {
+                "failed"
+            };
+
+            Self {
+                status,
+                native_gpu_output_ready,
+                complete_stage_sequence,
+                no_gpu_blockers,
+                backend_runtime_ready,
+                shader_cache_warmed,
+                readback_complete,
+                parity_within_tolerance,
+                expected_readback_bytes,
+            }
+        }
+    }
+
     #[derive(Debug, serde::Serialize)]
     struct GpuOutputRuntimeDiagnosticsReport {
         shader_cache_entries: usize,
@@ -2050,6 +2119,55 @@ mod tests {
                 next_frame_id: diagnostics.next_frame_id,
             }
         }
+    }
+
+    #[test]
+    fn gpu_output_smoke_health_summary_classifies_native_path() {
+        let frame = GpuOutputFrameReport {
+            width: 2,
+            height: 2,
+            pixel_count: 4,
+            input_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Srgb,
+        };
+        let stage = GpuOutputStageDiagnosticsReport {
+            total_stages: 3,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            readback_stages: 1,
+            gpu_blockers: 0,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown::default(),
+            stage_pixels: 12,
+        };
+        let runtime = GpuOutputRuntimeDiagnosticsReport {
+            shader_cache_entries: 1,
+            shader_cache_hits: 0,
+            shader_cache_misses: 1,
+            shader_cache_extraction_failures: 0,
+            backend_prep_resource_entries: 1,
+            backend_object_entries: 1,
+            backend_object_hits: 0,
+            backend_object_misses: 1,
+            backend_object_failures: 0,
+            frame_table_entries: 2,
+            next_frame_id: 3,
+        };
+
+        let passed = GpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 16, 2, 3);
+        assert_eq!(passed.status, "passed");
+        assert!(passed.native_gpu_output_ready);
+        assert!(passed.parity_within_tolerance);
+        assert_eq!(passed.expected_readback_bytes, 16);
+
+        let incomplete_readback =
+            GpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 12, 2, 3);
+        assert_eq!(incomplete_readback.status, "failed");
+        assert!(!incomplete_readback.readback_complete);
+        assert!(!incomplete_readback.native_gpu_output_ready);
+
+        let skipped = GpuOutputHealthSummary::evaluate(true, &frame, &stage, &runtime, 16, 2, 3);
+        assert_eq!(skipped.status, "skipped");
+        assert!(!skipped.native_gpu_output_ready);
     }
 
     fn source_descriptor(residency: ColorFrameResidency) -> ColorFrameDescriptor {
@@ -2464,20 +2582,35 @@ mod tests {
             Ok(context) => context,
             Err(err) => {
                 let skipped_runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000);
+                let frame_report = GpuOutputFrameReport {
+                    width: 0,
+                    height: 0,
+                    pixel_count: 0,
+                    input_color_space: ColorSpace::Rec709,
+                    output_color_space: ColorSpace::Srgb,
+                };
+                let stage_report: GpuOutputStageDiagnosticsReport =
+                    RenderColorStageDiagnostics::default().into();
+                let runtime_report: GpuOutputRuntimeDiagnosticsReport =
+                    skipped_runtime.diagnostics().into();
+                let health = GpuOutputHealthSummary::evaluate(
+                    true,
+                    &frame_report,
+                    &stage_report,
+                    &runtime_report,
+                    0,
+                    0,
+                    tolerance,
+                );
                 let report = GpuOutputBoundarySmokeReport {
                     scenario: "renderer_gpu_output_boundary",
                     skipped: Some(format!("no GPU adapter available: {err}")),
                     adapter: None,
-                    frame: GpuOutputFrameReport {
-                        width: 0,
-                        height: 0,
-                        pixel_count: 0,
-                        input_color_space: ColorSpace::Rec709,
-                        output_color_space: ColorSpace::Srgb,
-                    },
+                    frame: frame_report,
                     output_texture_format: "Rgba8Unorm",
-                    stage: RenderColorStageDiagnostics::default().into(),
-                    runtime: skipped_runtime.diagnostics().into(),
+                    health,
+                    stage: stage_report,
+                    runtime: runtime_report,
                     readback_bytes: 0,
                     max_rgba_delta: 0,
                     tolerance,
@@ -2532,11 +2665,25 @@ mod tests {
         let max_rgba_delta = max_rgba_delta(&expected.rgba, actual.rgba());
         let stage_diagnostics = record.stage_diagnostics;
         let runtime_diagnostics = runtime.diagnostics();
-        let passed = max_rgba_delta <= tolerance
-            && stage_diagnostics.upload_stages == 1
-            && stage_diagnostics.gpu_color_stages == 1
-            && stage_diagnostics.readback_stages == 1
-            && stage_diagnostics.gpu_blockers == 0;
+        let frame_report = GpuOutputFrameReport {
+            width: frame.descriptor().width as usize,
+            height: frame.descriptor().height as usize,
+            pixel_count: frame.descriptor().pixel_count(),
+            input_color_space: frame.descriptor().color_space,
+            output_color_space: boundary.output_color_space,
+        };
+        let stage_report = stage_diagnostics.into();
+        let runtime_report = runtime_diagnostics.into();
+        let health = GpuOutputHealthSummary::evaluate(
+            false,
+            &frame_report,
+            &stage_report,
+            &runtime_report,
+            actual.rgba().len(),
+            max_rgba_delta,
+            tolerance,
+        );
+        let passed = health.status == "passed";
         let report = GpuOutputBoundarySmokeReport {
             scenario: "renderer_gpu_output_boundary",
             skipped: None,
@@ -2547,16 +2694,11 @@ mod tests {
                 driver: adapter_info.driver,
                 driver_info: adapter_info.driver_info,
             }),
-            frame: GpuOutputFrameReport {
-                width: frame.descriptor().width as usize,
-                height: frame.descriptor().height as usize,
-                pixel_count: frame.descriptor().pixel_count(),
-                input_color_space: frame.descriptor().color_space,
-                output_color_space: boundary.output_color_space,
-            },
+            frame: frame_report,
             output_texture_format: "Rgba8Unorm",
-            stage: stage_diagnostics.into(),
-            runtime: runtime_diagnostics.into(),
+            health,
+            stage: stage_report,
+            runtime: runtime_report,
             readback_bytes: actual.rgba().len(),
             max_rgba_delta,
             tolerance,

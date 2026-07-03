@@ -186,7 +186,11 @@ transform direction plus typed input/output descriptors with the backend reason;
 renderer GPU output smoke additionally records a real wgpu upload + GPU color
 pass + readback boundary and emits `MONDRIAN_RENDERER_GPU_OUTPUT_JSON` (or JSONL
 via `MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT`) so dashboards can verify the
-native final-output path without launching the app window.
+native final-output path without launching the app window. The smoke report
+contains both raw stage/runtime counters and a derived `health` contract so
+dashboards can distinguish skipped adapters, incomplete native GPU sequencing,
+backend-cache/object preparation failures, readback-size mismatches, GPU
+blockers, and CPU/GPU parity failures without reverse-engineering the counters.
 callers should surface that structured context instead of reducing failures to
 plain strings.
 
