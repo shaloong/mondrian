@@ -92,6 +92,7 @@ struct AppUiWindowSession {
     window: Arc<winit::window::Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    surface_color_contract: AppUiSurfaceColorContract,
     frame_renderer: AppUiFrameRenderer,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
@@ -341,7 +342,10 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             log_frame_pressure(pressure);
                         }
-                        trace_color_output_runtime(session.color_output_runtime.diagnostics());
+                        trace_color_output_runtime(
+                            session.color_output_runtime.diagnostics(),
+                            session.surface_color_contract,
+                        );
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
                         }
@@ -639,45 +643,60 @@ fn build_app_ui_background_runtime() -> std::io::Result<tokio::runtime::Runtime>
         .build()
 }
 
-fn preferred_app_ui_surface_format(
+fn app_ui_surface_color_contract(
     surface: &wgpu::Surface<'static>,
     adapter: &wgpu::Adapter,
-    fallback: wgpu::TextureFormat,
-) -> wgpu::TextureFormat {
+) -> Result<AppUiSurfaceColorContract, AppUiSurfaceColorContractError> {
     let capabilities = surface.get_capabilities(adapter);
-    let choice = choose_app_ui_surface_format(&capabilities.formats, fallback);
-    if let Some(fallback) = choice.fallback {
-        tracing::warn!(
-            ?fallback,
-            "app UI surface format fallback; colors may be less consistent on this backend"
-        );
-    }
-    choice.format
+    choose_app_ui_surface_format(&capabilities.formats)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AppUiSurfaceFormatChoice {
+struct AppUiSurfaceColorContract {
     format: wgpu::TextureFormat,
-    fallback: Option<AppUiSurfaceFormatFallback>,
+    encoding: AppUiSurfaceEncoding,
+    hdr_mode: AppUiSurfaceHdrMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AppUiSurfaceFormatFallback {
-    NoSrgbFormat { selected: wgpu::TextureFormat },
+enum AppUiSurfaceEncoding {
+    Srgb,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppUiSurfaceHdrMode {
+    SdrOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppUiSurfaceColorContractError {
+    available_formats: Vec<wgpu::TextureFormat>,
+}
+
+impl std::fmt::Display for AppUiSurfaceColorContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "app UI surface does not expose an sRGB presentation format; available formats: {:?}",
+            self.available_formats
+        )
+    }
+}
+
+impl std::error::Error for AppUiSurfaceColorContractError {}
 
 fn choose_app_ui_surface_format(
     formats: &[wgpu::TextureFormat],
-    fallback: wgpu::TextureFormat,
-) -> AppUiSurfaceFormatChoice {
+) -> Result<AppUiSurfaceColorContract, AppUiSurfaceColorContractError> {
     if let Some(format) = formats.iter().copied().find(|format| is_srgb_surface_format(*format)) {
-        return AppUiSurfaceFormatChoice { format, fallback: None };
+        return Ok(AppUiSurfaceColorContract {
+            format,
+            encoding: AppUiSurfaceEncoding::Srgb,
+            hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+        });
     }
 
-    AppUiSurfaceFormatChoice {
-        format: fallback,
-        fallback: Some(AppUiSurfaceFormatFallback::NoSrgbFormat { selected: fallback }),
-    }
+    Err(AppUiSurfaceColorContractError { available_formats: formats.to_vec() })
 }
 
 fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
@@ -749,8 +768,14 @@ fn log_frame_pressure(pressure: AppUiFramePressure) {
     );
 }
 
-fn trace_color_output_runtime(diagnostics: RenderGpuOutputBoundaryRuntimeDiagnostics) {
+fn trace_color_output_runtime(
+    diagnostics: RenderGpuOutputBoundaryRuntimeDiagnostics,
+    surface_color_contract: AppUiSurfaceColorContract,
+) {
     tracing::trace!(
+        surface_format = ?surface_color_contract.format,
+        surface_encoding = ?surface_color_contract.encoding,
+        surface_hdr_mode = ?surface_color_contract.hdr_mode,
         shader_cache_entries = diagnostics.shader_cache.entries,
         shader_cache_hits = diagnostics.shader_cache.hits,
         shader_cache_misses = diagnostics.shader_cache.misses,
@@ -915,8 +940,15 @@ impl AppUiWindowSession {
         let mut config = surface
             .get_default_config(adapter, size.width, size.height)
             .ok_or("Failed surface config")?;
-        config.format = preferred_app_ui_surface_format(&surface, adapter, config.format);
+        let surface_color_contract = app_ui_surface_color_contract(&surface, adapter)?;
+        config.format = surface_color_contract.format;
         surface.configure(device, &config);
+        tracing::info!(
+            format = ?surface_color_contract.format,
+            encoding = ?surface_color_contract.encoding,
+            hdr_mode = ?surface_color_contract.hdr_mode,
+            "app UI surface color contract"
+        );
 
         let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
         TreeWalker::layout(host.active_root_mut(), bounds);
@@ -925,6 +957,7 @@ impl AppUiWindowSession {
             window,
             surface,
             config: config.clone(),
+            surface_color_contract,
             frame_renderer: AppUiFrameRenderer::new(device, config.format),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
@@ -1286,37 +1319,32 @@ mod tests {
     #[test]
     fn surface_format_choice_prefers_srgb_without_fallback() {
         assert_eq!(
-            choose_app_ui_surface_format(
-                &[
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    wgpu::TextureFormat::Rgba8UnormSrgb,
-                    wgpu::TextureFormat::Bgra8UnormSrgb,
-                ],
+            choose_app_ui_surface_format(&[
                 wgpu::TextureFormat::Bgra8Unorm,
-            ),
-            AppUiSurfaceFormatChoice {
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+            ]),
+            Ok(AppUiSurfaceColorContract {
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                fallback: None,
-            }
+                encoding: AppUiSurfaceEncoding::Srgb,
+                hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+            })
         );
     }
 
     #[test]
-    fn surface_format_choice_reports_non_srgb_fallback() {
+    fn surface_format_choice_rejects_non_srgb_formats() {
         assert_eq!(
-            choose_app_ui_surface_format(
-                &[
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    wgpu::TextureFormat::Rgba8Unorm
-                ],
+            choose_app_ui_surface_format(&[
                 wgpu::TextureFormat::Bgra8Unorm,
-            ),
-            AppUiSurfaceFormatChoice {
-                format: wgpu::TextureFormat::Bgra8Unorm,
-                fallback: Some(AppUiSurfaceFormatFallback::NoSrgbFormat {
-                    selected: wgpu::TextureFormat::Bgra8Unorm,
-                }),
-            }
+                wgpu::TextureFormat::Rgba8Unorm
+            ]),
+            Err(AppUiSurfaceColorContractError {
+                available_formats: vec![
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                ],
+            })
         );
     }
 

@@ -78,6 +78,14 @@ temporary RGBA8 path inside legacy effects or legacy blend modes must remain
 explicit and visible in tests until that subsystem has its own float/linear
 contract.
 
+The app UI presentation surface is also part of the color contract. The wgpu
+window session must select an explicit sRGB SDR surface format and fail closed
+when the backend exposes only non-sRGB presentation formats. It must not fall
+back to a non-sRGB swapchain, because that would hide OS/backend display
+management errors behind a visually plausible but untrusted viewer path. HDR,
+EDR, monitor ICC correction, and per-monitor switching require their own
+explicit surface/display contracts before they can be enabled.
+
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are
 scheduled explicitly by `RenderColorStagePlan` nodes rather than hidden inside
