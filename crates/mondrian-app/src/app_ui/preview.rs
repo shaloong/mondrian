@@ -1646,6 +1646,96 @@ fn resolve_preview_input_color_space(
     )
 }
 
+/// Collect preview input color-resolution source counts for one timeline frame.
+///
+/// This uses the same preview-intent render-plan evaluation as the viewer. It
+/// intentionally returns source counts only; output/display differences are
+/// handled by the preview color context and must not change input
+/// interpretation source categories.
+pub fn preview_input_color_resolution_counts_for_frame(
+    sequence: &Sequence,
+    sequences: &[Sequence],
+    asset_color_spaces: &HashMap<AssetId, ColorSpace>,
+    asset_interpretations: &HashMap<AssetId, AssetMediaInterpretation>,
+    project_color_management: &mondrian_core::ProjectColorManagement,
+    display_color_space: ColorSpace,
+    frame: i64,
+) -> Result<InputColorResolutionSourceCounts, String> {
+    let color_context = sequence
+        .settings
+        .root_preview_color_context(project_color_management, display_color_space);
+    preview_sequence_input_color_resolution_counts(
+        sequence,
+        sequences,
+        asset_color_spaces,
+        asset_interpretations,
+        frame,
+        color_context,
+        0,
+    )
+}
+
+fn preview_sequence_input_color_resolution_counts(
+    sequence: &Sequence,
+    sequences: &[Sequence],
+    asset_color_spaces: &HashMap<AssetId, ColorSpace>,
+    asset_interpretations: &HashMap<AssetId, AssetMediaInterpretation>,
+    frame: i64,
+    color_context: ColorContext,
+    depth: usize,
+) -> Result<InputColorResolutionSourceCounts, String> {
+    if depth >= MAX_NESTED_PREVIEW_DEPTH {
+        return Err("预览序列嵌套层级过深，已停止统计输入色彩解析".to_string());
+    }
+
+    let render_plan = evaluate_timeline_render_plan(
+        sequence,
+        TimelineEvaluationRequest::preview(
+            frame,
+            normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
+        ),
+    );
+    let mut counts = InputColorResolutionSourceCounts::default();
+    for element in render_plan.elements {
+        match element {
+            TimelineRenderPlanElement::Media(media) => {
+                let detected_color_space = asset_color_spaces.get(&media.asset_id).copied();
+                let asset_interpretation =
+                    asset_interpretations.get(&media.asset_id).copied().unwrap_or_default();
+                let resolution = resolve_preview_input_color_space(
+                    media.color_space_override,
+                    asset_interpretation,
+                    detected_color_space,
+                    &color_context,
+                );
+                counts.record(resolution.source);
+            }
+            TimelineRenderPlanElement::NestedSequence(nested) => {
+                let Some(nested_sequence) =
+                    sequences.iter().find(|sequence| sequence.id == nested.sequence_id)
+                else {
+                    return Err(format!("嵌套序列不存在: {}", nested.sequence_id));
+                };
+                let nested_context =
+                    nested_sequence.settings.nested_render_color_context(color_context.clone());
+                let nested_counts = preview_sequence_input_color_resolution_counts(
+                    nested_sequence,
+                    sequences,
+                    asset_color_spaces,
+                    asset_interpretations,
+                    nested.source_frame,
+                    nested_context,
+                    depth + 1,
+                )?;
+                counts.accumulate(nested_counts);
+            }
+            TimelineRenderPlanElement::Adjustment(_) | TimelineRenderPlanElement::SolidColor(_) => {
+            }
+        }
+    }
+    Ok(counts)
+}
+
 #[derive(Default)]
 struct AppUiPreviewMetrics {
     render_requests: Cell<u64>,
@@ -2059,6 +2149,7 @@ mod tests {
     use mondrian_renderer::ColorFrameDomain;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
+    use mondrian_timeline::track::Track;
 
     fn state_with_solid_color_clip(color: Color) -> AppState {
         let mut state = AppState::new();
@@ -2670,6 +2761,111 @@ mod tests {
             )
             .source,
             mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyRejectMedia
+        );
+    }
+
+    #[test]
+    fn preview_and_export_input_color_resolution_counts_match_for_frame() {
+        let mut sequence = Sequence::new("preview-export-color-resolution-parity");
+        sequence.settings.color_space = ColorSpace::Rec2020;
+        sequence.settings.color_management.missing_metadata_policy =
+            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+        let tb = sequence.time_base();
+        let detected_id = AssetId::new();
+        let override_id = AssetId::new();
+        let missing_id = AssetId::new();
+        let data_id = AssetId::new();
+
+        sequence.video_tracks[0]
+            .add_clip(Clip::new(
+                detected_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(10, tb),
+            ))
+            .expect("add detected clip");
+        for (name, asset_id) in [
+            ("override", override_id),
+            ("missing", missing_id),
+            ("data", data_id),
+        ] {
+            let mut track = Track::new_video(name);
+            track
+                .add_clip(Clip::new(
+                    asset_id,
+                    TimeCode::new(0, tb),
+                    TimeCode::new(10, tb),
+                ))
+                .expect("add clip");
+            sequence.video_tracks.push(track);
+        }
+
+        let mut asset_color_spaces = HashMap::new();
+        asset_color_spaces.insert(detected_id, ColorSpace::Srgb);
+        let mut asset_interpretations = HashMap::new();
+        asset_interpretations.insert(
+            override_id,
+            AssetMediaInterpretation {
+                color: mondrian_core::timeline_data::MediaColorInterpretation::Override {
+                    color_space: ColorSpace::SLog3,
+                },
+                ..AssetMediaInterpretation::default()
+            },
+        );
+        asset_interpretations.insert(
+            data_id,
+            AssetMediaInterpretation {
+                payload: mondrian_core::timeline_data::AssetColorPayload::NonColorData,
+                ..AssetMediaInterpretation::default()
+            },
+        );
+        let project_color_management = ProjectColorManagement::default();
+
+        let preview_counts = preview_input_color_resolution_counts_for_frame(
+            &sequence,
+            &[],
+            &asset_color_spaces,
+            &asset_interpretations,
+            &project_color_management,
+            ColorSpace::Rec709,
+            0,
+        )
+        .expect("preview counts");
+        let export_counts = mondrian_export::queue::export_input_color_resolution_counts_for_frame(
+            &mondrian_export::preset::TimelineExportInput {
+                sequence,
+                sequences: Vec::new(),
+                asset_paths: HashMap::new(),
+                asset_color_spaces,
+                asset_interpretations,
+                asset_color_diagnostics: HashMap::new(),
+                range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
+                project_color_management,
+            },
+            0,
+        )
+        .expect("export counts");
+
+        assert_eq!(preview_counts, export_counts);
+        assert_eq!(preview_counts.total(), 4);
+        assert_eq!(
+            preview_counts
+                .count(mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata),
+            1
+        );
+        assert_eq!(
+            preview_counts.count(mondrian_timeline::sequence::InputColorResolutionSource::Override),
+            1
+        );
+        assert_eq!(
+            preview_counts.count(
+                mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
+            ),
+            1
+        );
+        assert_eq!(
+            preview_counts
+                .count(mondrian_timeline::sequence::InputColorResolutionSource::DataTexture),
+            1
         );
     }
 
