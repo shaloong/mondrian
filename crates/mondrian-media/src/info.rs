@@ -146,6 +146,30 @@ pub struct VideoColorMetadataHint {
     pub detected_color_space: ColorSpace,
 }
 
+/// HDR-related stream side-data kind detected during media probing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoHdrSideDataKind {
+    /// SMPTE ST 2086 mastering display metadata.
+    MasteringDisplayMetadata,
+    /// MaxCLL / MaxFALL content light level metadata.
+    ContentLightLevel,
+    /// HDR10+ dynamic metadata.
+    DynamicHdr10Plus,
+    /// Dolby Vision configuration metadata.
+    DolbyVisionConfig,
+    /// ICC profile side data.
+    IccProfile,
+}
+
+/// Summary of HDR-related side data on a video stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoHdrMetadataSummary {
+    /// HDR side-data kind.
+    pub kind: VideoHdrSideDataKind,
+    /// Side-data payload size in bytes.
+    pub payload_size: usize,
+}
+
 /// Diagnostic snapshot of a video stream's color metadata interpretation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoColorDiagnostic {
@@ -160,6 +184,9 @@ pub struct VideoColorDiagnostic {
     /// Metadata hints that contributed to identifying acquisition/log color space.
     #[serde(default)]
     pub metadata_hints: Vec<VideoColorMetadataHint>,
+    /// HDR-related stream side-data summaries.
+    #[serde(default)]
+    pub hdr_metadata: Vec<VideoHdrMetadataSummary>,
 }
 
 impl VideoColorTag {
@@ -191,6 +218,7 @@ impl VideoColorDiagnostic {
             method: stream.color_detection_method,
             metadata: stream.color_metadata.clone(),
             metadata_hints: stream.color_metadata_hints.clone(),
+            hdr_metadata: stream.hdr_metadata.clone(),
         }
     }
 
@@ -214,9 +242,18 @@ impl VideoColorDiagnostic {
                 .collect::<Vec<_>>()
                 .join("|")
         };
+        let hdr = if self.hdr_metadata.is_empty() {
+            "none".to_string()
+        } else {
+            self.hdr_metadata
+                .iter()
+                .map(VideoHdrMetadataSummary::summary)
+                .collect::<Vec<_>>()
+                .join("|")
+        };
         format!(
-            "source={:?},method={:?},detected={},metadata={},hints={}",
-            self.source, self.method, detected, metadata, hints
+            "source={:?},method={:?},detected={},metadata={},hints={},hdr={}",
+            self.source, self.method, detected, metadata, hints, hdr
         )
     }
 }
@@ -228,6 +265,13 @@ impl VideoColorMetadataHint {
             "{:?}:{}={}->{:?}",
             self.scope, self.key, self.value, self.detected_color_space
         )
+    }
+}
+
+impl VideoHdrMetadataSummary {
+    /// Compact diagnostic representation for logs and export errors.
+    pub fn summary(&self) -> String {
+        format!("{:?}(bytes={})", self.kind, self.payload_size)
     }
 }
 
@@ -263,6 +307,9 @@ pub struct VideoStreamInfo {
     /// Acquisition/log metadata hints captured from container and stream metadata.
     #[serde(default)]
     pub color_metadata_hints: Vec<VideoColorMetadataHint>,
+    /// HDR-related stream side-data summaries.
+    #[serde(default)]
+    pub hdr_metadata: Vec<VideoHdrMetadataSummary>,
     pub bit_depth: u8,
     pub has_alpha: bool,
     pub avg_bitrate: u64, // bits/s
@@ -374,6 +421,7 @@ impl MediaInfo {
                         &stream.metadata(),
                     );
                     color_metadata_hints.extend(container_color_hints.clone());
+                    let hdr_metadata = collect_hdr_metadata_summaries(&stream);
                     let mut width = 0;
                     let mut height = 0;
                     let mut pixel_format = PixelFormat::Yuv420p;
@@ -410,6 +458,7 @@ impl MediaInfo {
                                 color_detection_method: color_metadata.method,
                                 color_metadata: Some(raw_color_metadata),
                                 color_metadata_hints,
+                                hdr_metadata,
                                 bit_depth,
                                 has_alpha,
                                 avg_bitrate: 0,
@@ -442,6 +491,7 @@ impl MediaInfo {
                         color_detection_method: VideoColorDetectionMethod::DecoderUnavailable,
                         color_metadata: None,
                         color_metadata_hints,
+                        hdr_metadata,
                         bit_depth,
                         has_alpha,
                         avg_bitrate: 0,
@@ -619,6 +669,33 @@ fn normalize_metadata_hint_text(value: &str) -> String {
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn collect_hdr_metadata_summaries(
+    stream: &ffmpeg::format::stream::Stream<'_>,
+) -> Vec<VideoHdrMetadataSummary> {
+    stream
+        .side_data()
+        .filter_map(|side_data| {
+            map_hdr_side_data_kind(side_data.kind())
+                .map(|kind| VideoHdrMetadataSummary { kind, payload_size: side_data.data().len() })
+        })
+        .collect()
+}
+
+fn map_hdr_side_data_kind(
+    kind: ffmpeg::codec::packet::side_data::Type,
+) -> Option<VideoHdrSideDataKind> {
+    use ffmpeg::codec::packet::side_data::Type;
+
+    match kind {
+        Type::MasteringDisplayMetadata => Some(VideoHdrSideDataKind::MasteringDisplayMetadata),
+        Type::ContentLightLevel => Some(VideoHdrSideDataKind::ContentLightLevel),
+        Type::DYNAMIC_HDR10_PLUS => Some(VideoHdrSideDataKind::DynamicHdr10Plus),
+        Type::DOVI_CONF => Some(VideoHdrSideDataKind::DolbyVisionConfig),
+        Type::ICC_PROFILE => Some(VideoHdrSideDataKind::IccProfile),
+        _ => None,
+    }
 }
 
 fn capture_color_metadata(
@@ -863,6 +940,25 @@ mod tests {
     }
 
     #[test]
+    fn hdr_side_data_kind_mapping_identifies_static_and_dynamic_hdr_metadata() {
+        use ffmpeg::codec::packet::side_data::Type;
+
+        assert_eq!(
+            map_hdr_side_data_kind(Type::MasteringDisplayMetadata),
+            Some(VideoHdrSideDataKind::MasteringDisplayMetadata)
+        );
+        assert_eq!(
+            map_hdr_side_data_kind(Type::ContentLightLevel),
+            Some(VideoHdrSideDataKind::ContentLightLevel)
+        );
+        assert_eq!(
+            map_hdr_side_data_kind(Type::DYNAMIC_HDR10_PLUS),
+            Some(VideoHdrSideDataKind::DynamicHdr10Plus)
+        );
+        assert_eq!(map_hdr_side_data_kind(Type::Palette), None);
+    }
+
+    #[test]
     fn capture_color_metadata_preserves_raw_cicp_tags() {
         let metadata = capture_color_metadata(
             Primaries::BT2020,
@@ -912,6 +1008,10 @@ mod tests {
                 value: "S-Log3 / S-Gamut3.Cine".to_string(),
                 detected_color_space: ColorSpace::SLog3,
             }],
+            hdr_metadata: vec![VideoHdrMetadataSummary {
+                kind: VideoHdrSideDataKind::MasteringDisplayMetadata,
+                payload_size: 88,
+            }],
         };
 
         let summary = diagnostic.summary();
@@ -923,5 +1023,6 @@ mod tests {
         assert!(summary.contains("transfer=smpte2084"));
         assert!(summary.contains("matrix=bt2020nc"));
         assert!(summary.contains("camera_profile=S-Log3 / S-Gamut3.Cine"));
+        assert!(summary.contains("MasteringDisplayMetadata(bytes=88)"));
     }
 }

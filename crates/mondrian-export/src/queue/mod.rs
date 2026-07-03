@@ -1830,6 +1830,7 @@ mod tests {
                     matrix: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
                 }),
                 metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
             },
         );
         let timeline = TimelineExportInput {
