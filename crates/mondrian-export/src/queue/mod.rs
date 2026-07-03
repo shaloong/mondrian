@@ -958,11 +958,15 @@ fn render_sequence_frame_into(
             continue;
         };
         let detected_color_space = timeline.asset_color_spaces.get(&media.asset_id).copied();
-        let input_color_resolution = color_context.missing_metadata_policy.resolve_input_decision(
-            media.color_space_override,
-            detected_color_space,
-            color_context.working_color_space,
-        );
+        let asset_interpretation =
+            timeline.asset_interpretations.get(&media.asset_id).copied().unwrap_or_default();
+        let input_color_resolution =
+            color_context.missing_metadata_policy.resolve_asset_input_decision(
+                media.color_space_override,
+                asset_interpretation,
+                detected_color_space,
+                color_context.working_color_space,
+            );
         let input_color_space = input_color_resolution.color_space.ok_or_else(|| {
                 let diagnostic = timeline
                     .asset_color_diagnostics
@@ -1523,6 +1527,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
             asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
@@ -1687,6 +1692,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
             asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
@@ -1711,6 +1717,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
             asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::EntireSequence,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
@@ -1738,6 +1745,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths,
             asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
             asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
@@ -1804,6 +1812,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths: HashMap::new(),
             asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
             asset_color_diagnostics: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
@@ -1899,6 +1908,7 @@ mod tests {
             sequences: Vec::new(),
             asset_paths,
             asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
             asset_color_diagnostics,
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),

@@ -124,7 +124,7 @@ impl AppState {
             return Err(export_error("enqueue_timeline_export", reason));
         };
 
-        let (asset_paths, asset_color_spaces, asset_color_diagnostics) =
+        let (asset_paths, asset_color_spaces, asset_interpretations, asset_color_diagnostics) =
             collect_timeline_asset_paths(self, &sequence, &sequences).map_err(|reason| {
                 self.set_status_hint(format!("导出失败：{reason}"), true);
                 export_error("enqueue_timeline_export", reason)
@@ -137,6 +137,7 @@ impl AppState {
                 sequences,
                 asset_paths,
                 asset_color_spaces,
+                asset_interpretations,
                 asset_color_diagnostics,
                 range: request.range,
                 project_color_management: self.project_settings.color_management.clone(),
@@ -154,6 +155,7 @@ impl AppState {
 pub(crate) type TimelineAssetPaths = (
     HashMap<mondrian_core::types::AssetId, PathBuf>,
     HashMap<mondrian_core::types::AssetId, mondrian_core::types::ColorSpace>,
+    HashMap<mondrian_core::types::AssetId, mondrian_core::timeline_data::AssetMediaInterpretation>,
     HashMap<mondrian_core::types::AssetId, mondrian_media::VideoColorDiagnostic>,
 );
 
@@ -170,6 +172,7 @@ pub(crate) fn collect_timeline_asset_paths(
 
     let mut paths = HashMap::new();
     let mut color_spaces = HashMap::new();
+    let mut interpretations = HashMap::new();
     let mut color_diagnostics = HashMap::new();
     for asset_id in asset_ids {
         let asset = library
@@ -189,6 +192,7 @@ pub(crate) fn collect_timeline_asset_paths(
         {
             color_spaces.insert(asset_id, color_space);
         }
+        interpretations.insert(asset_id, asset.interpretation);
         if let Some(diagnostic) = asset
             .media_info
             .primary_video()
@@ -199,7 +203,7 @@ pub(crate) fn collect_timeline_asset_paths(
         paths.insert(asset_id, asset.path);
     }
 
-    Ok((paths, color_spaces, color_diagnostics))
+    Ok((paths, color_spaces, interpretations, color_diagnostics))
 }
 
 pub(crate) fn collect_sequence_asset_ids(
@@ -247,8 +251,39 @@ fn export_error(step_id: &'static str, reason: String) -> MondrianError {
 mod tests {
     use super::*;
     use mondrian_assets::AssetLibrary;
-    use mondrian_core::types::TimeCode;
+    use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
+    use mondrian_core::types::{ColorSpace, TimeCode};
     use mondrian_timeline::{clip::Clip, sequence::Sequence};
+
+    fn write_minimal_wav(path: &std::path::Path) {
+        let sample_rate = 8_000u32;
+        let channels = 1u16;
+        let bits_per_sample = 16u16;
+        let samples = [0i16; 16];
+        let data_size = (samples.len() * std::mem::size_of::<i16>()) as u32;
+        let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+        let block_align = channels * bits_per_sample / 8;
+        let mut bytes = Vec::with_capacity(44 + data_size as usize);
+
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        std::fs::write(path, bytes).expect("write wav fixture");
+    }
 
     #[test]
     fn build_asset_paths_skips_synthetic_adjustment_assets() {
@@ -279,12 +314,60 @@ mod tests {
         }
 
         let seq = state.sequence.as_ref().expect("sequence should exist");
-        let (paths, color_spaces, color_diagnostics) =
+        let (paths, color_spaces, interpretations, color_diagnostics) =
             collect_timeline_asset_paths(&state, seq, std::slice::from_ref(seq))
                 .expect("collect asset paths");
         assert!(!paths.contains_key(&asset_id));
         assert!(!color_spaces.contains_key(&asset_id));
+        assert!(!interpretations.contains_key(&asset_id));
         assert!(!color_diagnostics.contains_key(&asset_id));
+
+        let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn build_asset_paths_carries_asset_interpretations_for_export() {
+        let mut state = AppState {
+            sequence: Some(Sequence::new("export-interpretation")),
+            ..Default::default()
+        };
+        let temp_root = std::env::temp_dir().join(format!(
+            "mondrian-export-interpretation-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let media_path = temp_root.join("tone.wav");
+        std::fs::create_dir_all(&temp_root).expect("create temp root");
+        write_minimal_wav(&media_path);
+        let library = AssetLibrary::open(temp_root.join("library")).expect("open library");
+        let asset_id = library.import_media_file(&media_path).expect("import media");
+        let interpretation = AssetMediaInterpretation {
+            color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+        };
+        library
+            .set_asset_interpretation(asset_id, interpretation)
+            .expect("set interpretation");
+        state.asset_library = Some(library);
+        {
+            let seq = state.sequence.as_mut().expect("sequence should exist");
+            let tb = seq.time_base();
+            seq.audio_tracks[0]
+                .add_clip(Clip::new(
+                    asset_id,
+                    TimeCode::new(0, tb),
+                    TimeCode::new(20, tb),
+                ))
+                .expect("add audio clip");
+        }
+
+        let seq = state.sequence.as_ref().expect("sequence should exist");
+        let (_, _, interpretations, _) =
+            collect_timeline_asset_paths(&state, seq, std::slice::from_ref(seq))
+                .expect("collect asset paths");
+
+        assert_eq!(interpretations.get(&asset_id), Some(&interpretation));
 
         let _ = std::fs::remove_dir_all(temp_root);
     }

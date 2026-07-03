@@ -19,6 +19,7 @@ pub enum EditingMode {
 }
 
 // Re-exported from mondrian_core::timeline_data.
+use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
 pub use mondrian_core::timeline_data::{FieldOrder, PixelAspectRatio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -124,6 +125,8 @@ pub enum MissingColorMetadataPolicy {
 pub enum InputColorResolutionSource {
     /// Clip/media interpretation override won.
     Override,
+    /// Asset is explicitly marked as data/non-color content.
+    DataTexture,
     /// Explicit media metadata identified the input color space.
     DetectedMetadata,
     /// Missing metadata policy assumed Rec.709.
@@ -209,6 +212,34 @@ impl MissingColorMetadataPolicy {
             detected_color_space: detected,
             missing_metadata_policy: self,
             working_color_space: working,
+        }
+    }
+
+    /// Resolve media input color using clip overrides, asset interpretation,
+    /// detected metadata, and missing-metadata policy in product precedence.
+    pub fn resolve_asset_input_decision(
+        self,
+        clip_override_color_space: Option<ColorSpace>,
+        asset_interpretation: AssetMediaInterpretation,
+        detected: Option<ColorSpace>,
+        working: ColorSpace,
+    ) -> InputColorResolution {
+        if clip_override_color_space.is_some() {
+            return self.resolve_input_decision(clip_override_color_space, detected, working);
+        }
+        match asset_interpretation.color {
+            MediaColorInterpretation::Auto => self.resolve_input_decision(None, detected, working),
+            MediaColorInterpretation::Override { color_space } => {
+                self.resolve_input_decision(Some(color_space), detected, working)
+            }
+            MediaColorInterpretation::Data => InputColorResolution {
+                color_space: Some(working),
+                source: InputColorResolutionSource::DataTexture,
+                override_color_space: None,
+                detected_color_space: detected,
+                missing_metadata_policy: self,
+                working_color_space: working,
+            },
         }
     }
 }
@@ -1173,6 +1204,42 @@ mod tests {
             rejected_resolution.source,
             InputColorResolutionSource::MissingPolicyRejectMedia
         );
+    }
+
+    #[test]
+    fn asset_media_interpretation_participates_in_input_resolution() {
+        let working = ColorSpace::Rec2020;
+
+        let asset_override = MissingColorMetadataPolicy::RejectMedia.resolve_asset_input_decision(
+            None,
+            AssetMediaInterpretation {
+                color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+            },
+            Some(ColorSpace::Rec709),
+            working,
+        );
+        assert_eq!(asset_override.color_space, Some(ColorSpace::SLog3));
+        assert_eq!(asset_override.source, InputColorResolutionSource::Override);
+
+        let data = MissingColorMetadataPolicy::RejectMedia.resolve_asset_input_decision(
+            None,
+            AssetMediaInterpretation { color: MediaColorInterpretation::Data },
+            None,
+            working,
+        );
+        assert_eq!(data.color_space, Some(working));
+        assert_eq!(data.source, InputColorResolutionSource::DataTexture);
+
+        let clip_override = MissingColorMetadataPolicy::RejectMedia.resolve_asset_input_decision(
+            Some(ColorSpace::AppleLog),
+            AssetMediaInterpretation {
+                color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+            },
+            Some(ColorSpace::Rec709),
+            working,
+        );
+        assert_eq!(clip_override.color_space, Some(ColorSpace::AppleLog));
+        assert_eq!(clip_override.source, InputColorResolutionSource::Override);
     }
 
     #[test]

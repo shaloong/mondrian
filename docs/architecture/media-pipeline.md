@@ -41,5 +41,8 @@ Interpret Footage dialog are stored as `Override { color_space }` or `Data` and
 must remain stable across metadata re-probes, relinks, and detector upgrades.
 UI may display the current resolved result beside Auto, but that resolved value
 comes from probe/color-management diagnostics rather than the asset record.
+Preview and export resolve input color with the same precedence: clip-level
+override, then asset-library interpretation, then detected metadata, then the
+sequence missing-metadata policy.
 
 Unknown/missing metadata policy is resolved at sequence color-management time, not by UI panels.

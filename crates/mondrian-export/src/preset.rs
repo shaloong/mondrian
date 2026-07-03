@@ -1,5 +1,6 @@
 //! 导出格式预设
 
+use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_media::VideoColorDiagnostic;
 use mondrian_timeline::sequence::Sequence;
@@ -123,6 +124,9 @@ pub struct TimelineExportInput {
     /// must resolve them through the sequence missing-metadata policy.
     #[serde(default)]
     pub asset_color_spaces: HashMap<AssetId, ColorSpace>,
+    /// Persistent user interpretation stored on asset-library records.
+    #[serde(default)]
+    pub asset_interpretations: HashMap<AssetId, AssetMediaInterpretation>,
     /// Per-asset media color diagnostics captured during app-side asset lookup.
     #[serde(default)]
     pub asset_color_diagnostics: HashMap<AssetId, VideoColorDiagnostic>,

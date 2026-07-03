@@ -12,6 +12,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use mondrian_assets::AssetKind;
+use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::VideoColorDiagnostic;
@@ -490,6 +491,9 @@ impl AppUiPreviewService {
     fn record_input_color_resolution(&self, source: InputColorResolutionSource) {
         match source {
             InputColorResolutionSource::Override => {
+                bump(&self.metrics.input_color_resolution_override);
+            }
+            InputColorResolutionSource::DataTexture => {
                 bump(&self.metrics.input_color_resolution_override);
             }
             InputColorResolutionSource::DetectedMetadata => {
@@ -1526,6 +1530,7 @@ impl AppUiPreviewService {
             .and_then(|video| video.detected_color_space);
         let input_color_resolution = resolve_preview_input_color_space(
             color_space_override,
+            asset.interpretation,
             detected_color_space,
             color_context,
         );
@@ -1608,11 +1613,13 @@ impl AppUiPreviewService {
 
 fn resolve_preview_input_color_space(
     override_color_space: Option<ColorSpace>,
+    asset_interpretation: AssetMediaInterpretation,
     detected_color_space: Option<ColorSpace>,
     color_context: &ColorContext,
 ) -> InputColorResolution {
-    color_context.missing_metadata_policy.resolve_input_decision(
+    color_context.missing_metadata_policy.resolve_asset_input_decision(
         override_color_space,
+        asset_interpretation,
         detected_color_space,
         color_context.working_color_space,
     )
@@ -2532,6 +2539,7 @@ mod tests {
         assert_eq!(
             resolve_preview_input_color_space(
                 Some(ColorSpace::SLog3),
+                AssetMediaInterpretation::default(),
                 Some(ColorSpace::Srgb),
                 &color_context,
             )
@@ -2541,6 +2549,7 @@ mod tests {
         assert_eq!(
             resolve_preview_input_color_space(
                 Some(ColorSpace::SLog3),
+                AssetMediaInterpretation::default(),
                 Some(ColorSpace::Srgb),
                 &color_context,
             )
@@ -2548,7 +2557,12 @@ mod tests {
             mondrian_timeline::sequence::InputColorResolutionSource::Override
         );
         assert_eq!(
-            resolve_preview_input_color_space(None, Some(ColorSpace::Srgb), &color_context),
+            resolve_preview_input_color_space(
+                None,
+                AssetMediaInterpretation::default(),
+                Some(ColorSpace::Srgb),
+                &color_context,
+            ),
             mondrian_timeline::sequence::InputColorResolution {
                 color_space: Some(ColorSpace::Srgb),
                 source: mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata,
@@ -2559,21 +2573,75 @@ mod tests {
             }
         );
         assert_eq!(
-            resolve_preview_input_color_space(None, None, &color_context).color_space,
+            resolve_preview_input_color_space(
+                None,
+                AssetMediaInterpretation::default(),
+                None,
+                &color_context,
+            )
+            .color_space,
             Some(ColorSpace::Rec2020)
         );
         assert_eq!(
-            resolve_preview_input_color_space(None, None, &color_context).source,
+            resolve_preview_input_color_space(
+                None,
+                AssetMediaInterpretation::default(),
+                None,
+                &color_context,
+            )
+            .source,
             mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
+        );
+
+        let asset_override = resolve_preview_input_color_space(
+            None,
+            AssetMediaInterpretation {
+                color: mondrian_core::timeline_data::MediaColorInterpretation::Override {
+                    color_space: ColorSpace::AppleLog,
+                },
+            },
+            Some(ColorSpace::Srgb),
+            &color_context,
+        );
+        assert_eq!(asset_override.color_space, Some(ColorSpace::AppleLog));
+        assert_eq!(
+            asset_override.source,
+            mondrian_timeline::sequence::InputColorResolutionSource::Override
+        );
+
+        let data = resolve_preview_input_color_space(
+            None,
+            AssetMediaInterpretation {
+                color: mondrian_core::timeline_data::MediaColorInterpretation::Data,
+            },
+            Some(ColorSpace::Srgb),
+            &color_context,
+        );
+        assert_eq!(data.color_space, Some(ColorSpace::Rec2020));
+        assert_eq!(
+            data.source,
+            mondrian_timeline::sequence::InputColorResolutionSource::DataTexture
         );
 
         color_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
         assert_eq!(
-            resolve_preview_input_color_space(None, None, &color_context).color_space,
+            resolve_preview_input_color_space(
+                None,
+                AssetMediaInterpretation::default(),
+                None,
+                &color_context,
+            )
+            .color_space,
             None
         );
         assert_eq!(
-            resolve_preview_input_color_space(None, None, &color_context).source,
+            resolve_preview_input_color_space(
+                None,
+                AssetMediaInterpretation::default(),
+                None,
+                &color_context,
+            )
+            .source,
             mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyRejectMedia
         );
     }
