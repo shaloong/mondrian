@@ -196,17 +196,19 @@ pub enum VideoColorInterpretationEvidence {
 pub enum VideoColorInterpretationWarning {
     /// Multiple metadata hints were found; the first stable probe-order hint was selected.
     MultipleMetadataHints {
-        /// Selected color space.
-        selected: ColorSpace,
-        /// Ignored color spaces, in probe order.
-        ignored: Vec<ColorSpace>,
+        /// Selected metadata hint.
+        selected: VideoColorMetadataHint,
+        /// Ignored metadata hints, in probe order.
+        ignored: Vec<VideoColorMetadataHint>,
     },
     /// A metadata hint took precedence over CICP tags that indicated another color space.
     MetadataHintOverridesCicpTags {
-        /// Hint-selected color space.
-        hint_color_space: ColorSpace,
+        /// Selected metadata hint.
+        selected: VideoColorMetadataHint,
         /// CICP-selected color space.
         cicp_color_space: ColorSpace,
+        /// Raw CICP metadata that conflicted with the selected hint.
+        cicp_metadata: VideoColorMetadata,
     },
     /// The result came from partial CICP tags instead of a complete exact triplet.
     PartialCicpTags {
@@ -373,6 +375,16 @@ impl VideoColorDiagnostic {
                 .collect::<Vec<_>>()
                 .join("|")
         };
+        let warnings = if self.interpretation.warnings.is_empty() {
+            "none".to_string()
+        } else {
+            self.interpretation
+                .warnings
+                .iter()
+                .map(VideoColorInterpretationWarning::summary)
+                .collect::<Vec<_>>()
+                .join("|")
+        };
         format!(
             "source={:?},method={:?},detected={},confidence={:?},overridable={},warnings={},metadata={},hints={},hdr={}",
             self.source,
@@ -380,7 +392,7 @@ impl VideoColorDiagnostic {
             detected,
             self.interpretation.confidence,
             self.interpretation.user_overridable,
-            self.interpretation.warnings.len(),
+            warnings,
             metadata,
             hints,
             hdr
@@ -395,6 +407,43 @@ impl VideoColorMetadataHint {
             "{:?}:{}={}->{:?}",
             self.scope, self.key, self.value, self.detected_color_space
         )
+    }
+}
+
+impl VideoColorInterpretationWarning {
+    /// Compact diagnostic representation for logs and export errors.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::MultipleMetadataHints { selected, ignored } => {
+                let ignored_summary = if ignored.is_empty() {
+                    "none".to_string()
+                } else {
+                    ignored
+                        .iter()
+                        .map(VideoColorMetadataHint::summary)
+                        .collect::<Vec<_>>()
+                        .join("|")
+                };
+                format!(
+                    "multiple_hints(selected={},ignored={})",
+                    selected.summary(),
+                    ignored_summary
+                )
+            }
+            Self::MetadataHintOverridesCicpTags { selected, cicp_color_space, cicp_metadata } => {
+                format!(
+                    "hint_overrides_cicp(selected={},cicp={:?},metadata={})",
+                    selected.summary(),
+                    cicp_color_space,
+                    cicp_metadata.summary()
+                )
+            }
+            Self::PartialCicpTags { detected_color_space } => {
+                format!("partial_cicp(detected={detected_color_space:?})")
+            }
+            Self::MissingOrUnsupportedCicpTags => "missing_or_unsupported_cicp".to_string(),
+            Self::DecoderUnavailable => "decoder_unavailable".to_string(),
+        }
     }
 }
 
@@ -743,13 +792,14 @@ fn detect_color_space_from_metadata(
         metadata.matrix.name.as_deref(),
     );
 
-    if let Some(color_space) = metadata_hints.iter().map(|hint| hint.detected_color_space).next() {
+    if let Some(selected_hint) = metadata_hints.first() {
+        let color_space = selected_hint.detected_color_space;
         let mut interpretation = DetectedColorInterpretation {
             color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::Medium,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::MetadataHint,
-            evidence: vec![metadata_hint_evidence(&metadata_hints[0])],
+            evidence: metadata_hints.iter().map(metadata_hint_evidence).collect(),
             warnings: Vec::new(),
             user_overridable: true,
         };
@@ -757,19 +807,18 @@ fn detect_color_space_from_metadata(
             interpretation
                 .warnings
                 .push(VideoColorInterpretationWarning::MultipleMetadataHints {
-                    selected: color_space,
-                    ignored: metadata_hints
-                        .iter()
-                        .skip(1)
-                        .map(|hint| hint.detected_color_space)
-                        .collect(),
+                    selected: selected_hint.clone(),
+                    ignored: metadata_hints.iter().skip(1).cloned().collect(),
                 });
         }
-        if let Some(cicp_color_space) = hinted_cicp.filter(|cicp| *cicp != color_space) {
+        if let Some(cicp_color_space) =
+            exact_cicp.or(hinted_cicp).filter(|cicp| *cicp != color_space)
+        {
             interpretation.warnings.push(
                 VideoColorInterpretationWarning::MetadataHintOverridesCicpTags {
-                    hint_color_space: color_space,
+                    selected: selected_hint.clone(),
                     cicp_color_space,
+                    cicp_metadata: metadata.clone(),
                 },
             );
         }
@@ -1281,7 +1330,7 @@ mod tests {
             detected_color_space: ColorSpace::ArriLogC4,
         };
 
-        let detection = detect_color_space_from_metadata(&metadata, &[hint]);
+        let detection = detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint));
 
         assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4));
         assert_eq!(
@@ -1299,8 +1348,9 @@ mod tests {
         ));
         assert!(detection.warnings.contains(
             &VideoColorInterpretationWarning::MetadataHintOverridesCicpTags {
-                hint_color_space: ColorSpace::ArriLogC4,
-                cicp_color_space: ColorSpace::Rec709
+                selected: hint,
+                cicp_color_space: ColorSpace::Rec709,
+                cicp_metadata: metadata
             }
         ));
     }
@@ -1330,12 +1380,46 @@ mod tests {
         let detection = detect_color_space_from_metadata(&metadata, &hints);
 
         assert_eq!(detection.color_space, Some(ColorSpace::SLog3));
+        assert_eq!(detection.evidence.len(), 2);
         assert!(detection.warnings.contains(
             &VideoColorInterpretationWarning::MultipleMetadataHints {
-                selected: ColorSpace::SLog3,
-                ignored: vec![ColorSpace::AppleLog],
+                selected: hints[0].clone(),
+                ignored: vec![hints[1].clone()],
             }
         ));
+    }
+
+    #[test]
+    fn video_color_diagnostic_summary_includes_warning_context() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT709,
+        );
+        let hint = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Stream,
+            key: "camera_profile".to_string(),
+            value: "ARRI LogC4".to_string(),
+            detected_color_space: ColorSpace::ArriLogC4,
+        };
+        let interpretation =
+            detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint));
+        let diagnostic = VideoColorDiagnostic {
+            detected_color_space: interpretation.color_space,
+            interpretation,
+            source: VideoColorSpaceSource::Metadata,
+            method: VideoColorDetectionMethod::MetadataHint,
+            metadata: Some(metadata),
+            metadata_hints: vec![hint],
+            hdr_metadata: Vec::new(),
+        };
+
+        let summary = diagnostic.summary();
+
+        assert!(summary.contains("hint_overrides_cicp"));
+        assert!(summary.contains("Stream:camera_profile=ARRI LogC4->ArriLogC4"));
+        assert!(summary.contains("cicp=Rec709"));
+        assert!(summary.contains("primaries=bt709"));
     }
 
     #[test]
