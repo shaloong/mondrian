@@ -71,7 +71,7 @@ pub struct TimelineCompositeFrame {
 }
 
 /// Counters describing which timeline composite path was used and why.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineCompositeDiagnostics {
     /// Number of timeline elements evaluated for the composite plan.
     pub elements: u64,

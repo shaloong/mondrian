@@ -179,12 +179,13 @@ and readback stages for a color boundary; `RenderColorStageExecution<T>` carries
 the transform result plus that stage summary. Preview and export performance
 smokes should report both layers: transform diagnostics prove color semantics,
 while stage diagnostics prove scheduling, residency, and GPU-readiness.
-Preview performance smoke reports must also include structured legacy RGBA8
-composite reasons (`layer`, `reason`, `count`) derived from renderer composite
-diagnostics via `TimelineCompositeColorPathSummary`. These reason details are
-the migration contract for removing old blend/effect/transform paths; dashboards
-and CI budgets should consume the summary directly instead of re-inferring
-fallback causes from aggregate counters.
+Preview performance smoke reports and export job diagnostics must also include
+structured legacy RGBA8 composite reasons (`layer`, `reason`, `count`) derived
+from renderer composite diagnostics via `TimelineCompositeColorPathSummary`.
+These reason details are the migration contract for removing old
+blend/effect/transform paths; dashboards, job panels, and CI budgets should
+consume the summary directly instead of re-inferring fallback causes from
+aggregate counters.
 Headless preview smoke reports must also carry GPU preview candidate counters:
 request, ready/current/loading/unavailable outcomes, candidate pixels, and
 external texture registration handoff counters. These counters prove that the
