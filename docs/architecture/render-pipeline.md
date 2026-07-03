@@ -215,4 +215,7 @@ interpretation, and nested color-processing mode to remain identical for the
 same sequence frame. Renderer and app tests also pin the final color boundary:
 for the same working frame, output color space, tone-map flag, and engine,
 preview display and export delivery targets must produce identical RGBA pixels
-while preserving distinct output domains in diagnostics.
+while preserving distinct output domains in diagnostics. The renderer golden
+suite includes a stable RGBA hash for this preview/export Rec.709 boundary
+parity contract; intentional color-pipeline changes must update that hash with
+the same care as image golden references.
