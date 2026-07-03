@@ -15,12 +15,12 @@ use mondrian_media::audio::{
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
+    composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
     CpuEncodedColorFrame, RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, ExportBitDepth, InputColorResolutionSourceCounts, SequenceSettings, VideoRange,
@@ -71,6 +71,8 @@ pub struct ExportJobDiagnostics {
 pub struct ExportJobColorDiagnostics {
     /// Aggregated input color-resolution branches across rendered frames.
     pub input_resolution_source_counts: InputColorResolutionSourceCounts,
+    /// Aggregated timeline composite color-path diagnostics across rendered frames.
+    pub composite_diagnostics: TimelineCompositeDiagnostics,
     /// Number of timeline video frames that contributed color diagnostics.
     pub diagnosed_frames: u64,
 }
@@ -80,6 +82,22 @@ impl ExportJobColorDiagnostics {
     pub fn record_input_resolution_counts(&mut self, counts: InputColorResolutionSourceCounts) {
         self.input_resolution_source_counts.accumulate(counts);
         self.diagnosed_frames = self.diagnosed_frames.saturating_add(1);
+    }
+
+    /// Record all color diagnostics observed while rendering one frame.
+    pub fn record_frame_diagnostics(
+        &mut self,
+        input_counts: InputColorResolutionSourceCounts,
+        composite_diagnostics: TimelineCompositeDiagnostics,
+    ) {
+        self.input_resolution_source_counts.accumulate(input_counts);
+        self.composite_diagnostics.accumulate(composite_diagnostics);
+        self.diagnosed_frames = self.diagnosed_frames.saturating_add(1);
+    }
+
+    /// Return the renderer-owned composite color-path summary for this export job.
+    pub fn composite_color_path_summary(self) -> TimelineCompositeColorPathSummary {
+        self.composite_diagnostics.color_path_summary()
     }
 }
 
@@ -909,6 +927,7 @@ fn write_timeline_frames_to_writer<W: Write>(
 
         let timeline_frame = range.start_frame + index as i64;
         let mut frame_color_counts = InputColorResolutionSourceCounts::default();
+        let mut frame_composite_diagnostics = TimelineCompositeDiagnostics::default();
         let render_result = render_timeline_frame_into(
             timeline,
             timeline_frame,
@@ -916,8 +935,11 @@ fn write_timeline_frames_to_writer<W: Write>(
             height,
             &mut canvas,
             Some(&mut frame_color_counts),
+            Some(&mut frame_composite_diagnostics),
         );
-        diagnostics.color.record_input_resolution_counts(frame_color_counts);
+        diagnostics
+            .color
+            .record_frame_diagnostics(frame_color_counts, frame_composite_diagnostics);
         report_diagnostics(diagnostics);
         match render_result {
             Ok(()) => {}
@@ -956,6 +978,7 @@ fn render_timeline_frame_into(
     height: u32,
     canvas: &mut Vec<u8>,
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
 ) -> Result<(), String> {
     let required_len = width as usize * height as usize * 4;
     if canvas.len() != required_len {
@@ -977,6 +1000,7 @@ fn render_timeline_frame_into(
         canvas,
         0,
         input_color_counts,
+        composite_diagnostics,
     )
 }
 
@@ -1073,6 +1097,7 @@ fn render_sequence_frame_into(
     canvas: &mut Vec<u8>,
     depth: usize,
     mut input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    mut composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
 ) -> Result<(), String> {
     if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
@@ -1209,6 +1234,7 @@ fn render_sequence_frame_into(
             &mut nested_canvas,
             depth + 1,
             input_color_counts.as_deref_mut(),
+            composite_diagnostics.as_deref_mut(),
         )?;
         let nested_source = CpuEncodedColorFrame::source_rgba8(
             nested_width,
@@ -1290,7 +1316,7 @@ fn render_sequence_frame_into(
     }
 
     let mut scratch = TimelineCompositeScratch::default();
-    let rendered = composite_timeline_elements_color_frame(
+    let rendered = composite_timeline_elements_color_frame_with_diagnostics(
         width,
         height,
         &composite_elements,
@@ -1298,12 +1324,15 @@ fn render_sequence_frame_into(
         color_context.working_color_space,
         &mut scratch,
     );
+    if let Some(diagnostics) = composite_diagnostics {
+        diagnostics.accumulate(rendered.diagnostics);
+    }
     let boundary = RenderOutputColorBoundary::export(
         color_context.output_color_space,
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    let encoded = execute_cpu_output_boundary_rgba8(&rendered, &boundary)
+    let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
         .map_err(|err| format!("final color transform failed: {err}"))?;
     canvas.clear();
     canvas.extend_from_slice(&encoded.rgba);
@@ -1826,12 +1855,19 @@ mod tests {
     #[test]
     fn queue_exposes_export_job_diagnostics_from_worker() {
         let mut diagnostics = ExportJobDiagnostics::default();
-        diagnostics.color.record_input_resolution_counts({
-            let mut counts = InputColorResolutionSourceCounts::default();
-            counts.record(InputColorResolutionSource::DetectedMetadata);
-            counts.record(InputColorResolutionSource::Override);
-            counts
-        });
+        let mut counts = InputColorResolutionSourceCounts::default();
+        counts.record(InputColorResolutionSource::DetectedMetadata);
+        counts.record(InputColorResolutionSource::Override);
+        diagnostics.color.record_frame_diagnostics(
+            counts,
+            TimelineCompositeDiagnostics {
+                elements: 3,
+                float_linear_composites: 1,
+                legacy_rgba8_composites: 1,
+                legacy_media_transform: 1,
+                ..TimelineCompositeDiagnostics::default()
+            },
+        );
         let queue = RenderQueue::new_with_executor(Arc::new(DiagnosticExecutor { diagnostics }));
 
         let job_id = queue.enqueue(RenderJob::new(dummy_config("diagnostics.mp4")));
@@ -1853,6 +1889,11 @@ mod tests {
             .expect("diagnostic job");
         assert_eq!(job.diagnostics, diagnostics);
         assert_eq!(job.diagnostics.color.diagnosed_frames, 1);
+        let composite_summary = job.diagnostics.color.composite_color_path_summary();
+        assert_eq!(composite_summary.elements, 3);
+        assert_eq!(composite_summary.float_linear_composites, 1);
+        assert_eq!(composite_summary.legacy_rgba8_composites, 1);
+        assert_eq!(composite_summary.legacy_breakdown.media_transform, 1);
         assert_eq!(
             job.diagnostics
                 .color
@@ -2134,7 +2175,7 @@ mod tests {
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];
-        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas, None)
+        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas, None, None)
             .expect("render should pass");
 
         for px in canvas.chunks_exact(4) {
@@ -2232,8 +2273,9 @@ mod tests {
 
         let mut canvas = Vec::new();
         let mut counts = InputColorResolutionSourceCounts::default();
-        let err = render_timeline_frame_into(&timeline, 0, 1, 1, &mut canvas, Some(&mut counts))
-            .expect_err("missing color metadata should be rejected before decode");
+        let err =
+            render_timeline_frame_into(&timeline, 0, 1, 1, &mut canvas, Some(&mut counts), None)
+                .expect_err("missing color metadata should be rejected before decode");
 
         assert!(err.contains("missing color metadata"));
         assert!(err.contains(temp_path.to_string_lossy().as_ref()));

@@ -3162,17 +3162,21 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
 
 fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {
     let counts = diagnostics.input_resolution_source_counts;
-    if diagnostics.diagnosed_frames == 0 && counts.total() == 0 {
+    let composite = diagnostics.composite_color_path_summary();
+    if diagnostics.diagnosed_frames == 0 && counts.total() == 0 && composite.composite_plans() == 0
+    {
         return None;
     }
     Some(format!(
-        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {}",
+        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / composite float {} legacy {}",
         diagnostics.diagnosed_frames,
         counts.detected_metadata,
         counts.override_count,
         counts.policy_assumptions(),
         counts.data_textures(),
-        counts.policy_rejections()
+        counts.policy_rejections(),
+        composite.float_linear_composites,
+        composite.legacy_rgba8_composites
     ))
 }
 
@@ -4653,14 +4657,22 @@ mod tests {
         let mut encoding = render_job("E:/renders/encoding.mp4");
         encoding.status = JobStatus::Encoding;
         encoding.progress = 0.82;
-        encoding.diagnostics.color.record_input_resolution_counts({
-            let mut counts =
-                mondrian_timeline::sequence::InputColorResolutionSourceCounts::default();
-            counts
-                .record(mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata);
-            counts.record(mondrian_timeline::sequence::InputColorResolutionSource::Override);
-            counts
-        });
+        let mut input_counts =
+            mondrian_timeline::sequence::InputColorResolutionSourceCounts::default();
+        input_counts
+            .record(mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata);
+        input_counts.record(mondrian_timeline::sequence::InputColorResolutionSource::Override);
+        encoding.diagnostics.color.record_frame_diagnostics(
+            input_counts,
+            mondrian_renderer::TimelineCompositeDiagnostics {
+                elements: 2,
+                float_linear_composites: 1,
+                ..mondrian_renderer::TimelineCompositeDiagnostics::default()
+            },
+        );
+        let legacy_summary = encoding.diagnostics.color.composite_color_path_summary();
+        assert_eq!(legacy_summary.float_linear_composites, 1);
+        assert_eq!(legacy_summary.legacy_rgba8_composites, 0);
         let encoding_id = state.render_queue.enqueue(encoding);
         let mut failed = render_job("E:/renders/failed.mp4");
         failed.status = JobStatus::Failed("disk full".to_owned());
@@ -4686,7 +4698,9 @@ mod tests {
         assert_eq!(encoding.status, "Encoding");
         assert_eq!(
             encoding.color_diagnostics.as_deref(),
-            Some("色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0")
+            Some(
+                "色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0 / composite float 1 legacy 0"
+            )
         );
         assert_eq!(encoding.progress_percent, 82);
         assert!(encoding.can_cancel);

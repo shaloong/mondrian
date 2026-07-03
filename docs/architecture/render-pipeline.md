@@ -75,9 +75,9 @@ callers can see whether a composite stayed on the float/linear path or fell back
 to legacy RGBA8 because of transform or effect support. Blend-mode counters stay
 in the diagnostic contract for future unsupported blend contracts, but current
 built-in media, solid, and float-capable adjustment blend modes are expected to
-remain float/linear. Preview diagnostics must aggregate these counters so
-performance smoke reports can identify which legacy color path blocked a fully
-float/linear frame. Callers should use
+remain float/linear. Preview and export diagnostics must aggregate these
+counters so performance smoke reports and job panels can identify which legacy
+color path blocked a fully float/linear frame. Callers should use
 `TimelineCompositeDiagnostics::color_path_summary()` as the renderer-owned
 contract for high-level path state and structured legacy reason breakdowns
 instead of re-inferring path safety from individual counters.
