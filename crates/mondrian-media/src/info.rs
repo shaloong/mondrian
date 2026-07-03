@@ -89,6 +89,28 @@ pub enum VideoColorSpaceSource {
     DecoderUnavailable,
 }
 
+/// One raw CICP-style color tag reported by FFmpeg.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoColorTag {
+    /// Numeric CICP/FFmpeg enum value.
+    pub code: i32,
+    /// Stable FFmpeg tag name when FFmpeg exposes one.
+    pub name: Option<String>,
+    /// Whether this tag carries an explicit value rather than `unspecified`.
+    pub specified: bool,
+}
+
+/// Raw container/codec color metadata for a decoded video stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoColorMetadata {
+    /// Color primaries tag.
+    pub primaries: VideoColorTag,
+    /// Transfer characteristic tag.
+    pub transfer: VideoColorTag,
+    /// Matrix coefficients tag.
+    pub matrix: VideoColorTag,
+}
+
 // ─── 声道布局 ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +136,8 @@ pub struct VideoStreamInfo {
     pub detected_color_space: Option<ColorSpace>,
     /// Source of the detected color-space result.
     pub color_space_source: VideoColorSpaceSource,
+    /// Raw CICP-style color metadata reported by FFmpeg when the decoder opens.
+    pub color_metadata: Option<VideoColorMetadata>,
     pub bit_depth: u8,
     pub has_alpha: bool,
     pub avg_bitrate: u64, // bits/s
@@ -238,6 +262,11 @@ impl MediaInfo {
                                 decoder.color_transfer_characteristic(),
                                 decoder.color_space(),
                             );
+                            let raw_color_metadata = capture_color_metadata(
+                                decoder.color_primaries(),
+                                decoder.color_transfer_characteristic(),
+                                decoder.color_space(),
+                            );
                             video_streams.push(VideoStreamInfo {
                                 index: stream.index() as u32,
                                 codec: map_video_codec(params.id()),
@@ -247,6 +276,7 @@ impl MediaInfo {
                                 pixel_format,
                                 detected_color_space: color_metadata.detected,
                                 color_space_source: color_metadata.source,
+                                color_metadata: Some(raw_color_metadata),
                                 bit_depth,
                                 has_alpha,
                                 avg_bitrate: 0,
@@ -276,6 +306,7 @@ impl MediaInfo {
                         pixel_format,
                         detected_color_space: None,
                         color_space_source: VideoColorSpaceSource::DecoderUnavailable,
+                        color_metadata: None,
                         bit_depth,
                         has_alpha,
                         avg_bitrate: 0,
@@ -405,6 +436,45 @@ fn detect_color_space(
             detected: None,
             source: VideoColorSpaceSource::MissingMetadata,
         }
+    }
+}
+
+fn capture_color_metadata(
+    primaries: ffmpeg::util::color::Primaries,
+    transfer: ffmpeg::util::color::TransferCharacteristic,
+    matrix: ffmpeg::util::color::Space,
+) -> VideoColorMetadata {
+    VideoColorMetadata {
+        primaries: primaries_tag(primaries),
+        transfer: transfer_tag(transfer),
+        matrix: matrix_tag(matrix),
+    }
+}
+
+fn primaries_tag(value: ffmpeg::util::color::Primaries) -> VideoColorTag {
+    let raw: ffmpeg::ffi::AVColorPrimaries = value.into();
+    VideoColorTag {
+        code: raw as i32,
+        name: value.name().map(str::to_owned),
+        specified: value != ffmpeg::util::color::Primaries::Unspecified,
+    }
+}
+
+fn transfer_tag(value: ffmpeg::util::color::TransferCharacteristic) -> VideoColorTag {
+    let raw: ffmpeg::ffi::AVColorTransferCharacteristic = value.into();
+    VideoColorTag {
+        code: raw as i32,
+        name: value.name().map(str::to_owned),
+        specified: value != ffmpeg::util::color::TransferCharacteristic::Unspecified,
+    }
+}
+
+fn matrix_tag(value: ffmpeg::util::color::Space) -> VideoColorTag {
+    let raw: ffmpeg::ffi::AVColorSpace = value.into();
+    VideoColorTag {
+        code: raw as i32,
+        name: value.name().map(str::to_owned),
+        specified: value != ffmpeg::util::color::Space::Unspecified,
     }
 }
 
@@ -547,5 +617,37 @@ mod tests {
 
         assert_eq!(detection.detected, None);
         assert_eq!(detection.source, VideoColorSpaceSource::MissingMetadata);
+    }
+
+    #[test]
+    fn capture_color_metadata_preserves_raw_cicp_tags() {
+        let metadata = capture_color_metadata(
+            Primaries::BT2020,
+            TransferCharacteristic::SMPTE2084,
+            Space::BT2020NCL,
+        );
+
+        assert!(metadata.primaries.specified);
+        assert!(metadata.transfer.specified);
+        assert!(metadata.matrix.specified);
+        assert_eq!(metadata.primaries.name.as_deref(), Some("bt2020"));
+        assert_eq!(metadata.transfer.name.as_deref(), Some("smpte2084"));
+        assert_eq!(metadata.matrix.name.as_deref(), Some("bt2020nc"));
+    }
+
+    #[test]
+    fn capture_color_metadata_marks_unspecified_tags() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+
+        assert!(!metadata.primaries.specified);
+        assert!(!metadata.transfer.specified);
+        assert!(!metadata.matrix.specified);
+        assert_eq!(metadata.primaries.name, None);
+        assert_eq!(metadata.transfer.name, None);
+        assert_eq!(metadata.matrix.name, None);
     }
 }

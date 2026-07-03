@@ -156,6 +156,12 @@ the only field that means container/codec metadata identified a color space.
 `VideoColorSpaceSource::MissingMetadata` and
 `VideoColorSpaceSource::DecoderUnavailable` are diagnostic source states, not
 permission for callers to bypass missing-metadata policy.
+`VideoStreamInfo.color_metadata` stores the raw CICP-style primaries, transfer,
+and matrix tags that FFmpeg reported, including numeric code, tag name, and
+specified/unspecified state. Diagnostics, future UI warnings, and camera-log
+identification should consume this raw metadata instead of parsing free-form
+FFmpeg strings or inferring whether metadata existed from a resolved
+`ColorSpace`.
 
 When detected media color space is missing, `MissingColorMetadataPolicy` resolves it as:
 
