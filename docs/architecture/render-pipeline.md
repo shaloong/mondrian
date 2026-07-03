@@ -233,6 +233,10 @@ Preview exposes the same frame-level input color-resolution source counts from
 its preview-intent evaluation path. Tests compare preview and export source
 counts for the same timeline frame so display/output differences cannot hide a
 divergence in media input interpretation.
+Nested-sequence recursion depth is a timeline-level contract exposed as
+`MAX_NESTED_SEQUENCE_RENDER_DEPTH`; preview, export video, export audio, and
+diagnostic source-count paths must all use that same limit instead of local
+hard-coded values.
 Preview final-frame cache keys must include the effective color context so a
 monitor/output transform change cannot reuse stale pixels from a previous view.
 For OCIO-backed preview this includes the resolved display and view names, not

@@ -24,6 +24,7 @@ use mondrian_renderer::{
 };
 use mondrian_timeline::sequence::{
     ColorContext, ExportBitDepth, InputColorResolutionSourceCounts, SequenceSettings, VideoRange,
+    MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
@@ -518,7 +519,7 @@ fn sequence_has_audio_content(
     end_exclusive: i64,
     depth: usize,
 ) -> bool {
-    if depth > 16 {
+    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return false;
     }
 
@@ -695,7 +696,7 @@ fn render_sequence_audio_chunk(
     channels: u8,
     depth: usize,
 ) -> Result<AudioBuffer, String> {
-    if depth > 16 {
+    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return Ok(AudioBuffer::silent(sample_rate, channels, chunk_frames));
     }
 
@@ -1008,7 +1009,7 @@ fn export_sequence_input_color_resolution_counts(
     color_context: ColorContext,
     depth: usize,
 ) -> Result<InputColorResolutionSourceCounts, String> {
-    if depth > 16 {
+    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return Err("序列嵌套层级过深，已停止统计输入色彩解析以避免循环".to_string());
     }
 
@@ -1073,7 +1074,7 @@ fn render_sequence_frame_into(
     depth: usize,
     mut input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
 ) -> Result<(), String> {
-    if depth > 16 {
+    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
     }
 
