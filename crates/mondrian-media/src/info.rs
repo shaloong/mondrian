@@ -111,6 +111,28 @@ pub struct VideoColorMetadata {
     pub matrix: VideoColorTag,
 }
 
+/// Scope where an acquisition/color metadata hint was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoColorMetadataHintScope {
+    /// Container-level metadata.
+    Container,
+    /// Video stream-level metadata.
+    Stream,
+}
+
+/// Metadata hint that identifies an acquisition or camera-log color space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoColorMetadataHint {
+    /// Metadata scope.
+    pub scope: VideoColorMetadataHintScope,
+    /// Original metadata key.
+    pub key: String,
+    /// Original metadata value.
+    pub value: String,
+    /// Color space identified by the hint.
+    pub detected_color_space: ColorSpace,
+}
+
 /// Diagnostic snapshot of a video stream's color metadata interpretation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoColorDiagnostic {
@@ -120,6 +142,9 @@ pub struct VideoColorDiagnostic {
     pub source: VideoColorSpaceSource,
     /// Raw CICP-style metadata captured from FFmpeg, when available.
     pub metadata: Option<VideoColorMetadata>,
+    /// Metadata hints that contributed to identifying acquisition/log color space.
+    #[serde(default)]
+    pub metadata_hints: Vec<VideoColorMetadataHint>,
 }
 
 impl VideoColorTag {
@@ -149,6 +174,7 @@ impl VideoColorDiagnostic {
             detected_color_space: stream.detected_color_space,
             source: stream.color_space_source,
             metadata: stream.color_metadata.clone(),
+            metadata_hints: stream.color_metadata_hints.clone(),
         }
     }
 
@@ -163,9 +189,28 @@ impl VideoColorDiagnostic {
             .as_ref()
             .map(VideoColorMetadata::summary)
             .unwrap_or_else(|| "unavailable".to_string());
+        let hints = if self.metadata_hints.is_empty() {
+            "none".to_string()
+        } else {
+            self.metadata_hints
+                .iter()
+                .map(VideoColorMetadataHint::summary)
+                .collect::<Vec<_>>()
+                .join("|")
+        };
         format!(
-            "source={:?},detected={},metadata={}",
-            self.source, detected, metadata
+            "source={:?},detected={},metadata={},hints={}",
+            self.source, detected, metadata, hints
+        )
+    }
+}
+
+impl VideoColorMetadataHint {
+    /// Compact diagnostic representation for logs and export errors.
+    pub fn summary(&self) -> String {
+        format!(
+            "{:?}:{}={}->{:?}",
+            self.scope, self.key, self.value, self.detected_color_space
         )
     }
 }
@@ -197,6 +242,9 @@ pub struct VideoStreamInfo {
     pub color_space_source: VideoColorSpaceSource,
     /// Raw CICP-style color metadata reported by FFmpeg when the decoder opens.
     pub color_metadata: Option<VideoColorMetadata>,
+    /// Acquisition/log metadata hints captured from container and stream metadata.
+    #[serde(default)]
+    pub color_metadata_hints: Vec<VideoColorMetadataHint>,
     pub bit_depth: u8,
     pub has_alpha: bool,
     pub avg_bitrate: u64, // bits/s
@@ -293,6 +341,8 @@ impl MediaInfo {
         };
 
         let container = input.format().name().to_lowercase();
+        let container_color_hints =
+            collect_color_metadata_hints(VideoColorMetadataHintScope::Container, &input.metadata());
 
         let mut video_streams = Vec::new();
         let mut audio_streams = Vec::new();
@@ -301,6 +351,11 @@ impl MediaInfo {
             let params = stream.parameters();
             match params.medium() {
                 ffmpeg::media::Type::Video => {
+                    let mut color_metadata_hints = collect_color_metadata_hints(
+                        VideoColorMetadataHintScope::Stream,
+                        &stream.metadata(),
+                    );
+                    color_metadata_hints.extend(container_color_hints.clone());
                     let mut width = 0;
                     let mut height = 0;
                     let mut pixel_format = PixelFormat::Yuv420p;
@@ -321,8 +376,10 @@ impl MediaInfo {
                                 decoder.color_transfer_characteristic(),
                                 decoder.color_space(),
                             );
-                            let color_metadata =
-                                detect_color_space_from_metadata(&raw_color_metadata);
+                            let color_metadata = detect_color_space_from_metadata(
+                                &raw_color_metadata,
+                                &color_metadata_hints,
+                            );
                             video_streams.push(VideoStreamInfo {
                                 index: stream.index() as u32,
                                 codec: map_video_codec(params.id()),
@@ -333,6 +390,7 @@ impl MediaInfo {
                                 detected_color_space: color_metadata.detected,
                                 color_space_source: color_metadata.source,
                                 color_metadata: Some(raw_color_metadata),
+                                color_metadata_hints,
                                 bit_depth,
                                 has_alpha,
                                 avg_bitrate: 0,
@@ -363,6 +421,7 @@ impl MediaInfo {
                         detected_color_space: None,
                         color_space_source: VideoColorSpaceSource::DecoderUnavailable,
                         color_metadata: None,
+                        color_metadata_hints,
                         bit_depth,
                         has_alpha,
                         avg_bitrate: 0,
@@ -461,15 +520,21 @@ fn detect_color_space(
     matrix: ffmpeg::util::color::Space,
 ) -> VideoColorSpaceDetection {
     let metadata = capture_color_metadata(primaries, transfer, matrix);
-    detect_color_space_from_metadata(&metadata)
+    detect_color_space_from_metadata(&metadata, &[])
 }
 
-fn detect_color_space_from_metadata(metadata: &VideoColorMetadata) -> VideoColorSpaceDetection {
-    let detected = ColorSpace::from_ffmpeg_tag_hints(
-        metadata.primaries.name.as_deref(),
-        metadata.transfer.name.as_deref(),
-        metadata.matrix.name.as_deref(),
-    );
+fn detect_color_space_from_metadata(
+    metadata: &VideoColorMetadata,
+    metadata_hints: &[VideoColorMetadataHint],
+) -> VideoColorSpaceDetection {
+    let detected =
+        metadata_hints.iter().map(|hint| hint.detected_color_space).next().or_else(|| {
+            ColorSpace::from_ffmpeg_tag_hints(
+                metadata.primaries.name.as_deref(),
+                metadata.transfer.name.as_deref(),
+                metadata.matrix.name.as_deref(),
+            )
+        });
 
     if let Some(color_space) = detected {
         VideoColorSpaceDetection {
@@ -482,6 +547,52 @@ fn detect_color_space_from_metadata(metadata: &VideoColorMetadata) -> VideoColor
             source: VideoColorSpaceSource::MissingMetadata,
         }
     }
+}
+
+fn collect_color_metadata_hints(
+    scope: VideoColorMetadataHintScope,
+    metadata: &ffmpeg::DictionaryRef<'_>,
+) -> Vec<VideoColorMetadataHint> {
+    metadata
+        .iter()
+        .filter_map(|(key, value)| detect_color_metadata_hint(scope, key, value))
+        .collect()
+}
+
+fn detect_color_metadata_hint(
+    scope: VideoColorMetadataHintScope,
+    key: &str,
+    value: &str,
+) -> Option<VideoColorMetadataHint> {
+    let haystack = normalize_metadata_hint_text(&format!("{key} {value}"));
+    let detected_color_space = if contains_any(&haystack, &["applelog", "applelogprofile"]) {
+        Some(ColorSpace::AppleLog)
+    } else if contains_any(&haystack, &["slog3", "sgamut3cine", "sonyslog3"]) {
+        Some(ColorSpace::SLog3)
+    } else if contains_any(&haystack, &["logc4", "arrilogc4", "arrilogc"]) {
+        Some(ColorSpace::ArriLogC4)
+    } else {
+        None
+    }?;
+
+    Some(VideoColorMetadataHint {
+        scope,
+        key: key.to_string(),
+        value: value.to_string(),
+        detected_color_space,
+    })
+}
+
+fn normalize_metadata_hint_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 fn capture_color_metadata(
@@ -665,6 +776,61 @@ mod tests {
     }
 
     #[test]
+    fn metadata_hint_identifies_camera_log_spaces() {
+        let slog3 = detect_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "com.sony.colorProfile",
+            "S-Log3 / S-Gamut3.Cine",
+        )
+        .expect("slog3 metadata hint");
+        assert_eq!(slog3.detected_color_space, ColorSpace::SLog3);
+
+        let apple_log = detect_color_metadata_hint(
+            VideoColorMetadataHintScope::Container,
+            "com.apple.proapps.cameraLog",
+            "Apple Log",
+        )
+        .expect("apple log metadata hint");
+        assert_eq!(apple_log.detected_color_space, ColorSpace::AppleLog);
+
+        let logc4 = detect_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "camera_profile",
+            "ARRI LogC4",
+        )
+        .expect("arri logc4 metadata hint");
+        assert_eq!(logc4.detected_color_space, ColorSpace::ArriLogC4);
+    }
+
+    #[test]
+    fn metadata_hint_ignores_ambiguous_log_words() {
+        assert_eq!(
+            detect_color_metadata_hint(VideoColorMetadataHintScope::Container, "log", "enabled"),
+            None
+        );
+    }
+
+    #[test]
+    fn metadata_hint_overrides_cicp_delivery_tags_for_camera_log() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT709,
+        );
+        let hint = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Stream,
+            key: "camera_profile".to_string(),
+            value: "ARRI LogC4".to_string(),
+            detected_color_space: ColorSpace::ArriLogC4,
+        };
+
+        let detection = detect_color_space_from_metadata(&metadata, &[hint]);
+
+        assert_eq!(detection.detected, Some(ColorSpace::ArriLogC4));
+        assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
+    }
+
+    #[test]
     fn capture_color_metadata_preserves_raw_cicp_tags() {
         let metadata = capture_color_metadata(
             Primaries::BT2020,
@@ -707,6 +873,12 @@ mod tests {
             detected_color_space: Some(ColorSpace::Rec2100Pq),
             source: VideoColorSpaceSource::Metadata,
             metadata: Some(metadata),
+            metadata_hints: vec![VideoColorMetadataHint {
+                scope: VideoColorMetadataHintScope::Stream,
+                key: "camera_profile".to_string(),
+                value: "S-Log3 / S-Gamut3.Cine".to_string(),
+                detected_color_space: ColorSpace::SLog3,
+            }],
         };
 
         let summary = diagnostic.summary();
@@ -716,5 +888,6 @@ mod tests {
         assert!(summary.contains("primaries=bt2020"));
         assert!(summary.contains("transfer=smpte2084"));
         assert!(summary.contains("matrix=bt2020nc"));
+        assert!(summary.contains("camera_profile=S-Log3 / S-Gamut3.Cine"));
     }
 }

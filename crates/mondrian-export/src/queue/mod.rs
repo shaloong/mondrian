@@ -1828,6 +1828,7 @@ mod tests {
                     },
                     matrix: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
                 }),
+                metadata_hints: Vec::new(),
             },
         );
         let timeline = TimelineExportInput {

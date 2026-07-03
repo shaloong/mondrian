@@ -148,6 +148,12 @@ Reverse media identification also lives on the same contract:
 interpretation rules used by media probing. `mondrian-media` must capture raw
 FFmpeg/CICP tags and call those core helpers rather than maintaining a separate
 color-space mapping table.
+Acquisition/log identification is represented as structured
+`VideoColorMetadataHint` values captured from container and stream metadata.
+Hints currently recognize explicit Apple Log, S-Log3/S-Gamut3.Cine, and ARRI
+LogC4 names and take precedence over generic CICP delivery tags. Future
+container-specific side-data parsers should feed the same hint model instead of
+adding another color-space decision path.
 
 Camera-log output is treated as a professional intermediate path. Export
 validation rejects consumer delivery codecs for camera-log output and only
