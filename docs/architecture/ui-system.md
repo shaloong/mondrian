@@ -91,6 +91,11 @@ dimensions, deterministic render-plan signature, and resolved media-frame
 identity. The final-frame key also includes the effective preview color context,
 so monitor/output changes invalidate previously rendered pixels. Unresolved
 media requests still bypass this cache until their source frame is available.
+The preview service resolves the requested display color space from the active
+display-management policy, but the app window owns real surface/display
+validation. The window records the final GPU output boundary only after checking
+the current wgpu surface/monitor contract, so an unsupported HDR viewer request
+cannot silently reuse the SDR surface path.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.

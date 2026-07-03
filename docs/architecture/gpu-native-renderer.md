@@ -269,13 +269,18 @@ telemetry can prove whether a frame used upload, native GPU OCIO, readback, and
 which pixel budget was touched without reconstructing the plan externally.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
 the surface/backend lifetime and traces its cache/resource diagnostics with the
-frame renderer diagnostics. Viewer preview evaluation now splits at the correct
-boundary: `AppUiPreviewService` resolves the timeline and composites a
-working-space `CpuColorFrame`, while the app window records the display/output
-boundary through that session-owned GPU runtime. The preview service may keep a
-CPU `RasterImage` as the correctness/fallback path, but it does not own wgpu
-objects and must not create short-lived GPU output runtimes inside CPU media
-workers.
+frame renderer diagnostics. The same session also owns the display-output
+contract for the current wgpu surface and monitor: selected sRGB surface format,
+SDR/HDR mode, available surface formats, present modes, alpha modes, and monitor
+fingerprint. Viewer preview evaluation now splits at the correct boundary:
+`AppUiPreviewService` resolves the timeline and composites a working-space
+`CpuColorFrame`, while the app window validates the requested display boundary
+against that contract and records the display/output boundary through the
+session-owned GPU runtime. Unsupported presentation requests, such as HDR output
+on an SDR-only surface, are structured blockers rather than implicit SDR
+fallbacks. The preview service may keep a CPU `RasterImage` as the
+correctness/fallback path, but it does not own wgpu objects and must not create
+short-lived GPU output runtimes inside CPU media workers.
 The self-hosted UI renderer has an external GPU texture plane for that preview
 path. `DrawCommand::ExternalTexture` carries only a stable renderer-owned key,
 bounds, UVs, and tint; widgets and panel models do not own wgpu objects.

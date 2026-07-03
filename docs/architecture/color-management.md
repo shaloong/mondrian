@@ -82,9 +82,15 @@ The app UI presentation surface is also part of the color contract. The wgpu
 window session must select an explicit sRGB SDR surface format and fail closed
 when the backend exposes only non-sRGB presentation formats. It must not fall
 back to a non-sRGB swapchain, because that would hide OS/backend display
-management errors behind a visually plausible but untrusted viewer path. HDR,
-EDR, monitor ICC correction, and per-monitor switching require their own
-explicit surface/display contracts before they can be enabled.
+management errors behind a visually plausible but untrusted viewer path.
+Preview display color space is resolved from the sequence/project
+`DisplayManagementPolicy` before building `RenderOutputColorBoundary`; the app
+window then validates that boundary against its real display-output contract
+(surface format, SDR/HDR mode, present modes, alpha modes, and current monitor
+fingerprint). HDR preview output is blocked on an SDR-only surface instead of
+silently presenting through SDR. EDR, monitor ICC correction, true HDR
+swapchains, and dynamic per-monitor profile switching require additional
+platform-specific contracts before they can be enabled.
 
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are

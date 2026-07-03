@@ -23,10 +23,12 @@ use crate::app_ui::runtime::{
 };
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
+use mondrian_core::types::ColorSpace;
 use mondrian_platform::SystemPlatformService;
 use mondrian_renderer::{
     GpuColorFrameTextureFormat, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -94,7 +96,7 @@ struct AppUiWindowSession {
     window: Arc<winit::window::Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    surface_color_contract: AppUiSurfaceColorContract,
+    display_output_contract: AppUiDisplayOutputContract,
     frame_renderer: AppUiFrameRenderer,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
     viewer_gpu_preview_texture_key: Option<ExternalTextureKey>,
@@ -350,7 +352,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         trace_color_output_runtime(
                             session.color_output_runtime.diagnostics(),
-                            session.surface_color_contract,
+                            &session.display_output_contract,
                         );
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
@@ -649,12 +651,20 @@ fn build_app_ui_background_runtime() -> std::io::Result<tokio::runtime::Runtime>
         .build()
 }
 
-fn app_ui_surface_color_contract(
+fn app_ui_display_output_contract(
+    window: &winit::window::Window,
     surface: &wgpu::Surface<'static>,
     adapter: &wgpu::Adapter,
-) -> Result<AppUiSurfaceColorContract, AppUiSurfaceColorContractError> {
+) -> Result<AppUiDisplayOutputContract, AppUiSurfaceColorContractError> {
     let capabilities = surface.get_capabilities(adapter);
-    choose_app_ui_surface_format(&capabilities.formats)
+    let surface_color = choose_app_ui_surface_format(&capabilities.formats)?;
+    Ok(AppUiDisplayOutputContract {
+        surface_color,
+        display_target: app_ui_display_target_for_window(window),
+        available_formats: capabilities.formats,
+        present_modes: capabilities.present_modes,
+        alpha_modes: capabilities.alpha_modes,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,6 +682,52 @@ enum AppUiSurfaceEncoding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppUiSurfaceHdrMode {
     SdrOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppUiDisplayOutputContract {
+    surface_color: AppUiSurfaceColorContract,
+    display_target: AppUiDisplayTarget,
+    available_formats: Vec<wgpu::TextureFormat>,
+    present_modes: Vec<wgpu::PresentMode>,
+    alpha_modes: Vec<wgpu::CompositeAlphaMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppUiDisplayTarget {
+    name: Option<String>,
+    position: (i32, i32),
+    physical_size: (u32, u32),
+    scale_factor_ppm: u32,
+    refresh_rate_millihertz: Option<u32>,
+}
+
+impl AppUiDisplayOutputContract {
+    fn boundary_blocker(
+        &self,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Option<AppUiDisplayBoundaryBlocker> {
+        if boundary.target != RenderOutputColorBoundaryTarget::Display {
+            return None;
+        }
+        if boundary.output_color_space.is_hdr()
+            && self.surface_color.hdr_mode == AppUiSurfaceHdrMode::SdrOnly
+        {
+            return Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
+                output_color_space: boundary.output_color_space,
+                surface_hdr_mode: self.surface_color.hdr_mode,
+            });
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AppUiDisplayBoundaryBlocker {
+    HdrOutputRequiresHdrSurface {
+        output_color_space: ColorSpace,
+        surface_hdr_mode: AppUiSurfaceHdrMode,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -710,6 +766,29 @@ fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
         format,
         wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
     )
+}
+
+fn app_ui_display_target_for_window(window: &winit::window::Window) -> AppUiDisplayTarget {
+    let Some(monitor) = window.current_monitor() else {
+        return AppUiDisplayTarget {
+            name: None,
+            position: (0, 0),
+            physical_size: (0, 0),
+            scale_factor_ppm: 0,
+            refresh_rate_millihertz: None,
+        };
+    };
+    let position = monitor.position();
+    let size = monitor.size();
+    let scale_factor_ppm =
+        (monitor.scale_factor() * 1_000_000.0).round().clamp(0.0, u32::MAX as f64) as u32;
+    AppUiDisplayTarget {
+        name: monitor.name(),
+        position: (position.x, position.y),
+        physical_size: (size.width, size.height),
+        scale_factor_ppm,
+        refresh_rate_millihertz: monitor.refresh_rate_millihertz(),
+    }
 }
 
 fn log_backend_event(event: AppUiBackendEvent) {
@@ -782,12 +861,22 @@ fn log_frame_pressure(pressure: AppUiFramePressure) {
 
 fn trace_color_output_runtime(
     diagnostics: RenderGpuOutputBoundaryRuntimeDiagnostics,
-    surface_color_contract: AppUiSurfaceColorContract,
+    display_output_contract: &AppUiDisplayOutputContract,
 ) {
+    let surface_color_contract = display_output_contract.surface_color;
     tracing::trace!(
         surface_format = ?surface_color_contract.format,
         surface_encoding = ?surface_color_contract.encoding,
         surface_hdr_mode = ?surface_color_contract.hdr_mode,
+        display_name = ?display_output_contract.display_target.name,
+        display_position = ?display_output_contract.display_target.position,
+        display_physical_size = ?display_output_contract.display_target.physical_size,
+        display_scale_factor_ppm = display_output_contract.display_target.scale_factor_ppm,
+        display_refresh_rate_millihertz =
+            ?display_output_contract.display_target.refresh_rate_millihertz,
+        available_surface_format_count = display_output_contract.available_formats.len(),
+        present_modes = ?display_output_contract.present_modes,
+        alpha_modes = ?display_output_contract.alpha_modes,
         shader_cache_entries = diagnostics.shader_cache.entries,
         shader_cache_hits = diagnostics.shader_cache.hits,
         shader_cache_misses = diagnostics.shader_cache.misses,
@@ -827,6 +916,22 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         return;
     };
+    if let Some(blocker) = session.display_output_contract.boundary_blocker(&frame.boundary) {
+        tracing::warn!(
+            sequence_id = %frame.sequence_id,
+            frame = frame.frame,
+            width = frame.width,
+            height = frame.height,
+            output_color_space = ?frame.boundary.output_color_space,
+            display_target = ?session.display_output_contract.display_target,
+            surface_format = ?session.display_output_contract.surface_color.format,
+            surface_hdr_mode = ?session.display_output_contract.surface_color.hdr_mode,
+            blocker = ?blocker,
+            "viewer GPU preview output boundary blocked by display output contract"
+        );
+        host.clear_external_viewer_frame();
+        return;
+    }
 
     if let Some(previous) = session.viewer_gpu_preview_texture_key.take() {
         session.frame_renderer.unregister_external_texture(&previous);
@@ -1036,13 +1141,18 @@ impl AppUiWindowSession {
         let mut config = surface
             .get_default_config(adapter, size.width, size.height)
             .ok_or("Failed surface config")?;
-        let surface_color_contract = app_ui_surface_color_contract(&surface, adapter)?;
+        let display_output_contract = app_ui_display_output_contract(&window, &surface, adapter)?;
+        let surface_color_contract = display_output_contract.surface_color;
         config.format = surface_color_contract.format;
         surface.configure(device, &config);
         tracing::info!(
             format = ?surface_color_contract.format,
             encoding = ?surface_color_contract.encoding,
             hdr_mode = ?surface_color_contract.hdr_mode,
+            display_target = ?display_output_contract.display_target,
+            available_formats = ?display_output_contract.available_formats,
+            present_modes = ?display_output_contract.present_modes,
+            alpha_modes = ?display_output_contract.alpha_modes,
             "app UI surface color contract"
         );
 
@@ -1053,7 +1163,7 @@ impl AppUiWindowSession {
             window,
             surface,
             config: config.clone(),
-            surface_color_contract,
+            display_output_contract,
             frame_renderer: AppUiFrameRenderer::new(device, config.format),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
             viewer_gpu_preview_texture_key: None,
@@ -1443,6 +1553,56 @@ mod tests {
                 ],
             })
         );
+    }
+
+    fn test_display_output_contract() -> AppUiDisplayOutputContract {
+        AppUiDisplayOutputContract {
+            surface_color: AppUiSurfaceColorContract {
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                encoding: AppUiSurfaceEncoding::Srgb,
+                hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+            },
+            display_target: AppUiDisplayTarget {
+                name: Some("test-display".to_owned()),
+                position: (0, 0),
+                physical_size: (3840, 2160),
+                scale_factor_ppm: 1_000_000,
+                refresh_rate_millihertz: Some(60_000),
+            },
+            available_formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
+            present_modes: vec![wgpu::PresentMode::Fifo],
+            alpha_modes: vec![wgpu::CompositeAlphaMode::Auto],
+        }
+    }
+
+    #[test]
+    fn display_output_contract_blocks_hdr_boundary_on_sdr_surface() {
+        let contract = test_display_output_contract();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec2100Pq,
+            false,
+            mondrian_core::ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(
+            contract.boundary_blocker(&boundary),
+            Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
+                output_color_space: ColorSpace::Rec2100Pq,
+                surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+            })
+        );
+    }
+
+    #[test]
+    fn display_output_contract_accepts_sdr_boundary_on_srgb_surface() {
+        let contract = test_display_output_contract();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            mondrian_core::ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(contract.boundary_blocker(&boundary), None);
     }
 
     struct CursorFocusWidget {

@@ -218,9 +218,11 @@ impl AppUiPreviewService {
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let display_color_space =
+            preview_display_color_space(sequence, &state.project_settings.color_management);
         let color_context = sequence.settings.root_preview_color_context(
             &state.project_settings.color_management,
-            ColorSpace::Rec709,
+            display_color_space,
         );
         let preview_state = match self.resolve_sequence_elements(
             state,
@@ -318,9 +320,11 @@ impl AppUiPreviewService {
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let display_color_space =
+            preview_display_color_space(sequence, &state.project_settings.color_management);
         let color_context = sequence.settings.root_preview_color_context(
             &state.project_settings.color_management,
-            ColorSpace::Rec709,
+            display_color_space,
         );
         let resolved = match self.resolve_sequence_elements(
             state,
@@ -1256,9 +1260,11 @@ impl AppUiPreviewService {
         if !state.is_playing() {
             return;
         }
+        let display_color_space =
+            preview_display_color_space(sequence, &state.project_settings.color_management);
         let color_context = sequence.settings.root_preview_color_context(
             &state.project_settings.color_management,
-            ColorSpace::Rec709,
+            display_color_space,
         );
         for offset in 1..=MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES {
             self.schedule_media_prefetch_for_sequence(
@@ -1681,6 +1687,34 @@ fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
     (width, height)
 }
 
+fn preview_display_color_space(
+    sequence: &Sequence,
+    project_cm: &mondrian_core::ProjectColorManagement,
+) -> ColorSpace {
+    let sequence_output = sequence.settings.color_management.output_color_space;
+    let display_management = if sequence.settings.color_management.inherit {
+        &project_cm.display_management
+    } else {
+        &sequence.settings.color_management.display_management
+    };
+    let profile_space = display_management
+        .monitor_profile
+        .managed_color_space(sequence_output)
+        .unwrap_or(sequence_output);
+
+    match display_management.viewer_mode.resolve(profile_space) {
+        mondrian_core::ResolvedViewerDisplayMode::Sdr => {
+            if profile_space.is_hdr() {
+                ColorSpace::Rec709
+            } else {
+                profile_space
+            }
+        }
+        mondrian_core::ResolvedViewerDisplayMode::HdrPq => ColorSpace::Rec2100Pq,
+        mondrian_core::ResolvedViewerDisplayMode::HdrHlg => ColorSpace::Rec2100Hlg,
+    }
+}
+
 struct PreviewCompositeOutput {
     rgba: Vec<u8>,
     composite_diagnostics: TimelineCompositeDiagnostics,
@@ -1898,6 +1932,44 @@ mod tests {
         Sequence::new("color-context")
             .settings
             .root_preview_color_context(&ProjectColorManagement::default(), output_color_space)
+    }
+
+    #[test]
+    fn preview_display_color_space_resolves_managed_monitor_profile() {
+        let mut sequence = Sequence::new("p3-preview");
+        sequence.settings.color_management.inherit = false;
+        sequence.settings.color_management.display_management =
+            mondrian_core::DisplayManagementPolicy {
+                monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(
+                    ColorSpace::DciP3,
+                ),
+                viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+                tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+            };
+
+        assert_eq!(
+            preview_display_color_space(&sequence, &ProjectColorManagement::default()),
+            ColorSpace::DciP3
+        );
+    }
+
+    #[test]
+    fn preview_display_color_space_resolves_explicit_hdr_viewer_mode() {
+        let mut sequence = Sequence::new("hdr-preview");
+        sequence.settings.color_management.inherit = false;
+        sequence.settings.color_management.display_management =
+            mondrian_core::DisplayManagementPolicy {
+                monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(
+                    ColorSpace::Rec709,
+                ),
+                viewer_mode: mondrian_core::ViewerDisplayMode::HdrPq,
+                tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+            };
+
+        assert_eq!(
+            preview_display_color_space(&sequence, &ProjectColorManagement::default()),
+            ColorSpace::Rec2100Pq
+        );
     }
 
     fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {
