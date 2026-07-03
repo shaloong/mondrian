@@ -419,6 +419,7 @@ impl Widget for InterpretAssetDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::timeline_data::AssetColorPayload;
     use mondrian_media::{VideoColorInterpretationWarning, VideoColorSpaceSource};
 
     #[test]
@@ -506,6 +507,36 @@ mod tests {
             )),
             Some(true)
         );
+    }
+
+    #[test]
+    fn color_space_dropdown_preserves_payload_classification() {
+        let interpretation = AssetMediaInterpretation {
+            payload: AssetColorPayload::NonColorData,
+            ..AssetMediaInterpretation::default()
+        };
+        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Matte",
+            interpretation,
+            Some(detected_interpretation(ColorSpace::Rec2020)),
+        ));
+
+        assert_eq!(
+            dialog.color_space_dropdown.checked_for_action(&draft_update_action(
+                interpretation,
+                MediaColorInterpretation::Auto,
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            dialog.color_space_dropdown.checked_for_action(&draft_update_action(
+                interpretation,
+                MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Hlg },
+            )),
+            Some(false)
+        );
+        assert_eq!(interpretation.payload, AssetColorPayload::NonColorData);
     }
 
     #[test]
