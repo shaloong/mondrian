@@ -137,6 +137,31 @@ pub enum InputColorResolutionSource {
     MissingPolicyRejectMedia,
 }
 
+impl InputColorResolutionSource {
+    /// Whether this branch used explicit user/project metadata instead of policy inference.
+    pub fn is_explicit_metadata_or_override(self) -> bool {
+        matches!(self, Self::Override | Self::DetectedMetadata)
+    }
+
+    /// Whether this branch kept rendering moving by assuming a color space from policy.
+    pub fn is_policy_assumption(self) -> bool {
+        matches!(
+            self,
+            Self::MissingPolicyAssumeRec709 | Self::MissingPolicyAssumeSequenceWorkingSpace
+        )
+    }
+
+    /// Whether this branch rejected media due to missing or unsupported metadata.
+    pub fn is_policy_rejection(self) -> bool {
+        matches!(self, Self::MissingPolicyRejectMedia)
+    }
+
+    /// Whether this branch treated the asset as non-color data.
+    pub fn is_data_texture(self) -> bool {
+        matches!(self, Self::DataTexture)
+    }
+}
+
 /// Result of resolving clip override, detected media metadata, and missing-metadata policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputColorResolution {
@@ -1240,6 +1265,29 @@ mod tests {
         );
         assert_eq!(clip_override.color_space, Some(ColorSpace::AppleLog));
         assert_eq!(clip_override.source, InputColorResolutionSource::Override);
+    }
+
+    #[test]
+    fn input_color_resolution_source_reports_diagnostic_categories() {
+        assert!(InputColorResolutionSource::Override.is_explicit_metadata_or_override());
+        assert!(InputColorResolutionSource::DetectedMetadata.is_explicit_metadata_or_override());
+        assert!(!InputColorResolutionSource::DataTexture.is_explicit_metadata_or_override());
+        assert!(!InputColorResolutionSource::MissingPolicyAssumeRec709
+            .is_explicit_metadata_or_override());
+
+        assert!(InputColorResolutionSource::MissingPolicyAssumeRec709.is_policy_assumption());
+        assert!(
+            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
+                .is_policy_assumption()
+        );
+        assert!(!InputColorResolutionSource::MissingPolicyRejectMedia.is_policy_assumption());
+        assert!(!InputColorResolutionSource::DataTexture.is_policy_assumption());
+
+        assert!(InputColorResolutionSource::MissingPolicyRejectMedia.is_policy_rejection());
+        assert!(!InputColorResolutionSource::Override.is_policy_rejection());
+
+        assert!(InputColorResolutionSource::DataTexture.is_data_texture());
+        assert!(!InputColorResolutionSource::Override.is_data_texture());
     }
 
     #[test]
