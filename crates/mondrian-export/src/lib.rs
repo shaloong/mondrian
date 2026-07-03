@@ -11,4 +11,6 @@ pub use encoder::EncoderBackend;
 pub use preset::{
     ExportConfig, ExportInput, ExportPreset, TimelineExportInput, TimelineExportRange,
 };
-pub use queue::{JobStatus, RenderJob, RenderQueue};
+pub use queue::{
+    ExportJobColorDiagnostics, ExportJobDiagnostics, JobStatus, RenderJob, RenderQueue,
+};

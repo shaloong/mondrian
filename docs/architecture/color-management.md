@@ -298,6 +298,9 @@ therefore distinguishes "metadata was known" from "the missing-metadata policy
 kept playback moving" instead of hiding both behind one resolved color space.
 The non-color `DataTexture` branch is reported separately from overrides so
 utility/data-channel assets cannot be mistaken for user color-space overrides.
+Export jobs accumulate the same counters in `RenderJob.diagnostics.color` while
+the worker renders frames. UI and telemetry should read that job snapshot rather
+than recomputing color interpretation from asset records.
 
 ## Display and Export
 

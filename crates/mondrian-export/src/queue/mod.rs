@@ -51,9 +51,35 @@ pub struct RenderJob {
     pub config: ExportConfig,
     pub status: JobStatus,
     pub progress: f32,
+    /// Export diagnostics accumulated by the worker while the job runs.
+    pub diagnostics: ExportJobDiagnostics,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Diagnostics accumulated for one export job.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExportJobDiagnostics {
+    /// Color-management diagnostics observed while rendering this job.
+    pub color: ExportJobColorDiagnostics,
+}
+
+/// Export color diagnostics observed on the real render path.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExportJobColorDiagnostics {
+    /// Aggregated input color-resolution branches across rendered frames.
+    pub input_resolution_source_counts: InputColorResolutionSourceCounts,
+    /// Number of timeline video frames that contributed color diagnostics.
+    pub diagnosed_frames: u64,
+}
+
+impl ExportJobColorDiagnostics {
+    /// Record color-resolution counts observed while rendering one frame.
+    pub fn record_input_resolution_counts(&mut self, counts: InputColorResolutionSourceCounts) {
+        self.input_resolution_source_counts.accumulate(counts);
+        self.diagnosed_frames = self.diagnosed_frames.saturating_add(1);
+    }
 }
 
 impl RenderJob {
@@ -63,6 +89,7 @@ impl RenderJob {
             config,
             status: JobStatus::Pending,
             progress: 0.0,
+            diagnostics: ExportJobDiagnostics::default(),
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
@@ -82,6 +109,7 @@ trait ExportExecutor: Send + Sync + 'static {
         job: &RenderJob,
         cancel: &AtomicBool,
         report: &mut dyn FnMut(JobStatus, f32),
+        report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     ) -> JobExecutionResult;
 }
 
@@ -94,6 +122,7 @@ impl ExportExecutor for FfmpegExportExecutor {
         job: &RenderJob,
         cancel: &AtomicBool,
         report: &mut dyn FnMut(JobStatus, f32),
+        report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     ) -> JobExecutionResult {
         if cancel.load(Ordering::Relaxed) {
             return JobExecutionResult::Cancelled;
@@ -119,7 +148,7 @@ impl ExportExecutor for FfmpegExportExecutor {
                 report,
             ),
             ExportInput::Timeline(timeline) => {
-                execute_timeline_export(job, timeline, cancel, report)
+                execute_timeline_export(job, timeline, cancel, report, report_diagnostics)
             }
         }
     }
@@ -238,6 +267,7 @@ fn execute_timeline_export(
     timeline: &TimelineExportInput,
     cancel: &AtomicBool,
     report: &mut dyn FnMut(JobStatus, f32),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let mut temp_audio_path_to_cleanup: Option<PathBuf> = None;
     let result = (|| {
@@ -371,7 +401,16 @@ fn execute_timeline_export(
             return JobExecutionResult::Failed("ffmpeg stdin 管道不可用".to_string());
         };
 
-        match write_timeline_frames(stdin, timeline, range, width, height, cancel, report) {
+        match write_timeline_frames(
+            stdin,
+            timeline,
+            range,
+            width,
+            height,
+            cancel,
+            report,
+            report_diagnostics,
+        ) {
             JobExecutionResult::Completed => {}
             JobExecutionResult::Cancelled => {
                 let _ = child.kill();
@@ -833,9 +872,19 @@ fn write_timeline_frames(
     height: u32,
     cancel: &AtomicBool,
     report: &mut dyn FnMut(JobStatus, f32),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let mut writer = BufWriter::new(stdin);
-    write_timeline_frames_to_writer(&mut writer, timeline, range, width, height, cancel, report)
+    write_timeline_frames_to_writer(
+        &mut writer,
+        timeline,
+        range,
+        width,
+        height,
+        cancel,
+        report,
+        report_diagnostics,
+    )
 }
 
 fn write_timeline_frames_to_writer<W: Write>(
@@ -846,9 +895,11 @@ fn write_timeline_frames_to_writer<W: Write>(
     height: u32,
     cancel: &AtomicBool,
     report: &mut dyn FnMut(JobStatus, f32),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; width as usize * height as usize * 4];
+    let mut diagnostics = ExportJobDiagnostics::default();
 
     for index in 0..total {
         if cancel.load(Ordering::Relaxed) {
@@ -856,7 +907,18 @@ fn write_timeline_frames_to_writer<W: Write>(
         }
 
         let timeline_frame = range.start_frame + index as i64;
-        match render_timeline_frame_into(timeline, timeline_frame, width, height, &mut canvas) {
+        let mut frame_color_counts = InputColorResolutionSourceCounts::default();
+        let render_result = render_timeline_frame_into(
+            timeline,
+            timeline_frame,
+            width,
+            height,
+            &mut canvas,
+            Some(&mut frame_color_counts),
+        );
+        diagnostics.color.record_input_resolution_counts(frame_color_counts);
+        report_diagnostics(diagnostics);
+        match render_result {
             Ok(()) => {}
             Err(err) => {
                 return JobExecutionResult::Failed(format!(
@@ -892,6 +954,7 @@ fn render_timeline_frame_into(
     width: u32,
     height: u32,
     canvas: &mut Vec<u8>,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
 ) -> Result<(), String> {
     let required_len = width as usize * height as usize * 4;
     if canvas.len() != required_len {
@@ -912,6 +975,7 @@ fn render_timeline_frame_into(
         color_context,
         canvas,
         0,
+        input_color_counts,
     )
 }
 
@@ -1007,6 +1071,7 @@ fn render_sequence_frame_into(
     color_context: ColorContext,
     canvas: &mut Vec<u8>,
     depth: usize,
+    mut input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
 ) -> Result<(), String> {
     if depth > 16 {
         return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
@@ -1052,6 +1117,9 @@ fn render_sequence_frame_into(
                 detected_color_space,
                 color_context.working_color_space,
             );
+        if let Some(counts) = input_color_counts.as_deref_mut() {
+            counts.record(input_color_resolution.source);
+        }
         let input_color_space = input_color_resolution.color_space.ok_or_else(|| {
                 let diagnostic = timeline
                     .asset_color_diagnostics
@@ -1139,6 +1207,7 @@ fn render_sequence_frame_into(
             nested_context,
             &mut nested_canvas,
             depth + 1,
+            input_color_counts.as_deref_mut(),
         )?;
         let nested_source = CpuEncodedColorFrame::source_rgba8(
             nested_width,
@@ -1385,7 +1454,15 @@ impl RenderQueue {
                     let mut report = |status: JobStatus, progress: f32| {
                         update_job_status(&jobs, job.id, status, progress);
                     };
-                    let outcome = executor.execute(&job, cancel_flag.as_ref(), &mut report);
+                    let mut report_diagnostics = |diagnostics: ExportJobDiagnostics| {
+                        update_job_diagnostics(&jobs, job.id, diagnostics);
+                    };
+                    let outcome = executor.execute(
+                        &job,
+                        cancel_flag.as_ref(),
+                        &mut report,
+                        &mut report_diagnostics,
+                    );
 
                     match outcome {
                         JobExecutionResult::Completed => {
@@ -1521,6 +1598,17 @@ fn update_job_status(
     }
 }
 
+fn update_job_diagnostics(
+    jobs: &Mutex<VecDeque<RenderJob>>,
+    job_id: JobId,
+    diagnostics: ExportJobDiagnostics,
+) {
+    let mut queue = jobs.lock();
+    if let Some(job) = queue.iter_mut().find(|job| job.id == job_id) {
+        job.diagnostics = diagnostics;
+    }
+}
+
 mod helpers;
 pub(crate) use helpers::*;
 
@@ -1576,6 +1664,7 @@ mod tests {
             _job: &RenderJob,
             cancel: &AtomicBool,
             report: &mut dyn FnMut(JobStatus, f32),
+            _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
         ) -> JobExecutionResult {
             self.calls.fetch_add(1, Ordering::Relaxed);
             report(JobStatus::Encoding, 0.2);
@@ -1594,6 +1683,24 @@ mod tests {
                 JobStatus::Rendering { frame: 1000, total_frames: 1000 },
                 0.95,
             );
+            JobExecutionResult::Completed
+        }
+    }
+
+    struct DiagnosticExecutor {
+        diagnostics: ExportJobDiagnostics,
+    }
+
+    impl ExportExecutor for DiagnosticExecutor {
+        fn execute(
+            &self,
+            _job: &RenderJob,
+            _cancel: &AtomicBool,
+            report: &mut dyn FnMut(JobStatus, f32),
+            report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        ) -> JobExecutionResult {
+            report(JobStatus::Rendering { frame: 1, total_frames: 1 }, 0.5);
+            report_diagnostics(self.diagnostics);
             JobExecutionResult::Completed
         }
     }
@@ -1713,6 +1820,45 @@ mod tests {
 
         assert!(queue.list_jobs().is_empty());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn queue_exposes_export_job_diagnostics_from_worker() {
+        let mut diagnostics = ExportJobDiagnostics::default();
+        diagnostics.color.record_input_resolution_counts({
+            let mut counts = InputColorResolutionSourceCounts::default();
+            counts.record(InputColorResolutionSource::DetectedMetadata);
+            counts.record(InputColorResolutionSource::Override);
+            counts
+        });
+        let queue = RenderQueue::new_with_executor(Arc::new(DiagnosticExecutor { diagnostics }));
+
+        let job_id = queue.enqueue(RenderJob::new(dummy_config("diagnostics.mp4")));
+
+        let done = wait_until(2_000, || {
+            queue
+                .list_jobs()
+                .iter()
+                .find(|job| job.id == job_id)
+                .map(|job| matches!(job.status, JobStatus::Completed))
+                .unwrap_or(false)
+        });
+
+        assert!(done, "job should complete within timeout");
+        let job = queue
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("diagnostic job");
+        assert_eq!(job.diagnostics, diagnostics);
+        assert_eq!(job.diagnostics.color.diagnosed_frames, 1);
+        assert_eq!(
+            job.diagnostics
+                .color
+                .input_resolution_source_counts
+                .explicit_metadata_or_override(),
+            2
+        );
     }
 
     #[test]
@@ -1987,7 +2133,8 @@ mod tests {
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];
-        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas).expect("render should pass");
+        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas, None)
+            .expect("render should pass");
 
         for px in canvas.chunks_exact(4) {
             assert_eq!(px, &[0, 0, 0, 255]);
@@ -2083,13 +2230,18 @@ mod tests {
         };
 
         let mut canvas = Vec::new();
-        let err = render_timeline_frame_into(&timeline, 0, 1, 1, &mut canvas)
+        let mut counts = InputColorResolutionSourceCounts::default();
+        let err = render_timeline_frame_into(&timeline, 0, 1, 1, &mut canvas, Some(&mut counts))
             .expect_err("missing color metadata should be rejected before decode");
 
         assert!(err.contains("missing color metadata"));
         assert!(err.contains(temp_path.to_string_lossy().as_ref()));
         assert!(err.contains("source=MissingMetadata"));
         assert!(err.contains("primaries=unspecified"));
+        assert_eq!(
+            counts.count(InputColorResolutionSource::MissingPolicyRejectMedia),
+            1
+        );
         let _ = std::fs::remove_file(temp_path);
     }
 

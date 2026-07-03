@@ -223,6 +223,12 @@ classification, or by project policy. Aggregated report fields such as
 `policy_assumptions` and `explicit_metadata_or_override` must be derived from
 `InputColorResolutionSourceCounts` in `mondrian-timeline`, not hand-maintained
 in preview/export reporting code.
+Timeline export writes accumulated render-path color diagnostics into
+`RenderJob.diagnostics.color`. The worker updates this snapshot while frames are
+actually rendered, so app panels, logs, and future JSONL reports read the same
+source of truth instead of re-evaluating timeline state from UI code. Export
+diagnostics may expose additional preflight helpers, but final job-level
+counters must be produced from the frame render path.
 Preview final-frame cache keys must include the effective color context so a
 monitor/output transform change cannot reuse stale pixels from a previous view.
 For OCIO-backed preview this includes the resolved display and view names, not
