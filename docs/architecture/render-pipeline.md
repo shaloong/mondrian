@@ -214,7 +214,12 @@ attach `VideoStreamInfo.color_interpretation` and `VideoStreamInfo.color_metadat
 raw CICP tags rather than rebuilding diagnostics from path or decoder text.
 Export jobs carry this as `TimelineExportInput.asset_color_diagnostics`, and
 preview emits the same diagnostic summary when missing-metadata policy rejects a
-media asset.
+media asset. Preview also stores the latest viewer-request rejection as
+`AppUiPreviewColorRejection` so panels, diagnostics, and automated smoke tests
+can inspect the rejected asset id, path, missing-metadata policy,
+`InputColorResolution` branch, working color space, and media diagnostic summary
+without scraping logs. Playback prefetch must not overwrite this viewer-facing
+snapshot.
 Preview perf smoke reports and export frame diagnostics expose the same
 per-branch input color-resolution counters, including override, detected
 metadata, missing-policy assumptions, and missing-policy rejects. Data/non-color
