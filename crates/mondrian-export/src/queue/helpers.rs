@@ -178,15 +178,24 @@ pub(crate) fn apply_color_tag_args(cmd: &mut Command, color_space: ColorSpace) {
 /// 写入 HDR10 元数据（母版显示色彩体积 + 内容光级别）。
 ///
 /// 当序列设置中 `preserve_hdr_metadata` 为 true 且输出为 HDR 色彩空间时调用。
-pub(crate) fn apply_hdr_metadata_args(cmd: &mut Command, settings: &SequenceSettings) {
+pub(crate) fn apply_hdr_metadata_args(
+    cmd: &mut Command,
+    settings: &SequenceSettings,
+) -> Result<(), String> {
     let cm = &settings.color_management;
     let mastering = cm
         .hdr_mastering_display
-        .as_deref()
-        .unwrap_or("G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)");
-    let cll = cm.hdr_max_cll.as_deref().unwrap_or("1000,400");
+        .as_ref()
+        .ok_or_else(|| "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?
+        .to_x265_master_display()
+        .ok_or_else(|| "SMPTE ST 2086 母版显示元数据不完整".to_string())?;
+    let cll = cm
+        .hdr_content_light
+        .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?
+        .to_x265_max_cll();
     cmd.arg("-x265-params").arg(format!("master-display={mastering}"));
     cmd.arg("-x265-params").arg(format!("max-cll={cll}"));
+    Ok(())
 }
 
 pub(crate) fn apply_sequence_video_format_args(cmd: &mut Command, settings: &SequenceSettings) {
@@ -251,6 +260,12 @@ pub(crate) fn validate_timeline_export_color_compatibility(
     }
     if preserve_hdr && bit_depth == ExportBitDepth::Eight {
         return Err("保留 HDR metadata 需要 10-bit 或更高位深".to_string());
+    }
+    if preserve_hdr && settings.color_management.hdr_mastering_display.is_none() {
+        return Err("保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string());
+    }
+    if preserve_hdr && settings.color_management.hdr_content_light.is_none() {
+        return Err("保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string());
     }
 
     match (&config.preset.container, &config.preset.video) {

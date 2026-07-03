@@ -1,7 +1,7 @@
 //! 序列（时间线）
 
 use crate::{clip::ActiveClip, track::Track};
-use mondrian_core::types::*;
+use mondrian_core::{types::*, VideoContentLightMetadata, VideoMasteringDisplayMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -178,14 +178,12 @@ pub struct SequenceColorManagement {
     pub export_bit_depth: ExportBitDepth,
     #[serde(default = "default_preserve_hdr_metadata")]
     pub preserve_hdr_metadata: bool,
-    /// HDR 母版显示色彩体积（SMPTE ST 2086），如 `"G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)"`。
-    /// 未设置时使用 Rec.2100 PQ 默认值。
+    /// HDR mastering-display color volume (SMPTE ST 2086).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hdr_mastering_display: Option<String>,
-    /// HDR 内容光级别（MaxCLL,MaxFALL），如 `"1000,400"`。
-    /// 未设置时使用默认值 `"1000,400"`。
+    pub hdr_mastering_display: Option<VideoMasteringDisplayMetadata>,
+    /// HDR content light level metadata (MaxCLL / MaxFALL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hdr_max_cll: Option<String>,
+    pub hdr_content_light: Option<VideoContentLightMetadata>,
 }
 
 /// 渲染色彩上下文 —— 单帧渲染所需的全部色彩信息。
@@ -219,7 +217,7 @@ impl Default for SequenceColorManagement {
             export_bit_depth: ExportBitDepth::SixteenFloat,
             preserve_hdr_metadata: false,
             hdr_mastering_display: None,
-            hdr_max_cll: None,
+            hdr_content_light: None,
         }
     }
 }
@@ -372,6 +370,22 @@ impl SequenceSettings {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
                 reason: "只有 HDR 输出色彩空间可以保留 HDR metadata".to_string(),
+            });
+        }
+        if self.color_management.preserve_hdr_metadata
+            && self.color_management.hdr_mastering_display.is_none()
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string(),
+            });
+        }
+        if self.color_management.preserve_hdr_metadata
+            && self.color_management.hdr_content_light.is_none()
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string(),
             });
         }
         Ok(())
@@ -1201,6 +1215,10 @@ mod tests {
             color_management: SequenceColorManagement {
                 output_color_space: ColorSpace::Rec2100Pq,
                 preserve_hdr_metadata: true,
+                hdr_mastering_display: Some(
+                    VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+                ),
+                hdr_content_light: Some(VideoContentLightMetadata::hdr10_1000_nit_reference()),
                 ..Default::default()
             },
             ..Default::default()

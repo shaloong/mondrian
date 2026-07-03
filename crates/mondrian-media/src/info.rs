@@ -5,7 +5,12 @@
 
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::*;
+use mondrian_core::{
+    VideoContentLightMetadata, VideoHdrChromaticity, VideoHdrMetadataPayload, VideoHdrRational,
+    VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
+};
 use serde::{Deserialize, Serialize};
+use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
@@ -168,6 +173,9 @@ pub struct VideoHdrMetadataSummary {
     pub kind: VideoHdrSideDataKind,
     /// Side-data payload size in bytes.
     pub payload_size: usize,
+    /// Parsed HDR metadata payload when FFmpeg exposes a stable ABI for the side data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<VideoHdrMetadataPayload>,
 }
 
 /// Diagnostic snapshot of a video stream's color metadata interpretation.
@@ -271,7 +279,15 @@ impl VideoColorMetadataHint {
 impl VideoHdrMetadataSummary {
     /// Compact diagnostic representation for logs and export errors.
     pub fn summary(&self) -> String {
-        format!("{:?}(bytes={})", self.kind, self.payload_size)
+        let payload = self
+            .payload
+            .as_ref()
+            .map(VideoHdrMetadataPayload::summary)
+            .unwrap_or_else(|| "unparsed".to_string());
+        format!(
+            "{:?}(bytes={},payload={})",
+            self.kind, self.payload_size, payload
+        )
     }
 }
 
@@ -677,8 +693,12 @@ fn collect_hdr_metadata_summaries(
     stream
         .side_data()
         .filter_map(|side_data| {
-            map_hdr_side_data_kind(side_data.kind())
-                .map(|kind| VideoHdrMetadataSummary { kind, payload_size: side_data.data().len() })
+            let side_data_kind = side_data.kind();
+            map_hdr_side_data_kind(side_data_kind).map(|kind| VideoHdrMetadataSummary {
+                kind,
+                payload_size: side_data.data().len(),
+                payload: parse_hdr_metadata_payload(side_data_kind, side_data.data()),
+            })
         })
         .collect()
 }
@@ -696,6 +716,89 @@ fn map_hdr_side_data_kind(
         Type::ICC_PROFILE => Some(VideoHdrSideDataKind::IccProfile),
         _ => None,
     }
+}
+
+fn parse_hdr_metadata_payload(
+    kind: ffmpeg::codec::packet::side_data::Type,
+    data: &[u8],
+) -> Option<VideoHdrMetadataPayload> {
+    use ffmpeg::codec::packet::side_data::Type;
+
+    match kind {
+        Type::MasteringDisplayMetadata => {
+            parse_mastering_display_payload(data).map(VideoHdrMetadataPayload::MasteringDisplay)
+        }
+        Type::ContentLightLevel => {
+            parse_content_light_payload(data).map(VideoHdrMetadataPayload::ContentLightLevel)
+        }
+        _ => None,
+    }
+}
+
+fn parse_mastering_display_payload(data: &[u8]) -> Option<VideoMasteringDisplayMetadata> {
+    let raw = read_unaligned_payload::<FfmpegMasteringDisplayMetadata>(data)?;
+    let primaries = (raw.has_primaries != 0).then(|| VideoMasteringDisplayPrimaries {
+        red: chromaticity_from_ffmpeg(raw.display_primaries[0]),
+        green: chromaticity_from_ffmpeg(raw.display_primaries[1]),
+        blue: chromaticity_from_ffmpeg(raw.display_primaries[2]),
+        white_point: chromaticity_from_ffmpeg(raw.white_point),
+    });
+    let luminance = (raw.has_luminance != 0).then(|| VideoMasteringDisplayLuminance {
+        min: rational_from_ffmpeg(raw.min_luminance),
+        max: rational_from_ffmpeg(raw.max_luminance),
+    });
+    Some(VideoMasteringDisplayMetadata { primaries, luminance })
+}
+
+fn parse_content_light_payload(data: &[u8]) -> Option<VideoContentLightMetadata> {
+    let raw = read_unaligned_payload::<FfmpegContentLightMetadata>(data)?;
+    Some(VideoContentLightMetadata {
+        max_content_light_level: raw.max_cll,
+        max_frame_average_light_level: raw.max_fall,
+    })
+}
+
+fn read_unaligned_payload<T: Copy>(data: &[u8]) -> Option<T> {
+    if data.len() < std::mem::size_of::<T>() {
+        return None;
+    }
+    Some(unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<T>()) })
+}
+
+fn chromaticity_from_ffmpeg(raw: [FfmpegRational; 2]) -> VideoHdrChromaticity {
+    VideoHdrChromaticity {
+        x: rational_from_ffmpeg(raw[0]),
+        y: rational_from_ffmpeg(raw[1]),
+    }
+}
+
+fn rational_from_ffmpeg(raw: FfmpegRational) -> VideoHdrRational {
+    VideoHdrRational::new(raw.num, raw.den)
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct FfmpegRational {
+    num: c_int,
+    den: c_int,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct FfmpegMasteringDisplayMetadata {
+    display_primaries: [[FfmpegRational; 2]; 3],
+    white_point: [FfmpegRational; 2],
+    min_luminance: FfmpegRational,
+    max_luminance: FfmpegRational,
+    has_primaries: c_int,
+    has_luminance: c_int,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct FfmpegContentLightMetadata {
+    max_cll: u32,
+    max_fall: u32,
 }
 
 fn capture_color_metadata(
@@ -959,6 +1062,73 @@ mod tests {
     }
 
     #[test]
+    fn hdr_mastering_display_payload_parses_and_formats_x265_metadata() {
+        use ffmpeg::codec::packet::side_data::Type;
+
+        let raw = FfmpegMasteringDisplayMetadata {
+            display_primaries: [
+                [raw_q(34_000, 50_000), raw_q(16_000, 50_000)],
+                [raw_q(13_250, 50_000), raw_q(34_500, 50_000)],
+                [raw_q(7_500, 50_000), raw_q(3_000, 50_000)],
+            ],
+            white_point: [raw_q(15_635, 50_000), raw_q(16_450, 50_000)],
+            min_luminance: raw_q(1, 10_000),
+            max_luminance: raw_q(1000, 1),
+            has_primaries: 1,
+            has_luminance: 1,
+        };
+
+        let payload = parse_hdr_metadata_payload(Type::MasteringDisplayMetadata, bytes_of(&raw))
+            .expect("valid mastering display payload");
+
+        let VideoHdrMetadataPayload::MasteringDisplay(metadata) = payload else {
+            panic!("expected mastering display payload");
+        };
+        assert_eq!(
+            metadata.to_x265_master_display().as_deref(),
+            Some("G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)")
+        );
+    }
+
+    #[test]
+    fn hdr_content_light_payload_parses_and_formats_x265_metadata() {
+        use ffmpeg::codec::packet::side_data::Type;
+
+        let raw = FfmpegContentLightMetadata { max_cll: 1000, max_fall: 400 };
+        let payload = parse_hdr_metadata_payload(Type::ContentLightLevel, bytes_of(&raw))
+            .expect("valid content light payload");
+
+        let VideoHdrMetadataPayload::ContentLightLevel(metadata) = payload else {
+            panic!("expected content light payload");
+        };
+        assert_eq!(metadata.to_x265_max_cll(), "1000,400");
+    }
+
+    #[test]
+    fn undersized_hdr_payload_is_not_parsed() {
+        use ffmpeg::codec::packet::side_data::Type;
+
+        assert_eq!(
+            parse_hdr_metadata_payload(Type::MasteringDisplayMetadata, &[0; 8]),
+            None
+        );
+        assert_eq!(
+            parse_hdr_metadata_payload(Type::ContentLightLevel, &[0; 4]),
+            None
+        );
+    }
+
+    #[test]
+    fn hdr_payload_abi_mirrors_ffmpeg_side_data_layout() {
+        assert_eq!(std::mem::size_of::<FfmpegRational>(), 8);
+        assert_eq!(std::mem::align_of::<FfmpegRational>(), 4);
+        assert_eq!(std::mem::size_of::<FfmpegMasteringDisplayMetadata>(), 88);
+        assert_eq!(std::mem::align_of::<FfmpegMasteringDisplayMetadata>(), 4);
+        assert_eq!(std::mem::size_of::<FfmpegContentLightMetadata>(), 8);
+        assert_eq!(std::mem::align_of::<FfmpegContentLightMetadata>(), 4);
+    }
+
+    #[test]
     fn capture_color_metadata_preserves_raw_cicp_tags() {
         let metadata = capture_color_metadata(
             Primaries::BT2020,
@@ -1011,6 +1181,9 @@ mod tests {
             hdr_metadata: vec![VideoHdrMetadataSummary {
                 kind: VideoHdrSideDataKind::MasteringDisplayMetadata,
                 payload_size: 88,
+                payload: Some(VideoHdrMetadataPayload::MasteringDisplay(
+                    VideoMasteringDisplayMetadata { primaries: None, luminance: None },
+                )),
             }],
         };
 
@@ -1023,6 +1196,19 @@ mod tests {
         assert!(summary.contains("transfer=smpte2084"));
         assert!(summary.contains("matrix=bt2020nc"));
         assert!(summary.contains("camera_profile=S-Log3 / S-Gamut3.Cine"));
-        assert!(summary.contains("MasteringDisplayMetadata(bytes=88)"));
+        assert!(summary.contains("MasteringDisplayMetadata(bytes=88,payload=master_display"));
+    }
+
+    const fn raw_q(num: i32, den: i32) -> FfmpegRational {
+        FfmpegRational { num, den }
+    }
+
+    fn bytes_of<T>(value: &T) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(value).cast::<u8>(),
+                std::mem::size_of::<T>(),
+            )
+        }
     }
 }

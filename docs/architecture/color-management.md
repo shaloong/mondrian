@@ -158,13 +158,17 @@ adding another color-space decision path.
 a metadata hint, CICP tags, missing metadata, or decoder unavailability; UI,
 logs, and export reports should surface that method instead of asking users to
 infer provenance from raw tags.
-HDR stream side-data presence is captured as `VideoHdrMetadataSummary` entries
-on `VideoStreamInfo` and copied into `VideoColorDiagnostic`. These summaries
-record side-data kind and payload size for ST 2086 mastering display metadata,
-MaxCLL/MaxFALL content light metadata, HDR10+, Dolby Vision configuration, and
-ICC profile payloads. They are presence/diagnostic records only; payload parsing
-and automatic sequence/export HDR metadata population must be implemented as a
-separate parser stage that consumes the same summary/source model.
+HDR stream side-data is captured as `VideoHdrMetadataSummary` entries on
+`VideoStreamInfo` and copied into `VideoColorDiagnostic`. The summary records
+side-data kind, payload size, and a typed `mondrian-core` payload when FFmpeg
+exposes a stable stream-side-data ABI. ST 2086 mastering display metadata and
+CTA-861.3 MaxCLL/MaxFALL content-light metadata are parsed into shared core
+value objects that can also format x265-compatible `master-display` and
+`max-cll` strings. HDR10+, Dolby Vision configuration, and ICC profile payloads
+remain presence/diagnostic records until dedicated parsers are introduced.
+Sequence/export HDR preservation stores these typed core payloads directly and
+fails closed when either ST 2086 mastering-display metadata or MaxCLL/MaxFALL
+content-light metadata is missing; export must not synthesize hidden defaults.
 
 Camera-log output is treated as a professional intermediate path. Export
 validation rejects consumer delivery codecs for camera-log output and only

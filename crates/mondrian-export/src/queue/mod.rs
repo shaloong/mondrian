@@ -342,7 +342,9 @@ fn execute_timeline_export(
             timeline.sequence.settings.color_management.output_color_space,
         );
         if timeline.sequence.settings.color_management.preserve_hdr_metadata {
-            apply_hdr_metadata_args(&mut cmd, &timeline.sequence.settings);
+            if let Err(err) = apply_hdr_metadata_args(&mut cmd, &timeline.sequence.settings) {
+                return JobExecutionResult::Failed(err);
+            }
         }
         if !matches!(&audio_input, TimelineAudioInput::Disabled) {
             apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
@@ -1435,6 +1437,7 @@ pub(crate) use helpers::*;
 mod tests {
     use super::*;
     use mondrian_core::types::{AssetId, BlendMode, TimeCode};
+    use mondrian_core::{VideoContentLightMetadata, VideoMasteringDisplayMetadata};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
@@ -1637,6 +1640,35 @@ mod tests {
 
         validate_timeline_export_color_compatibility(&config, &timeline)
             .expect("camera log ProRes intermediate should pass");
+    }
+
+    #[test]
+    fn export_color_validation_rejects_preserve_hdr_without_typed_metadata() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
+        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        let mut config = dummy_config("hdr-missing-metadata.mp4");
+        config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+
+        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect_err("preserve HDR should require typed metadata");
+        assert!(err.contains("SMPTE ST 2086"));
+    }
+
+    #[test]
+    fn export_color_validation_allows_preserve_hdr_with_typed_metadata() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
+        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        timeline.sequence.settings.color_management.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+        timeline.sequence.settings.color_management.hdr_content_light =
+            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+        let mut config = dummy_config("hdr-with-metadata.mp4");
+        config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+
+        validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect("typed HDR metadata should pass validation");
     }
 
     #[test]
