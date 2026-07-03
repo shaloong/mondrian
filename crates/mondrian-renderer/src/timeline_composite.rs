@@ -9,6 +9,7 @@ use mondrian_effects::{
     blend_rgba_f32_pixel_seeded, blend_rgba_pixel_seeded, compiled_effect_graph_supports_rgba_f32,
     CompiledEffectGraph,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -96,6 +97,91 @@ pub struct TimelineCompositeDiagnostics {
     pub legacy_adjustment_effect: u64,
 }
 
+/// High-level compositing color path selected by timeline compositing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineCompositeColorPath {
+    /// Every composite plan stayed in the float/linear working path.
+    #[default]
+    FloatLinear,
+    /// At least one composite plan required the legacy RGBA8 path.
+    LegacyRgba8,
+}
+
+/// Structured reasons a composite plan required the legacy RGBA8 path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineCompositeLegacyBreakdown {
+    /// Media layers that required legacy RGBA8 because of blend mode support.
+    pub media_blend_mode: u64,
+    /// Media layers that required legacy RGBA8 because of transform support.
+    pub media_transform: u64,
+    /// Media layers that required legacy RGBA8 because of effect graph support.
+    pub media_effect: u64,
+    /// Solid layers that required legacy RGBA8 because of blend mode support.
+    pub solid_blend_mode: u64,
+    /// Solid layers that required legacy RGBA8 because of transform support.
+    pub solid_transform: u64,
+    /// Solid layers that required legacy RGBA8 because of effect graph support.
+    pub solid_effect: u64,
+    /// Adjustment layers that required legacy RGBA8 because of blend mode support.
+    pub adjustment_blend_mode: u64,
+    /// Adjustment layers that required legacy RGBA8 because of effect graph support.
+    pub adjustment_effect: u64,
+}
+
+impl TimelineCompositeLegacyBreakdown {
+    /// Total number of recorded legacy RGBA8 causes.
+    pub fn total(self) -> u64 {
+        self.media_blend_mode
+            .saturating_add(self.media_transform)
+            .saturating_add(self.media_effect)
+            .saturating_add(self.solid_blend_mode)
+            .saturating_add(self.solid_transform)
+            .saturating_add(self.solid_effect)
+            .saturating_add(self.adjustment_blend_mode)
+            .saturating_add(self.adjustment_effect)
+    }
+
+    /// Returns true when no legacy RGBA8 causes were recorded.
+    pub fn is_empty(self) -> bool {
+        self.total() == 0
+    }
+}
+
+/// Renderer-owned summary of composite color-path safety for a diagnostics snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineCompositeColorPathSummary {
+    /// Selected color path after folding all composite diagnostics.
+    pub path: TimelineCompositeColorPath,
+    /// Number of timeline elements evaluated by the composite plans.
+    pub elements: u64,
+    /// Composite plans that stayed on the float/linear path.
+    pub float_linear_composites: u64,
+    /// Composite plans that fell back to the legacy RGBA8 path.
+    pub legacy_rgba8_composites: u64,
+    /// Structured reasons for any legacy RGBA8 fallback.
+    pub legacy_breakdown: TimelineCompositeLegacyBreakdown,
+}
+
+impl TimelineCompositeColorPathSummary {
+    /// Number of composite plans represented by this summary.
+    pub fn composite_plans(self) -> u64 {
+        self.float_linear_composites.saturating_add(self.legacy_rgba8_composites)
+    }
+
+    /// Returns true when at least one composite plan used or required legacy RGBA8.
+    pub fn uses_legacy_rgba8(self) -> bool {
+        matches!(self.path, TimelineCompositeColorPath::LegacyRgba8)
+    }
+
+    /// Returns true when all represented plans stayed on the float/linear path.
+    pub fn is_fully_float_linear(self) -> bool {
+        self.composite_plans() > 0
+            && !self.uses_legacy_rgba8()
+            && self.float_linear_composites == self.composite_plans()
+    }
+}
+
 impl TimelineCompositeDiagnostics {
     /// Merge another diagnostic snapshot into this one using saturating counters.
     pub fn accumulate(&mut self, other: Self) {
@@ -125,7 +211,41 @@ impl TimelineCompositeDiagnostics {
 
     /// Returns true when the composite plan used any legacy RGBA8 fallback.
     pub fn uses_legacy_rgba8(self) -> bool {
-        self.legacy_rgba8_composites > 0
+        self.color_path_summary().uses_legacy_rgba8()
+    }
+
+    /// Return structured legacy RGBA8 fallback reasons.
+    pub fn legacy_breakdown(self) -> TimelineCompositeLegacyBreakdown {
+        TimelineCompositeLegacyBreakdown {
+            media_blend_mode: self.legacy_media_blend_mode,
+            media_transform: self.legacy_media_transform,
+            media_effect: self.legacy_media_effect,
+            solid_blend_mode: self.legacy_solid_blend_mode,
+            solid_transform: self.legacy_solid_transform,
+            solid_effect: self.legacy_solid_effect,
+            adjustment_blend_mode: self.legacy_adjustment_blend_mode,
+            adjustment_effect: self.legacy_adjustment_effect,
+        }
+    }
+
+    /// Return the high-level composite color path for this diagnostics snapshot.
+    pub fn color_path(self) -> TimelineCompositeColorPath {
+        if self.legacy_rgba8_composites > 0 || !self.legacy_breakdown().is_empty() {
+            TimelineCompositeColorPath::LegacyRgba8
+        } else {
+            TimelineCompositeColorPath::FloatLinear
+        }
+    }
+
+    /// Return a renderer-owned summary that callers can use for reports and budgets.
+    pub fn color_path_summary(self) -> TimelineCompositeColorPathSummary {
+        TimelineCompositeColorPathSummary {
+            path: self.color_path(),
+            elements: self.elements,
+            float_linear_composites: self.float_linear_composites,
+            legacy_rgba8_composites: self.legacy_rgba8_composites,
+            legacy_breakdown: self.legacy_breakdown(),
+        }
     }
 }
 
@@ -1136,5 +1256,61 @@ mod tests {
         assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
         assert!(!output.diagnostics.uses_legacy_rgba8());
         assert!(scratch.media_source.is_empty());
+    }
+
+    #[test]
+    fn composite_color_path_summary_reports_clean_float_linear_path() {
+        let diagnostics = TimelineCompositeDiagnostics {
+            elements: 2,
+            float_linear_composites: 2,
+            ..TimelineCompositeDiagnostics::default()
+        };
+
+        let summary = diagnostics.color_path_summary();
+
+        assert_eq!(summary.path, TimelineCompositeColorPath::FloatLinear);
+        assert_eq!(summary.elements, 2);
+        assert_eq!(summary.composite_plans(), 2);
+        assert!(summary.legacy_breakdown.is_empty());
+        assert!(summary.is_fully_float_linear());
+        assert!(!diagnostics.uses_legacy_rgba8());
+    }
+
+    #[test]
+    fn composite_color_path_summary_reports_structured_legacy_reasons() {
+        let diagnostics = TimelineCompositeDiagnostics {
+            elements: 4,
+            float_linear_composites: 1,
+            legacy_rgba8_composites: 1,
+            legacy_media_transform: 1,
+            legacy_solid_effect: 2,
+            ..TimelineCompositeDiagnostics::default()
+        };
+
+        let summary = diagnostics.color_path_summary();
+
+        assert_eq!(summary.path, TimelineCompositeColorPath::LegacyRgba8);
+        assert_eq!(summary.composite_plans(), 2);
+        assert_eq!(summary.legacy_breakdown.media_transform, 1);
+        assert_eq!(summary.legacy_breakdown.solid_effect, 2);
+        assert_eq!(summary.legacy_breakdown.total(), 3);
+        assert!(!summary.is_fully_float_linear());
+        assert!(diagnostics.uses_legacy_rgba8());
+    }
+
+    #[test]
+    fn composite_color_path_summary_fails_closed_on_legacy_reason_mismatch() {
+        let diagnostics = TimelineCompositeDiagnostics {
+            float_linear_composites: 1,
+            legacy_media_effect: 1,
+            ..TimelineCompositeDiagnostics::default()
+        };
+
+        let summary = diagnostics.color_path_summary();
+
+        assert_eq!(summary.path, TimelineCompositeColorPath::LegacyRgba8);
+        assert_eq!(summary.legacy_rgba8_composites, 0);
+        assert_eq!(summary.legacy_breakdown.total(), 1);
+        assert!(diagnostics.uses_legacy_rgba8());
     }
 }

@@ -16,14 +16,17 @@ use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::VideoColorDiagnostic;
+#[cfg(test)]
+use mondrian_renderer::TimelineCompositeColorPath;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
     CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
     RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
-    TimelineAdjustmentLayer, TimelineCompositeDiagnostics, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -921,6 +924,24 @@ impl AppUiPreviewDiagnostics {
             missing_assume_working: self.input_color_resolution_missing_assume_working,
             missing_rejected: self.input_color_resolution_missing_rejected,
         }
+    }
+
+    /// Return the renderer-owned composite color-path summary for preview diagnostics.
+    pub fn composite_color_path_summary(self) -> TimelineCompositeColorPathSummary {
+        TimelineCompositeDiagnostics {
+            elements: self.color_composite_elements,
+            float_linear_composites: self.color_composite_float_linear,
+            legacy_rgba8_composites: self.color_composite_legacy_rgba8,
+            legacy_media_blend_mode: self.color_composite_legacy_media_blend_mode,
+            legacy_media_transform: self.color_composite_legacy_media_transform,
+            legacy_media_effect: self.color_composite_legacy_media_effect,
+            legacy_solid_blend_mode: self.color_composite_legacy_solid_blend_mode,
+            legacy_solid_transform: self.color_composite_legacy_solid_transform,
+            legacy_solid_effect: self.color_composite_legacy_solid_effect,
+            legacy_adjustment_blend_mode: self.color_composite_legacy_adjustment_blend_mode,
+            legacy_adjustment_effect: self.color_composite_legacy_adjustment_effect,
+        }
+        .color_path_summary()
     }
 }
 
@@ -2375,6 +2396,27 @@ mod tests {
         assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 1);
         assert_eq!(diagnostics.input_color_resolution_missing_assume_working, 1);
         assert_eq!(diagnostics.input_color_resolution_missing_rejected, 1);
+    }
+
+    #[test]
+    fn preview_diagnostics_derives_composite_color_path_summary() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            color_composite_elements: 5,
+            color_composite_float_linear: 2,
+            color_composite_legacy_rgba8: 1,
+            color_composite_legacy_media_transform: 1,
+            color_composite_legacy_adjustment_effect: 2,
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let summary = diagnostics.composite_color_path_summary();
+
+        assert_eq!(summary.path, TimelineCompositeColorPath::LegacyRgba8);
+        assert_eq!(summary.elements, 5);
+        assert_eq!(summary.composite_plans(), 3);
+        assert_eq!(summary.legacy_breakdown.media_transform, 1);
+        assert_eq!(summary.legacy_breakdown.adjustment_effect, 2);
+        assert_eq!(summary.legacy_breakdown.total(), 3);
     }
 
     #[test]

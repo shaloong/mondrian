@@ -120,7 +120,8 @@ pub use timeline_composite::{
     composite_timeline_elements_color_frame,
     composite_timeline_elements_color_frame_with_diagnostics, composite_timeline_elements_into,
     is_identity_transform, quantize_transform_signature, TimelineAdjustmentLayer,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeFrame,
+    TimelineCompositeColorPath, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeElement, TimelineCompositeFrame, TimelineCompositeLegacyBreakdown,
     TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
     TimelineSolidColorLayer,
 };

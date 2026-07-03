@@ -113,61 +113,60 @@ struct PreviewLegacyReasonReport {
 
 impl PreviewColorPathReport {
     fn from_diagnostics(diagnostics: AppUiPreviewDiagnostics) -> Self {
+        let composite_summary = diagnostics.composite_color_path_summary();
+        let legacy_breakdown = composite_summary.legacy_breakdown;
         let mut legacy_reason_details = Vec::new();
         push_legacy_reason(
             &mut legacy_reason_details,
             "media",
             "blend_mode",
-            diagnostics.color_composite_legacy_media_blend_mode,
+            legacy_breakdown.media_blend_mode,
         );
         push_legacy_reason(
             &mut legacy_reason_details,
             "media",
             "transform",
-            diagnostics.color_composite_legacy_media_transform,
+            legacy_breakdown.media_transform,
         );
         push_legacy_reason(
             &mut legacy_reason_details,
             "media",
             "effect",
-            diagnostics.color_composite_legacy_media_effect,
+            legacy_breakdown.media_effect,
         );
         push_legacy_reason(
             &mut legacy_reason_details,
             "solid",
             "blend_mode",
-            diagnostics.color_composite_legacy_solid_blend_mode,
+            legacy_breakdown.solid_blend_mode,
         );
         push_legacy_reason(
             &mut legacy_reason_details,
             "solid",
             "transform",
-            diagnostics.color_composite_legacy_solid_transform,
+            legacy_breakdown.solid_transform,
         );
         push_legacy_reason(
             &mut legacy_reason_details,
             "solid",
             "effect",
-            diagnostics.color_composite_legacy_solid_effect,
+            legacy_breakdown.solid_effect,
         );
         push_legacy_reason(
             &mut legacy_reason_details,
             "adjustment",
             "blend_mode",
-            diagnostics.color_composite_legacy_adjustment_blend_mode,
+            legacy_breakdown.adjustment_blend_mode,
         );
         push_legacy_reason(
             &mut legacy_reason_details,
             "adjustment",
             "effect",
-            diagnostics.color_composite_legacy_adjustment_effect,
+            legacy_breakdown.adjustment_effect,
         );
-        let legacy_reason_total = legacy_reason_details
-            .iter()
-            .fold(0u64, |total, reason| total.saturating_add(reason.count));
-        let fully_float_linear = diagnostics.color_composite_plans > 0
-            && diagnostics.color_composite_legacy_rgba8 == 0
-            && diagnostics.color_composite_float_linear == diagnostics.color_composite_plans;
+        let legacy_reason_total = legacy_breakdown.total();
+        let fully_float_linear = composite_summary.is_fully_float_linear()
+            && diagnostics.color_composite_plans == composite_summary.composite_plans();
         let gpu_path_ready = diagnostics.color_stage_gpu_blockers == 0
             && diagnostics.color_stage_readback_stages == 0
             && diagnostics.color_stage_upload_stages == 0;
@@ -175,9 +174,9 @@ impl PreviewColorPathReport {
 
         Self {
             composite_plans: diagnostics.color_composite_plans,
-            composite_elements: diagnostics.color_composite_elements,
-            float_linear_composites: diagnostics.color_composite_float_linear,
-            legacy_rgba8_composites: diagnostics.color_composite_legacy_rgba8,
+            composite_elements: composite_summary.elements,
+            float_linear_composites: composite_summary.float_linear_composites,
+            legacy_rgba8_composites: composite_summary.legacy_rgba8_composites,
             legacy_reason_total,
             legacy_reason_details,
             input_color_resolution: PreviewInputColorResolutionReport {
