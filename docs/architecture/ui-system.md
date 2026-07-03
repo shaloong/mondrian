@@ -95,7 +95,10 @@ The preview service resolves the requested display color space from the active
 display-management policy, but the app window owns real surface/display
 validation. The window records the final GPU output boundary only after checking
 the current wgpu surface/monitor contract, so an unsupported HDR viewer request
-cannot silently reuse the SDR surface path.
+cannot silently reuse the SDR surface path. Resize, scale-factor, and move
+events refresh that contract; any change invalidates the external GPU viewer
+frame so monitor/output changes cannot reuse a texture produced for the previous
+display target.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.

@@ -83,6 +83,12 @@ enum SurfaceLifecycleReason {
     ScaleFactorChanged,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayOutputContractRefreshReason {
+    SurfaceLifecycle(SurfaceLifecycleReason),
+    WindowMoved,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SurfaceLifecycleUpdate {
     reconfigure_surface: bool,
@@ -364,6 +370,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                         apply_surface_lifecycle_update(
                             SurfaceLifecycleReason::Resize,
                             (new_size.width, new_size.height),
+                            &adapter,
                             &device,
                             &mut session,
                             &mut host,
@@ -381,9 +388,25 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                         apply_surface_lifecycle_update(
                             SurfaceLifecycleReason::ScaleFactorChanged,
                             (size.width, size.height),
+                            &adapter,
                             &device,
                             &mut session,
                             &mut host,
+                        );
+                    }
+
+                    WindowEvent::Moved(position) => {
+                        tracing::debug!(
+                            x = position.x,
+                            y = position.y,
+                            "app UI window moved; refreshing display output contract"
+                        );
+                        refresh_display_output_contract(
+                            DisplayOutputContractRefreshReason::WindowMoved,
+                            &adapter,
+                            &device,
+                            &mut session,
+                            &host,
                         );
                     }
 
@@ -720,6 +743,20 @@ impl AppUiDisplayOutputContract {
         }
         None
     }
+}
+
+fn display_output_contract_requires_gpu_preview_invalidation(
+    previous: &AppUiDisplayOutputContract,
+    next: &AppUiDisplayOutputContract,
+) -> bool {
+    previous != next
+}
+
+fn display_output_contract_requires_renderer_rebuild(
+    previous: &AppUiDisplayOutputContract,
+    next: &AppUiDisplayOutputContract,
+) -> bool {
+    previous.surface_color.format != next.surface_color.format
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1101,6 +1138,7 @@ fn surface_lifecycle_update(
 fn apply_surface_lifecycle_update(
     reason: SurfaceLifecycleReason,
     next_size: (u32, u32),
+    adapter: &wgpu::Adapter,
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
     host: &mut AppUiHost,
@@ -1115,6 +1153,13 @@ fn apply_surface_lifecycle_update(
         session.config.height = next_size.1;
         session.surface.configure(device, &session.config);
     }
+    refresh_display_output_contract(
+        DisplayOutputContractRefreshReason::SurfaceLifecycle(reason),
+        adapter,
+        device,
+        session,
+        host,
+    );
     if update.relayout_root {
         if let Some(bounds) = update.bounds {
             session.current_bounds.set(bounds);
@@ -1124,6 +1169,59 @@ fn apply_surface_lifecycle_update(
     if update.request_redraw {
         session.window.request_redraw();
     }
+}
+
+fn refresh_display_output_contract(
+    reason: DisplayOutputContractRefreshReason,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+) {
+    let previous = session.display_output_contract.clone();
+    let next = match app_ui_display_output_contract(&session.window, &session.surface, adapter) {
+        Ok(contract) => contract,
+        Err(err) => {
+            tracing::warn!(
+                ?reason,
+                "app UI display output contract refresh failed: {err}"
+            );
+            invalidate_display_dependent_gpu_preview(session, host);
+            return;
+        }
+    };
+
+    if !display_output_contract_requires_gpu_preview_invalidation(&previous, &next) {
+        return;
+    }
+
+    let surface_format_changed =
+        display_output_contract_requires_renderer_rebuild(&previous, &next);
+    session.display_output_contract = next;
+    session.config.format = session.display_output_contract.surface_color.format;
+    if surface_format_changed {
+        session.surface.configure(device, &session.config);
+        session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
+    }
+    invalidate_display_dependent_gpu_preview(session, host);
+    tracing::info!(
+        ?reason,
+        surface_format_changed,
+        display_target = ?session.display_output_contract.display_target,
+        surface_format = ?session.display_output_contract.surface_color.format,
+        surface_hdr_mode = ?session.display_output_contract.surface_color.hdr_mode,
+        "app UI display output contract refreshed"
+    );
+    session.window.request_redraw();
+}
+
+fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, host: &AppUiHost) {
+    if let Some(previous) = session.viewer_gpu_preview_texture_key.take() {
+        session.frame_renderer.unregister_external_texture(&previous);
+    }
+    session.color_output_runtime.clear_frame_resources();
+    host.clear_external_viewer_frame();
+    host.mark_dirty();
 }
 
 impl AppUiWindowSession {
@@ -1603,6 +1701,34 @@ mod tests {
         );
 
         assert_eq!(contract.boundary_blocker(&boundary), None);
+    }
+
+    #[test]
+    fn display_output_contract_change_invalidates_gpu_preview_resources() {
+        let first = test_display_output_contract();
+        let mut second = first.clone();
+        second.display_target.position = (3840, 0);
+
+        assert!(display_output_contract_requires_gpu_preview_invalidation(
+            &first, &second
+        ));
+        assert!(!display_output_contract_requires_renderer_rebuild(
+            &first, &second
+        ));
+    }
+
+    #[test]
+    fn display_output_contract_surface_format_change_rebuilds_renderer() {
+        let first = test_display_output_contract();
+        let mut second = first.clone();
+        second.surface_color.format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        assert!(display_output_contract_requires_gpu_preview_invalidation(
+            &first, &second
+        ));
+        assert!(display_output_contract_requires_renderer_rebuild(
+            &first, &second
+        ));
     }
 
     struct CursorFocusWidget {

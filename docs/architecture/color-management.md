@@ -88,9 +88,13 @@ Preview display color space is resolved from the sequence/project
 window then validates that boundary against its real display-output contract
 (surface format, SDR/HDR mode, present modes, alpha modes, and current monitor
 fingerprint). HDR preview output is blocked on an SDR-only surface instead of
-silently presenting through SDR. EDR, monitor ICC correction, true HDR
-swapchains, and dynamic per-monitor profile switching require additional
-platform-specific contracts before they can be enabled.
+silently presenting through SDR. Window resize, scale-factor changes, and moves
+refresh the display-output contract; any contract change invalidates the GPU
+viewer output texture and output-boundary runtime frame resources, and surface
+format changes rebuild the UI frame renderer before presenting again. EDR,
+monitor ICC correction, true HDR swapchains, and dynamic per-monitor profile
+switching require additional platform-specific contracts before they can be
+enabled.
 
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are

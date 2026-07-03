@@ -278,9 +278,14 @@ fingerprint. Viewer preview evaluation now splits at the correct boundary:
 against that contract and records the display/output boundary through the
 session-owned GPU runtime. Unsupported presentation requests, such as HDR output
 on an SDR-only surface, are structured blockers rather than implicit SDR
-fallbacks. The preview service may keep a CPU `RasterImage` as the
-correctness/fallback path, but it does not own wgpu objects and must not create
-short-lived GPU output runtimes inside CPU media workers.
+fallbacks. Window resize, scale-factor, and move events refresh the
+display-output contract. When that contract changes, the window unregisters the
+previous external preview texture, clears output-runtime frame resources, and
+marks the viewer frame dirty; if the selected surface format changes, it also
+reconfigures the surface and rebuilds the frame renderer for the new format. The
+preview service may keep a CPU `RasterImage` as the correctness/fallback path,
+but it does not own wgpu objects and must not create short-lived GPU output
+runtimes inside CPU media workers.
 The self-hosted UI renderer has an external GPU texture plane for that preview
 path. `DrawCommand::ExternalTexture` carries only a stable renderer-owned key,
 bounds, UVs, and tint; widgets and panel models do not own wgpu objects.
