@@ -30,7 +30,8 @@ use mondrian_renderer::{
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
-    InputColorResolutionSourceCounts, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
+    InputColorResolutionSourceCounts, MissingColorMetadataPolicy, Sequence,
+    MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
@@ -62,6 +63,7 @@ pub struct AppUiPreviewService {
     current_generation: Cell<u64>,
     current_frame_pending: Cell<bool>,
     last_ready_frame: RefCell<Option<ScopedViewerFrame>>,
+    last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
     metrics: AppUiPreviewMetrics,
 }
 
@@ -96,6 +98,7 @@ impl AppUiPreviewService {
             current_generation: Cell::new(0),
             current_frame_pending: Cell::new(false),
             last_ready_frame: RefCell::new(None),
+            last_color_rejection: RefCell::new(None),
             metrics: AppUiPreviewMetrics::default(),
         }
     }
@@ -215,6 +218,11 @@ impl AppUiPreviewService {
         }
     }
 
+    /// Return the latest color-management rejection captured for the current viewer request.
+    pub fn last_color_rejection(&self) -> Option<AppUiPreviewColorRejection> {
+        self.last_color_rejection.borrow().clone()
+    }
+
     /// Poll completed background media preview decodes.
     pub fn poll_finished(&self) -> bool {
         let mut changed = false;
@@ -255,6 +263,7 @@ impl AppUiPreviewService {
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
         self.current_frame_pending.set(false);
+        self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
             self.scheduler.prune_obsolete();
             self.last_ready_frame.replace(None);
@@ -359,6 +368,7 @@ impl AppUiPreviewService {
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
         self.current_frame_pending.set(false);
+        self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
             self.scheduler.prune_obsolete();
             self.external_viewer_frame.replace(None);
@@ -913,6 +923,47 @@ pub struct AppUiPreviewDiagnostics {
     pub color_composite_legacy_adjustment_effect: u64,
 }
 
+/// Structured color-management rejection captured from the viewer preview path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewColorRejection {
+    /// Asset that could not be interpreted for preview.
+    pub asset_id: AssetId,
+    /// Media path shown in diagnostics.
+    pub path: PathBuf,
+    /// Active missing-metadata policy that rejected the asset.
+    pub missing_metadata_policy: MissingColorMetadataPolicy,
+    /// Resolution branch that produced the rejection.
+    pub source: InputColorResolutionSource,
+    /// Clip/media color-space override in effect, if any.
+    pub override_color_space: Option<ColorSpace>,
+    /// Explicitly detected media color space, if any.
+    pub detected_color_space: Option<ColorSpace>,
+    /// Sequence working color space active during the decision.
+    pub working_color_space: ColorSpace,
+    /// Compact media color diagnostic summary from `mondrian-media`.
+    pub diagnostic_summary: String,
+}
+
+impl AppUiPreviewColorRejection {
+    fn new(
+        asset_id: AssetId,
+        path: PathBuf,
+        resolution: InputColorResolution,
+        diagnostic_summary: String,
+    ) -> Self {
+        Self {
+            asset_id,
+            path,
+            missing_metadata_policy: resolution.missing_metadata_policy,
+            source: resolution.source,
+            override_color_space: resolution.override_color_space,
+            detected_color_space: resolution.detected_color_space,
+            working_color_space: resolution.working_color_space,
+            diagnostic_summary,
+        }
+    }
+}
+
 impl AppUiPreviewDiagnostics {
     /// Return input color-resolution branch counters using the shared timeline model.
     pub fn input_color_resolution_counts(self) -> InputColorResolutionSourceCounts {
@@ -1457,6 +1508,7 @@ impl AppUiPreviewService {
                         target_width,
                         target_height,
                         &color_context,
+                        false,
                     ) else {
                         continue;
                     };
@@ -1508,6 +1560,7 @@ impl AppUiPreviewService {
             target_width,
             target_height,
             color_context,
+            true,
         )?;
         if let Some(frame) = self.cached_media_frame(&key) {
             return Some(frame);
@@ -1549,6 +1602,7 @@ impl AppUiPreviewService {
         target_width: u32,
         target_height: u32,
         color_context: &ColorContext,
+        record_color_rejection: bool,
     ) -> Option<(MediaPreviewKey, f64)> {
         let library = state.asset_library.as_ref()?;
         let asset = match library.get_asset(*asset_id) {
@@ -1585,6 +1639,14 @@ impl AppUiPreviewService {
                     .map(VideoColorDiagnostic::from_stream)
                     .map(|diagnostic| diagnostic.summary())
                     .unwrap_or_else(|| "unavailable".to_string());
+                if record_color_rejection {
+                    self.record_color_rejection(AppUiPreviewColorRejection::new(
+                        *asset_id,
+                        asset.path.clone(),
+                        input_color_resolution,
+                        diagnostic.clone(),
+                    ));
+                }
                 tracing::warn!(
                     asset_id = %asset_id,
                     path = %asset.path.display(),
@@ -1649,6 +1711,10 @@ impl AppUiPreviewService {
                 tracing::debug!("viewer preview worker unavailable");
             }
         }
+    }
+
+    fn record_color_rejection(&self, rejection: AppUiPreviewColorRejection) {
+        self.last_color_rejection.replace(Some(rejection));
     }
 }
 
@@ -2803,6 +2869,71 @@ mod tests {
             .source,
             mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyRejectMedia
         );
+    }
+
+    #[test]
+    fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
+        let service = AppUiPreviewService::new();
+        let mut color_context = test_color_context(ColorSpace::Rec709);
+        color_context.working_color_space = ColorSpace::Rec2020;
+        color_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
+        let resolution = resolve_preview_input_color_space(
+            None,
+            AssetMediaInterpretation::default(),
+            None,
+            &color_context,
+        );
+        let asset_id = AssetId::new();
+        let path = PathBuf::from("E:/media/missing-color-tags.mov");
+        let diagnostic =
+            "source=MissingMetadata,method=MissingMetadata,warnings=missing_or_unsupported_cicp"
+                .to_string();
+
+        service.record_color_rejection(AppUiPreviewColorRejection::new(
+            asset_id,
+            path.clone(),
+            resolution,
+            diagnostic.clone(),
+        ));
+
+        let rejection = service.last_color_rejection().expect("preview color rejection");
+        assert_eq!(rejection.asset_id, asset_id);
+        assert_eq!(rejection.path, path);
+        assert_eq!(
+            rejection.missing_metadata_policy,
+            MissingColorMetadataPolicy::RejectMedia
+        );
+        assert_eq!(
+            rejection.source,
+            InputColorResolutionSource::MissingPolicyRejectMedia
+        );
+        assert_eq!(rejection.override_color_space, None);
+        assert_eq!(rejection.detected_color_space, None);
+        assert_eq!(rejection.working_color_space, ColorSpace::Rec2020);
+        assert_eq!(rejection.diagnostic_summary, diagnostic);
+    }
+
+    #[test]
+    fn preview_render_request_clears_stale_color_rejection() {
+        let service = AppUiPreviewService::new();
+        let color_context = test_color_context(ColorSpace::Rec709);
+        service.record_color_rejection(AppUiPreviewColorRejection::new(
+            AssetId::new(),
+            PathBuf::from("E:/media/old.mov"),
+            resolve_preview_input_color_space(
+                None,
+                AssetMediaInterpretation::default(),
+                None,
+                &color_context,
+            ),
+            "old".to_string(),
+        ));
+        assert!(service.last_color_rejection().is_some());
+
+        let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        let _ = ready_frame(service.viewer_preview_for_state(&state));
+
+        assert_eq!(service.last_color_rejection(), None);
     }
 
     #[test]
