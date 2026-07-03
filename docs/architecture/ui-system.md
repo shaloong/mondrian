@@ -99,6 +99,14 @@ cannot silently reuse the SDR surface path. Resize, scale-factor, and move
 events refresh that contract; any change invalidates the external GPU viewer
 frame so monitor/output changes cannot reuse a texture produced for the previous
 display target.
+The startup/default window contract remains SDR sRGB unless an explicit display
+output intent asks for a different presentation contract. The surface resolver
+can choose Display P3, Rec.2100 PQ, or Rec.2100 HLG only when wgpu reports the
+matching `SurfaceColorSpace` for a compatible format. SDR sRGB and Display P3
+use sRGB-encoded surface formats; PQ/HLG require float or 10-bit non-sRGB
+formats so the final color pass, not hardware sRGB conversion, owns the output
+transfer. Camera-log and Rec.2020 working spaces are not presentation contracts
+and must fail closed until mapped through an explicit display/view transform.
 Viewer GPU output telemetry reports display-boundary blockers by reason, not
 only as a total. It separates HDR-output-on-SDR-surface blockers from
 surface-color-space blockers and stores the last blocked output color space,
