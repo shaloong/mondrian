@@ -37,7 +37,9 @@ use crate::app_ui::preferences_store::{
     app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
     AppUiPreferences,
 };
-use crate::app_ui::preview::AppUiPreviewService;
+use crate::app_ui::preview::{
+    AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiPreviewService,
+};
 use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
 use crate::app_ui::shortcuts::{
     default_shortcuts, is_known_shortcut_id, AppUiShortcutBinding, AppUiShortcutKey,
@@ -183,6 +185,31 @@ impl AppUiHost {
     /// Read-only access to the current app state.
     pub fn app_state(&self) -> Ref<'_, AppState> {
         self.app_state.borrow()
+    }
+
+    /// Build a GPU-output preview candidate for the current app state.
+    pub(crate) fn gpu_preview_frame_for_current_state(&self) -> AppUiGpuPreviewFrameState {
+        let state = self.app_state.borrow();
+        self.preview_service.gpu_preview_frame_for_state(&state)
+    }
+
+    /// Advertise a registered GPU preview texture as the viewer frame for its resolved plan.
+    pub(crate) fn set_external_viewer_frame(
+        &self,
+        frame: &AppUiGpuPreviewFrame,
+        texture_key: impl Into<String>,
+    ) -> bool {
+        let updated = self.preview_service.set_external_viewer_frame(frame, texture_key);
+        if updated {
+            self.mark_dirty();
+        }
+        updated
+    }
+
+    /// Clear any advertised GPU viewer frame.
+    pub(crate) fn clear_external_viewer_frame(&self) {
+        self.preview_service.clear_external_viewer_frame();
+        self.mark_dirty();
     }
 
     /// Current persisted app UI preferences snapshot.

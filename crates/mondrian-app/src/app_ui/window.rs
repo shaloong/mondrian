@@ -13,6 +13,7 @@ use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
+use crate::app_ui::preview::AppUiGpuPreviewFrameState;
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };
@@ -24,14 +25,15 @@ use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_platform::SystemPlatformService;
 use mondrian_renderer::{
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
+    GpuColorFrameTextureFormat, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::TreeWalker;
 use mondrian_ui_events::EventRouter;
-use mondrian_ui_renderer::command::DrawEncoder;
+use mondrian_ui_renderer::{command::DrawEncoder, ExternalTextureKey};
 use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use tracing_subscriber::prelude::*;
@@ -95,6 +97,7 @@ struct AppUiWindowSession {
     surface_color_contract: AppUiSurfaceColorContract,
     frame_renderer: AppUiFrameRenderer,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
+    viewer_gpu_preview_texture_key: Option<ExternalTextureKey>,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
     router: EventRouter,
     ui_runtime: WinitUiRuntime,
@@ -298,6 +301,8 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
+                        prepare_viewer_gpu_preview(&device, &queue, &mut session, &host);
+                        host.refresh_if_dirty(session.current_bounds.get());
                         let mut encoder = DrawEncoder::new();
                         let theme = mondrian_ui_theme::current_theme();
                         let b = session.current_bounds.get();
@@ -798,6 +803,90 @@ fn trace_color_output_runtime(
     );
 }
 
+fn prepare_viewer_gpu_preview(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+) {
+    if session.role != AppUiWindowRole::Workspace {
+        return;
+    }
+    let frame = match host.gpu_preview_frame_for_current_state() {
+        AppUiGpuPreviewFrameState::Ready(frame) => frame,
+        AppUiGpuPreviewFrameState::Current
+        | AppUiGpuPreviewFrameState::Loading
+        | AppUiGpuPreviewFrameState::Unavailable => return,
+    };
+    let Some(texture_key) = ExternalTextureKey::new(frame.external_texture_key()) else {
+        tracing::warn!(
+            sequence_id = %frame.sequence_id,
+            frame = frame.frame,
+            "viewer GPU preview produced an invalid external texture key"
+        );
+        host.clear_external_viewer_frame();
+        return;
+    };
+
+    if let Some(previous) = session.viewer_gpu_preview_texture_key.take() {
+        session.frame_renderer.unregister_external_texture(&previous);
+    }
+    session.color_output_runtime.clear_frame_resources();
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("app_ui_viewer_gpu_preview_output_encoder"),
+    });
+    let record = session.color_output_runtime.record_wgpu_output_boundary_owned_backend(
+        &frame.boundary,
+        &frame.working_frame,
+        GpuColorFrameTextureFormat::Rgba8Unorm,
+        RenderColorTransformGpuOptions::default(),
+        RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+            device,
+            queue,
+            encoder: &mut encoder,
+            load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+        },
+    );
+    let record = match record {
+        Ok(record) => record,
+        Err(err) => {
+            tracing::warn!(
+                sequence_id = %frame.sequence_id,
+                frame = frame.frame,
+                width = frame.width,
+                height = frame.height,
+                "viewer GPU preview output boundary failed: {err:?}"
+            );
+            host.clear_external_viewer_frame();
+            return;
+        }
+    };
+    let output = record.materialized.output.clone();
+    let view = match session.color_output_runtime.frame_table().get(&output) {
+        Ok(resource) => &resource.resource().texture_view,
+        Err(err) => {
+            tracing::warn!(
+                sequence_id = %frame.sequence_id,
+                frame = frame.frame,
+                "viewer GPU preview output texture missing from runtime table: {err:?}"
+            );
+            host.clear_external_viewer_frame();
+            return;
+        }
+    };
+
+    session
+        .frame_renderer
+        .register_external_texture_view(device, texture_key.clone(), view);
+    queue.submit(std::iter::once(encoder.finish()));
+    if host.set_external_viewer_frame(&frame, texture_key.as_str().to_owned()) {
+        session.viewer_gpu_preview_texture_key = Some(texture_key);
+    } else {
+        session.frame_renderer.unregister_external_texture(&texture_key);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeFileDndDiagnostic {
     HoverUnhandled,
@@ -967,6 +1056,7 @@ impl AppUiWindowSession {
             surface_color_contract,
             frame_renderer: AppUiFrameRenderer::new(device, config.format),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
+            viewer_gpu_preview_texture_key: None,
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
             router: build_event_router(
                 host.active_root().id(),

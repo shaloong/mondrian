@@ -25,7 +25,7 @@ use mondrian_renderer::{
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence};
-use mondrian_ui_widgets::{ViewerFrameContent, ViewerFrameImage};
+use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
 use crate::app::AppState;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
@@ -50,6 +50,7 @@ pub struct AppUiPreviewService {
     media_cache: RefCell<MediaPreviewCache>,
     media_failures: RefCell<MediaPreviewFailureCache>,
     viewer_frame_cache: RefCell<ViewerPreviewFrameCache>,
+    external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
@@ -83,6 +84,7 @@ impl AppUiPreviewService {
             viewer_frame_cache: RefCell::new(ViewerPreviewFrameCache::new(
                 VIEWER_PREVIEW_FRAME_CACHE_CAPACITY,
             )),
+            external_viewer_frame: RefCell::new(None),
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             current_generation: Cell::new(0),
@@ -233,6 +235,12 @@ impl AppUiPreviewService {
                 if let Some(frame) = resolved
                     .cache_key
                     .as_ref()
+                    .and_then(|cache_key| self.external_viewer_frame_for_key(cache_key))
+                {
+                    ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                } else if let Some(frame) = resolved
+                    .cache_key
+                    .as_ref()
                     .and_then(|cache_key| self.cached_viewer_frame(cache_key))
                 {
                     self.last_ready_frame.replace(Some(ScopedViewerFrame {
@@ -292,6 +300,109 @@ impl AppUiPreviewService {
         preview_state
     }
 
+    /// Build a CPU working-space preview frame suitable for the app-window GPU output boundary.
+    ///
+    /// The returned frame is not display encoded. The app window owns wgpu recording,
+    /// output texture registration, and texture lifetime.
+    pub(crate) fn gpu_preview_frame_for_state(
+        &self,
+        state: &AppState,
+    ) -> AppUiGpuPreviewFrameState {
+        let generation = self.scheduler.begin_generation();
+        self.current_generation.set(generation);
+        self.current_frame_pending.set(false);
+        let Some(sequence) = state.sequence.as_ref() else {
+            self.scheduler.prune_obsolete();
+            self.external_viewer_frame.replace(None);
+            return AppUiGpuPreviewFrameState::Unavailable;
+        };
+        let frame = state.current_frame().max(0);
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let color_context = sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            ColorSpace::Rec709,
+        );
+        let resolved = match self.resolve_sequence_elements(
+            state,
+            sequence,
+            frame,
+            width,
+            height,
+            0,
+            color_context,
+        ) {
+            Some(resolved) => resolved,
+            None if self.current_frame_pending.get() => {
+                self.schedule_media_prefetches(state, sequence, frame, width, height);
+                self.scheduler.prune_obsolete();
+                return AppUiGpuPreviewFrameState::Loading;
+            }
+            None => {
+                self.scheduler.prune_obsolete();
+                self.external_viewer_frame.replace(None);
+                return AppUiGpuPreviewFrameState::Unavailable;
+            }
+        };
+        let Some(cache_key) = resolved.cache_key.clone() else {
+            self.scheduler.prune_obsolete();
+            self.external_viewer_frame.replace(None);
+            return AppUiGpuPreviewFrameState::Unavailable;
+        };
+        if self.external_viewer_frame_for_key(&cache_key).is_some() {
+            self.schedule_media_prefetches(state, sequence, frame, width, height);
+            self.scheduler.prune_obsolete();
+            return AppUiGpuPreviewFrameState::Current;
+        }
+        let output = match composite_resolved_preview_working(
+            width,
+            height,
+            &resolved.elements,
+            &resolved.color_context,
+            &mut self.scratch.borrow_mut(),
+        ) {
+            Ok(output) => output,
+            Err(err) => {
+                tracing::warn!("viewer GPU preview working composite failed: {err}");
+                self.scheduler.prune_obsolete();
+                return AppUiGpuPreviewFrameState::Unavailable;
+            }
+        };
+        self.record_composite(output.composite_diagnostics);
+        self.schedule_media_prefetches(state, sequence, frame, width, height);
+        self.scheduler.prune_obsolete();
+        AppUiGpuPreviewFrameState::Ready(Box::new(AppUiGpuPreviewFrame {
+            cache_key,
+            sequence_id: sequence.id,
+            frame,
+            width,
+            height,
+            working_frame: output.frame,
+            boundary: output.boundary,
+        }))
+    }
+
+    /// Mark a GPU preview output texture as the current viewer frame for its resolved plan.
+    pub(crate) fn set_external_viewer_frame(
+        &self,
+        frame: &AppUiGpuPreviewFrame,
+        texture_key: impl Into<String>,
+    ) -> bool {
+        let Some(content) = ViewerExternalTextureFrame::new(texture_key, frame.width, frame.height)
+        else {
+            return false;
+        };
+        self.external_viewer_frame.replace(Some(ScopedExternalViewerFrame {
+            cache_key: frame.cache_key.clone(),
+            content,
+        }));
+        true
+    }
+
+    /// Clear any external GPU viewer frame currently advertised by the service.
+    pub(crate) fn clear_external_viewer_frame(&self) {
+        self.external_viewer_frame.replace(None);
+    }
+
     fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
         let frame = self.viewer_frame_cache.borrow_mut().get(key);
         if frame.is_some() {
@@ -300,6 +411,15 @@ impl AppUiPreviewService {
             bump(&self.metrics.viewer_frame_cache_misses);
         }
         frame
+    }
+
+    fn external_viewer_frame_for_key(
+        &self,
+        key: &ViewerPreviewCacheKey,
+    ) -> Option<ViewerExternalTextureFrame> {
+        let frame = self.external_viewer_frame.borrow();
+        let frame = frame.as_ref()?;
+        (&frame.cache_key == key).then(|| frame.content.clone())
     }
 
     fn record_preview_state(&self, state: &ViewerPreviewState) {
@@ -676,6 +796,45 @@ pub struct AppUiPreviewDiagnostics {
     pub color_composite_legacy_adjustment_effect: u64,
 }
 
+/// Result of asking the preview service for a GPU-output viewer frame candidate.
+pub(crate) enum AppUiGpuPreviewFrameState {
+    /// The current resolved viewer frame is already backed by a registered external texture.
+    Current,
+    /// A working-space frame is ready for GPU output-boundary recording.
+    Ready(Box<AppUiGpuPreviewFrame>),
+    /// Required media is still decoding or rendering.
+    Loading,
+    /// No viewer preview frame is expected for the current state.
+    Unavailable,
+}
+
+/// Working-space viewer frame plus the output boundary needed by the app-window GPU path.
+pub(crate) struct AppUiGpuPreviewFrame {
+    cache_key: ViewerPreviewCacheKey,
+    /// Active sequence that produced this frame.
+    pub sequence_id: SequenceId,
+    /// Timeline frame number.
+    pub frame: i64,
+    /// Preview frame width in pixels.
+    pub width: u32,
+    /// Preview frame height in pixels.
+    pub height: u32,
+    /// CPU working-space composite frame that enters the GPU output boundary.
+    pub working_frame: CpuColorFrame,
+    /// Display/output boundary to execute on the GPU.
+    pub boundary: RenderOutputColorBoundary,
+}
+
+impl AppUiGpuPreviewFrame {
+    /// Stable external texture key for the resolved plan represented by this frame.
+    pub fn external_texture_key(&self) -> String {
+        format!(
+            "app-ui.viewer.gpu:{}:{}x{}:{:016x}",
+            self.sequence_id, self.width, self.height, self.cache_key.plan_signature
+        )
+    }
+}
+
 enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),
     Adjustment(TimelineAdjustmentLayer),
@@ -746,8 +905,14 @@ struct ScopedViewerFrame {
     frame: ViewerFrameImage,
 }
 
+#[derive(Debug, Clone)]
+struct ScopedExternalViewerFrame {
+    cache_key: ViewerPreviewCacheKey,
+    content: ViewerExternalTextureFrame,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ViewerPreviewCacheKey {
+pub(crate) struct ViewerPreviewCacheKey {
     sequence_id: SequenceId,
     width: u32,
     height: u32,
@@ -1523,13 +1688,19 @@ struct PreviewCompositeOutput {
     color_stage_diagnostics: RenderColorStageDiagnostics,
 }
 
-fn composite_resolved_preview(
+struct PreviewWorkingCompositeOutput {
+    frame: CpuColorFrame,
+    boundary: RenderOutputColorBoundary,
+    composite_diagnostics: TimelineCompositeDiagnostics,
+}
+
+fn composite_resolved_preview_working(
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
     color_context: &ColorContext,
     scratch: &mut TimelineCompositeScratch,
-) -> Result<PreviewCompositeOutput, String> {
+) -> Result<PreviewWorkingCompositeOutput, String> {
     let elements: Vec<_> = resolved
         .iter()
         .map(|element| match element {
@@ -1569,10 +1740,26 @@ fn composite_resolved_preview(
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    execute_cpu_output_boundary_rgba8(&composite.frame, &boundary)
+    Ok(PreviewWorkingCompositeOutput {
+        frame: composite.frame,
+        boundary,
+        composite_diagnostics: composite.diagnostics,
+    })
+}
+
+fn composite_resolved_preview(
+    width: u32,
+    height: u32,
+    resolved: &[ResolvedPreviewElement],
+    color_context: &ColorContext,
+    scratch: &mut TimelineCompositeScratch,
+) -> Result<PreviewCompositeOutput, String> {
+    let composite =
+        composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
+    execute_cpu_output_boundary_rgba8(&composite.frame, &composite.boundary)
         .map(|output| PreviewCompositeOutput {
             rgba: output.rgba,
-            composite_diagnostics: composite.diagnostics,
+            composite_diagnostics: composite.composite_diagnostics,
             color_diagnostics: output.color_diagnostics,
             color_stage_diagnostics: output.stage_diagnostics,
         })
@@ -1735,6 +1922,52 @@ mod tests {
         assert_eq!(frame.height, 540);
         assert_eq!(frame.rgba.len(), 960 * 540 * 4);
         assert!(frame.key.contains("app UI-viewer:960x540:f4:"));
+    }
+
+    #[test]
+    fn gpu_preview_frame_for_state_returns_working_frame_candidate() {
+        let service = AppUiPreviewService::new();
+        let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+
+        let frame = match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Ready(frame) => frame,
+            AppUiGpuPreviewFrameState::Current => panic!("expected new GPU preview candidate"),
+            AppUiGpuPreviewFrameState::Loading => panic!("expected ready GPU preview candidate"),
+            AppUiGpuPreviewFrameState::Unavailable => {
+                panic!("expected available GPU preview candidate")
+            }
+        };
+
+        assert_eq!(frame.width, 960);
+        assert_eq!(frame.height, 540);
+        assert_eq!(frame.working_frame.descriptor().width, 960);
+        assert_eq!(frame.working_frame.descriptor().height, 540);
+        assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
+    }
+
+    #[test]
+    fn external_gpu_preview_frame_overrides_raster_preview_for_same_plan() {
+        let service = AppUiPreviewService::new();
+        let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        let frame = match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Ready(frame) => frame,
+            _ => panic!("expected ready GPU preview candidate"),
+        };
+        let key = frame.external_texture_key();
+
+        assert!(service.set_external_viewer_frame(&frame, key.clone()));
+        match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Current => {}
+            _ => panic!("expected current external GPU preview frame"),
+        }
+        match service.viewer_preview_for_state(&state) {
+            ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame)) => {
+                assert_eq!(frame.key, key);
+                assert_eq!(frame.width, 960);
+                assert_eq!(frame.height, 540);
+            }
+            other => panic!("expected external GPU preview frame, got {other:?}"),
+        }
     }
 
     #[test]

@@ -269,21 +269,28 @@ telemetry can prove whether a frame used upload, native GPU OCIO, readback, and
 which pixel budget was touched without reconstructing the plan externally.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
 the surface/backend lifetime and traces its cache/resource diagnostics with the
-frame renderer diagnostics. The current viewer preview service remains the CPU
-reference path until preview frame evaluation records through this runtime; it
-must not create short-lived GPU output runtimes inside CPU media workers.
-The self-hosted UI renderer now has an external GPU texture plane for that
-future preview path. `DrawCommand::ExternalTexture` carries only a stable
-renderer-owned key, bounds, UVs, and tint; widgets and panel models do not own
-wgpu objects. `ViewerFrameContent` is the widget/app-model boundary and can
-carry either a CPU `RasterImage` reference or a GPU `ViewerExternalTextureFrame`
-key. `AppUiFrameRenderer::register_external_texture_view` exposes the renderer
+frame renderer diagnostics. Viewer preview evaluation now splits at the correct
+boundary: `AppUiPreviewService` resolves the timeline and composites a
+working-space `CpuColorFrame`, while the app window records the display/output
+boundary through that session-owned GPU runtime. The preview service may keep a
+CPU `RasterImage` as the correctness/fallback path, but it does not own wgpu
+objects and must not create short-lived GPU output runtimes inside CPU media
+workers.
+The self-hosted UI renderer has an external GPU texture plane for that preview
+path. `DrawCommand::ExternalTexture` carries only a stable renderer-owned key,
+bounds, UVs, and tint; widgets and panel models do not own wgpu objects.
+`ViewerFrameContent` is the widget/app-model boundary and can carry either a
+CPU `RasterImage` reference or a GPU `ViewerExternalTextureFrame` key.
+`AppUiFrameRenderer::register_external_texture_view` exposes the renderer
 registry to the app window/runtime layer, while `UiRenderer` owns the concrete
-bind group for the current backend lifetime. Missing external keys render a
-visible diagnostic fallback while incrementing `failed_external_textures`.
-Viewer preview GPU output should register the final display-encoded texture
-through this plane instead of converting it into a CPU `RasterImage` or placing
-full-frame video into the raster image atlas.
+bind group for the current backend lifetime. The window unregisters the
+previous viewer GPU texture key and clears obsolete output-frame resources when
+recording a new preview output, so playback does not leak per-frame texture
+bindings. Missing external keys render a visible diagnostic fallback while
+incrementing `failed_external_textures`. Viewer preview GPU output registers
+the final display-encoded texture through this plane instead of converting it
+into a CPU `RasterImage` or placing full-frame video into the raster image
+atlas.
 `GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
 encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
 unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only
