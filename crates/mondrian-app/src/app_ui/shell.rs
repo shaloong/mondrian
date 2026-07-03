@@ -1411,13 +1411,13 @@ fn update_timeline_playhead_widgets(widget: &mut dyn Widget, frame: i64) -> bool
 
 fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> bool {
     if let Some(viewer) = widget.as_any_mut().and_then(|any| any.downcast_mut::<ViewerSurface>()) {
-        viewer.set_playback_frame_state(
+        viewer.set_playback_frame_content_state(
             model.status.clone(),
             model.status_tone,
             model.timecode_label.clone(),
             model.frame_label.clone(),
             model.playing,
-            model.frame_image.clone(),
+            model.frame_content.clone(),
             model.empty_message.clone(),
         );
         return true;

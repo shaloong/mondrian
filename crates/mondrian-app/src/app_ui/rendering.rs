@@ -4,7 +4,7 @@
 //! upload and surface-present path so renderer behavior does not drift between
 //! test windows and the real app shell.
 
-use mondrian_ui_renderer::{DrawCommand, GlyphUpload, UiRenderer};
+use mondrian_ui_renderer::{DrawCommand, ExternalTextureKey, GlyphUpload, UiRenderer};
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use std::time::Instant;
 
@@ -319,6 +319,29 @@ impl AppUiFrameRenderer {
             ui_renderer: UiRenderer::new(device, surface_format),
             text_renderer: TextRenderer::new(),
         }
+    }
+
+    /// Register or replace a GPU texture view for viewer/UI external texture draws.
+    ///
+    /// Callers keep ownership of the texture allocation. The renderer owns only
+    /// a bind-group reference keyed by a stable frame/content identifier.
+    pub fn register_external_texture_view(
+        &mut self,
+        device: &wgpu::Device,
+        key: ExternalTextureKey,
+        texture_view: &wgpu::TextureView,
+    ) {
+        self.ui_renderer.register_external_texture_view(device, key, texture_view);
+    }
+
+    /// Remove a previously registered external GPU texture view.
+    pub fn unregister_external_texture(&mut self, key: &ExternalTextureKey) -> bool {
+        self.ui_renderer.unregister_external_texture(key)
+    }
+
+    /// Number of external GPU texture views currently registered with the UI renderer.
+    pub fn external_texture_count(&self) -> usize {
+        self.ui_renderer.external_texture_count()
     }
 
     /// Resolve text draw commands, upload pending glyphs, and present a frame.

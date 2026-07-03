@@ -422,6 +422,19 @@ pub trait DrawCommandEncoder {
         _tint: mondrian_core::Color,
     ) {
     }
+    /// Draw a renderer-registered GPU texture by stable key.
+    ///
+    /// This is the widget-layer boundary for native preview frames: widgets
+    /// never own backend GPU handles, and production renderers resolve the key
+    /// through their own texture registry.
+    fn draw_external_texture(
+        &mut self,
+        _key: &str,
+        _bounds: Rect,
+        _uv_rect: Rect,
+        _tint: mondrian_core::Color,
+    ) {
+    }
     fn draw_text(
         &mut self,
         text: &str,

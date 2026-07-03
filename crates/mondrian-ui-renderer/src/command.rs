@@ -678,6 +678,12 @@ impl DrawCommandEncoder for DrawEncoder {
         DrawEncoder::draw_raster_image(self, key, bounds, width, height, rgba, tint);
     }
 
+    fn draw_external_texture(&mut self, key: &str, bounds: Rect, uv_rect: Rect, tint: Color) {
+        if let Some(key) = ExternalTextureKey::new(key) {
+            DrawEncoder::draw_external_texture(self, key, bounds, uv_rect, tint);
+        }
+    }
+
     fn draw_text(&mut self, text: &str, font_size: f32, position: Point, color: Color) {
         use mondrian_ui_theme::typography::FontWeight;
         let style = TextStyle {
@@ -1279,10 +1285,21 @@ mod tests {
             1.0,
             color(),
         );
+        <DrawEncoder as DrawCommandEncoder>::draw_external_texture(
+            &mut enc,
+            "viewer.preview.gpu",
+            rect(),
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            color(),
+        );
         <DrawEncoder as DrawCommandEncoder>::push_translate(&mut enc, Vec2::ZERO);
         <DrawEncoder as DrawCommandEncoder>::pop_transform(&mut enc);
         let cmds = enc.finish();
-        assert_eq!(cmds.len(), 6);
+        assert_eq!(cmds.len(), 7);
+        assert!(cmds.iter().any(|cmd| matches!(
+            cmd,
+            DrawCommand::ExternalTexture { key, .. } if key.as_str() == "viewer.preview.gpu"
+        )));
     }
 
     #[test]

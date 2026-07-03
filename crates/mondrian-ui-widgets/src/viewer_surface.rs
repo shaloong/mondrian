@@ -1,8 +1,8 @@
 //! Domain-light viewer surface for editor preview panels.
 //!
-//! The widget paints preview chrome, aspect-ratio fitting, an optional raster
-//! preview frame, safe-area guides, and status metadata. App/runtime layers own
-//! preview decoding and pass already-renderable frame images across this
+//! The widget paints preview chrome, aspect-ratio fitting, an optional preview
+//! frame, safe-area guides, and status metadata. App/runtime layers own preview
+//! decoding/rendering and pass already-renderable frame references across this
 //! domain-light boundary.
 
 mod model;
@@ -64,6 +64,47 @@ impl ViewerMetrics {
 
 /// RGBA preview image presented by [`ViewerSurface`].
 pub type ViewerFrameImage = RasterImage;
+
+/// Renderer-registered GPU preview texture presented by [`ViewerSurface`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewerExternalTextureFrame {
+    /// Stable key registered with the active UI renderer.
+    pub key: String,
+    /// Source frame width in pixels.
+    pub width: u32,
+    /// Source frame height in pixels.
+    pub height: u32,
+}
+
+impl ViewerExternalTextureFrame {
+    /// Create an external GPU texture frame reference.
+    ///
+    /// Empty keys or invalid dimensions are rejected so missing producer state
+    /// becomes a renderer diagnostic instead of a malformed widget command.
+    pub fn new(key: impl Into<String>, width: u32, height: u32) -> Option<Self> {
+        let key = key.into();
+        (!key.is_empty() && width > 0 && height > 0).then_some(Self { key, width, height })
+    }
+}
+
+/// Preview frame content presented by [`ViewerSurface`].
+#[derive(Debug, Clone)]
+pub enum ViewerFrameContent {
+    /// CPU RGBA frame uploaded through the renderer-owned raster atlas.
+    Raster(ViewerFrameImage),
+    /// GPU frame already registered with the renderer texture registry.
+    ExternalTexture(ViewerExternalTextureFrame),
+}
+
+impl ViewerFrameContent {
+    /// Source frame dimensions.
+    pub fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Raster(frame) => (frame.width, frame.height),
+            Self::ExternalTexture(frame) => (frame.width, frame.height),
+        }
+    }
+}
 
 /// Semantic tone for the viewer status badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +191,7 @@ pub struct ViewerSurface {
     source_height: u32,
     playing: bool,
     enabled: bool,
-    frame_image: Option<ViewerFrameImage>,
+    frame_content: Option<ViewerFrameContent>,
     empty_message: Option<String>,
     hovered_control: Option<ViewerControl>,
     pressed_control: Option<ViewerControl>,
@@ -192,7 +233,7 @@ impl ViewerSurface {
             source_height: source_height.max(1),
             playing: false,
             enabled: true,
-            frame_image: None,
+            frame_content: None,
             empty_message: None,
             hovered_control: None,
             pressed_control: None,
@@ -296,7 +337,13 @@ impl ViewerSurface {
 
     /// Set the rendered preview image shown inside the fitted canvas.
     pub fn with_frame_image(mut self, frame_image: ViewerFrameImage) -> Self {
-        self.frame_image = Some(frame_image);
+        self.frame_content = Some(ViewerFrameContent::Raster(frame_image));
+        self
+    }
+
+    /// Set the rendered preview content shown inside the fitted canvas.
+    pub fn with_frame_content(mut self, frame_content: ViewerFrameContent) -> Self {
+        self.frame_content = Some(frame_content);
         self
     }
 
@@ -311,12 +358,34 @@ impl ViewerSurface {
         frame_image: Option<ViewerFrameImage>,
         empty_message: Option<String>,
     ) {
+        self.set_playback_frame_content_state(
+            status,
+            status_tone,
+            timecode_label,
+            frame_label,
+            playing,
+            frame_image.map(ViewerFrameContent::Raster),
+            empty_message,
+        );
+    }
+
+    /// Update only playback-frame dependent viewer state with generic frame content.
+    pub fn set_playback_frame_content_state(
+        &mut self,
+        status: impl Into<String>,
+        status_tone: ViewerStatusTone,
+        timecode_label: impl Into<String>,
+        frame_label: impl Into<String>,
+        playing: bool,
+        frame_content: Option<ViewerFrameContent>,
+        empty_message: Option<String>,
+    ) {
         self.status = status.into();
         self.status_tone = status_tone;
         self.timecode_label = timecode_label.into();
         self.frame_label = frame_label.into();
         self.playing = playing;
-        self.frame_image = frame_image;
+        self.frame_content = frame_content;
         self.empty_message = empty_message;
     }
 
@@ -747,19 +816,31 @@ impl Widget for ViewerSurface {
         ctx.push_clip(canvas);
         ctx.encoder.draw_rect(canvas, colors.canvas, 0.0);
         if self.enabled {
-            if let Some(frame) = &self.frame_image {
+            if let Some(frame) = &self.frame_content {
                 paint::paint_checkerboard(ctx, canvas);
-                ctx.encoder.draw_raster_image(
-                    &frame.key,
-                    canvas,
-                    frame.width,
-                    frame.height,
-                    Arc::clone(&frame.rgba),
-                    Color::WHITE,
-                );
+                match frame {
+                    ViewerFrameContent::Raster(frame) => {
+                        ctx.encoder.draw_raster_image(
+                            &frame.key,
+                            canvas,
+                            frame.width,
+                            frame.height,
+                            Arc::clone(&frame.rgba),
+                            Color::WHITE,
+                        );
+                    }
+                    ViewerFrameContent::ExternalTexture(frame) => {
+                        ctx.encoder.draw_external_texture(
+                            &frame.key,
+                            canvas,
+                            Rect::new(0.0, 0.0, 1.0, 1.0),
+                            Color::WHITE,
+                        );
+                    }
+                }
             }
         }
-        if self.frame_image.is_none() {
+        if self.frame_content.is_none() {
             if let Some(message) =
                 self.empty_message.as_deref().filter(|message| !message.is_empty())
             {
@@ -858,7 +939,7 @@ impl Widget for ViewerSurface {
                 .with_value(AccessibilityValue::Viewer {
                     source_width: self.source_width,
                     source_height: self.source_height,
-                    has_frame: self.frame_image.is_some(),
+                    has_frame: self.frame_content.is_some(),
                     zoom_scale: self.zoom_scale,
                 }),
         )
@@ -1183,6 +1264,7 @@ mod tests {
         texts: Vec<String>,
         text_positions: Vec<Point>,
         raster_images: Vec<(String, Rect, u32, u32)>,
+        external_textures: Vec<(String, Rect, Rect)>,
         clips: Vec<Rect>,
         clip_pops: usize,
     }
@@ -1230,6 +1312,9 @@ mod tests {
             _tint: Color,
         ) {
             self.raster_images.push((key.to_owned(), bounds, width, height));
+        }
+        fn draw_external_texture(&mut self, key: &str, bounds: Rect, uv_rect: Rect, _tint: Color) {
+            self.external_textures.push((key.to_owned(), bounds, uv_rect));
         }
         fn push_translate(&mut self, _offset: glam::Vec2) {}
         fn pop_transform(&mut self) {}
@@ -2222,6 +2307,13 @@ mod tests {
     }
 
     #[test]
+    fn external_texture_frame_rejects_invalid_identity() {
+        assert!(ViewerExternalTextureFrame::new("", 1920, 1080).is_none());
+        assert!(ViewerExternalTextureFrame::new("viewer.preview", 0, 1080).is_none());
+        assert!(ViewerExternalTextureFrame::new("viewer.preview", 1920, 0).is_none());
+    }
+
+    #[test]
     fn paint_draws_preview_frame_inside_canvas_clip() {
         let image =
             ViewerFrameImage::new("preview:42", 2, 2, vec![255; 16]).expect("valid preview image");
@@ -2268,6 +2360,44 @@ mod tests {
     }
 
     #[test]
+    fn paint_draws_external_texture_frame_inside_canvas_clip() {
+        let frame = ViewerExternalTextureFrame::new("viewer.preview.gpu", 1920, 1080)
+            .expect("valid external texture frame");
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_frame_content(ViewerFrameContent::ExternalTexture(frame));
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let canvas = viewer.canvas_rect();
+        let viewport = viewer.canvas_viewport_rect();
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+
+        assert!(encoder.raster_images.is_empty());
+        assert_eq!(
+            encoder.external_textures,
+            vec![(
+                "viewer.preview.gpu".to_owned(),
+                canvas,
+                Rect::new(0.0, 0.0, 1.0, 1.0)
+            )]
+        );
+        assert!(
+            encoder.clips.contains(&viewport),
+            "external texture must be clipped to the viewer viewport"
+        );
+        assert!(
+            encoder.clips.contains(&canvas),
+            "external texture must also be clipped to the sequence canvas"
+        );
+    }
+
+    #[test]
     fn disabled_viewer_does_not_draw_preview_frame() {
         let image = ViewerFrameImage::new("preview:disabled", 2, 2, vec![255; 16])
             .expect("valid preview image");
@@ -2285,5 +2415,6 @@ mod tests {
         viewer.paint(&mut ctx);
 
         assert!(encoder.raster_images.is_empty());
+        assert!(encoder.external_textures.is_empty());
     }
 }

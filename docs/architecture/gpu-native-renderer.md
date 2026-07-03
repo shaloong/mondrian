@@ -275,12 +275,15 @@ must not create short-lived GPU output runtimes inside CPU media workers.
 The self-hosted UI renderer now has an external GPU texture plane for that
 future preview path. `DrawCommand::ExternalTexture` carries only a stable
 renderer-owned key, bounds, UVs, and tint; widgets and panel models do not own
-wgpu objects. `UiRenderer::register_external_texture_view` binds a concrete
-`wgpu::TextureView` into the renderer registry for the current backend lifetime,
-and missing external keys render a visible diagnostic fallback while incrementing
-`failed_external_textures`. Viewer preview GPU output should register the final
-display-encoded texture through this plane instead of converting it into a CPU
-`RasterImage` or placing full-frame video into the raster image atlas.
+wgpu objects. `ViewerFrameContent` is the widget/app-model boundary and can
+carry either a CPU `RasterImage` reference or a GPU `ViewerExternalTextureFrame`
+key. `AppUiFrameRenderer::register_external_texture_view` exposes the renderer
+registry to the app window/runtime layer, while `UiRenderer` owns the concrete
+bind group for the current backend lifetime. Missing external keys render a
+visible diagnostic fallback while incrementing `failed_external_textures`.
+Viewer preview GPU output should register the final display-encoded texture
+through this plane instead of converting it into a CPU `RasterImage` or placing
+full-frame video into the raster image atlas.
 `GpuColorFrameReadbackPlan` records the matching GPU-to-CPU boundary for final
 encoded output. It aligns copied rows to wgpu's copy-buffer requirement and
 unpacks padded mapped bytes into `CpuEncodedColorFrame`. Only

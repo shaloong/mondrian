@@ -1,7 +1,7 @@
 //! Viewer preview service for the app UI host.
 //!
 //! The service owns render-plan interpretation and preview-frame cache keys.
-//! Panels stay read-only and only consume `ViewerFrameImage` payloads.
+//! Panels stay read-only and only consume renderer-ready viewer frame content.
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
@@ -25,7 +25,7 @@ use mondrian_renderer::{
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence};
-use mondrian_ui_widgets::ViewerFrameImage;
+use mondrian_ui_widgets::{ViewerFrameContent, ViewerFrameImage};
 
 use crate::app::AppState;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
@@ -241,7 +241,7 @@ impl AppUiPreviewService {
                         height,
                         frame: frame.clone(),
                     }));
-                    ViewerPreviewState::Ready(frame)
+                    ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
                 } else {
                     let output = match composite_resolved_preview(
                         width,
@@ -274,7 +274,7 @@ impl AppUiPreviewService {
                                 height,
                                 frame: frame.clone(),
                             }));
-                            ViewerPreviewState::Ready(frame)
+                            ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
                         }
                         None => ViewerPreviewState::Unavailable,
                     }
@@ -282,7 +282,7 @@ impl AppUiPreviewService {
             }
             None if self.current_frame_pending.get() => self
                 .stale_frame_for_sequence(sequence, width, height)
-                .map(ViewerPreviewState::Stale)
+                .map(|frame| ViewerPreviewState::Stale(ViewerFrameContent::Raster(frame)))
                 .unwrap_or(ViewerPreviewState::Loading),
             None => ViewerPreviewState::Unavailable,
         };
@@ -1715,7 +1715,10 @@ mod tests {
 
     fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {
         match state {
-            ViewerPreviewState::Ready(frame) => frame,
+            ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame)) => frame,
+            ViewerPreviewState::Ready(other) => {
+                panic!("expected raster ready frame, got {other:?}")
+            }
             other => panic!("expected ready frame, got {other:?}"),
         }
     }

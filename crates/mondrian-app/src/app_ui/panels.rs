@@ -41,7 +41,7 @@ use mondrian_ui_widgets::{
     TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
     TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
     TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl,
-    ViewerFrameImage, ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -108,7 +108,7 @@ pub trait AssetThumbnailSource {
 /// Supplies render-ready viewer preview frames for the active application state.
 ///
 /// Implementations own preview caching, media decode, and render-plan execution.
-/// Panel models only receive immutable `ViewerFrameImage` payloads.
+/// Panel models only receive immutable renderer-ready frame content.
 pub trait ViewerPreviewSource {
     /// Return the current viewer preview lifecycle state.
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState;
@@ -122,9 +122,9 @@ pub enum ViewerPreviewState {
     /// A frame request has been queued or is currently rendering/decoding.
     Loading,
     /// The requested frame is not ready, so the viewer may keep the previous frame visible.
-    Stale(ViewerFrameImage),
+    Stale(ViewerFrameContent),
     /// A render-ready frame is available for the current playhead frame.
-    Ready(ViewerFrameImage),
+    Ready(ViewerFrameContent),
 }
 
 /// Current thumbnail lifecycle state for one asset card.
@@ -528,7 +528,7 @@ pub struct ViewerPanelModel {
     pub height: u32,
     pub playing: bool,
     pub enabled: bool,
-    pub frame_image: Option<ViewerFrameImage>,
+    pub frame_content: Option<ViewerFrameContent>,
     pub empty_message: Option<String>,
 }
 
@@ -557,7 +557,7 @@ impl ViewerPanelModel {
         let preview_state = preview
             .map(|preview| preview.viewer_preview_for_state(state))
             .unwrap_or(ViewerPreviewState::Unavailable);
-        let frame_image = match &preview_state {
+        let frame_content = match &preview_state {
             ViewerPreviewState::Ready(frame) | ViewerPreviewState::Stale(frame) => {
                 Some(frame.clone())
             }
@@ -602,7 +602,7 @@ impl ViewerPanelModel {
             height: resolution.height,
             playing: state.is_playing(),
             enabled: true,
-            frame_image,
+            frame_content,
             empty_message: if matches!(preview_state, ViewerPreviewState::Loading) {
                 Some("预览准备中".into())
             } else {
@@ -629,7 +629,7 @@ impl ViewerPanelModel {
             height: 9,
             playing: false,
             enabled: false,
-            frame_image: None,
+            frame_content: None,
             empty_message: Some("未载入序列".into()),
         }
     }
@@ -1774,8 +1774,8 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
     } else {
         surface
     };
-    match model.frame_image.clone() {
-        Some(frame_image) => surface.with_frame_image(frame_image),
+    match model.frame_content.clone() {
+        Some(frame_content) => surface.with_frame_content(frame_content),
         None => surface,
     }
 }
@@ -4043,6 +4043,7 @@ mod tests {
     use mondrian_ui_core::UiEvent;
     use mondrian_ui_events::EventRouter;
     use mondrian_ui_widgets::menu::MenuItemKind;
+    use mondrian_ui_widgets::ViewerFrameImage;
     use std::cell::RefCell;
     use std::path::PathBuf;
 
@@ -6539,10 +6540,10 @@ mod tests {
 
         impl ViewerPreviewSource for TestPreview {
             fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
-                ViewerPreviewState::Ready(
+                ViewerPreviewState::Ready(ViewerFrameContent::Raster(
                     ViewerFrameImage::new("test-preview", 320, 180, vec![128; 320 * 180 * 4])
                         .expect("preview frame"),
-                )
+                ))
             }
         }
 
@@ -6556,7 +6557,10 @@ mod tests {
             Some(&TestPreview),
         );
 
-        let frame = models.viewer.frame_image.expect("preview frame");
+        let ViewerFrameContent::Raster(frame) = models.viewer.frame_content.expect("preview frame")
+        else {
+            panic!("expected raster preview frame");
+        };
         assert_eq!(frame.key, "test-preview");
         assert_eq!(frame.width, 320);
         assert_eq!(frame.height, 180);
@@ -6586,7 +6590,7 @@ mod tests {
 
         assert_eq!(models.viewer.status, "预览准备中");
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
-        assert!(models.viewer.frame_image.is_none());
+        assert!(models.viewer.frame_content.is_none());
         assert_eq!(models.viewer.empty_message.as_deref(), Some("预览准备中"));
     }
 
@@ -6596,10 +6600,10 @@ mod tests {
 
         impl ViewerPreviewSource for StalePreview {
             fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
-                ViewerPreviewState::Stale(
+                ViewerPreviewState::Stale(ViewerFrameContent::Raster(
                     ViewerFrameImage::new("stale-preview", 320, 180, vec![96; 320 * 180 * 4])
                         .expect("stale preview frame"),
-                )
+                ))
             }
         }
 
@@ -6613,7 +6617,11 @@ mod tests {
             Some(&StalePreview),
         );
 
-        let frame = models.viewer.frame_image.expect("stale frame remains visible");
+        let ViewerFrameContent::Raster(frame) =
+            models.viewer.frame_content.expect("stale frame remains visible")
+        else {
+            panic!("expected raster stale preview frame");
+        };
         assert_eq!(models.viewer.status, "预览准备中");
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
         assert_eq!(frame.key, "stale-preview");
@@ -6626,10 +6634,10 @@ mod tests {
 
         impl ViewerPreviewSource for UnexpectedPreview {
             fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
-                ViewerPreviewState::Ready(
+                ViewerPreviewState::Ready(ViewerFrameContent::Raster(
                     ViewerFrameImage::new("unexpected-preview", 320, 180, vec![128; 320 * 180 * 4])
                         .expect("preview frame"),
-                )
+                ))
             }
         }
 
@@ -6643,7 +6651,7 @@ mod tests {
         );
 
         assert!(!models.viewer.enabled);
-        assert!(models.viewer.frame_image.is_none());
+        assert!(models.viewer.frame_content.is_none());
         assert_eq!(models.viewer.empty_message.as_deref(), Some("未载入序列"));
     }
 
