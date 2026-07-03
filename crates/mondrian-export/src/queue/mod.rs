@@ -95,6 +95,8 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub data_textures: u64,
     /// Inputs rejected by missing-metadata policy.
     pub policy_rejections: u64,
+    /// Inputs resolved from explicit metadata or user overrides.
+    pub explicit_metadata_or_override: u64,
     /// CPU input color-transform stages.
     pub cpu_input_stages: u64,
     /// CPU output/display/export color-transform stages.
@@ -109,6 +111,12 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub float_linear_composites: u64,
     /// Legacy RGBA8 timeline composites.
     pub legacy_rgba8_composites: u64,
+    /// Structured legacy RGBA8 fallback reason count.
+    pub legacy_reason_total: u64,
+    /// Whether all diagnosed composites stayed in the float/linear path.
+    pub fully_float_linear: bool,
+    /// Whether native GPU color scheduling was free of upload/readback and blockers.
+    pub gpu_path_ready: bool,
 }
 
 impl ExportJobColorDiagnostics {
@@ -155,6 +163,7 @@ impl ExportJobColorDiagnostics {
             policy_assumptions: counts.policy_assumptions(),
             data_textures: counts.data_textures(),
             policy_rejections: counts.policy_rejections(),
+            explicit_metadata_or_override: counts.explicit_metadata_or_override(),
             cpu_input_stages: stages.cpu_input_stages,
             cpu_output_stages: stages.cpu_output_stages,
             gpu_color_stages: stages.gpu_color_stages,
@@ -162,6 +171,11 @@ impl ExportJobColorDiagnostics {
             transfer_stages: stages.upload_stages.saturating_add(stages.readback_stages),
             float_linear_composites: composite.float_linear_composites,
             legacy_rgba8_composites: composite.legacy_rgba8_composites,
+            legacy_reason_total: composite.legacy_breakdown.total(),
+            fully_float_linear: composite.is_fully_float_linear(),
+            gpu_path_ready: stages.gpu_blockers == 0
+                && stages.upload_stages == 0
+                && stages.readback_stages == 0,
         })
     }
 }
@@ -2049,11 +2063,13 @@ mod tests {
                 diagnosed_frames: 1,
                 detected_metadata: 1,
                 override_count: 1,
+                explicit_metadata_or_override: 2,
                 gpu_blockers: 1,
                 cpu_input_stages: 1,
                 cpu_output_stages: 1,
                 float_linear_composites: 1,
                 legacy_rgba8_composites: 1,
+                legacy_reason_total: 1,
                 ..ExportJobColorDiagnosticsSummary::default()
             })
         );
@@ -2063,6 +2079,51 @@ mod tests {
                 .input_resolution_source_counts
                 .explicit_metadata_or_override(),
             2
+        );
+    }
+
+    #[test]
+    fn export_color_diagnostics_summary_reports_health_contract() {
+        assert_eq!(ExportJobColorDiagnostics::default().summary(), None);
+
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        let mut counts = InputColorResolutionSourceCounts::default();
+        counts.record(InputColorResolutionSource::DetectedMetadata);
+        counts.record(InputColorResolutionSource::Override);
+        counts.record(InputColorResolutionSource::DataTexture);
+        counts.record(InputColorResolutionSource::MissingPolicyAssumeRec709);
+        counts.record(InputColorResolutionSource::MissingPolicyRejectMedia);
+        diagnostics.record_frame_diagnostics(
+            counts,
+            RenderColorStageDiagnostics {
+                total_stages: 2,
+                gpu_color_stages: 2,
+                stage_pixels: 16,
+                ..RenderColorStageDiagnostics::default()
+            },
+            TimelineCompositeDiagnostics {
+                elements: 4,
+                float_linear_composites: 2,
+                ..TimelineCompositeDiagnostics::default()
+            },
+        );
+
+        assert_eq!(
+            diagnostics.summary(),
+            Some(ExportJobColorDiagnosticsSummary {
+                diagnosed_frames: 1,
+                detected_metadata: 1,
+                override_count: 1,
+                policy_assumptions: 1,
+                data_textures: 1,
+                policy_rejections: 1,
+                explicit_metadata_or_override: 2,
+                gpu_color_stages: 2,
+                float_linear_composites: 2,
+                fully_float_linear: true,
+                gpu_path_ready: true,
+                ..ExportJobColorDiagnosticsSummary::default()
+            })
         );
     }
 
