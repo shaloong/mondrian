@@ -10,6 +10,7 @@ use mondrian_core::{ColorSpace, ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
+use mondrian_media::DetectedColorInterpretation;
 use mondrian_timeline::{
     sequence::{
         ColorWorkflow, ExportBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
@@ -844,8 +845,8 @@ pub struct AppShellInterpretAssetDialogPayload {
     pub asset_name: String,
     /// Current persistent interpretation to seed the dialog draft.
     pub interpretation: AssetMediaInterpretation,
-    /// Current automatic color-space result detected from media metadata.
-    pub detected_color_space: Option<ColorSpace>,
+    /// Current structured automatic color interpretation from media metadata.
+    pub auto_interpretation: Option<DetectedColorInterpretation>,
 }
 
 /// Draft update emitted by the Interpret Footage dialog.

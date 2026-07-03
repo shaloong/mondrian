@@ -3,6 +3,9 @@
 use mondrian_core::display_labels::color_space_label;
 use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
 use mondrian_core::types::{AssetId, ColorSpace};
+use mondrian_media::{
+    DetectedColorInterpretation, VideoColorDetectionMethod, VideoColorInterpretationConfidence,
+};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
@@ -50,8 +53,8 @@ pub struct AppUiInterpretAssetDraft {
     pub asset_name: String,
     /// Persistent interpretation currently selected in the dialog.
     pub interpretation: AssetMediaInterpretation,
-    /// Current automatic color-space result detected from media metadata.
-    pub detected_color_space: Option<ColorSpace>,
+    /// Current structured automatic color interpretation from media metadata.
+    pub auto_interpretation: Option<DetectedColorInterpretation>,
 }
 
 impl AppUiInterpretAssetDraft {
@@ -60,13 +63,13 @@ impl AppUiInterpretAssetDraft {
         asset_id: AssetId,
         asset_name: impl Into<String>,
         interpretation: AssetMediaInterpretation,
-        detected_color_space: Option<ColorSpace>,
+        auto_interpretation: Option<DetectedColorInterpretation>,
     ) -> Self {
         Self {
             asset_id,
             asset_name: asset_name.into(),
             interpretation,
-            detected_color_space,
+            auto_interpretation,
         }
     }
 
@@ -156,8 +159,10 @@ impl InterpretAssetDialog {
     fn refresh_controls(&mut self) {
         self.asset_label.set_text(self.draft.asset_name.clone());
         self.status_value_label.set_text(interpretation_status(&self.draft));
-        self.color_space_dropdown =
-            color_space_dropdown_for(self.draft.interpretation, self.draft.detected_color_space);
+        self.color_space_dropdown = color_space_dropdown_for(
+            self.draft.interpretation,
+            self.draft.auto_interpretation.as_ref(),
+        );
     }
 }
 
@@ -170,11 +175,14 @@ fn row_label(text: impl Into<String>) -> Label {
 
 fn color_space_dropdown_for(
     interpretation: AssetMediaInterpretation,
-    detected_color_space: Option<ColorSpace>,
+    auto_interpretation: Option<&DetectedColorInterpretation>,
 ) -> Dropdown {
-    let selected = selected_override_color_space(interpretation, detected_color_space);
+    let selected = selected_override_color_space(
+        interpretation,
+        auto_detected_color_space(auto_interpretation),
+    );
     let mut items = vec![MenuItem::new(
-        auto_option_label(detected_color_space),
+        auto_option_label(auto_interpretation),
         draft_update_action(MediaColorInterpretation::Auto),
     )
     .checked(matches!(
@@ -195,7 +203,7 @@ fn color_space_dropdown_for(
     }));
 
     let label = match interpretation.color {
-        MediaColorInterpretation::Auto => auto_option_label(detected_color_space),
+        MediaColorInterpretation::Auto => auto_option_label(auto_interpretation),
         MediaColorInterpretation::Data => "非色彩数据".to_owned(),
         MediaColorInterpretation::Override { color_space } => {
             color_space_label(color_space).to_owned()
@@ -221,16 +229,51 @@ fn selected_override_color_space(
         .unwrap_or(ColorSpace::Rec709)
 }
 
-fn auto_option_label(detected_color_space: Option<ColorSpace>) -> String {
-    match detected_color_space {
+fn auto_detected_color_space(
+    auto_interpretation: Option<&DetectedColorInterpretation>,
+) -> Option<ColorSpace> {
+    auto_interpretation.and_then(|interpretation| interpretation.color_space)
+}
+
+fn auto_option_label(auto_interpretation: Option<&DetectedColorInterpretation>) -> String {
+    let Some(interpretation) = auto_interpretation else {
+        return "自动 — 未明确标记".to_owned();
+    };
+    let base = match interpretation.color_space {
         Some(color_space) => format!("自动 — 已识别为 {}", color_space_label(color_space)),
         None => "自动 — 未明确标记".to_owned(),
+    };
+    let mut details = vec![
+        confidence_label(interpretation.confidence).to_owned(),
+        method_label(interpretation.method).to_owned(),
+    ];
+    if !interpretation.warnings.is_empty() {
+        details.push(format!("{} 个警告", interpretation.warnings.len()));
+    }
+    format!("{base}（{}）", details.join("，"))
+}
+
+fn confidence_label(confidence: VideoColorInterpretationConfidence) -> &'static str {
+    match confidence {
+        VideoColorInterpretationConfidence::None => "无置信度",
+        VideoColorInterpretationConfidence::Low => "低置信度",
+        VideoColorInterpretationConfidence::Medium => "中置信度",
+        VideoColorInterpretationConfidence::High => "高置信度",
+    }
+}
+
+fn method_label(method: VideoColorDetectionMethod) -> &'static str {
+    match method {
+        VideoColorDetectionMethod::MetadataHint => "元数据提示",
+        VideoColorDetectionMethod::CicpTags => "CICP",
+        VideoColorDetectionMethod::MissingMetadata => "无元数据",
+        VideoColorDetectionMethod::DecoderUnavailable => "解码器不可用",
     }
 }
 
 fn interpretation_status(draft: &AppUiInterpretAssetDraft) -> String {
     match draft.interpretation.color {
-        MediaColorInterpretation::Auto => auto_option_label(draft.detected_color_space),
+        MediaColorInterpretation::Auto => auto_option_label(draft.auto_interpretation.as_ref()),
         MediaColorInterpretation::Data => "非色彩数据 — 绕过色彩管理".to_owned(),
         MediaColorInterpretation::Override { color_space } => {
             format!("手动 — {}", color_space_label(color_space))
@@ -372,6 +415,7 @@ impl Widget for InterpretAssetDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_media::{VideoColorInterpretationWarning, VideoColorSpaceSource};
 
     #[test]
     fn draft_converts_to_asset_payload() {
@@ -382,7 +426,7 @@ mod tests {
             AssetMediaInterpretation {
                 color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
             },
-            Some(ColorSpace::Rec2020),
+            Some(detected_interpretation(ColorSpace::Rec2020)),
         );
 
         let payload = draft.into_payload();
@@ -400,7 +444,7 @@ mod tests {
             AssetId::new(),
             "Shot",
             AssetMediaInterpretation::default(),
-            Some(ColorSpace::Rec2020),
+            Some(detected_interpretation(ColorSpace::Rec2020)),
         );
 
         let status = interpretation_status(&draft);
@@ -408,8 +452,9 @@ mod tests {
         assert!(status.contains("自动"));
         assert!(status.contains("已识别为"));
         assert!(status.contains("Rec. 2020"));
+        assert!(status.contains("高置信度"));
+        assert!(status.contains("CICP"));
         assert!(!status.contains("预览/导出"));
-        assert!(!status.contains("metadata"));
     }
 
     #[test]
@@ -418,7 +463,7 @@ mod tests {
             AssetId::new(),
             "Shot",
             AssetMediaInterpretation::default(),
-            Some(ColorSpace::Rec2020),
+            Some(detected_interpretation(ColorSpace::Rec2020)),
         ));
 
         assert!(dialog.color_space_dropdown.is_enabled());
@@ -438,7 +483,7 @@ mod tests {
             AssetMediaInterpretation {
                 color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
             },
-            Some(ColorSpace::Rec2020),
+            Some(detected_interpretation(ColorSpace::Rec2020)),
         ));
 
         assert!(dialog.color_space_dropdown.is_enabled());
@@ -448,5 +493,35 @@ mod tests {
             )),
             Some(true)
         );
+    }
+
+    #[test]
+    fn auto_status_surfaces_detection_warnings() {
+        let mut interpretation = detected_interpretation(ColorSpace::Rec2020);
+        interpretation.warnings.push(VideoColorInterpretationWarning::PartialCicpTags {
+            detected_color_space: ColorSpace::Rec2020,
+        });
+        let draft = AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Shot",
+            AssetMediaInterpretation::default(),
+            Some(interpretation),
+        );
+
+        let status = interpretation_status(&draft);
+
+        assert!(status.contains("1 个警告"));
+    }
+
+    fn detected_interpretation(color_space: ColorSpace) -> DetectedColorInterpretation {
+        DetectedColorInterpretation {
+            color_space: Some(color_space),
+            confidence: VideoColorInterpretationConfidence::High,
+            source: VideoColorSpaceSource::Metadata,
+            method: VideoColorDetectionMethod::CicpTags,
+            evidence: Vec::new(),
+            warnings: Vec::new(),
+            user_overridable: true,
+        }
     }
 }
