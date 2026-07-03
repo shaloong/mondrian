@@ -36,7 +36,9 @@ use mondrian_timeline::sequence::{
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
 use crate::app::AppState;
-use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
+use crate::app_ui::panels::{
+    ViewerPreviewColorRejectionModel, ViewerPreviewSource, ViewerPreviewState,
+};
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
 const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
@@ -1051,6 +1053,19 @@ enum ResolvedPreviewElement {
 impl ViewerPreviewSource for AppUiPreviewService {
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
         self.render_preview(state)
+    }
+
+    fn viewer_color_rejection(&self) -> Option<ViewerPreviewColorRejectionModel> {
+        self.last_color_rejection().map(|rejection| ViewerPreviewColorRejectionModel {
+            asset_id: rejection.asset_id,
+            path: rejection.path,
+            missing_metadata_policy: rejection.missing_metadata_policy,
+            source: rejection.source,
+            override_color_space: rejection.override_color_space,
+            detected_color_space: rejection.detected_color_space,
+            working_color_space: rejection.working_color_space,
+            diagnostic_summary: rejection.diagnostic_summary,
+        })
     }
 }
 
