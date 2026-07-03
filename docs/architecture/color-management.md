@@ -47,6 +47,7 @@ same rule for the embedded `mondrian_default_ocio_v1` asset.
 Important fields:
 
 - `workflow`: DisplayReferred, SceneReferred, Aces
+- `display_management`: monitor/profile reference, viewer SDR/HDR mode, and tone-map policy
 - `missing_metadata_policy`
 - `nested_processing`
 - `output_color_space`
@@ -237,6 +238,14 @@ presentation context with a caller-provided display/output color space.
 `SequenceSettings::root_export_color_context(...)` builds the delivery context
 from the sequence output color space. Callers must choose one of these explicit
 entry points instead of using a generic root render context.
+
+Display management is explicit in the resolved `ColorContext`. Project settings
+own the default `DisplayManagementPolicy`; sequences inherit that policy unless
+they disable color-management inheritance. The policy carries the monitor/profile
+reference, viewer SDR/HDR mode, and tone-map policy. `DisplayToneMapPolicy`
+resolves the concrete `tone_map` flag for working -> output boundaries,
+including HDR-working to SDR-output presentation, so preview, export, cache
+keys, and future diagnostics do not infer tone mapping from scattered booleans.
 
 For `MondrianSmart` and explicit `Ocio` engines, root sequence contexts copy
 the currently loaded OCIO config's default display/view into the context when

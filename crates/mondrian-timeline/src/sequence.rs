@@ -1,7 +1,9 @@
 //! 序列（时间线）
 
 use crate::{clip::ActiveClip, track::Track};
-use mondrian_core::{types::*, VideoContentLightMetadata, VideoMasteringDisplayMetadata};
+use mondrian_core::{
+    types::*, DisplayManagementPolicy, VideoContentLightMetadata, VideoMasteringDisplayMetadata,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -170,6 +172,10 @@ pub struct SequenceColorManagement {
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     #[serde(default)]
     pub nested_processing: NestedColorProcessing,
+    /// Display/monitor/tone-map policy used when this sequence does not inherit
+    /// project-level color management.
+    #[serde(default)]
+    pub display_management: DisplayManagementPolicy,
     #[serde(default = "default_output_color_space")]
     pub output_color_space: ColorSpace,
     #[serde(default)]
@@ -198,6 +204,8 @@ pub struct ColorContext {
     pub nested_processing: NestedColorProcessing,
     pub engine: ColorEngine,
     pub missing_metadata_policy: MissingColorMetadataPolicy,
+    /// Resolved display-management policy for this render context.
+    pub display_management: DisplayManagementPolicy,
     /// OCIO 显示设备名（仅在 OCIO 引擎 + 预览路径使用）。
     pub ocio_display: Option<String>,
     /// OCIO 视图名（仅在 OCIO 引擎 + 预览路径使用）。
@@ -212,6 +220,7 @@ impl Default for SequenceColorManagement {
             engine: ColorEngine::default(),
             missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
             nested_processing: NestedColorProcessing::PreserveChildWorkingSpace,
+            display_management: DisplayManagementPolicy::default(),
             output_color_space: ColorSpace::Rec709,
             video_range: VideoRange::Full,
             export_bit_depth: ExportBitDepth::SixteenFloat,
@@ -427,14 +436,23 @@ impl SequenceSettings {
         } else {
             self.color_management.engine.clone()
         };
+        let display_management = if self.color_management.inherit {
+            project_cm.display_management.clone()
+        } else {
+            self.color_management.display_management.clone()
+        };
 
         // SceneReferred and Aces workflows always need a view transform
         // (tone map) when output is display-referred (SDR).
-        let tone_map = self.auto_tone_map_media
-            || matches!(
+        let tone_map = display_management.tone_map_policy.resolve(
+            self.auto_tone_map_media,
+            matches!(
                 self.color_management.workflow,
                 ColorWorkflow::SceneReferred | ColorWorkflow::Aces
-            );
+            ),
+            self.color_space,
+            output_color_space,
+        );
 
         // Auto-populate OCIO display/view from config defaults.
         let (ocio_display, ocio_view) = if matches!(
@@ -455,6 +473,7 @@ impl SequenceSettings {
             nested_processing: self.color_management.nested_processing,
             engine,
             missing_metadata_policy: self.color_management.missing_metadata_policy,
+            display_management,
             ocio_display,
             ocio_view,
             workflow: self.color_management.workflow,
@@ -476,6 +495,7 @@ impl SequenceSettings {
                     nested_processing: self.color_management.nested_processing,
                     engine,
                     missing_metadata_policy: self.color_management.missing_metadata_policy,
+                    display_management: parent.display_management.clone(),
                     ocio_display: parent.ocio_display.clone(),
                     ocio_view: parent.ocio_view.clone(),
                     workflow: self.color_management.workflow,
@@ -488,6 +508,7 @@ impl SequenceSettings {
                 nested_processing: self.color_management.nested_processing,
                 engine: parent.engine.clone(),
                 missing_metadata_policy: parent.missing_metadata_policy,
+                display_management: parent.display_management.clone(),
                 ocio_display: parent.ocio_display.clone(),
                 ocio_view: parent.ocio_view.clone(),
                 workflow: parent.workflow,
@@ -505,6 +526,7 @@ impl SequenceSettings {
                     nested_processing: self.color_management.nested_processing,
                     engine,
                     missing_metadata_policy: self.color_management.missing_metadata_policy,
+                    display_management: parent.display_management.clone(),
                     ocio_display: parent.ocio_display.clone(),
                     ocio_view: parent.ocio_view.clone(),
                     workflow: self.color_management.workflow,
@@ -1031,7 +1053,7 @@ mod tests {
     use mondrian_core::automation::{
         timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
     };
-    use mondrian_core::ProjectColorManagement;
+    use mondrian_core::{DisplayToneMapPolicy, ProjectColorManagement};
 
     #[test]
     fn sequence_active_clips() {
@@ -1444,6 +1466,90 @@ mod tests {
     }
 
     #[test]
+    fn display_management_policy_inherits_from_project_color_management() {
+        let project_cm = ProjectColorManagement {
+            engine: ColorEngine::MondrianSmart,
+            display_management: DisplayManagementPolicy {
+                monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(
+                    ColorSpace::DciP3,
+                ),
+                viewer_mode: mondrian_core::ViewerDisplayMode::HdrPq,
+                tone_map_policy: DisplayToneMapPolicy::Always,
+            },
+        };
+        let mut settings = SequenceSettings::default();
+        settings.color_management.inherit = true;
+        settings.color_management.display_management = DisplayManagementPolicy {
+            monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Srgb),
+            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+            tone_map_policy: DisplayToneMapPolicy::Never,
+        };
+
+        let ctx = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Pq);
+
+        assert_eq!(ctx.display_management, project_cm.display_management);
+        assert!(ctx.tone_map);
+        assert_eq!(
+            ctx.display_management.viewer_mode.resolve(ctx.output_color_space),
+            mondrian_core::ResolvedViewerDisplayMode::HdrPq
+        );
+    }
+
+    #[test]
+    fn sequence_display_management_override_controls_tone_map_policy() {
+        let project_cm = ProjectColorManagement {
+            engine: ColorEngine::MondrianSmart,
+            display_management: DisplayManagementPolicy {
+                tone_map_policy: DisplayToneMapPolicy::Always,
+                ..Default::default()
+            },
+        };
+        let mut settings = SequenceSettings {
+            color_space: ColorSpace::Rec2100Pq,
+            auto_tone_map_media: true,
+            ..Default::default()
+        };
+        settings.color_management.inherit = false;
+        settings.color_management.display_management = DisplayManagementPolicy {
+            tone_map_policy: DisplayToneMapPolicy::Never,
+            ..Default::default()
+        };
+
+        let ctx = settings.root_preview_color_context(&project_cm, ColorSpace::Rec709);
+
+        assert_eq!(
+            ctx.display_management.tone_map_policy,
+            DisplayToneMapPolicy::Never
+        );
+        assert!(
+            !ctx.tone_map,
+            "explicit sequence display policy should be able to bypass tone mapping"
+        );
+    }
+
+    #[test]
+    fn automatic_display_policy_tone_maps_hdr_working_space_to_sdr_output() {
+        let settings = SequenceSettings {
+            color_space: ColorSpace::Rec2100Pq,
+            auto_tone_map_media: false,
+            color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::DisplayReferred,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let ctx = settings
+            .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
+
+        assert!(ctx.tone_map);
+        assert_eq!(
+            ctx.display_management.viewer_mode.resolve(ctx.output_color_space),
+            mondrian_core::ResolvedViewerDisplayMode::Sdr
+        );
+    }
+
+    #[test]
     fn ocio_engine_populates_display_view_in_context() {
         let mut settings = SequenceSettings::default();
         settings.color_management.inherit = false;
@@ -1473,6 +1579,7 @@ mod tests {
             engine: ColorEngine::Ocio {
                 source: OcioConfigSource::Builtin { name: String::from("aces_1.2") },
             },
+            display_management: DisplayManagementPolicy::default(),
         };
 
         // inherit=true → use project engine

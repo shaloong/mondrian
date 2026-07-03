@@ -3,7 +3,7 @@
 //! 持久化项目文档由 `mondrian-project` 定义；这里保留跨 crate 共享的
 //! 项目元数据和项目级设置。
 
-use crate::types::*;
+use crate::{types::*, DisplayManagementPolicy};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -50,6 +50,9 @@ pub struct ProjectColorManagement {
     /// policy over the bundled OCIO config.
     #[serde(default)]
     pub engine: ColorEngine,
+    /// Project-level display-management policy inherited by sequences.
+    #[serde(default)]
+    pub display_management: DisplayManagementPolicy,
 }
 
 /// 项目全局设置

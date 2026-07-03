@@ -1,8 +1,144 @@
 //! UI-facing color models and parsing helpers.
 
-use crate::types::Color;
+use crate::types::{Color, ColorSpace};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Display or monitor profile reference used by preview presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum MonitorProfileReference {
+    /// Use the final output color space as the display profile contract.
+    #[default]
+    MatchOutputColorSpace,
+    /// Use a Mondrian-managed color space as the monitor profile.
+    ColorSpace(ColorSpace),
+    /// Use an OCIO display from the active config.
+    OcioDisplay {
+        /// OCIO display name.
+        display: String,
+    },
+    /// Use an externally managed ICC profile identified by product metadata.
+    IccProfile {
+        /// Stable profile identifier or absolute profile path chosen by the caller.
+        profile_id: String,
+    },
+}
+
+impl MonitorProfileReference {
+    /// Resolve the managed color space when this profile directly maps to one.
+    pub fn managed_color_space(&self, output_color_space: ColorSpace) -> Option<ColorSpace> {
+        match self {
+            Self::MatchOutputColorSpace => Some(output_color_space),
+            Self::ColorSpace(color_space) => Some(*color_space),
+            Self::OcioDisplay { .. } | Self::IccProfile { .. } => None,
+        }
+    }
+}
+
+/// Viewer presentation mode selected for display management.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ViewerDisplayMode {
+    /// Resolve SDR/HDR mode from the output color-space contract.
+    #[default]
+    MatchOutputColorSpace,
+    /// SDR viewer mode.
+    Sdr,
+    /// HDR viewer mode using PQ/ST 2084 semantics.
+    HdrPq,
+    /// HDR viewer mode using HLG semantics.
+    HdrHlg,
+}
+
+impl ViewerDisplayMode {
+    /// Resolve this mode against a concrete output color space.
+    pub fn resolve(self, output_color_space: ColorSpace) -> ResolvedViewerDisplayMode {
+        match self {
+            Self::MatchOutputColorSpace => match output_color_space {
+                ColorSpace::Rec2100Pq => ResolvedViewerDisplayMode::HdrPq,
+                ColorSpace::Rec2100Hlg => ResolvedViewerDisplayMode::HdrHlg,
+                _ => ResolvedViewerDisplayMode::Sdr,
+            },
+            Self::Sdr => ResolvedViewerDisplayMode::Sdr,
+            Self::HdrPq => ResolvedViewerDisplayMode::HdrPq,
+            Self::HdrHlg => ResolvedViewerDisplayMode::HdrHlg,
+        }
+    }
+}
+
+/// Concrete SDR/HDR mode after resolving a viewer policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResolvedViewerDisplayMode {
+    /// SDR presentation.
+    Sdr,
+    /// HDR presentation using PQ/ST 2084 semantics.
+    HdrPq,
+    /// HDR presentation using HLG semantics.
+    HdrHlg,
+}
+
+impl ResolvedViewerDisplayMode {
+    /// Whether this resolved viewer mode is HDR.
+    pub fn is_hdr(self) -> bool {
+        matches!(self, Self::HdrPq | Self::HdrHlg)
+    }
+}
+
+/// Policy for applying tone mapping at display/export output boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum DisplayToneMapPolicy {
+    /// Tone-map when the sequence/workflow/output contract requires it.
+    #[default]
+    Automatic,
+    /// Always request tone mapping at the output boundary.
+    Always,
+    /// Explicitly bypass tone mapping for technical monitoring or passthrough.
+    Never,
+}
+
+impl DisplayToneMapPolicy {
+    /// Resolve the concrete tone-map flag for a working -> output boundary.
+    pub fn resolve(
+        self,
+        auto_tone_map_media: bool,
+        scene_referred_workflow: bool,
+        working_color_space: ColorSpace,
+        output_color_space: ColorSpace,
+    ) -> bool {
+        match self {
+            Self::Automatic => {
+                auto_tone_map_media
+                    || scene_referred_workflow
+                    || (working_color_space.is_hdr() && !output_color_space.is_hdr())
+            }
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
+/// Display-management policy resolved by project/sequence settings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DisplayManagementPolicy {
+    /// Monitor/profile source used for preview presentation.
+    #[serde(default)]
+    pub monitor_profile: MonitorProfileReference,
+    /// SDR/HDR viewer mode policy.
+    #[serde(default)]
+    pub viewer_mode: ViewerDisplayMode,
+    /// Tone-map policy for output boundaries.
+    #[serde(default)]
+    pub tone_map_policy: DisplayToneMapPolicy,
+}
+
+impl Default for DisplayManagementPolicy {
+    fn default() -> Self {
+        Self {
+            monitor_profile: MonitorProfileReference::MatchOutputColorSpace,
+            viewer_mode: ViewerDisplayMode::MatchOutputColorSpace,
+            tone_map_policy: DisplayToneMapPolicy::Automatic,
+        }
+    }
+}
 
 /// Error returned when parsing a hex color string fails.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -437,5 +573,51 @@ mod tests {
         let color = Color::from_hsv(HsvColor { h: -120.0, s: 2.0, v: 2.0, a: -1.0 });
         assert_eq!(color.to_rgba8()[3], 0);
         assert_close(color.to_hsv().h, 240.0);
+    }
+
+    #[test]
+    fn viewer_display_mode_resolves_from_output_color_space() {
+        assert_eq!(
+            ViewerDisplayMode::MatchOutputColorSpace.resolve(ColorSpace::Rec709),
+            ResolvedViewerDisplayMode::Sdr
+        );
+        assert_eq!(
+            ViewerDisplayMode::MatchOutputColorSpace.resolve(ColorSpace::Rec2100Pq),
+            ResolvedViewerDisplayMode::HdrPq
+        );
+        assert_eq!(
+            ViewerDisplayMode::MatchOutputColorSpace.resolve(ColorSpace::Rec2100Hlg),
+            ResolvedViewerDisplayMode::HdrHlg
+        );
+        assert!(ResolvedViewerDisplayMode::HdrPq.is_hdr());
+        assert!(!ResolvedViewerDisplayMode::Sdr.is_hdr());
+    }
+
+    #[test]
+    fn display_tone_map_policy_resolves_boundary_flag() {
+        assert!(DisplayToneMapPolicy::Automatic.resolve(
+            false,
+            false,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec709
+        ));
+        assert!(DisplayToneMapPolicy::Automatic.resolve(
+            false,
+            true,
+            ColorSpace::Rec709,
+            ColorSpace::Rec2100Pq
+        ));
+        assert!(DisplayToneMapPolicy::Always.resolve(
+            false,
+            false,
+            ColorSpace::Rec709,
+            ColorSpace::Rec709
+        ));
+        assert!(!DisplayToneMapPolicy::Never.resolve(
+            true,
+            true,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec709
+        ));
     }
 }

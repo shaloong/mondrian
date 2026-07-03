@@ -1291,6 +1291,7 @@ fn viewer_preview_cache_key_for_resolved_plan(
     color_context.output_color_space.hash(&mut hasher);
     color_context.tone_map.hash(&mut hasher);
     color_context.engine.hash(&mut hasher);
+    color_context.display_management.hash(&mut hasher);
     color_context.ocio_display.hash(&mut hasher);
     color_context.ocio_view.hash(&mut hasher);
     elements.len().hash(&mut hasher);
@@ -1820,6 +1821,40 @@ mod tests {
             viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &rec709);
         let second =
             viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &srgb);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn resolved_media_preview_cache_key_includes_display_management_policy() {
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let resolved = vec![ResolvedPreviewElement::Media {
+            frame: test_media_frame_with_size(0, 2, 2, 100),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            effect_graph,
+            frame_seed: 12,
+        }];
+        let sequence_id = SequenceId::new();
+
+        let mut sdr = test_color_context(ColorSpace::Rec709);
+        sdr.display_management = mondrian_core::DisplayManagementPolicy {
+            monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Rec709),
+            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+            tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+        };
+        let mut p3 = sdr.clone();
+        p3.display_management = mondrian_core::DisplayManagementPolicy {
+            monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::DciP3),
+            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+            tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+        };
+        let first =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &sdr);
+        let second =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &p3);
 
         assert_ne!(first, second);
     }
