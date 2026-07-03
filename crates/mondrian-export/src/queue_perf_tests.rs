@@ -2,9 +2,10 @@ use super::*;
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 use mondrian_renderer::{
-    composite_timeline_elements_into, execute_cpu_input_stage, CpuEncodedColorFrame,
-    RenderColorStageDiagnostics, RenderInputTransform, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
+    composite_timeline_elements_color_frame_with_diagnostics, execute_cpu_input_stage,
+    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderInputTransform,
+    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineMediaLayer,
 };
 use serde::Serialize;
 use std::cmp;
@@ -50,6 +51,7 @@ struct ExportPerfSimReport {
     color_stage_readback_stages: u64,
     color_stage_gpu_blockers: u64,
     color_stage_pixels: u64,
+    color_health: ExportJobColorDiagnosticsSummary,
     passed: bool,
 }
 
@@ -163,13 +165,12 @@ fn build_frame_layers(
     out
 }
 
-fn compose_frame_layers_into_canvas(
-    canvas: &mut Vec<u8>,
+fn compose_frame_layers_with_diagnostics(
     width: u32,
     height: u32,
     layers: &[(Arc<DecodedVideoLayer>, f32)],
     frame_idx: u64,
-) {
+) -> TimelineCompositeDiagnostics {
     let mut scratch = TimelineCompositeScratch::default();
     let elements = layers
         .iter()
@@ -185,14 +186,15 @@ fn compose_frame_layers_into_canvas(
             })
         })
         .collect::<Vec<_>>();
-    composite_timeline_elements_into(
-        canvas,
+    composite_timeline_elements_color_frame_with_diagnostics(
         width,
         height,
         &elements,
         TimelineCompositeOptions::default(),
+        ColorSpace::Rec709,
         &mut scratch,
-    );
+    )
+    .diagnostics
 }
 
 fn run_export_render_simulation(
@@ -217,8 +219,8 @@ fn run_export_render_simulation(
         layers.push(layer);
     }
 
-    let mut canvas = vec![0u8; (width as usize) * (height as usize) * 4];
     let mut passthrough_frames = 0usize;
+    let mut color_diagnostics = ExportJobColorDiagnostics::default();
     let pattern_name = match pattern {
         OpacityPattern::Blend => "blend",
         OpacityPattern::Passthrough => "passthrough",
@@ -230,8 +232,14 @@ fn run_export_render_simulation(
         && first_frame_layers[0].0.frame.descriptor().width == width
         && first_frame_layers[0].0.frame.descriptor().height == height;
     let first_started = Instant::now();
-    compose_frame_layers_into_canvas(&mut canvas, width, height, &first_frame_layers, 0);
+    let first_composite_diagnostics =
+        compose_frame_layers_with_diagnostics(width, height, &first_frame_layers, 0);
     let first_frame_ms = first_started.elapsed().as_millis();
+    color_diagnostics.record_frame_diagnostics(
+        InputColorResolutionSourceCounts::default(),
+        color_stage_diagnostics,
+        first_composite_diagnostics,
+    );
     if first_frame_passthrough {
         passthrough_frames += 1;
     }
@@ -248,8 +256,14 @@ fn run_export_render_simulation(
             && frame_layers[0].0.frame.descriptor().height == height;
 
         let started = Instant::now();
-        compose_frame_layers_into_canvas(&mut canvas, width, height, &frame_layers, frame + 1);
+        let composite_diagnostics =
+            compose_frame_layers_with_diagnostics(width, height, &frame_layers, frame + 1);
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        color_diagnostics.record_frame_diagnostics(
+            InputColorResolutionSourceCounts::default(),
+            RenderColorStageDiagnostics::default(),
+            composite_diagnostics,
+        );
 
         if frame_passthrough {
             passthrough_frames += 1;
@@ -271,6 +285,7 @@ fn run_export_render_simulation(
     } else {
         0.0
     };
+    let color_health = color_diagnostics.summary().expect("export perf color diagnostics");
 
     let simulated_total = sim_frames.saturating_add(1);
     let passthrough_ratio_pct = if simulated_total > 0 {
@@ -313,6 +328,7 @@ fn run_export_render_simulation(
         color_stage_readback_stages: color_stage_diagnostics.readback_stages,
         color_stage_gpu_blockers: color_stage_diagnostics.gpu_blockers,
         color_stage_pixels: color_stage_diagnostics.stage_pixels,
+        color_health,
         passed,
     })
 }
@@ -351,6 +367,47 @@ fn run_and_report_scenario(
         );
     }
     Ok(())
+}
+
+#[test]
+fn export_perf_sim_report_includes_color_health_summary() {
+    let report = run_export_render_simulation(
+        "export-color-health-test",
+        8,
+        4,
+        30.0,
+        2,
+        1,
+        1_000,
+        1.0,
+        60.0,
+        OpacityPattern::Passthrough,
+    )
+    .expect("export perf report");
+
+    assert_eq!(report.color_health.diagnosed_frames, 3);
+    assert_eq!(
+        report.color_health.cpu_input_stages,
+        report.color_stage_cpu_input_stages
+    );
+    assert_eq!(
+        report.color_health.gpu_blockers,
+        report.color_stage_gpu_blockers
+    );
+    assert_eq!(report.color_health.legacy_reason_total, 0);
+    assert!(report.color_health.fully_float_linear);
+    assert!(report.color_health.gpu_path_ready);
+
+    let report_json = serde_json::to_value(&report).expect("serialize report");
+    assert!(report_json.get("color_health").is_some());
+    assert_eq!(
+        report_json["color_health"]["gpu_blocker_breakdown"]["render_pipeline_not_prepared"],
+        0
+    );
+    assert_eq!(
+        report_json["color_health"]["legacy_breakdown"]["media_transform"],
+        0
+    );
 }
 
 #[test]
