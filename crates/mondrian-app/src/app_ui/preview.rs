@@ -180,6 +180,19 @@ impl AppUiPreviewService {
             color_stage_upload_stages: self.metrics.color_stage_upload_stages.get(),
             color_stage_readback_stages: self.metrics.color_stage_readback_stages.get(),
             color_stage_gpu_blockers: self.metrics.color_stage_gpu_blockers.get(),
+            color_stage_gpu_shader_module_blockers: self
+                .metrics
+                .color_stage_gpu_shader_module_blockers
+                .get(),
+            color_stage_gpu_ocio_resource_blockers: self
+                .metrics
+                .color_stage_gpu_ocio_resource_blockers
+                .get(),
+            color_stage_gpu_wrapper_blockers: self.metrics.color_stage_gpu_wrapper_blockers.get(),
+            color_stage_gpu_render_pipeline_blockers: self
+                .metrics
+                .color_stage_gpu_render_pipeline_blockers
+                .get(),
             color_stage_pixels: self.metrics.color_stage_pixels.get(),
             color_composite_plans: self.metrics.color_composite_plans.get(),
             color_composite_elements: self.metrics.color_composite_elements.get(),
@@ -582,6 +595,22 @@ impl AppUiPreviewService {
             &self.metrics.color_stage_gpu_blockers,
             diagnostics.gpu_blockers,
         );
+        add_cell(
+            &self.metrics.color_stage_gpu_shader_module_blockers,
+            diagnostics.gpu_blocker_breakdown.shader_module_not_prepared,
+        );
+        add_cell(
+            &self.metrics.color_stage_gpu_ocio_resource_blockers,
+            diagnostics.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared,
+        );
+        add_cell(
+            &self.metrics.color_stage_gpu_wrapper_blockers,
+            diagnostics.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
+        );
+        add_cell(
+            &self.metrics.color_stage_gpu_render_pipeline_blockers,
+            diagnostics.gpu_blocker_breakdown.render_pipeline_not_prepared,
+        );
         add_cell(&self.metrics.color_stage_pixels, diagnostics.stage_pixels);
     }
 
@@ -897,6 +926,14 @@ pub struct AppUiPreviewDiagnostics {
     pub color_stage_readback_stages: u64,
     /// GPU color stage blockers surfaced by preview.
     pub color_stage_gpu_blockers: u64,
+    /// GPU blockers caused by missing shader modules.
+    pub color_stage_gpu_shader_module_blockers: u64,
+    /// GPU blockers caused by missing OCIO LUT/uniform bind groups.
+    pub color_stage_gpu_ocio_resource_blockers: u64,
+    /// GPU blockers caused by missing fullscreen wrappers.
+    pub color_stage_gpu_wrapper_blockers: u64,
+    /// GPU blockers caused by missing render pipelines.
+    pub color_stage_gpu_render_pipeline_blockers: u64,
     /// Pixels covered by preview color stage plans.
     pub color_stage_pixels: u64,
     /// Timeline composite plans executed by preview.
@@ -1882,6 +1919,10 @@ struct AppUiPreviewMetrics {
     color_stage_upload_stages: Cell<u64>,
     color_stage_readback_stages: Cell<u64>,
     color_stage_gpu_blockers: Cell<u64>,
+    color_stage_gpu_shader_module_blockers: Cell<u64>,
+    color_stage_gpu_ocio_resource_blockers: Cell<u64>,
+    color_stage_gpu_wrapper_blockers: Cell<u64>,
+    color_stage_gpu_render_pipeline_blockers: Cell<u64>,
     color_stage_pixels: Cell<u64>,
     color_composite_plans: Cell<u64>,
     color_composite_elements: Cell<u64>,
@@ -2247,7 +2288,7 @@ mod tests {
     use mondrian_core::types::{AssetId, TimeCode};
     use mondrian_core::{Color, ProjectColorManagement};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
-    use mondrian_renderer::ColorFrameDomain;
+    use mondrian_renderer::{ColorFrameDomain, RenderColorStageGpuBlockerBreakdown};
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
     use mondrian_timeline::track::Track;
@@ -2448,11 +2489,40 @@ mod tests {
         assert_eq!(diagnostics.color_stage_upload_stages, 0);
         assert_eq!(diagnostics.color_stage_readback_stages, 0);
         assert_eq!(diagnostics.color_stage_gpu_blockers, 0);
+        assert_eq!(diagnostics.color_stage_gpu_shader_module_blockers, 0);
+        assert_eq!(diagnostics.color_stage_gpu_ocio_resource_blockers, 0);
+        assert_eq!(diagnostics.color_stage_gpu_wrapper_blockers, 0);
+        assert_eq!(diagnostics.color_stage_gpu_render_pipeline_blockers, 0);
         assert_eq!(diagnostics.color_stage_pixels, 960_u64 * 540);
         assert_eq!(diagnostics.color_composite_plans, 1);
         assert_eq!(diagnostics.color_composite_elements, 1);
         assert_eq!(diagnostics.color_composite_float_linear, 1);
         assert_eq!(diagnostics.color_composite_legacy_rgba8, 0);
+    }
+
+    #[test]
+    fn preview_diagnostics_count_gpu_stage_blocker_breakdown() {
+        let service = AppUiPreviewService::new();
+        service.record_color_stage(RenderColorStageDiagnostics {
+            total_stages: 1,
+            gpu_color_stages: 1,
+            gpu_blockers: 4,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                shader_module_not_prepared: 1,
+                ocio_resource_bind_group_not_prepared: 1,
+                fullscreen_wrapper_not_prepared: 1,
+                render_pipeline_not_prepared: 1,
+            },
+            ..RenderColorStageDiagnostics::default()
+        });
+
+        let diagnostics = service.diagnostics();
+
+        assert_eq!(diagnostics.color_stage_gpu_blockers, 4);
+        assert_eq!(diagnostics.color_stage_gpu_shader_module_blockers, 1);
+        assert_eq!(diagnostics.color_stage_gpu_ocio_resource_blockers, 1);
+        assert_eq!(diagnostics.color_stage_gpu_wrapper_blockers, 1);
+        assert_eq!(diagnostics.color_stage_gpu_render_pipeline_blockers, 1);
     }
 
     #[test]

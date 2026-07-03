@@ -9,7 +9,7 @@ use crate::{
     OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
     OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
     OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
-    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBindGroupPreparer,
+    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuBlocker,
     OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup, OcioGpuWgpuRenderPassError,
     OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
     OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
@@ -126,8 +126,69 @@ pub struct RenderColorStageDiagnostics {
     pub readback_stages: u64,
     /// Native GPU blockers exposed by planned GPU stages.
     pub gpu_blockers: u64,
+    /// Structured native GPU blocker breakdown.
+    pub gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
     /// Sum of pixels touched by scheduled stages.
     pub stage_pixels: u64,
+}
+
+/// Aggregated native GPU blocker reasons in a color stage plan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderColorStageGpuBlockerBreakdown {
+    /// Backend shader module has not been prepared.
+    pub shader_module_not_prepared: u64,
+    /// OCIO LUT/uniform resources are not connected to a concrete bind group.
+    pub ocio_resource_bind_group_not_prepared: u64,
+    /// Fullscreen wrapper shader is missing.
+    pub fullscreen_wrapper_not_prepared: u64,
+    /// Final render pipeline/render-pass node is missing.
+    pub render_pipeline_not_prepared: u64,
+}
+
+impl RenderColorStageGpuBlockerBreakdown {
+    /// Total counted native GPU blockers.
+    pub fn total(self) -> u64 {
+        self.shader_module_not_prepared
+            .saturating_add(self.ocio_resource_bind_group_not_prepared)
+            .saturating_add(self.fullscreen_wrapper_not_prepared)
+            .saturating_add(self.render_pipeline_not_prepared)
+    }
+
+    /// Record one native GPU blocker.
+    pub fn record(&mut self, blocker: &OcioGpuWgpuBlocker) {
+        match blocker {
+            OcioGpuWgpuBlocker::ShaderModuleNotPrepared { .. } => {
+                self.shader_module_not_prepared = self.shader_module_not_prepared.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::OcioResourceBindGroupNotPrepared { .. } => {
+                self.ocio_resource_bind_group_not_prepared =
+                    self.ocio_resource_bind_group_not_prepared.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::FullscreenWrapperNotPrepared => {
+                self.fullscreen_wrapper_not_prepared =
+                    self.fullscreen_wrapper_not_prepared.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::RenderPipelineNotPrepared => {
+                self.render_pipeline_not_prepared =
+                    self.render_pipeline_not_prepared.saturating_add(1);
+            }
+        }
+    }
+
+    /// Add counts from another breakdown.
+    pub fn accumulate(&mut self, other: Self) {
+        self.shader_module_not_prepared =
+            self.shader_module_not_prepared.saturating_add(other.shader_module_not_prepared);
+        self.ocio_resource_bind_group_not_prepared = self
+            .ocio_resource_bind_group_not_prepared
+            .saturating_add(other.ocio_resource_bind_group_not_prepared);
+        self.fullscreen_wrapper_not_prepared = self
+            .fullscreen_wrapper_not_prepared
+            .saturating_add(other.fullscreen_wrapper_not_prepared);
+        self.render_pipeline_not_prepared = self
+            .render_pipeline_not_prepared
+            .saturating_add(other.render_pipeline_not_prepared);
+    }
 }
 
 impl RenderColorStageDiagnostics {
@@ -140,6 +201,7 @@ impl RenderColorStageDiagnostics {
         self.upload_stages = self.upload_stages.saturating_add(other.upload_stages);
         self.readback_stages = self.readback_stages.saturating_add(other.readback_stages);
         self.gpu_blockers = self.gpu_blockers.saturating_add(other.gpu_blockers);
+        self.gpu_blocker_breakdown.accumulate(other.gpu_blocker_breakdown);
         self.stage_pixels = self.stage_pixels.saturating_add(other.stage_pixels);
     }
 }
@@ -183,6 +245,9 @@ impl RenderColorStagePlan {
                     diagnostics.gpu_color_stages = diagnostics.gpu_color_stages.saturating_add(1);
                     diagnostics.gpu_blockers =
                         diagnostics.gpu_blockers.saturating_add(plan.wgpu.blockers.len() as u64);
+                    for blocker in &plan.wgpu.blockers {
+                        diagnostics.gpu_blocker_breakdown.record(blocker);
+                    }
                 }
                 RenderColorStage::ReadbackToCpu { .. } => {
                     diagnostics.readback_stages = diagnostics.readback_stages.saturating_add(1);
@@ -1936,6 +2001,7 @@ mod tests {
         gpu_color_stages: u64,
         readback_stages: u64,
         gpu_blockers: u64,
+        gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
         stage_pixels: u64,
     }
 
@@ -1947,6 +2013,7 @@ mod tests {
                 gpu_color_stages: diagnostics.gpu_color_stages,
                 readback_stages: diagnostics.readback_stages,
                 gpu_blockers: diagnostics.gpu_blockers,
+                gpu_blocker_breakdown: diagnostics.gpu_blocker_breakdown,
                 stage_pixels: diagnostics.stage_pixels,
             }
         }
@@ -2546,6 +2613,41 @@ mod tests {
         assert_eq!(diagnostics.gpu_color_stages, 1);
         assert_eq!(diagnostics.readback_stages, 1);
         assert_eq!(diagnostics.gpu_blockers, 0);
+    }
+
+    #[test]
+    fn color_stage_diagnostics_break_down_gpu_blocker_reasons() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let mut plan = gpu_output_stage_plan_for_frame(&frame);
+        add_gpu_stage_blocker_reason(
+            &mut plan,
+            OcioGpuWgpuBlocker::ShaderModuleNotPrepared { language: GpuLanguage::Glsl4_0 },
+        );
+        add_gpu_stage_blocker_reason(
+            &mut plan,
+            OcioGpuWgpuBlocker::OcioResourceBindGroupNotPrepared {
+                texture_2d_count: 2,
+                texture_3d_count: 1,
+                uniform_buffers: 1,
+            },
+        );
+        add_gpu_stage_blocker_reason(&mut plan, OcioGpuWgpuBlocker::FullscreenWrapperNotPrepared);
+        add_gpu_stage_blocker_reason(&mut plan, OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+
+        let diagnostics = plan.diagnostics();
+
+        assert_eq!(diagnostics.gpu_blockers, 4);
+        assert_eq!(diagnostics.gpu_blocker_breakdown.total(), 4);
+        assert_eq!(
+            diagnostics.gpu_blocker_breakdown,
+            RenderColorStageGpuBlockerBreakdown {
+                shader_module_not_prepared: 1,
+                ocio_resource_bind_group_not_prepared: 1,
+                fullscreen_wrapper_not_prepared: 1,
+                render_pipeline_not_prepared: 1,
+            }
+        );
     }
 
     #[test]
@@ -3399,9 +3501,16 @@ mod tests {
     }
 
     fn add_gpu_stage_blocker(stage_plan: &mut RenderColorStagePlan) {
+        add_gpu_stage_blocker_reason(stage_plan, OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+    }
+
+    fn add_gpu_stage_blocker_reason(
+        stage_plan: &mut RenderColorStagePlan,
+        blocker: OcioGpuWgpuBlocker,
+    ) {
         for stage in &mut stage_plan.stages {
             if let RenderColorStage::GpuColorTransform { plan, .. } = stage {
-                plan.wgpu.blockers.push(OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+                plan.wgpu.blockers.push(blocker.clone());
             }
         }
     }
