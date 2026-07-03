@@ -34,6 +34,53 @@ pub enum AlphaInterpretation {
     Ignore,
 }
 
+/// User-selected color interpretation mode for a media asset.
+///
+/// `Auto` stores user intent, not a resolved color space. The active color
+/// space is resolved at runtime from media metadata, detection policy, and
+/// project color management settings. `Override` is the only mode that pins a
+/// user-authored interpretation and must not be replaced by later auto-detect
+/// improvements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum MediaColorInterpretation {
+    /// Resolve color interpretation automatically from media metadata and
+    /// project color management policy.
+    #[default]
+    Auto,
+    /// Treat the asset as data/non-color content. Color transforms must not be
+    /// applied to the asset payload.
+    Data,
+    /// Use this explicit user override instead of detected media metadata.
+    Override {
+        /// The color space selected by the user.
+        color_space: ColorSpace,
+    },
+}
+
+impl MediaColorInterpretation {
+    /// Returns the user override color space when this interpretation pins one.
+    pub fn override_color_space(self) -> Option<ColorSpace> {
+        match self {
+            Self::Override { color_space } => Some(color_space),
+            Self::Auto | Self::Data => None,
+        }
+    }
+}
+
+/// Persistent media interpretation stored on an asset library record.
+///
+/// This is deliberately separated from probe results. Asset records keep the
+/// user's mode (`Auto`, `Override`, or `Data`); resolved diagnostics remain
+/// runtime data so detector/config upgrades can improve Auto behavior without
+/// rewriting library state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AssetMediaInterpretation {
+    /// Color interpretation intent for the asset.
+    #[serde(default)]
+    pub color: MediaColorInterpretation,
+}
+
 /// Overrides for media asset metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MediaInterpretation {

@@ -42,6 +42,12 @@ Dropdowns, context menus, popovers, and tooltips should render through overlay p
 
 Menus, shortcut preferences, command palette, and future plugins should consume `app_ui::commands` descriptors. Menus are command presentation, not business logic owners.
 
+Opening an editor dialog is a shell action because it mutates transient UI state,
+not the undoable domain model. The dialog's committed payload must flow through a
+domain/app action owned by the target subsystem. For example, Asset Library →
+Interpret Footage opens an app-shell modal, but applying Auto/Override/Data is
+an asset-library mutation that persists `AssetMediaInterpretation`.
+
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback

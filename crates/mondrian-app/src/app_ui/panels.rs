@@ -8776,6 +8776,7 @@ mod tests {
             path,
             source: None,
             folder_id: None,
+            interpretation: mondrian_core::timeline_data::AssetMediaInterpretation::default(),
             media_info: mondrian_media::MediaInfo::synthetic_adjustment_layer(),
             created_at: "2026-06-19T00:00:00Z".to_owned(),
             updated_at: "2026-06-19T00:00:00Z".to_owned(),

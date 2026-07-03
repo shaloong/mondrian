@@ -33,4 +33,13 @@ Evidence records whether a result came from a camera/log metadata hint, exact
 CICP tags, partial CICP tags, unsupported CICP tags, or decoder unavailability.
 Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.
 
+Asset library records store persistent user intent separately as
+`AssetMediaInterpretation`. Imported media defaults to `Auto`; Auto means "resolve
+from current metadata, detector, and project color policy" and must not persist
+the currently resolved color space. User changes from the asset-library
+Interpret Footage dialog are stored as `Override { color_space }` or `Data` and
+must remain stable across metadata re-probes, relinks, and detector upgrades.
+UI may display the current resolved result beside Auto, but that resolved value
+comes from probe/color-management diagnostics rather than the asset record.
+
 Unknown/missing metadata policy is resolved at sequence color-management time, not by UI panels.

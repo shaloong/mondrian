@@ -1,7 +1,8 @@
 //! 素材库主入口
 
-use crate::schema::{INIT_SQL, MIGRATE_FOLDERS_SQL};
+use crate::schema::{INIT_SQL, MIGRATE_FOLDERS_SQL, MIGRATE_INTERPRETATION_SQL};
 use mondrian_core::{
+    timeline_data::AssetMediaInterpretation,
     types::{AssetId, AssetSource},
     MondrianError, Result,
 };
@@ -53,6 +54,8 @@ pub struct AssetRecord {
     pub source: Option<AssetSource>,
     #[serde(default)]
     pub folder_id: Option<String>,
+    #[serde(default)]
+    pub interpretation: AssetMediaInterpretation,
     pub media_info: MediaInfo,
     pub created_at: String,
     pub updated_at: String,
@@ -88,6 +91,7 @@ impl AssetLibrary {
 
         // Migrate existing databases that lack folder support.
         let _ = conn.execute_batch(MIGRATE_FOLDERS_SQL);
+        let _ = conn.execute_batch(MIGRATE_INTERPRETATION_SQL);
 
         info!("Asset library opened at {:?}", root);
         Ok(Arc::new(Self { root, db: Arc::new(Mutex::new(conn)) }))
@@ -140,11 +144,13 @@ impl AssetLibrary {
         };
 
         let metadata_json = serde_json::to_string(&info)?;
+        let interpretation_json = serde_json::to_string(&AssetMediaInterpretation::default())?;
         db.execute(
             "INSERT OR REPLACE INTO assets \
-             (id, name, asset_type, path, tags, metadata, created_at, updated_at) \
+             (id, name, asset_type, path, tags, metadata, interpretation, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, \
-                COALESCE((SELECT created_at FROM assets WHERE path = ?4), ?7), ?7)",
+                COALESCE((SELECT interpretation FROM assets WHERE path = ?4), ?7), \
+                COALESCE((SELECT created_at FROM assets WHERE path = ?4), ?8), ?8)",
             rusqlite::params![
                 id.0.to_string(),
                 name,
@@ -152,6 +158,7 @@ impl AssetLibrary {
                 path_str,
                 "[]",
                 metadata_json,
+                interpretation_json,
                 now
             ],
         )
@@ -172,12 +179,13 @@ impl AssetLibrary {
         // belongs to the timeline instance created from it, not this asset record.
         let synthetic_path = synthetic_adjustment_layer_path(asset_id);
         let metadata_json = serde_json::to_string(&MediaInfo::synthetic_adjustment_layer())?;
+        let interpretation_json = serde_json::to_string(&AssetMediaInterpretation::default())?;
         let db = self.db.lock();
 
         db.execute(
             "INSERT INTO assets \
-             (id, name, asset_type, path, tags, metadata, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+             (id, name, asset_type, path, tags, metadata, interpretation, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
             rusqlite::params![
                 asset_id.0.to_string(),
                 asset_name,
@@ -185,6 +193,7 @@ impl AssetLibrary {
                 synthetic_path.to_string_lossy().to_string(),
                 "[]",
                 metadata_json,
+                interpretation_json,
                 now
             ],
         )
@@ -203,12 +212,13 @@ impl AssetLibrary {
             .unwrap_or_else(|| self.next_solid_color_name());
         let synthetic_path = synthetic_solid_color_path(asset_id);
         let metadata_json = serde_json::to_string(&MediaInfo::synthetic_solid_color())?;
+        let interpretation_json = serde_json::to_string(&AssetMediaInterpretation::default())?;
         let db = self.db.lock();
 
         db.execute(
             "INSERT INTO assets \
-             (id, name, asset_type, path, tags, metadata, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+             (id, name, asset_type, path, tags, metadata, interpretation, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
             rusqlite::params![
                 asset_id.0.to_string(),
                 asset_name,
@@ -216,6 +226,7 @@ impl AssetLibrary {
                 synthetic_path.to_string_lossy().to_string(),
                 "[]",
                 metadata_json,
+                interpretation_json,
                 now
             ],
         )
@@ -284,6 +295,7 @@ impl AssetLibrary {
             let mut stmt = db
                 .prepare(
                     "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
+                     , interpretation \
                      FROM assets WHERE folder_id = ?1 ORDER BY updated_at DESC",
                 )
                 .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
@@ -296,6 +308,7 @@ impl AssetLibrary {
             let mut stmt = db
                 .prepare(
                     "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
+                     , interpretation \
                      FROM assets ORDER BY updated_at DESC",
                 )
                 .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
@@ -312,6 +325,7 @@ impl AssetLibrary {
         let mut stmt = db
             .prepare(
                 "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
+                 , interpretation \
                  FROM assets WHERE id = ?1 LIMIT 1",
             )
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
@@ -322,6 +336,37 @@ impl AssetLibrary {
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 
         Ok(result)
+    }
+
+    /// Persist the user-selected interpretation for an asset.
+    ///
+    /// This stores only user intent. Automatic detection results remain in
+    /// `MediaInfo`/runtime diagnostics and may change as detectors improve.
+    pub fn set_asset_interpretation(
+        &self,
+        asset_id: AssetId,
+        interpretation: AssetMediaInterpretation,
+    ) -> Result<()> {
+        let interpretation_json = serde_json::to_string(&interpretation)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let db = self.db.lock();
+        let changed = db
+            .execute(
+                "UPDATE assets SET interpretation = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![interpretation_json, now, asset_id.0.to_string()],
+            )
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+
+        if changed == 0 {
+            return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
+        }
+
+        Ok(())
+    }
+
+    /// Reset the asset interpretation to automatic detection.
+    pub fn reset_asset_interpretation(&self, asset_id: AssetId) -> Result<()> {
+        self.set_asset_interpretation(asset_id, AssetMediaInterpretation::default())
     }
 
     pub fn rename_asset(&self, asset_id: AssetId, new_name: &str) -> Result<()> {
@@ -678,6 +723,7 @@ fn parse_asset_row(row: &rusqlite::Row) -> rusqlite::Result<AssetRecord> {
     let metadata_raw: String = row.get(5)?;
     let created_at: String = row.get(6)?;
     let updated_at: String = row.get(7)?;
+    let interpretation_raw: String = row.get(8)?;
 
     let asset_id = Uuid::parse_str(&id_raw).map(AssetId).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -685,6 +731,10 @@ fn parse_asset_row(row: &rusqlite::Row) -> rusqlite::Result<AssetRecord> {
     let media_info = serde_json::from_str::<MediaInfo>(&metadata_raw).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
     })?;
+    let interpretation = serde_json::from_str::<AssetMediaInterpretation>(&interpretation_raw)
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
+        })?;
 
     Ok(AssetRecord {
         id: asset_id,
@@ -693,6 +743,7 @@ fn parse_asset_row(row: &rusqlite::Row) -> rusqlite::Result<AssetRecord> {
         path: PathBuf::from(path_raw),
         source: None, // legacy DB records; set for new assets only
         folder_id,
+        interpretation,
         media_info,
         created_at,
         updated_at,
@@ -745,6 +796,10 @@ fn detect_asset_kind(info: &MediaInfo, path: &Path) -> Result<AssetKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::{
+        timeline_data::{AssetMediaInterpretation, MediaColorInterpretation},
+        ColorSpace,
+    };
 
     fn open_test_library() -> Arc<AssetLibrary> {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -767,6 +822,7 @@ mod tests {
         let record = lib.get_asset(id).expect("get").expect("exists");
         assert_eq!(record.kind, AssetKind::AdjustmentLayer);
         assert_eq!(record.name, "Test Adjustment");
+        assert_eq!(record.interpretation, AssetMediaInterpretation::default());
         assert!(record.path.to_string_lossy().starts_with("mondrian://adjustment-layer/"));
     }
 
@@ -796,7 +852,57 @@ mod tests {
         let record = lib.get_asset(id).expect("get").expect("exists");
         assert_eq!(record.kind, AssetKind::SolidColor);
         assert_eq!(record.name, "Red Background");
+        assert_eq!(record.interpretation, AssetMediaInterpretation::default());
         assert!(record.path.to_string_lossy().starts_with("mondrian://solid-color/"));
+    }
+
+    #[test]
+    fn set_asset_interpretation_persists_user_override() {
+        let lib = open_test_library();
+        let id = lib.create_solid_color_asset(Some("Plate")).expect("create");
+        let interpretation = AssetMediaInterpretation {
+            color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+        };
+
+        lib.set_asset_interpretation(id, interpretation).expect("set interpretation");
+
+        let record = lib.get_asset(id).expect("get").expect("exists");
+        assert_eq!(record.interpretation, interpretation);
+        assert_eq!(
+            record.interpretation.color.override_color_space(),
+            Some(ColorSpace::Rec2100Pq)
+        );
+    }
+
+    #[test]
+    fn reset_asset_interpretation_returns_to_auto() {
+        let lib = open_test_library();
+        let id = lib.create_solid_color_asset(Some("Plate")).expect("create");
+        lib.set_asset_interpretation(
+            id,
+            AssetMediaInterpretation {
+                color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+            },
+        )
+        .expect("set interpretation");
+
+        lib.reset_asset_interpretation(id).expect("reset interpretation");
+
+        let record = lib.get_asset(id).expect("get").expect("exists");
+        assert_eq!(record.interpretation.color, MediaColorInterpretation::Auto);
+    }
+
+    #[test]
+    fn set_asset_interpretation_rejects_missing_asset() {
+        let lib = open_test_library();
+        let err = lib
+            .set_asset_interpretation(
+                AssetId::new(),
+                AssetMediaInterpretation { color: MediaColorInterpretation::Data },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, MondrianError::AssetNotFound { .. }));
     }
 
     #[test]

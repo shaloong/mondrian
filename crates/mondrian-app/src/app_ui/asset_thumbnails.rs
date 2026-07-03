@@ -222,6 +222,7 @@ fn thumbnail_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::timeline_data::AssetMediaInterpretation;
     use mondrian_media::MediaInfo;
 
     fn asset(kind: AssetKind, path: PathBuf) -> AssetRecord {
@@ -232,6 +233,7 @@ mod tests {
             path: path.clone(),
             source: None,
             folder_id: None,
+            interpretation: AssetMediaInterpretation::default(),
             media_info: MediaInfo::synthetic_solid_color(),
             created_at: String::new(),
             updated_at: String::new(),

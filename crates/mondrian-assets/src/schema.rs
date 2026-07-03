@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS assets (
     thumbnail   TEXT,
     tags        TEXT DEFAULT '[]',
     metadata    TEXT DEFAULT '{}',
+    interpretation TEXT DEFAULT '{"color":{"mode":"auto"}}',
     usage_count INTEGER DEFAULT 0,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
@@ -66,4 +67,9 @@ CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 
 ALTER TABLE assets ADD COLUMN folder_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_assets_folder ON assets(folder_id);
+"#;
+
+/// Migration SQL for existing databases that don't have asset interpretation.
+pub const MIGRATE_INTERPRETATION_SQL: &str = r#"
+ALTER TABLE assets ADD COLUMN interpretation TEXT DEFAULT '{"color":{"mode":"auto"}}';
 "#;
