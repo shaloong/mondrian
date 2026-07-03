@@ -388,6 +388,71 @@ pub fn blend_rgba_pixel_seeded(
     out
 }
 
+/// Blend one straight-alpha working-space `f32` RGBA pixel over another.
+///
+/// This mirrors the legacy RGBA8 blend semantics without quantizing the color
+/// channels, so renderer float/linear paths can apply timeline blend modes
+/// without crossing a temporary RGBA8 boundary.
+pub fn blend_rgba_f32_pixel(
+    base_px: [f32; 4],
+    blend_px: [f32; 4],
+    opacity: f32,
+    blend_mode: BlendMode,
+) -> [f32; 4] {
+    blend_rgba_f32_pixel_seeded(base_px, blend_px, opacity, blend_mode, 0)
+}
+
+/// Blend one straight-alpha working-space `f32` RGBA pixel with a stable seed.
+///
+/// The seed is used by `BlendMode::Dissolve` to keep dither decisions stable
+/// across preview/export paths that share the same frame and pixel identity.
+pub fn blend_rgba_f32_pixel_seeded(
+    base_px: [f32; 4],
+    blend_px: [f32; 4],
+    opacity: f32,
+    blend_mode: BlendMode,
+    dither_seed: u32,
+) -> [f32; 4] {
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 1.0e-4 {
+        return base_px;
+    }
+
+    let base_alpha = base_px[3].clamp(0.0, 1.0);
+    let blend_alpha = (blend_px[3] * opacity).clamp(0.0, 1.0);
+    if blend_alpha <= 1.0e-4 {
+        return base_px;
+    }
+    if base_alpha <= 1.0e-4 {
+        return [blend_px[0], blend_px[1], blend_px[2], blend_alpha];
+    }
+
+    if blend_mode == BlendMode::Dissolve {
+        let threshold = hash_u32(dither_seed) as f32 / u32::MAX as f32;
+        if threshold > opacity {
+            return base_px;
+        }
+        return [blend_px[0], blend_px[1], blend_px[2], blend_alpha];
+    }
+
+    let base_rgb = [base_px[0], base_px[1], base_px[2]];
+    let blend_rgb = [blend_px[0], blend_px[1], blend_px[2]];
+    let blended_rgb = blend_mode_rgb(blend_mode, base_rgb, blend_rgb);
+    let out_alpha = blend_alpha + base_alpha * (1.0 - blend_alpha);
+    if out_alpha <= 1.0e-4 {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+
+    let mut out = [0.0f32; 4];
+    for channel in 0..3 {
+        let premul = blended_rgb[channel] * blend_alpha
+            + base_rgb[channel] * base_alpha * (1.0 - blend_alpha);
+        out[channel] = premul / out_alpha;
+    }
+    out[3] = out_alpha;
+    out
+}
+
 fn hash_u32(mut x: u32) -> u32 {
     x ^= x >> 16;
     x = x.wrapping_mul(0x7feb352d);
@@ -904,6 +969,34 @@ mod tests {
         assert!(out[0] < base[0]);
         assert!(out[1] < base[1]);
         assert_eq!(out[3], 255);
+    }
+
+    #[test]
+    fn f32_pixel_blend_matches_rgba8_multiply_semantics() {
+        let base_u8 = [128, 96, 64, 255];
+        let blend_u8 = [64, 192, 128, 255];
+        let rgba8 = blend_rgba_pixel_seeded(base_u8, blend_u8, 0.75, BlendMode::Multiply, 0);
+        let f32 = blend_rgba_f32_pixel(
+            [
+                base_u8[0] as f32 / 255.0,
+                base_u8[1] as f32 / 255.0,
+                base_u8[2] as f32 / 255.0,
+                base_u8[3] as f32 / 255.0,
+            ],
+            [
+                blend_u8[0] as f32 / 255.0,
+                blend_u8[1] as f32 / 255.0,
+                blend_u8[2] as f32 / 255.0,
+                blend_u8[3] as f32 / 255.0,
+            ],
+            0.75,
+            BlendMode::Multiply,
+        );
+
+        for channel in 0..4 {
+            let actual = (f32[channel].clamp(0.0, 1.0) * 255.0).round() as u8;
+            assert!((actual as i16 - rgba8[channel] as i16).abs() <= 1);
+        }
     }
 
     #[test]

@@ -14,7 +14,9 @@ pub mod plugin_sdk;
 pub mod text;
 pub mod transition;
 
-pub use adjustment::{blend_rgba_pixel, blend_rgba_pixel_seeded};
+pub use adjustment::{
+    blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,
+};
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
     effect_display_name, effect_library_types, register_effect_definition, EffectCacheKeyBuilder,

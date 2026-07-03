@@ -60,21 +60,24 @@ Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
-The CPU timeline compositor keeps simple `Normal`/identity media and solid-color
-layers in the typed float/linear working frame. Those paths must not round-trip
-through RGBA8 scratch buffers, so extended working values remain available to
-the final output boundary. Float-capable unary effects such as color adjustment
-and white balance may also run in this path through the
-`mondrian-effects` float contract. Normal adjustment layers whose effect graph
-is float-capable also stay in the typed working frame. Non-normal blend modes,
-geometric transforms, and legacy-only effects currently use the RGBA8 compositor
-path until their own float/linear execution contracts are implemented.
+The CPU timeline compositor keeps identity-transform media, solid-color layers,
+and float-capable adjustment layers in the typed float/linear working frame.
+Timeline blend modes, including seeded Dissolve, are implemented by
+`mondrian-effects`' float pixel blend contract and must not round-trip through
+RGBA8 scratch buffers. Extended working values therefore remain available to the
+final output boundary. Float-capable unary effects such as color adjustment and
+white balance also run in this path through the same `mondrian-effects` float
+contract. Geometric transforms and legacy-only effects currently use the RGBA8
+compositor path until their own float/linear execution contracts are
+implemented.
 `TimelineCompositeDiagnostics` makes that fallback explicit: preview/export
 callers can see whether a composite stayed on the float/linear path or fell back
-to legacy RGBA8 because of media blend mode, media transform, media effect,
-solid blend/transform/effect, adjustment blend mode, or adjustment effect
-support. Preview diagnostics must aggregate these counters so performance smoke
-reports can identify which legacy color path blocked a fully float/linear frame.
+to legacy RGBA8 because of transform or effect support. Blend-mode counters stay
+in the diagnostic contract for future unsupported blend contracts, but current
+built-in media, solid, and float-capable adjustment blend modes are expected to
+remain float/linear. Preview diagnostics must aggregate these counters so
+performance smoke reports can identify which legacy color path blocked a fully
+float/linear frame.
 
 Decoded media enters the graph as a typed source/import RGBA8 boundary
 (`CpuEncodedColorFrame::source_rgba8`). Preview and export must use

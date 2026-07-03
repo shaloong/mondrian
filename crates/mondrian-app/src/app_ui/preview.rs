@@ -2466,9 +2466,9 @@ mod tests {
         assert_eq!(preview.rgba, export);
         assert_eq!(stable_rgba_hash(&preview.rgba), stable_rgba_hash(&export));
         assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 1);
-        assert_eq!(preview.composite_diagnostics.legacy_media_blend_mode, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_media_blend_mode, 0);
         assert_eq!(preview.composite_diagnostics.legacy_media_transform, 1);
-        assert_eq!(preview.composite_diagnostics.legacy_solid_blend_mode, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_solid_blend_mode, 0);
         assert_eq!(preview.composite_diagnostics.legacy_solid_transform, 1);
     }
 

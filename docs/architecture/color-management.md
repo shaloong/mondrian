@@ -73,10 +73,10 @@ same domain/encoding/residency/color-space descriptor. RGBA8 is a boundary
 format, not an intermediate color-management contract.
 Timeline compositing must therefore prefer direct float/linear operations for
 supported working-space media, solid-color layers, and float-capable unary
-effects, including Normal adjustment passes built from those unary effects; any
-temporary RGBA8 path inside legacy effects or legacy blend modes must remain
-explicit and visible in tests until that subsystem has its own float/linear
-contract.
+effects, including media, solid, and adjustment blend modes that have a seeded
+float pixel blend contract; any temporary RGBA8 path inside legacy effects or
+transforms must remain explicit and visible in tests until that subsystem has
+its own float/linear contract.
 
 The app UI presentation surface is also part of the color contract. The wgpu
 window session must select an explicit sRGB SDR surface format and fail closed

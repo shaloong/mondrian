@@ -63,16 +63,19 @@ supported. The float path must preserve extended scene-linear values and must
 not clamp RGB to 0..1 as the legacy RGBA8 path does.
 
 Adjustment-layer passes use `apply_compiled_effect_graph_pass_rgba_f32(...)`
-when the graph is float-capable and the requested blend mode is `Normal`. This
-keeps ordinary color-correction layers in the same linear working frame instead
-of forcing an RGBA8 scratch boundary.
+when the graph is float-capable. This keeps ordinary color-correction layers in
+the same linear working frame instead of forcing an RGBA8 scratch boundary.
+Media, solid-color, and float-capable adjustment timeline layers use
+`blend_rgba_f32_pixel_seeded(...)` for built-in blend modes while remaining in
+the float/linear compositor. Dissolve uses the same stable frame/pixel seed
+contract as the legacy RGBA8 path so preview and export make identical dither
+decisions.
 
 Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
 callers can make an explicit legacy fallback decision. Blur, sharpen, vignette,
-chromatic aberration, grain, LUT, custom/plugin processors, masks, non-normal
-blend modes, and multi-input nodes remain legacy-only until they gain their own
-float contract.
+chromatic aberration, grain, LUT, custom/plugin processors, masks, and
+multi-input nodes remain legacy-only until they gain their own float contract.
 
 File-backed LUT caches key existing files by canonical path and invalidate on
 file fingerprint changes. Tests that validate cache behavior should use local

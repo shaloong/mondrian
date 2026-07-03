@@ -1,6 +1,6 @@
 use crate::adjustment::{
-    apply_render_op, apply_render_op_f32, blend_adjustment_result, blend_rgba_pixel_seeded,
-    unit_to_u8,
+    apply_render_op, apply_render_op_f32, blend_adjustment_result, blend_rgba_f32_pixel_seeded,
+    blend_rgba_pixel_seeded, unit_to_u8,
 };
 use crate::{
     get_or_compile_scheduled_effect_graph, graph::effect_graph_node_use_counts,
@@ -801,12 +801,6 @@ pub fn apply_compiled_effect_graph_pass_rgba_f32(
         return Ok(Vec::new());
     }
     let mode = blend_mode.unwrap_or(BlendMode::Normal);
-    if mode != BlendMode::Normal {
-        return Err(EffectFloatExecutionError::UnsupportedNode {
-            node_id: compiled.graph.output.unwrap_or(EffectGraphNodeId(0)),
-            reason: EffectFloatUnsupportedReason::UnsupportedBlendMode { mode },
-        });
-    }
     let opacity = opacity.clamp(0.0, 1.0);
     if opacity <= 1.0e-4 || compiled.graph.is_identity() {
         return Ok(base.to_vec());
@@ -815,7 +809,7 @@ pub fn apply_compiled_effect_graph_pass_rgba_f32(
     let processed =
         apply_compiled_effect_graph_rgba_f32(base, width, height, compiled, frame_seed)?;
     let mut out = base.to_vec();
-    blend_rgba_f32_normal_in_place(&mut out, &processed, opacity);
+    blend_rgba_f32_in_place(&mut out, &processed, opacity, mode);
     Ok(out)
 }
 
@@ -1138,38 +1132,20 @@ fn blend_graph_inputs_in_place(
     }
 }
 
-fn blend_rgba_f32_normal_in_place(base: &mut [[f32; 4]], overlay: &[[f32; 4]], opacity: f32) {
+fn blend_rgba_f32_in_place(
+    base: &mut [[f32; 4]],
+    overlay: &[[f32; 4]],
+    opacity: f32,
+    blend_mode: BlendMode,
+) {
     let opacity = opacity.clamp(0.0, 1.0);
     if opacity <= 1.0e-4 {
         return;
     }
 
-    for (base_px, overlay_px) in base.iter_mut().zip(overlay.iter()) {
-        let base_alpha = base_px[3].clamp(0.0, 1.0);
-        let overlay_alpha = (overlay_px[3] * opacity).clamp(0.0, 1.0);
-        if overlay_alpha <= 1.0e-4 {
-            continue;
-        }
-        if base_alpha <= 1.0e-4 {
-            base_px[0] = overlay_px[0];
-            base_px[1] = overlay_px[1];
-            base_px[2] = overlay_px[2];
-            base_px[3] = overlay_alpha;
-            continue;
-        }
-
-        let out_alpha = overlay_alpha + base_alpha * (1.0 - overlay_alpha);
-        if out_alpha <= 1.0e-4 {
-            *base_px = [0.0, 0.0, 0.0, 0.0];
-            continue;
-        }
-
-        for channel in 0..3 {
-            let premultiplied = overlay_px[channel] * overlay_alpha
-                + base_px[channel] * base_alpha * (1.0 - overlay_alpha);
-            base_px[channel] = premultiplied / out_alpha;
-        }
-        base_px[3] = out_alpha;
+    for (index, (base_px, overlay_px)) in base.iter_mut().zip(overlay.iter()).enumerate() {
+        *base_px =
+            blend_rgba_f32_pixel_seeded(*base_px, *overlay_px, opacity, blend_mode, index as u32);
     }
 }
 
@@ -1252,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn float_effect_graph_pass_reports_legacy_blend_modes() {
+    fn float_effect_graph_pass_supports_non_normal_blend_modes() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
             ops: vec![EffectRenderOp::ColorAdjust {
                 exposure: 0.0,
@@ -1262,7 +1238,7 @@ mod tests {
         })
         .expect("compile color adjust graph");
 
-        let err = apply_compiled_effect_graph_pass_rgba_f32(
+        let output = apply_compiled_effect_graph_pass_rgba_f32(
             &[[0.25, 0.5, 0.75, 1.0]],
             1,
             1,
@@ -1271,17 +1247,12 @@ mod tests {
             Some(BlendMode::Multiply),
             0,
         )
-        .expect_err("multiply is legacy-only on float pass path");
+        .expect("multiply stays on float pass path");
 
-        assert!(matches!(
-            err,
-            EffectFloatExecutionError::UnsupportedNode {
-                reason: EffectFloatUnsupportedReason::UnsupportedBlendMode {
-                    mode: BlendMode::Multiply
-                },
-                ..
-            }
-        ));
+        assert!((output[0][0] - 0.0625).abs() <= 1.0e-6);
+        assert!((output[0][1] - 0.25).abs() <= 1.0e-6);
+        assert!((output[0][2] - 0.5625).abs() <= 1.0e-6);
+        assert_eq!(output[0][3], 1.0);
     }
 
     #[test]
