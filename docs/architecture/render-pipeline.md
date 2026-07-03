@@ -202,9 +202,10 @@ Preview media decoding must convert source media into the sequence working
 color space before compositing. The source color space resolves from clip
 override first, then explicitly detected media metadata, then the configured
 missing-metadata policy. Resolved or assumed probe values are not media metadata;
-callers must use `VideoStreamInfo.detected_color_space` and let
-`MissingColorMetadataPolicy` handle absent metadata. When preview/export logs
-or UI need to explain why metadata was rejected or unsupported, they should
+callers must use `VideoStreamInfo.detected_color_space` and
+`MissingColorMetadataPolicy::resolve_input_decision(...)` so preview and export
+share the same `InputColorResolution` branch diagnostics. When preview/export
+logs or UI need to explain why metadata was rejected or unsupported, they should
 attach `VideoStreamInfo.color_interpretation` and `VideoStreamInfo.color_metadata`
 raw CICP tags rather than rebuilding diagnostics from path or decoder text.
 Export jobs carry this as `TimelineExportInput.asset_color_diagnostics`, and

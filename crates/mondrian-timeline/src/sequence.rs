@@ -119,6 +119,38 @@ pub enum MissingColorMetadataPolicy {
     RejectMedia,
 }
 
+/// Source that decided a media input color space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputColorResolutionSource {
+    /// Clip/media interpretation override won.
+    Override,
+    /// Explicit media metadata identified the input color space.
+    DetectedMetadata,
+    /// Missing metadata policy assumed Rec.709.
+    MissingPolicyAssumeRec709,
+    /// Missing metadata policy assumed the sequence working color space.
+    MissingPolicyAssumeSequenceWorkingSpace,
+    /// Missing metadata policy rejected the media.
+    MissingPolicyRejectMedia,
+}
+
+/// Result of resolving clip override, detected media metadata, and missing-metadata policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputColorResolution {
+    /// Effective input color space, or `None` when policy rejects the media.
+    pub color_space: Option<ColorSpace>,
+    /// Decision branch that produced the result.
+    pub source: InputColorResolutionSource,
+    /// Clip/media color-space override supplied by the user.
+    pub override_color_space: Option<ColorSpace>,
+    /// Explicitly detected media metadata color space.
+    pub detected_color_space: Option<ColorSpace>,
+    /// Missing metadata policy active during the decision.
+    pub missing_metadata_policy: MissingColorMetadataPolicy,
+    /// Sequence working color space active during the decision.
+    pub working_color_space: ColorSpace,
+}
+
 impl MissingColorMetadataPolicy {
     /// 根据策略和检测到的色彩空间，解析有效的输入色彩空间。
     ///
@@ -129,13 +161,54 @@ impl MissingColorMetadataPolicy {
         detected: Option<ColorSpace>,
         working: ColorSpace,
     ) -> Option<ColorSpace> {
-        match detected {
-            Some(cs) => Some(cs),
-            None => match self {
-                Self::AssumeRec709 => Some(ColorSpace::Rec709),
-                Self::AssumeSequenceWorkingSpace => Some(working),
-                Self::RejectMedia => None,
-            },
+        self.resolve_input_decision(None, detected, working).color_space
+    }
+
+    /// Resolve the effective input color space and retain the decision branch for diagnostics.
+    pub fn resolve_input_decision(
+        self,
+        override_color_space: Option<ColorSpace>,
+        detected: Option<ColorSpace>,
+        working: ColorSpace,
+    ) -> InputColorResolution {
+        if let Some(color_space) = override_color_space {
+            return InputColorResolution {
+                color_space: Some(color_space),
+                source: InputColorResolutionSource::Override,
+                override_color_space,
+                detected_color_space: detected,
+                missing_metadata_policy: self,
+                working_color_space: working,
+            };
+        }
+        if let Some(color_space) = detected {
+            return InputColorResolution {
+                color_space: Some(color_space),
+                source: InputColorResolutionSource::DetectedMetadata,
+                override_color_space,
+                detected_color_space: detected,
+                missing_metadata_policy: self,
+                working_color_space: working,
+            };
+        }
+        let (color_space, source) = match self {
+            Self::AssumeRec709 => (
+                Some(ColorSpace::Rec709),
+                InputColorResolutionSource::MissingPolicyAssumeRec709,
+            ),
+            Self::AssumeSequenceWorkingSpace => (
+                Some(working),
+                InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace,
+            ),
+            Self::RejectMedia => (None, InputColorResolutionSource::MissingPolicyRejectMedia),
+        };
+        InputColorResolution {
+            color_space,
+            source,
+            override_color_space,
+            detected_color_space: detected,
+            missing_metadata_policy: self,
+            working_color_space: working,
         }
     }
 }
@@ -1054,6 +1127,53 @@ mod tests {
         timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
     };
     use mondrian_core::{DisplayToneMapPolicy, ProjectColorManagement};
+
+    #[test]
+    fn missing_color_metadata_policy_reports_input_resolution_source() {
+        let working = ColorSpace::Rec2020;
+
+        let override_resolution = MissingColorMetadataPolicy::RejectMedia.resolve_input_decision(
+            Some(ColorSpace::SLog3),
+            Some(ColorSpace::Srgb),
+            working,
+        );
+        assert_eq!(override_resolution.color_space, Some(ColorSpace::SLog3));
+        assert_eq!(
+            override_resolution.source,
+            InputColorResolutionSource::Override
+        );
+        assert_eq!(
+            override_resolution.detected_color_space,
+            Some(ColorSpace::Srgb)
+        );
+
+        let detected_resolution = MissingColorMetadataPolicy::AssumeRec709.resolve_input_decision(
+            None,
+            Some(ColorSpace::DciP3),
+            working,
+        );
+        assert_eq!(detected_resolution.color_space, Some(ColorSpace::DciP3));
+        assert_eq!(
+            detected_resolution.source,
+            InputColorResolutionSource::DetectedMetadata
+        );
+
+        let assumed_resolution = MissingColorMetadataPolicy::AssumeSequenceWorkingSpace
+            .resolve_input_decision(None, None, working);
+        assert_eq!(assumed_resolution.color_space, Some(ColorSpace::Rec2020));
+        assert_eq!(
+            assumed_resolution.source,
+            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
+        );
+
+        let rejected_resolution =
+            MissingColorMetadataPolicy::RejectMedia.resolve_input_decision(None, None, working);
+        assert_eq!(rejected_resolution.color_space, None);
+        assert_eq!(
+            rejected_resolution.source,
+            InputColorResolutionSource::MissingPolicyRejectMedia
+        );
+    }
 
     #[test]
     fn sequence_active_clips() {

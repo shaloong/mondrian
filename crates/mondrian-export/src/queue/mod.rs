@@ -957,25 +957,27 @@ fn render_sequence_frame_into(
         let Some(path) = timeline.asset_paths.get(&media.asset_id) else {
             continue;
         };
-        let input_color_space = media
-            .color_space_override
-            .or_else(|| timeline.asset_color_spaces.get(&media.asset_id).copied())
-            .or_else(|| {
-                color_context
-                    .missing_metadata_policy
-                    .resolve_input(None, color_context.working_color_space)
-            })
-            .ok_or_else(|| {
+        let detected_color_space = timeline.asset_color_spaces.get(&media.asset_id).copied();
+        let input_color_resolution = color_context.missing_metadata_policy.resolve_input_decision(
+            media.color_space_override,
+            detected_color_space,
+            color_context.working_color_space,
+        );
+        let input_color_space = input_color_resolution.color_space.ok_or_else(|| {
                 let diagnostic = timeline
                     .asset_color_diagnostics
                     .get(&media.asset_id)
                     .map(mondrian_media::VideoColorDiagnostic::summary)
                     .unwrap_or_else(|| "unavailable".to_string());
                 format!(
-                    "asset={} path={} missing color metadata rejected by sequence policy {:?}; {}",
+                    "asset={} path={} missing color metadata rejected by sequence policy {:?}; resolution={:?} override={:?} detected={:?} working={:?}; {}",
                     media.asset_id,
                     path.display(),
                     color_context.missing_metadata_policy,
+                    input_color_resolution.source,
+                    input_color_resolution.override_color_space,
+                    input_color_resolution.detected_color_space,
+                    input_color_resolution.working_color_space,
                     diagnostic
                 )
             })?;

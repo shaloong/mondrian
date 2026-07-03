@@ -24,7 +24,7 @@ use mondrian_renderer::{
     TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
-use mondrian_timeline::sequence::{ColorContext, Sequence};
+use mondrian_timeline::sequence::{ColorContext, InputColorResolution, Sequence};
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
 use crate::app::AppState;
@@ -1475,11 +1475,12 @@ impl AppUiPreviewService {
             .video_streams
             .first()
             .and_then(|video| video.detected_color_space);
-        let input_color_space = match resolve_preview_input_color_space(
+        let input_color_resolution = resolve_preview_input_color_space(
             color_space_override,
             detected_color_space,
             color_context,
-        ) {
+        );
+        let input_color_space = match input_color_resolution.color_space {
             Some(color_space) => color_space,
             None => {
                 let diagnostic = asset
@@ -1492,6 +1493,10 @@ impl AppUiPreviewService {
                     asset_id = %asset_id,
                     path = %asset.path.display(),
                     missing_metadata_policy = ?color_context.missing_metadata_policy,
+                    color_resolution_source = ?input_color_resolution.source,
+                    override_color_space = ?input_color_resolution.override_color_space,
+                    detected_color_space = ?input_color_resolution.detected_color_space,
+                    working_color_space = ?input_color_resolution.working_color_space,
                     color_diagnostic = %diagnostic,
                     "viewer preview rejected media with missing color metadata"
                 );
@@ -1555,12 +1560,12 @@ fn resolve_preview_input_color_space(
     override_color_space: Option<ColorSpace>,
     detected_color_space: Option<ColorSpace>,
     color_context: &ColorContext,
-) -> Option<ColorSpace> {
-    override_color_space.or_else(|| {
-        color_context
-            .missing_metadata_policy
-            .resolve_input(detected_color_space, color_context.working_color_space)
-    })
+) -> InputColorResolution {
+    color_context.missing_metadata_policy.resolve_input_decision(
+        override_color_space,
+        detected_color_space,
+        color_context.working_color_space,
+    )
 }
 
 #[derive(Default)]
@@ -2447,22 +2452,47 @@ mod tests {
                 Some(ColorSpace::SLog3),
                 Some(ColorSpace::Srgb),
                 &color_context,
-            ),
+            )
+            .color_space,
             Some(ColorSpace::SLog3)
         );
         assert_eq!(
-            resolve_preview_input_color_space(None, Some(ColorSpace::Srgb), &color_context),
-            Some(ColorSpace::Srgb)
+            resolve_preview_input_color_space(
+                Some(ColorSpace::SLog3),
+                Some(ColorSpace::Srgb),
+                &color_context,
+            )
+            .source,
+            mondrian_timeline::sequence::InputColorResolutionSource::Override
         );
         assert_eq!(
-            resolve_preview_input_color_space(None, None, &color_context),
+            resolve_preview_input_color_space(None, Some(ColorSpace::Srgb), &color_context),
+            mondrian_timeline::sequence::InputColorResolution {
+                color_space: Some(ColorSpace::Srgb),
+                source: mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata,
+                override_color_space: None,
+                detected_color_space: Some(ColorSpace::Srgb),
+                missing_metadata_policy: color_context.missing_metadata_policy,
+                working_color_space: color_context.working_color_space,
+            }
+        );
+        assert_eq!(
+            resolve_preview_input_color_space(None, None, &color_context).color_space,
             Some(ColorSpace::Rec2020)
+        );
+        assert_eq!(
+            resolve_preview_input_color_space(None, None, &color_context).source,
+            mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
         );
 
         color_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
         assert_eq!(
-            resolve_preview_input_color_space(None, None, &color_context),
+            resolve_preview_input_color_space(None, None, &color_context).color_space,
             None
+        );
+        assert_eq!(
+            resolve_preview_input_color_space(None, None, &color_context).source,
+            mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyRejectMedia
         );
     }
 
