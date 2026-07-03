@@ -197,6 +197,10 @@ Export job color summaries also carry the renderer-owned GPU blocker breakdown
 and legacy RGBA8 breakdown next to the health booleans (`fully_float_linear`,
 `gpu_path_ready`). UI labels, JSONL reports, and future CI budgets must read
 those structured fields rather than parsing totals or rebuilding reason lists.
+Export simulation performance reports written through `MONDRIAN_EXPORT_SIM_OUTPUT`
+include this same summary as `color_health` while retaining legacy flat stage
+counters for dashboard continuity. The nested summary is the authoritative
+machine-readable color health contract.
 Headless preview smoke reports must also carry GPU preview candidate counters:
 request, ready/current/loading/unavailable outcomes, candidate pixels, and
 external texture registration handoff counters. These counters prove that the
