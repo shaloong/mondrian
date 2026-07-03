@@ -112,7 +112,10 @@ Renderer color-transform executors provide detailed diagnostics for both input
 and output boundaries: backend, direction, typed input/output descriptors,
 pixel count, and whether a temporary RGBA8 CPU boundary was crossed. Product
 preview/export diagnostics should aggregate these records instead of inferring
-color workload from UI or encoder code.
+color workload from UI or encoder code. Transform failures must carry the same
+direction and typed boundary descriptors alongside the backend reason so UI,
+logs, and export reports can identify which source, working, display, or export
+boundary failed without parsing free-form OCIO text.
 
 Renderer color-stage diagnostics sit one layer higher than transform
 diagnostics. A `RenderColorStagePlan` records the scheduled CPU, GPU, upload,

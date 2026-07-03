@@ -187,6 +187,14 @@ impl CpuColorTransformExecutor {
                 domain: descriptor.domain,
             });
         }
+        let output_descriptor = ColorFrameDescriptor {
+            width: descriptor.width,
+            height: descriptor.height,
+            color_space: transform.working_color_space,
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Cpu,
+        };
 
         let mut rgba = frame.rgba().to_vec();
         convert_rgba8_in_place(
@@ -199,7 +207,12 @@ impl CpuColorTransformExecutor {
             )
             .with_engine(transform.engine.clone()),
         )
-        .map_err(RenderColorTransformError::ExecutionFailed)?;
+        .map_err(|reason| RenderColorTransformError::ExecutionFailed {
+            direction: RenderColorTransformDirection::InputToWorking,
+            input: descriptor,
+            output: output_descriptor,
+            reason,
+        })?;
 
         let frame = CpuColorFrame::working(RgbaF32Frame::from_rgba8(
             descriptor.width,
@@ -213,7 +226,7 @@ impl CpuColorTransformExecutor {
             backend: transform.backend,
             direction: RenderColorTransformDirection::InputToWorking,
             input: descriptor,
-            output: frame.descriptor(),
+            output: output_descriptor,
             pixel_count: descriptor.width as usize * descriptor.height as usize,
             used_rgba8_boundary: true,
         };
@@ -232,6 +245,14 @@ impl CpuColorTransformExecutor {
                 domain: descriptor.domain,
             });
         }
+        let output_descriptor = ColorFrameDescriptor {
+            width: descriptor.width,
+            height: descriptor.height,
+            color_space: transform.output_color_space,
+            domain: transform.output_domain,
+            encoding: ColorFrameEncoding::EncodedRgba8,
+            residency: ColorFrameResidency::Cpu,
+        };
 
         let mut rgba = frame.to_output_rgba8(descriptor.color_space, false);
         convert_rgba8_in_place(
@@ -244,7 +265,12 @@ impl CpuColorTransformExecutor {
             )
             .with_engine(transform.engine.clone()),
         )
-        .map_err(RenderColorTransformError::ExecutionFailed)?;
+        .map_err(|reason| RenderColorTransformError::ExecutionFailed {
+            direction: RenderColorTransformDirection::WorkingToOutput,
+            input: descriptor,
+            output: output_descriptor,
+            reason,
+        })?;
 
         let frame = CpuEncodedColorFrame::rgba8(
             descriptor.width,
@@ -257,7 +283,7 @@ impl CpuColorTransformExecutor {
             backend: transform.backend,
             direction: RenderColorTransformDirection::WorkingToOutput,
             input: descriptor,
-            output: frame.descriptor(),
+            output: output_descriptor,
             pixel_count: descriptor.width as usize * descriptor.height as usize,
             used_rgba8_boundary: true,
         };
@@ -377,8 +403,17 @@ pub enum RenderColorTransformError {
         domain: ColorFrameDomain,
     },
     /// The selected color engine failed.
-    #[error("render color transform failed: {0}")]
-    ExecutionFailed(String),
+    #[error("render color transform failed ({direction:?}, {input:?} -> {output:?}): {reason}")]
+    ExecutionFailed {
+        /// Logical transform direction.
+        direction: RenderColorTransformDirection,
+        /// Input frame descriptor.
+        input: ColorFrameDescriptor,
+        /// Intended output frame descriptor.
+        output: ColorFrameDescriptor,
+        /// Backend diagnostic reason.
+        reason: String,
+    },
     /// GPU shader planning failed before native execution could be scheduled.
     #[error("render GPU color transform planning failed: {0}")]
     GpuPlanningFailed(#[from] OcioGpuShaderError),
@@ -404,6 +439,7 @@ pub enum RenderColorTransformError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::types::OcioConfigSource;
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, RgbaF32Frame};
 
     #[test]
@@ -458,6 +494,74 @@ mod tests {
         assert_eq!(working.diagnostics.output.domain, ColorFrameDomain::Working);
         assert_eq!(working.diagnostics.pixel_count, 1);
         assert!(working.diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn input_transform_failure_carries_boundary_descriptors() {
+        let source = CpuEncodedColorFrame::source_rgba8(2, 1, ColorSpace::SLog3, vec![128; 2 * 4]);
+        let missing_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-input-ocio-{}.ocio",
+            std::process::id()
+        ));
+        let transform = RenderInputTransform::to_working(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::Ocio {
+                source: OcioConfigSource::Path { path: missing_path },
+            },
+        );
+
+        let err = CpuColorTransformExecutor::input_to_working(&source, &transform)
+            .expect_err("missing explicit OCIO source must fail");
+
+        match err {
+            RenderColorTransformError::ExecutionFailed { direction, input, output, reason } => {
+                assert_eq!(direction, RenderColorTransformDirection::InputToWorking);
+                assert_eq!(input, source.descriptor());
+                assert_eq!(output.domain, ColorFrameDomain::Working);
+                assert_eq!(output.color_space, ColorSpace::Rec709);
+                assert_eq!(output.pixel_count(), 2);
+                assert!(reason.contains("OCIO config file not found"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_transform_failure_carries_boundary_descriptors() {
+        let source = CpuColorFrame::working(RgbaF32Frame {
+            width: 2,
+            height: 2,
+            data: vec![[0.5, 0.25, 0.125, 1.0]; 4],
+            color_space: ColorSpace::Rec709,
+        });
+        let missing_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-output-ocio-{}.ocio",
+            std::process::id()
+        ));
+        let transform = RenderColorTransform::export(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::Ocio {
+                source: OcioConfigSource::Path { path: missing_path },
+            },
+        );
+
+        let err = CpuColorTransformExecutor::transform(&source, &transform)
+            .expect_err("missing explicit OCIO source must fail");
+
+        match err {
+            RenderColorTransformError::ExecutionFailed { direction, input, output, reason } => {
+                assert_eq!(direction, RenderColorTransformDirection::WorkingToOutput);
+                assert_eq!(input, source.descriptor());
+                assert_eq!(output.domain, ColorFrameDomain::Export);
+                assert_eq!(output.color_space, ColorSpace::Srgb);
+                assert_eq!(output.encoding, ColorFrameEncoding::EncodedRgba8);
+                assert_eq!(output.pixel_count(), 4);
+                assert!(reason.contains("OCIO config file not found"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

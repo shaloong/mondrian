@@ -167,7 +167,10 @@ aggregate `.stage_diagnostics` where they expose observability. Preview
 diagnostics and export performance smoke reports record stage-plan counts,
 CPU/GPU stage mix, transfer stages, GPU blockers, and touched pixels so later
 GPU execution work can prove it removed CPU bottlenecks instead of merely
-moving code around.
+moving code around. `RenderColorTransformError::ExecutionFailed` must keep the
+transform direction plus typed input/output descriptors with the backend reason;
+callers should surface that structured context instead of reducing failures to
+plain strings.
 
 ## Required Semantics
 
