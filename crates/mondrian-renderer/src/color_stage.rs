@@ -210,6 +210,19 @@ pub struct RenderColorStageExecution<T> {
     pub stage_diagnostics: RenderColorStageDiagnostics,
 }
 
+/// Encoded RGBA8 output plus diagnostics for a final preview/export color boundary.
+#[derive(Debug, Clone)]
+pub struct RenderOutputColorBoundaryRgba8 {
+    /// Encoded RGBA8 pixels produced by the output boundary.
+    pub rgba: Vec<u8>,
+    /// Color transform diagnostics emitted by the boundary executor.
+    pub color_diagnostics: crate::RenderColorTransformDiagnostics,
+    /// Stage diagnostics for the executed boundary plan.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Descriptor of the encoded output frame.
+    pub output_descriptor: ColorFrameDescriptor,
+}
+
 /// Final output boundary requested by preview or export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderOutputColorBoundaryTarget {
@@ -1497,6 +1510,21 @@ pub fn execute_cpu_output_boundary(
     executor.execute(frame, boundary)
 }
 
+/// Plan and execute a CPU final-output boundary, returning encoded RGBA8 pixels.
+pub fn execute_cpu_output_boundary_rgba8(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+) -> Result<RenderOutputColorBoundaryRgba8, RenderColorTransformError> {
+    let output = execute_cpu_output_boundary(frame, boundary)?;
+    let output_descriptor = output.result.frame.descriptor();
+    Ok(RenderOutputColorBoundaryRgba8 {
+        rgba: output.result.frame.into_rgba(),
+        color_diagnostics: output.result.diagnostics,
+        stage_diagnostics: output.stage_diagnostics,
+        output_descriptor,
+    })
+}
+
 impl<'a> RenderColorStagePlanner<'a> {
     /// Create a planner that always schedules CPU color transforms.
     pub fn cpu_only() -> Self {
@@ -1992,6 +2020,30 @@ mod tests {
             crate::RenderColorTransformDirection::WorkingToOutput
         );
         assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+    }
+
+    #[test]
+    fn cpu_output_boundary_rgba8_helper_returns_pixels_and_diagnostics() {
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+
+        let output = execute_cpu_output_boundary_rgba8(&frame, &boundary)
+            .expect("display boundary should encode RGBA8");
+
+        assert_eq!(output.output_descriptor.domain, ColorFrameDomain::Display);
+        assert_eq!(
+            output.output_descriptor.encoding,
+            ColorFrameEncoding::EncodedRgba8
+        );
+        assert_eq!(
+            output.rgba.len(),
+            output.output_descriptor.pixel_count() * 4
+        );
+        assert_eq!(output.color_diagnostics.input, frame.descriptor());
+        assert_eq!(output.color_diagnostics.output, output.output_descriptor);
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+        assert_eq!(output.stage_diagnostics.gpu_color_stages, 0);
     }
 
     #[test]

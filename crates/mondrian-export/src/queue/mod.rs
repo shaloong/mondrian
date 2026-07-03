@@ -16,8 +16,8 @@ use mondrian_media::audio::{
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, execute_cpu_output_boundary, CpuColorFrame, CpuEncodedColorFrame,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
+    CpuEncodedColorFrame, RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
     TimelineSolidColorLayer,
@@ -1122,12 +1122,10 @@ fn render_sequence_frame_into(
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    let encoded = execute_cpu_output_boundary(&rendered, &boundary)
-        .map_err(|err| format!("final color transform failed: {err}"))?
-        .result
-        .frame;
+    let encoded = execute_cpu_output_boundary_rgba8(&rendered, &boundary)
+        .map_err(|err| format!("final color transform failed: {err}"))?;
     canvas.clear();
-    canvas.extend_from_slice(encoded.rgba());
+    canvas.extend_from_slice(&encoded.rgba);
     Ok(())
 }
 

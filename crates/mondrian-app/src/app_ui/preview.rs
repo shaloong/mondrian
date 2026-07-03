@@ -16,12 +16,12 @@ use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, Sequence
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, execute_cpu_output_boundary, CpuColorFrame, CpuEncodedColorFrame,
-    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderColorTransformDirection,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
+    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
+    RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
+    TimelineAdjustmentLayer, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence};
 use mondrian_ui_widgets::ViewerFrameImage;
@@ -1426,11 +1426,11 @@ fn composite_resolved_preview(
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    execute_cpu_output_boundary(&working_frame, &boundary)
-        .map(|frame| PreviewCompositeOutput {
-            rgba: frame.result.frame.into_rgba(),
-            color_diagnostics: frame.result.diagnostics,
-            color_stage_diagnostics: frame.stage_diagnostics,
+    execute_cpu_output_boundary_rgba8(&working_frame, &boundary)
+        .map(|output| PreviewCompositeOutput {
+            rgba: output.rgba,
+            color_diagnostics: output.color_diagnostics,
+            color_stage_diagnostics: output.stage_diagnostics,
         })
         .map_err(|err| format!("viewer preview final color transform failed: {err}"))
 }
@@ -1914,7 +1914,7 @@ mod tests {
             expected_frame.descriptor().color_space,
             color_context.working_color_space
         );
-        let export = execute_cpu_output_boundary(
+        let export = mondrian_renderer::execute_cpu_output_boundary(
             &expected_frame,
             &RenderOutputColorBoundary::export(
                 color_context.output_color_space,
@@ -2043,7 +2043,7 @@ mod tests {
     }
 
     fn test_media_frame_rgba8(frame: &MediaPreviewFrame) -> Vec<u8> {
-        execute_cpu_output_boundary(
+        mondrian_renderer::execute_cpu_output_boundary(
             &frame.frame,
             &RenderOutputColorBoundary::display(
                 ColorSpace::Rec709,

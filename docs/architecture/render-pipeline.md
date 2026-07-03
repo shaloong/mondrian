@@ -95,11 +95,13 @@ renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
 that planner. Its CPU-only mode is the current correctness execution path;
 its PreferGpu mode must produce GPU/upload/readback stages plus explicit
 blocker diagnostics instead of silently falling back to a CPU output stage.
-`RenderOutputColorBoundaryExecutor` is the CPU final-output execution boundary:
-callers choose an explicit strategy at construction time, and the executor owns
-the final-output plan/execute sequence instead of exposing low-level transform
-executors to app/export code. CPU callers use `cpu_only().execute(...)`; native
-GPU app/export callers must use
+`RenderOutputColorBoundaryExecutor` is the lower-level CPU final-output
+execution boundary: callers choose an explicit strategy at construction time,
+and the executor owns the final-output plan/execute sequence instead of
+exposing low-level transform executors to app/export code. App/export CPU
+reference callers use `execute_cpu_output_boundary_rgba8(...)`, which returns
+encoded RGBA8 pixels plus transform/stage diagnostics as one boundary contract;
+native GPU app/export callers must use
 `RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
 with `RenderGpuOutputBoundaryRuntimeOwnedBackendContext`. GPU planning,
 backend-object preparation, or recording failures are reported structurally and
@@ -150,11 +152,12 @@ GPU-to-CPU output for encode, thumbnails, tests, or debug captures must use one
 of those renderer-owned paths; readback is valid only for explicit encoded RGBA8
 output contracts unless a future conversion stage says otherwise.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
-source boundaries and `execute_cpu_output_boundary(...)` for final display or
-export output. That CPU reference helper delegates to
-`RenderOutputColorBoundaryExecutor::cpu_only()`; app/export code should not
-instantiate the final-output executor directly or call
-`execute_cpu_output_stage(...)` for final timeline output. Direct
+source boundaries and `execute_cpu_output_boundary_rgba8(...)` for final display
+or export output. That CPU reference helper delegates to
+`RenderOutputColorBoundaryExecutor::cpu_only()` and returns the encoded RGBA8
+boundary result plus diagnostics; app/export code should not instantiate the
+final-output executor directly or call `execute_cpu_output_stage(...)` for final
+timeline output. Direct
 `CpuColorTransformExecutor` usage is limited to renderer internals and its
 focused unit tests.
 
