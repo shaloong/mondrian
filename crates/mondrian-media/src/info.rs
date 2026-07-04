@@ -4,10 +4,12 @@
 //! 不进行解码，仅提取元数据。
 
 use ffmpeg_next as ffmpeg;
+use mondrian_core::icc::parse_icc_display_profile;
 use mondrian_core::types::*;
 use mondrian_core::{
     VideoContentLightMetadata, VideoHdrChromaticity, VideoHdrMetadataPayload, VideoHdrRational,
-    VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
+    VideoIccProfileMetadata, VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata,
+    VideoMasteringDisplayPrimaries,
 };
 use serde::{Deserialize, Serialize};
 use std::os::raw::c_int;
@@ -99,6 +101,8 @@ pub enum VideoColorSpaceSource {
 pub enum VideoColorDetectionMethod {
     /// Explicit acquisition/log metadata hint won.
     MetadataHint,
+    /// An embedded ICC profile identified the input color family.
+    IccProfile,
     /// Raw CICP/FFmpeg color tags resolved to a supported color space.
     CicpTags,
     /// No supported color metadata was found.
@@ -118,6 +122,12 @@ pub enum VideoColorInterpretationConfidence {
     Medium,
     /// Explicit metadata identified a supported color space.
     High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IccColorProfileHint {
+    color_space: ColorSpace,
+    profile_name: Option<String>,
 }
 
 /// One raw CICP-style color tag reported by FFmpeg.
@@ -393,6 +403,9 @@ pub struct VideoColorDiagnosticIssueAggregate {
     pub diagnostics_with_hdr_metadata: u64,
     /// Diagnostics whose final decision came from metadata hints.
     pub method_metadata_hint: u64,
+    /// Diagnostics whose final decision came from ICC profile metadata.
+    #[serde(default)]
+    pub method_icc_profile: u64,
     /// Diagnostics whose final decision came from CICP tags.
     pub method_cicp_tags: u64,
     /// Diagnostics that fell through to missing-metadata handling.
@@ -668,6 +681,9 @@ impl VideoColorDiagnosticIssueAggregate {
         match summary.method {
             VideoColorDetectionMethod::MetadataHint => {
                 self.method_metadata_hint = self.method_metadata_hint.saturating_add(1);
+            }
+            VideoColorDetectionMethod::IccProfile => {
+                self.method_icc_profile = self.method_icc_profile.saturating_add(1);
             }
             VideoColorDetectionMethod::CicpTags => {
                 self.method_cicp_tags = self.method_cicp_tags.saturating_add(1);
@@ -951,6 +967,7 @@ impl MediaInfo {
                             let color_interpretation = detect_color_space_from_metadata(
                                 &raw_color_metadata,
                                 &color_metadata_hints,
+                                icc_color_profile_hint(&hdr_metadata).as_ref(),
                             );
                             let detected_color_space = color_interpretation.color_space;
                             let color_space_source = color_interpretation.source;
@@ -1095,12 +1112,13 @@ fn detect_color_space(
     matrix: ffmpeg::util::color::Space,
 ) -> DetectedColorInterpretation {
     let metadata = capture_color_metadata(primaries, transfer, matrix);
-    detect_color_space_from_metadata(&metadata, &[])
+    detect_color_space_from_metadata(&metadata, &[], None)
 }
 
 fn detect_color_space_from_metadata(
     metadata: &VideoColorMetadata,
     metadata_hints: &[VideoColorMetadataHint],
+    icc_profile: Option<&IccColorProfileHint>,
 ) -> DetectedColorInterpretation {
     let exact_cicp = exact_cicp_color_space(metadata);
     let hinted_cicp = ColorSpace::from_ffmpeg_tag_hints(
@@ -1108,6 +1126,7 @@ fn detect_color_space_from_metadata(
         metadata.transfer.name.as_deref(),
         metadata.matrix.name.as_deref(),
     );
+    let cicp_color_space = exact_cicp.or(hinted_cicp);
 
     if let Some(selected_hint) = metadata_hints.first() {
         let color_space = selected_hint.detected_color_space;
@@ -1120,6 +1139,11 @@ fn detect_color_space_from_metadata(
             warnings: Vec::new(),
             user_overridable: true,
         };
+        append_icc_profile_evidence_and_warnings(
+            &mut interpretation,
+            icc_profile,
+            cicp_color_space,
+        );
         if metadata_hints.len() > 1 {
             interpretation
                 .warnings
@@ -1128,9 +1152,7 @@ fn detect_color_space_from_metadata(
                     ignored: metadata_hints.iter().skip(1).cloned().collect(),
                 });
         }
-        if let Some(cicp_color_space) =
-            exact_cicp.or(hinted_cicp).filter(|cicp| *cicp != color_space)
-        {
+        if let Some(cicp_color_space) = cicp_color_space.filter(|cicp| *cicp != color_space) {
             interpretation.warnings.push(
                 VideoColorInterpretationWarning::MetadataHintOverridesCicpTags {
                     selected: selected_hint.clone(),
@@ -1143,7 +1165,7 @@ fn detect_color_space_from_metadata(
     }
 
     if let Some(color_space) = exact_cicp {
-        return DetectedColorInterpretation {
+        let mut interpretation = DetectedColorInterpretation {
             color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::High,
             source: VideoColorSpaceSource::Metadata,
@@ -1157,10 +1179,16 @@ fn detect_color_space_from_metadata(
             warnings: Vec::new(),
             user_overridable: true,
         };
+        append_icc_profile_evidence_and_warnings(
+            &mut interpretation,
+            icc_profile,
+            Some(color_space),
+        );
+        return interpretation;
     }
 
     if let Some(color_space) = hinted_cicp {
-        return DetectedColorInterpretation {
+        let mut interpretation = DetectedColorInterpretation {
             color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::Medium,
             source: VideoColorSpaceSource::Metadata,
@@ -1176,9 +1204,30 @@ fn detect_color_space_from_metadata(
             }],
             user_overridable: true,
         };
+        append_icc_profile_evidence_and_warnings(
+            &mut interpretation,
+            icc_profile,
+            Some(color_space),
+        );
+        return interpretation;
     }
 
-    DetectedColorInterpretation {
+    if let Some(icc_profile) = icc_profile {
+        return DetectedColorInterpretation {
+            color_space: Some(icc_profile.color_space),
+            confidence: VideoColorInterpretationConfidence::Medium,
+            source: VideoColorSpaceSource::Metadata,
+            method: VideoColorDetectionMethod::IccProfile,
+            evidence: vec![VideoColorInterpretationEvidence::IccProfile {
+                inferred_color_space: icc_profile.color_space,
+                profile_name: icc_profile.profile_name.clone(),
+            }],
+            warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+            user_overridable: true,
+        };
+    }
+
+    let mut interpretation = DetectedColorInterpretation {
         color_space: None,
         confidence: VideoColorInterpretationConfidence::None,
         source: VideoColorSpaceSource::MissingMetadata,
@@ -1190,6 +1239,30 @@ fn detect_color_space_from_metadata(
         }],
         warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
         user_overridable: true,
+    };
+    append_icc_profile_evidence_and_warnings(&mut interpretation, icc_profile, None);
+    interpretation
+}
+
+fn append_icc_profile_evidence_and_warnings(
+    interpretation: &mut DetectedColorInterpretation,
+    icc_profile: Option<&IccColorProfileHint>,
+    selected_color_space: Option<ColorSpace>,
+) {
+    let Some(icc_profile) = icc_profile else {
+        return;
+    };
+    interpretation.evidence.push(VideoColorInterpretationEvidence::IccProfile {
+        inferred_color_space: icc_profile.color_space,
+        profile_name: icc_profile.profile_name.clone(),
+    });
+    if let Some(selected_color_space) =
+        selected_color_space.filter(|color_space| *color_space != icc_profile.color_space)
+    {
+        interpretation.warnings.push(VideoColorInterpretationWarning::IccCicpMismatch {
+            icc_color_space: icc_profile.color_space,
+            cicp_color_space: selected_color_space,
+        });
     }
 }
 
@@ -1286,6 +1359,18 @@ fn collect_hdr_metadata_summaries(
         .collect()
 }
 
+fn icc_color_profile_hint(hdr_metadata: &[VideoHdrMetadataSummary]) -> Option<IccColorProfileHint> {
+    hdr_metadata.iter().find_map(|summary| {
+        let VideoHdrMetadataPayload::IccProfile(profile) = summary.payload.as_ref()? else {
+            return None;
+        };
+        Some(IccColorProfileHint {
+            color_space: profile.color_space,
+            profile_name: Some(profile.name.clone()),
+        })
+    })
+}
+
 fn map_hdr_side_data_kind(
     kind: ffmpeg::codec::packet::side_data::Type,
 ) -> Option<VideoHdrSideDataKind> {
@@ -1314,6 +1399,13 @@ fn parse_hdr_metadata_payload(
         Type::ContentLightLevel => {
             parse_content_light_payload(data).map(VideoHdrMetadataPayload::ContentLightLevel)
         }
+        Type::ICC_PROFILE => parse_icc_display_profile(data)
+            .ok()
+            .map(|profile| VideoIccProfileMetadata {
+                name: profile.name,
+                color_space: profile.color_space,
+            })
+            .map(VideoHdrMetadataPayload::IccProfile),
         _ => None,
     }
 }
@@ -1599,6 +1691,72 @@ mod tests {
     }
 
     #[test]
+    fn detect_color_space_uses_icc_profile_when_cicp_is_missing() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let icc_profile = IccColorProfileHint {
+            color_space: ColorSpace::DciP3,
+            profile_name: Some("Display P3".to_owned()),
+        };
+
+        let detection = detect_color_space_from_metadata(&metadata, &[], Some(&icc_profile));
+
+        assert_eq!(detection.color_space, Some(ColorSpace::DciP3));
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::Medium
+        );
+        assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
+        assert_eq!(detection.method, VideoColorDetectionMethod::IccProfile);
+        assert!(
+            detection.evidence.contains(&VideoColorInterpretationEvidence::IccProfile {
+                inferred_color_space: ColorSpace::DciP3,
+                profile_name: Some("Display P3".to_owned()),
+            })
+        );
+        assert!(detection
+            .warnings
+            .contains(&VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags));
+    }
+
+    #[test]
+    fn detect_color_space_reports_icc_cicp_mismatch_without_changing_cicp_decision() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT709,
+        );
+        let icc_profile = IccColorProfileHint {
+            color_space: ColorSpace::DciP3,
+            profile_name: Some("Display P3".to_owned()),
+        };
+
+        let detection = detect_color_space_from_metadata(&metadata, &[], Some(&icc_profile));
+
+        assert_eq!(detection.color_space, Some(ColorSpace::Rec709));
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::High
+        );
+        assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
+        assert!(
+            detection.evidence.contains(&VideoColorInterpretationEvidence::IccProfile {
+                inferred_color_space: ColorSpace::DciP3,
+                profile_name: Some("Display P3".to_owned()),
+            })
+        );
+        assert!(
+            detection.warnings.contains(&VideoColorInterpretationWarning::IccCicpMismatch {
+                icc_color_space: ColorSpace::DciP3,
+                cicp_color_space: ColorSpace::Rec709,
+            })
+        );
+    }
+
+    #[test]
     fn metadata_hint_identifies_camera_log_spaces() {
         let slog3 = detect_color_metadata_hint(
             VideoColorMetadataHintScope::Stream,
@@ -1647,7 +1805,8 @@ mod tests {
             detected_color_space: ColorSpace::ArriLogC4,
         };
 
-        let detection = detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint));
+        let detection =
+            detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint), None);
 
         assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4));
         assert_eq!(
@@ -1694,7 +1853,7 @@ mod tests {
             },
         ];
 
-        let detection = detect_color_space_from_metadata(&metadata, &hints);
+        let detection = detect_color_space_from_metadata(&metadata, &hints, None);
 
         assert_eq!(detection.color_space, Some(ColorSpace::SLog3));
         assert_eq!(detection.evidence.len(), 2);
@@ -1720,7 +1879,7 @@ mod tests {
             detected_color_space: ColorSpace::ArriLogC4,
         };
         let interpretation =
-            detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint));
+            detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint), None);
         let diagnostic = VideoColorDiagnostic {
             detected_color_space: interpretation.color_space,
             interpretation,
@@ -1760,7 +1919,7 @@ mod tests {
                 detected_color_space: ColorSpace::SLog3,
             },
         ];
-        let interpretation = detect_color_space_from_metadata(&metadata, &hints);
+        let interpretation = detect_color_space_from_metadata(&metadata, &hints, None);
         let diagnostic = VideoColorDiagnostic {
             detected_color_space: interpretation.color_space,
             interpretation,
@@ -1886,7 +2045,7 @@ mod tests {
                 detected_color_space: ColorSpace::SLog3,
             },
         ];
-        let metadata_interpretation = detect_color_space_from_metadata(&metadata, &hints);
+        let metadata_interpretation = detect_color_space_from_metadata(&metadata, &hints, None);
         let metadata_diagnostic = VideoColorDiagnostic {
             detected_color_space: metadata_interpretation.color_space,
             interpretation: metadata_interpretation,
@@ -1937,6 +2096,7 @@ mod tests {
                 diagnostics_with_metadata_hints: 1,
                 diagnostics_with_hdr_metadata: 2,
                 method_metadata_hint: 1,
+                method_icc_profile: 0,
                 method_cicp_tags: 0,
                 method_missing_metadata: 0,
                 method_decoder_unavailable: 1,
@@ -2091,7 +2251,7 @@ mod tests {
         );
         let diagnostic = VideoColorDiagnostic {
             detected_color_space: Some(ColorSpace::Rec2100Pq),
-            interpretation: detect_color_space_from_metadata(&metadata, &[]),
+            interpretation: detect_color_space_from_metadata(&metadata, &[], None),
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::CicpTags,
             metadata: Some(metadata),

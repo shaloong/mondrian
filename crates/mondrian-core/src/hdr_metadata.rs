@@ -1,5 +1,6 @@
 //! HDR metadata value objects shared by media probing, timeline policy, and export.
 
+use crate::types::ColorSpace;
 use serde::{Deserialize, Serialize};
 
 /// Parsed HDR side-data payload.
@@ -9,6 +10,8 @@ pub enum VideoHdrMetadataPayload {
     MasteringDisplay(VideoMasteringDisplayMetadata),
     /// CTA-861.3 MaxCLL / MaxFALL content-light metadata.
     ContentLightLevel(VideoContentLightMetadata),
+    /// Embedded ICC profile interpreted as input color-family metadata.
+    IccProfile(VideoIccProfileMetadata),
 }
 
 /// Rational value as stored in FFmpeg HDR metadata payloads.
@@ -71,12 +74,22 @@ pub struct VideoContentLightMetadata {
     pub max_frame_average_light_level: u32,
 }
 
+/// Embedded ICC profile metadata relevant to automatic color interpretation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoIccProfileMetadata {
+    /// Human-readable ICC profile name.
+    pub name: String,
+    /// Mondrian color-space family inferred from the ICC profile.
+    pub color_space: ColorSpace,
+}
+
 impl VideoHdrMetadataPayload {
     /// Compact diagnostic representation for logs and export errors.
     pub fn summary(&self) -> String {
         match self {
             Self::MasteringDisplay(metadata) => metadata.summary(),
             Self::ContentLightLevel(metadata) => metadata.summary(),
+            Self::IccProfile(metadata) => metadata.summary(),
         }
     }
 }
@@ -166,6 +179,13 @@ impl VideoContentLightMetadata {
     /// Compact diagnostic representation.
     pub fn summary(&self) -> String {
         format!("max_cll={}", self.to_x265_max_cll())
+    }
+}
+
+impl VideoIccProfileMetadata {
+    /// Compact diagnostic representation.
+    pub fn summary(&self) -> String {
+        format!("icc_profile={}->{:?}", self.name, self.color_space)
     }
 }
 

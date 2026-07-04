@@ -270,6 +270,7 @@ fn confidence_label(confidence: VideoColorInterpretationConfidence) -> &'static 
 fn method_label(method: VideoColorDetectionMethod) -> &'static str {
     match method {
         VideoColorDetectionMethod::MetadataHint => "元数据提示",
+        VideoColorDetectionMethod::IccProfile => "ICC 配置文件",
         VideoColorDetectionMethod::CicpTags => "CICP",
         VideoColorDetectionMethod::MissingMetadata => "无元数据",
         VideoColorDetectionMethod::DecoderUnavailable => "解码器不可用",

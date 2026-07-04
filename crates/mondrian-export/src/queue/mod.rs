@@ -73,7 +73,7 @@ impl ExportFrameContract {
         }
     }
 
-    /// FFmpeg input pixel format string.
+    /// FFmpeg input pixel format string for the raw video pipe.
     pub fn ffmpeg_pix_fmt(&self) -> &'static str {
         match self {
             Self::Rgba8 => "rgba",
@@ -88,10 +88,17 @@ impl ExportFrameContract {
             Self::Rgba16Float => 8, // 4 channels × 2 bytes (f16)
         }
     }
+
+    /// Canvas byte length for given dimensions.
+    pub fn canvas_len(&self, width: u32, height: u32) -> usize {
+        width as usize * height as usize * self.bytes_per_pixel()
+    }
 }
 
-const EXPORT_GPU_OUTPUT_TEXTURE_FORMAT: GpuColorFrameTextureFormat =
-    GpuColorFrameTextureFormat::Rgba8Unorm;
+/// Resolve the export frame contract from sequence settings.
+fn export_frame_contract(settings: &SequenceSettings) -> ExportFrameContract {
+    ExportFrameContract::from_bit_depth(settings.color_management.export_bit_depth)
+}
 
 struct ExportGpuOutputBackend {
     context: Arc<GpuContext>,
@@ -155,9 +162,10 @@ fn map_readback_buffer_sync(
     Ok(mapped.to_vec())
 }
 
-fn execute_export_gpu_output_boundary_rgba8(
+fn execute_export_gpu_output_boundary(
     frame: &CpuColorFrame,
     boundary: &RenderOutputColorBoundary,
+    texture_format: GpuColorFrameTextureFormat,
 ) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputFallbackReason> {
     let backend = export_gpu_output_runtime()
         .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)?;
@@ -175,7 +183,7 @@ fn execute_export_gpu_output_boundary_rgba8(
         .record_wgpu_output_boundary_owned_backend(
             boundary,
             frame,
-            EXPORT_GPU_OUTPUT_TEXTURE_FORMAT,
+            texture_format,
             RenderColorTransformGpuOptions {
                 output_residency: ColorFrameResidency::Cpu,
                 ..RenderColorTransformGpuOptions::default()
@@ -193,19 +201,41 @@ fn execute_export_gpu_output_boundary_rgba8(
     let readback_buffer = record
         .readback_buffer
         .ok_or(ExportGpuOutputFallbackReason::MissingReadbackBuffer)?;
-    let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
-        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+    let readback_plan = match texture_format {
+        GpuColorFrameTextureFormat::Rgba8Unorm => {
+            GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
+        }
+        GpuColorFrameTextureFormat::Rgba16Float => {
+            GpuColorFrameReadbackPlan::encoded_rgba16float(record.materialized.output)
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
+        }
+        GpuColorFrameTextureFormat::Rgba32Float => {
+            GpuColorFrameReadbackPlan::encoded_rgba16float(record.materialized.output)
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
+        }
+    };
     let mapped = map_readback_buffer_sync(&backend.context.device, &readback_buffer)
         .map_err(|_| ExportGpuOutputFallbackReason::ReadbackMapFailed)?;
-    let actual = readback_plan
-        .unpack_mapped_rgba8(&mapped)
-        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+    let rgba = match texture_format {
+        GpuColorFrameTextureFormat::Rgba8Unorm => {
+            let actual = readback_plan
+                .unpack_mapped_rgba8(&mapped)
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            actual.rgba().to_vec()
+        }
+        GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
+            let f32_data = readback_plan
+                .unpack_mapped_rgba16float(&mapped)
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            // Convert f32 to RGBA8 for the canvas writer (temporary: until
+            // the full float canvas path is wired through).
+            f32_data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect()
+        }
+    };
     readback_buffer.unmap();
 
-    Ok(ExportGpuOutputAttemptOutcome {
-        rgba: actual.rgba().to_vec(),
-        stage_diagnostics: record.stage_diagnostics,
-    })
+    Ok(ExportGpuOutputAttemptOutcome { rgba, stage_diagnostics: record.stage_diagnostics })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1108,6 +1138,7 @@ fn execute_timeline_export(
             ),
         };
         let mut cmd = Command::new("ffmpeg");
+        let pix_fmt = export_frame_contract(&timeline.sequence.settings).ffmpeg_pix_fmt();
         cmd.arg("-y")
             .arg("-hide_banner")
             .arg("-loglevel")
@@ -1115,7 +1146,7 @@ fn execute_timeline_export(
             .arg("-f")
             .arg("rawvideo")
             .arg("-pix_fmt")
-            .arg("rgba")
+            .arg(pix_fmt)
             .arg("-s")
             .arg(format!("{width}x{height}"))
             .arg("-r")
@@ -1689,7 +1720,8 @@ fn write_timeline_frames_to_writer<W: Write>(
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let total = range.total_frames.max(1);
-    let mut canvas = vec![0u8; width as usize * height as usize * 4];
+    let frame_contract = export_frame_contract(&timeline.sequence.settings);
+    let mut canvas = vec![0u8; frame_contract.canvas_len(width, height)];
     let mut diagnostics = ExportJobDiagnostics::default();
     diagnostics
         .color
@@ -1989,7 +2021,8 @@ fn render_sequence_frame_into(
         return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
     }
 
-    let required_len = width as usize * height as usize * 4;
+    let frame_contract = export_frame_contract(&sequence.settings);
+    let required_len = frame_contract.canvas_len(width, height);
     if canvas.len() != required_len {
         canvas.resize(required_len, 0);
     }
@@ -2232,12 +2265,16 @@ fn render_sequence_frame_into(
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    let attempt = execute_export_gpu_output_boundary_rgba8(&rendered.frame, &boundary)
-        .inspect_err(|reason| {
-            gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
-            gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(*reason);
-        })
-        .ok();
+    let attempt = execute_export_gpu_output_boundary(
+        &rendered.frame,
+        &boundary,
+        frame_contract.gpu_texture_format(),
+    )
+    .inspect_err(|reason| {
+        gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
+        gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(*reason);
+    })
+    .ok();
     gpu_output_attempts = gpu_output_attempts.saturating_add(1);
 
     let final_bytes = match attempt {

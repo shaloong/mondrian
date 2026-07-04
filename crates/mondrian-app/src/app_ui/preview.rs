@@ -2639,11 +2639,20 @@ fn composite_resolved_preview_working(
         color_context.working_color_space,
         scratch,
     );
-    let boundary = RenderOutputColorBoundary::display(
-        color_context.output_color_space,
-        color_context.tone_map,
-        color_context.engine.clone(),
-    );
+    let boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
+        (Some(display), Some(view)) => RenderOutputColorBoundary::display_view(
+            color_context.output_color_space,
+            display.clone(),
+            view.clone(),
+            color_context.tone_map,
+            color_context.engine.clone(),
+        ),
+        _ => RenderOutputColorBoundary::display(
+            color_context.output_color_space,
+            color_context.tone_map,
+            color_context.engine.clone(),
+        ),
+    };
     Ok(PreviewWorkingCompositeOutput {
         frame: composite.frame,
         boundary,
@@ -3690,6 +3699,21 @@ mod tests {
         );
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn preview_working_composite_boundary_uses_resolved_display_view() {
+        let mut color_context = test_color_context(ColorSpace::Rec709);
+        color_context.ocio_display = Some("sRGB - Display".to_owned());
+        color_context.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
+        let mut scratch = TimelineCompositeScratch::default();
+
+        let output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)
+            .expect("empty preview composite");
+
+        let display_view = output.boundary.display_view.expect("resolved display/view");
+        assert_eq!(display_view.display, "sRGB - Display");
+        assert_eq!(display_view.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
     }
 
     #[test]

@@ -84,6 +84,13 @@ Important fields:
 - `export_bit_depth`
 - HDR metadata preservation fields
 
+Media probing keeps automatic interpretation evidence separate from user
+overrides. CICP/container tags, camera/log metadata hints, HDR side data, and
+embedded ICC profiles are recorded as diagnostic evidence with confidence and
+warnings; ICC-only streams may resolve to an inferred input color family, while
+ICC-vs-CICP conflicts must be surfaced as warnings rather than silently changing
+an explicit user override.
+
 ## Working Space
 
 `SequenceSettings.color_space` is the timeline working color space. Media input transforms resolve from clip/media interpretation into this working space. Output/display transforms convert from working/output context to the destination.
@@ -116,9 +123,11 @@ non-sRGB presentation formats or the chosen format cannot be configured with
 sRGB color space. It must not fall back to a non-sRGB swapchain, because that
 would hide OS/backend display management errors behind a visually plausible but
 untrusted viewer path.
-Preview display color space is resolved from the sequence/project
-`DisplayManagementPolicy` before building `RenderOutputColorBoundary`; the app
-window then validates that boundary against its real display-output contract
+Preview display color space and OCIO display/view are resolved from the
+sequence/project `DisplayManagementPolicy` before building
+`RenderOutputColorBoundary`; the app preview boundary must carry the resolved
+display/view when present, and the app window then validates that boundary
+against its real display-output contract
 (surface format, selected `SurfaceColorSpace`, SDR/HDR mode, per-format color
 space capabilities, `display_hdr_info` snapshot, present modes, alpha modes, and
 current monitor fingerprint). Display preview output is accepted only when the

@@ -595,6 +595,12 @@ pub fn evaluate_jsonl(
     );
     push_max_failure(
         &mut failures,
+        "os_display_profile_unsupported",
+        display_issues.os_display_profile_unsupported,
+        budget.max_os_display_profile_unsupported,
+    );
+    push_max_failure(
+        &mut failures,
         "unknown_display_issues",
         display_issues.unknown,
         budget.max_unknown_display_issues,
@@ -3190,6 +3196,32 @@ mod tests {
                     limit: 0,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn budget_fails_os_display_profile_unsupported_threshold() {
+        let jsonl = r#"
+{"health":{"status":"Blocked"},"display_issue_summary":{"reason":"OsDisplayProfileUnsupported","output_color_space":"DisplayP3","payload_blocker":null}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 0,
+            max_blocked: 1,
+            max_display_issues: 1,
+            max_os_display_profile_unsupported: 0,
+            ..viewer_gpu_output_budget_allow_missing()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert_eq!(
+            summary.failures,
+            vec![ViewerGpuOutputBudgetFailure {
+                metric: "os_display_profile_unsupported",
+                actual: 1,
+                limit: 0,
+            }]
         );
     }
 
