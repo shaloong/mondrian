@@ -85,6 +85,16 @@ impl Default for ViewerGpuOutputBudget {
     }
 }
 
+impl ViewerGpuOutputBudget {
+    /// Fail-closed viewer display baseline budget with limited startup refresh headroom.
+    pub fn display_baseline() -> Self {
+        Self {
+            max_display_contract_refreshes: 2,
+            ..Self::default()
+        }
+    }
+}
+
 /// Structured result of evaluating a viewer GPU-output diagnostics JSONL stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ViewerGpuOutputBudgetSummary {

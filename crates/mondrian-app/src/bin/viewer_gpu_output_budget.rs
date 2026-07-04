@@ -5,6 +5,8 @@ use std::path::Path;
 use anyhow::{bail, Context};
 use mondrian_app::app_ui::viewer_gpu_output_budget::{evaluate_jsonl, ViewerGpuOutputBudget};
 
+const DISPLAY_BASELINE_PRESET: &str = "display-baseline";
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let args = BudgetArgs::parse(&args)?;
@@ -33,13 +35,20 @@ impl BudgetArgs {
     fn parse(args: &[String]) -> anyhow::Result<Self> {
         let Some(first) = args.first() else {
             bail!(
-                "usage: viewer_gpu_output_budget <jsonl-path> [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N]"
+                "usage: viewer_gpu_output_budget <jsonl-path> [--preset display-baseline] [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N]"
             );
         };
         let mut budget = ViewerGpuOutputBudget::default();
         let mut index = 1usize;
         while index < args.len() {
             let flag = args[index].as_str();
+            if flag == "--preset" {
+                let preset =
+                    args.get(index + 1).with_context(|| format!("missing value for {flag}"))?;
+                budget = parse_budget_preset(preset)?;
+                index += 2;
+                continue;
+            }
             let value = args.get(index + 1).with_context(|| format!("missing value for {flag}"))?;
             let parsed = value
                 .parse::<u64>()
@@ -95,6 +104,13 @@ impl BudgetArgs {
             index += 2;
         }
         Ok(Self { path: Path::new(first).to_path_buf(), budget })
+    }
+}
+
+fn parse_budget_preset(name: &str) -> anyhow::Result<ViewerGpuOutputBudget> {
+    match name {
+        DISPLAY_BASELINE_PRESET => Ok(ViewerGpuOutputBudget::display_baseline()),
+        _ => bail!("unknown budget preset: {name}"),
     }
 }
 
@@ -175,6 +191,45 @@ mod tests {
                 max_display_payload_blockers: 0,
                 max_color_rejections: 2,
                 ..ViewerGpuOutputBudget::default()
+            }
+        );
+    }
+
+    #[test]
+    fn budget_args_parse_display_baseline_preset() {
+        let args = vec![
+            "target/perf/viewer.jsonl".to_owned(),
+            "--preset".to_owned(),
+            DISPLAY_BASELINE_PRESET.to_owned(),
+        ];
+
+        let parsed = BudgetArgs::parse(&args).expect("parse preset args");
+
+        assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
+        assert_eq!(parsed.budget, ViewerGpuOutputBudget::display_baseline());
+    }
+
+    #[test]
+    fn budget_args_allow_overrides_after_display_baseline_preset() {
+        let args = vec![
+            "target/perf/viewer.jsonl".to_owned(),
+            "--preset".to_owned(),
+            DISPLAY_BASELINE_PRESET.to_owned(),
+            "--max-display-contract-refreshes".to_owned(),
+            "4".to_owned(),
+            "--max-display-issues".to_owned(),
+            "1".to_owned(),
+        ];
+
+        let parsed = BudgetArgs::parse(&args).expect("parse preset override args");
+
+        assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
+        assert_eq!(
+            parsed.budget,
+            ViewerGpuOutputBudget {
+                max_display_contract_refreshes: 4,
+                max_display_issues: 1,
+                ..ViewerGpuOutputBudget::display_baseline()
             }
         );
     }

@@ -413,7 +413,7 @@ fn viewer_gpu_output_display_baseline_budget_from_env() -> ViewerGpuOutputBudget
     ViewerGpuOutputBudget {
         max_display_contract_refreshes: env_u64(
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
-            2,
+            ViewerGpuOutputBudget::display_baseline().max_display_contract_refreshes,
         ),
         ..viewer_gpu_output_budget_from_env()
     }
