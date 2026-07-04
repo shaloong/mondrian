@@ -314,7 +314,11 @@ structured display issue reason counts, payload-blocker counts, aggregated
 media issue counts, stage counters, and last health flags, then adds fixed
 diagnostic checks, root causes, actions, and evidence across capture integrity,
 viewer output state, GPU color path, display contract, display capability
-drift, and media color policy. Reports must use this single structured shape
+drift, and media color policy. Display capability drift must not collapse into
+one opaque bucket: reports should distinguish refresh churn, issue-after-refresh
+correlation, HDR tone-map headroom drift, surface-format set drift, per-format
+color-space capability drift, present-mode drift, and alpha-mode drift. Reports
+must use this single structured shape
 instead of parsing trace text, reconstructing readiness from ad hoc counters,
 or depending on a legacy summary-only output. The same session also owns
 the display-output contract for the current wgpu 30 surface and monitor:

@@ -989,30 +989,70 @@ fn push_root_causes_and_actions(
                 "inspect_media_color_metadata",
                 "Inspect the last color rejection and source metadata evidence before relaxing policy.",
             ),
-            "display_contract_refreshes"
-            | "display_issue_refresh_correlations"
-            | "display_tone_map_headroom_changes"
-            | "available_surface_format_changes"
-            | "format_color_space_changes"
-            | "present_mode_changes"
-            | "alpha_mode_changes" => push_root_cause_with_action(
+            "display_contract_refreshes" => push_root_cause_with_action(
                 root_causes,
                 actions,
                 ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
-                "display_capability_drift",
-                format!("{}={} limit={}", failure.metric, failure.actual, failure.limit),
-                "inspect_display_refresh_evidence",
-                "Inspect the preceding display-contract refresh and OS surface capability diff.",
+                "display_contract_refresh_churn",
+                display_refresh_churn_evidence(summary, failure.actual, failure.limit),
+                "inspect_display_refresh_history",
+                "Inspect display-contract refresh history and identify whether monitor, format, or HDR contract churn is expected.",
             ),
-            _ => push_root_cause_with_action(
+            "display_issue_refresh_correlations" => push_root_cause_with_action(
                 root_causes,
                 actions,
-                ViewerGpuOutputDiagnosticArea::DisplayContract,
-                "display_contract_blocked_output",
-                format!("{}={} limit={}", failure.metric, failure.actual, failure.limit),
-                "inspect_display_contract",
-                "Inspect display issue reason, desired surface contract, and payload blocker evidence.",
+                ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+                "display_issue_correlated_with_contract_refresh",
+                display_issue_refresh_correlation_evidence(summary, failure.actual, failure.limit),
+                "inspect_display_issue_correlation",
+                "Inspect the preceding refresh attached to the display issue and confirm whether the blocker began after monitor or surface reconfiguration.",
             ),
+            "display_tone_map_headroom_changes" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+                "display_tone_map_headroom_drift",
+                display_tone_map_headroom_evidence(summary, failure.actual, failure.limit),
+                "inspect_display_tone_map_headroom",
+                "Inspect previous and next HDR headroom evidence to confirm whether monitor HDR reporting drifted.",
+            ),
+            "available_surface_format_changes" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+                "surface_format_capability_drift",
+                display_surface_format_drift_evidence(summary, failure.actual, failure.limit),
+                "inspect_surface_format_capabilities",
+                "Inspect previous and next available surface format sets for monitor or backend capability drift.",
+            ),
+            "format_color_space_changes" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+                "surface_color_space_capability_drift",
+                display_format_color_space_drift_evidence(summary, failure.actual, failure.limit),
+                "inspect_surface_color_space_capabilities",
+                "Inspect per-format surface color-space capability diffs before trusting display promotion decisions.",
+            ),
+            "present_mode_changes" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+                "present_mode_capability_drift",
+                display_present_mode_drift_evidence(summary, failure.actual, failure.limit),
+                "inspect_present_mode_capabilities",
+                "Inspect present-mode capability changes reported by the OS/backend around the refresh event.",
+            ),
+            "alpha_mode_changes" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+                "alpha_mode_capability_drift",
+                display_alpha_mode_drift_evidence(summary, failure.actual, failure.limit),
+                "inspect_alpha_mode_capabilities",
+                "Inspect alpha-mode capability changes reported by the OS/backend around the refresh event.",
+            ),
+            _ => push_display_contract_root_cause(summary, failure, root_causes, actions),
         }
     }
 
@@ -1048,6 +1088,312 @@ fn push_root_causes_and_actions(
             "Trace why the viewer output path left the native GPU color path and introduced transfer stages.",
         );
     }
+}
+
+fn push_display_contract_root_cause(
+    summary: &ViewerGpuOutputBudgetSummary,
+    failure: &ViewerGpuOutputBudgetFailure,
+    root_causes: &mut Vec<ViewerGpuOutputHealthRootCause>,
+    actions: &mut Vec<ViewerGpuOutputHealthAction>,
+) {
+    let (root_code, action_code, action_description) = match failure.metric {
+        "hdr_output_requires_hdr_surface" => (
+            "hdr_output_requires_hdr_surface",
+            "inspect_hdr_surface_contract",
+            "Inspect the selected surface HDR mode and desired HDR surface contract for the blocked output.",
+        ),
+        "output_color_space_requires_surface_color_space" => (
+            "output_color_space_requires_surface_color_space",
+            "inspect_surface_color_space_contract",
+            "Inspect the selected and desired surface color spaces for the blocked output.",
+        ),
+        "reconfigure_blocked_by_payload" | "display_payload_blockers" => (
+            "display_payload_contract_blocked",
+            "inspect_display_payload_blocker",
+            "Inspect the viewer payload blocker that prevented surface reconfiguration or promotion.",
+        ),
+        "unsupported_presentation_intent" => (
+            "unsupported_presentation_intent",
+            "inspect_unsupported_presentation_intent",
+            "Inspect the requested viewer output intent and confirm it targets a real presentation space.",
+        ),
+        "unsupported_surface_contract" => (
+            "unsupported_surface_contract",
+            "inspect_unsupported_surface_contract",
+            "Inspect the desired output contract and confirm the current monitor/surface can present it.",
+        ),
+        "unknown_display_issues" => (
+            "unknown_display_issue_reason",
+            "inspect_unknown_display_issue_reason",
+            "Inspect the raw display issue reason and extend the evaluator with an explicit classification.",
+        ),
+        "display_issues" => (
+            "display_issue_summary_present",
+            "inspect_display_issue_summary",
+            "Inspect the last structured display issue summary and its desired surface contract evidence.",
+        ),
+        _ => (
+            "display_contract_blocked_output",
+            "inspect_display_contract",
+            "Inspect display issue reason, desired surface contract, and payload blocker evidence.",
+        ),
+    };
+    push_root_cause_with_action(
+        root_causes,
+        actions,
+        ViewerGpuOutputDiagnosticArea::DisplayContract,
+        root_code,
+        display_issue_evidence(summary, failure.metric, failure.actual, failure.limit),
+        action_code,
+        action_description,
+    );
+}
+
+fn display_issue_evidence(
+    summary: &ViewerGpuOutputBudgetSummary,
+    metric: &str,
+    actual: u64,
+    limit: u64,
+) -> String {
+    let issue = summary.last_display_issue.as_ref();
+    format!(
+        "{}={} limit={} reason={} output={} desired={} selected={} payload={} target_supported={} display={}",
+        metric,
+        actual,
+        limit,
+        issue.map(|i| i.reason.as_str()).unwrap_or("unknown"),
+        issue
+            .and_then(|i| i.output_color_space.as_deref())
+            .unwrap_or("unknown"),
+        issue
+            .and_then(|i| i.desired_surface_color_space.as_deref())
+            .unwrap_or("unknown"),
+        issue
+            .and_then(|i| i.selected_surface_color_space.as_deref())
+            .unwrap_or("unknown"),
+        issue
+            .and_then(|i| i.payload_blocker.as_deref())
+            .unwrap_or("none"),
+        issue
+            .and_then(|i| i.target_surface_color_space_supported)
+            .map(|supported| if supported { "true" } else { "false" })
+            .unwrap_or("unknown"),
+        issue
+            .and_then(|i| i.display_target.as_ref())
+            .map(format_display_target)
+            .unwrap_or_else(|| "unknown".to_owned()),
+    )
+}
+
+fn display_refresh_churn_evidence(
+    summary: &ViewerGpuOutputBudgetSummary,
+    actual: u64,
+    limit: u64,
+) -> String {
+    let refreshes = summary.display_contract_refreshes;
+    let last_reason = summary
+        .last_display_contract_refresh
+        .as_ref()
+        .map(|refresh| refresh.reason.as_str())
+        .unwrap_or("unknown");
+    format!(
+        "display_contract_refreshes={} limit={} resize={} scale_factor_changed={} window_moved={} renderer_rebuilt={} display_target_changed={} last_reason={}",
+        actual,
+        limit,
+        refreshes.resize,
+        refreshes.scale_factor_changed,
+        refreshes.window_moved,
+        refreshes.renderer_rebuilt,
+        refreshes.display_target_changed,
+        last_reason,
+    )
+}
+
+fn display_issue_refresh_correlation_evidence(
+    summary: &ViewerGpuOutputBudgetSummary,
+    actual: u64,
+    limit: u64,
+) -> String {
+    let correlations = summary.display_issue_refresh_correlations;
+    let preceding_reason = summary
+        .last_display_issue
+        .as_ref()
+        .and_then(|issue| issue.preceding_display_contract_refresh.as_ref())
+        .map(|refresh| refresh.reason.as_str())
+        .unwrap_or("unknown");
+    format!(
+        "display_issue_refresh_correlations={} limit={} after_resize={} after_scale_factor_changed={} after_window_moved={} preceding_reason={}",
+        actual,
+        limit,
+        correlations.after_resize,
+        correlations.after_scale_factor_changed,
+        correlations.after_window_moved,
+        preceding_reason,
+    )
+}
+
+fn display_tone_map_headroom_evidence(
+    summary: &ViewerGpuOutputBudgetSummary,
+    actual: u64,
+    limit: u64,
+) -> String {
+    let refresh = summary.last_display_contract_refresh.as_ref();
+    format!(
+        "display_tone_map_headroom_changes={} limit={} previous_headroom_ppm={} next_headroom_ppm={} last_reason={}",
+        actual,
+        limit,
+        refresh
+            .and_then(|refresh| refresh.previous.display_tone_map_headroom_ppm)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_owned()),
+        refresh
+            .and_then(|refresh| refresh.next.display_tone_map_headroom_ppm)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_owned()),
+        refresh
+            .map(|refresh| refresh.reason.as_str())
+            .unwrap_or("unknown"),
+    )
+}
+
+fn display_surface_format_drift_evidence(
+    summary: &ViewerGpuOutputBudgetSummary,
+    actual: u64,
+    limit: u64,
+) -> String {
+    let refresh = summary.last_display_contract_refresh.as_ref();
+    format!(
+        "available_surface_format_changes={} limit={} previous_formats={} next_formats={} last_reason={}",
+        actual,
+        limit,
+        refresh
+            .map(|refresh| refresh.previous.available_surface_formats.join(","))
+            .filter(|formats| !formats.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        refresh
+            .map(|refresh| refresh.next.available_surface_formats.join(","))
+            .filter(|formats| !formats.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        refresh
+            .map(|refresh| refresh.reason.as_str())
+            .unwrap_or("unknown"),
+    )
+}
+
+fn display_format_color_space_drift_evidence(
+    summary: &ViewerGpuOutputBudgetSummary,
+    actual: u64,
+    limit: u64,
+) -> String {
+    let refresh = summary.last_display_contract_refresh.as_ref();
+    format!(
+        "format_color_space_changes={} limit={} previous_formats={} next_formats={} last_reason={}",
+        actual,
+        limit,
+        refresh
+            .map(|refresh| summarize_format_color_spaces(&refresh.previous.format_color_spaces))
+            .filter(|formats| !formats.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        refresh
+            .map(|refresh| summarize_format_color_spaces(&refresh.next.format_color_spaces))
+            .filter(|formats| !formats.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        refresh.map(|refresh| refresh.reason.as_str()).unwrap_or("unknown"),
+    )
+}
+
+fn display_present_mode_drift_evidence(
+    summary: &ViewerGpuOutputBudgetSummary,
+    actual: u64,
+    limit: u64,
+) -> String {
+    let refresh = summary.last_display_contract_refresh.as_ref();
+    format!(
+        "present_mode_changes={} limit={} previous_present_modes={} next_present_modes={} last_reason={}",
+        actual,
+        limit,
+        refresh
+            .map(|refresh| refresh.previous.present_modes.join(","))
+            .filter(|modes| !modes.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        refresh
+            .map(|refresh| refresh.next.present_modes.join(","))
+            .filter(|modes| !modes.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        refresh
+            .map(|refresh| refresh.reason.as_str())
+            .unwrap_or("unknown"),
+    )
+}
+
+fn display_alpha_mode_drift_evidence(
+    summary: &ViewerGpuOutputBudgetSummary,
+    actual: u64,
+    limit: u64,
+) -> String {
+    let refresh = summary.last_display_contract_refresh.as_ref();
+    format!(
+        "alpha_mode_changes={} limit={} previous_alpha_modes={} next_alpha_modes={} last_reason={}",
+        actual,
+        limit,
+        refresh
+            .map(|refresh| refresh.previous.alpha_modes.join(","))
+            .filter(|modes| !modes.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        refresh
+            .map(|refresh| refresh.next.alpha_modes.join(","))
+            .filter(|modes| !modes.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        refresh.map(|refresh| refresh.reason.as_str()).unwrap_or("unknown"),
+    )
+}
+
+fn summarize_format_color_spaces(formats: &[ViewerGpuOutputSurfaceFormatColorSpaces]) -> String {
+    formats
+        .iter()
+        .map(|format| {
+            let mut supported = Vec::new();
+            if format.srgb {
+                supported.push("Srgb");
+            }
+            if format.extended_srgb_linear {
+                supported.push("ExtendedSrgbLinear");
+            }
+            if format.display_p3 {
+                supported.push("DisplayP3");
+            }
+            if format.bt2100_pq {
+                supported.push("Bt2100Pq");
+            }
+            if format.bt2100_hlg {
+                supported.push("Bt2100Hlg");
+            }
+            if format.extended_srgb {
+                supported.push("ExtendedSrgb");
+            }
+            if format.extended_display_p3 {
+                supported.push("ExtendedDisplayP3");
+            }
+            format!("{}:[{}]", format.format, supported.join("|"))
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn format_display_target(display_target: &ViewerGpuOutputDisplayTarget) -> String {
+    format!(
+        "{}@{},{} {}x{} scale_ppm={} refresh_mhz={}",
+        display_target.name.as_deref().unwrap_or("unknown"),
+        display_target.position.0,
+        display_target.position.1,
+        display_target.physical_size.0,
+        display_target.physical_size.1,
+        display_target.scale_factor_ppm,
+        display_target
+            .refresh_rate_millihertz
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_owned()),
+    )
 }
 
 fn push_root_cause_with_action(
@@ -1739,7 +2085,7 @@ mod tests {
         assert!(report
             .root_causes
             .iter()
-            .any(|root| root.code == "display_contract_blocked_output"));
+            .any(|root| root.code == "hdr_output_requires_hdr_surface"));
         assert!(report.root_causes.iter().any(|root| root.code == "gpu_color_stage_blocked"));
         assert!(report
             .root_causes
@@ -1749,6 +2095,81 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_gpu_blocker_breakdown"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_hdr_surface_contract"));
+    }
+
+    #[test]
+    fn health_report_splits_display_drift_root_causes() {
+        let jsonl = r#"
+{"health":{"status":"Ready","viewer_output_ready":true,"native_gpu_boundary_ready":true,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":true},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"display_issue_summary":{"reason":"OutputColorSpaceRequiresSurfaceColorSpace","output_color_space":"DciP3","preceding_display_contract_refresh":{"reason":"WindowMoved","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly","display_tone_map_headroom_ppm":500000,"available_surface_formats":["Bgra8UnormSrgb"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo"],"alpha_modes":["Auto"]},"next":{"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"surface_format":"Rgba16Float","surface_color_space":"DisplayP3","surface_encoding":"Srgb","surface_hdr_mode":"HdrPq","display_tone_map_headroom_ppm":850000,"available_surface_formats":["Bgra8UnormSrgb","Rgba16Float"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false},{"format":"Rgba16Float","srgb":false,"extended_srgb_linear":false,"display_p3":true,"bt2100_pq":true,"bt2100_hlg":true,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo","Immediate"],"alpha_modes":["Auto","Opaque"]},"renderer_rebuilt":true,"display_target_changed":true,"surface_format_changed":true,"surface_color_space_changed":true,"surface_hdr_mode_changed":true,"display_tone_map_headroom_changed":true,"available_surface_formats_changed":true,"format_color_spaces_changed":true,"present_modes_changed":true,"alpha_modes_changed":true},"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"current_surface_format":"Rgba16Float","current_surface_color_space":"DisplayP3","current_surface_encoding":"Srgb","selected_surface_format":"Rgba16Float","selected_surface_color_space":"DisplayP3","selected_surface_encoding":"Srgb","surface_hdr_mode":"HdrPq","desired_surface_format":"Rgba16Float","desired_surface_color_space":"DisplayP3","desired_surface_encoding":"Srgb","desired_surface_hdr_mode":"HdrPq","payload_blocker":null,"supported_surface_color_space_count":2,"target_surface_color_space_supported":true},"last_display_contract_refresh":{"reason":"WindowMoved","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly","display_tone_map_headroom_ppm":500000,"available_surface_formats":["Bgra8UnormSrgb"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo"],"alpha_modes":["Auto"]},"next":{"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"surface_format":"Rgba16Float","surface_color_space":"DisplayP3","surface_encoding":"Srgb","surface_hdr_mode":"HdrPq","display_tone_map_headroom_ppm":850000,"available_surface_formats":["Bgra8UnormSrgb","Rgba16Float"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false},{"format":"Rgba16Float","srgb":false,"extended_srgb_linear":false,"display_p3":true,"bt2100_pq":true,"bt2100_hlg":true,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo","Immediate"],"alpha_modes":["Auto","Opaque"]},"renderer_rebuilt":true,"display_target_changed":true,"surface_format_changed":true,"surface_color_space_changed":true,"surface_hdr_mode_changed":true,"display_tone_map_headroom_changed":true,"available_surface_formats_changed":true,"format_color_spaces_changed":true,"present_modes_changed":true,"alpha_modes_changed":true}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            max_display_contract_refreshes: 0,
+            max_display_issue_refresh_correlations: 0,
+            max_display_tone_map_headroom_changes: 0,
+            max_available_surface_format_changes: 0,
+            max_format_color_space_changes: 0,
+            max_present_mode_changes: 0,
+            max_alpha_mode_changes: 0,
+            max_display_issues: 1,
+            max_output_color_space_requires_surface_color_space: 1,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+        let report = build_health_report(summary, "display-baseline", None);
+
+        assert_eq!(report.verdict, ViewerGpuOutputHealthVerdict::Fail);
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "display_contract_refresh_churn"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "display_issue_correlated_with_contract_refresh"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "display_tone_map_headroom_drift"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "surface_format_capability_drift"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "surface_color_space_capability_drift"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "present_mode_capability_drift"));
+        assert!(report.root_causes.iter().any(|root| root.code == "alpha_mode_capability_drift"));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "surface_format_capability_drift"
+                && root.evidence.contains("Bgra8UnormSrgb")
+                && root.evidence.contains("Rgba16Float")
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "display_tone_map_headroom_drift"
+                && root.evidence.contains("previous_headroom_ppm=500000")
+                && root.evidence.contains("next_headroom_ppm=850000")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_display_refresh_history"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_display_issue_correlation"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_surface_color_space_capabilities"));
     }
 
     #[test]
