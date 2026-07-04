@@ -241,7 +241,9 @@ in preview/export reporting code.
 Media metadata quality must travel through the same reporting path: export job
 diagnostics carry `asset_issue_summary`, and preview media smokes serialize
 `media_color_issues`, both derived from `VideoColorDiagnosticIssueAggregate`
-rather than from parsed warning strings.
+rather than from parsed warning strings. The aggregate scope is the referenced
+timeline asset set, not the whole asset-diagnostics cache, so preview/export
+parity cannot be skewed by unrelated assets loaded in the project.
 Timeline export writes accumulated render-path color diagnostics into
 `RenderJob.diagnostics.color`. The worker updates this snapshot while frames are
 actually rendered. App panels, logs, and future JSONL reports should consume
