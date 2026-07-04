@@ -435,18 +435,28 @@ pub fn composite_path_diagnostics(
                     diagnostics.legacy_media_effect =
                         diagnostics.legacy_media_effect.saturating_add(1);
                 }
+                // Track GPU execution evidence for effect graphs.
+                let gpu_blockers = mondrian_effects::effect_graph_gpu_blockers(&layer.effect_graph);
+                diagnostics.effect_gpu_blockers =
+                    diagnostics.effect_gpu_blockers.saturating_add(gpu_blockers.len() as u64);
             }
             TimelineCompositeElement::SolidColor(layer) => {
                 if !layer.effect_graph.graph.is_identity() {
                     diagnostics.legacy_solid_effect =
                         diagnostics.legacy_solid_effect.saturating_add(1);
                 }
+                let gpu_blockers = mondrian_effects::effect_graph_gpu_blockers(&layer.effect_graph);
+                diagnostics.effect_gpu_blockers =
+                    diagnostics.effect_gpu_blockers.saturating_add(gpu_blockers.len() as u64);
             }
             TimelineCompositeElement::Adjustment(layer) => {
                 if !compiled_effect_graph_supports_rgba_f32(&layer.effect_graph) {
                     diagnostics.legacy_adjustment_effect =
                         diagnostics.legacy_adjustment_effect.saturating_add(1);
                 }
+                let gpu_blockers = mondrian_effects::effect_graph_gpu_blockers(&layer.effect_graph);
+                diagnostics.effect_gpu_blockers =
+                    diagnostics.effect_gpu_blockers.saturating_add(gpu_blockers.len() as u64);
             }
         }
     }
