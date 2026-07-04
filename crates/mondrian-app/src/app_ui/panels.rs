@@ -122,6 +122,11 @@ pub trait ViewerPreviewSource {
     fn viewer_color_rejection(&self) -> Option<ViewerPreviewColorRejectionModel> {
         None
     }
+
+    /// Return the current color pipeline health status for the viewer.
+    fn viewer_color_pipeline_status(&self) -> Option<ViewerColorPipelineStatus> {
+        None
+    }
 }
 
 /// Current viewer preview lifecycle state for the active frame.
@@ -135,6 +140,17 @@ pub enum ViewerPreviewState {
     Stale(ViewerFrameContent),
     /// A render-ready frame is available for the current playhead frame.
     Ready(ViewerFrameContent),
+}
+
+/// Viewer-facing color pipeline health status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewerColorPipelineStatus {
+    /// All composites stayed on the float/linear path with no GPU blockers.
+    FloatLinear,
+    /// At least one composite required the legacy RGBA8 path.
+    LegacyRgba8 { legacy_reasons: u64 },
+    /// GPU color path has blockers preventing native GPU execution.
+    GpuBlocked { gpu_blockers: u64 },
 }
 
 /// Viewer-facing color-management rejection details.
@@ -564,6 +580,7 @@ pub struct ViewerPanelModel {
     pub frame_content: Option<ViewerFrameContent>,
     pub empty_message: Option<String>,
     pub color_rejection: Option<ViewerPreviewColorRejectionModel>,
+    pub color_pipeline_status: Option<ViewerColorPipelineStatus>,
 }
 
 impl ViewerPanelModel {
@@ -652,6 +669,8 @@ impl ViewerPanelModel {
                 None
             },
             color_rejection,
+            color_pipeline_status: preview
+                .and_then(ViewerPreviewSource::viewer_color_pipeline_status),
         }
     }
 
@@ -676,6 +695,7 @@ impl ViewerPanelModel {
             frame_content: None,
             empty_message: Some("未载入序列".into()),
             color_rejection: None,
+            color_pipeline_status: None,
         }
     }
 }

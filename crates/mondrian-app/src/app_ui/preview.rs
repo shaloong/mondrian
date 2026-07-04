@@ -37,7 +37,8 @@ use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, Viewer
 
 use crate::app::AppState;
 use crate::app_ui::panels::{
-    ViewerPreviewColorRejectionModel, ViewerPreviewSource, ViewerPreviewState,
+    ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
+    ViewerPreviewState,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
@@ -1551,6 +1552,25 @@ impl ViewerPreviewSource for AppUiPreviewService {
             diagnostic_summary: rejection.diagnostic_summary,
             diagnostic_issue_summary: rejection.diagnostic_issue_summary,
         })
+    }
+
+    fn viewer_color_pipeline_status(&self) -> Option<ViewerColorPipelineStatus> {
+        let diagnostics = self.diagnostics();
+        let summary = diagnostics.composite_color_path_summary();
+        if summary.composite_plans() == 0 {
+            return None;
+        }
+        if diagnostics.color_stage_gpu_blockers > 0 {
+            return Some(ViewerColorPipelineStatus::GpuBlocked {
+                gpu_blockers: diagnostics.color_stage_gpu_blockers,
+            });
+        }
+        if summary.uses_legacy_rgba8() {
+            return Some(ViewerColorPipelineStatus::LegacyRgba8 {
+                legacy_reasons: summary.legacy_breakdown.total(),
+            });
+        }
+        Some(ViewerColorPipelineStatus::FloatLinear)
     }
 }
 

@@ -253,7 +253,6 @@ enum AppUiDisplayContractRefreshReasonDiagnostic {
     Resize,
     ScaleFactorChanged,
     WindowMoved,
-    MonitorIdentityChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
