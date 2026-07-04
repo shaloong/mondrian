@@ -4,6 +4,10 @@ use crate::app_ui::preview::{
     AppUiPreviewColorHealthSummary, AppUiPreviewDiagnostics, AppUiPreviewService,
 };
 use crate::app_ui::shell::AppUiAppRoot;
+use crate::app_ui::viewer_gpu_output_budget::{
+    evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputBudgetSummary,
+};
+use anyhow::Context;
 use serde::Serialize;
 use std::cmp;
 use std::fs::OpenOptions;
@@ -80,6 +84,13 @@ struct PreviewMediaPlaybackPerfReport {
     preview_color_health: Option<AppUiPreviewColorHealthSummary>,
     preview_color_path: PreviewColorPathReport,
     cases: Vec<PerfCaseReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct ViewerGpuOutputBudgetSmokeReport {
+    scenario: &'static str,
+    source_path: String,
+    summary: ViewerGpuOutputBudgetSummary,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -248,6 +259,13 @@ fn env_u128(key: &str, default: u128) -> u128 {
         .unwrap_or(default)
 }
 
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()
@@ -270,6 +288,29 @@ fn write_report_if_needed(report_json: &str) {
             let _ = writeln!(file, "{report_json}");
         }
     }
+}
+
+fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
+    ViewerGpuOutputBudget {
+        min_ready: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MIN_READY", 1),
+        max_failed: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FAILED", 0),
+        max_blocked: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_BLOCKED", 0),
+        max_rejected: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_REJECTED", 0),
+        max_degraded: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DEGRADED", 0),
+        max_waiting: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_WAITING", u64::MAX),
+    }
+}
+
+fn viewer_gpu_output_budget_report_from_jsonl(
+    source_path: impl Into<String>,
+    contents: &str,
+    budget: &ViewerGpuOutputBudget,
+) -> anyhow::Result<ViewerGpuOutputBudgetSmokeReport> {
+    Ok(ViewerGpuOutputBudgetSmokeReport {
+        scenario: "viewer_gpu_output_budget",
+        source_path: source_path.into(),
+        summary: evaluate_jsonl(contents, budget)?,
+    })
 }
 
 fn run_case<F>(
@@ -302,6 +343,36 @@ where
         threshold_ms,
         passed,
     })
+}
+
+#[test]
+#[ignore = "development viewer GPU output budget smoke; run after capturing MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT JSONL"]
+fn viewer_gpu_output_budget_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf smoke lock");
+    let output_path = std::env::var_os("MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT")
+        .map(PathBuf::from)
+        .context(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT must point to a viewer GPU output JSONL file",
+        )?;
+    let contents = std::fs::read_to_string(&output_path).with_context(|| {
+        format!(
+            "failed to read viewer GPU output JSONL: {}",
+            output_path.display()
+        )
+    })?;
+    let budget = viewer_gpu_output_budget_from_env();
+    let report = viewer_gpu_output_budget_report_from_jsonl(
+        output_path.display().to_string(),
+        &contents,
+        &budget,
+    )?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_BUDGET_JSON={report_json}");
+    write_report_if_needed(&report_json);
+    if !report.summary.passed {
+        anyhow::bail!("viewer GPU output budget smoke failed: {report_json}");
+    }
+    Ok(())
 }
 
 #[test]
@@ -1100,6 +1171,30 @@ fn preview_perf_report_serializes_color_health_summary() {
         json["preview_color_health"]["legacy_breakdown"]["media_transform"],
         0
     );
+}
+
+#[test]
+fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
+    let jsonl = r#"
+{"health":{"status":"Waiting"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":0}}
+{"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"last_frame_context":{"sequence_id":"seq","frame":12,"width":1280,"height":720,"external_texture_key":"key","output_target":"Display","output_color_space":"Srgb","tone_map":false}}
+"#;
+
+    let report = viewer_gpu_output_budget_report_from_jsonl(
+        "target/perf/viewer-gpu-output.jsonl",
+        jsonl,
+        &ViewerGpuOutputBudget::default(),
+    )
+    .expect("viewer GPU output budget report");
+    let json = serde_json::to_value(&report).expect("serialize viewer GPU output budget report");
+
+    assert_eq!(json["scenario"], "viewer_gpu_output_budget");
+    assert_eq!(json["summary"]["passed"], true);
+    assert_eq!(json["summary"]["records"], 2);
+    assert_eq!(json["summary"]["counts"]["ready"], 1);
+    assert_eq!(json["summary"]["counts"]["waiting"], 1);
+    assert_eq!(json["summary"]["reported_counts_match_replay"], true);
+    assert_eq!(json["summary"]["last_frame_context"]["frame"], 12);
 }
 
 fn paint_command_count(
