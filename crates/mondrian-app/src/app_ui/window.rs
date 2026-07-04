@@ -105,6 +105,7 @@ struct AppUiViewerGpuOutputTelemetry {
     missing_output_textures: u64,
     registered_frames: u64,
     rejected_external_frames: u64,
+    health_counts: AppUiViewerGpuOutputHealthCounts,
     accumulated_stage_diagnostics: RenderColorStageDiagnostics,
     last_stage_diagnostics: Option<RenderColorStageDiagnostics>,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
@@ -142,6 +143,7 @@ struct AppUiViewerGpuOutputDiagnostics {
     stage_gpu_render_pipeline_blockers: u64,
     stage_pixels: u64,
     health: AppUiViewerGpuOutputHealthSummary,
+    health_counts: AppUiViewerGpuOutputHealthCounts,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
@@ -174,6 +176,17 @@ struct AppUiViewerGpuOutputHealthSummary {
     no_gpu_blockers: bool,
     output_texture_available: bool,
     external_texture_registered: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+struct AppUiViewerGpuOutputHealthCounts {
+    no_invocation: u64,
+    waiting: u64,
+    blocked: u64,
+    failed: u64,
+    rejected: u64,
+    degraded: u64,
+    ready: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -288,6 +301,7 @@ impl AppUiViewerGpuOutputTelemetry {
                 .render_pipeline_not_prepared,
             stage_pixels: self.accumulated_stage_diagnostics.stage_pixels,
             health,
+            health_counts: self.health_counts,
             last_frame_context: self.last_frame_context.clone(),
             last_display_contract_blocker: self.last_display_contract_blocker,
             last_display_presentation_readiness: self.last_display_presentation_readiness,
@@ -315,26 +329,31 @@ impl AppUiViewerGpuOutputTelemetry {
     fn record_non_workspace_skip(&mut self) {
         self.non_workspace_skips = self.non_workspace_skips.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::NonWorkspace);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Waiting);
     }
 
     fn record_current_skip(&mut self) {
         self.current_skips = self.current_skips.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Current);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Waiting);
     }
 
     fn record_loading_skip(&mut self) {
         self.loading_skips = self.loading_skips.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Loading);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Waiting);
     }
 
     fn record_unavailable_skip(&mut self) {
         self.unavailable_skips = self.unavailable_skips.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Unavailable);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Waiting);
     }
 
     fn record_invalid_texture_key(&mut self) {
         self.invalid_texture_keys = self.invalid_texture_keys.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::InvalidTextureKey);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Waiting);
     }
 
     fn record_display_contract_blocker(&mut self, blocker: &AppUiDisplayBoundaryBlocker) {
@@ -352,6 +371,7 @@ impl AppUiViewerGpuOutputTelemetry {
         }
         self.last_display_contract_blocker = Some(diagnostics);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Blocked);
     }
 
     fn record_display_presentation_readiness(
@@ -378,11 +398,13 @@ impl AppUiViewerGpuOutputTelemetry {
     fn record_record_failure(&mut self) {
         self.record_failures = self.record_failures.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::RecordFailed);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Failed);
     }
 
     fn record_missing_output_texture(&mut self) {
         self.missing_output_textures = self.missing_output_textures.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::OutputTextureMissing);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Failed);
     }
 
     fn record_registered_frame(&mut self, diagnostics: RenderColorStageDiagnostics) {
@@ -390,6 +412,7 @@ impl AppUiViewerGpuOutputTelemetry {
         self.accumulated_stage_diagnostics.accumulate(diagnostics);
         self.last_stage_diagnostics = Some(diagnostics);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Registered);
+        self.record_health_count(AppUiViewerGpuOutputHealthSummary::from_telemetry(self).status);
     }
 
     fn record_rejected_external_frame(&mut self, diagnostics: RenderColorStageDiagnostics) {
@@ -397,6 +420,39 @@ impl AppUiViewerGpuOutputTelemetry {
         self.accumulated_stage_diagnostics.accumulate(diagnostics);
         self.last_stage_diagnostics = Some(diagnostics);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected);
+        self.record_health_count(AppUiViewerGpuOutputHealthStatus::Rejected);
+    }
+
+    fn record_health_count(&mut self, status: AppUiViewerGpuOutputHealthStatus) {
+        self.health_counts.record(status);
+    }
+}
+
+impl AppUiViewerGpuOutputHealthCounts {
+    fn record(&mut self, status: AppUiViewerGpuOutputHealthStatus) {
+        match status {
+            AppUiViewerGpuOutputHealthStatus::NoInvocation => {
+                self.no_invocation = self.no_invocation.saturating_add(1);
+            }
+            AppUiViewerGpuOutputHealthStatus::Waiting => {
+                self.waiting = self.waiting.saturating_add(1);
+            }
+            AppUiViewerGpuOutputHealthStatus::Blocked => {
+                self.blocked = self.blocked.saturating_add(1);
+            }
+            AppUiViewerGpuOutputHealthStatus::Failed => {
+                self.failed = self.failed.saturating_add(1);
+            }
+            AppUiViewerGpuOutputHealthStatus::Rejected => {
+                self.rejected = self.rejected.saturating_add(1);
+            }
+            AppUiViewerGpuOutputHealthStatus::Degraded => {
+                self.degraded = self.degraded.saturating_add(1);
+            }
+            AppUiViewerGpuOutputHealthStatus::Ready => {
+                self.ready = self.ready.saturating_add(1);
+            }
+        }
     }
 }
 
@@ -2111,6 +2167,12 @@ fn trace_viewer_gpu_output_telemetry(telemetry: &AppUiViewerGpuOutputTelemetry) 
         no_gpu_blockers = diagnostics.health.no_gpu_blockers,
         output_texture_available = diagnostics.health.output_texture_available,
         external_texture_registered = diagnostics.health.external_texture_registered,
+        health_count_waiting = diagnostics.health_counts.waiting,
+        health_count_blocked = diagnostics.health_counts.blocked,
+        health_count_failed = diagnostics.health_counts.failed,
+        health_count_rejected = diagnostics.health_counts.rejected,
+        health_count_degraded = diagnostics.health_counts.degraded,
+        health_count_ready = diagnostics.health_counts.ready,
         last_frame_context = ?diagnostics.last_frame_context,
         last_display_contract_blocker = ?diagnostics.last_display_contract_blocker,
         last_display_presentation_readiness = ?diagnostics.last_display_presentation_readiness,
@@ -3508,6 +3570,15 @@ mod tests {
                 ..AppUiViewerGpuOutputHealthSummary::default()
             }
         );
+        assert_eq!(
+            telemetry.diagnostics().health_counts,
+            AppUiViewerGpuOutputHealthCounts {
+                waiting: 5,
+                blocked: 1,
+                failed: 2,
+                ..AppUiViewerGpuOutputHealthCounts::default()
+            }
+        );
     }
 
     #[test]
@@ -3575,6 +3646,10 @@ mod tests {
                     display_boundary_ready: false,
                     presentation_ready: true,
                     ..AppUiViewerGpuOutputHealthSummary::default()
+                },
+                health_counts: AppUiViewerGpuOutputHealthCounts {
+                    blocked: 2,
+                    ..AppUiViewerGpuOutputHealthCounts::default()
                 },
                 last_outcome: Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked),
                 ..AppUiViewerGpuOutputDiagnostics::default()
@@ -3773,6 +3848,11 @@ mod tests {
                     output_texture_available: true,
                     ..AppUiViewerGpuOutputHealthSummary::default()
                 },
+                health_counts: AppUiViewerGpuOutputHealthCounts {
+                    rejected: 1,
+                    ready: 1,
+                    ..AppUiViewerGpuOutputHealthCounts::default()
+                },
                 last_outcome: Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected),
                 ..AppUiViewerGpuOutputDiagnostics::default()
             }
@@ -3819,6 +3899,13 @@ mod tests {
                 external_texture_registered: true,
             }
         );
+        assert_eq!(
+            telemetry.diagnostics().health_counts,
+            AppUiViewerGpuOutputHealthCounts {
+                ready: 1,
+                ..AppUiViewerGpuOutputHealthCounts::default()
+            }
+        );
     }
 
     #[test]
@@ -3860,6 +3947,13 @@ mod tests {
                 no_gpu_blockers: true,
                 output_texture_available: true,
                 external_texture_registered: true,
+            }
+        );
+        assert_eq!(
+            telemetry.diagnostics().health_counts,
+            AppUiViewerGpuOutputHealthCounts {
+                degraded: 1,
+                ..AppUiViewerGpuOutputHealthCounts::default()
             }
         );
     }
@@ -3949,6 +4043,9 @@ mod tests {
         assert_eq!(json["health"]["viewer_output_ready"], true);
         assert_eq!(json["health"]["native_gpu_boundary_ready"], true);
         assert_eq!(json["health"]["presentation_ready"], true);
+        assert_eq!(json["health_counts"]["ready"], 1);
+        assert_eq!(json["health_counts"]["degraded"], 0);
+        assert_eq!(json["health_counts"]["failed"], 0);
         assert_eq!(json["stage_gpu_color_stages"], 1);
         assert_eq!(json["last_outcome"], "Registered");
         assert_eq!(

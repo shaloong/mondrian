@@ -174,7 +174,8 @@ GPU output diagnostics as JSONL so real playback/scrubbing sessions can be
 correlated with preview/export perf health reports. Each record carries the
 last frame context (sequence id, timeline frame, preview dimensions, external
 texture key, output target/color space, tone-map flag, and optional display/view)
-so budget failures can be traced back to the exact viewer boundary.
+plus cumulative ready/degraded/blocked/failed/rejected/waiting health counts, so
+budget failures can be measured and traced back to the exact viewer boundary.
 
 Input transforms follow the same rule. Decode/import code wraps source pixels in
 `CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks

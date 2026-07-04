@@ -260,6 +260,9 @@ readiness, native GPU stage sequence, blocker breakdown, output texture state,
 external texture registration outcome, and frame context needed to correlate
 failures with a concrete sequence id, timeline frame, preview size, external
 texture key, output target/color space, tone-map flag, and optional display/view.
+The same records include cumulative ready/degraded/blocked/failed/rejected/waiting
+health counts so smoke tooling can enforce viewer GPU-output budgets directly
+from the JSONL stream.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from
