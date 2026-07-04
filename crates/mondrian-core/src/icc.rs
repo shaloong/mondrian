@@ -429,3 +429,43 @@ mod tests {
         assert!((estimated as f64 - 2.2).abs() < 0.15);
     }
 }
+
+/// OS-level display profile access status.
+///
+/// This reports whether the current platform can provide ICC profile access,
+/// EDR information, or HDR display metadata. For alpha, this is a diagnostic
+/// only — full OS integration is deferred to a later phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsDisplayProfileStatus {
+    /// Whether ICC profile parsing is available (always true — the parser is
+    /// built-in, but OS-level profile discovery is not implemented).
+    pub icc_parser_available: bool,
+    /// Whether OS-level ICC profile discovery is available (currently false
+    /// on all platforms).
+    pub os_icc_discovery_available: bool,
+    /// Whether EDR (Extended Dynamic Range) information is available from the OS.
+    pub os_edr_available: bool,
+    /// Whether HDR display metadata is available from the OS.
+    pub os_hdr_metadata_available: bool,
+    /// Human-readable status message.
+    pub status_message: String,
+}
+
+impl OsDisplayProfileStatus {
+    /// Check the current platform's display profile access capabilities.
+    ///
+    /// For alpha, this always reports OS-level access as unavailable. Full
+    /// integration with Windows ICC, macOS ColorSync, and Linux colord is
+    /// deferred to a later phase.
+    pub fn check() -> Self {
+        Self {
+            icc_parser_available: true,
+            os_icc_discovery_available: false,
+            os_edr_available: false,
+            os_hdr_metadata_available: false,
+            status_message: "OS display profile discovery not implemented; \
+             ICC profiles must be provided explicitly via project settings."
+                .to_string(),
+        }
+    }
+}
