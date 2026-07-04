@@ -338,6 +338,11 @@ the active display target fingerprint plus current/selected/desired surface
 format, color space, encoding, HDR mode, payload blocker, and support evidence
 so smoke tooling can diagnose the exact presentation contract mismatch from the
 JSONL report alone.
+Display-contract refreshes are part of the same persisted evidence: the session
+records structured resize / scale-factor / window-move events with previous and
+next contract snapshots, allowing multi-monitor or swapchain reconfiguration
+problems to be reconstructed from JSONL without depending on trace log
+retention.
 The window session also owns viewer GPU output telemetry next to the runtime:
 each preparation attempt records whether it skipped because the external
 texture was already current, media was loading, the preview was unavailable, the

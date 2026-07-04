@@ -79,6 +79,9 @@ The summary preserves the last display issue's structured surface-contract
 evidence as well: display target fingerprint, current/selected/desired surface
 format and color space, SDR/PQ/HLG encoding, HDR mode, payload blocker, and
 whether the required target surface color space was actually supported.
+It also replays recent display-contract refresh events and reports the last
+refresh event, so resize, scale-factor, and window-move monitor transitions can
+be diagnosed from the same JSONL summary instead of only from trace logs.
 Use the per-reason viewer display thresholds
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE`,
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE`,

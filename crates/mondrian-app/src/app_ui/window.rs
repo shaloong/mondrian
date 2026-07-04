@@ -57,6 +57,7 @@ const WORKSPACE_WINDOW_WIDTH: f32 = 1600.0;
 const WORKSPACE_WINDOW_HEIGHT: f32 = 900.0;
 const WORKSPACE_MIN_WIDTH: f32 = 1024.0;
 const WORKSPACE_MIN_HEIGHT: f32 = 600.0;
+const APP_UI_DISPLAY_CONTRACT_REFRESH_HISTORY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppUiWindowRole {
@@ -103,6 +104,7 @@ struct AppUiViewerGpuOutputTelemetry {
     display_presentation_reconfigure_candidates: u64,
     display_presentation_payload_blockers: u64,
     display_presentation_unsupported_contracts: u64,
+    display_contract_refreshes: u64,
     record_failures: u64,
     missing_output_textures: u64,
     registered_frames: u64,
@@ -113,6 +115,8 @@ struct AppUiViewerGpuOutputTelemetry {
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
+    recent_display_contract_refreshes: Vec<AppUiDisplayContractRefreshEvent>,
+    last_display_contract_refresh: Option<AppUiDisplayContractRefreshEvent>,
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
 }
 
@@ -130,6 +134,7 @@ struct AppUiViewerGpuOutputDiagnostics {
     display_presentation_reconfigure_candidates: u64,
     display_presentation_payload_blockers: u64,
     display_presentation_unsupported_contracts: u64,
+    display_contract_refreshes: u64,
     record_failures: u64,
     missing_output_textures: u64,
     registered_frames: u64,
@@ -150,6 +155,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     last_color_rejection: Option<AppUiPreviewColorRejection>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
+    recent_display_contract_refreshes: Vec<AppUiDisplayContractRefreshEvent>,
+    last_display_contract_refresh: Option<AppUiDisplayContractRefreshEvent>,
     display_issue_summary: Option<AppUiDisplayIssueSummary>,
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
 }
@@ -230,6 +237,34 @@ struct AppUiViewerGpuOutputDisplayView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum AppUiDisplayContractRefreshReasonDiagnostic {
+    Resize,
+    ScaleFactorChanged,
+    WindowMoved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiDisplayOutputContractSnapshot {
+    display_target: AppUiDisplayTarget,
+    surface_format: AppUiSurfaceFormatDiagnostic,
+    surface_color_space: AppUiSurfaceColorSpaceDiagnostic,
+    surface_encoding: AppUiSurfaceEncodingDiagnostic,
+    surface_hdr_mode: AppUiSurfaceHdrMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiDisplayContractRefreshEvent {
+    reason: AppUiDisplayContractRefreshReasonDiagnostic,
+    previous: AppUiDisplayOutputContractSnapshot,
+    next: AppUiDisplayOutputContractSnapshot,
+    renderer_rebuilt: bool,
+    display_target_changed: bool,
+    surface_format_changed: bool,
+    surface_color_space_changed: bool,
+    surface_hdr_mode_changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiDisplayIssueReason {
     HdrOutputRequiresHdrSurface,
     OutputColorSpaceRequiresSurfaceColorSpace,
@@ -282,6 +317,7 @@ impl AppUiViewerGpuOutputTelemetry {
             display_presentation_payload_blockers: self.display_presentation_payload_blockers,
             display_presentation_unsupported_contracts: self
                 .display_presentation_unsupported_contracts,
+            display_contract_refreshes: self.display_contract_refreshes,
             record_failures: self.record_failures,
             missing_output_textures: self.missing_output_textures,
             registered_frames: self.registered_frames,
@@ -314,6 +350,8 @@ impl AppUiViewerGpuOutputTelemetry {
             last_color_rejection: None,
             last_display_contract_blocker: self.last_display_contract_blocker,
             last_display_presentation_readiness: self.last_display_presentation_readiness,
+            recent_display_contract_refreshes: self.recent_display_contract_refreshes.clone(),
+            last_display_contract_refresh: self.last_display_contract_refresh.clone(),
             display_issue_summary,
             last_outcome: self.last_outcome,
         }
@@ -402,6 +440,24 @@ impl AppUiViewerGpuOutputTelemetry {
             }
         }
         self.last_display_presentation_readiness = Some(diagnostics);
+    }
+
+    fn record_display_contract_refresh(
+        &mut self,
+        reason: DisplayOutputContractRefreshReason,
+        previous: &AppUiDisplayOutputContract,
+        next: &AppUiDisplayOutputContract,
+        renderer_rebuilt: bool,
+    ) {
+        self.display_contract_refreshes = self.display_contract_refreshes.saturating_add(1);
+        let event = AppUiDisplayContractRefreshEvent::new(reason, previous, next, renderer_rebuilt);
+        if self.recent_display_contract_refreshes.len()
+            >= APP_UI_DISPLAY_CONTRACT_REFRESH_HISTORY_LIMIT
+        {
+            self.recent_display_contract_refreshes.remove(0);
+        }
+        self.recent_display_contract_refreshes.push(event.clone());
+        self.last_display_contract_refresh = Some(event);
     }
 
     fn record_record_failure(&mut self) {
@@ -664,6 +720,42 @@ impl AppUiDisplayIssueSummary {
     }
 }
 
+impl AppUiDisplayOutputContractSnapshot {
+    fn from_contract(contract: &AppUiDisplayOutputContract) -> Self {
+        Self {
+            display_target: contract.display_target.clone(),
+            surface_format: app_ui_surface_format_diagnostic(contract.surface_color.format),
+            surface_color_space: app_ui_surface_color_space_diagnostic(
+                contract.surface_color.color_space,
+            ),
+            surface_encoding: app_ui_surface_encoding_diagnostic(contract.surface_color.encoding),
+            surface_hdr_mode: contract.surface_color.hdr_mode,
+        }
+    }
+}
+
+impl AppUiDisplayContractRefreshEvent {
+    fn new(
+        reason: DisplayOutputContractRefreshReason,
+        previous: &AppUiDisplayOutputContract,
+        next: &AppUiDisplayOutputContract,
+        renderer_rebuilt: bool,
+    ) -> Self {
+        Self {
+            reason: AppUiDisplayContractRefreshReasonDiagnostic::from_reason(reason),
+            previous: AppUiDisplayOutputContractSnapshot::from_contract(previous),
+            next: AppUiDisplayOutputContractSnapshot::from_contract(next),
+            renderer_rebuilt,
+            display_target_changed: previous.display_target != next.display_target,
+            surface_format_changed: previous.surface_color.format != next.surface_color.format,
+            surface_color_space_changed: previous.surface_color.color_space
+                != next.surface_color.color_space,
+            surface_hdr_mode_changed: previous.surface_color.hdr_mode
+                != next.surface_color.hdr_mode,
+        }
+    }
+}
+
 impl AppUiDisplayBoundaryBlockerDiagnostics {
     fn supports_output_surface_color_space(self) -> bool {
         match target_display_surface_color_space(self.output_color_space) {
@@ -687,6 +779,20 @@ impl AppUiDisplayBoundaryBlockerDiagnostics {
 enum DisplayOutputContractRefreshReason {
     SurfaceLifecycle(SurfaceLifecycleReason),
     WindowMoved,
+}
+
+impl AppUiDisplayContractRefreshReasonDiagnostic {
+    fn from_reason(reason: DisplayOutputContractRefreshReason) -> Self {
+        match reason {
+            DisplayOutputContractRefreshReason::SurfaceLifecycle(
+                SurfaceLifecycleReason::Resize,
+            ) => Self::Resize,
+            DisplayOutputContractRefreshReason::SurfaceLifecycle(
+                SurfaceLifecycleReason::ScaleFactorChanged,
+            ) => Self::ScaleFactorChanged,
+            DisplayOutputContractRefreshReason::WindowMoved => Self::WindowMoved,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2616,19 +2722,24 @@ fn refresh_display_output_contract(
         return;
     }
 
-    let surface_format_changed =
-        display_output_contract_requires_renderer_rebuild(&previous, &next);
+    let renderer_rebuilt = display_output_contract_requires_renderer_rebuild(&previous, &next);
+    session.viewer_gpu_output_telemetry.record_display_contract_refresh(
+        reason,
+        &previous,
+        &next,
+        renderer_rebuilt,
+    );
     session.display_output_contract = next;
     session.config.format = session.display_output_contract.surface_color.format;
     session.config.color_space = session.display_output_contract.surface_color.color_space;
-    if surface_format_changed {
+    if renderer_rebuilt {
         session.surface.configure(device, &session.config);
         session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
     }
     invalidate_display_dependent_gpu_preview(session, host);
     tracing::info!(
         ?reason,
-        surface_format_changed,
+        renderer_rebuilt,
         display_target = ?session.display_output_contract.display_target,
         surface_format = ?session.display_output_contract.surface_color.format,
         surface_color_space = ?session.display_output_contract.surface_color.color_space,
@@ -3956,6 +4067,44 @@ mod tests {
     }
 
     #[test]
+    fn viewer_gpu_output_diagnostics_preserve_display_contract_refresh_history() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        let previous = test_display_output_contract();
+        let mut next = previous.clone();
+        next.display_target.name = Some("hdr-display".to_owned());
+        next.display_target.position = (3840, 0);
+        next.surface_color.format = wgpu::TextureFormat::Rgba16Float;
+        next.surface_color.color_space = wgpu::SurfaceColorSpace::Bt2100Pq;
+        next.surface_color.encoding = AppUiSurfaceEncoding::Pq;
+        next.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
+
+        telemetry.record_display_contract_refresh(
+            DisplayOutputContractRefreshReason::WindowMoved,
+            &previous,
+            &next,
+            true,
+        );
+
+        let diagnostics = telemetry.diagnostics();
+
+        assert_eq!(diagnostics.display_contract_refreshes, 1);
+        assert_eq!(diagnostics.recent_display_contract_refreshes.len(), 1);
+        assert_eq!(
+            diagnostics.last_display_contract_refresh,
+            Some(AppUiDisplayContractRefreshEvent {
+                reason: AppUiDisplayContractRefreshReasonDiagnostic::WindowMoved,
+                previous: AppUiDisplayOutputContractSnapshot::from_contract(&previous),
+                next: AppUiDisplayOutputContractSnapshot::from_contract(&next),
+                renderer_rebuilt: true,
+                display_target_changed: true,
+                surface_format_changed: true,
+                surface_color_space_changed: true,
+                surface_hdr_mode_changed: true,
+            })
+        );
+    }
+
+    #[test]
     fn viewer_gpu_output_telemetry_accumulates_recorded_stage_diagnostics() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let first = RenderColorStageDiagnostics {
@@ -4163,6 +4312,15 @@ mod tests {
     #[test]
     fn viewer_gpu_output_diagnostics_jsonl_includes_health_summary() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        let previous_contract = test_display_output_contract();
+        let mut next_contract = previous_contract.clone();
+        next_contract.display_target.position = (3840, 0);
+        telemetry.record_display_contract_refresh(
+            DisplayOutputContractRefreshReason::WindowMoved,
+            &previous_contract,
+            &next_contract,
+            false,
+        );
         telemetry.record_invocation();
         telemetry.record_display_presentation_readiness(
             AppUiDisplayPresentationReadinessDiagnostics {
@@ -4262,6 +4420,15 @@ mod tests {
         assert_eq!(json["health_counts"]["failed"], 0);
         assert_eq!(json["stage_gpu_color_stages"], 1);
         assert_eq!(json["last_outcome"], "Registered");
+        assert_eq!(json["display_contract_refreshes"], 1);
+        assert_eq!(
+            json["recent_display_contract_refreshes"][0]["reason"],
+            "WindowMoved"
+        );
+        assert_eq!(
+            json["last_display_contract_refresh"]["display_target_changed"],
+            true
+        );
         assert_eq!(
             json["last_frame_context"]["sequence_id"],
             "sequence-for-jsonl"

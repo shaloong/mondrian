@@ -73,6 +73,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub counts: ViewerGpuOutputHealthCounts,
     /// Counts replayed from structured display issue summaries.
     pub display_issues: ViewerGpuOutputDisplayIssueCounts,
+    /// Counts replayed from structured display-contract refresh events.
+    pub display_contract_refreshes: ViewerGpuOutputDisplayContractRefreshCounts,
     /// Records carrying a structured viewer color rejection.
     pub color_rejections: u64,
     /// Aggregated machine-readable media issue summaries from color rejections.
@@ -95,6 +97,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub last_frame_context: Option<ViewerGpuOutputFrameContext>,
     /// Last display issue summary observed in the stream.
     pub last_display_issue: Option<ViewerGpuOutputDisplayIssueSummary>,
+    /// Last display-contract refresh event observed in the stream.
+    pub last_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
     /// Last viewer color rejection observed in the stream.
     pub last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
 }
@@ -192,7 +196,9 @@ pub fn evaluate_jsonl(
     let mut last_status = None;
     let mut last_frame_context = None;
     let mut display_issues = ViewerGpuOutputDisplayIssueCounts::default();
+    let mut display_contract_refreshes = ViewerGpuOutputDisplayContractRefreshCounts::default();
     let mut last_display_issue = None;
+    let mut last_display_contract_refresh = None;
     let mut color_rejections = 0u64;
     let mut media_issues = VideoColorDiagnosticIssueAggregate::default();
     let mut last_color_rejection = None;
@@ -221,6 +227,20 @@ pub fn evaluate_jsonl(
         if let Some(issue) = record.display_issue_summary {
             display_issues.record(&issue);
             last_display_issue = Some(issue);
+        }
+        for refresh in record.recent_display_contract_refreshes {
+            display_contract_refreshes.record(&refresh);
+            last_display_contract_refresh = Some(refresh);
+        }
+        if let Some(refresh) = record.last_display_contract_refresh {
+            let needs_record = last_display_contract_refresh
+                .as_ref()
+                .map(|last| last != &refresh)
+                .unwrap_or(true);
+            if needs_record {
+                display_contract_refreshes.record(&refresh);
+            }
+            last_display_contract_refresh = Some(refresh);
         }
         if let Some(rejection) = record.last_color_rejection {
             color_rejections = color_rejections.saturating_add(1);
@@ -327,6 +347,7 @@ pub fn evaluate_jsonl(
         records,
         counts,
         display_issues,
+        display_contract_refreshes,
         color_rejections,
         media_issues,
         reported_counts,
@@ -338,6 +359,7 @@ pub fn evaluate_jsonl(
         last_status,
         last_frame_context,
         last_display_issue,
+        last_display_contract_refresh,
         last_color_rejection,
     })
 }
@@ -359,6 +381,9 @@ struct ViewerGpuOutputDiagnosticRecord {
     health_counts: Option<ViewerGpuOutputHealthCounts>,
     last_frame_context: Option<ViewerGpuOutputFrameContext>,
     display_issue_summary: Option<ViewerGpuOutputDisplayIssueSummary>,
+    #[serde(default)]
+    recent_display_contract_refreshes: Vec<ViewerGpuOutputDisplayContractRefreshEvent>,
+    last_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
     last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
 }
 
@@ -428,6 +453,58 @@ pub struct ViewerGpuOutputDisplayIssueCounts {
     pub payload_blockers: u64,
     /// Unknown reason strings from newer diagnostics.
     pub unknown: u64,
+}
+
+/// Counts replayed from viewer GPU-output display-contract refresh events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputDisplayContractRefreshCounts {
+    /// Total refresh events replayed from the JSONL stream.
+    pub total: u64,
+    /// Refreshes caused by surface resize.
+    pub resize: u64,
+    /// Refreshes caused by scale-factor changes.
+    pub scale_factor_changed: u64,
+    /// Refreshes caused by window monitor changes/moves.
+    pub window_moved: u64,
+    /// Refreshes that rebuilt the frame renderer.
+    pub renderer_rebuilt: u64,
+    /// Refreshes that changed the active display target.
+    pub display_target_changed: u64,
+    /// Refreshes that changed the active surface format.
+    pub surface_format_changed: u64,
+    /// Refreshes that changed the active surface color space.
+    pub surface_color_space_changed: u64,
+    /// Refreshes that changed the active HDR mode.
+    pub surface_hdr_mode_changed: u64,
+}
+
+impl ViewerGpuOutputDisplayContractRefreshCounts {
+    fn record(&mut self, refresh: &ViewerGpuOutputDisplayContractRefreshEvent) {
+        self.total = self.total.saturating_add(1);
+        match refresh.reason.as_str() {
+            "Resize" => self.resize = self.resize.saturating_add(1),
+            "ScaleFactorChanged" => {
+                self.scale_factor_changed = self.scale_factor_changed.saturating_add(1);
+            }
+            "WindowMoved" => self.window_moved = self.window_moved.saturating_add(1),
+            _ => {}
+        }
+        if refresh.renderer_rebuilt {
+            self.renderer_rebuilt = self.renderer_rebuilt.saturating_add(1);
+        }
+        if refresh.display_target_changed {
+            self.display_target_changed = self.display_target_changed.saturating_add(1);
+        }
+        if refresh.surface_format_changed {
+            self.surface_format_changed = self.surface_format_changed.saturating_add(1);
+        }
+        if refresh.surface_color_space_changed {
+            self.surface_color_space_changed = self.surface_color_space_changed.saturating_add(1);
+        }
+        if refresh.surface_hdr_mode_changed {
+            self.surface_hdr_mode_changed = self.surface_hdr_mode_changed.saturating_add(1);
+        }
+    }
 }
 
 impl ViewerGpuOutputDisplayIssueCounts {
@@ -517,6 +594,42 @@ pub struct ViewerGpuOutputDisplayTarget {
     pub scale_factor_ppm: u32,
     /// Display refresh rate in millihertz, when available.
     pub refresh_rate_millihertz: Option<u32>,
+}
+
+/// Display-contract refresh event consumed from viewer GPU-output diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputDisplayContractRefreshEvent {
+    /// Stable refresh reason emitted by the app window.
+    pub reason: String,
+    /// The previous display-output contract snapshot.
+    pub previous: ViewerGpuOutputDisplayContractSnapshot,
+    /// The next display-output contract snapshot.
+    pub next: ViewerGpuOutputDisplayContractSnapshot,
+    /// Whether the refresh rebuilt the frame renderer.
+    pub renderer_rebuilt: bool,
+    /// Whether the refresh changed the active display target.
+    pub display_target_changed: bool,
+    /// Whether the refresh changed the active surface format.
+    pub surface_format_changed: bool,
+    /// Whether the refresh changed the active surface color space.
+    pub surface_color_space_changed: bool,
+    /// Whether the refresh changed the active HDR mode.
+    pub surface_hdr_mode_changed: bool,
+}
+
+/// Display-output contract snapshot consumed from viewer GPU-output diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputDisplayContractSnapshot {
+    /// Display target active for the snapshot.
+    pub display_target: ViewerGpuOutputDisplayTarget,
+    /// Surface format chosen for the snapshot.
+    pub surface_format: String,
+    /// Surface color space chosen for the snapshot.
+    pub surface_color_space: String,
+    /// Surface encoding chosen for the snapshot.
+    pub surface_encoding: String,
+    /// Surface HDR mode chosen for the snapshot.
+    pub surface_hdr_mode: String,
 }
 
 impl ViewerGpuOutputHealthCounts {
@@ -795,6 +908,75 @@ mod tests {
                 payload_blocker: None,
                 supported_surface_color_space_count: Some(2),
                 target_surface_color_space_supported: Some(true),
+            })
+        );
+    }
+
+    #[test]
+    fn budget_replays_display_contract_refresh_history() {
+        let jsonl = r#"
+{"health":{"status":"Waiting"},"recent_display_contract_refreshes":[{"reason":"Resize","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[1920,1080],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly"},"next":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly"},"renderer_rebuilt":false,"display_target_changed":true,"surface_format_changed":false,"surface_color_space_changed":false,"surface_hdr_mode_changed":false}]}
+{"health":{"status":"Blocked"},"last_display_contract_refresh":{"reason":"WindowMoved","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly"},"next":{"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"surface_format":"Rgba16Float","surface_color_space":"Bt2100Pq","surface_encoding":"Pq","surface_hdr_mode":"HdrPq"},"renderer_rebuilt":true,"display_target_changed":true,"surface_format_changed":true,"surface_color_space_changed":true,"surface_hdr_mode_changed":true}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 0,
+            max_waiting: 1,
+            max_blocked: 1,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(summary.passed);
+        assert_eq!(
+            summary.display_contract_refreshes,
+            ViewerGpuOutputDisplayContractRefreshCounts {
+                total: 2,
+                resize: 1,
+                window_moved: 1,
+                renderer_rebuilt: 1,
+                display_target_changed: 2,
+                surface_format_changed: 1,
+                surface_color_space_changed: 1,
+                surface_hdr_mode_changed: 1,
+                ..ViewerGpuOutputDisplayContractRefreshCounts::default()
+            }
+        );
+        assert_eq!(
+            summary.last_display_contract_refresh,
+            Some(ViewerGpuOutputDisplayContractRefreshEvent {
+                reason: "WindowMoved".to_owned(),
+                previous: ViewerGpuOutputDisplayContractSnapshot {
+                    display_target: ViewerGpuOutputDisplayTarget {
+                        name: Some("Panel A".to_owned()),
+                        position: (0, 0),
+                        physical_size: (2560, 1440),
+                        scale_factor_ppm: 1_000_000,
+                        refresh_rate_millihertz: Some(60_000),
+                    },
+                    surface_format: "Bgra8UnormSrgb".to_owned(),
+                    surface_color_space: "Srgb".to_owned(),
+                    surface_encoding: "Srgb".to_owned(),
+                    surface_hdr_mode: "SdrOnly".to_owned(),
+                },
+                next: ViewerGpuOutputDisplayContractSnapshot {
+                    display_target: ViewerGpuOutputDisplayTarget {
+                        name: Some("HDR Monitor".to_owned()),
+                        position: (2560, 0),
+                        physical_size: (3840, 2160),
+                        scale_factor_ppm: 1_000_000,
+                        refresh_rate_millihertz: Some(120_000),
+                    },
+                    surface_format: "Rgba16Float".to_owned(),
+                    surface_color_space: "Bt2100Pq".to_owned(),
+                    surface_encoding: "Pq".to_owned(),
+                    surface_hdr_mode: "HdrPq".to_owned(),
+                },
+                renderer_rebuilt: true,
+                display_target_changed: true,
+                surface_format_changed: true,
+                surface_color_space_changed: true,
+                surface_hdr_mode_changed: true,
             })
         );
     }
