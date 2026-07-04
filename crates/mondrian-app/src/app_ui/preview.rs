@@ -3118,6 +3118,228 @@ mod tests {
         assert_eq!(preview.gpu_path_ready, export.gpu_path_ready);
     }
 
+    fn assert_preview_export_color_reports_match(
+        preview: &AppUiPreviewColorHealthReport,
+        export: &mondrian_export::queue::ExportColorHealthReport,
+    ) {
+        assert_eq!(
+            preview_color_report_verdict(preview.verdict),
+            export_color_report_verdict(export.verdict)
+        );
+        assert_eq!(
+            preview_shared_check_signature(preview),
+            export_shared_check_signature(export)
+        );
+        assert_eq!(
+            preview_root_cause_signature(preview),
+            export_root_cause_signature(export)
+        );
+        assert_eq!(
+            preview_action_signature(preview),
+            export_action_signature(export)
+        );
+    }
+
+    fn preview_color_report_verdict(verdict: AppUiPreviewColorHealthVerdict) -> &'static str {
+        match verdict {
+            AppUiPreviewColorHealthVerdict::Pass => "pass",
+            AppUiPreviewColorHealthVerdict::Warn => "warn",
+            AppUiPreviewColorHealthVerdict::Fail => "fail",
+        }
+    }
+
+    fn export_color_report_verdict(
+        verdict: mondrian_export::queue::ExportColorHealthVerdict,
+    ) -> &'static str {
+        match verdict {
+            mondrian_export::queue::ExportColorHealthVerdict::Pass => "pass",
+            mondrian_export::queue::ExportColorHealthVerdict::Warn => "warn",
+            mondrian_export::queue::ExportColorHealthVerdict::Fail => "fail",
+        }
+    }
+
+    fn preview_shared_check_signature(
+        report: &AppUiPreviewColorHealthReport,
+    ) -> Vec<(String, String, String, u64, Option<u64>)> {
+        let mut signature = report
+            .checks
+            .iter()
+            .filter(|check| is_shared_color_report_check(check.code))
+            .map(|check| {
+                (
+                    format!("{:?}", check.area),
+                    check.code.to_owned(),
+                    preview_color_report_severity(check.severity).to_owned(),
+                    check.observed,
+                    check.limit,
+                )
+            })
+            .collect::<Vec<_>>();
+        signature.sort();
+        signature
+    }
+
+    fn export_shared_check_signature(
+        report: &mondrian_export::queue::ExportColorHealthReport,
+    ) -> Vec<(String, String, String, u64, Option<u64>)> {
+        let mut signature = report
+            .checks
+            .iter()
+            .filter(|check| is_shared_color_report_check(check.code))
+            .map(|check| {
+                (
+                    format!("{:?}", check.area),
+                    check.code.to_owned(),
+                    export_color_report_severity(check.severity).to_owned(),
+                    check.observed,
+                    check.limit,
+                )
+            })
+            .collect::<Vec<_>>();
+        signature.sort();
+        signature
+    }
+
+    fn is_shared_color_report_check(code: &str) -> bool {
+        matches!(
+            code,
+            "fully_float_linear"
+                | "gpu_path_ready"
+                | "gpu_blockers"
+                | "transfer_stages"
+                | "legacy_reason_total"
+                | "policy_rejections"
+        )
+    }
+
+    fn preview_root_cause_signature(
+        report: &AppUiPreviewColorHealthReport,
+    ) -> Vec<(String, String, String, String)> {
+        let mut signature = report
+            .root_causes
+            .iter()
+            .map(|root| {
+                (
+                    format!("{:?}", root.area),
+                    normalized_color_root_cause_code(root.code).to_owned(),
+                    preview_color_report_severity(root.severity).to_owned(),
+                    root.evidence.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        signature.sort();
+        signature
+    }
+
+    fn export_root_cause_signature(
+        report: &mondrian_export::queue::ExportColorHealthReport,
+    ) -> Vec<(String, String, String, String)> {
+        let mut signature = report
+            .root_causes
+            .iter()
+            .filter(|root| root.code != "asset_color_diagnostics_warning")
+            .map(|root| {
+                (
+                    format!("{:?}", root.area),
+                    normalized_color_root_cause_code(root.code).to_owned(),
+                    export_color_report_severity(root.severity).to_owned(),
+                    root.evidence.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        signature.sort();
+        signature
+    }
+
+    fn preview_action_signature(report: &AppUiPreviewColorHealthReport) -> Vec<(String, String)> {
+        let mut signature = report
+            .actions
+            .iter()
+            .map(|action| {
+                (
+                    format!("{:?}", action.area),
+                    normalized_color_action_code(action.code).to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        signature.sort();
+        signature
+    }
+
+    fn export_action_signature(
+        report: &mondrian_export::queue::ExportColorHealthReport,
+    ) -> Vec<(String, String)> {
+        let mut signature = report
+            .actions
+            .iter()
+            .filter(|action| action.code != "inspect_asset_color_warning_evidence")
+            .map(|action| {
+                (
+                    format!("{:?}", action.area),
+                    normalized_color_action_code(action.code).to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        signature.sort();
+        signature
+    }
+
+    fn normalized_color_root_cause_code(code: &str) -> &str {
+        match code {
+            "missing_preview_color_evidence" | "missing_export_color_evidence" => {
+                "missing_color_evidence"
+            }
+            "preview_gpu_color_stage_blocked" | "export_gpu_color_stage_blocked" => {
+                "gpu_color_stage_blocked"
+            }
+            "preview_transfer_stage_present" | "export_transfer_stage_present" => {
+                "transfer_stage_present"
+            }
+            "legacy_rgba8_composite_path" => "legacy_rgba8_composite_path",
+            "input_color_policy_rejected_source" => "input_color_policy_rejected_source",
+            other => other,
+        }
+    }
+
+    fn normalized_color_action_code(code: &str) -> &str {
+        match code {
+            "inspect_preview_diagnostics" | "inspect_export_render_path" => {
+                "inspect_color_evidence"
+            }
+            "inspect_preview_asset_color_diagnostics" | "inspect_asset_color_diagnostics" => {
+                "inspect_asset_color_diagnostics"
+            }
+            "inspect_preview_gpu_blockers" | "inspect_export_gpu_blockers" => {
+                "inspect_gpu_blockers"
+            }
+            "remove_preview_transfer_stage" | "remove_export_transfer_stage" => {
+                "remove_transfer_stage"
+            }
+            "migrate_preview_legacy_composite_reason" | "migrate_legacy_composite_reason" => {
+                "migrate_legacy_composite_reason"
+            }
+            other => other,
+        }
+    }
+
+    fn preview_color_report_severity(severity: AppUiPreviewColorHealthSeverity) -> &'static str {
+        match severity {
+            AppUiPreviewColorHealthSeverity::Pass => "pass",
+            AppUiPreviewColorHealthSeverity::Warn => "warn",
+            AppUiPreviewColorHealthSeverity::Fail => "fail",
+        }
+    }
+
+    fn export_color_report_severity(
+        severity: mondrian_export::queue::ExportColorHealthSeverity,
+    ) -> &'static str {
+        match severity {
+            mondrian_export::queue::ExportColorHealthSeverity::Pass => "pass",
+            mondrian_export::queue::ExportColorHealthSeverity::Warn => "warn",
+            mondrian_export::queue::ExportColorHealthSeverity::Fail => "fail",
+        }
+    }
+
     fn preview_asset_issue_summary_for_sequence(
         sequence: &Sequence,
         nested_sequences: &[Sequence],
@@ -4336,6 +4558,12 @@ mod tests {
         );
         let export_health = export_diagnostics.summary().expect("export color health");
         assert_preview_export_color_health_match(preview_health, export_health);
+        let preview_report =
+            build_preview_color_health_report(Some(preview_health), "preview-export-golden");
+        let export_report = export_diagnostics
+            .health_report("preview-export-golden")
+            .expect("export color report");
+        assert_preview_export_color_reports_match(&preview_report, &export_report);
     }
 
     #[test]
