@@ -282,7 +282,9 @@ record for perf dashboards. The JSON includes a `health` summary derived from
 the raw stage/runtime diagnostics: native GPU output readiness, upload + GPU
 OCIO + readback stage completeness, blocker-free execution, shader/backend
 runtime readiness, readback byte completeness, expected readback bytes, and
-CPU/GPU parity within tolerance. This smoke proves renderer-side upload +
+CPU/GPU parity within tolerance. It also includes `health_failures`, a
+machine-readable list of failed readiness metrics, or an explicit `not_skipped`
+failure when no adapter was available. This smoke proves renderer-side upload +
 native GPU OCIO + readback sequencing; it does not prove OS
 swapchain/display-management correctness, which remains the app-window display
 contract's responsibility.
