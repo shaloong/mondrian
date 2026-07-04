@@ -191,8 +191,9 @@ contains both raw stage/runtime counters and a derived `health` contract so
 dashboards can distinguish skipped adapters, incomplete native GPU sequencing,
 backend-cache/object preparation failures, readback-size mismatches, GPU
 blockers, and CPU/GPU parity failures without reverse-engineering the counters.
-callers should surface that structured context instead of reducing failures to
-plain strings.
+It also emits `health_failures`, a structured list of violated readiness metrics,
+so dashboards and CI logs can show the exact native-GPU-output blocker instead
+of parsing booleans or reducing failures to plain strings.
 
 ## Required Semantics
 

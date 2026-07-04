@@ -1969,6 +1969,7 @@ mod tests {
         frame: GpuOutputFrameReport,
         output_texture_format: &'static str,
         health: GpuOutputHealthSummary,
+        health_failures: Vec<GpuOutputHealthFailure>,
         stage: GpuOutputStageDiagnosticsReport,
         runtime: GpuOutputRuntimeDiagnosticsReport,
         readback_bytes: usize,
@@ -2033,6 +2034,13 @@ mod tests {
         expected_readback_bytes: usize,
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+    struct GpuOutputHealthFailure {
+        metric: &'static str,
+        actual: u64,
+        limit: u64,
+    }
+
     impl GpuOutputHealthSummary {
         fn evaluate(
             skipped: bool,
@@ -2086,6 +2094,64 @@ mod tests {
                 expected_readback_bytes,
             }
         }
+    }
+
+    fn gpu_output_health_failures(health: GpuOutputHealthSummary) -> Vec<GpuOutputHealthFailure> {
+        let mut failures = Vec::new();
+        if health.status == "skipped" {
+            failures.push(GpuOutputHealthFailure { metric: "not_skipped", actual: 0, limit: 1 });
+            return failures;
+        }
+        if !health.native_gpu_output_ready {
+            failures.push(GpuOutputHealthFailure {
+                metric: "native_gpu_output_ready",
+                actual: 0,
+                limit: 1,
+            });
+        }
+        if !health.complete_stage_sequence {
+            failures.push(GpuOutputHealthFailure {
+                metric: "complete_stage_sequence",
+                actual: 0,
+                limit: 1,
+            });
+        }
+        if !health.no_gpu_blockers {
+            failures.push(GpuOutputHealthFailure {
+                metric: "no_gpu_blockers",
+                actual: 0,
+                limit: 1,
+            });
+        }
+        if !health.backend_runtime_ready {
+            failures.push(GpuOutputHealthFailure {
+                metric: "backend_runtime_ready",
+                actual: 0,
+                limit: 1,
+            });
+        }
+        if !health.shader_cache_warmed {
+            failures.push(GpuOutputHealthFailure {
+                metric: "shader_cache_warmed",
+                actual: 0,
+                limit: 1,
+            });
+        }
+        if !health.readback_complete {
+            failures.push(GpuOutputHealthFailure {
+                metric: "readback_complete",
+                actual: 0,
+                limit: 1,
+            });
+        }
+        if !health.parity_within_tolerance {
+            failures.push(GpuOutputHealthFailure {
+                metric: "parity_within_tolerance",
+                actual: 0,
+                limit: 1,
+            });
+        }
+        failures
     }
 
     #[derive(Debug, serde::Serialize)]
@@ -2158,16 +2224,32 @@ mod tests {
         assert!(passed.native_gpu_output_ready);
         assert!(passed.parity_within_tolerance);
         assert_eq!(passed.expected_readback_bytes, 16);
+        assert!(gpu_output_health_failures(passed).is_empty());
 
         let incomplete_readback =
             GpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 12, 2, 3);
         assert_eq!(incomplete_readback.status, "failed");
         assert!(!incomplete_readback.readback_complete);
         assert!(!incomplete_readback.native_gpu_output_ready);
+        assert_eq!(
+            gpu_output_health_failures(incomplete_readback),
+            vec![
+                GpuOutputHealthFailure {
+                    metric: "native_gpu_output_ready",
+                    actual: 0,
+                    limit: 1,
+                },
+                GpuOutputHealthFailure { metric: "readback_complete", actual: 0, limit: 1 },
+            ]
+        );
 
         let skipped = GpuOutputHealthSummary::evaluate(true, &frame, &stage, &runtime, 16, 2, 3);
         assert_eq!(skipped.status, "skipped");
         assert!(!skipped.native_gpu_output_ready);
+        assert_eq!(
+            gpu_output_health_failures(skipped),
+            vec![GpuOutputHealthFailure { metric: "not_skipped", actual: 0, limit: 1 }]
+        );
     }
 
     fn source_descriptor(residency: ColorFrameResidency) -> ColorFrameDescriptor {
@@ -2602,6 +2684,7 @@ mod tests {
                     0,
                     tolerance,
                 );
+                let health_failures = gpu_output_health_failures(health);
                 let report = GpuOutputBoundarySmokeReport {
                     scenario: "renderer_gpu_output_boundary",
                     skipped: Some(format!("no GPU adapter available: {err}")),
@@ -2609,6 +2692,7 @@ mod tests {
                     frame: frame_report,
                     output_texture_format: "Rgba8Unorm",
                     health,
+                    health_failures,
                     stage: stage_report,
                     runtime: runtime_report,
                     readback_bytes: 0,
@@ -2683,6 +2767,7 @@ mod tests {
             max_rgba_delta,
             tolerance,
         );
+        let health_failures = gpu_output_health_failures(health);
         let passed = health.status == "passed";
         let report = GpuOutputBoundarySmokeReport {
             scenario: "renderer_gpu_output_boundary",
@@ -2697,6 +2782,7 @@ mod tests {
             frame: frame_report,
             output_texture_format: "Rgba8Unorm",
             health,
+            health_failures,
             stage: stage_report,
             runtime: runtime_report,
             readback_bytes: actual.rgba().len(),
