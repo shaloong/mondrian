@@ -346,6 +346,17 @@ callers must use `TimelineEvaluationRequest::export(...)`. Any future thumbnail,
 analysis, AI, or cache-warm path should add an explicit intent instead of
 reinterpreting sequence state directly.
 
+Preview and export health reports share a common color report vocabulary
+defined in `mondrian_renderer::color_report_vocab`. Shared check codes
+(`fully_float_linear`, `gpu_path_ready`, `gpu_blockers`, `transfer_stages`,
+`legacy_reason_total`, `policy_rejections`) and normalized root-cause/action
+codes are the canonical contract for cross-report comparison. Preview and
+export reports may emit additional context-specific codes (e.g.,
+`preview_gpu_color_stage_blocked`), but normalization functions map them to
+shared canonical forms for parity testing. App and export crates must not
+recompute color health semantics locally; they consume renderer-owned summary
+fields and shared vocabulary codes.
+
 The renderer test suite contains an explicit preview/export semantic-signature
 contract. It allows request settings such as intent, quality, color target, frame
 drop policy, and resolution scale to differ, but requires media source timing,

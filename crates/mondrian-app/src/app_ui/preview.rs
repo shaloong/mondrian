@@ -19,14 +19,15 @@ use mondrian_media::{VideoColorDiagnostic, VideoColorDiagnosticIssueSummary};
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
-    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
+    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_rgba8,
+    CpuColorFrame, CpuEncodedColorFrame, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
+    RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
+    TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -1159,40 +1160,40 @@ pub fn build_preview_color_health_report(
         push_preview_bool_check(
             &mut checks,
             AppUiPreviewColorHealthArea::CompositePath,
-            "fully_float_linear",
+            color_report_vocab::check::FULLY_FLOAT_LINEAR,
             summary.fully_float_linear,
         );
         push_preview_bool_check(
             &mut checks,
             AppUiPreviewColorHealthArea::StageScheduling,
-            "gpu_path_ready",
+            color_report_vocab::check::GPU_PATH_READY,
             summary.gpu_path_ready,
         );
         push_preview_max_check(
             &mut checks,
             AppUiPreviewColorHealthArea::StageScheduling,
-            "gpu_blockers",
+            color_report_vocab::check::GPU_BLOCKERS,
             summary.gpu_blockers,
             0,
         );
         push_preview_max_check(
             &mut checks,
             AppUiPreviewColorHealthArea::StageScheduling,
-            "transfer_stages",
+            color_report_vocab::check::TRANSFER_STAGES,
             summary.transfer_stages,
             0,
         );
         push_preview_max_check(
             &mut checks,
             AppUiPreviewColorHealthArea::CompositePath,
-            "legacy_reason_total",
+            color_report_vocab::check::LEGACY_REASON_TOTAL,
             summary.legacy_reason_total,
             0,
         );
         push_preview_max_check(
             &mut checks,
             AppUiPreviewColorHealthArea::InputColorPolicy,
-            "policy_rejections",
+            color_report_vocab::check::POLICY_REJECTIONS,
             summary.policy_rejections,
             0,
         );
@@ -1283,9 +1284,9 @@ fn push_preview_root_causes_and_actions(
             root_causes,
             actions,
             AppUiPreviewColorHealthArea::InputColorPolicy,
-            "input_color_policy_rejected_source",
+            color_report_vocab::root_cause::INPUT_COLOR_POLICY_REJECTED_SOURCE,
             format!("policy_rejections={}", summary.policy_rejections),
-            "inspect_preview_asset_color_diagnostics",
+            color_report_vocab::action::INSPECT_ASSET_COLOR_DIAGNOSTICS,
             "Inspect active-sequence media color diagnostics and missing-metadata policy.",
         );
     }
@@ -1305,7 +1306,7 @@ fn push_preview_root_causes_and_actions(
                 summary.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
                 summary.gpu_blocker_breakdown.render_pipeline_not_prepared
             ),
-            "inspect_preview_gpu_blockers",
+            color_report_vocab::action::INSPECT_GPU_BLOCKERS,
             "Inspect renderer GPU color blocker breakdown before relying on preview GPU scheduling.",
         );
     }
@@ -1316,7 +1317,7 @@ fn push_preview_root_causes_and_actions(
             AppUiPreviewColorHealthArea::StageScheduling,
             "preview_transfer_stage_present",
             format!("transfer_stages={}", summary.transfer_stages),
-            "remove_preview_transfer_stage",
+            color_report_vocab::action::REMOVE_TRANSFER_STAGE,
             "Trace why preview color work introduced upload/readback transfer stages.",
         );
     }
@@ -1325,12 +1326,12 @@ fn push_preview_root_causes_and_actions(
             root_causes,
             actions,
             AppUiPreviewColorHealthArea::CompositePath,
-            "legacy_rgba8_composite_path",
+            color_report_vocab::root_cause::LEGACY_RGBA8_COMPOSITE_PATH,
             format!(
                 "fully_float_linear={} legacy_reason_total={}",
                 summary.fully_float_linear, summary.legacy_reason_total
             ),
-            "migrate_preview_legacy_composite_reason",
+            color_report_vocab::action::MIGRATE_LEGACY_COMPOSITE_REASON,
             "Use structured legacy RGBA8 reasons to migrate preview composites back to float/linear.",
         );
     }

@@ -10,6 +10,7 @@
 
 pub mod batched_pipeline;
 pub mod color_frame;
+pub mod color_report_vocab;
 pub mod color_stage;
 pub mod color_transform;
 pub mod compositor;

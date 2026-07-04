@@ -16,16 +16,17 @@ use mondrian_media::audio::{
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_media::VideoColorDiagnosticIssueAggregate;
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, ColorFrameResidency, CpuColorFrame,
-    CpuEncodedColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
+    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_rgba8,
+    ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame, GpuColorFrameReadbackPlan,
+    GpuColorFrameTextureFormat, GpuContext, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics, TimelineCompositeElement,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, ExportBitDepth, InputColorResolutionSourceCounts, SequenceSettings, VideoRange,
@@ -475,26 +476,26 @@ impl ExportJobColorDiagnosticsSummary {
         push_export_bool_check(
             &mut checks,
             ExportColorHealthArea::CompositePath,
-            "fully_float_linear",
+            color_report_vocab::check::FULLY_FLOAT_LINEAR,
             self.fully_float_linear,
         );
         push_export_bool_check(
             &mut checks,
             ExportColorHealthArea::StageScheduling,
-            "gpu_path_ready",
+            color_report_vocab::check::GPU_PATH_READY,
             self.gpu_path_ready,
         );
         push_export_max_check(
             &mut checks,
             ExportColorHealthArea::StageScheduling,
-            "gpu_blockers",
+            color_report_vocab::check::GPU_BLOCKERS,
             self.gpu_blockers,
             0,
         );
         push_export_max_check(
             &mut checks,
             ExportColorHealthArea::StageScheduling,
-            "transfer_stages",
+            color_report_vocab::check::TRANSFER_STAGES,
             self.transfer_stages,
             0,
         );
@@ -508,14 +509,14 @@ impl ExportJobColorDiagnosticsSummary {
         push_export_max_check(
             &mut checks,
             ExportColorHealthArea::CompositePath,
-            "legacy_reason_total",
+            color_report_vocab::check::LEGACY_REASON_TOTAL,
             self.legacy_reason_total,
             0,
         );
         push_export_max_check(
             &mut checks,
             ExportColorHealthArea::InputColorPolicy,
-            "policy_rejections",
+            color_report_vocab::check::POLICY_REJECTIONS,
             self.policy_rejections,
             0,
         );
@@ -654,10 +655,10 @@ fn push_export_root_causes_and_actions(
             root_causes,
             actions,
             ExportColorHealthArea::InputColorPolicy,
-            "input_color_policy_rejected_source",
+            color_report_vocab::root_cause::INPUT_COLOR_POLICY_REJECTED_SOURCE,
             ExportColorHealthSeverity::Fail,
             format!("policy_rejections={}", summary.policy_rejections),
-            "inspect_asset_color_diagnostics",
+            color_report_vocab::action::INSPECT_ASSET_COLOR_DIAGNOSTICS,
             "Inspect per-asset color diagnostics and missing-metadata policy before export.",
         );
     }
@@ -676,7 +677,7 @@ fn push_export_root_causes_and_actions(
                 summary.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
                 summary.gpu_blocker_breakdown.render_pipeline_not_prepared
             ),
-            "inspect_export_gpu_blockers",
+            color_report_vocab::action::INSPECT_GPU_BLOCKERS,
             "Inspect renderer GPU color blocker breakdown before relying on export GPU scheduling.",
         );
     }
@@ -706,13 +707,13 @@ fn push_export_root_causes_and_actions(
             root_causes,
             actions,
             ExportColorHealthArea::CompositePath,
-            "legacy_rgba8_composite_path",
+            color_report_vocab::root_cause::LEGACY_RGBA8_COMPOSITE_PATH,
             ExportColorHealthSeverity::Fail,
             format!(
                 "fully_float_linear={} legacy_reason_total={}",
                 summary.fully_float_linear, summary.legacy_reason_total
             ),
-            "migrate_legacy_composite_reason",
+            color_report_vocab::action::MIGRATE_LEGACY_COMPOSITE_REASON,
             "Use structured legacy RGBA8 reasons to migrate export composites back to float/linear.",
         );
     }
