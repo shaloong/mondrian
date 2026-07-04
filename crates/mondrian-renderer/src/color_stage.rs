@@ -1961,6 +1961,8 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
+    const GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION: u32 = 1;
+
     #[derive(Debug, serde::Serialize)]
     struct GpuOutputBoundarySmokeReport {
         scenario: &'static str,
@@ -1968,14 +1970,12 @@ mod tests {
         adapter: Option<GpuOutputAdapterReport>,
         frame: GpuOutputFrameReport,
         output_texture_format: &'static str,
-        health: GpuOutputHealthSummary,
-        health_failures: Vec<GpuOutputHealthFailure>,
+        health_report: GpuOutputHealthReport,
         stage: GpuOutputStageDiagnosticsReport,
         runtime: GpuOutputRuntimeDiagnosticsReport,
         readback_bytes: usize,
         max_rgba_delta: u8,
         tolerance: u8,
-        passed: bool,
     }
 
     #[derive(Debug, serde::Serialize)]
@@ -2035,10 +2035,71 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-    struct GpuOutputHealthFailure {
-        metric: &'static str,
-        actual: u64,
-        limit: u64,
+    struct GpuOutputHealthReport {
+        schema_version: u32,
+        profile: &'static str,
+        verdict: GpuOutputHealthVerdict,
+        summary: GpuOutputHealthSummary,
+        checks: Vec<GpuOutputHealthCheck>,
+        root_causes: Vec<GpuOutputHealthRootCause>,
+        actions: Vec<GpuOutputHealthAction>,
+        evidence: GpuOutputHealthEvidence,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+    enum GpuOutputHealthVerdict {
+        Pass,
+        Fail,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+    enum GpuOutputDiagnosticArea {
+        CaptureIntegrity,
+        GpuColorPath,
+        BackendRuntime,
+        Parity,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+    enum GpuOutputHealthSeverity {
+        Pass,
+        Fail,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+    struct GpuOutputHealthCheck {
+        area: GpuOutputDiagnosticArea,
+        code: &'static str,
+        severity: GpuOutputHealthSeverity,
+        observed: u64,
+        limit: Option<u64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+    struct GpuOutputHealthRootCause {
+        area: GpuOutputDiagnosticArea,
+        code: &'static str,
+        severity: GpuOutputHealthSeverity,
+        evidence: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+    struct GpuOutputHealthAction {
+        area: GpuOutputDiagnosticArea,
+        code: &'static str,
+        description: &'static str,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+    struct GpuOutputHealthEvidence {
+        skipped_reason: Option<String>,
+        expected_readback_bytes: usize,
+        observed_readback_bytes: usize,
+        max_rgba_delta: u8,
+        tolerance: u8,
+        gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
+        shader_cache_entries: usize,
+        backend_object_entries: usize,
     }
 
     impl GpuOutputHealthSummary {
@@ -2096,62 +2157,276 @@ mod tests {
         }
     }
 
-    fn gpu_output_health_failures(health: GpuOutputHealthSummary) -> Vec<GpuOutputHealthFailure> {
-        let mut failures = Vec::new();
-        if health.status == "skipped" {
-            failures.push(GpuOutputHealthFailure { metric: "not_skipped", actual: 0, limit: 1 });
-            return failures;
+    fn build_gpu_output_health_report(
+        profile: &'static str,
+        skipped_reason: Option<String>,
+        health: GpuOutputHealthSummary,
+        stage: &GpuOutputStageDiagnosticsReport,
+        runtime: &GpuOutputRuntimeDiagnosticsReport,
+        readback_bytes: usize,
+        max_rgba_delta: u8,
+        tolerance: u8,
+    ) -> GpuOutputHealthReport {
+        let mut checks = Vec::new();
+        let mut root_causes = Vec::new();
+        let mut actions = Vec::new();
+
+        push_gpu_output_bool_check(
+            &mut checks,
+            GpuOutputDiagnosticArea::CaptureIntegrity,
+            "not_skipped",
+            health.status != "skipped",
+        );
+        push_gpu_output_bool_check(
+            &mut checks,
+            GpuOutputDiagnosticArea::GpuColorPath,
+            "native_gpu_output_ready",
+            health.native_gpu_output_ready,
+        );
+        push_gpu_output_bool_check(
+            &mut checks,
+            GpuOutputDiagnosticArea::GpuColorPath,
+            "complete_stage_sequence",
+            health.complete_stage_sequence,
+        );
+        push_gpu_output_bool_check(
+            &mut checks,
+            GpuOutputDiagnosticArea::GpuColorPath,
+            "no_gpu_blockers",
+            health.no_gpu_blockers,
+        );
+        push_gpu_output_bool_check(
+            &mut checks,
+            GpuOutputDiagnosticArea::BackendRuntime,
+            "backend_runtime_ready",
+            health.backend_runtime_ready,
+        );
+        push_gpu_output_bool_check(
+            &mut checks,
+            GpuOutputDiagnosticArea::BackendRuntime,
+            "shader_cache_warmed",
+            health.shader_cache_warmed,
+        );
+        push_gpu_output_bool_check(
+            &mut checks,
+            GpuOutputDiagnosticArea::CaptureIntegrity,
+            "readback_complete",
+            health.readback_complete,
+        );
+        checks.push(GpuOutputHealthCheck {
+            area: GpuOutputDiagnosticArea::Parity,
+            code: "parity_within_tolerance",
+            severity: if health.parity_within_tolerance {
+                GpuOutputHealthSeverity::Pass
+            } else {
+                GpuOutputHealthSeverity::Fail
+            },
+            observed: u64::from(max_rgba_delta),
+            limit: Some(u64::from(tolerance)),
+        });
+
+        push_gpu_output_root_causes_and_actions(
+            skipped_reason.clone(),
+            &health,
+            stage,
+            runtime,
+            readback_bytes,
+            max_rgba_delta,
+            tolerance,
+            &mut root_causes,
+            &mut actions,
+        );
+
+        let verdict = if checks.iter().any(|check| check.severity == GpuOutputHealthSeverity::Fail)
+        {
+            GpuOutputHealthVerdict::Fail
+        } else {
+            GpuOutputHealthVerdict::Pass
+        };
+
+        GpuOutputHealthReport {
+            schema_version: GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
+            profile,
+            verdict,
+            summary: health,
+            checks,
+            root_causes,
+            actions,
+            evidence: GpuOutputHealthEvidence {
+                skipped_reason,
+                expected_readback_bytes: health.expected_readback_bytes,
+                observed_readback_bytes: readback_bytes,
+                max_rgba_delta,
+                tolerance,
+                gpu_blocker_breakdown: stage.gpu_blocker_breakdown,
+                shader_cache_entries: runtime.shader_cache_entries,
+                backend_object_entries: runtime.backend_object_entries,
+            },
         }
-        if !health.native_gpu_output_ready {
-            failures.push(GpuOutputHealthFailure {
-                metric: "native_gpu_output_ready",
-                actual: 0,
-                limit: 1,
-            });
+    }
+
+    fn push_gpu_output_bool_check(
+        checks: &mut Vec<GpuOutputHealthCheck>,
+        area: GpuOutputDiagnosticArea,
+        code: &'static str,
+        passed: bool,
+    ) {
+        checks.push(GpuOutputHealthCheck {
+            area,
+            code,
+            severity: if passed {
+                GpuOutputHealthSeverity::Pass
+            } else {
+                GpuOutputHealthSeverity::Fail
+            },
+            observed: if passed { 1 } else { 0 },
+            limit: Some(1),
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_gpu_output_root_causes_and_actions(
+        skipped_reason: Option<String>,
+        health: &GpuOutputHealthSummary,
+        stage: &GpuOutputStageDiagnosticsReport,
+        runtime: &GpuOutputRuntimeDiagnosticsReport,
+        readback_bytes: usize,
+        max_rgba_delta: u8,
+        tolerance: u8,
+        root_causes: &mut Vec<GpuOutputHealthRootCause>,
+        actions: &mut Vec<GpuOutputHealthAction>,
+    ) {
+        if let Some(reason) = skipped_reason {
+            push_gpu_output_root_cause_with_action(
+                root_causes,
+                actions,
+                GpuOutputDiagnosticArea::CaptureIntegrity,
+                "gpu_adapter_unavailable",
+                reason,
+                "provision_real_wgpu_adapter",
+                "Run the smoke on a machine where wgpu can acquire a real adapter.",
+            );
         }
         if !health.complete_stage_sequence {
-            failures.push(GpuOutputHealthFailure {
-                metric: "complete_stage_sequence",
-                actual: 0,
-                limit: 1,
-            });
+            push_gpu_output_root_cause_with_action(
+                root_causes,
+                actions,
+                GpuOutputDiagnosticArea::GpuColorPath,
+                "gpu_stage_sequence_incomplete",
+                format!(
+                    "total_stages={} upload={} gpu={} readback={}",
+                    stage.total_stages,
+                    stage.upload_stages,
+                    stage.gpu_color_stages,
+                    stage.readback_stages
+                ),
+                "inspect_gpu_stage_sequence",
+                "Inspect upload, GPU color, and readback stage sequencing on the real boundary.",
+            );
         }
         if !health.no_gpu_blockers {
-            failures.push(GpuOutputHealthFailure {
-                metric: "no_gpu_blockers",
-                actual: 0,
-                limit: 1,
-            });
+            push_gpu_output_root_cause_with_action(
+                root_causes,
+                actions,
+                GpuOutputDiagnosticArea::GpuColorPath,
+                "gpu_stage_blocked",
+                format!(
+                    "gpu_blockers={} shader={} ocio={} wrapper={} pipeline={}",
+                    stage.gpu_blockers,
+                    stage.gpu_blocker_breakdown.shader_module_not_prepared,
+                    stage.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared,
+                    stage.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
+                    stage.gpu_blocker_breakdown.render_pipeline_not_prepared
+                ),
+                "inspect_gpu_blocker_breakdown",
+                "Inspect shader module, OCIO resource, fullscreen wrapper, and render pipeline blockers.",
+            );
         }
         if !health.backend_runtime_ready {
-            failures.push(GpuOutputHealthFailure {
-                metric: "backend_runtime_ready",
-                actual: 0,
-                limit: 1,
-            });
+            push_gpu_output_root_cause_with_action(
+                root_causes,
+                actions,
+                GpuOutputDiagnosticArea::BackendRuntime,
+                "backend_runtime_not_ready",
+                format!(
+                    "prep_entries={} backend_entries={} backend_misses={} backend_failures={}",
+                    runtime.backend_prep_resource_entries,
+                    runtime.backend_object_entries,
+                    runtime.backend_object_misses,
+                    runtime.backend_object_failures
+                ),
+                "inspect_backend_runtime",
+                "Inspect backend prep/object caches and runtime object materialization for the smoke boundary.",
+            );
         }
         if !health.shader_cache_warmed {
-            failures.push(GpuOutputHealthFailure {
-                metric: "shader_cache_warmed",
-                actual: 0,
-                limit: 1,
-            });
+            push_gpu_output_root_cause_with_action(
+                root_causes,
+                actions,
+                GpuOutputDiagnosticArea::BackendRuntime,
+                "shader_cache_not_ready",
+                format!(
+                    "shader_cache_entries={} hits={} misses={} extraction_failures={}",
+                    runtime.shader_cache_entries,
+                    runtime.shader_cache_hits,
+                    runtime.shader_cache_misses,
+                    runtime.shader_cache_extraction_failures
+                ),
+                "inspect_shader_cache_extraction",
+                "Inspect OCIO shader extraction and cache warming for the real GPU output boundary.",
+            );
         }
         if !health.readback_complete {
-            failures.push(GpuOutputHealthFailure {
-                metric: "readback_complete",
-                actual: 0,
-                limit: 1,
-            });
+            push_gpu_output_root_cause_with_action(
+                root_causes,
+                actions,
+                GpuOutputDiagnosticArea::CaptureIntegrity,
+                "gpu_readback_incomplete",
+                format!(
+                    "observed_readback_bytes={} expected_readback_bytes={}",
+                    readback_bytes, health.expected_readback_bytes
+                ),
+                "inspect_gpu_readback",
+                "Inspect GPU readback byte count and output texture/readback plan compatibility.",
+            );
         }
         if !health.parity_within_tolerance {
-            failures.push(GpuOutputHealthFailure {
-                metric: "parity_within_tolerance",
-                actual: 0,
-                limit: 1,
+            push_gpu_output_root_cause_with_action(
+                root_causes,
+                actions,
+                GpuOutputDiagnosticArea::Parity,
+                "cpu_gpu_parity_out_of_tolerance",
+                format!("max_rgba_delta={} tolerance={}", max_rgba_delta, tolerance),
+                "inspect_cpu_gpu_parity",
+                "Inspect CPU/GPU output parity and verify OCIO + wrapper execution matches the CPU reference path.",
+            );
+        }
+    }
+
+    fn push_gpu_output_root_cause_with_action(
+        root_causes: &mut Vec<GpuOutputHealthRootCause>,
+        actions: &mut Vec<GpuOutputHealthAction>,
+        area: GpuOutputDiagnosticArea,
+        root_code: &'static str,
+        evidence: String,
+        action_code: &'static str,
+        action_description: &'static str,
+    ) {
+        if !root_causes.iter().any(|root| root.code == root_code) {
+            root_causes.push(GpuOutputHealthRootCause {
+                area,
+                code: root_code,
+                severity: GpuOutputHealthSeverity::Fail,
+                evidence,
             });
         }
-        failures
+        if !actions.iter().any(|action| action.code == action_code) {
+            actions.push(GpuOutputHealthAction {
+                area,
+                code: action_code,
+                description: action_description,
+            });
+        }
     }
 
     #[derive(Debug, serde::Serialize)]
@@ -2188,7 +2463,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_output_smoke_health_summary_classifies_native_path() {
+    fn gpu_output_health_report_classifies_native_path() {
         let frame = GpuOutputFrameReport {
             width: 2,
             height: 2,
@@ -2220,35 +2495,132 @@ mod tests {
         };
 
         let passed = GpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 16, 2, 3);
-        assert_eq!(passed.status, "passed");
-        assert!(passed.native_gpu_output_ready);
-        assert!(passed.parity_within_tolerance);
-        assert_eq!(passed.expected_readback_bytes, 16);
-        assert!(gpu_output_health_failures(passed).is_empty());
+        let passed_report = build_gpu_output_health_report(
+            "renderer_gpu_output_boundary",
+            None,
+            passed,
+            &stage,
+            &runtime,
+            16,
+            2,
+            3,
+        );
+        assert_eq!(passed_report.verdict, GpuOutputHealthVerdict::Pass);
+        assert_eq!(passed_report.summary.status, "passed");
+        assert!(passed_report.summary.native_gpu_output_ready);
+        assert!(passed_report.summary.parity_within_tolerance);
+        assert_eq!(passed_report.summary.expected_readback_bytes, 16);
+        assert!(passed_report.root_causes.is_empty());
+        assert!(passed_report.actions.is_empty());
 
         let incomplete_readback =
             GpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 12, 2, 3);
-        assert_eq!(incomplete_readback.status, "failed");
-        assert!(!incomplete_readback.readback_complete);
-        assert!(!incomplete_readback.native_gpu_output_ready);
-        assert_eq!(
-            gpu_output_health_failures(incomplete_readback),
-            vec![
-                GpuOutputHealthFailure {
-                    metric: "native_gpu_output_ready",
-                    actual: 0,
-                    limit: 1,
-                },
-                GpuOutputHealthFailure { metric: "readback_complete", actual: 0, limit: 1 },
-            ]
+        let incomplete_readback_report = build_gpu_output_health_report(
+            "renderer_gpu_output_boundary",
+            None,
+            incomplete_readback,
+            &stage,
+            &runtime,
+            12,
+            2,
+            3,
         );
+        assert_eq!(
+            incomplete_readback_report.verdict,
+            GpuOutputHealthVerdict::Fail
+        );
+        assert_eq!(incomplete_readback_report.summary.status, "failed");
+        assert!(!incomplete_readback_report.summary.readback_complete);
+        assert!(!incomplete_readback_report.summary.native_gpu_output_ready);
+        assert!(incomplete_readback_report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "gpu_readback_incomplete"));
 
         let skipped = GpuOutputHealthSummary::evaluate(true, &frame, &stage, &runtime, 16, 2, 3);
-        assert_eq!(skipped.status, "skipped");
-        assert!(!skipped.native_gpu_output_ready);
+        let skipped_report = build_gpu_output_health_report(
+            "renderer_gpu_output_boundary",
+            Some("no GPU adapter available".to_owned()),
+            skipped,
+            &stage,
+            &runtime,
+            16,
+            2,
+            3,
+        );
+        assert_eq!(skipped_report.verdict, GpuOutputHealthVerdict::Fail);
+        assert_eq!(skipped_report.summary.status, "skipped");
+        assert!(!skipped_report.summary.native_gpu_output_ready);
+        assert!(skipped_report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "gpu_adapter_unavailable"));
+    }
+
+    #[test]
+    fn gpu_output_smoke_report_serializes_health_report() {
+        let frame = GpuOutputFrameReport {
+            width: 2,
+            height: 2,
+            pixel_count: 4,
+            input_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Srgb,
+        };
+        let stage = GpuOutputStageDiagnosticsReport {
+            total_stages: 3,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            readback_stages: 1,
+            gpu_blockers: 0,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown::default(),
+            stage_pixels: 12,
+        };
+        let runtime = GpuOutputRuntimeDiagnosticsReport {
+            shader_cache_entries: 1,
+            shader_cache_hits: 0,
+            shader_cache_misses: 1,
+            shader_cache_extraction_failures: 0,
+            backend_prep_resource_entries: 1,
+            backend_object_entries: 1,
+            backend_object_hits: 0,
+            backend_object_misses: 1,
+            backend_object_failures: 0,
+            frame_table_entries: 2,
+            next_frame_id: 3,
+        };
+        let health = GpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 16, 2, 3);
+        let report = GpuOutputBoundarySmokeReport {
+            scenario: "renderer_gpu_output_boundary",
+            skipped: None,
+            adapter: None,
+            frame,
+            output_texture_format: "Rgba8Unorm",
+            health_report: build_gpu_output_health_report(
+                "renderer_gpu_output_boundary",
+                None,
+                health,
+                &stage,
+                &runtime,
+                16,
+                2,
+                3,
+            ),
+            stage,
+            runtime,
+            readback_bytes: 16,
+            max_rgba_delta: 2,
+            tolerance: 3,
+        };
+
+        let json = serde_json::to_value(&report).expect("serialize renderer smoke report");
+        assert!(json.get("health").is_none());
+        assert!(json.get("health_failures").is_none());
+        assert!(json.get("passed").is_none());
+        assert_eq!(json["health_report"]["schema_version"], 1);
+        assert_eq!(json["health_report"]["verdict"], "Pass");
         assert_eq!(
-            gpu_output_health_failures(skipped),
-            vec![GpuOutputHealthFailure { metric: "not_skipped", actual: 0, limit: 1 }]
+            json["health_report"]["summary"]["expected_readback_bytes"],
+            16
         );
     }
 
@@ -2684,21 +3056,28 @@ mod tests {
                     0,
                     tolerance,
                 );
-                let health_failures = gpu_output_health_failures(health);
+                let skipped_reason = format!("no GPU adapter available: {err}");
                 let report = GpuOutputBoundarySmokeReport {
                     scenario: "renderer_gpu_output_boundary",
-                    skipped: Some(format!("no GPU adapter available: {err}")),
+                    skipped: Some(skipped_reason.clone()),
                     adapter: None,
                     frame: frame_report,
                     output_texture_format: "Rgba8Unorm",
-                    health,
-                    health_failures,
+                    health_report: build_gpu_output_health_report(
+                        "renderer_gpu_output_boundary",
+                        Some(skipped_reason),
+                        health,
+                        &stage_report,
+                        &runtime_report,
+                        0,
+                        0,
+                        tolerance,
+                    ),
                     stage: stage_report,
                     runtime: runtime_report,
                     readback_bytes: 0,
                     max_rgba_delta: 0,
                     tolerance,
-                    passed: false,
                 };
                 emit_gpu_output_smoke_report(&report)?;
                 return Ok(());
@@ -2767,8 +3146,17 @@ mod tests {
             max_rgba_delta,
             tolerance,
         );
-        let health_failures = gpu_output_health_failures(health);
-        let passed = health.status == "passed";
+        let health_report = build_gpu_output_health_report(
+            "renderer_gpu_output_boundary",
+            None,
+            health,
+            &stage_report,
+            &runtime_report,
+            actual.rgba().len(),
+            max_rgba_delta,
+            tolerance,
+        );
+        let passed = health_report.verdict == GpuOutputHealthVerdict::Pass;
         let report = GpuOutputBoundarySmokeReport {
             scenario: "renderer_gpu_output_boundary",
             skipped: None,
@@ -2781,14 +3169,12 @@ mod tests {
             }),
             frame: frame_report,
             output_texture_format: "Rgba8Unorm",
-            health,
-            health_failures,
+            health_report,
             stage: stage_report,
             runtime: runtime_report,
             readback_bytes: actual.rgba().len(),
             max_rgba_delta,
             tolerance,
-            passed,
         };
         emit_gpu_output_smoke_report(&report)?;
 

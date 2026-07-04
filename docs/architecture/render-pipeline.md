@@ -187,13 +187,12 @@ renderer GPU output smoke additionally records a real wgpu upload + GPU color
 pass + readback boundary and emits `MONDRIAN_RENDERER_GPU_OUTPUT_JSON` (or JSONL
 via `MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT`) so dashboards can verify the
 native final-output path without launching the app window. The smoke report
-contains both raw stage/runtime counters and a derived `health` contract so
-dashboards can distinguish skipped adapters, incomplete native GPU sequencing,
-backend-cache/object preparation failures, readback-size mismatches, GPU
-blockers, and CPU/GPU parity failures without reverse-engineering the counters.
-It also emits `health_failures`, a structured list of violated readiness metrics,
-so dashboards and CI logs can show the exact native-GPU-output blocker instead
-of parsing booleans or reducing failures to plain strings.
+contains both raw stage/runtime counters and a versioned `health_report` as the
+sole high-level contract. That report embeds the derived health summary, fixed
+checks, root causes, actions, and evidence so dashboards can distinguish
+skipped adapters, incomplete native GPU sequencing, backend-cache/object
+preparation failures, readback-size mismatches, GPU blockers, and CPU/GPU
+parity failures without reverse-engineering the counters.
 
 ## Required Semantics
 

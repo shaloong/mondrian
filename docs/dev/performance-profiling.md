@@ -28,6 +28,7 @@ $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo te
 $env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-1080p2997.jsonl'; cargo test -p mondrian-export export_1080p2997_simulated_perf -- --ignored --nocapture
 $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-media.jsonl'; cargo test -p mondrian-app preview_media_decode_cache_smoke -- --ignored --nocapture
 $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-playback.jsonl'; cargo test -p mondrian-app preview_media_continuous_playback_smoke -- --ignored --nocapture
+$env:MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT='target/perf/renderer-gpu-output.jsonl'; cargo test -p mondrian-renderer gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture
 ```
 
 Export simulation reports include a versioned `color_report`. The report embeds
@@ -39,6 +40,15 @@ export smokes fail closed unless export stays fully float/linear, has no GPU
 blockers, has no upload/readback transfer stages, reports no structured legacy
 RGBA8 reasons, and has at least one diagnosed frame. The old `color_health*`
 perf fields are not part of the report contract.
+
+Renderer GPU output smoke reports include a versioned `health_report`. That
+report is the sole renderer-side native GPU output contract: tooling should key
+off `health_report.verdict`, `checks`, `root_causes`, and `actions`, not off
+legacy `health`, `health_failures`, or `passed` fields. Default renderer smoke
+expectations are fail-closed: the run must not be skipped, the native GPU stage
+sequence must be complete, GPU blockers must be absent, backend runtime and
+shader cache must be ready, readback must be byte-complete, and CPU/GPU parity
+must stay within tolerance.
 
 Preview media smoke reports include `preview_color_report` and
 `media_color_issues`. The decode/cache and continuous-playback smokes fail
