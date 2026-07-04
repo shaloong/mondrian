@@ -295,9 +295,12 @@ separates ready native GPU output, blocked display contracts, degraded
 presentation readiness, missing output textures, record failures, and external
 texture registration rejection without making dashboards reconstruct the state
 machine from counters. Setting `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT` appends those
-viewer diagnostics as JSONL from the live app window, giving playback/scrubbing
-sessions a persistent health stream in addition to trace logs. The same session
-also owns the display-output contract for the current wgpu 30 surface and monitor:
+viewer diagnostics as JSONL from the live app window, including sequence id,
+timeline frame, preview dimensions, external texture key, output target, output
+color space, tone-map flag, and optional OCIO display/view. This gives
+playback/scrubbing sessions a persistent health stream that can be correlated
+back to specific frames in addition to trace logs. The same session also owns
+the display-output contract for the current wgpu 30 surface and monitor:
 selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
 per-format surface color-space capabilities, `display_hdr_info` and tone-map
