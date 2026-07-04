@@ -267,9 +267,12 @@ structured summary, and fails closed when ready/failed/blocked/rejected/degraded
 thresholds are not met or when the reported cumulative `health_counts` disagree
 with the statuses replayed from the JSONL records. Empty streams fail explicitly
 with a `records` budget failure instead of being reported only as missing ready
-frames. The same evaluator lives in `app_ui::viewer_gpu_output_budget` so Rust
-smoke tests and the CLI share one budget implementation; the ignored
-`viewer_gpu_output_budget_smoke` test reads
+frames. The same budget also replays `display_issue_summary` records into
+reason counts and payload-blocker counts, allowing smoke runs to fail on HDR,
+wide-gamut, unsupported presentation, or UI payload blockers even when a
+temporary health budget permits degraded frames. The same evaluator lives in
+`app_ui::viewer_gpu_output_budget` so Rust smoke tests and the CLI share one
+budget implementation; the ignored `viewer_gpu_output_budget_smoke` test reads
 `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same summary into
 `MONDRIAN_PERF_OUTPUT` when configured, and fails the test on budget violations.
 Export diagnostics may expose additional preflight helpers, but final job-level

@@ -302,8 +302,11 @@ counts for ready/degraded/blocked/failed/rejected/waiting outcomes. This gives
 playback/scrubbing sessions a persistent health stream that can be budgeted and
 correlated back to specific frames in addition to trace logs; the
 `viewer_gpu_output_budget` developer binary consumes that JSONL and exits
-non-zero when the configured health thresholds are violated. The same session
-also owns the display-output contract for the current wgpu 30 surface and monitor:
+non-zero when the configured health thresholds or display-issue thresholds are
+violated. Its report includes structured display issue reason counts and payload
+blocker counts, so HDR/P3/surface-contract problems remain visible even when
+a temporary smoke run allows degraded viewer output. The same session also owns
+the display-output contract for the current wgpu 30 surface and monitor:
 selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
 per-format surface color-space capabilities, `display_hdr_info` and tone-map

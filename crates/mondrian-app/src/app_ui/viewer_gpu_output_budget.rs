@@ -20,6 +20,10 @@ pub struct ViewerGpuOutputBudget {
     pub max_degraded: u64,
     /// Maximum allowed waiting attempts.
     pub max_waiting: u64,
+    /// Maximum allowed records with a display issue summary.
+    pub max_display_issues: u64,
+    /// Maximum allowed records with a display presentation payload blocker.
+    pub max_display_payload_blockers: u64,
 }
 
 impl Default for ViewerGpuOutputBudget {
@@ -32,6 +36,8 @@ impl Default for ViewerGpuOutputBudget {
             max_rejected: 0,
             max_degraded: 0,
             max_waiting: u64::MAX,
+            max_display_issues: 0,
+            max_display_payload_blockers: 0,
         }
     }
 }
@@ -43,6 +49,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub records: u64,
     /// Counts replayed from each record's health status.
     pub counts: ViewerGpuOutputHealthCounts,
+    /// Counts replayed from structured display issue summaries.
+    pub display_issues: ViewerGpuOutputDisplayIssueCounts,
     /// Last cumulative counts reported by the JSONL stream, when present.
     pub reported_counts: Option<ViewerGpuOutputHealthCounts>,
     /// Whether reported cumulative counts match status replay.
@@ -59,6 +67,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub last_status: Option<ViewerGpuOutputHealthStatus>,
     /// Last frame context observed in the stream.
     pub last_frame_context: Option<ViewerGpuOutputFrameContext>,
+    /// Last display issue summary observed in the stream.
+    pub last_display_issue: Option<ViewerGpuOutputDisplayIssueSummary>,
 }
 
 /// Serializable representation of the applied budget.
@@ -78,6 +88,10 @@ pub struct ViewerGpuOutputBudgetReport {
     pub max_degraded: u64,
     /// Maximum allowed waiting attempts.
     pub max_waiting: u64,
+    /// Maximum allowed records with a display issue summary.
+    pub max_display_issues: u64,
+    /// Maximum allowed records with a display presentation payload blocker.
+    pub max_display_payload_blockers: u64,
 }
 
 impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
@@ -90,6 +104,8 @@ impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
             max_rejected: budget.max_rejected,
             max_degraded: budget.max_degraded,
             max_waiting: budget.max_waiting,
+            max_display_issues: budget.max_display_issues,
+            max_display_payload_blockers: budget.max_display_payload_blockers,
         }
     }
 }
@@ -125,6 +141,8 @@ pub fn evaluate_jsonl(
     let mut records = 0u64;
     let mut last_status = None;
     let mut last_frame_context = None;
+    let mut display_issues = ViewerGpuOutputDisplayIssueCounts::default();
+    let mut last_display_issue = None;
     let mut reported_counts = None;
     let mut count_mismatches = Vec::new();
 
@@ -146,6 +164,10 @@ pub fn evaluate_jsonl(
                     reported: record_counts,
                 });
             }
+        }
+        if let Some(issue) = record.display_issue_summary {
+            display_issues.record(&issue);
+            last_display_issue = Some(issue);
         }
         last_status = Some(record.health.status);
         last_frame_context = record.last_frame_context;
@@ -188,10 +210,23 @@ pub fn evaluate_jsonl(
         budget.max_degraded,
     );
     push_max_failure(&mut failures, "waiting", counts.waiting, budget.max_waiting);
+    push_max_failure(
+        &mut failures,
+        "display_issues",
+        display_issues.total,
+        budget.max_display_issues,
+    );
+    push_max_failure(
+        &mut failures,
+        "display_payload_blockers",
+        display_issues.payload_blockers,
+        budget.max_display_payload_blockers,
+    );
 
     Ok(ViewerGpuOutputBudgetSummary {
         records,
         counts,
+        display_issues,
         reported_counts,
         reported_counts_match_replay: count_mismatches.is_empty(),
         count_mismatches,
@@ -200,6 +235,7 @@ pub fn evaluate_jsonl(
         failures,
         last_status,
         last_frame_context,
+        last_display_issue,
     })
 }
 
@@ -219,6 +255,7 @@ struct ViewerGpuOutputDiagnosticRecord {
     health: ViewerGpuOutputHealthSummary,
     health_counts: Option<ViewerGpuOutputHealthCounts>,
     last_frame_context: Option<ViewerGpuOutputFrameContext>,
+    display_issue_summary: Option<ViewerGpuOutputDisplayIssueSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -243,6 +280,73 @@ pub struct ViewerGpuOutputHealthCounts {
     pub degraded: u64,
     /// Ready status count.
     pub ready: u64,
+}
+
+/// Counts replayed from viewer GPU-output display issue summaries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputDisplayIssueCounts {
+    /// Total records carrying a display issue summary.
+    pub total: u64,
+    /// HDR output requested on a surface that cannot prove HDR presentation.
+    pub hdr_output_requires_hdr_surface: u64,
+    /// Output color space requires a different surface color space.
+    pub output_color_space_requires_surface_color_space: u64,
+    /// Surface reconfiguration is blocked by the viewer/UI payload contract.
+    pub reconfigure_blocked_by_payload: u64,
+    /// Requested output is not a presentation color space.
+    pub unsupported_presentation_intent: u64,
+    /// No supported surface contract exists for the requested output.
+    pub unsupported_surface_contract: u64,
+    /// Records whose display issue includes a payload blocker.
+    pub payload_blockers: u64,
+    /// Unknown reason strings from newer diagnostics.
+    pub unknown: u64,
+}
+
+impl ViewerGpuOutputDisplayIssueCounts {
+    fn record(&mut self, issue: &ViewerGpuOutputDisplayIssueSummary) {
+        self.total = self.total.saturating_add(1);
+        match issue.reason.as_str() {
+            "HdrOutputRequiresHdrSurface" => {
+                self.hdr_output_requires_hdr_surface =
+                    self.hdr_output_requires_hdr_surface.saturating_add(1);
+            }
+            "OutputColorSpaceRequiresSurfaceColorSpace" => {
+                self.output_color_space_requires_surface_color_space =
+                    self.output_color_space_requires_surface_color_space.saturating_add(1);
+            }
+            "ReconfigureBlockedByPayload" => {
+                self.reconfigure_blocked_by_payload =
+                    self.reconfigure_blocked_by_payload.saturating_add(1);
+            }
+            "UnsupportedPresentationIntent" => {
+                self.unsupported_presentation_intent =
+                    self.unsupported_presentation_intent.saturating_add(1);
+            }
+            "UnsupportedSurfaceContract" => {
+                self.unsupported_surface_contract =
+                    self.unsupported_surface_contract.saturating_add(1);
+            }
+            _ => {
+                self.unknown = self.unknown.saturating_add(1);
+            }
+        }
+        if issue.payload_blocker.is_some() {
+            self.payload_blockers = self.payload_blockers.saturating_add(1);
+        }
+    }
+}
+
+/// Display issue summary consumed from viewer GPU-output JSONL records.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputDisplayIssueSummary {
+    /// Stable display issue reason emitted by the app window.
+    pub reason: String,
+    /// Output color space requested by the viewer boundary.
+    pub output_color_space: Option<String>,
+    /// Viewer/UI payload blocker, when the surface could be promoted but the
+    /// frame payload path cannot yet present that contract.
+    pub payload_blocker: Option<String>,
 }
 
 impl ViewerGpuOutputHealthCounts {
@@ -331,6 +435,10 @@ mod tests {
         assert_eq!(summary.records, 2);
         assert_eq!(summary.counts.waiting, 1);
         assert_eq!(summary.counts.ready, 1);
+        assert_eq!(
+            summary.display_issues,
+            ViewerGpuOutputDisplayIssueCounts::default()
+        );
         assert!(summary.reported_counts_match_replay);
         assert_eq!(summary.reported_counts, Some(summary.counts));
         assert!(summary.count_mismatches.is_empty());
@@ -413,6 +521,73 @@ mod tests {
                 actual: 1,
                 limit: 0,
             }]
+        );
+    }
+
+    #[test]
+    fn budget_counts_display_issue_reasons() {
+        let jsonl = r#"
+{"health":{"status":"Blocked"},"display_issue_summary":{"reason":"HdrOutputRequiresHdrSurface","output_color_space":"Rec2100Pq","payload_blocker":null}}
+{"health":{"status":"Degraded"},"display_issue_summary":{"reason":"ReconfigureBlockedByPayload","output_color_space":"DciP3","payload_blocker":"UiExternalTextureCompositingRequiresSdrSrgb"}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 0,
+            max_blocked: 1,
+            max_degraded: 1,
+            max_display_issues: 2,
+            max_display_payload_blockers: 1,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(summary.passed);
+        assert_eq!(
+            summary.display_issues,
+            ViewerGpuOutputDisplayIssueCounts {
+                total: 2,
+                hdr_output_requires_hdr_surface: 1,
+                reconfigure_blocked_by_payload: 1,
+                payload_blockers: 1,
+                ..ViewerGpuOutputDisplayIssueCounts::default()
+            }
+        );
+        assert_eq!(
+            summary.last_display_issue,
+            Some(ViewerGpuOutputDisplayIssueSummary {
+                reason: "ReconfigureBlockedByPayload".to_owned(),
+                output_color_space: Some("DciP3".to_owned()),
+                payload_blocker: Some("UiExternalTextureCompositingRequiresSdrSrgb".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn budget_fails_display_issue_thresholds() {
+        let jsonl = r#"
+{"health":{"status":"Degraded"},"display_issue_summary":{"reason":"ReconfigureBlockedByPayload","output_color_space":"DciP3","payload_blocker":"UiExternalTextureCompositingRequiresSdrSrgb"}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 0,
+            max_degraded: 1,
+            max_display_issues: 0,
+            max_display_payload_blockers: 0,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert_eq!(
+            summary.failures,
+            vec![
+                ViewerGpuOutputBudgetFailure { metric: "display_issues", actual: 1, limit: 0 },
+                ViewerGpuOutputBudgetFailure {
+                    metric: "display_payload_blockers",
+                    actual: 1,
+                    limit: 0,
+                },
+            ]
         );
     }
 }
