@@ -1,11 +1,14 @@
 use super::*;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::{
-    AppUiPreviewColorHealthSummary, AppUiPreviewDiagnostics, AppUiPreviewService,
+    build_preview_color_health_report, AppUiPreviewColorHealthReport,
+    AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict, AppUiPreviewDiagnostics,
+    AppUiPreviewService,
 };
 use crate::app_ui::shell::AppUiAppRoot;
 use crate::app_ui::viewer_gpu_output_budget::{
-    evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputBudgetSummary,
+    build_health_report, evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputHealthReport,
+    ViewerGpuOutputHealthVerdict,
 };
 use anyhow::Context;
 use serde::Serialize;
@@ -48,11 +51,9 @@ struct AppUiScaleReport {
     initial_paint_commands: usize,
     playback_paint_commands_max: usize,
     preview_diagnostics: AppUiPreviewDiagnostics,
-    preview_color_health: Option<AppUiPreviewColorHealthSummary>,
-    preview_color_path: PreviewColorPathReport,
+    preview_color_report: AppUiPreviewColorHealthReport,
     preview_playback_diagnostics: AppUiPreviewDiagnostics,
-    preview_playback_color_health: Option<AppUiPreviewColorHealthSummary>,
-    preview_playback_color_path: PreviewColorPathReport,
+    preview_playback_color_report: AppUiPreviewColorHealthReport,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -63,11 +64,7 @@ struct PreviewMediaPerfReport {
     cache_iterations: usize,
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
-    preview_color_health: Option<AppUiPreviewColorHealthSummary>,
-    preview_color_health_budget: PreviewPerfColorHealthBudget,
-    preview_color_health_passed: bool,
-    preview_color_health_failures: Vec<PreviewPerfColorHealthBudgetFailure>,
-    preview_color_path: PreviewColorPathReport,
+    preview_color_report: AppUiPreviewColorHealthReport,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -87,201 +84,18 @@ struct PreviewMediaPlaybackPerfReport {
     readiness: PreviewReadinessCounts,
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
-    preview_color_health: Option<AppUiPreviewColorHealthSummary>,
-    preview_color_health_budget: PreviewPerfColorHealthBudget,
-    preview_color_health_passed: bool,
-    preview_color_health_failures: Vec<PreviewPerfColorHealthBudgetFailure>,
-    preview_color_path: PreviewColorPathReport,
+    preview_color_report: AppUiPreviewColorHealthReport,
     cases: Vec<PerfCaseReport>,
 }
 
 #[derive(Debug, Serialize)]
-struct ViewerGpuOutputBudgetSmokeReport {
+struct ViewerGpuOutputHealthSmokeReport {
     scenario: &'static str,
-    source_path: String,
-    summary: ViewerGpuOutputBudgetSummary,
+    report: ViewerGpuOutputHealthReport,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-struct PreviewPerfColorHealthBudget {
-    require_color_health: bool,
-    require_fully_float_linear: bool,
-    require_gpu_path_ready: bool,
-    max_gpu_blockers: u64,
-    max_legacy_reason_total: u64,
-    max_transfer_stages: u64,
-    max_policy_rejections: u64,
-}
-
-impl Default for PreviewPerfColorHealthBudget {
-    fn default() -> Self {
-        Self {
-            require_color_health: true,
-            require_fully_float_linear: true,
-            require_gpu_path_ready: true,
-            max_gpu_blockers: 0,
-            max_legacy_reason_total: 0,
-            max_transfer_stages: 0,
-            max_policy_rejections: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct PreviewPerfColorHealthBudgetFailure {
-    metric: &'static str,
-    actual: u64,
-    limit: u64,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct PreviewColorPathReport {
-    composite_plans: u64,
-    composite_elements: u64,
-    float_linear_composites: u64,
-    legacy_rgba8_composites: u64,
-    legacy_reason_total: u64,
-    legacy_reason_details: Vec<PreviewLegacyReasonReport>,
-    input_color_resolution: PreviewInputColorResolutionReport,
-    gpu_color_stages: u64,
-    gpu_blockers: u64,
-    gpu_blocker_breakdown: PreviewGpuBlockerBreakdownReport,
-    rgba8_boundary_calls: u64,
-    fully_float_linear: bool,
-    gpu_path_ready: bool,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct PreviewInputColorResolutionReport {
-    override_count: u64,
-    data_texture: u64,
-    detected_metadata: u64,
-    missing_assume_rec709: u64,
-    missing_assume_working: u64,
-    missing_rejected: u64,
-    policy_assumptions: u64,
-    explicit_metadata_or_override: u64,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct PreviewGpuBlockerBreakdownReport {
-    shader_module_not_prepared: u64,
-    ocio_resource_bind_group_not_prepared: u64,
-    fullscreen_wrapper_not_prepared: u64,
-    render_pipeline_not_prepared: u64,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct PreviewLegacyReasonReport {
-    layer: &'static str,
-    reason: &'static str,
-    count: u64,
-}
-
-impl PreviewColorPathReport {
-    fn from_diagnostics(diagnostics: AppUiPreviewDiagnostics) -> Self {
-        let composite_summary = diagnostics.composite_color_path_summary();
-        let legacy_breakdown = composite_summary.legacy_breakdown;
-        let mut legacy_reason_details = Vec::new();
-        push_legacy_reason(
-            &mut legacy_reason_details,
-            "media",
-            "blend_mode",
-            legacy_breakdown.media_blend_mode,
-        );
-        push_legacy_reason(
-            &mut legacy_reason_details,
-            "media",
-            "transform",
-            legacy_breakdown.media_transform,
-        );
-        push_legacy_reason(
-            &mut legacy_reason_details,
-            "media",
-            "effect",
-            legacy_breakdown.media_effect,
-        );
-        push_legacy_reason(
-            &mut legacy_reason_details,
-            "solid",
-            "blend_mode",
-            legacy_breakdown.solid_blend_mode,
-        );
-        push_legacy_reason(
-            &mut legacy_reason_details,
-            "solid",
-            "transform",
-            legacy_breakdown.solid_transform,
-        );
-        push_legacy_reason(
-            &mut legacy_reason_details,
-            "solid",
-            "effect",
-            legacy_breakdown.solid_effect,
-        );
-        push_legacy_reason(
-            &mut legacy_reason_details,
-            "adjustment",
-            "blend_mode",
-            legacy_breakdown.adjustment_blend_mode,
-        );
-        push_legacy_reason(
-            &mut legacy_reason_details,
-            "adjustment",
-            "effect",
-            legacy_breakdown.adjustment_effect,
-        );
-        let legacy_reason_total = legacy_breakdown.total();
-        let fully_float_linear = composite_summary.is_fully_float_linear()
-            && diagnostics.color_composite_plans == composite_summary.composite_plans();
-        let gpu_path_ready = diagnostics.color_stage_gpu_blockers == 0
-            && diagnostics.color_stage_readback_stages == 0
-            && diagnostics.color_stage_upload_stages == 0;
-        let input_counts = diagnostics.input_color_resolution_counts();
-
-        Self {
-            composite_plans: diagnostics.color_composite_plans,
-            composite_elements: composite_summary.elements,
-            float_linear_composites: composite_summary.float_linear_composites,
-            legacy_rgba8_composites: composite_summary.legacy_rgba8_composites,
-            legacy_reason_total,
-            legacy_reason_details,
-            input_color_resolution: PreviewInputColorResolutionReport {
-                override_count: diagnostics.input_color_resolution_override,
-                data_texture: diagnostics.input_color_resolution_data_texture,
-                detected_metadata: diagnostics.input_color_resolution_detected_metadata,
-                missing_assume_rec709: diagnostics.input_color_resolution_missing_assume_rec709,
-                missing_assume_working: diagnostics.input_color_resolution_missing_assume_working,
-                missing_rejected: diagnostics.input_color_resolution_missing_rejected,
-                policy_assumptions: input_counts.policy_assumptions(),
-                explicit_metadata_or_override: input_counts.explicit_metadata_or_override(),
-            },
-            gpu_color_stages: diagnostics.color_stage_gpu_color_stages,
-            gpu_blockers: diagnostics.color_stage_gpu_blockers,
-            gpu_blocker_breakdown: PreviewGpuBlockerBreakdownReport {
-                shader_module_not_prepared: diagnostics.color_stage_gpu_shader_module_blockers,
-                ocio_resource_bind_group_not_prepared: diagnostics
-                    .color_stage_gpu_ocio_resource_blockers,
-                fullscreen_wrapper_not_prepared: diagnostics.color_stage_gpu_wrapper_blockers,
-                render_pipeline_not_prepared: diagnostics.color_stage_gpu_render_pipeline_blockers,
-            },
-            rgba8_boundary_calls: diagnostics.color_rgba8_boundary_calls,
-            fully_float_linear,
-            gpu_path_ready,
-        }
-    }
-}
-
-fn push_legacy_reason(
-    reasons: &mut Vec<PreviewLegacyReasonReport>,
-    layer: &'static str,
-    reason: &'static str,
-    count: u64,
-) {
-    if count > 0 {
-        reasons.push(PreviewLegacyReasonReport { layer, reason, count });
-    }
-}
+const VIEWER_GPU_OUTPUT_BUDGET_SCENARIO: &str = "viewer_gpu_output_budget";
+const VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_SCENARIO: &str = "viewer_gpu_output_display_baseline";
 
 fn perf_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -305,17 +119,6 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(default)
-}
-
-fn env_bool(key: &str, default: bool) -> bool {
-    let Some(value) = std::env::var(key).ok() else {
-        return default;
-    };
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        _ => default,
-    }
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -352,6 +155,52 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
         max_degraded: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DEGRADED", 0),
         max_waiting: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_WAITING", u64::MAX),
         max_display_issues: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUES", 0),
+        max_hdr_output_requires_hdr_surface: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE",
+            0,
+        ),
+        max_output_color_space_requires_surface_color_space: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE",
+            0,
+        ),
+        max_reconfigure_blocked_by_payload: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_RECONFIGURE_BLOCKED_BY_PAYLOAD",
+            0,
+        ),
+        max_unsupported_presentation_intent: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_PRESENTATION_INTENT",
+            0,
+        ),
+        max_unsupported_surface_contract: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT",
+            0,
+        ),
+        max_unknown_display_issues: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
+            0,
+        ),
+        max_display_contract_refreshes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
+            u64::MAX,
+        ),
+        max_display_issue_refresh_correlations: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUE_REFRESH_CORRELATIONS",
+            0,
+        ),
+        max_display_tone_map_headroom_changes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_TONE_MAP_HEADROOM_CHANGES",
+            0,
+        ),
+        max_available_surface_format_changes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_AVAILABLE_SURFACE_FORMAT_CHANGES",
+            0,
+        ),
+        max_format_color_space_changes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FORMAT_COLOR_SPACE_CHANGES",
+            0,
+        ),
+        max_present_mode_changes: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PRESENT_MODE_CHANGES", 0),
+        max_alpha_mode_changes: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES", 0),
         max_display_payload_blockers: env_u64(
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
             0,
@@ -360,97 +209,26 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
     }
 }
 
-fn preview_color_health_budget_from_env() -> PreviewPerfColorHealthBudget {
-    PreviewPerfColorHealthBudget {
-        require_color_health: env_bool("MONDRIAN_PREVIEW_REQUIRE_COLOR_HEALTH", true),
-        require_fully_float_linear: env_bool("MONDRIAN_PREVIEW_REQUIRE_FULLY_FLOAT_LINEAR", true),
-        require_gpu_path_ready: env_bool("MONDRIAN_PREVIEW_REQUIRE_GPU_PATH_READY", true),
-        max_gpu_blockers: env_u64("MONDRIAN_PREVIEW_MAX_GPU_BLOCKERS", 0),
-        max_legacy_reason_total: env_u64("MONDRIAN_PREVIEW_MAX_LEGACY_REASONS", 0),
-        max_transfer_stages: env_u64("MONDRIAN_PREVIEW_MAX_TRANSFER_STAGES", 0),
-        max_policy_rejections: env_u64("MONDRIAN_PREVIEW_MAX_POLICY_REJECTIONS", 0),
-    }
-}
-
-fn evaluate_preview_color_health_budget(
-    color_health: Option<AppUiPreviewColorHealthSummary>,
-    budget: PreviewPerfColorHealthBudget,
-) -> Vec<PreviewPerfColorHealthBudgetFailure> {
-    let Some(color_health) = color_health else {
-        return if budget.require_color_health {
-            vec![PreviewPerfColorHealthBudgetFailure {
-                metric: "color_health_present",
-                actual: 0,
-                limit: 1,
-            }]
-        } else {
-            Vec::new()
-        };
-    };
-
-    let mut failures = Vec::new();
-    if budget.require_fully_float_linear && !color_health.fully_float_linear {
-        failures.push(PreviewPerfColorHealthBudgetFailure {
-            metric: "fully_float_linear",
-            actual: 0,
-            limit: 1,
-        });
-    }
-    if budget.require_gpu_path_ready && !color_health.gpu_path_ready {
-        failures.push(PreviewPerfColorHealthBudgetFailure {
-            metric: "gpu_path_ready",
-            actual: 0,
-            limit: 1,
-        });
-    }
-    push_max_preview_color_health_failure(
-        &mut failures,
-        "gpu_blockers",
-        color_health.gpu_blockers,
-        budget.max_gpu_blockers,
-    );
-    push_max_preview_color_health_failure(
-        &mut failures,
-        "legacy_reason_total",
-        color_health.legacy_reason_total,
-        budget.max_legacy_reason_total,
-    );
-    push_max_preview_color_health_failure(
-        &mut failures,
-        "transfer_stages",
-        color_health.transfer_stages,
-        budget.max_transfer_stages,
-    );
-    push_max_preview_color_health_failure(
-        &mut failures,
-        "policy_rejections",
-        color_health.policy_rejections,
-        budget.max_policy_rejections,
-    );
-    failures
-}
-
-fn push_max_preview_color_health_failure(
-    failures: &mut Vec<PreviewPerfColorHealthBudgetFailure>,
-    metric: &'static str,
-    actual: u64,
-    limit: u64,
-) {
-    if actual > limit {
-        failures.push(PreviewPerfColorHealthBudgetFailure { metric, actual, limit });
+fn viewer_gpu_output_display_baseline_budget_from_env() -> ViewerGpuOutputBudget {
+    ViewerGpuOutputBudget {
+        max_display_contract_refreshes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
+            ViewerGpuOutputBudget::display_baseline().max_display_contract_refreshes,
+        ),
+        ..viewer_gpu_output_budget_from_env()
     }
 }
 
 fn viewer_gpu_output_budget_report_from_jsonl(
+    scenario: &'static str,
     source_path: impl Into<String>,
     contents: &str,
     budget: &ViewerGpuOutputBudget,
-) -> anyhow::Result<ViewerGpuOutputBudgetSmokeReport> {
-    Ok(ViewerGpuOutputBudgetSmokeReport {
-        scenario: "viewer_gpu_output_budget",
-        source_path: source_path.into(),
-        summary: evaluate_jsonl(contents, budget)?,
-    })
+) -> anyhow::Result<ViewerGpuOutputHealthSmokeReport> {
+    let summary = evaluate_jsonl(contents, budget)?;
+    let source_path = source_path.into();
+    let report = build_health_report(summary, scenario, Some(source_path));
+    Ok(ViewerGpuOutputHealthSmokeReport { scenario, report })
 }
 
 fn run_case<F>(
@@ -502,15 +280,47 @@ fn viewer_gpu_output_budget_smoke() -> anyhow::Result<()> {
     })?;
     let budget = viewer_gpu_output_budget_from_env();
     let report = viewer_gpu_output_budget_report_from_jsonl(
+        VIEWER_GPU_OUTPUT_BUDGET_SCENARIO,
         output_path.display().to_string(),
         &contents,
         &budget,
     )?;
     let report_json = serde_json::to_string(&report)?;
-    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_BUDGET_JSON={report_json}");
+    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_HEALTH_REPORT_JSON={report_json}");
     write_report_if_needed(&report_json);
-    if !report.summary.passed {
+    if report.report.verdict == ViewerGpuOutputHealthVerdict::Fail {
         anyhow::bail!("viewer GPU output budget smoke failed: {report_json}");
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "development baseline viewer display smoke; run after capturing MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT JSONL"]
+fn viewer_gpu_output_display_baseline_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf smoke lock");
+    let output_path = std::env::var_os("MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT")
+        .map(PathBuf::from)
+        .context(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT must point to a viewer GPU output JSONL file",
+        )?;
+    let contents = std::fs::read_to_string(&output_path).with_context(|| {
+        format!(
+            "failed to read viewer GPU output JSONL: {}",
+            output_path.display()
+        )
+    })?;
+    let budget = viewer_gpu_output_display_baseline_budget_from_env();
+    let report = viewer_gpu_output_budget_report_from_jsonl(
+        VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_SCENARIO,
+        output_path.display().to_string(),
+        &contents,
+        &budget,
+    )?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_HEALTH_REPORT_JSON={report_json}");
+    write_report_if_needed(&report_json);
+    if report.report.verdict == ViewerGpuOutputHealthVerdict::Fail {
+        anyhow::bail!("viewer GPU output display baseline smoke failed: {report_json}");
     }
     Ok(())
 }
@@ -721,12 +531,14 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
             initial_paint_commands,
             playback_paint_commands_max,
             preview_diagnostics,
-            preview_color_health: preview_diagnostics.color_health_summary(),
-            preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
+            preview_color_report: build_preview_color_health_report(
+                preview_diagnostics.color_health_summary(),
+                "app_ui_scale_preview",
+            ),
             preview_playback_diagnostics,
-            preview_playback_color_health: preview_playback_diagnostics.color_health_summary(),
-            preview_playback_color_path: PreviewColorPathReport::from_diagnostics(
-                preview_playback_diagnostics,
+            preview_playback_color_report: build_preview_color_health_report(
+                preview_playback_diagnostics.color_health_summary(),
+                "app_ui_scale_preview_playback",
             ),
             cases: vec![
                 build_case,
@@ -838,22 +650,17 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
 
         let preview_diagnostics = preview_service.diagnostics();
         let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
-        let preview_color_health = preview_diagnostics.color_health_summary();
-        let preview_color_health_budget = preview_color_health_budget_from_env();
-        let preview_color_health_failures =
-            evaluate_preview_color_health_budget(preview_color_health, preview_color_health_budget);
-        let preview_color_health_passed = preview_color_health_failures.is_empty();
+        let preview_color_report = build_preview_color_health_report(
+            preview_diagnostics.color_health_summary(),
+            "preview_media_decode_cache",
+        );
         Ok(PreviewMediaPerfReport {
             scenario: "preview_media_decode_cache",
             frames: frame_count,
             cache_iterations,
             media_color_issues,
             preview_diagnostics,
-            preview_color_health,
-            preview_color_health_budget,
-            preview_color_health_passed,
-            preview_color_health_failures,
-            preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
+            preview_color_report,
             cases: vec![
                 first_frame_case,
                 cached_frame_case,
@@ -879,8 +686,8 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             report_json
         );
     }
-    if !report.preview_color_health_passed {
-        anyhow::bail!("preview media color-health budget failed: {report_json}");
+    if report.preview_color_report.verdict == AppUiPreviewColorHealthVerdict::Fail {
+        anyhow::bail!("preview media color report failed: {report_json}");
     }
 
     Ok(())
@@ -968,11 +775,10 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
 
         let preview_diagnostics = preview_service.diagnostics();
         let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
-        let preview_color_health = preview_diagnostics.color_health_summary();
-        let preview_color_health_budget = preview_color_health_budget_from_env();
-        let preview_color_health_failures =
-            evaluate_preview_color_health_budget(preview_color_health, preview_color_health_budget);
-        let preview_color_health_passed = preview_color_health_failures.is_empty();
+        let preview_color_report = build_preview_color_health_report(
+            preview_diagnostics.color_health_summary(),
+            "preview_media_continuous_playback",
+        );
         Ok(PreviewMediaPlaybackPerfReport {
             scenario: "preview_media_continuous_playback",
             frames: frame_count,
@@ -980,11 +786,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             readiness,
             media_color_issues,
             preview_diagnostics,
-            preview_color_health,
-            preview_color_health_budget,
-            preview_color_health_passed,
-            preview_color_health_failures,
-            preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
+            preview_color_report,
             cases: vec![playback_case, gpu_candidate_case],
         })
     })();
@@ -1005,8 +807,8 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             report_json
         );
     }
-    if !report.preview_color_health_passed {
-        anyhow::bail!("preview media playback color-health budget failed: {report_json}");
+    if report.preview_color_report.verdict == AppUiPreviewColorHealthVerdict::Fail {
+        anyhow::bail!("preview media playback color report failed: {report_json}");
     }
 
     Ok(())
@@ -1249,7 +1051,7 @@ fn record_preview_readiness(counts: &mut PreviewReadinessCounts, state: ViewerPr
 }
 
 #[test]
-fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
+fn preview_color_report_summarizes_legacy_and_gpu_blockers() {
     let diagnostics = AppUiPreviewDiagnostics {
         color_composite_plans: 3,
         color_composite_elements: 7,
@@ -1270,51 +1072,38 @@ fn preview_color_path_report_summarizes_legacy_and_gpu_blockers() {
         ..AppUiPreviewDiagnostics::default()
     };
 
-    let report = PreviewColorPathReport::from_diagnostics(diagnostics);
+    let report =
+        build_preview_color_health_report(diagnostics.color_health_summary(), "preview-test");
 
-    assert_eq!(report.composite_plans, 3);
-    assert_eq!(report.composite_elements, 7);
-    assert_eq!(report.float_linear_composites, 2);
-    assert_eq!(report.legacy_rgba8_composites, 1);
-    assert_eq!(report.legacy_reason_total, 3);
+    let summary = report.summary.expect("preview color summary");
+    assert_eq!(report.verdict, AppUiPreviewColorHealthVerdict::Fail);
+    assert_eq!(summary.composite_plans, 3);
+    assert_eq!(summary.float_linear_composites, 2);
+    assert_eq!(summary.legacy_rgba8_composites, 1);
+    assert_eq!(summary.legacy_reason_total, 3);
+    assert_eq!(summary.override_count, 2);
+    assert_eq!(summary.data_textures, 13);
+    assert_eq!(summary.detected_metadata, 3);
+    assert_eq!(summary.policy_assumptions, 12);
+    assert_eq!(summary.explicit_metadata_or_override, 5);
+    assert_eq!(summary.gpu_color_stages, 4);
+    assert_eq!(summary.gpu_blockers, 1);
     assert_eq!(
-        report.legacy_reason_details,
-        vec![
-            PreviewLegacyReasonReport { layer: "media", reason: "transform", count: 1 },
-            PreviewLegacyReasonReport { layer: "solid", reason: "effect", count: 2 },
-        ]
+        summary.gpu_blocker_breakdown.render_pipeline_not_prepared,
+        1
     );
-    assert_eq!(
-        report.input_color_resolution,
-        PreviewInputColorResolutionReport {
-            override_count: 2,
-            data_texture: 13,
-            detected_metadata: 3,
-            missing_assume_rec709: 5,
-            missing_assume_working: 7,
-            missing_rejected: 11,
-            policy_assumptions: 12,
-            explicit_metadata_or_override: 5,
-        }
-    );
-    assert_eq!(report.gpu_color_stages, 4);
-    assert_eq!(report.gpu_blockers, 1);
-    assert_eq!(
-        report.gpu_blocker_breakdown,
-        PreviewGpuBlockerBreakdownReport {
-            shader_module_not_prepared: 0,
-            ocio_resource_bind_group_not_prepared: 0,
-            fullscreen_wrapper_not_prepared: 0,
-            render_pipeline_not_prepared: 1,
-        }
-    );
-    assert_eq!(report.rgba8_boundary_calls, 3);
-    assert!(!report.fully_float_linear);
-    assert!(!report.gpu_path_ready);
+    assert_eq!(summary.rgba8_boundary_calls, 3);
+    assert!(!summary.fully_float_linear);
+    assert!(!summary.gpu_path_ready);
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "preview_gpu_color_stage_blocked"));
+    assert!(report.root_causes.iter().any(|root| root.code == "legacy_rgba8_composite_path"));
 }
 
 #[test]
-fn preview_color_path_report_marks_clean_float_linear_path() {
+fn preview_color_report_marks_clean_float_linear_path() {
     let diagnostics = AppUiPreviewDiagnostics {
         color_composite_plans: 2,
         color_composite_elements: 2,
@@ -1322,16 +1111,18 @@ fn preview_color_path_report_marks_clean_float_linear_path() {
         ..AppUiPreviewDiagnostics::default()
     };
 
-    let report = PreviewColorPathReport::from_diagnostics(diagnostics);
+    let report =
+        build_preview_color_health_report(diagnostics.color_health_summary(), "preview-clean");
+    let summary = report.summary.expect("preview color summary");
 
-    assert_eq!(report.legacy_reason_total, 0);
-    assert!(report.legacy_reason_details.is_empty());
-    assert!(report.fully_float_linear);
-    assert!(report.gpu_path_ready);
+    assert_eq!(report.verdict, AppUiPreviewColorHealthVerdict::Pass);
+    assert_eq!(summary.legacy_reason_total, 0);
+    assert!(summary.fully_float_linear);
+    assert!(summary.gpu_path_ready);
 }
 
 #[test]
-fn preview_perf_report_serializes_color_health_summary() {
+fn preview_perf_report_serializes_color_report() {
     let diagnostics = AppUiPreviewDiagnostics {
         color_composite_plans: 1,
         color_composite_elements: 1,
@@ -1340,10 +1131,6 @@ fn preview_perf_report_serializes_color_health_summary() {
         color_stage_cpu_output_stages: 1,
         ..AppUiPreviewDiagnostics::default()
     };
-    let preview_color_health = diagnostics.color_health_summary();
-    let preview_color_health_budget = PreviewPerfColorHealthBudget::default();
-    let preview_color_health_failures =
-        evaluate_preview_color_health_budget(preview_color_health, preview_color_health_budget);
     let report = PreviewMediaPerfReport {
         scenario: "preview-color-health-test",
         frames: 1,
@@ -1357,48 +1144,44 @@ fn preview_perf_report_serializes_color_health_summary() {
             ..VideoColorDiagnosticIssueAggregate::default()
         },
         preview_diagnostics: diagnostics,
-        preview_color_health,
-        preview_color_health_budget,
-        preview_color_health_passed: preview_color_health_failures.is_empty(),
-        preview_color_health_failures,
-        preview_color_path: PreviewColorPathReport::from_diagnostics(diagnostics),
+        preview_color_report: build_preview_color_health_report(
+            diagnostics.color_health_summary(),
+            "preview-color-health-test",
+        ),
         cases: Vec::new(),
     };
 
     let json = serde_json::to_value(&report).expect("serialize report");
 
     assert_eq!(
-        json["preview_color_health"]["fully_float_linear"],
+        json["preview_color_report"]["summary"]["fully_float_linear"],
         serde_json::Value::Bool(true)
     );
     assert_eq!(
-        json["preview_color_health"]["gpu_path_ready"],
+        json["preview_color_report"]["summary"]["gpu_path_ready"],
         serde_json::Value::Bool(true)
     );
     assert_eq!(
-        json["preview_color_health"]["gpu_blocker_breakdown"]["render_pipeline_not_prepared"],
+        json["preview_color_report"]["summary"]["gpu_blocker_breakdown"]
+            ["render_pipeline_not_prepared"],
         0
     );
     assert_eq!(
-        json["preview_color_health"]["legacy_breakdown"]["media_transform"],
+        json["preview_color_report"]["summary"]["legacy_breakdown"]["media_transform"],
         0
     );
     assert_eq!(json["media_color_issues"]["diagnostics"], 1);
     assert_eq!(json["media_color_issues"]["method_cicp_tags"], 1);
-    assert_eq!(json["preview_color_health_passed"], true);
-    assert_eq!(
-        json["preview_color_health_budget"]["max_legacy_reason_total"],
-        0
-    );
-    assert!(json["preview_color_health_failures"]
-        .as_array()
-        .expect("preview color-health failures array")
-        .is_empty());
+    assert_eq!(json["preview_color_report"]["verdict"], "Pass");
+    assert!(json.get("preview_color_health").is_none());
+    assert!(json.get("preview_color_health_budget").is_none());
+    assert!(json.get("preview_color_health_passed").is_none());
+    assert!(json.get("preview_color_health_failures").is_none());
 }
 
 #[test]
-fn preview_color_health_budget_reports_failures() {
-    let failures = evaluate_preview_color_health_budget(
+fn preview_color_report_reports_failures() {
+    let report = build_preview_color_health_report(
         Some(AppUiPreviewColorHealthSummary {
             policy_rejections: 1,
             gpu_blockers: 2,
@@ -1408,51 +1191,41 @@ fn preview_color_health_budget_reports_failures() {
             gpu_path_ready: false,
             ..AppUiPreviewColorHealthSummary::default()
         }),
-        PreviewPerfColorHealthBudget::default(),
+        "preview-ci",
     );
 
-    assert_eq!(
-        failures,
-        vec![
-            PreviewPerfColorHealthBudgetFailure {
-                metric: "fully_float_linear",
-                actual: 0,
-                limit: 1,
-            },
-            PreviewPerfColorHealthBudgetFailure { metric: "gpu_path_ready", actual: 0, limit: 1 },
-            PreviewPerfColorHealthBudgetFailure { metric: "gpu_blockers", actual: 2, limit: 0 },
-            PreviewPerfColorHealthBudgetFailure {
-                metric: "legacy_reason_total",
-                actual: 4,
-                limit: 0,
-            },
-            PreviewPerfColorHealthBudgetFailure { metric: "transfer_stages", actual: 3, limit: 0 },
-            PreviewPerfColorHealthBudgetFailure {
-                metric: "policy_rejections",
-                actual: 1,
-                limit: 0,
-            },
-        ]
-    );
+    assert_eq!(report.verdict, AppUiPreviewColorHealthVerdict::Fail);
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "input_color_policy_rejected_source"));
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "preview_gpu_color_stage_blocked"));
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "preview_transfer_stage_present"));
+    assert!(report.root_causes.iter().any(|root| root.code == "legacy_rgba8_composite_path"));
 
-    assert_eq!(
-        evaluate_preview_color_health_budget(None, PreviewPerfColorHealthBudget::default()),
-        vec![PreviewPerfColorHealthBudgetFailure {
-            metric: "color_health_present",
-            actual: 0,
-            limit: 1,
-        }]
-    );
+    let missing = build_preview_color_health_report(None, "preview-missing");
+    assert_eq!(missing.verdict, AppUiPreviewColorHealthVerdict::Fail);
+    assert!(missing
+        .root_causes
+        .iter()
+        .any(|root| root.code == "missing_preview_color_evidence"));
 }
 
 #[test]
-fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
+fn viewer_gpu_output_budget_smoke_report_serializes_health_report() {
     let jsonl = r#"
 {"health":{"status":"Waiting"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":0}}
 {"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"last_frame_context":{"sequence_id":"seq","frame":12,"width":1280,"height":720,"external_texture_key":"key","output_target":"Display","output_color_space":"Srgb","tone_map":false}}
 "#;
 
     let report = viewer_gpu_output_budget_report_from_jsonl(
+        VIEWER_GPU_OUTPUT_BUDGET_SCENARIO,
         "target/perf/viewer-gpu-output.jsonl",
         jsonl,
         &ViewerGpuOutputBudget::default(),
@@ -1461,17 +1234,218 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     let json = serde_json::to_value(&report).expect("serialize viewer GPU output budget report");
 
     assert_eq!(json["scenario"], "viewer_gpu_output_budget");
-    assert_eq!(json["summary"]["passed"], true);
-    assert_eq!(json["summary"]["records"], 2);
-    assert_eq!(json["summary"]["budget"]["min_records"], 1);
-    assert_eq!(json["summary"]["counts"]["ready"], 1);
-    assert_eq!(json["summary"]["counts"]["waiting"], 1);
-    assert_eq!(json["summary"]["display_issues"]["total"], 0);
-    assert_eq!(json["summary"]["budget"]["max_display_payload_blockers"], 0);
-    assert_eq!(json["summary"]["budget"]["max_color_rejections"], 0);
-    assert_eq!(json["summary"]["color_rejections"], 0);
-    assert_eq!(json["summary"]["reported_counts_match_replay"], true);
-    assert_eq!(json["summary"]["last_frame_context"]["frame"], 12);
+    assert_eq!(json["report"]["schema_version"], 1);
+    assert_eq!(json["report"]["profile"], "viewer_gpu_output_budget");
+    assert_eq!(
+        json["report"]["source_path"],
+        "target/perf/viewer-gpu-output.jsonl"
+    );
+    assert_eq!(json["report"]["verdict"], "Pass");
+    assert!(json.get("summary").is_none());
+    assert!(json.get("health_report").is_none());
+    assert!(json.get("source_path").is_none());
+    assert_eq!(json["report"]["summary"]["passed"], true);
+    assert_eq!(json["report"]["summary"]["records"], 2);
+    assert_eq!(json["report"]["summary"]["budget"]["min_records"], 1);
+    assert_eq!(json["report"]["summary"]["counts"]["ready"], 1);
+    assert_eq!(json["report"]["summary"]["counts"]["waiting"], 1);
+    assert_eq!(json["report"]["summary"]["display_issues"]["total"], 0);
+    assert_eq!(
+        json["report"]["summary"]["display_contract_refreshes"]["total"],
+        0
+    );
+    assert_eq!(
+        json["report"]["summary"]["display_issue_refresh_correlations"]["total"],
+        0
+    );
+    assert_eq!(
+        json["report"]["summary"]["budget"]["max_display_contract_refreshes"],
+        u64::MAX
+    );
+    assert_eq!(
+        json["report"]["summary"]["budget"]["max_hdr_output_requires_hdr_surface"],
+        0
+    );
+    assert_eq!(
+        json["report"]["summary"]["budget"]["max_display_payload_blockers"],
+        0
+    );
+    assert_eq!(
+        json["report"]["summary"]["budget"]["max_color_rejections"],
+        0
+    );
+    assert_eq!(json["report"]["summary"]["color_rejections"], 0);
+    assert_eq!(
+        json["report"]["summary"]["reported_counts_match_replay"],
+        true
+    );
+    assert_eq!(json["report"]["summary"]["last_frame_context"]["frame"], 12);
+}
+
+#[test]
+fn viewer_gpu_output_display_baseline_budget_defaults_to_refresh_headroom() {
+    let _lock = perf_lock().lock().expect("perf lock");
+    let key = "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES";
+    let previous = std::env::var(key).ok();
+
+    unsafe {
+        std::env::remove_var(key);
+    }
+
+    let budget = viewer_gpu_output_display_baseline_budget_from_env();
+    assert_eq!(budget.max_display_contract_refreshes, 2);
+    assert_eq!(budget.max_display_issue_refresh_correlations, 0);
+    assert_eq!(budget.max_display_tone_map_headroom_changes, 0);
+    assert_eq!(budget.max_available_surface_format_changes, 0);
+    assert_eq!(budget.max_format_color_space_changes, 0);
+    assert_eq!(budget.max_present_mode_changes, 0);
+    assert_eq!(budget.max_alpha_mode_changes, 0);
+
+    match previous {
+        Some(value) => unsafe {
+            std::env::set_var(key, value);
+        },
+        None => unsafe {
+            std::env::remove_var(key);
+        },
+    }
+}
+
+#[test]
+fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
+    let _lock = perf_lock().lock().expect("perf lock");
+    let keys = [
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MIN_RECORDS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MIN_READY",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FAILED",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_BLOCKED",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_REJECTED",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DEGRADED",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_WAITING",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_RECONFIGURE_BLOCKED_BY_PAYLOAD",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_PRESENTATION_INTENT",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUE_REFRESH_CORRELATIONS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_TONE_MAP_HEADROOM_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_AVAILABLE_SURFACE_FORMAT_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FORMAT_COLOR_SPACE_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PRESENT_MODE_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS",
+    ];
+    let previous = keys
+        .iter()
+        .map(|key| ((*key).to_owned(), std::env::var(key).ok()))
+        .collect::<Vec<_>>();
+
+    unsafe {
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MIN_RECORDS", "3");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MIN_READY", "4");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FAILED", "5");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_BLOCKED", "6");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_REJECTED", "7");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DEGRADED", "8");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_WAITING", "9");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUES", "10");
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE",
+            "11",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE",
+            "12",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_RECONFIGURE_BLOCKED_BY_PAYLOAD",
+            "13",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_PRESENTATION_INTENT",
+            "14",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT",
+            "15",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
+            "16",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
+            "17",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUE_REFRESH_CORRELATIONS",
+            "18",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_TONE_MAP_HEADROOM_CHANGES",
+            "19",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_AVAILABLE_SURFACE_FORMAT_CHANGES",
+            "20",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FORMAT_COLOR_SPACE_CHANGES",
+            "21",
+        );
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PRESENT_MODE_CHANGES", "22");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES", "23");
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
+            "24",
+        );
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS", "25");
+    }
+
+    let budget = viewer_gpu_output_budget_from_env();
+
+    for (key, value) in previous {
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    assert_eq!(
+        budget,
+        ViewerGpuOutputBudget {
+            min_records: 3,
+            min_ready: 4,
+            max_failed: 5,
+            max_blocked: 6,
+            max_rejected: 7,
+            max_degraded: 8,
+            max_waiting: 9,
+            max_display_issues: 10,
+            max_hdr_output_requires_hdr_surface: 11,
+            max_output_color_space_requires_surface_color_space: 12,
+            max_reconfigure_blocked_by_payload: 13,
+            max_unsupported_presentation_intent: 14,
+            max_unsupported_surface_contract: 15,
+            max_unknown_display_issues: 16,
+            max_display_contract_refreshes: 17,
+            max_display_issue_refresh_correlations: 18,
+            max_display_tone_map_headroom_changes: 19,
+            max_available_surface_format_changes: 20,
+            max_format_color_space_changes: 21,
+            max_present_mode_changes: 22,
+            max_alpha_mode_changes: 23,
+            max_display_payload_blockers: 24,
+            max_color_rejections: 25,
+        }
+    );
 }
 
 fn paint_command_count(

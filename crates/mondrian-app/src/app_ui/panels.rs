@@ -21,7 +21,7 @@ use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
-use mondrian_export::queue::{ExportJobColorDiagnostics, JobStatus};
+use mondrian_export::queue::{ExportColorHealthSeverity, ExportJobColorDiagnostics, JobStatus};
 use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::{
@@ -3225,17 +3225,8 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
 }
 
 fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {
-    let summary = diagnostics.summary()?;
-    let float_health = if summary.fully_float_linear {
-        "float-ready"
-    } else {
-        "legacy-rgba8"
-    };
-    let gpu_health = if summary.gpu_path_ready {
-        "gpu-ready"
-    } else {
-        "gpu-blocked"
-    };
+    let report = diagnostics.health_report("export-panel")?;
+    let summary = report.summary;
     let asset_issue_tags = color_issue_aggregate_tags(&summary.asset_issue_summary);
     let asset_issue_segment = if asset_issue_tags.is_empty() {
         format!(
@@ -3249,8 +3240,30 @@ fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) ->
             asset_issue_tags.join(" ")
         )
     };
+    let root_causes = if report.root_causes.is_empty() {
+        "none".to_owned()
+    } else {
+        report
+            .root_causes
+            .iter()
+            .map(|root| {
+                if root.severity == ExportColorHealthSeverity::Warn {
+                    format!("warn:{}", root.code)
+                } else {
+                    root.code.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let actions = if report.actions.is_empty() {
+        "none".to_owned()
+    } else {
+        report.actions.iter().map(|action| action.code).collect::<Vec<_>>().join(" ")
+    };
     Some(format!(
-        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / {} / health {} {} / stages cpu-in {} cpu-out {} gpu {} blockers {} transfer {} / gpu blockers shader {} resource {} wrapper {} pipeline {} / composite float {} legacy {} reasons {}",
+        "色彩: report {:?} / {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / {} / checks {} / causes {} / actions {} / stages cpu-in {} cpu-out {} gpu {} blockers {} transfer {} / gpu blockers shader {} resource {} wrapper {} pipeline {} / composite float {} legacy {} reasons {}",
+        report.verdict,
         summary.diagnosed_frames,
         summary.detected_metadata,
         summary.override_count,
@@ -3258,8 +3271,9 @@ fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) ->
         summary.data_textures,
         summary.policy_rejections,
         asset_issue_segment,
-        float_health,
-        gpu_health,
+        report.checks.len(),
+        root_causes,
+        actions,
         summary.cpu_input_stages,
         summary.cpu_output_stages,
         summary.gpu_color_stages,
@@ -4871,7 +4885,10 @@ mod tests {
             color_diagnostics.contains("metadata 1 / override 1 / policy 0 / data 0 / reject 0")
         );
         assert!(color_diagnostics.contains("assets 2 / issues warn 2 missing-cicp 1 decoder 1"));
-        assert!(color_diagnostics.contains("health float-ready gpu-blocked"));
+        assert!(color_diagnostics.contains("report Fail"));
+        assert!(color_diagnostics.contains("warn:asset_color_diagnostics_warning"));
+        assert!(color_diagnostics.contains("export_gpu_color_stage_blocked"));
+        assert!(color_diagnostics.contains("actions inspect_asset_color_warning_evidence"));
         assert!(color_diagnostics.contains("gpu blockers shader 0 resource 0 wrapper 0 pipeline 1"));
         assert_eq!(encoding.progress_percent, 82);
         assert!(encoding.can_cancel);

@@ -141,7 +141,20 @@ Telemetry must also expose a stable display issue summary that names the reason,
 target output color space, current or selected surface contract, desired surface
 contract, payload blocker, and whether the target surface color space is
 reported as supported. UI, perf JSON, and diagnostics tooling should consume this
-summary rather than parsing Debug-formatted blocker/readiness payloads.
+summary rather than parsing Debug-formatted blocker/readiness payloads. The
+summary must preserve the display-target fingerprint and surface encoding
+evidence end to end, so viewer smoke/budget reports can tell whether a failure
+happened on the wrong monitor, on the wrong surface contract, or only because
+the current payload path cannot yet present that contract. Contract refreshes
+caused by resize, scale-factor change, or moving onto another monitor must also
+be persisted as structured events with previous/next surface snapshots so
+diagnostics can explain how the current contract was reached. When an issue is
+recorded after such a refresh, the issue summary should carry the correlated
+preceding refresh event instead of forcing downstream tooling to infer that
+relationship from separate records. The refresh snapshots should include enough
+capability evidence to explain why the contract changed: surface format set,
+per-format color-space support, present modes, alpha modes, and HDR headroom
+diagnostics.
 The same rule applies to media interpretation failures: viewer empty-state
 diagnostics and export queue job summaries should consume
 `VideoColorDiagnosticIssueSummary` / `VideoColorDiagnosticIssueAggregate`
@@ -149,7 +162,13 @@ directly and only use the compact human-readable summary as supporting context.
 The viewer GPU-output budget evaluator consumes the same JSONL summary and
 replays display issue reason counts plus payload-blocker counts, so smoke tests
 can budget real display/surface regressions independently from broad health
-status totals.
+status totals. That budget must stay fail-closed per reason as well as in
+aggregate, so HDR-surface regressions, surface-color-space mismatches, payload
+contract blockers, unsupported presentation intents, and unsupported surface
+contracts can each trip their own threshold instead of disappearing inside one
+combined display-issue count. Unknown future reason strings must also budget as
+their own fail-closed class so diagnostics schema drift cannot hide inside a
+temporarily relaxed aggregate threshold.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.

@@ -246,29 +246,29 @@ timeline asset set, not the whole asset-diagnostics cache, so preview/export
 parity cannot be skewed by unrelated assets loaded in the project.
 Timeline export writes accumulated render-path color diagnostics into
 `RenderJob.diagnostics.color`. The worker updates this snapshot while frames are
-actually rendered. App panels, logs, and future JSONL reports should consume
-`ExportJobColorDiagnostics::summary()` as the stable semantic summary instead
-of re-evaluating timeline state or rebuilding derived counters in UI code.
-The summary carries the same health concepts used by preview reports:
+actually rendered. App panels, logs, and JSONL reports should consume
+`ExportJobDiagnostics::color_report()` or
+`ExportJobColorDiagnostics::health_report()` as the stable semantic contract
+instead of re-evaluating timeline state or rebuilding derived counters in UI
+code. The embedded summary carries the same health concepts used by preview
+reports:
 explicit metadata/override totals, policy assumptions/rejections, data-texture
 bypasses, legacy RGBA8 reason totals, float/linear completeness, GPU blockers,
 GPU blocker breakdowns, legacy RGBA8 reason breakdowns, and GPU path readiness.
-Export simulation perf JSONL includes this summary as `color_health` so
-continuous perf runs can budget against structured color-path health while old
-flat stage counters remain available during dashboard migration. Export
-simulation `passed` must include that color-health budget: default runs require
-fully float/linear composites, GPU path readiness, zero GPU blockers, zero
-upload/readback transfer stages, and zero structured legacy RGBA8 reasons unless
-the operator explicitly relaxes a budget for investigation.
-Preview perf JSONL follows the same pattern with `preview_color_health` and
-`preview_playback_color_health`; the app preview service owns the derivation
-from raw counters to summary fields so perf tests do not hand-maintain color
-health semantics. Preview media decode/cache and continuous-playback smokes also
-apply a color-health budget to those summaries: default runs require a present
-health summary, fully float/linear composites, GPU path readiness, zero GPU
-blockers, zero upload/readback transfer stages, zero structured legacy RGBA8
-reasons, and zero missing-metadata policy rejections unless the operator
-explicitly relaxes a budget for investigation.
+Export simulation perf JSONL includes this evidence only through the versioned
+`color_report`; `color_health*` fields are not a supported external report
+surface. Export simulation `passed` must include that report verdict: default
+runs require diagnosed frames, fully float/linear composites, GPU path
+readiness, zero GPU blockers, zero upload/readback transfer stages, and zero
+structured legacy RGBA8 reasons.
+Preview perf JSONL follows the same pattern with `preview_color_report` and,
+for app-scale playback probes, `preview_playback_color_report`. The app preview
+service owns the derivation from raw counters to report summary fields so perf
+tests do not hand-maintain color health semantics. Preview media decode/cache
+and continuous-playback smokes fail closed on those reports: default runs
+require a present health summary, fully float/linear composites, GPU path
+readiness, zero GPU blockers, zero upload/readback transfer stages, zero
+structured legacy RGBA8 reasons, and zero missing-metadata policy rejections.
 Live app-window viewer output diagnostics can additionally be persisted with
 `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`. That JSONL stream records the last viewer
 GPU output attempt, including the derived health summary, display/presentation
@@ -281,19 +281,23 @@ rejects an asset.
 The same records include cumulative ready/degraded/blocked/failed/rejected/waiting
 health counts so smoke tooling can enforce viewer GPU-output budgets directly
 from the JSONL stream. `viewer_gpu_output_budget` consumes this stream, emits a
-structured summary, and fails closed when ready/failed/blocked/rejected/degraded
-thresholds are not met or when the reported cumulative `health_counts` disagree
-with the statuses replayed from the JSONL records. Empty streams fail explicitly
-with a `records` budget failure instead of being reported only as missing ready
-frames. The same budget also replays `display_issue_summary` records into
-reason counts and payload-blocker counts, and it replays viewer color
-rejections into a `VideoColorDiagnosticIssueAggregate`, allowing smoke runs to
-fail on HDR, wide-gamut, unsupported presentation, UI payload blockers, or
-metadata-policy rejections even when a temporary health budget permits degraded
-frames. The same evaluator lives in
+versioned health report, and fails closed when ready/failed/blocked/rejected/
+degraded thresholds are not met or when the reported cumulative `health_counts`
+disagree with the statuses replayed from the JSONL records. Empty streams fail
+explicitly with a `records` budget failure instead of being reported only as
+missing ready frames. The report's embedded summary replays
+`display_issue_summary` records into reason counts and payload-blocker counts,
+and it replays viewer color rejections into a
+`VideoColorDiagnosticIssueAggregate`, allowing smoke runs to fail on HDR,
+wide-gamut, unsupported presentation, UI payload blockers, or metadata-policy
+rejections even when a temporary health budget permits degraded frames.
+Per-reason display thresholds are part of the contract, so CI can relax one
+failure class for investigation without silently tolerating the rest, and
+unknown future display reasons still fail closed instead of disappearing inside
+an aggregate display-issue allowance. The same evaluator lives in
 `app_ui::viewer_gpu_output_budget` so Rust smoke tests and the CLI share one
 budget implementation; the ignored `viewer_gpu_output_budget_smoke` test reads
-`MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same summary into
+`MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same health report into
 `MONDRIAN_PERF_OUTPUT` when configured, and fails the test on budget violations.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.

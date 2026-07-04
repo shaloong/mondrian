@@ -307,10 +307,16 @@ playback/scrubbing sessions a persistent health stream that can be budgeted and
 correlated back to specific frames in addition to trace logs; the
 `viewer_gpu_output_budget` developer binary consumes that JSONL and exits
 non-zero when the configured health thresholds or display-issue thresholds are
-violated. Its report includes structured display issue reason counts,
-payload-blocker counts, and aggregated media issue counts, so HDR/P3/surface-contract
-problems and metadata-policy rejections remain visible even when a temporary
-smoke run allows degraded viewer output. The same session also owns
+violated. It emits a versioned health report for CI walls and issue
+attachments. That report carries the diagnostics stream source path and keeps
+the raw budget summary intact, including
+structured display issue reason counts, payload-blocker counts, aggregated
+media issue counts, stage counters, and last health flags, then adds fixed
+diagnostic checks, root causes, actions, and evidence across capture integrity,
+viewer output state, GPU color path, display contract, display capability
+drift, and media color policy. Reports must use this single structured shape
+instead of parsing trace text, reconstructing readiness from ad hoc counters,
+or depending on a legacy summary-only output. The same session also owns
 the display-output contract for the current wgpu 30 surface and monitor:
 selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
@@ -333,6 +339,21 @@ selected surface color-space change follows the same rebuild path. The preview
 service may keep a CPU `RasterImage` as the correctness/fallback path, but it
 does not own wgpu objects and must not create short-lived GPU output runtimes
 inside CPU media workers.
+The persisted `display_issue_summary` is not just a reason string: it carries
+the active display target fingerprint plus current/selected/desired surface
+format, color space, encoding, HDR mode, payload blocker, and support evidence
+so smoke tooling can diagnose the exact presentation contract mismatch from the
+JSONL report alone.
+Display-contract refreshes are part of the same persisted evidence: the session
+records structured resize / scale-factor / window-move events with previous and
+next contract snapshots, allowing multi-monitor or swapchain reconfiguration
+problems to be reconstructed from JSONL without depending on trace log
+retention. When a subsequent display issue is emitted, it should preserve the
+preceding correlated refresh event so diagnostics can attribute the blocker to
+the contract transition that introduced it. Those refresh snapshots must carry
+capability-difference evidence too, including available formats, per-format
+color-space support, present modes, alpha modes, and HDR tone-map headroom, so
+JSONL reports can show not only that the contract changed but why it had to.
 The window session also owns viewer GPU output telemetry next to the runtime:
 each preparation attempt records whether it skipped because the external
 texture was already current, media was loading, the preview was unavailable, the

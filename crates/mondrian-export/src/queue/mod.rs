@@ -69,6 +69,13 @@ pub struct ExportJobDiagnostics {
     pub color: ExportJobColorDiagnostics,
 }
 
+impl ExportJobDiagnostics {
+    /// Build the versioned export color report for this job when color evidence exists.
+    pub fn color_report(self, profile: impl Into<String>) -> Option<ExportColorHealthReport> {
+        self.color.health_report(profile)
+    }
+}
+
 /// Export color diagnostics observed on the real render path.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExportJobColorDiagnostics {
@@ -129,6 +136,368 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub gpu_path_ready: bool,
 }
 
+/// Schema version for export color health reports.
+pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 1;
+
+/// Versioned export color health report for UI, telemetry, perf, and job artifacts.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExportColorHealthReport {
+    /// Report schema version.
+    pub schema_version: u32,
+    /// Applied report profile.
+    pub profile: String,
+    /// Overall export color health verdict.
+    pub verdict: ExportColorHealthVerdict,
+    /// Stable export color diagnostics summary used as report evidence.
+    pub summary: ExportJobColorDiagnosticsSummary,
+    /// Structured checks by export color-pipeline area.
+    pub checks: Vec<ExportColorHealthCheck>,
+    /// Prioritized machine-readable root causes.
+    pub root_causes: Vec<ExportColorHealthRootCause>,
+    /// Suggested engineering or operator actions.
+    pub actions: Vec<ExportColorHealthAction>,
+}
+
+/// Overall export color health verdict.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ExportColorHealthVerdict {
+    /// Export color path met all fail-closed checks.
+    Pass,
+    /// Export color path passed hard checks but has warning evidence.
+    Warn,
+    /// Export color path violated a fail-closed check.
+    Fail,
+}
+
+/// Export color diagnostic area.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ExportColorHealthArea {
+    /// Evidence capture and frame coverage.
+    CaptureIntegrity,
+    /// Input media metadata and policy handling.
+    InputColorPolicy,
+    /// Renderer color-stage scheduling.
+    StageScheduling,
+    /// Timeline compositing precision and legacy paths.
+    CompositePath,
+}
+
+/// Export color health check severity.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ExportColorHealthSeverity {
+    /// Check passed.
+    Pass,
+    /// Check produced warning evidence.
+    Warn,
+    /// Check failed.
+    Fail,
+}
+
+/// One export color health check.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExportColorHealthCheck {
+    /// Diagnostic area for this check.
+    pub area: ExportColorHealthArea,
+    /// Stable check code.
+    pub code: &'static str,
+    /// Check severity.
+    pub severity: ExportColorHealthSeverity,
+    /// Observed value.
+    pub observed: u64,
+    /// Optional target or threshold.
+    pub limit: Option<u64>,
+}
+
+/// One export color health root cause.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExportColorHealthRootCause {
+    /// Diagnostic area for this root cause.
+    pub area: ExportColorHealthArea,
+    /// Stable root-cause code.
+    pub code: &'static str,
+    /// Root-cause severity.
+    pub severity: ExportColorHealthSeverity,
+    /// Compact evidence string.
+    pub evidence: String,
+}
+
+/// One export color health action.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExportColorHealthAction {
+    /// Diagnostic area for this action.
+    pub area: ExportColorHealthArea,
+    /// Stable action code.
+    pub code: &'static str,
+    /// Human-readable action.
+    pub description: &'static str,
+}
+
+impl ExportJobColorDiagnosticsSummary {
+    /// Build the versioned export color health report for this summary.
+    pub fn health_report(self, profile: impl Into<String>) -> ExportColorHealthReport {
+        let mut checks = Vec::new();
+        let mut root_causes = Vec::new();
+        let mut actions = Vec::new();
+
+        push_export_min_check(
+            &mut checks,
+            ExportColorHealthArea::CaptureIntegrity,
+            "diagnosed_frames_present",
+            self.diagnosed_frames,
+            1,
+        );
+        push_export_bool_check(
+            &mut checks,
+            ExportColorHealthArea::CompositePath,
+            "fully_float_linear",
+            self.fully_float_linear,
+        );
+        push_export_bool_check(
+            &mut checks,
+            ExportColorHealthArea::StageScheduling,
+            "gpu_path_ready",
+            self.gpu_path_ready,
+        );
+        push_export_max_check(
+            &mut checks,
+            ExportColorHealthArea::StageScheduling,
+            "gpu_blockers",
+            self.gpu_blockers,
+            0,
+        );
+        push_export_max_check(
+            &mut checks,
+            ExportColorHealthArea::StageScheduling,
+            "transfer_stages",
+            self.transfer_stages,
+            0,
+        );
+        push_export_max_check(
+            &mut checks,
+            ExportColorHealthArea::CompositePath,
+            "legacy_reason_total",
+            self.legacy_reason_total,
+            0,
+        );
+        push_export_max_check(
+            &mut checks,
+            ExportColorHealthArea::InputColorPolicy,
+            "policy_rejections",
+            self.policy_rejections,
+            0,
+        );
+        let warning_count = self.asset_issue_summary.diagnostics_with_warnings;
+        checks.push(ExportColorHealthCheck {
+            area: ExportColorHealthArea::InputColorPolicy,
+            code: "media_warnings",
+            severity: if warning_count > 0 {
+                ExportColorHealthSeverity::Warn
+            } else {
+                ExportColorHealthSeverity::Pass
+            },
+            observed: warning_count,
+            limit: Some(0),
+        });
+
+        push_export_root_causes_and_actions(self, &mut root_causes, &mut actions);
+
+        let has_failures =
+            checks.iter().any(|check| check.severity == ExportColorHealthSeverity::Fail);
+        let has_warnings =
+            checks.iter().any(|check| check.severity == ExportColorHealthSeverity::Warn);
+        let verdict = if has_failures {
+            ExportColorHealthVerdict::Fail
+        } else if has_warnings {
+            ExportColorHealthVerdict::Warn
+        } else {
+            ExportColorHealthVerdict::Pass
+        };
+
+        ExportColorHealthReport {
+            schema_version: EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION,
+            profile: profile.into(),
+            verdict,
+            summary: self,
+            checks,
+            root_causes,
+            actions,
+        }
+    }
+}
+
+fn push_export_min_check(
+    checks: &mut Vec<ExportColorHealthCheck>,
+    area: ExportColorHealthArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(ExportColorHealthCheck {
+        area,
+        code,
+        severity: if observed < limit {
+            ExportColorHealthSeverity::Fail
+        } else {
+            ExportColorHealthSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_export_max_check(
+    checks: &mut Vec<ExportColorHealthCheck>,
+    area: ExportColorHealthArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(ExportColorHealthCheck {
+        area,
+        code,
+        severity: if observed > limit {
+            ExportColorHealthSeverity::Fail
+        } else {
+            ExportColorHealthSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_export_bool_check(
+    checks: &mut Vec<ExportColorHealthCheck>,
+    area: ExportColorHealthArea,
+    code: &'static str,
+    passed: bool,
+) {
+    checks.push(ExportColorHealthCheck {
+        area,
+        code,
+        severity: if passed {
+            ExportColorHealthSeverity::Pass
+        } else {
+            ExportColorHealthSeverity::Fail
+        },
+        observed: if passed { 1 } else { 0 },
+        limit: Some(1),
+    });
+}
+
+fn push_export_root_causes_and_actions(
+    summary: ExportJobColorDiagnosticsSummary,
+    root_causes: &mut Vec<ExportColorHealthRootCause>,
+    actions: &mut Vec<ExportColorHealthAction>,
+) {
+    if summary.diagnosed_frames == 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::CaptureIntegrity,
+            "missing_export_color_evidence",
+            ExportColorHealthSeverity::Fail,
+            "diagnosed_frames=0".to_owned(),
+            "inspect_export_render_path",
+            "Ensure export jobs record frame color diagnostics from the real render path.",
+        );
+    }
+    if summary.asset_issue_summary.diagnostics_with_warnings > 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::InputColorPolicy,
+            "asset_color_diagnostics_warning",
+            ExportColorHealthSeverity::Warn,
+            format!(
+                "diagnostics_with_warnings={}",
+                summary.asset_issue_summary.diagnostics_with_warnings
+            ),
+            "inspect_asset_color_warning_evidence",
+            "Inspect source media color diagnostic warnings before trusting export color policy.",
+        );
+    }
+    if summary.policy_rejections > 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::InputColorPolicy,
+            "input_color_policy_rejected_source",
+            ExportColorHealthSeverity::Fail,
+            format!("policy_rejections={}", summary.policy_rejections),
+            "inspect_asset_color_diagnostics",
+            "Inspect per-asset color diagnostics and missing-metadata policy before export.",
+        );
+    }
+    if summary.gpu_blockers > 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::StageScheduling,
+            "export_gpu_color_stage_blocked",
+            ExportColorHealthSeverity::Fail,
+            format!(
+                "gpu_blockers={} shader={} ocio={} wrapper={} pipeline={}",
+                summary.gpu_blockers,
+                summary.gpu_blocker_breakdown.shader_module_not_prepared,
+                summary.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared,
+                summary.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
+                summary.gpu_blocker_breakdown.render_pipeline_not_prepared
+            ),
+            "inspect_export_gpu_blockers",
+            "Inspect renderer GPU color blocker breakdown before relying on export GPU scheduling.",
+        );
+    }
+    if summary.transfer_stages > 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::StageScheduling,
+            "export_transfer_stage_present",
+            ExportColorHealthSeverity::Fail,
+            format!("transfer_stages={}", summary.transfer_stages),
+            "remove_export_transfer_stage",
+            "Trace why export color work introduced upload/readback transfer stages.",
+        );
+    }
+    if !summary.fully_float_linear || summary.legacy_reason_total > 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::CompositePath,
+            "legacy_rgba8_composite_path",
+            ExportColorHealthSeverity::Fail,
+            format!(
+                "fully_float_linear={} legacy_reason_total={}",
+                summary.fully_float_linear, summary.legacy_reason_total
+            ),
+            "migrate_legacy_composite_reason",
+            "Use structured legacy RGBA8 reasons to migrate export composites back to float/linear.",
+        );
+    }
+}
+
+fn push_export_root_cause_with_action(
+    root_causes: &mut Vec<ExportColorHealthRootCause>,
+    actions: &mut Vec<ExportColorHealthAction>,
+    area: ExportColorHealthArea,
+    root_code: &'static str,
+    severity: ExportColorHealthSeverity,
+    evidence: String,
+    action_code: &'static str,
+    action_description: &'static str,
+) {
+    if !root_causes.iter().any(|root| root.code == root_code) {
+        root_causes.push(ExportColorHealthRootCause { area, code: root_code, severity, evidence });
+    }
+    if !actions.iter().any(|action| action.code == action_code) {
+        actions.push(ExportColorHealthAction {
+            area,
+            code: action_code,
+            description: action_description,
+        });
+    }
+}
+
 impl ExportJobColorDiagnostics {
     /// Record the aggregated media color-diagnostic issues for this export job.
     pub fn record_asset_issue_summary(&mut self, summary: VideoColorDiagnosticIssueAggregate) {
@@ -157,6 +526,11 @@ impl ExportJobColorDiagnostics {
     /// Return the renderer-owned composite color-path summary for this export job.
     pub fn composite_color_path_summary(self) -> TimelineCompositeColorPathSummary {
         self.composite_diagnostics.color_path_summary()
+    }
+
+    /// Build the versioned export color report when this diagnostic set has color evidence.
+    pub fn health_report(self, profile: impl Into<String>) -> Option<ExportColorHealthReport> {
+        self.summary().map(|summary| summary.health_report(profile))
     }
 
     /// Return a stable export color diagnostics summary when this job has color evidence.
@@ -2195,6 +2569,27 @@ mod tests {
                 .explicit_metadata_or_override(),
             2
         );
+        let color_report = job
+            .diagnostics
+            .color_report("export-job-diagnostics")
+            .expect("export job color report");
+        assert_eq!(
+            color_report.schema_version,
+            EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION
+        );
+        assert_eq!(color_report.profile, "export-job-diagnostics");
+        assert_eq!(color_report.verdict, ExportColorHealthVerdict::Fail);
+        assert_eq!(color_report.summary.diagnosed_frames, 1);
+        assert_eq!(color_report.summary.gpu_blockers, 1);
+        assert_eq!(color_report.summary.legacy_reason_total, 1);
+        assert!(color_report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "export_gpu_color_stage_blocked"));
+        assert!(color_report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "legacy_rgba8_composite_path"));
     }
 
     #[test]
@@ -2240,39 +2635,82 @@ mod tests {
             },
         );
 
+        let expected_summary = ExportJobColorDiagnosticsSummary {
+            asset_issue_summary: VideoColorDiagnosticIssueAggregate {
+                diagnostics: 2,
+                diagnostics_with_warnings: 1,
+                method_missing_metadata: 1,
+                method_decoder_unavailable: 1,
+                confidence_none: 1,
+                confidence_medium: 1,
+                missing_or_unsupported_cicp_tags: 1,
+                decoder_unavailable: 1,
+                ..VideoColorDiagnosticIssueAggregate::default()
+            },
+            diagnosed_frames: 1,
+            detected_metadata: 1,
+            override_count: 1,
+            policy_assumptions: 1,
+            data_textures: 1,
+            policy_rejections: 1,
+            explicit_metadata_or_override: 2,
+            gpu_color_stages: 2,
+            gpu_blockers: 2,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                shader_module_not_prepared: 1,
+                ocio_resource_bind_group_not_prepared: 1,
+                ..RenderColorStageGpuBlockerBreakdown::default()
+            },
+            float_linear_composites: 2,
+            fully_float_linear: true,
+            ..ExportJobColorDiagnosticsSummary::default()
+        };
+        assert_eq!(diagnostics.summary(), Some(expected_summary));
+
+        let report = diagnostics
+            .health_report("export-health-contract")
+            .expect("export health report");
         assert_eq!(
-            diagnostics.summary(),
-            Some(ExportJobColorDiagnosticsSummary {
-                asset_issue_summary: VideoColorDiagnosticIssueAggregate {
-                    diagnostics: 2,
-                    diagnostics_with_warnings: 1,
-                    method_missing_metadata: 1,
-                    method_decoder_unavailable: 1,
-                    confidence_none: 1,
-                    confidence_medium: 1,
-                    missing_or_unsupported_cicp_tags: 1,
-                    decoder_unavailable: 1,
-                    ..VideoColorDiagnosticIssueAggregate::default()
-                },
-                diagnosed_frames: 1,
-                detected_metadata: 1,
-                override_count: 1,
-                policy_assumptions: 1,
-                data_textures: 1,
-                policy_rejections: 1,
-                explicit_metadata_or_override: 2,
-                gpu_color_stages: 2,
-                gpu_blockers: 2,
-                gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
-                    shader_module_not_prepared: 1,
-                    ocio_resource_bind_group_not_prepared: 1,
-                    ..RenderColorStageGpuBlockerBreakdown::default()
-                },
-                float_linear_composites: 2,
-                fully_float_linear: true,
-                ..ExportJobColorDiagnosticsSummary::default()
-            })
+            report.schema_version,
+            EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION
         );
+        assert_eq!(report.profile, "export-health-contract");
+        assert_eq!(report.summary, expected_summary);
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "media_warnings" && check.severity == ExportColorHealthSeverity::Warn
+        }));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "input_color_policy_rejected_source"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "export_gpu_color_stage_blocked"));
+    }
+
+    #[test]
+    fn export_color_diagnostics_report_fails_closed_without_frame_evidence() {
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_asset_issue_summary(VideoColorDiagnosticIssueAggregate {
+            diagnostics: 1,
+            method_missing_metadata: 1,
+            confidence_none: 1,
+            missing_or_unsupported_cicp_tags: 1,
+            ..VideoColorDiagnosticIssueAggregate::default()
+        });
+
+        let report = diagnostics
+            .health_report("export-missing-evidence")
+            .expect("export health report");
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
+        assert_eq!(report.summary.diagnosed_frames, 0);
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "missing_export_color_evidence"));
+        assert!(report.root_causes.iter().any(|root| root.code == "legacy_rgba8_composite_path"));
     }
 
     #[test]
