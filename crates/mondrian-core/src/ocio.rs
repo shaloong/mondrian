@@ -1158,6 +1158,62 @@ pub fn apply_ocio_display_rgba8(
     Ok(())
 }
 
+/// Apply an OCIO color-space conversion to an `&mut [f32]` RGBA linear-light
+/// buffer without u8 quantization.
+///
+/// The buffer is treated as `num_pixels × 4` channels in the **source**
+/// encoding. OCIO decodes, converts primaries, and re-encodes into the
+/// destination encoding. Alpha is passed through unchanged.
+///
+/// This is the precision-preserving alternative to [`apply_ocio_rgba8`].
+pub fn apply_ocio_float(data: &mut [f32], src: ColorSpace, dst: ColorSpace) -> Result<(), String> {
+    if data.is_empty() || src == dst {
+        return Ok(());
+    }
+
+    let cpu = ocio_cpu_processor(src, dst)?;
+    apply_cpu_processor_float(&cpu, data);
+    Ok(())
+}
+
+/// Apply an OCIO source -> working -> output conversion to an RGBA f32 buffer
+/// without u8 quantization.
+pub fn apply_ocio_pipeline_float(
+    data: &mut [f32],
+    src: ColorSpace,
+    working: ColorSpace,
+    dst: ColorSpace,
+) -> Result<(), String> {
+    if data.is_empty() || (src == working && working == dst) {
+        return Ok(());
+    }
+
+    if src != working {
+        apply_ocio_float(data, src, working)?;
+    }
+    if working != dst {
+        apply_ocio_float(data, working, dst)?;
+    }
+    Ok(())
+}
+
+/// Apply an OCIO display transform to an RGBA f32 buffer without u8
+/// quantization.
+pub fn apply_ocio_display_float(
+    data: &mut [f32],
+    src: ColorSpace,
+    display: &str,
+    view: &str,
+) -> Result<(), String> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let cpu = ocio_display_cpu_processor(src, display, view)?;
+    apply_cpu_processor_float(&cpu, data);
+    Ok(())
+}
+
 /// Extract a GPU shader bundle for `src -> dst` from the current OCIO config.
 ///
 /// The returned bundle is renderer-facing metadata. It deliberately does not
@@ -1273,6 +1329,19 @@ fn apply_cpu_processor_rgba8(cpu: &CPUProcessor, data: &mut [u8]) {
         px[2] = (f32_buf[base + 2].clamp(0.0, 1.0) * 255.0).round() as u8;
         px[3] = (f32_buf[base + 3].clamp(0.0, 1.0) * 255.0).round() as u8;
     }
+}
+
+/// Low-level: run an already-obtained [`CPUProcessor`] over an RGBA f32 buffer.
+///
+/// Unlike [`apply_cpu_processor_rgba8`], this operates directly on f32 data
+/// without any u8 quantization round-trip. The caller must ensure `data` contains
+/// RGBA f32 pixels (4 floats per pixel, linear light).
+fn apply_cpu_processor_float(cpu: &CPUProcessor, data: &mut [f32]) {
+    let num_pixels = (data.len() / 4) as i64;
+    if num_pixels == 0 {
+        return;
+    }
+    cpu.apply_rgba_pixels(data, num_pixels, 4);
 }
 
 // ── Utility: list available displays / views ───────────────────────────────────

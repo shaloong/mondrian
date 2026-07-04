@@ -1,7 +1,7 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    CpuEncodedColorFrame, OcioGpuShaderCache, OcioGpuShaderError, OcioGpuShaderRequest,
-    OcioGpuWgpuExecutionPlan, OcioGpuWgpuWrapperColorContract,
+    CpuEncodedColorFrame, LinearFloatSource, OcioGpuShaderCache, OcioGpuShaderError,
+    OcioGpuShaderRequest, OcioGpuWgpuExecutionPlan, OcioGpuWgpuWrapperColorContract,
 };
 use mondrian_core::{
     convert_rgba8_in_place,
@@ -14,6 +14,8 @@ use mondrian_core::{
 pub enum RenderColorTransformBackend {
     /// CPU OCIO path via an explicit RGBA8 boundary.
     CpuOcioRgba8Boundary,
+    /// CPU OCIO path operating directly on f32 data without u8 quantization.
+    CpuOcioFloat,
     /// Planned OCIO GPU shader path before native wgpu upload/execution.
     OcioGpuShaderPlan,
 }
@@ -58,6 +60,14 @@ pub struct RenderInputTransformResult {
 pub struct RenderOutputTransformResult {
     /// Encoded boundary frame.
     pub frame: CpuEncodedColorFrame,
+    /// Execution diagnostics.
+    pub diagnostics: RenderColorTransformDiagnostics,
+}
+
+/// Result of a float output transform that bypasses RGBA8 quantization.
+pub struct RenderOutputTransformFloatResult {
+    /// Linear float working frame with output transform applied.
+    pub frame: CpuColorFrame,
     /// Execution diagnostics.
     pub diagnostics: RenderColorTransformDiagnostics,
 }
@@ -214,6 +224,81 @@ impl RenderColorTransform {
 pub struct CpuColorTransformExecutor;
 
 impl CpuColorTransformExecutor {
+    /// Apply a source/import transform from a linear float source and return
+    /// frame plus execution diagnostics. This bypasses the RGBA8 quantization
+    /// path entirely.
+    pub fn input_to_working_float(
+        frame: &LinearFloatSource,
+        transform: &RenderInputTransform,
+    ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+        let descriptor = frame.descriptor();
+        if descriptor.domain != ColorFrameDomain::Source {
+            return Err(RenderColorTransformError::UnsupportedInputDomain {
+                domain: descriptor.domain,
+            });
+        }
+        if descriptor.encoding != ColorFrameEncoding::LinearFloat {
+            return Err(RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::InputToWorking,
+                input: descriptor,
+                output: ColorFrameDescriptor {
+                    width: descriptor.width,
+                    height: descriptor.height,
+                    color_space: transform.working_color_space,
+                    domain: ColorFrameDomain::Working,
+                    encoding: ColorFrameEncoding::LinearFloat,
+                    residency: ColorFrameResidency::Cpu,
+                },
+                reason: "LinearFloatSource must have LinearFloat encoding".to_string(),
+            });
+        }
+
+        let output_descriptor = ColorFrameDescriptor {
+            width: descriptor.width,
+            height: descriptor.height,
+            color_space: transform.working_color_space,
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Cpu,
+        };
+
+        let mut data = frame.data().to_vec();
+        transform
+            .engine
+            .convert_pipeline_float(
+                &mut data,
+                descriptor.color_space,
+                transform.working_color_space,
+                transform.working_color_space,
+            )
+            .map_err(|reason| RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::InputToWorking,
+                input: descriptor,
+                output: output_descriptor,
+                reason,
+            })?;
+
+        // Re-pack flat f32 into Vec<[f32; 4]> for RgbaF32Frame.
+        let pixels: Vec<[f32; 4]> =
+            data.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        let frame = CpuColorFrame::working(RgbaF32Frame {
+            width: descriptor.width,
+            height: descriptor.height,
+            data: pixels,
+            color_space: transform.working_color_space,
+        });
+        let diagnostics = RenderColorTransformDiagnostics {
+            backend: transform.backend,
+            direction: RenderColorTransformDirection::InputToWorking,
+            input: descriptor,
+            output: output_descriptor,
+            pixel_count: descriptor.width as usize * descriptor.height as usize,
+            used_rgba8_boundary: false,
+        };
+
+        Ok(RenderInputTransformResult { frame, diagnostics })
+    }
+
     /// Apply a source/import transform and return frame plus execution diagnostics.
     pub fn input_to_working(
         frame: &CpuEncodedColorFrame,
@@ -345,9 +430,90 @@ impl CpuColorTransformExecutor {
 
         Ok(RenderOutputTransformResult { frame, diagnostics })
     }
-}
 
-/// Plans OCIO GPU shader execution for renderer color-transform boundaries.
+    /// Apply a working -> output transform on f32 data without u8
+    /// quantization. Returns a working-space `CpuColorFrame` with the output
+    /// transform applied in float.
+    ///
+    /// This is the precision-preserving alternative to [`Self::transform`].
+    /// The caller can then use the frame for GPU upload or further processing
+    /// without an intermediate u8 round-trip.
+    pub fn transform_float(
+        frame: &CpuColorFrame,
+        transform: &RenderColorTransform,
+    ) -> Result<RenderOutputTransformFloatResult, RenderColorTransformError> {
+        let descriptor = frame.descriptor();
+        if descriptor.domain != ColorFrameDomain::Working {
+            return Err(RenderColorTransformError::UnsupportedInputDomain {
+                domain: descriptor.domain,
+            });
+        }
+
+        let output_descriptor = ColorFrameDescriptor {
+            width: descriptor.width,
+            height: descriptor.height,
+            color_space: transform.output_color_space,
+            domain: transform.output_domain,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Cpu,
+        };
+
+        let data: Vec<[f32; 4]> = frame.rgba_f32().data.clone();
+        // Flatten to contiguous f32 for OCIO processing.
+        let mut flat: Vec<f32> = data.iter().flat_map(|p| p.iter().copied()).collect();
+        if let Some(display_view) = &transform.display_view {
+            transform
+                .engine
+                .display_transform_float(
+                    &mut flat,
+                    descriptor.color_space,
+                    &display_view.display,
+                    &display_view.view,
+                )
+                .map_err(|reason| RenderColorTransformError::ExecutionFailed {
+                    direction: RenderColorTransformDirection::WorkingToOutput,
+                    input: descriptor,
+                    output: output_descriptor,
+                    reason,
+                })?;
+        } else {
+            transform
+                .engine
+                .convert_pipeline_float(
+                    &mut flat,
+                    descriptor.color_space,
+                    descriptor.color_space,
+                    transform.output_color_space,
+                )
+                .map_err(|reason| RenderColorTransformError::ExecutionFailed {
+                    direction: RenderColorTransformDirection::WorkingToOutput,
+                    input: descriptor,
+                    output: output_descriptor,
+                    reason,
+                })?;
+        }
+
+        // Re-pack flat f32 into Vec<[f32; 4]>.
+        let pixels: Vec<[f32; 4]> =
+            flat.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        let out_frame = CpuColorFrame::working(RgbaF32Frame {
+            width: descriptor.width,
+            height: descriptor.height,
+            data: pixels,
+            color_space: transform.output_color_space,
+        });
+        let diagnostics = RenderColorTransformDiagnostics {
+            backend: RenderColorTransformBackend::CpuOcioFloat,
+            direction: RenderColorTransformDirection::WorkingToOutput,
+            input: descriptor,
+            output: output_descriptor,
+            pixel_count: descriptor.width as usize * descriptor.height as usize,
+            used_rgba8_boundary: false,
+        };
+
+        Ok(RenderOutputTransformFloatResult { frame: out_frame, diagnostics })
+    }
+}
 pub struct RenderColorTransformGpuPlanner<'a> {
     cache: &'a mut OcioGpuShaderCache,
     options: RenderColorTransformGpuOptions,
@@ -827,5 +993,91 @@ mod tests {
         );
         assert!(plan.wgpu.blockers.is_empty());
         assert!(plan.wgpu.can_execute());
+    }
+
+    #[test]
+    fn float_input_transform_bypasses_rgba8_boundary() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let source = LinearFloatSource::new(
+            2,
+            2,
+            ColorSpace::Rec709,
+            vec![
+                0.5, 0.25, 0.125, 1.0, 0.8, 0.6, 0.4, 1.0, 0.2, 0.4, 0.6, 1.0, 1.0, 0.5, 0.0, 1.0,
+            ],
+        );
+        let transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+
+        let result = CpuColorTransformExecutor::input_to_working_float(&source, &transform)
+            .expect("float input transform");
+
+        assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Working);
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+        assert_eq!(result.diagnostics.pixel_count, 4);
+        assert!(!result.diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn float_output_transform_produces_float_frame() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let source = CpuColorFrame::working(RgbaF32Frame {
+            width: 2,
+            height: 2,
+            data: vec![
+                [0.5, 0.25, 0.125, 1.0],
+                [0.8, 0.6, 0.4, 1.0],
+                [0.2, 0.4, 0.6, 1.0],
+                [1.0, 0.5, 0.0, 1.0],
+            ],
+            color_space: ColorSpace::Rec709,
+        });
+        let transform =
+            RenderColorTransform::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+
+        let result = CpuColorTransformExecutor::transform_float(&source, &transform)
+            .expect("float output transform");
+
+        // Float output produces a CpuColorFrame (Working domain) with LinearFloat encoding.
+        // This is the precision-preserving path that avoids u8 quantization.
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+        assert_eq!(result.diagnostics.pixel_count, 4);
+        assert!(!result.diagnostics.used_rgba8_boundary);
+        assert_eq!(
+            result.diagnostics.backend,
+            RenderColorTransformBackend::CpuOcioFloat
+        );
+    }
+
+    #[test]
+    fn float_pipeline_avoids_transfer_function_round_trip() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        // Create a float source with linear values.
+        let linear_data = vec![0.5, 0.25, 0.125, 1.0];
+        let float_source = LinearFloatSource::new(1, 1, ColorSpace::Rec709, linear_data);
+
+        let transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+
+        let result = CpuColorTransformExecutor::input_to_working_float(&float_source, &transform)
+            .expect("float input");
+
+        // Verify the float path produces a valid working frame without RGBA8 boundary.
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+        assert!(!result.diagnostics.used_rgba8_boundary);
+        assert_eq!(result.diagnostics.pixel_count, 1);
+        // The output should be in working space with reasonable values.
+        let output_data = &result.frame.rgba_f32().data[0];
+        assert!(output_data[0] > 0.0 && output_data[0] < 1.0);
+        assert!(output_data[3] > 0.9); // Alpha should be preserved
     }
 }

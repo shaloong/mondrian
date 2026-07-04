@@ -114,6 +114,53 @@ impl ColorEngine {
         }
     }
 
+    /// Apply a full source -> working -> output color conversion on f32 data
+    /// without u8 quantization.
+    ///
+    /// This is the precision-preserving alternative to [`Self::convert_pipeline`].
+    /// The data must be RGBA f32 pixels (4 floats per pixel, linear light).
+    pub fn convert_pipeline_float(
+        &self,
+        data: &mut [f32],
+        src: ColorSpace,
+        working: ColorSpace,
+        dst: ColorSpace,
+    ) -> Result<(), String> {
+        match self {
+            Self::MondrianSmart => {
+                crate::ocio::ensure_mondrian_default_ocio_loaded()?;
+                crate::ocio::apply_ocio_pipeline_float(data, src, working, dst)
+            }
+            Self::Ocio { .. } => {
+                self.ensure_loaded()?;
+                crate::ocio::apply_ocio_pipeline_float(data, src, working, dst)
+            }
+        }
+    }
+
+    /// Apply a display transform on f32 data without u8 quantization.
+    ///
+    /// This is the precision-preserving alternative to [`Self::display_transform`].
+    /// The data must be RGBA f32 pixels (4 floats per pixel, linear light).
+    pub fn display_transform_float(
+        &self,
+        data: &mut [f32],
+        src: ColorSpace,
+        display: &str,
+        view: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::MondrianSmart => {
+                crate::ocio::ensure_mondrian_default_ocio_loaded()?;
+                crate::ocio::apply_ocio_display_float(data, src, display, view)
+            }
+            Self::Ocio { .. } => {
+                self.ensure_loaded()?;
+                crate::ocio::apply_ocio_display_float(data, src, display, view)
+            }
+        }
+    }
+
     /// Whether the engine is ready to process data.
     pub fn is_available(&self) -> bool {
         match self {

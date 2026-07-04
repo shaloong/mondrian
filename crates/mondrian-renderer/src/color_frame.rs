@@ -840,6 +840,82 @@ impl CpuEncodedColorFrame {
     }
 }
 
+/// A CPU-resident linear-light f32 source frame.
+///
+/// This is the precision-preserving alternative to [`CpuEncodedColorFrame`] for
+/// sources that are already in linear float (e.g., synthetic test data, float
+/// decode output, or effect graph intermediates). It bypasses the RGBA8
+/// quantization path entirely.
+///
+/// The frame stores RGBA f32 pixels (4 floats per pixel) in linear light,
+/// matching the `CpuColorFrame` working-space contract but at the source
+/// domain boundary.
+#[derive(Debug, Clone)]
+pub struct LinearFloatSource {
+    descriptor: ColorFrameDescriptor,
+    data: Vec<f32>,
+}
+
+impl LinearFloatSource {
+    /// Create a linear float source frame.
+    pub fn new(width: u32, height: u32, color_space: ColorSpace, data: Vec<f32>) -> Self {
+        assert_eq!(
+            data.len(),
+            width as usize * height as usize * 4,
+            "LinearFloatSource data length must be width * height * 4"
+        );
+        let descriptor = ColorFrameDescriptor {
+            width,
+            height,
+            color_space,
+            domain: ColorFrameDomain::Source,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Cpu,
+        };
+        Self { descriptor, data }
+    }
+
+    /// Return frame width.
+    pub fn width(&self) -> u32 {
+        self.descriptor.width
+    }
+
+    /// Return frame height.
+    pub fn height(&self) -> u32 {
+        self.descriptor.height
+    }
+
+    /// Return the frame metadata contract.
+    pub fn descriptor(&self) -> ColorFrameDescriptor {
+        self.descriptor
+    }
+
+    /// Borrow RGBA f32 pixels.
+    pub fn data(&self) -> &[f32] {
+        &self.data
+    }
+
+    /// Consume this wrapper and return RGBA f32 pixels.
+    pub fn into_data(self) -> Vec<f32> {
+        self.data
+    }
+
+    /// Convert to a working-space [`CpuColorFrame`] without any u8
+    /// quantization. The caller must ensure the data is already in the target
+    /// working color space.
+    pub fn to_working_frame(self, working_color_space: ColorSpace) -> CpuColorFrame {
+        let pixels: Vec<[f32; 4]> =
+            self.data.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        let frame = RgbaF32Frame {
+            width: self.descriptor.width,
+            height: self.descriptor.height,
+            data: pixels,
+            color_space: working_color_space,
+        };
+        CpuColorFrame::working(frame)
+    }
+}
+
 fn validate_frame_contract(
     id: GpuColorFrameId,
     expected: &GpuColorFrameHandle,

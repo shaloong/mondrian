@@ -85,11 +85,22 @@ contract for high-level path state and structured legacy reason breakdowns
 instead of re-inferring path safety from individual counters.
 
 Decoded media enters the graph as a typed source/import RGBA8 boundary
-(`CpuEncodedColorFrame::source_rgba8`). Preview and export must use
-`RenderInputTransform` plus `execute_cpu_input_stage(...)` or a future GPU-capable
-stage executor to produce a result carrying both `CpuColorFrame` and stage
-diagnostics before building `TimelineMediaLayer`. Timeline media layers
-therefore carry typed working frames, not naked RGBA slices.
+(`CpuEncodedColorFrame::source_rgba8`). Sources that are already in linear
+float (synthetic test data, float decode output, or effect graph intermediates)
+can use `LinearFloatSource` to bypass the RGBA8 quantization path entirely.
+Preview and export must use `RenderInputTransform` plus
+`execute_cpu_input_stage(...)` or `execute_cpu_input_stage_float(...)` to
+produce a result carrying both `CpuColorFrame` and stage diagnostics before
+building `TimelineMediaLayer`. Timeline media layers therefore carry typed
+working frames, not naked RGBA slices.
+
+The float transform path (`CpuColorTransformExecutor::input_to_working_float`
+and `transform_float`) operates directly on f32 data without u8 quantization,
+preserving HDR/log/10-bit precision. The `RenderColorTransformBackend::CpuOcioFloat`
+backend indicates the float path was used, and `used_rgba8_boundary: false`
+proves no intermediate quantization occurred. The existing RGBA8 path remains
+available for decoded media, UI raster, debug/golden boundaries, and legacy
+effects, with `used_rgba8_boundary: true` in diagnostics.
 
 Color-transform executors emit `RenderColorTransformDiagnostics` for input and
 output boundaries. Preview diagnostics aggregate transform calls, transformed

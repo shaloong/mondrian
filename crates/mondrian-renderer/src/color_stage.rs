@@ -5,8 +5,8 @@ use crate::{
     GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
-    OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
+    GpuColorFrameWgpuResource, LinearFloatSource, OcioGpuShaderCache,
+    OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
     OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
     OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
     OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuBlocker,
@@ -2191,6 +2191,30 @@ impl CpuRenderColorStageExecutor {
         validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
         Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
     }
+
+    /// Execute a CPU source/import -> working-space stage plan from a linear
+    /// float source, bypassing RGBA8 quantization.
+    pub fn input_to_working_float(
+        frame: &LinearFloatSource,
+        plan: &RenderColorStagePlan,
+    ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
+    {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuInputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution only supports CPU input transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result = CpuColorTransformExecutor::input_to_working_float(frame, transform)?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+    }
 }
 
 /// Plan and execute a CPU source/import -> working-space color stage.
@@ -2201,6 +2225,17 @@ pub fn execute_cpu_input_stage(
     let mut planner = RenderColorStagePlanner::cpu_only();
     let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
     CpuRenderColorStageExecutor::input_to_working(frame, &plan)
+}
+
+/// Plan and execute a CPU input stage from a linear float source, bypassing
+/// RGBA8 quantization entirely.
+pub fn execute_cpu_input_stage_float(
+    frame: &LinearFloatSource,
+    transform: &RenderInputTransform,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let mut planner = RenderColorStagePlanner::cpu_only();
+    let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
+    CpuRenderColorStageExecutor::input_to_working_float(frame, &plan)
 }
 
 /// Plan and execute a CPU working-space -> display/export color stage.
