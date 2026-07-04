@@ -43,6 +43,53 @@ use std::sync::{mpsc, Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
+/// Frame contract for export output, selected based on `ExportBitDepth`.
+///
+/// This determines the GPU texture format, FFmpeg input pixel format, and
+/// canvas allocation strategy for the export pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFrameContract {
+    /// 8-bit RGBA legacy boundary. Used for SDR 8-bit delivery.
+    Rgba8,
+    /// 16-bit float RGBA boundary. Used for 10-bit ProRes/HDR delivery
+    /// and camera-log intermediates.
+    Rgba16Float,
+}
+
+impl ExportFrameContract {
+    /// Select the appropriate frame contract from the export bit depth.
+    pub fn from_bit_depth(bit_depth: ExportBitDepth) -> Self {
+        match bit_depth {
+            ExportBitDepth::Eight => Self::Rgba8,
+            ExportBitDepth::Ten | ExportBitDepth::SixteenFloat => Self::Rgba16Float,
+        }
+    }
+
+    /// GPU texture format for this contract.
+    pub fn gpu_texture_format(&self) -> GpuColorFrameTextureFormat {
+        match self {
+            Self::Rgba8 => GpuColorFrameTextureFormat::Rgba8Unorm,
+            Self::Rgba16Float => GpuColorFrameTextureFormat::Rgba16Float,
+        }
+    }
+
+    /// FFmpeg input pixel format string.
+    pub fn ffmpeg_pix_fmt(&self) -> &'static str {
+        match self {
+            Self::Rgba8 => "rgba",
+            Self::Rgba16Float => "rgba64le",
+        }
+    }
+
+    /// Bytes per pixel for canvas allocation.
+    pub fn bytes_per_pixel(&self) -> usize {
+        match self {
+            Self::Rgba8 => 4,
+            Self::Rgba16Float => 8, // 4 channels × 2 bytes (f16)
+        }
+    }
+}
+
 const EXPORT_GPU_OUTPUT_TEXTURE_FORMAT: GpuColorFrameTextureFormat =
     GpuColorFrameTextureFormat::Rgba8Unorm;
 

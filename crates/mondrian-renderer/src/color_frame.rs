@@ -629,6 +629,42 @@ impl GpuColorFrameReadbackPlan {
         })
     }
 
+    /// Create a readback plan for a `Rgba16Float` GPU texture.
+    ///
+    /// This is the precision-preserving alternative to [`Self::encoded_rgba8`]
+    /// for export paths that need higher-than-8-bit precision.
+    pub fn encoded_rgba16float(
+        handle: GpuColorFrameHandle,
+    ) -> Result<Self, GpuColorFrameReadbackError> {
+        if handle.texture_format() != GpuColorFrameTextureFormat::Rgba16Float {
+            return Err(GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                texture_format: handle.texture_format(),
+            });
+        }
+        let descriptor = handle.descriptor();
+        let unpadded_bytes_per_row = descriptor
+            .width
+            .checked_mul(handle.texture_format().bytes_per_pixel())
+            .ok_or(GpuColorFrameReadbackError::ReadbackLayoutOverflow)?;
+        let padded_bytes_per_row = align_copy_bytes_per_row(unpadded_bytes_per_row)?;
+        let buffer_size = u64::from(padded_bytes_per_row)
+            .checked_mul(u64::from(descriptor.height))
+            .ok_or(GpuColorFrameReadbackError::ReadbackLayoutOverflow)?;
+        Ok(Self {
+            handle,
+            output_descriptor: descriptor.with_residency(ColorFrameResidency::Cpu),
+            texture_format: GpuColorFrameTextureFormat::Rgba16Float,
+            extent: wgpu::Extent3d {
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: 1,
+            },
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+            buffer_size,
+        })
+    }
+
     /// Unpack a padded mapped readback buffer into a typed CPU encoded frame.
     pub fn unpack_mapped_rgba8(
         &self,
@@ -656,6 +692,48 @@ impl GpuColorFrameReadbackPlan {
             self.output_descriptor.domain,
             rgba,
         ))
+    }
+
+    /// Unpack a padded mapped readback buffer from an `Rgba16Float` texture
+    /// into linear f32 RGBA pixels.
+    ///
+    /// Returns the pixel data as `Vec<f32>` (4 floats per pixel, little-endian
+    /// half-float unpacked to f32). The caller can use this for higher-bit-depth
+    /// export paths without RGBA8 quantization.
+    pub fn unpack_mapped_rgba16float(
+        &self,
+        mapped: &[u8],
+    ) -> Result<Vec<f32>, GpuColorFrameReadbackError> {
+        if self.texture_format != GpuColorFrameTextureFormat::Rgba16Float {
+            return Err(GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                texture_format: self.texture_format,
+            });
+        }
+        let expected = self.buffer_size as usize;
+        if mapped.len() < expected {
+            return Err(GpuColorFrameReadbackError::MappedBufferTooSmall {
+                expected,
+                actual: mapped.len(),
+            });
+        }
+        let pixel_count = self.extent.width as usize * self.extent.height as usize;
+        let mut data = Vec::with_capacity(pixel_count * 4);
+        for row in 0..self.extent.height as usize {
+            let src_start = row * self.padded_bytes_per_row as usize;
+            for px in 0..self.extent.width as usize {
+                let offset = src_start + px * 8; // 8 bytes per pixel (4 × f16)
+                if offset + 8 > mapped.len() {
+                    break;
+                }
+                // Unpack f16 to f32.
+                for c in 0..4 {
+                    let half_bits =
+                        u16::from_le_bytes([mapped[offset + c * 2], mapped[offset + c * 2 + 1]]);
+                    data.push(f16_to_f32(half_bits));
+                }
+            }
+        }
+        Ok(data)
     }
 }
 
@@ -959,6 +1037,32 @@ fn align_copy_bytes_per_row(bytes_per_row: u32) -> Result<u32, GpuColorFrameRead
         .checked_add(alignment - 1)
         .map(|value| (value / alignment) * alignment)
         .ok_or(GpuColorFrameReadbackError::ReadbackLayoutOverflow)
+}
+
+/// Convert IEEE 754 half-precision (f16) bits to f32.
+fn f16_to_f32(half: u16) -> f32 {
+    let sign = (half >> 15) as u32;
+    let exponent = ((half >> 10) & 0x1F) as u32;
+    let mantissa = (half & 0x3FF) as u32;
+
+    if exponent == 0 {
+        if mantissa == 0 {
+            // Zero.
+            f32::from_bits(sign << 31)
+        } else {
+            // Denormalized.
+            let value = (mantissa as f32) / 1024.0 * f32::from_bits(0x38800000); // 2^-14
+            f32::from_bits((sign << 31) | value.to_bits())
+        }
+    } else if exponent == 31 {
+        // Infinity or NaN.
+        f32::from_bits((sign << 31) | 0x7F800000 | (mantissa << 13))
+    } else {
+        // Normalized.
+        let biased_exponent = exponent as i32 - 15 + 127;
+        let bits = (sign << 31) | ((biased_exponent as u32) << 23) | (mantissa << 13);
+        f32::from_bits(bits)
+    }
 }
 
 fn default_color_frame_texture_usage() -> wgpu::TextureUsages {
