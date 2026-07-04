@@ -22,7 +22,7 @@ use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
 use mondrian_export::queue::{ExportJobColorDiagnostics, JobStatus};
-use mondrian_media::VideoColorDiagnosticIssueSummary;
+use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::{
     InputColorResolutionSource, MissingColorMetadataPolicy, Sequence,
@@ -681,11 +681,22 @@ impl ViewerPanelModel {
 }
 
 fn viewer_color_rejection_empty_message(rejection: &ViewerPreviewColorRejectionModel) -> String {
+    let summary = &rejection.diagnostic_issue_summary;
+    let issue_tags = color_issue_summary_tags(summary);
+    let issue_line = if issue_tags.is_empty() {
+        "问题：none".to_owned()
+    } else {
+        format!("问题：{}", issue_tags.join(" / "))
+    };
     format!(
-        "色彩解释被拒绝\n素材：{}\n策略：{:?} / {:?}\n{}",
+        "色彩解释被拒绝\n素材：{}\n策略：{:?} / {:?}\n检测：{:?} / {:?} / warnings {}\n{}\n{}",
         rejection.path.display(),
         rejection.missing_metadata_policy,
         rejection.source,
+        summary.method,
+        summary.confidence,
+        summary.warning_count,
+        issue_line,
         rejection.diagnostic_summary
     )
 }
@@ -3225,14 +3236,28 @@ fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) ->
     } else {
         "gpu-blocked"
     };
+    let asset_issue_tags = color_issue_aggregate_tags(&summary.asset_issue_summary);
+    let asset_issue_segment = if asset_issue_tags.is_empty() {
+        format!(
+            "assets {} / issues none",
+            summary.asset_issue_summary.diagnostics
+        )
+    } else {
+        format!(
+            "assets {} / issues {}",
+            summary.asset_issue_summary.diagnostics,
+            asset_issue_tags.join(" ")
+        )
+    };
     Some(format!(
-        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / health {} {} / stages cpu-in {} cpu-out {} gpu {} blockers {} transfer {} / gpu blockers shader {} resource {} wrapper {} pipeline {} / composite float {} legacy {} reasons {}",
+        "色彩: {} 帧 / metadata {} / override {} / policy {} / data {} / reject {} / {} / health {} {} / stages cpu-in {} cpu-out {} gpu {} blockers {} transfer {} / gpu blockers shader {} resource {} wrapper {} pipeline {} / composite float {} legacy {} reasons {}",
         summary.diagnosed_frames,
         summary.detected_metadata,
         summary.override_count,
         summary.policy_assumptions,
         summary.data_textures,
         summary.policy_rejections,
+        asset_issue_segment,
         float_health,
         gpu_health,
         summary.cpu_input_stages,
@@ -3248,6 +3273,59 @@ fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) ->
         summary.legacy_rgba8_composites,
         summary.legacy_reason_total
     ))
+}
+
+fn color_issue_summary_tags(summary: &VideoColorDiagnosticIssueSummary) -> Vec<String> {
+    let mut tags = Vec::new();
+    push_issue_metric(
+        &mut tags,
+        "missing-cicp",
+        summary.missing_or_unsupported_cicp_tags,
+    );
+    push_issue_metric(&mut tags, "decoder", summary.decoder_unavailable);
+    push_issue_metric(&mut tags, "partial-cicp", summary.partial_cicp_tags);
+    push_issue_metric(
+        &mut tags,
+        "hint-conflict",
+        summary.metadata_hint_overrides_cicp_tags,
+    );
+    push_issue_metric(&mut tags, "multi-hint", summary.multiple_metadata_hints);
+    push_issue_metric(&mut tags, "ignored-hints", summary.ignored_metadata_hints);
+    push_issue_metric(&mut tags, "metadata-hints", summary.metadata_hint_count);
+    push_issue_metric(&mut tags, "hdr", summary.hdr_side_data_count);
+    if summary.has_raw_cicp_metadata {
+        tags.push("raw-cicp".to_owned());
+    }
+    if summary.has_icc_profile {
+        tags.push("icc".to_owned());
+    }
+    tags
+}
+
+fn color_issue_aggregate_tags(summary: &VideoColorDiagnosticIssueAggregate) -> Vec<String> {
+    let mut tags = Vec::new();
+    push_issue_metric(&mut tags, "warn", summary.diagnostics_with_warnings);
+    push_issue_metric(
+        &mut tags,
+        "missing-cicp",
+        summary.missing_or_unsupported_cicp_tags,
+    );
+    push_issue_metric(&mut tags, "decoder", summary.decoder_unavailable);
+    push_issue_metric(
+        &mut tags,
+        "hint-conflict",
+        summary.metadata_hint_overrides_cicp_tags,
+    );
+    push_issue_metric(&mut tags, "multi-hint", summary.multiple_metadata_hints);
+    push_issue_metric(&mut tags, "partial-cicp", summary.partial_cicp_tags);
+    push_issue_metric(&mut tags, "hdr", summary.hdr_side_data_count);
+    tags
+}
+
+fn push_issue_metric(tags: &mut Vec<String>, label: &str, value: u64) {
+    if value > 0 {
+        tags.push(format!("{label} {value}"));
+    }
 }
 
 fn export_default_file_name(preset: Option<&ExportPreset>) -> String {
@@ -4751,6 +4829,16 @@ mod tests {
                 ..mondrian_renderer::TimelineCompositeDiagnostics::default()
             },
         );
+        encoding
+            .diagnostics
+            .color
+            .record_asset_issue_summary(VideoColorDiagnosticIssueAggregate {
+                diagnostics: 2,
+                diagnostics_with_warnings: 2,
+                missing_or_unsupported_cicp_tags: 1,
+                decoder_unavailable: 1,
+                ..VideoColorDiagnosticIssueAggregate::default()
+            });
         let legacy_summary = encoding.diagnostics.color.composite_color_path_summary();
         assert_eq!(legacy_summary.float_linear_composites, 1);
         assert_eq!(legacy_summary.legacy_rgba8_composites, 0);
@@ -4777,12 +4865,14 @@ mod tests {
             model.jobs.iter().find(|job| job.id == encoding_id).expect("encoding job model");
         assert_eq!(encoding.title, "encoding.mp4");
         assert_eq!(encoding.status, "Encoding");
-        assert_eq!(
-            encoding.color_diagnostics.as_deref(),
-            Some(
-                "色彩: 1 帧 / metadata 1 / override 1 / policy 0 / data 0 / reject 0 / health float-ready gpu-blocked / stages cpu-in 1 cpu-out 1 gpu 0 blockers 1 transfer 0 / gpu blockers shader 0 resource 0 wrapper 0 pipeline 1 / composite float 1 legacy 0 reasons 0"
-            )
+        let color_diagnostics =
+            encoding.color_diagnostics.as_deref().expect("encoding color diagnostics");
+        assert!(
+            color_diagnostics.contains("metadata 1 / override 1 / policy 0 / data 0 / reject 0")
         );
+        assert!(color_diagnostics.contains("assets 2 / issues warn 2 missing-cicp 1 decoder 1"));
+        assert!(color_diagnostics.contains("health float-ready gpu-blocked"));
+        assert!(color_diagnostics.contains("gpu blockers shader 0 resource 0 wrapper 0 pipeline 1"));
         assert_eq!(encoding.progress_percent, 82);
         assert!(encoding.can_cancel);
         assert!(!encoding.is_completed);
@@ -6828,6 +6918,8 @@ mod tests {
         assert!(empty.contains("色彩解释被拒绝"));
         assert!(empty.contains("missing-color-tags.mov"));
         assert!(empty.contains("MissingPolicyRejectMedia"));
+        assert!(empty.contains("检测：MissingMetadata / None / warnings 1"));
+        assert!(empty.contains("问题：missing-cicp 1"));
         assert!(empty.contains("missing_or_unsupported_cicp"));
     }
 

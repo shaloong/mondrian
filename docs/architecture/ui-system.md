@@ -142,6 +142,10 @@ target output color space, current or selected surface contract, desired surface
 contract, payload blocker, and whether the target surface color space is
 reported as supported. UI, perf JSON, and diagnostics tooling should consume this
 summary rather than parsing Debug-formatted blocker/readiness payloads.
+The same rule applies to media interpretation failures: viewer empty-state
+diagnostics and export queue job summaries should consume
+`VideoColorDiagnosticIssueSummary` / `VideoColorDiagnosticIssueAggregate`
+directly and only use the compact human-readable summary as supporting context.
 The viewer GPU-output budget evaluator consumes the same JSONL summary and
 replays display issue reason counts plus payload-blocker counts, so smoke tests
 can budget real display/surface regressions independently from broad health
