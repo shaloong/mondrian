@@ -256,7 +256,12 @@ the operator explicitly relaxes a budget for investigation.
 Preview perf JSONL follows the same pattern with `preview_color_health` and
 `preview_playback_color_health`; the app preview service owns the derivation
 from raw counters to summary fields so perf tests do not hand-maintain color
-health semantics.
+health semantics. Preview media decode/cache and continuous-playback smokes also
+apply a color-health budget to those summaries: default runs require a present
+health summary, fully float/linear composites, GPU path readiness, zero GPU
+blockers, zero upload/readback transfer stages, zero structured legacy RGBA8
+reasons, and zero missing-metadata policy rejections unless the operator
+explicitly relaxes a budget for investigation.
 Live app-window viewer output diagnostics can additionally be persisted with
 `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`. That JSONL stream records the last viewer
 GPU output attempt, including the derived health summary, display/presentation
