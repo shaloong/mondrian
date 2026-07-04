@@ -67,9 +67,11 @@ Timeline blend modes, including seeded Dissolve, are implemented by
 RGBA8 scratch buffers. Extended working values therefore remain available to the
 final output boundary. Float-capable unary effects such as color adjustment and
 white balance also run in this path through the same `mondrian-effects` float
-contract. Geometric transforms and legacy-only effects currently use the RGBA8
-compositor path until their own float/linear execution contracts are
-implemented.
+contract. Affine geometric transforms (scale, rotate, translate) are implemented
+in the float/linear path using inverse-affine mapping with bilinear sampling,
+so media and solid layers with non-identity transforms no longer require legacy
+RGBA8 fallback. Legacy-only effects still use the RGBA8 compositor path until
+their own float/linear execution contracts are implemented.
 `TimelineCompositeDiagnostics` makes that fallback explicit: preview/export
 callers can see whether a composite stayed on the float/linear path or fell back
 to legacy RGBA8 because of transform or effect support. Blend-mode counters stay

@@ -363,6 +363,7 @@ fn composite_supported_elements_to_working_frame(
                     src_height as usize,
                     layer.opacity,
                     layer.blend_mode,
+                    layer.transform,
                     layer.frame_seed,
                 );
                 has_composited_layer = true;
@@ -422,20 +423,12 @@ pub fn composite_path_diagnostics(
     for element in elements {
         match element {
             TimelineCompositeElement::Media(layer) => {
-                if !is_identity_transform(layer.transform) {
-                    diagnostics.legacy_media_transform =
-                        diagnostics.legacy_media_transform.saturating_add(1);
-                }
                 if !compiled_effect_graph_supports_rgba_f32(&layer.effect_graph) {
                     diagnostics.legacy_media_effect =
                         diagnostics.legacy_media_effect.saturating_add(1);
                 }
             }
             TimelineCompositeElement::SolidColor(layer) => {
-                if !is_identity_transform(layer.transform) {
-                    diagnostics.legacy_solid_transform =
-                        diagnostics.legacy_solid_transform.saturating_add(1);
-                }
                 if !layer.effect_graph.graph.is_identity() {
                     diagnostics.legacy_solid_effect =
                         diagnostics.legacy_solid_effect.saturating_add(1);
@@ -496,27 +489,93 @@ fn alpha_blend_f32_layer(
     src_h: usize,
     opacity: f32,
     blend_mode: BlendMode,
+    transform: [f32; 6],
     frame_seed: i64,
 ) {
-    let width = dst_w.min(src_w);
-    let height = dst_h.min(src_h);
     let opacity = opacity.clamp(0.0, 1.0);
     if opacity <= 1.0e-4 {
         return;
     }
-    for y in 0..height {
-        for x in 0..width {
-            let dst_px = &mut dst[y * dst_w + x];
-            let src_px = src[y * src_w + x];
-            *dst_px = blend_rgba_f32_pixel_seeded(
-                *dst_px,
+
+    if is_identity_transform(transform) {
+        let width = dst_w.min(src_w);
+        let height = dst_h.min(src_h);
+        for y in 0..height {
+            for x in 0..width {
+                let dst_px = &mut dst[y * dst_w + x];
+                let src_px = src[y * src_w + x];
+                *dst_px = blend_rgba_f32_pixel_seeded(
+                    *dst_px,
+                    src_px,
+                    opacity,
+                    blend_mode,
+                    dither_seed((y * dst_w + x) as u32, frame_seed),
+                );
+            }
+        }
+        return;
+    }
+
+    let Some(inv) = invert_affine(transform) else {
+        return;
+    };
+
+    for dy in 0..dst_h {
+        for dx in 0..dst_w {
+            let fx = dx as f32 + 0.5;
+            let fy = dy as f32 + 0.5;
+            let sx = inv[0] * fx + inv[1] * fy + inv[2];
+            let sy = inv[3] * fx + inv[4] * fy + inv[5];
+            let Some(src_px) = sample_src_f32_bilinear(src, src_w, src_h, sx - 0.5, sy - 0.5)
+            else {
+                continue;
+            };
+            let dst_idx = dy * dst_w + dx;
+            dst[dst_idx] = blend_rgba_f32_pixel_seeded(
+                dst[dst_idx],
                 src_px,
                 opacity,
                 blend_mode,
-                dither_seed((y * dst_w + x) as u32, frame_seed),
+                dither_seed((dy * dst_w + dx) as u32, frame_seed),
             );
         }
     }
+}
+
+fn sample_src_f32_bilinear(
+    src: &[[f32; 4]],
+    src_w: usize,
+    src_h: usize,
+    sx: f32,
+    sy: f32,
+) -> Option<[f32; 4]> {
+    let x0 = sx.floor() as isize;
+    let y0 = sy.floor() as isize;
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+
+    if x0 < 0 || y0 < 0 || x1 >= src_w as isize || y1 >= src_h as isize {
+        if x0 >= 0 && y0 >= 0 && x0 < src_w as isize && y0 < src_h as isize {
+            return Some(src[y0 as usize * src_w + x0 as usize]);
+        }
+        return None;
+    }
+
+    let fx = sx - x0 as f32;
+    let fy = sy - y0 as f32;
+
+    let tl = src[y0 as usize * src_w + x0 as usize];
+    let tr = src[y0 as usize * src_w + x1 as usize];
+    let bl = src[y1 as usize * src_w + x0 as usize];
+    let br = src[y1 as usize * src_w + x1 as usize];
+
+    let mut out = [0.0f32; 4];
+    for c in 0..4 {
+        let top = tl[c] + (tr[c] - tl[c]) * fx;
+        let bot = bl[c] + (br[c] - bl[c]) * fx;
+        out[c] = top + (bot - top) * fy;
+    }
+    Some(out)
 }
 
 fn dither_seed(pixel_index: u32, frame_seed: i64) -> u32 {
@@ -1296,6 +1355,94 @@ mod tests {
         assert_eq!(summary.legacy_breakdown.total(), 3);
         assert!(!summary.is_fully_float_linear());
         assert!(diagnostics.uses_legacy_rgba8());
+    }
+
+    #[test]
+    fn float_linear_compositor_handles_non_identity_transform() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let media = working_frame(
+            &[
+                64, 128, 192, 255, 100, 150, 200, 255, 50, 100, 150, 255, 200, 50, 100, 255,
+            ],
+            2,
+            2,
+        );
+        let elements = [TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [2.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+            effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+                .expect("compile identity graph"),
+            frame_seed: 0,
+        })];
+
+        let output = composite_timeline_elements_color_frame_with_diagnostics(
+            2,
+            2,
+            &elements,
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch,
+        );
+
+        assert_eq!(output.diagnostics.float_linear_composites, 1);
+        assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
+        assert_eq!(output.diagnostics.legacy_media_transform, 0);
+        assert!(!output.diagnostics.uses_legacy_rgba8());
+    }
+
+    #[test]
+    fn float_linear_compositor_deterministic_across_identity_and_scale() {
+        let mut scratch_a = TimelineCompositeScratch::default();
+        let mut scratch_b = TimelineCompositeScratch::default();
+        let media = working_frame(
+            &[
+                100, 150, 200, 255, 50, 100, 150, 255, 200, 50, 100, 255, 150, 200, 50, 255,
+            ],
+            2,
+            2,
+        );
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let scale_1x = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+
+        let elements_a = [TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &media,
+            opacity: 0.8,
+            blend_mode: BlendMode::Multiply,
+            transform: identity,
+            effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+                .expect("compile identity graph"),
+            frame_seed: 42,
+        })];
+        let elements_b = [TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &media,
+            opacity: 0.8,
+            blend_mode: BlendMode::Multiply,
+            transform: scale_1x,
+            effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+                .expect("compile identity graph"),
+            frame_seed: 42,
+        })];
+
+        let out_a = composite_timeline_elements_color_frame_with_diagnostics(
+            2,
+            2,
+            &elements_a,
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch_a,
+        );
+        let out_b = composite_timeline_elements_color_frame_with_diagnostics(
+            2,
+            2,
+            &elements_b,
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch_b,
+        );
+
+        assert_eq!(out_a.frame.rgba_f32().data, out_b.frame.rgba_f32().data);
     }
 
     #[test]
