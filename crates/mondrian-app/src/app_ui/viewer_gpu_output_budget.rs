@@ -2,6 +2,9 @@
 
 use anyhow::Context;
 use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
+use mondrian_renderer::{
+    RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
+};
 use serde::{Deserialize, Serialize};
 
 /// Schema version for the high-level viewer GPU-output health report.
@@ -113,6 +116,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub display_issue_refresh_correlations: ViewerGpuOutputDisplayIssueRefreshCorrelationCounts,
     /// Latest cumulative color-stage/runtime counters observed in the stream.
     pub stage: ViewerGpuOutputStageCounts,
+    /// Last renderer GPU-output runtime snapshot observed in the stream.
+    pub last_runtime_report: Option<RenderGpuOutputRuntimeDiagnosticsReport>,
     /// Records carrying a structured viewer color rejection.
     pub color_rejections: u64,
     /// Aggregated machine-readable media issue summaries from color rejections.
@@ -186,6 +191,8 @@ pub enum ViewerGpuOutputDiagnosticArea {
     ViewerOutput,
     /// Renderer color-stage and native GPU path health.
     GpuColorPath,
+    /// Renderer GPU backend/runtime preparation health.
+    BackendRuntime,
     /// Display boundary and presentation contract health.
     DisplayContract,
     /// Monitor/surface capability drift across refresh events.
@@ -259,6 +266,8 @@ pub struct ViewerGpuOutputHealthEvidence {
     pub last_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
     /// Last media color rejection observed in the stream.
     pub last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
+    /// Last renderer runtime snapshot observed in the stream.
+    pub last_runtime_report: Option<RenderGpuOutputRuntimeDiagnosticsReport>,
     /// Budget failures that drove a fail verdict.
     pub budget_failures: Vec<ViewerGpuOutputBudgetFailure>,
 }
@@ -387,6 +396,7 @@ pub fn evaluate_jsonl(
     let mut color_rejections = 0u64;
     let mut media_issues = VideoColorDiagnosticIssueAggregate::default();
     let mut last_color_rejection = None;
+    let mut last_runtime_report = None;
     let mut reported_counts = None;
     let mut count_mismatches = Vec::new();
 
@@ -400,6 +410,7 @@ pub fn evaluate_jsonl(
         records = records.saturating_add(1);
         counts.record(record.health.status);
         stage.merge_max(record.stage_counts());
+        last_runtime_report = record.runtime_report;
         if let Some(record_counts) = record.health_counts {
             reported_counts = Some(record_counts);
             if record_counts != counts {
@@ -594,6 +605,7 @@ pub fn evaluate_jsonl(
         last_display_issue,
         last_display_contract_refresh,
         last_color_rejection,
+        last_runtime_report,
     })
 }
 
@@ -667,6 +679,7 @@ pub fn build_health_report(
         summary.budget.max_degraded,
     );
     push_gpu_color_checks(&mut checks, &summary);
+    push_backend_runtime_checks(&mut checks, &summary);
     push_display_contract_checks(&mut checks, &summary);
     push_display_drift_checks(&mut checks, &summary);
     push_max_check(
@@ -707,6 +720,7 @@ pub fn build_health_report(
         last_display_issue: summary.last_display_issue.clone(),
         last_display_contract_refresh: summary.last_display_contract_refresh.clone(),
         last_color_rejection: summary.last_color_rejection.clone(),
+        last_runtime_report: summary.last_runtime_report,
         budget_failures: summary.failures.clone(),
     };
 
@@ -837,6 +851,38 @@ fn push_gpu_color_checks(
             ViewerGpuOutputHealthSeverity::Pass
         },
         observed: summary.stage.gpu_blockers,
+        limit: Some(0),
+    });
+}
+
+fn push_backend_runtime_checks(
+    checks: &mut Vec<ViewerGpuOutputHealthCheck>,
+    summary: &ViewerGpuOutputBudgetSummary,
+) {
+    let Some(runtime) = summary.last_runtime_report else {
+        return;
+    };
+
+    checks.push(ViewerGpuOutputHealthCheck {
+        area: ViewerGpuOutputDiagnosticArea::BackendRuntime,
+        code: "shader_cache_extraction_failures",
+        severity: if runtime.shader_cache_extraction_failures > 0 {
+            ViewerGpuOutputHealthSeverity::Fail
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed: runtime.shader_cache_extraction_failures,
+        limit: Some(0),
+    });
+    checks.push(ViewerGpuOutputHealthCheck {
+        area: ViewerGpuOutputDiagnosticArea::BackendRuntime,
+        code: "backend_object_failures",
+        severity: if runtime.backend_object_failures > 0 {
+            ViewerGpuOutputHealthSeverity::Fail
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed: runtime.backend_object_failures,
         limit: Some(0),
     });
 }
@@ -1087,6 +1133,42 @@ fn push_root_causes_and_actions(
             "remove_transfer_stage",
             "Trace why the viewer output path left the native GPU color path and introduced transfer stages.",
         );
+    }
+    if let Some(runtime) = summary.last_runtime_report {
+        if runtime.shader_cache_extraction_failures > 0 {
+            push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::BackendRuntime,
+                "shader_cache_extraction_failed",
+                format!(
+                    "shader_cache_entries={} hits={} misses={} extraction_failures={}",
+                    runtime.shader_cache_entries,
+                    runtime.shader_cache_hits,
+                    runtime.shader_cache_misses,
+                    runtime.shader_cache_extraction_failures
+                ),
+                "inspect_shader_cache_extraction",
+                "Inspect renderer shader-cache extraction failures before trusting viewer GPU readiness.",
+            );
+        }
+        if runtime.backend_object_failures > 0 {
+            push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::BackendRuntime,
+                "backend_object_runtime_failed",
+                format!(
+                    "backend_object_entries={} hits={} misses={} failures={}",
+                    runtime.backend_object_entries,
+                    runtime.backend_object_hits,
+                    runtime.backend_object_misses,
+                    runtime.backend_object_failures
+                ),
+                "inspect_backend_object_runtime",
+                "Inspect renderer backend-object preparation failures before trusting viewer GPU readiness.",
+            );
+        }
     }
 }
 
@@ -1426,6 +1508,9 @@ fn push_root_cause_with_action(
 struct ViewerGpuOutputDiagnosticRecord {
     health: ViewerGpuOutputHealthSummary,
     health_counts: Option<ViewerGpuOutputHealthCounts>,
+    accumulated_stage_report: Option<RenderGpuOutputStageDiagnosticsReport>,
+    last_stage_report: Option<RenderGpuOutputStageDiagnosticsReport>,
+    runtime_report: Option<RenderGpuOutputRuntimeDiagnosticsReport>,
     #[serde(default)]
     stage_total_stages: u64,
     #[serde(default)]
@@ -1456,6 +1541,9 @@ struct ViewerGpuOutputDiagnosticRecord {
 
 impl ViewerGpuOutputDiagnosticRecord {
     fn stage_counts(&self) -> ViewerGpuOutputStageCounts {
+        if let Some(report) = self.accumulated_stage_report {
+            return report.into();
+        }
         ViewerGpuOutputStageCounts {
             total_stages: self.stage_total_stages,
             upload_stages: self.stage_upload_stages,
@@ -1565,6 +1653,25 @@ impl ViewerGpuOutputStageCounts {
         self.gpu_render_pipeline_blockers =
             self.gpu_render_pipeline_blockers.max(other.gpu_render_pipeline_blockers);
         self.pixels = self.pixels.max(other.pixels);
+    }
+}
+
+impl From<RenderGpuOutputStageDiagnosticsReport> for ViewerGpuOutputStageCounts {
+    fn from(report: RenderGpuOutputStageDiagnosticsReport) -> Self {
+        Self {
+            total_stages: report.total_stages,
+            upload_stages: report.upload_stages,
+            gpu_color_stages: report.gpu_color_stages,
+            readback_stages: report.readback_stages,
+            gpu_blockers: report.gpu_blockers,
+            gpu_shader_module_blockers: report.gpu_blocker_breakdown.shader_module_not_prepared,
+            gpu_ocio_resource_blockers: report
+                .gpu_blocker_breakdown
+                .ocio_resource_bind_group_not_prepared,
+            gpu_wrapper_blockers: report.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
+            gpu_render_pipeline_blockers: report.gpu_blocker_breakdown.render_pipeline_not_prepared,
+            pixels: report.stage_pixels,
+        }
     }
 }
 
@@ -2006,7 +2113,7 @@ mod tests {
     #[test]
     fn budget_replays_stage_and_health_flags() {
         let jsonl = r#"
-{"health":{"status":"Ready","viewer_output_ready":true,"native_gpu_boundary_ready":true,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":true},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"stage_total_stages":2,"stage_upload_stages":0,"stage_gpu_color_stages":1,"stage_readback_stages":0,"stage_gpu_blockers":0,"stage_pixels":2073600}
+{"health":{"status":"Ready","viewer_output_ready":true,"native_gpu_boundary_ready":true,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":true},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"stage_total_stages":99,"stage_gpu_color_stages":99,"stage_pixels":1,"accumulated_stage_report":{"total_stages":2,"upload_stages":0,"gpu_color_stages":1,"readback_stages":0,"gpu_blockers":0,"gpu_blocker_breakdown":{"shader_module_not_prepared":0,"ocio_resource_bind_group_not_prepared":0,"fullscreen_wrapper_not_prepared":0,"render_pipeline_not_prepared":0},"stage_pixels":2073600},"runtime_report":{"shader_cache_entries":1,"shader_cache_hits":2,"shader_cache_misses":3,"shader_cache_extraction_failures":0,"backend_prep_resource_entries":4,"backend_object_entries":5,"backend_object_hits":6,"backend_object_misses":7,"backend_object_failures":0,"frame_table_entries":8,"next_frame_id":9}}
 "#;
 
         let summary =
@@ -2023,6 +2130,22 @@ mod tests {
             }
         );
         assert_eq!(
+            summary.last_runtime_report,
+            Some(RenderGpuOutputRuntimeDiagnosticsReport {
+                shader_cache_entries: 1,
+                shader_cache_hits: 2,
+                shader_cache_misses: 3,
+                shader_cache_extraction_failures: 0,
+                backend_prep_resource_entries: 4,
+                backend_object_entries: 5,
+                backend_object_hits: 6,
+                backend_object_misses: 7,
+                backend_object_failures: 0,
+                frame_table_entries: 8,
+                next_frame_id: 9,
+            })
+        );
+        assert_eq!(
             summary.last_health,
             Some(ViewerGpuOutputHealthSummary {
                 status: ViewerGpuOutputHealthStatus::Ready,
@@ -2034,6 +2157,52 @@ mod tests {
                 no_gpu_blockers: true,
                 output_texture_available: true,
                 external_texture_registered: true,
+            })
+        );
+    }
+
+    #[test]
+    fn health_report_surfaces_backend_runtime_failures() {
+        let jsonl = r#"
+{"health":{"status":"Failed","viewer_output_ready":false,"native_gpu_boundary_ready":false,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":false},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":1,"rejected":0,"degraded":0,"ready":0},"accumulated_stage_report":{"total_stages":2,"upload_stages":0,"gpu_color_stages":1,"readback_stages":0,"gpu_blockers":0,"gpu_blocker_breakdown":{"shader_module_not_prepared":0,"ocio_resource_bind_group_not_prepared":0,"fullscreen_wrapper_not_prepared":0,"render_pipeline_not_prepared":0},"stage_pixels":4096},"runtime_report":{"shader_cache_entries":1,"shader_cache_hits":0,"shader_cache_misses":1,"shader_cache_extraction_failures":1,"backend_prep_resource_entries":1,"backend_object_entries":1,"backend_object_hits":0,"backend_object_misses":1,"backend_object_failures":1,"frame_table_entries":2,"next_frame_id":3}}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let report = build_health_report(summary, "display-baseline", None);
+
+        assert_eq!(report.verdict, ViewerGpuOutputHealthVerdict::Fail);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.code == "shader_cache_extraction_failures"
+                && check.severity == ViewerGpuOutputHealthSeverity::Fail));
+        assert!(
+            report.checks.iter().any(|check| check.code == "backend_object_failures"
+                && check.severity == ViewerGpuOutputHealthSeverity::Fail)
+        );
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "shader_cache_extraction_failed"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "backend_object_runtime_failed"));
+        assert_eq!(
+            report.evidence.last_runtime_report,
+            Some(RenderGpuOutputRuntimeDiagnosticsReport {
+                shader_cache_entries: 1,
+                shader_cache_hits: 0,
+                shader_cache_misses: 1,
+                shader_cache_extraction_failures: 1,
+                backend_prep_resource_entries: 1,
+                backend_object_entries: 1,
+                backend_object_hits: 0,
+                backend_object_misses: 1,
+                backend_object_failures: 1,
+                frame_table_entries: 2,
+                next_frame_id: 3,
             })
         );
     }

@@ -175,6 +175,10 @@ temporarily relaxed aggregate threshold. The same JSONL records should also
 preserve renderer-owned structured stage evidence (`RenderGpuOutputStageDiagnosticsReport`)
 next to any temporary app-local flattened counters, so viewer tooling can
 consume one renderer schema rather than rebuilding stage-breakdown models.
+Renderer runtime evidence (`RenderGpuOutputRuntimeDiagnosticsReport`) should
+travel with the same records so viewer budgets and triage can surface shader
+cache extraction or backend-object preparation failures without inventing a
+parallel app-local runtime taxonomy.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.

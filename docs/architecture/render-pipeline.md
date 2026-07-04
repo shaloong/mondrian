@@ -284,7 +284,9 @@ and the latest structured viewer color rejection when preview metadata policy
 rejects an asset. The stream now also carries renderer-owned structured stage
 evidence through `RenderGpuOutputStageDiagnosticsReport`, so downstream budget
 or triage tools can migrate away from app-local flat stage counters without
-redefining the renderer schema.
+redefining the renderer schema. It also carries the latest renderer runtime
+snapshot through `RenderGpuOutputRuntimeDiagnosticsReport`, so viewer triage can
+see shader-cache and backend-object failures from the same JSONL record stream.
 The same records include cumulative ready/degraded/blocked/failed/rejected/waiting
 health counts so smoke tooling can enforce viewer GPU-output budgets directly
 from the JSONL stream. `viewer_gpu_output_budget` consumes this stream, emits a

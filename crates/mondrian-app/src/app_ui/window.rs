@@ -32,8 +32,9 @@ use mondrian_platform::SystemPlatformService;
 use mondrian_renderer::{
     GpuColorFrameTextureFormat, RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
     RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputStageDiagnosticsReport,
-    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputRuntimeDiagnosticsReport,
+    RenderGpuOutputStageDiagnosticsReport, RenderOutputColorBoundary,
+    RenderOutputColorBoundaryTarget,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -153,6 +154,7 @@ struct AppUiViewerGpuOutputDiagnostics {
     stage_pixels: u64,
     accumulated_stage_report: RenderGpuOutputStageDiagnosticsReport,
     last_stage_report: Option<RenderGpuOutputStageDiagnosticsReport>,
+    runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     health: AppUiViewerGpuOutputHealthSummary,
     health_counts: AppUiViewerGpuOutputHealthCounts,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
@@ -341,7 +343,10 @@ struct AppUiDisplayIssueSummary {
 }
 
 impl AppUiViewerGpuOutputTelemetry {
-    fn diagnostics(&self) -> AppUiViewerGpuOutputDiagnostics {
+    fn diagnostics(
+        &self,
+        runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
+    ) -> AppUiViewerGpuOutputDiagnostics {
         let mut display_issue_summary = display_issue_summary(
             self.last_display_contract_blocker,
             self.last_display_presentation_readiness,
@@ -400,6 +405,7 @@ impl AppUiViewerGpuOutputTelemetry {
             stage_pixels: self.accumulated_stage_diagnostics.stage_pixels,
             accumulated_stage_report: self.accumulated_stage_diagnostics.into(),
             last_stage_report: self.last_stage_diagnostics.map(Into::into),
+            runtime_report,
             health,
             health_counts: self.health_counts,
             last_frame_context: self.last_frame_context.clone(),
@@ -1189,6 +1195,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &host,
                             &session.viewer_gpu_output_telemetry,
                             &session.display_output_contract.display_target,
+                            session.color_output_runtime.diagnostics().into(),
                         );
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
@@ -2460,8 +2467,9 @@ fn viewer_gpu_output_diagnostics(
     host: &AppUiHost,
     telemetry: &AppUiViewerGpuOutputTelemetry,
     display_target: &AppUiDisplayTarget,
+    runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
 ) -> AppUiViewerGpuOutputDiagnostics {
-    let mut diagnostics = telemetry.diagnostics();
+    let mut diagnostics = telemetry.diagnostics(runtime_report);
     diagnostics.last_color_rejection = host.current_viewer_color_rejection();
     if let Some(issue) = diagnostics.display_issue_summary.as_mut() {
         issue.display_target = Some(display_target.clone());
@@ -2473,8 +2481,10 @@ fn trace_viewer_gpu_output_telemetry(
     host: &AppUiHost,
     telemetry: &AppUiViewerGpuOutputTelemetry,
     display_target: &AppUiDisplayTarget,
+    runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
 ) {
-    let diagnostics = viewer_gpu_output_diagnostics(host, telemetry, display_target);
+    let diagnostics =
+        viewer_gpu_output_diagnostics(host, telemetry, display_target, runtime_report);
     tracing::trace!(
         invocations = diagnostics.invocations,
         non_workspace_skips = diagnostics.non_workspace_skips,
@@ -3934,7 +3944,7 @@ mod tests {
             Some(AppUiViewerGpuOutputOutcome::OutputTextureMissing)
         );
         assert_eq!(
-            telemetry.diagnostics().health,
+            telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()).health,
             AppUiViewerGpuOutputHealthSummary {
                 status: AppUiViewerGpuOutputHealthStatus::Failed,
                 display_boundary_ready: true,
@@ -3943,7 +3953,9 @@ mod tests {
             }
         );
         assert_eq!(
-            telemetry.diagnostics().health_counts,
+            telemetry
+                .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
+                .health_counts,
             AppUiViewerGpuOutputHealthCounts {
                 waiting: 5,
                 blocked: 1,
@@ -3983,7 +3995,7 @@ mod tests {
         telemetry.record_display_contract_blocker(&p3_blocker);
 
         assert_eq!(
-            telemetry.diagnostics(),
+            telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()),
             AppUiViewerGpuOutputDiagnostics {
                 display_contract_blockers: 2,
                 display_contract_hdr_surface_blockers: 1,
@@ -4063,7 +4075,7 @@ mod tests {
         telemetry.record_display_presentation_readiness(readiness);
 
         assert_eq!(
-            telemetry.diagnostics(),
+            telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()),
             AppUiViewerGpuOutputDiagnostics {
                 display_presentation_reconfigure_candidates: 1,
                 display_presentation_payload_blockers: 1,
@@ -4115,7 +4127,9 @@ mod tests {
         );
 
         assert_eq!(
-            telemetry.diagnostics().display_issue_summary,
+            telemetry
+                .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
+                .display_issue_summary,
             Some(AppUiDisplayIssueSummary {
                 reason: AppUiDisplayIssueReason::HdrOutputRequiresHdrSurface,
                 output_color_space: ColorSpace::Rec2100Pq,
@@ -4160,7 +4174,9 @@ mod tests {
         telemetry.record_display_presentation_readiness(readiness);
 
         assert_eq!(
-            telemetry.diagnostics().display_issue_summary,
+            telemetry
+                .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
+                .display_issue_summary,
             Some(AppUiDisplayIssueSummary {
                 reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
                 output_color_space: ColorSpace::DciP3,
@@ -4211,7 +4227,12 @@ mod tests {
             refresh_rate_millihertz: Some(60_000),
         };
 
-        let diagnostics = viewer_gpu_output_diagnostics(&host, &telemetry, &display_target);
+        let diagnostics = viewer_gpu_output_diagnostics(
+            &host,
+            &telemetry,
+            &display_target,
+            RenderGpuOutputRuntimeDiagnosticsReport::default(),
+        );
 
         assert_eq!(
             diagnostics.display_issue_summary.expect("display issue summary").display_target,
@@ -4251,7 +4272,7 @@ mod tests {
             true,
         );
 
-        let diagnostics = telemetry.diagnostics();
+        let diagnostics = telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
 
         assert_eq!(diagnostics.display_contract_refreshes, 1);
         assert_eq!(diagnostics.recent_display_contract_refreshes.len(), 1);
@@ -4298,7 +4319,7 @@ mod tests {
             },
         );
 
-        let diagnostics = telemetry.diagnostics();
+        let diagnostics = telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
 
         assert_eq!(
             diagnostics
@@ -4361,7 +4382,7 @@ mod tests {
             }
         );
         assert_eq!(
-            telemetry.diagnostics(),
+            telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()),
             AppUiViewerGpuOutputDiagnostics {
                 registered_frames: 1,
                 rejected_external_frames: 1,
@@ -4418,7 +4439,7 @@ mod tests {
         });
 
         assert_eq!(
-            telemetry.diagnostics().health,
+            telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()).health,
             AppUiViewerGpuOutputHealthSummary {
                 status: AppUiViewerGpuOutputHealthStatus::Ready,
                 viewer_output_ready: true,
@@ -4432,7 +4453,9 @@ mod tests {
             }
         );
         assert_eq!(
-            telemetry.diagnostics().health_counts,
+            telemetry
+                .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
+                .health_counts,
             AppUiViewerGpuOutputHealthCounts {
                 ready: 1,
                 ..AppUiViewerGpuOutputHealthCounts::default()
@@ -4469,7 +4492,7 @@ mod tests {
         });
 
         assert_eq!(
-            telemetry.diagnostics().health,
+            telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()).health,
             AppUiViewerGpuOutputHealthSummary {
                 status: AppUiViewerGpuOutputHealthStatus::Degraded,
                 viewer_output_ready: false,
@@ -4483,7 +4506,9 @@ mod tests {
             }
         );
         assert_eq!(
-            telemetry.diagnostics().health_counts,
+            telemetry
+                .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
+                .health_counts,
             AppUiViewerGpuOutputHealthCounts {
                 degraded: 1,
                 ..AppUiViewerGpuOutputHealthCounts::default()
@@ -4506,7 +4531,7 @@ mod tests {
         telemetry.record_loading_skip();
 
         assert_eq!(
-            telemetry.diagnostics().health,
+            telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()).health,
             AppUiViewerGpuOutputHealthSummary {
                 status: AppUiViewerGpuOutputHealthStatus::Waiting,
                 display_boundary_ready: true,
@@ -4565,7 +4590,8 @@ mod tests {
                 view: "Standard".to_owned(),
             }),
         });
-        let mut diagnostics = telemetry.diagnostics();
+        let mut diagnostics =
+            telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
         diagnostics.last_color_rejection = Some(AppUiPreviewColorRejection {
             asset_id: mondrian_core::types::AssetId::new(),
             path: PathBuf::from("E:/media/missing-color-tags.mov"),
@@ -4629,6 +4655,8 @@ mod tests {
         assert_eq!(json["accumulated_stage_report"]["gpu_color_stages"], 1);
         assert_eq!(json["accumulated_stage_report"]["upload_stages"], 1);
         assert_eq!(json["last_stage_report"]["gpu_color_stages"], 1);
+        assert_eq!(json["runtime_report"]["shader_cache_entries"], 0);
+        assert_eq!(json["runtime_report"]["backend_object_entries"], 0);
         assert_eq!(json["last_outcome"], "Registered");
         assert_eq!(json["display_contract_refreshes"], 1);
         assert_eq!(
