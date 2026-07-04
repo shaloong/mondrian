@@ -1412,6 +1412,7 @@ impl AppUiPreviewDiagnostics {
             legacy_solid_effect: self.color_composite_legacy_solid_effect,
             legacy_adjustment_blend_mode: self.color_composite_legacy_adjustment_blend_mode,
             legacy_adjustment_effect: self.color_composite_legacy_adjustment_effect,
+            ..TimelineCompositeDiagnostics::default()
         }
         .color_path_summary()
     }

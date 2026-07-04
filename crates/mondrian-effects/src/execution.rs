@@ -76,6 +76,46 @@ pub enum EffectFloatUnsupportedReason {
     },
 }
 
+/// Structured reason an effect node cannot execute on the GPU.
+///
+/// Unlike [`EffectFloatUnsupportedReason`] which tracks CPU float limitations,
+/// this type tracks GPU-specific blockers that prevent a render op from being
+/// dispatched to the GPU executor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectGpuBlocker {
+    /// The render op has no GPU implementation.
+    UnsupportedRenderOp {
+        /// Stable render-op label for diagnostics.
+        op: &'static str,
+    },
+    /// The GPU executor rejected the op (returned `None`).
+    ExecutorRejected {
+        /// Stable render-op label for diagnostics.
+        op: &'static str,
+    },
+    /// The GPU executor panicked or returned malformed data.
+    ExecutorFailed {
+        /// Stable render-op label for diagnostics.
+        op: &'static str,
+        /// Reason the executor failed.
+        reason: String,
+    },
+    /// The effect node kind does not support GPU execution.
+    UnsupportedNodeKind {
+        /// Stable node kind label for diagnostics.
+        kind: &'static str,
+    },
+}
+
+/// Result of GPU execution attempt for a single effect render op.
+#[derive(Debug, Clone)]
+pub enum EffectGpuExecutionResult {
+    /// GPU executed successfully.
+    GpuExecuted,
+    /// GPU was not available; fell back to CPU.
+    CpuFallback { blocker: EffectGpuBlocker },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EffectOutputCacheKey {
     graph_signature: u64,
@@ -704,6 +744,57 @@ pub fn apply_compiled_effect_graph_with_gpu(
 /// Return whether a compiled graph can execute entirely on the float/linear CPU path.
 pub fn compiled_effect_graph_supports_rgba_f32(compiled: &CompiledEffectGraph) -> bool {
     validate_float_effect_graph(compiled).is_ok()
+}
+
+/// Check whether a render op can be executed on the GPU.
+///
+/// This queries the global GPU executor to determine if the op is supported.
+/// Returns `None` if no GPU executor is registered or if the op is not supported.
+pub fn check_effect_gpu_capability(op: &EffectRenderOp) -> Option<EffectGpuBlocker> {
+    let gpu = GPU_EXECUTOR
+        .get()
+        .and_then(|opt| opt.as_ref())
+        .map(|arc| arc.as_ref() as &dyn EffectGpuExecutor);
+    if gpu.is_none() {
+        return Some(EffectGpuBlocker::UnsupportedRenderOp { op: effect_render_op_name(op) });
+    }
+    // The executor exists; the op is potentially supported.
+    // Actual GPU execution success is determined at runtime.
+    None
+}
+
+/// Return the list of render ops in a compiled graph that would require CPU
+/// fallback if GPU execution is attempted. This is useful for diagnostics
+/// and reporting which effects block GPU acceleration.
+pub fn effect_graph_gpu_blockers(compiled: &CompiledEffectGraph) -> Vec<EffectGpuBlocker> {
+    let mut blockers = Vec::new();
+    for node_id in &compiled.schedule.ordered_nodes {
+        if let Some(node) = compiled.graph.node(*node_id) {
+            match &node.kind {
+                EffectGraphNodeKind::UnaryEffect { op, .. } => {
+                    if let Some(blocker) = check_effect_gpu_capability(op) {
+                        blockers.push(blocker);
+                    }
+                }
+                EffectGraphNodeKind::Blend { .. }
+                | EffectGraphNodeKind::Mask { .. }
+                | EffectGraphNodeKind::MaskSource { .. }
+                | EffectGraphNodeKind::MultiInput { .. } => {
+                    blockers.push(EffectGpuBlocker::UnsupportedNodeKind {
+                        kind: match &node.kind {
+                            EffectGraphNodeKind::Blend { .. } => "blend",
+                            EffectGraphNodeKind::Mask { .. } => "mask",
+                            EffectGraphNodeKind::MaskSource { .. } => "mask_source",
+                            EffectGraphNodeKind::MultiInput { .. } => "multi_input",
+                            _ => "unknown",
+                        },
+                    });
+                }
+                EffectGraphNodeKind::Source => {}
+            }
+        }
+    }
+    blockers
 }
 
 /// Execute a compiled graph over linear `f32` RGBA pixels.

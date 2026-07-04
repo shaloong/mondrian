@@ -95,6 +95,10 @@ pub struct TimelineCompositeDiagnostics {
     pub legacy_adjustment_blend_mode: u64,
     /// Adjustment layers that required legacy RGBA8 because of effect graph support.
     pub legacy_adjustment_effect: u64,
+    /// Effect nodes that could not execute on GPU (structured blockers).
+    pub effect_gpu_blockers: u64,
+    /// Effect nodes that executed on GPU successfully.
+    pub effect_gpu_executed: u64,
 }
 
 /// High-level compositing color path selected by timeline compositing.
@@ -207,6 +211,10 @@ impl TimelineCompositeDiagnostics {
             .saturating_add(other.legacy_adjustment_blend_mode);
         self.legacy_adjustment_effect =
             self.legacy_adjustment_effect.saturating_add(other.legacy_adjustment_effect);
+        self.effect_gpu_blockers =
+            self.effect_gpu_blockers.saturating_add(other.effect_gpu_blockers);
+        self.effect_gpu_executed =
+            self.effect_gpu_executed.saturating_add(other.effect_gpu_executed);
     }
 
     /// Returns true when the composite plan used any legacy RGBA8 fallback.
