@@ -2734,6 +2734,40 @@ mod tests {
         assert!(!summary.gpu_path_ready);
     }
 
+    fn assert_preview_export_color_health_match(
+        preview: AppUiPreviewColorHealthSummary,
+        export: mondrian_export::queue::ExportJobColorDiagnosticsSummary,
+    ) {
+        assert_eq!(export.diagnosed_frames, 1);
+        assert_eq!(preview.detected_metadata, export.detected_metadata);
+        assert_eq!(preview.override_count, export.override_count);
+        assert_eq!(preview.policy_assumptions, export.policy_assumptions);
+        assert_eq!(preview.data_textures, export.data_textures);
+        assert_eq!(preview.policy_rejections, export.policy_rejections);
+        assert_eq!(
+            preview.explicit_metadata_or_override,
+            export.explicit_metadata_or_override
+        );
+        assert_eq!(preview.cpu_input_stages, export.cpu_input_stages);
+        assert_eq!(preview.cpu_output_stages, export.cpu_output_stages);
+        assert_eq!(preview.gpu_color_stages, export.gpu_color_stages);
+        assert_eq!(preview.gpu_blockers, export.gpu_blockers);
+        assert_eq!(preview.gpu_blocker_breakdown, export.gpu_blocker_breakdown);
+        assert_eq!(preview.transfer_stages, export.transfer_stages);
+        assert_eq!(
+            preview.float_linear_composites,
+            export.float_linear_composites
+        );
+        assert_eq!(
+            preview.legacy_rgba8_composites,
+            export.legacy_rgba8_composites
+        );
+        assert_eq!(preview.legacy_reason_total, export.legacy_reason_total);
+        assert_eq!(preview.legacy_breakdown, export.legacy_breakdown);
+        assert_eq!(preview.fully_float_linear, export.fully_float_linear);
+        assert_eq!(preview.gpu_path_ready, export.gpu_path_ready);
+    }
+
     #[test]
     fn preview_dimensions_clamp_invalid_resolution_scale() {
         let mut below_min = Sequence::new("below");
@@ -3615,26 +3649,25 @@ mod tests {
             TimelineCompositeElement::SolidColor(solid),
         ];
         let mut export_scratch = TimelineCompositeScratch::default();
-        let export_working = mondrian_renderer::composite_timeline_elements_color_frame(
-            2,
-            2,
-            &export_elements,
-            TimelineCompositeOptions::default(),
-            color_context.working_color_space,
-            &mut export_scratch,
-        );
-        let export = mondrian_renderer::execute_cpu_output_boundary(
-            &export_working,
+        let export_working =
+            mondrian_renderer::composite_timeline_elements_color_frame_with_diagnostics(
+                2,
+                2,
+                &export_elements,
+                TimelineCompositeOptions::default(),
+                color_context.working_color_space,
+                &mut export_scratch,
+            );
+        let export_output = mondrian_renderer::execute_cpu_output_boundary(
+            &export_working.frame,
             &RenderOutputColorBoundary::export(
                 color_context.output_color_space,
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
         )
-        .expect("export multilayer color transform")
-        .result
-        .frame
-        .into_rgba();
+        .expect("export multilayer color transform");
+        let export = export_output.result.frame.clone().into_rgba();
 
         assert_eq!(preview.rgba, export);
         let preview_export_hash = stable_rgba_hash(&preview.rgba);
@@ -3645,6 +3678,72 @@ mod tests {
         assert_eq!(preview.composite_diagnostics.legacy_media_transform, 1);
         assert_eq!(preview.composite_diagnostics.legacy_solid_blend_mode, 0);
         assert_eq!(preview.composite_diagnostics.legacy_solid_transform, 1);
+
+        let preview_composite_summary = preview.composite_diagnostics.color_path_summary();
+        let preview_diagnostics = AppUiPreviewDiagnostics {
+            color_stage_total_stages: preview.color_stage_diagnostics.total_stages,
+            color_stage_cpu_input_stages: preview.color_stage_diagnostics.cpu_input_stages,
+            color_stage_cpu_output_stages: preview.color_stage_diagnostics.cpu_output_stages,
+            color_stage_gpu_color_stages: preview.color_stage_diagnostics.gpu_color_stages,
+            color_stage_upload_stages: preview.color_stage_diagnostics.upload_stages,
+            color_stage_readback_stages: preview.color_stage_diagnostics.readback_stages,
+            color_stage_gpu_blockers: preview.color_stage_diagnostics.gpu_blockers,
+            color_stage_gpu_shader_module_blockers: preview
+                .color_stage_diagnostics
+                .gpu_blocker_breakdown
+                .shader_module_not_prepared,
+            color_stage_gpu_ocio_resource_blockers: preview
+                .color_stage_diagnostics
+                .gpu_blocker_breakdown
+                .ocio_resource_bind_group_not_prepared,
+            color_stage_gpu_wrapper_blockers: preview
+                .color_stage_diagnostics
+                .gpu_blocker_breakdown
+                .fullscreen_wrapper_not_prepared,
+            color_stage_gpu_render_pipeline_blockers: preview
+                .color_stage_diagnostics
+                .gpu_blocker_breakdown
+                .render_pipeline_not_prepared,
+            color_stage_pixels: preview.color_stage_diagnostics.stage_pixels,
+            color_rgba8_boundary_calls: u64::from(preview.color_diagnostics.used_rgba8_boundary),
+            color_composite_plans: preview_composite_summary.composite_plans(),
+            color_composite_elements: preview.composite_diagnostics.elements,
+            color_composite_float_linear: preview.composite_diagnostics.float_linear_composites,
+            color_composite_legacy_rgba8: preview.composite_diagnostics.legacy_rgba8_composites,
+            color_composite_legacy_media_blend_mode: preview
+                .composite_diagnostics
+                .legacy_media_blend_mode,
+            color_composite_legacy_media_transform: preview
+                .composite_diagnostics
+                .legacy_media_transform,
+            color_composite_legacy_media_effect: preview.composite_diagnostics.legacy_media_effect,
+            color_composite_legacy_solid_blend_mode: preview
+                .composite_diagnostics
+                .legacy_solid_blend_mode,
+            color_composite_legacy_solid_transform: preview
+                .composite_diagnostics
+                .legacy_solid_transform,
+            color_composite_legacy_solid_effect: preview.composite_diagnostics.legacy_solid_effect,
+            color_composite_legacy_adjustment_blend_mode: preview
+                .composite_diagnostics
+                .legacy_adjustment_blend_mode,
+            color_composite_legacy_adjustment_effect: preview
+                .composite_diagnostics
+                .legacy_adjustment_effect,
+            ..AppUiPreviewDiagnostics::default()
+        };
+        let preview_health =
+            preview_diagnostics.color_health_summary().expect("preview color health");
+        assert_eq!(preview_health.rgba8_boundary_calls, 1);
+
+        let mut export_diagnostics = mondrian_export::queue::ExportJobColorDiagnostics::default();
+        export_diagnostics.record_frame_diagnostics(
+            mondrian_timeline::sequence::InputColorResolutionSourceCounts::default(),
+            export_output.stage_diagnostics,
+            export_working.diagnostics,
+        );
+        let export_health = export_diagnostics.summary().expect("export color health");
+        assert_preview_export_color_health_match(preview_health, export_health);
     }
 
     #[test]
