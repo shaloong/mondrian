@@ -25,7 +25,19 @@
 ```powershell
 $env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
 $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo test -p mondrian-app preview_1080p2997_simulated_perf -- --ignored --nocapture
+$env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-1080p2997.jsonl'; cargo test -p mondrian-export export_1080p2997_simulated_perf -- --ignored --nocapture
 ```
+
+Export simulation reports include `color_health`, `color_health_budget`,
+`color_health_passed`, and `color_health_failures`. By default the smoke fails
+closed unless export stays fully float/linear, has no GPU blockers, has no
+upload/readback transfer stages, and reports no structured legacy RGBA8 reasons.
+Use `MONDRIAN_EXPORT_SIM_REQUIRE_FULLY_FLOAT_LINEAR`,
+`MONDRIAN_EXPORT_SIM_REQUIRE_GPU_PATH_READY`,
+`MONDRIAN_EXPORT_SIM_MAX_GPU_BLOCKERS`,
+`MONDRIAN_EXPORT_SIM_MAX_LEGACY_REASONS`, and
+`MONDRIAN_EXPORT_SIM_MAX_TRANSFER_STAGES` only when intentionally relaxing the
+budget for an investigation.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

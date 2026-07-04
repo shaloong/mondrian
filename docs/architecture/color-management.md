@@ -216,7 +216,10 @@ those structured fields rather than parsing totals or rebuilding reason lists.
 Export simulation performance reports written through `MONDRIAN_EXPORT_SIM_OUTPUT`
 include this same summary as `color_health` while retaining legacy flat stage
 counters for dashboard continuity. The nested summary is the authoritative
-machine-readable color health contract.
+machine-readable color health contract, and export simulation smoke tests fail
+closed against it by default: no GPU blockers, no transfer stages, no structured
+legacy RGBA8 reasons, fully float/linear composites, and GPU path readiness are
+required unless an operator explicitly relaxes the budget for investigation.
 Preview performance JSONL reports written through `MONDRIAN_PERF_OUTPUT` expose
 the same idea as `preview_color_health` and, for playback probes,
 `preview_playback_color_health`. Older `preview_color_path` fields remain during
