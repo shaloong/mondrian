@@ -281,7 +281,10 @@ external texture registration outcome, and frame context needed to correlate
 failures with a concrete sequence id, timeline frame, preview size, external
 texture key, output target/color space, tone-map flag, optional display/view,
 and the latest structured viewer color rejection when preview metadata policy
-rejects an asset.
+rejects an asset. The stream now also carries renderer-owned structured stage
+evidence through `RenderGpuOutputStageDiagnosticsReport`, so downstream budget
+or triage tools can migrate away from app-local flat stage counters without
+redefining the renderer schema.
 The same records include cumulative ready/degraded/blocked/failed/rejected/waiting
 health counts so smoke tooling can enforce viewer GPU-output budgets directly
 from the JSONL stream. `viewer_gpu_output_budget` consumes this stream, emits a

@@ -687,7 +687,7 @@ impl RenderGpuOutputFrameReport {
 }
 
 /// Serializable stage evidence for renderer GPU output diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct RenderGpuOutputStageDiagnosticsReport {
     /// Total scheduled stages for this output boundary.
     pub total_stages: u64,
@@ -720,7 +720,7 @@ impl From<RenderColorStageDiagnostics> for RenderGpuOutputStageDiagnosticsReport
 }
 
 /// Serializable runtime evidence for renderer GPU output diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct RenderGpuOutputRuntimeDiagnosticsReport {
     /// Number of prepared shader-cache entries.
     pub shader_cache_entries: usize,

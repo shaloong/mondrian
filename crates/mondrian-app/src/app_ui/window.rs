@@ -32,8 +32,8 @@ use mondrian_platform::SystemPlatformService;
 use mondrian_renderer::{
     GpuColorFrameTextureFormat, RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
     RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryTarget,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputStageDiagnosticsReport,
+    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -151,6 +151,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     stage_gpu_wrapper_blockers: u64,
     stage_gpu_render_pipeline_blockers: u64,
     stage_pixels: u64,
+    accumulated_stage_report: RenderGpuOutputStageDiagnosticsReport,
+    last_stage_report: Option<RenderGpuOutputStageDiagnosticsReport>,
     health: AppUiViewerGpuOutputHealthSummary,
     health_counts: AppUiViewerGpuOutputHealthCounts,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
@@ -396,6 +398,8 @@ impl AppUiViewerGpuOutputTelemetry {
                 .gpu_blocker_breakdown
                 .render_pipeline_not_prepared,
             stage_pixels: self.accumulated_stage_diagnostics.stage_pixels,
+            accumulated_stage_report: self.accumulated_stage_diagnostics.into(),
+            last_stage_report: self.last_stage_diagnostics.map(Into::into),
             health,
             health_counts: self.health_counts,
             last_frame_context: self.last_frame_context.clone(),
@@ -4622,6 +4626,9 @@ mod tests {
         assert_eq!(json["health_counts"]["degraded"], 0);
         assert_eq!(json["health_counts"]["failed"], 0);
         assert_eq!(json["stage_gpu_color_stages"], 1);
+        assert_eq!(json["accumulated_stage_report"]["gpu_color_stages"], 1);
+        assert_eq!(json["accumulated_stage_report"]["upload_stages"], 1);
+        assert_eq!(json["last_stage_report"]["gpu_color_stages"], 1);
         assert_eq!(json["last_outcome"], "Registered");
         assert_eq!(json["display_contract_refreshes"], 1);
         assert_eq!(
