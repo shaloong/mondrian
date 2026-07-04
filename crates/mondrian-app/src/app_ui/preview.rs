@@ -4329,7 +4329,7 @@ mod tests {
 
         assert_eq!(
             preview_summary.path,
-            TimelineCompositeColorPath::LegacyRgba8
+            TimelineCompositeColorPath::FloatLinear
         );
         assert_eq!(preview_summary.path, export_summary.path);
         assert_eq!(preview_summary.elements, export_summary.elements);
@@ -4373,9 +4373,9 @@ mod tests {
             preview.color_diagnostics.output.domain,
             ColorFrameDomain::Display
         );
-        assert_eq!(preview.composite_diagnostics.float_linear_composites, 0);
-        assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 1);
-        assert_eq!(preview.composite_diagnostics.legacy_media_transform, 1);
+        assert_eq!(preview.composite_diagnostics.float_linear_composites, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 0);
+        assert_eq!(preview.composite_diagnostics.legacy_media_transform, 0);
 
         let export_elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &frame.frame,
@@ -4422,7 +4422,7 @@ mod tests {
 
     #[test]
     fn preview_multilayer_color_output_matches_export_frame_hash() {
-        const REC2020_TO_SRGB_MULTILAYER_GOLDEN_HASH: u64 = 7_217_838_714_620_762_053;
+        const REC2020_TO_SRGB_MULTILAYER_GOLDEN_HASH: u64 = 14_322_780_855_923_385_797;
 
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
@@ -4509,11 +4509,11 @@ mod tests {
         let preview_export_hash = stable_rgba_hash(&preview.rgba);
         assert_eq!(preview_export_hash, stable_rgba_hash(&export));
         assert_eq!(preview_export_hash, REC2020_TO_SRGB_MULTILAYER_GOLDEN_HASH);
-        assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 0);
         assert_eq!(preview.composite_diagnostics.legacy_media_blend_mode, 0);
-        assert_eq!(preview.composite_diagnostics.legacy_media_transform, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_media_transform, 0);
         assert_eq!(preview.composite_diagnostics.legacy_solid_blend_mode, 0);
-        assert_eq!(preview.composite_diagnostics.legacy_solid_transform, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_solid_transform, 0);
 
         let preview_composite_summary = preview.composite_diagnostics.color_path_summary();
         let preview_diagnostics = AppUiPreviewDiagnostics {
