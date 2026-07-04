@@ -36,7 +36,9 @@ enum: multiple-hint warnings keep the selected and ignored metadata keys,
 values, and scopes; hint-vs-CICP warnings keep the selected hint and the raw
 CICP triplet that conflicted with it. `VideoColorDiagnostic::summary()` is the
 stable compact form for logs/export errors and should include those warning
-details.
+details. `VideoColorDiagnostic::issue_summary()` is the machine-readable
+contract for UI, telemetry, smoke JSONL, and export reports; callers must
+consume its counters and flags instead of parsing the compact summary string.
 Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.
 
 Asset library records store persistent user intent separately as
