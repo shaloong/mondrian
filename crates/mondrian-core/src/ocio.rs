@@ -29,6 +29,28 @@ use std::path::{Path, PathBuf};
 ///
 /// All OCIO config mutations must go through this module. The mutex protects
 /// both the Rust-side metadata and the C++ global config atomically.
+///
+/// # Concurrency Constraint
+///
+/// OCIO's C++ backend uses a process-global current config (`set_current_config`).
+/// This means **only one OCIO config can be active at a time**. Concurrent
+/// rendering with different OCIO configs (e.g., multi-project or multi-sequence
+/// with different color science) is NOT supported and will produce incorrect
+/// results.
+///
+/// The mutex in [`OCIO_STATE`] serializes config mutations, but does NOT prevent
+/// concurrent `current_config()` calls from seeing a config that was loaded for
+/// a different project/sequence. Callers must ensure that:
+///
+/// 1. All rendering within a process uses the same OCIO config, OR
+/// 2. Config switches are serialized with rendering (no concurrent access during
+///    config transition), OR
+/// 3. The application architecture prevents multi-config scenarios (current
+///    Mondrian design: one project = one config).
+///
+/// Full config isolation (per-config processor caches, no process-global state)
+/// requires upstream OCIO changes or a wrapper layer. This is deferred to a
+/// future phase.
 struct OcioGlobalState {
     /// Path or virtual path of the currently loaded config.
     path: Option<PathBuf>,
@@ -61,6 +83,18 @@ impl OcioGlobalState {
 /// increments on every config load. Use it for cache invalidation.
 pub fn ocio_config_generation() -> u64 {
     OCIO_STATE.lock().map(|g| g.generation).unwrap_or(0)
+}
+
+/// Check whether the config has changed since the given generation.
+///
+/// Callers should capture the generation at the start of a rendering operation
+/// and check it again before submitting GPU work. If the config changed, the
+/// cached shader plans and backend objects may be stale and must be invalidated.
+///
+/// Returns `true` if the config has changed (generation increased), `false` if
+/// it's still the same config.
+pub fn ocio_config_changed_since(since_generation: u64) -> bool {
+    ocio_config_generation() != since_generation
 }
 
 /// Return the current config source identity, if any.
