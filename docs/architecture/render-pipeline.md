@@ -329,11 +329,12 @@ same sequence frame. Renderer and app tests also pin the final color boundary:
 for the same working frame, output color space, tone-map flag, and engine,
 preview display and export delivery targets must produce identical RGBA pixels
 while preserving distinct output domains in diagnostics. App-level parity tests
-also compare `TimelineCompositeColorPathSummary` and the shared fields of the
-preview/export color-health summaries for the same timeline frame, so preview
-and export cannot silently diverge in float/linear versus legacy RGBA8 composite
-routing, stage scheduling, GPU blocker accounting, or health booleans. The
-renderer golden suite includes a stable RGBA hash for
+also compare `TimelineCompositeColorPathSummary`, the shared fields of the
+preview/export color-health summaries, and the normalized versioned report
+verdict/check/root-cause/action signatures for the same timeline frame, so
+preview and export cannot silently diverge in float/linear versus legacy RGBA8
+composite routing, stage scheduling, GPU blocker accounting, health booleans, or
+diagnostic interpretation. The renderer golden suite includes a stable RGBA hash for
 this preview/export Rec.709 boundary parity contract; intentional color-pipeline
 changes must update that hash with the same care as image golden references.
 The app preview suite also pins a stable Rec.2020-working to sRGB-output
