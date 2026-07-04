@@ -264,7 +264,8 @@ The same records include cumulative ready/degraded/blocked/failed/rejected/waiti
 health counts so smoke tooling can enforce viewer GPU-output budgets directly
 from the JSONL stream. `viewer_gpu_output_budget` consumes this stream, emits a
 structured summary, and fails closed when ready/failed/blocked/rejected/degraded
-thresholds are not met.
+thresholds are not met or when the reported cumulative `health_counts` disagree
+with the statuses replayed from the JSONL records.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from
