@@ -168,7 +168,10 @@ readback schedule instead of inferring it from renderer tests. Viewer telemetry
 also derives a last-attempt `health` summary from that same outcome, stage, and
 display-presentation state, separating native GPU boundary readiness, display
 contract readiness, presentation readiness, missing output textures, record
-failures, and external texture rejection from cumulative counters.
+failures, and external texture rejection from cumulative counters. When
+`MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT` is set, the app window appends these viewer
+GPU output diagnostics as JSONL so real playback/scrubbing sessions can be
+correlated with preview/export perf health reports.
 
 Input transforms follow the same rule. Decode/import code wraps source pixels in
 `CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks

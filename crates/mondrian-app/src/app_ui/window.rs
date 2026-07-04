@@ -5,7 +5,9 @@
 //! native event-loop wiring, renderer setup, shell command application, and the
 //! bridge between widget-dispatched actions and `AppState`.
 
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -48,6 +50,7 @@ use tracing_subscriber::EnvFilter;
 
 pub(crate) const DEFAULT_APP_UI_LOG_FILTER: &str = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn";
 pub(crate) const APP_UI_BACKGROUND_WORKERS: usize = 4;
+const VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV: &str = "MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT";
 const WORKSPACE_WINDOW_WIDTH: f32 = 1600.0;
 const WORKSPACE_WINDOW_HEIGHT: f32 = 900.0;
 const WORKSPACE_MIN_WIDTH: f32 = 1024.0;
@@ -2048,6 +2051,37 @@ fn trace_viewer_gpu_output_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) {
         last_outcome = ?diagnostics.last_outcome,
         "app UI viewer GPU output telemetry"
     );
+    write_viewer_gpu_output_diagnostics_if_needed(&diagnostics);
+}
+
+fn write_viewer_gpu_output_diagnostics_if_needed(diagnostics: &AppUiViewerGpuOutputDiagnostics) {
+    let Some(path) = viewer_gpu_output_diagnostics_output_path() else {
+        return;
+    };
+    let result = write_viewer_gpu_output_diagnostics_to_path(&path, diagnostics);
+    if let Err(err) = result {
+        tracing::warn!(
+            output_path = %path.display(),
+            "failed to write viewer GPU output diagnostics JSONL: {err:?}"
+        );
+    }
+}
+
+fn write_viewer_gpu_output_diagnostics_to_path(
+    path: &Path,
+    diagnostics: &AppUiViewerGpuOutputDiagnostics,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let report_json = serde_json::to_string(diagnostics)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{report_json}")?;
+    Ok(())
+}
+
+fn viewer_gpu_output_diagnostics_output_path() -> Option<PathBuf> {
+    std::env::var_os(VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV).map(PathBuf::from)
 }
 
 fn prepare_viewer_gpu_preview(
@@ -3783,6 +3817,56 @@ mod tests {
                 ..AppUiViewerGpuOutputHealthSummary::default()
             }
         );
+    }
+
+    #[test]
+    fn viewer_gpu_output_diagnostics_jsonl_includes_health_summary() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        telemetry.record_invocation();
+        telemetry.record_display_presentation_readiness(
+            AppUiDisplayPresentationReadinessDiagnostics {
+                status: AppUiDisplayPresentationReadinessStatus::Current,
+                output_color_space: ColorSpace::Srgb,
+                current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
+                current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+                desired_surface_format: None,
+                desired_surface_color_space: None,
+                desired_surface_encoding: None,
+                desired_surface_hdr_mode: None,
+                payload_blocker: None,
+            },
+        );
+        telemetry.record_registered_frame(RenderColorStageDiagnostics {
+            total_stages: 2,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            stage_pixels: 20,
+            ..RenderColorStageDiagnostics::default()
+        });
+        let diagnostics = telemetry.diagnostics();
+        let output_path = std::env::temp_dir().join(format!(
+            "mondrian-viewer-gpu-output-diagnostics-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after unix epoch")
+                .as_nanos()
+        ));
+
+        write_viewer_gpu_output_diagnostics_to_path(&output_path, &diagnostics)
+            .expect("write viewer GPU output JSONL");
+        let contents = std::fs::read_to_string(&output_path).expect("read viewer GPU output JSONL");
+        let _ = std::fs::remove_file(&output_path);
+        let json: serde_json::Value =
+            serde_json::from_str(contents.trim()).expect("parse viewer GPU output JSONL");
+
+        assert_eq!(json["health"]["status"], "Ready");
+        assert_eq!(json["health"]["viewer_output_ready"], true);
+        assert_eq!(json["health"]["native_gpu_boundary_ready"], true);
+        assert_eq!(json["health"]["presentation_ready"], true);
+        assert_eq!(json["stage_gpu_color_stages"], 1);
+        assert_eq!(json["last_outcome"], "Registered");
     }
 
     #[test]
