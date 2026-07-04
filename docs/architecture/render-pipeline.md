@@ -273,7 +273,9 @@ GPU output attempt, including the derived health summary, display/presentation
 readiness, native GPU stage sequence, blocker breakdown, output texture state,
 external texture registration outcome, and frame context needed to correlate
 failures with a concrete sequence id, timeline frame, preview size, external
-texture key, output target/color space, tone-map flag, and optional display/view.
+texture key, output target/color space, tone-map flag, optional display/view,
+and the latest structured viewer color rejection when preview metadata policy
+rejects an asset.
 The same records include cumulative ready/degraded/blocked/failed/rejected/waiting
 health counts so smoke tooling can enforce viewer GPU-output budgets directly
 from the JSONL stream. `viewer_gpu_output_budget` consumes this stream, emits a
@@ -282,9 +284,11 @@ thresholds are not met or when the reported cumulative `health_counts` disagree
 with the statuses replayed from the JSONL records. Empty streams fail explicitly
 with a `records` budget failure instead of being reported only as missing ready
 frames. The same budget also replays `display_issue_summary` records into
-reason counts and payload-blocker counts, allowing smoke runs to fail on HDR,
-wide-gamut, unsupported presentation, or UI payload blockers even when a
-temporary health budget permits degraded frames. The same evaluator lives in
+reason counts and payload-blocker counts, and it replays viewer color
+rejections into a `VideoColorDiagnosticIssueAggregate`, allowing smoke runs to
+fail on HDR, wide-gamut, unsupported presentation, UI payload blockers, or
+metadata-policy rejections even when a temporary health budget permits degraded
+frames. The same evaluator lives in
 `app_ui::viewer_gpu_output_budget` so Rust smoke tests and the CLI share one
 budget implementation; the ignored `viewer_gpu_output_budget_smoke` test reads
 `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same summary into

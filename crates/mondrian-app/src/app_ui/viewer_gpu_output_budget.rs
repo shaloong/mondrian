@@ -1,6 +1,7 @@
 //! Budget evaluation for live viewer GPU-output diagnostics JSONL.
 
 use anyhow::Context;
+use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
 use serde::{Deserialize, Serialize};
 
 /// Thresholds for evaluating a viewer GPU-output diagnostics JSONL stream.
@@ -24,6 +25,8 @@ pub struct ViewerGpuOutputBudget {
     pub max_display_issues: u64,
     /// Maximum allowed records with a display presentation payload blocker.
     pub max_display_payload_blockers: u64,
+    /// Maximum allowed records carrying a viewer color rejection.
+    pub max_color_rejections: u64,
 }
 
 impl Default for ViewerGpuOutputBudget {
@@ -38,6 +41,7 @@ impl Default for ViewerGpuOutputBudget {
             max_waiting: u64::MAX,
             max_display_issues: 0,
             max_display_payload_blockers: 0,
+            max_color_rejections: 0,
         }
     }
 }
@@ -51,6 +55,10 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub counts: ViewerGpuOutputHealthCounts,
     /// Counts replayed from structured display issue summaries.
     pub display_issues: ViewerGpuOutputDisplayIssueCounts,
+    /// Records carrying a structured viewer color rejection.
+    pub color_rejections: u64,
+    /// Aggregated machine-readable media issue summaries from color rejections.
+    pub media_issues: VideoColorDiagnosticIssueAggregate,
     /// Last cumulative counts reported by the JSONL stream, when present.
     pub reported_counts: Option<ViewerGpuOutputHealthCounts>,
     /// Whether reported cumulative counts match status replay.
@@ -69,6 +77,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub last_frame_context: Option<ViewerGpuOutputFrameContext>,
     /// Last display issue summary observed in the stream.
     pub last_display_issue: Option<ViewerGpuOutputDisplayIssueSummary>,
+    /// Last viewer color rejection observed in the stream.
+    pub last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
 }
 
 /// Serializable representation of the applied budget.
@@ -92,6 +102,8 @@ pub struct ViewerGpuOutputBudgetReport {
     pub max_display_issues: u64,
     /// Maximum allowed records with a display presentation payload blocker.
     pub max_display_payload_blockers: u64,
+    /// Maximum allowed records carrying a viewer color rejection.
+    pub max_color_rejections: u64,
 }
 
 impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
@@ -106,6 +118,7 @@ impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
             max_waiting: budget.max_waiting,
             max_display_issues: budget.max_display_issues,
             max_display_payload_blockers: budget.max_display_payload_blockers,
+            max_color_rejections: budget.max_color_rejections,
         }
     }
 }
@@ -143,6 +156,9 @@ pub fn evaluate_jsonl(
     let mut last_frame_context = None;
     let mut display_issues = ViewerGpuOutputDisplayIssueCounts::default();
     let mut last_display_issue = None;
+    let mut color_rejections = 0u64;
+    let mut media_issues = VideoColorDiagnosticIssueAggregate::default();
+    let mut last_color_rejection = None;
     let mut reported_counts = None;
     let mut count_mismatches = Vec::new();
 
@@ -168,6 +184,11 @@ pub fn evaluate_jsonl(
         if let Some(issue) = record.display_issue_summary {
             display_issues.record(&issue);
             last_display_issue = Some(issue);
+        }
+        if let Some(rejection) = record.last_color_rejection {
+            color_rejections = color_rejections.saturating_add(1);
+            media_issues.observe_summary(rejection.diagnostic_issue_summary);
+            last_color_rejection = Some(rejection);
         }
         last_status = Some(record.health.status);
         last_frame_context = record.last_frame_context;
@@ -222,11 +243,19 @@ pub fn evaluate_jsonl(
         display_issues.payload_blockers,
         budget.max_display_payload_blockers,
     );
+    push_max_failure(
+        &mut failures,
+        "color_rejections",
+        color_rejections,
+        budget.max_color_rejections,
+    );
 
     Ok(ViewerGpuOutputBudgetSummary {
         records,
         counts,
         display_issues,
+        color_rejections,
+        media_issues,
         reported_counts,
         reported_counts_match_replay: count_mismatches.is_empty(),
         count_mismatches,
@@ -236,6 +265,7 @@ pub fn evaluate_jsonl(
         last_status,
         last_frame_context,
         last_display_issue,
+        last_color_rejection,
     })
 }
 
@@ -256,6 +286,30 @@ struct ViewerGpuOutputDiagnosticRecord {
     health_counts: Option<ViewerGpuOutputHealthCounts>,
     last_frame_context: Option<ViewerGpuOutputFrameContext>,
     display_issue_summary: Option<ViewerGpuOutputDisplayIssueSummary>,
+    last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
+}
+
+/// Viewer color rejection summary consumed from viewer GPU-output JSONL records.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputColorRejectionSummary {
+    /// Rejected asset id.
+    pub asset_id: String,
+    /// Rejected media path.
+    pub path: String,
+    /// Missing-metadata policy active during rejection.
+    pub missing_metadata_policy: String,
+    /// Input color-resolution source.
+    pub source: String,
+    /// Override color space, when present.
+    pub override_color_space: Option<String>,
+    /// Detected media color space, when present.
+    pub detected_color_space: Option<String>,
+    /// Sequence working color space.
+    pub working_color_space: String,
+    /// Compact human-readable diagnostic summary.
+    pub diagnostic_summary: String,
+    /// Machine-readable media issue summary.
+    pub diagnostic_issue_summary: VideoColorDiagnosticIssueSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -435,6 +489,11 @@ mod tests {
         assert_eq!(summary.records, 2);
         assert_eq!(summary.counts.waiting, 1);
         assert_eq!(summary.counts.ready, 1);
+        assert_eq!(summary.color_rejections, 0);
+        assert_eq!(
+            summary.media_issues,
+            VideoColorDiagnosticIssueAggregate::default()
+        );
         assert_eq!(
             summary.display_issues,
             ViewerGpuOutputDisplayIssueCounts::default()
@@ -563,6 +622,77 @@ mod tests {
     }
 
     #[test]
+    fn budget_replays_viewer_color_rejections_into_media_issue_summary() {
+        let jsonl = r#"
+{"health":{"status":"Waiting"},"last_color_rejection":{"asset_id":"asset-a","path":"E:/media/missing.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"detected_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=MissingMetadata,warnings=missing_or_unsupported_cicp","diagnostic_issue_summary":{"detected_color_space":null,"confidence":"None","source":"MissingMetadata","method":"MissingMetadata","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":0,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"partial_cicp_tags":0,"missing_or_unsupported_cicp_tags":1,"decoder_unavailable":0,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
+{"health":{"status":"Ready"},"last_color_rejection":{"asset_id":"asset-b","path":"E:/media/offline.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"detected_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=DecoderUnavailable,warnings=decoder_unavailable","diagnostic_issue_summary":{"detected_color_space":null,"confidence":"None","source":"DecoderUnavailable","method":"DecoderUnavailable","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":1,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"partial_cicp_tags":0,"missing_or_unsupported_cicp_tags":0,"decoder_unavailable":1,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 1,
+            max_waiting: 1,
+            max_color_rejections: 2,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(summary.passed);
+        assert_eq!(summary.color_rejections, 2);
+        assert_eq!(
+            summary.media_issues,
+            VideoColorDiagnosticIssueAggregate {
+                diagnostics: 2,
+                diagnostics_with_warnings: 2,
+                method_missing_metadata: 1,
+                method_decoder_unavailable: 1,
+                confidence_none: 2,
+                evidence_count: 1,
+                warning_count: 2,
+                missing_or_unsupported_cicp_tags: 1,
+                decoder_unavailable: 1,
+                ..VideoColorDiagnosticIssueAggregate::default()
+            }
+        );
+        assert_eq!(
+            summary.last_color_rejection,
+            Some(ViewerGpuOutputColorRejectionSummary {
+                asset_id: "asset-b".to_owned(),
+                path: "E:/media/offline.mov".to_owned(),
+                missing_metadata_policy: "RejectMedia".to_owned(),
+                source: "MissingPolicyRejectMedia".to_owned(),
+                override_color_space: None,
+                detected_color_space: None,
+                working_color_space: "Rec2020".to_owned(),
+                diagnostic_summary: "source=DecoderUnavailable,warnings=decoder_unavailable"
+                    .to_owned(),
+                diagnostic_issue_summary: VideoColorDiagnosticIssueSummary {
+                    detected_color_space: None,
+                    confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                    source: mondrian_media::VideoColorSpaceSource::DecoderUnavailable,
+                    method: mondrian_media::VideoColorDetectionMethod::DecoderUnavailable,
+                    has_raw_cicp_metadata: false,
+                    metadata_hint_count: 0,
+                    evidence_count: 1,
+                    warning_count: 1,
+                    multiple_metadata_hints: 0,
+                    ignored_metadata_hints: 0,
+                    metadata_hint_overrides_cicp_tags: 0,
+                    partial_cicp_tags: 0,
+                    missing_or_unsupported_cicp_tags: 0,
+                    decoder_unavailable: 1,
+                    hdr_side_data_count: 0,
+                    has_mastering_display_metadata: false,
+                    has_content_light_metadata: false,
+                    has_dynamic_hdr10_plus: false,
+                    has_dolby_vision_config: false,
+                    has_icc_profile: false,
+                    has_user_visible_warnings: true,
+                },
+            })
+        );
+    }
+
+    #[test]
     fn budget_fails_display_issue_thresholds() {
         let jsonl = r#"
 {"health":{"status":"Degraded"},"display_issue_summary":{"reason":"ReconfigureBlockedByPayload","output_color_space":"DciP3","payload_blocker":"UiExternalTextureCompositingRequiresSdrSrgb"}}
@@ -589,5 +719,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn budget_fails_color_rejection_threshold() {
+        let jsonl = r#"
+{"health":{"status":"Ready"},"last_color_rejection":{"asset_id":"asset-a","path":"E:/media/missing.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"detected_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=MissingMetadata,warnings=missing_or_unsupported_cicp","diagnostic_issue_summary":{"detected_color_space":null,"confidence":"None","source":"MissingMetadata","method":"MissingMetadata","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":0,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"partial_cicp_tags":0,"missing_or_unsupported_cicp_tags":1,"decoder_unavailable":0,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            max_color_rejections: 0,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert!(summary.failures.contains(&ViewerGpuOutputBudgetFailure {
+            metric: "color_rejections",
+            actual: 1,
+            limit: 0,
+        }));
     }
 }

@@ -15,7 +15,9 @@ use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
-use crate::app_ui::preview::{AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState};
+use crate::app_ui::preview::{
+    AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiPreviewColorRejection,
+};
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };
@@ -145,6 +147,7 @@ struct AppUiViewerGpuOutputDiagnostics {
     health: AppUiViewerGpuOutputHealthSummary,
     health_counts: AppUiViewerGpuOutputHealthCounts,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
+    last_color_rejection: Option<AppUiPreviewColorRejection>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
     display_issue_summary: Option<AppUiDisplayIssueSummary>,
@@ -303,6 +306,7 @@ impl AppUiViewerGpuOutputTelemetry {
             health,
             health_counts: self.health_counts,
             last_frame_context: self.last_frame_context.clone(),
+            last_color_rejection: None,
             last_display_contract_blocker: self.last_display_contract_blocker,
             last_display_presentation_readiness: self.last_display_presentation_readiness,
             display_issue_summary,
@@ -939,7 +943,10 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.color_output_runtime.diagnostics(),
                             &session.display_output_contract,
                         );
-                        trace_viewer_gpu_output_telemetry(&session.viewer_gpu_output_telemetry);
+                        trace_viewer_gpu_output_telemetry(
+                            &host,
+                            &session.viewer_gpu_output_telemetry,
+                        );
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
                         }
@@ -2126,8 +2133,17 @@ fn trace_color_output_runtime(
     );
 }
 
-fn trace_viewer_gpu_output_telemetry(telemetry: &AppUiViewerGpuOutputTelemetry) {
-    let diagnostics = telemetry.diagnostics();
+fn viewer_gpu_output_diagnostics(
+    host: &AppUiHost,
+    telemetry: &AppUiViewerGpuOutputTelemetry,
+) -> AppUiViewerGpuOutputDiagnostics {
+    let mut diagnostics = telemetry.diagnostics();
+    diagnostics.last_color_rejection = host.current_viewer_color_rejection();
+    diagnostics
+}
+
+fn trace_viewer_gpu_output_telemetry(host: &AppUiHost, telemetry: &AppUiViewerGpuOutputTelemetry) {
+    let diagnostics = viewer_gpu_output_diagnostics(host, telemetry);
     tracing::trace!(
         invocations = diagnostics.invocations,
         non_workspace_skips = diagnostics.non_workspace_skips,
@@ -2174,6 +2190,7 @@ fn trace_viewer_gpu_output_telemetry(telemetry: &AppUiViewerGpuOutputTelemetry) 
         health_count_degraded = diagnostics.health_counts.degraded,
         health_count_ready = diagnostics.health_counts.ready,
         last_frame_context = ?diagnostics.last_frame_context,
+        last_color_rejection = ?diagnostics.last_color_rejection,
         last_display_contract_blocker = ?diagnostics.last_display_contract_blocker,
         last_display_presentation_readiness = ?diagnostics.last_display_presentation_readiness,
         display_issue_summary = ?diagnostics.display_issue_summary,
@@ -4022,7 +4039,43 @@ mod tests {
                 view: "Standard".to_owned(),
             }),
         });
-        let diagnostics = telemetry.diagnostics();
+        let mut diagnostics = telemetry.diagnostics();
+        diagnostics.last_color_rejection = Some(AppUiPreviewColorRejection {
+            asset_id: mondrian_core::types::AssetId::new(),
+            path: PathBuf::from("E:/media/missing-color-tags.mov"),
+            missing_metadata_policy:
+                mondrian_timeline::sequence::MissingColorMetadataPolicy::RejectMedia,
+            source:
+                mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyRejectMedia,
+            override_color_space: None,
+            detected_color_space: None,
+            working_color_space: ColorSpace::Rec2020,
+            diagnostic_summary: "source=MissingMetadata,warnings=missing_or_unsupported_cicp"
+                .to_string(),
+            diagnostic_issue_summary: mondrian_media::VideoColorDiagnosticIssueSummary {
+                detected_color_space: None,
+                source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                has_raw_cicp_metadata: false,
+                metadata_hint_count: 0,
+                evidence_count: 0,
+                warning_count: 1,
+                multiple_metadata_hints: 0,
+                ignored_metadata_hints: 0,
+                metadata_hint_overrides_cicp_tags: 0,
+                partial_cicp_tags: 0,
+                missing_or_unsupported_cicp_tags: 1,
+                decoder_unavailable: 0,
+                hdr_side_data_count: 0,
+                has_mastering_display_metadata: false,
+                has_content_light_metadata: false,
+                has_dynamic_hdr10_plus: false,
+                has_dolby_vision_config: false,
+                has_icc_profile: false,
+                has_user_visible_warnings: true,
+            },
+        });
         let output_path = std::env::temp_dir().join(format!(
             "mondrian-viewer-gpu-output-diagnostics-{}-{}.jsonl",
             std::process::id(),
@@ -4060,6 +4113,15 @@ mod tests {
         assert_eq!(
             json["last_frame_context"]["display_view"]["view"],
             "Standard"
+        );
+        assert_eq!(
+            json["last_color_rejection"]["diagnostic_issue_summary"]
+                ["missing_or_unsupported_cicp_tags"],
+            1
+        );
+        assert_eq!(
+            json["last_color_rejection"]["missing_metadata_policy"],
+            "RejectMedia"
         );
     }
 

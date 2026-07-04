@@ -15,7 +15,7 @@ use mondrian_assets::AssetKind;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
-use mondrian_media::VideoColorDiagnostic;
+use mondrian_media::{VideoColorDiagnostic, VideoColorDiagnosticIssueSummary};
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
 use mondrian_renderer::{
@@ -981,6 +981,8 @@ pub struct AppUiPreviewColorRejection {
     pub working_color_space: ColorSpace,
     /// Compact media color diagnostic summary from `mondrian-media`.
     pub diagnostic_summary: String,
+    /// Machine-readable media color diagnostic issue summary.
+    pub diagnostic_issue_summary: VideoColorDiagnosticIssueSummary,
 }
 
 /// Stable preview color-path health summary for perf JSONL and diagnostics tooling.
@@ -1034,6 +1036,7 @@ impl AppUiPreviewColorRejection {
         path: PathBuf,
         resolution: InputColorResolution,
         diagnostic_summary: String,
+        diagnostic_issue_summary: VideoColorDiagnosticIssueSummary,
     ) -> Self {
         Self {
             asset_id,
@@ -1044,6 +1047,7 @@ impl AppUiPreviewColorRejection {
             detected_color_space: resolution.detected_color_space,
             working_color_space: resolution.working_color_space,
             diagnostic_summary,
+            diagnostic_issue_summary,
         }
     }
 }
@@ -1207,6 +1211,7 @@ impl ViewerPreviewSource for AppUiPreviewService {
             detected_color_space: rejection.detected_color_space,
             working_color_space: rejection.working_color_space,
             diagnostic_summary: rejection.diagnostic_summary,
+            diagnostic_issue_summary: rejection.diagnostic_issue_summary,
         })
     }
 }
@@ -1794,14 +1799,32 @@ impl AppUiPreviewService {
                     .media_info
                     .primary_video()
                     .map(VideoColorDiagnostic::from_stream)
-                    .map(|diagnostic| diagnostic.summary())
-                    .unwrap_or_else(|| "unavailable".to_string());
+                    .unwrap_or_else(|| VideoColorDiagnostic {
+                        detected_color_space: None,
+                        interpretation: mondrian_media::DetectedColorInterpretation {
+                            color_space: None,
+                            confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                            source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                            method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                            evidence: Vec::new(),
+                            warnings: Vec::new(),
+                            user_overridable: true,
+                        },
+                        source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                        method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                        metadata: None,
+                        metadata_hints: Vec::new(),
+                        hdr_metadata: Vec::new(),
+                    });
+                let diagnostic_summary = diagnostic.summary();
+                let diagnostic_issue_summary = diagnostic.issue_summary();
                 if record_color_rejection {
                     self.record_color_rejection(AppUiPreviewColorRejection::new(
                         *asset_id,
                         asset.path.clone(),
                         input_color_resolution,
-                        diagnostic.clone(),
+                        diagnostic_summary.clone(),
+                        diagnostic_issue_summary,
                     ));
                 }
                 tracing::warn!(
@@ -1812,7 +1835,8 @@ impl AppUiPreviewService {
                     override_color_space = ?input_color_resolution.override_color_space,
                     detected_color_space = ?input_color_resolution.detected_color_space,
                     working_color_space = ?input_color_resolution.working_color_space,
-                    color_diagnostic = %diagnostic,
+                    color_diagnostic = %diagnostic_summary,
+                    color_diagnostic_issue_summary = ?diagnostic_issue_summary,
                     "viewer preview rejected media with missing color metadata"
                 );
                 return None;
@@ -3171,12 +3195,43 @@ mod tests {
         let diagnostic =
             "source=MissingMetadata,method=MissingMetadata,warnings=missing_or_unsupported_cicp"
                 .to_string();
+        let issue_summary = VideoColorDiagnosticIssueSummary {
+            source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+            method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+            confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+            missing_or_unsupported_cicp_tags: 1,
+            has_user_visible_warnings: true,
+            ..VideoColorDiagnosticIssueSummary {
+                detected_color_space: None,
+                source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                has_raw_cicp_metadata: false,
+                metadata_hint_count: 0,
+                evidence_count: 0,
+                warning_count: 0,
+                multiple_metadata_hints: 0,
+                ignored_metadata_hints: 0,
+                metadata_hint_overrides_cicp_tags: 0,
+                partial_cicp_tags: 0,
+                missing_or_unsupported_cicp_tags: 0,
+                decoder_unavailable: 0,
+                hdr_side_data_count: 0,
+                has_mastering_display_metadata: false,
+                has_content_light_metadata: false,
+                has_dynamic_hdr10_plus: false,
+                has_dolby_vision_config: false,
+                has_icc_profile: false,
+                has_user_visible_warnings: false,
+            }
+        };
 
         service.record_color_rejection(AppUiPreviewColorRejection::new(
             asset_id,
             path.clone(),
             resolution,
             diagnostic.clone(),
+            issue_summary,
         ));
 
         let rejection = service.last_color_rejection().expect("preview color rejection");
@@ -3194,6 +3249,7 @@ mod tests {
         assert_eq!(rejection.detected_color_space, None);
         assert_eq!(rejection.working_color_space, ColorSpace::Rec2020);
         assert_eq!(rejection.diagnostic_summary, diagnostic);
+        assert_eq!(rejection.diagnostic_issue_summary, issue_summary);
     }
 
     #[test]
@@ -3210,6 +3266,29 @@ mod tests {
                 &color_context,
             ),
             "old".to_string(),
+            VideoColorDiagnosticIssueSummary {
+                detected_color_space: None,
+                source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                has_raw_cicp_metadata: false,
+                metadata_hint_count: 0,
+                evidence_count: 0,
+                warning_count: 0,
+                multiple_metadata_hints: 0,
+                ignored_metadata_hints: 0,
+                metadata_hint_overrides_cicp_tags: 0,
+                partial_cicp_tags: 0,
+                missing_or_unsupported_cicp_tags: 0,
+                decoder_unavailable: 0,
+                hdr_side_data_count: 0,
+                has_mastering_display_metadata: false,
+                has_content_light_metadata: false,
+                has_dynamic_hdr10_plus: false,
+                has_dolby_vision_config: false,
+                has_icc_profile: false,
+                has_user_visible_warnings: false,
+            },
         ));
         assert!(service.last_color_rejection().is_some());
 

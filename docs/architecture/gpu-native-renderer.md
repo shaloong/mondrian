@@ -300,14 +300,17 @@ machine from counters. Setting `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT` appends those
 viewer diagnostics as JSONL from the live app window, including sequence id,
 timeline frame, preview dimensions, external texture key, output target, output
 color space, tone-map flag, optional OCIO display/view, and cumulative health
-counts for ready/degraded/blocked/failed/rejected/waiting outcomes. This gives
+counts for ready/degraded/blocked/failed/rejected/waiting outcomes. The same
+records also carry the latest structured viewer color rejection and its machine
+issue summary when missing-metadata policy rejects preview media. This gives
 playback/scrubbing sessions a persistent health stream that can be budgeted and
 correlated back to specific frames in addition to trace logs; the
 `viewer_gpu_output_budget` developer binary consumes that JSONL and exits
 non-zero when the configured health thresholds or display-issue thresholds are
-violated. Its report includes structured display issue reason counts and payload
-blocker counts, so HDR/P3/surface-contract problems remain visible even when
-a temporary smoke run allows degraded viewer output. The same session also owns
+violated. Its report includes structured display issue reason counts,
+payload-blocker counts, and aggregated media issue counts, so HDR/P3/surface-contract
+problems and metadata-policy rejections remain visible even when a temporary
+smoke run allows degraded viewer output. The same session also owns
 the display-output contract for the current wgpu 30 surface and monitor:
 selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
