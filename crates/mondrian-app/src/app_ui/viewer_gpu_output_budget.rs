@@ -1279,6 +1279,50 @@ mod tests {
     }
 
     #[test]
+    fn budget_fails_display_capability_drift_thresholds() {
+        let jsonl = r#"
+{"health":{"status":"Ready"},"last_display_contract_refresh":{"reason":"WindowMoved","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly","display_tone_map_headroom_ppm":null,"available_surface_formats":["Bgra8UnormSrgb"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo"],"alpha_modes":["Auto"]},"next":{"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"surface_format":"Rgba16Float","surface_color_space":"Bt2100Pq","surface_encoding":"Pq","surface_hdr_mode":"HdrPq","display_tone_map_headroom_ppm":null,"available_surface_formats":["Bgra8UnormSrgb","Rgba16Float"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false},{"format":"Rgba16Float","srgb":false,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":true,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo","Immediate"],"alpha_modes":["Auto","Opaque"]},"renderer_rebuilt":true,"display_target_changed":true,"surface_format_changed":true,"surface_color_space_changed":true,"surface_hdr_mode_changed":true,"display_tone_map_headroom_changed":false,"available_surface_formats_changed":true,"format_color_spaces_changed":true,"present_modes_changed":true,"alpha_modes_changed":true}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            max_display_contract_refreshes: 0,
+            max_available_surface_format_changes: 0,
+            max_format_color_space_changes: 0,
+            max_present_mode_changes: 0,
+            max_alpha_mode_changes: 0,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert!(summary.failures.contains(&ViewerGpuOutputBudgetFailure {
+            metric: "display_contract_refreshes",
+            actual: 1,
+            limit: 0,
+        }));
+        assert!(summary.failures.contains(&ViewerGpuOutputBudgetFailure {
+            metric: "available_surface_format_changes",
+            actual: 1,
+            limit: 0,
+        }));
+        assert!(summary.failures.contains(&ViewerGpuOutputBudgetFailure {
+            metric: "format_color_space_changes",
+            actual: 1,
+            limit: 0,
+        }));
+        assert!(summary.failures.contains(&ViewerGpuOutputBudgetFailure {
+            metric: "present_mode_changes",
+            actual: 1,
+            limit: 0,
+        }));
+        assert!(summary.failures.contains(&ViewerGpuOutputBudgetFailure {
+            metric: "alpha_mode_changes",
+            actual: 1,
+            limit: 0,
+        }));
+    }
+
+    #[test]
     fn budget_replays_viewer_color_rejections_into_media_issue_summary() {
         let jsonl = r#"
 {"health":{"status":"Waiting"},"last_color_rejection":{"asset_id":"asset-a","path":"E:/media/missing.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"detected_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=MissingMetadata,warnings=missing_or_unsupported_cicp","diagnostic_issue_summary":{"detected_color_space":null,"confidence":"None","source":"MissingMetadata","method":"MissingMetadata","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":0,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"partial_cicp_tags":0,"missing_or_unsupported_cicp_tags":1,"decoder_unavailable":0,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
