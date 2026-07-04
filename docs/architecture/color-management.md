@@ -164,7 +164,11 @@ external texture was registered/rejected. Successful and rejected registration
 paths accumulate the actual `RenderColorStageDiagnostics` returned by the
 recorded GPU output stage, so product logs and smoke tests can prove that the
 main preview path used the intended upload + native GPU color + optional
-readback schedule instead of inferring it from renderer tests.
+readback schedule instead of inferring it from renderer tests. Viewer telemetry
+also derives a last-attempt `health` summary from that same outcome, stage, and
+display-presentation state, separating native GPU boundary readiness, display
+contract readiness, presentation readiness, missing output textures, record
+failures, and external texture rejection from cumulative counters.
 
 Input transforms follow the same rule. Decode/import code wraps source pixels in
 `CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks

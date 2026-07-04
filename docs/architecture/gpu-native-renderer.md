@@ -288,8 +288,14 @@ swapchain/display-management correctness, which remains the app-window display
 contract's responsibility.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
 the surface/backend lifetime and traces its cache/resource diagnostics with the
-frame renderer diagnostics. The same session also owns the display-output
-contract for the current wgpu 30 surface and monitor: selected sRGB surface
+frame renderer diagnostics. Viewer GPU output telemetry also derives a
+per-attempt `health` summary from the last output-boundary outcome, final stage
+diagnostics, display-boundary blockers, and presentation readiness. That summary
+separates ready native GPU output, blocked display contracts, degraded
+presentation readiness, missing output textures, record failures, and external
+texture registration rejection without making dashboards reconstruct the state
+machine from counters. The same session also owns the display-output contract
+for the current wgpu 30 surface and monitor: selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
 per-format surface color-space capabilities, `display_hdr_info` and tone-map
 headroom diagnostics, present modes, alpha modes, and monitor fingerprint.

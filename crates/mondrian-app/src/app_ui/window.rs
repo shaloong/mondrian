@@ -103,6 +103,7 @@ struct AppUiViewerGpuOutputTelemetry {
     registered_frames: u64,
     rejected_external_frames: u64,
     accumulated_stage_diagnostics: RenderColorStageDiagnostics,
+    last_stage_diagnostics: Option<RenderColorStageDiagnostics>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
@@ -136,6 +137,7 @@ struct AppUiViewerGpuOutputDiagnostics {
     stage_gpu_wrapper_blockers: u64,
     stage_gpu_render_pipeline_blockers: u64,
     stage_pixels: u64,
+    health: AppUiViewerGpuOutputHealthSummary,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
     display_issue_summary: Option<AppUiDisplayIssueSummary>,
@@ -154,6 +156,31 @@ enum AppUiViewerGpuOutputOutcome {
     OutputTextureMissing,
     Registered,
     ExternalFrameRejected,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+struct AppUiViewerGpuOutputHealthSummary {
+    status: AppUiViewerGpuOutputHealthStatus,
+    viewer_output_ready: bool,
+    native_gpu_boundary_ready: bool,
+    display_boundary_ready: bool,
+    presentation_ready: bool,
+    stage_sequence_ready: bool,
+    no_gpu_blockers: bool,
+    output_texture_available: bool,
+    external_texture_registered: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+enum AppUiViewerGpuOutputHealthStatus {
+    #[default]
+    NoInvocation,
+    Waiting,
+    Blocked,
+    Failed,
+    Rejected,
+    Degraded,
+    Ready,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -187,6 +214,7 @@ impl AppUiViewerGpuOutputTelemetry {
             self.last_display_contract_blocker,
             self.last_display_presentation_readiness,
         );
+        let health = AppUiViewerGpuOutputHealthSummary::from_telemetry(self);
         AppUiViewerGpuOutputDiagnostics {
             invocations: self.invocations,
             non_workspace_skips: self.non_workspace_skips,
@@ -229,6 +257,7 @@ impl AppUiViewerGpuOutputTelemetry {
                 .gpu_blocker_breakdown
                 .render_pipeline_not_prepared,
             stage_pixels: self.accumulated_stage_diagnostics.stage_pixels,
+            health,
             last_display_contract_blocker: self.last_display_contract_blocker,
             last_display_presentation_readiness: self.last_display_presentation_readiness,
             display_issue_summary,
@@ -238,6 +267,10 @@ impl AppUiViewerGpuOutputTelemetry {
 
     fn record_invocation(&mut self) {
         self.invocations = self.invocations.saturating_add(1);
+        self.last_stage_diagnostics = None;
+        self.last_display_contract_blocker = None;
+        self.last_display_presentation_readiness = None;
+        self.last_outcome = None;
     }
 
     fn record_non_workspace_skip(&mut self) {
@@ -316,13 +349,94 @@ impl AppUiViewerGpuOutputTelemetry {
     fn record_registered_frame(&mut self, diagnostics: RenderColorStageDiagnostics) {
         self.registered_frames = self.registered_frames.saturating_add(1);
         self.accumulated_stage_diagnostics.accumulate(diagnostics);
+        self.last_stage_diagnostics = Some(diagnostics);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Registered);
     }
 
     fn record_rejected_external_frame(&mut self, diagnostics: RenderColorStageDiagnostics) {
         self.rejected_external_frames = self.rejected_external_frames.saturating_add(1);
         self.accumulated_stage_diagnostics.accumulate(diagnostics);
+        self.last_stage_diagnostics = Some(diagnostics);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected);
+    }
+}
+
+impl AppUiViewerGpuOutputHealthSummary {
+    fn from_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) -> Self {
+        if telemetry.last_outcome.is_none() {
+            return Self::default();
+        }
+        let display_boundary_ready =
+            telemetry.last_outcome != Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked);
+        let presentation_ready = telemetry
+            .last_display_presentation_readiness
+            .map(|readiness| readiness.status == AppUiDisplayPresentationReadinessStatus::Current)
+            .unwrap_or(true);
+        let stage_sequence_ready = telemetry
+            .last_stage_diagnostics
+            .map(|diagnostics| {
+                diagnostics.total_stages == 2
+                    && diagnostics.upload_stages == 1
+                    && diagnostics.gpu_color_stages == 1
+                    && diagnostics.readback_stages == 0
+            })
+            .unwrap_or(false);
+        let no_gpu_blockers = telemetry
+            .last_stage_diagnostics
+            .map(|diagnostics| {
+                diagnostics.gpu_blockers == 0 && diagnostics.gpu_blocker_breakdown.total() == 0
+            })
+            .unwrap_or(false);
+        let output_texture_available = !matches!(
+            telemetry.last_outcome,
+            Some(AppUiViewerGpuOutputOutcome::OutputTextureMissing)
+        ) && telemetry.last_stage_diagnostics.is_some();
+        let external_texture_registered =
+            telemetry.last_outcome == Some(AppUiViewerGpuOutputOutcome::Registered);
+        let native_gpu_boundary_ready =
+            stage_sequence_ready && no_gpu_blockers && output_texture_available;
+        let viewer_output_ready = native_gpu_boundary_ready
+            && display_boundary_ready
+            && presentation_ready
+            && external_texture_registered;
+        let status = match telemetry.last_outcome {
+            None => AppUiViewerGpuOutputHealthStatus::NoInvocation,
+            Some(
+                AppUiViewerGpuOutputOutcome::NonWorkspace
+                | AppUiViewerGpuOutputOutcome::Current
+                | AppUiViewerGpuOutputOutcome::Loading
+                | AppUiViewerGpuOutputOutcome::Unavailable
+                | AppUiViewerGpuOutputOutcome::InvalidTextureKey,
+            ) => AppUiViewerGpuOutputHealthStatus::Waiting,
+            Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked) => {
+                AppUiViewerGpuOutputHealthStatus::Blocked
+            }
+            Some(
+                AppUiViewerGpuOutputOutcome::RecordFailed
+                | AppUiViewerGpuOutputOutcome::OutputTextureMissing,
+            ) => AppUiViewerGpuOutputHealthStatus::Failed,
+            Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected) => {
+                AppUiViewerGpuOutputHealthStatus::Rejected
+            }
+            Some(AppUiViewerGpuOutputOutcome::Registered) if viewer_output_ready => {
+                AppUiViewerGpuOutputHealthStatus::Ready
+            }
+            Some(AppUiViewerGpuOutputOutcome::Registered) => {
+                AppUiViewerGpuOutputHealthStatus::Degraded
+            }
+        };
+
+        Self {
+            status,
+            viewer_output_ready,
+            native_gpu_boundary_ready,
+            display_boundary_ready,
+            presentation_ready,
+            stage_sequence_ready,
+            no_gpu_blockers,
+            output_texture_available,
+            external_texture_registered,
+        }
     }
 }
 
@@ -1919,6 +2033,15 @@ fn trace_viewer_gpu_output_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) {
         stage_gpu_wrapper_blockers = diagnostics.stage_gpu_wrapper_blockers,
         stage_gpu_render_pipeline_blockers = diagnostics.stage_gpu_render_pipeline_blockers,
         stage_pixels = diagnostics.stage_pixels,
+        viewer_output_health_status = ?diagnostics.health.status,
+        viewer_output_ready = diagnostics.health.viewer_output_ready,
+        native_gpu_boundary_ready = diagnostics.health.native_gpu_boundary_ready,
+        display_boundary_ready = diagnostics.health.display_boundary_ready,
+        presentation_ready = diagnostics.health.presentation_ready,
+        stage_sequence_ready = diagnostics.health.stage_sequence_ready,
+        no_gpu_blockers = diagnostics.health.no_gpu_blockers,
+        output_texture_available = diagnostics.health.output_texture_available,
+        external_texture_registered = diagnostics.health.external_texture_registered,
         last_display_contract_blocker = ?diagnostics.last_display_contract_blocker,
         last_display_presentation_readiness = ?diagnostics.last_display_presentation_readiness,
         display_issue_summary = ?diagnostics.display_issue_summary,
@@ -1966,10 +2089,10 @@ fn prepare_viewer_gpu_preview(
     let presentation_readiness = session
         .display_output_contract
         .presentation_readiness_for_boundary(&frame.boundary);
+    session
+        .viewer_gpu_output_telemetry
+        .record_display_presentation_readiness(presentation_readiness);
     if presentation_readiness.status != AppUiDisplayPresentationReadinessStatus::Current {
-        session
-            .viewer_gpu_output_telemetry
-            .record_display_presentation_readiness(presentation_readiness);
         tracing::warn!(
             sequence_id = %frame.sequence_id,
             frame = frame.frame,
@@ -3267,26 +3390,19 @@ mod tests {
         assert_eq!(telemetry.display_contract_surface_color_space_blockers, 0);
         assert_eq!(telemetry.record_failures, 1);
         assert_eq!(telemetry.missing_output_textures, 1);
-        assert_eq!(
-            telemetry.last_display_contract_blocker,
-            Some(AppUiDisplayBoundaryBlockerDiagnostics {
-                kind: AppUiDisplayBoundaryBlockerKind::HdrOutputRequiresHdrSurface,
-                output_color_space: ColorSpace::Rec2100Pq,
-                selected_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
-                surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
-                supported_surface_color_space_count: 1,
-                supports_srgb: true,
-                supports_display_p3: false,
-                supports_extended_srgb_linear: false,
-                supports_extended_srgb: false,
-                supports_extended_display_p3: false,
-                supports_bt2100_pq: false,
-                supports_bt2100_hlg: false,
-            })
-        );
+        assert_eq!(telemetry.last_display_contract_blocker, None);
         assert_eq!(
             telemetry.last_outcome,
             Some(AppUiViewerGpuOutputOutcome::OutputTextureMissing)
+        );
+        assert_eq!(
+            telemetry.diagnostics().health,
+            AppUiViewerGpuOutputHealthSummary {
+                status: AppUiViewerGpuOutputHealthStatus::Failed,
+                display_boundary_ready: true,
+                presentation_ready: true,
+                ..AppUiViewerGpuOutputHealthSummary::default()
+            }
         );
     }
 
@@ -3350,6 +3466,12 @@ mod tests {
                     supported_surface_color_space_count: Some(2),
                     target_surface_color_space_supported: Some(true),
                 }),
+                health: AppUiViewerGpuOutputHealthSummary {
+                    status: AppUiViewerGpuOutputHealthStatus::Blocked,
+                    display_boundary_ready: false,
+                    presentation_ready: true,
+                    ..AppUiViewerGpuOutputHealthSummary::default()
+                },
                 last_outcome: Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked),
                 ..AppUiViewerGpuOutputDiagnostics::default()
             }
@@ -3540,8 +3662,125 @@ mod tests {
                 stage_gpu_blockers: 1,
                 stage_gpu_render_pipeline_blockers: 1,
                 stage_pixels: 50,
+                health: AppUiViewerGpuOutputHealthSummary {
+                    status: AppUiViewerGpuOutputHealthStatus::Rejected,
+                    display_boundary_ready: true,
+                    presentation_ready: true,
+                    output_texture_available: true,
+                    ..AppUiViewerGpuOutputHealthSummary::default()
+                },
                 last_outcome: Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected),
                 ..AppUiViewerGpuOutputDiagnostics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn viewer_gpu_output_health_reports_ready_registered_native_boundary() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        telemetry.record_invocation();
+        telemetry.record_display_presentation_readiness(
+            AppUiDisplayPresentationReadinessDiagnostics {
+                status: AppUiDisplayPresentationReadinessStatus::Current,
+                output_color_space: ColorSpace::Srgb,
+                current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
+                current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+                desired_surface_format: None,
+                desired_surface_color_space: None,
+                desired_surface_encoding: None,
+                desired_surface_hdr_mode: None,
+                payload_blocker: None,
+            },
+        );
+        telemetry.record_registered_frame(RenderColorStageDiagnostics {
+            total_stages: 2,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            stage_pixels: 20,
+            ..RenderColorStageDiagnostics::default()
+        });
+
+        assert_eq!(
+            telemetry.diagnostics().health,
+            AppUiViewerGpuOutputHealthSummary {
+                status: AppUiViewerGpuOutputHealthStatus::Ready,
+                viewer_output_ready: true,
+                native_gpu_boundary_ready: true,
+                display_boundary_ready: true,
+                presentation_ready: true,
+                stage_sequence_ready: true,
+                no_gpu_blockers: true,
+                output_texture_available: true,
+                external_texture_registered: true,
+            }
+        );
+    }
+
+    #[test]
+    fn viewer_gpu_output_health_reports_degraded_registered_presentation() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        telemetry.record_invocation();
+        let readiness = AppUiDisplayPresentationReadinessDiagnostics {
+            status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+            output_color_space: ColorSpace::DciP3,
+            current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
+            current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+            current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+            desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
+            desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
+            desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
+            desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
+            payload_blocker: Some(
+                AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
+            ),
+        };
+        telemetry.record_display_presentation_readiness(readiness);
+        telemetry.record_registered_frame(RenderColorStageDiagnostics {
+            total_stages: 2,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            stage_pixels: 20,
+            ..RenderColorStageDiagnostics::default()
+        });
+
+        assert_eq!(
+            telemetry.diagnostics().health,
+            AppUiViewerGpuOutputHealthSummary {
+                status: AppUiViewerGpuOutputHealthStatus::Degraded,
+                viewer_output_ready: false,
+                native_gpu_boundary_ready: true,
+                display_boundary_ready: true,
+                presentation_ready: false,
+                stage_sequence_ready: true,
+                no_gpu_blockers: true,
+                output_texture_available: true,
+                external_texture_registered: true,
+            }
+        );
+    }
+
+    #[test]
+    fn viewer_gpu_output_health_resets_last_stage_on_new_invocation() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        telemetry.record_invocation();
+        telemetry.record_registered_frame(RenderColorStageDiagnostics {
+            total_stages: 2,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            stage_pixels: 20,
+            ..RenderColorStageDiagnostics::default()
+        });
+        telemetry.record_invocation();
+        telemetry.record_loading_skip();
+
+        assert_eq!(
+            telemetry.diagnostics().health,
+            AppUiViewerGpuOutputHealthSummary {
+                status: AppUiViewerGpuOutputHealthStatus::Waiting,
+                display_boundary_ready: true,
+                presentation_ready: true,
+                ..AppUiViewerGpuOutputHealthSummary::default()
             }
         );
     }
