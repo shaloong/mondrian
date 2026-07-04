@@ -5,8 +5,8 @@ use crate::app_ui::preview::{
 };
 use crate::app_ui::shell::AppUiAppRoot;
 use crate::app_ui::viewer_gpu_output_budget::{
-    build_health_report, evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputBudgetSummary,
-    ViewerGpuOutputHealthReport,
+    build_health_report, evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputHealthReport,
+    ViewerGpuOutputHealthVerdict,
 };
 use anyhow::Context;
 use serde::Serialize;
@@ -97,11 +97,9 @@ struct PreviewMediaPlaybackPerfReport {
 }
 
 #[derive(Debug, Serialize)]
-struct ViewerGpuOutputBudgetSmokeReport {
+struct ViewerGpuOutputHealthSmokeReport {
     scenario: &'static str,
-    source_path: String,
-    summary: ViewerGpuOutputBudgetSummary,
-    health_report: ViewerGpuOutputHealthReport,
+    report: ViewerGpuOutputHealthReport,
 }
 
 const VIEWER_GPU_OUTPUT_BUDGET_SCENARIO: &str = "viewer_gpu_output_budget";
@@ -507,15 +505,11 @@ fn viewer_gpu_output_budget_report_from_jsonl(
     source_path: impl Into<String>,
     contents: &str,
     budget: &ViewerGpuOutputBudget,
-) -> anyhow::Result<ViewerGpuOutputBudgetSmokeReport> {
+) -> anyhow::Result<ViewerGpuOutputHealthSmokeReport> {
     let summary = evaluate_jsonl(contents, budget)?;
-    let health_report = build_health_report(summary.clone(), scenario);
-    Ok(ViewerGpuOutputBudgetSmokeReport {
-        scenario,
-        source_path: source_path.into(),
-        summary,
-        health_report,
-    })
+    let source_path = source_path.into();
+    let report = build_health_report(summary, scenario, Some(source_path));
+    Ok(ViewerGpuOutputHealthSmokeReport { scenario, report })
 }
 
 fn run_case<F>(
@@ -573,9 +567,9 @@ fn viewer_gpu_output_budget_smoke() -> anyhow::Result<()> {
         &budget,
     )?;
     let report_json = serde_json::to_string(&report)?;
-    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_BUDGET_JSON={report_json}");
+    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_HEALTH_REPORT_JSON={report_json}");
     write_report_if_needed(&report_json);
-    if !report.summary.passed {
+    if report.report.verdict == ViewerGpuOutputHealthVerdict::Fail {
         anyhow::bail!("viewer GPU output budget smoke failed: {report_json}");
     }
     Ok(())
@@ -604,9 +598,9 @@ fn viewer_gpu_output_display_baseline_smoke() -> anyhow::Result<()> {
         &budget,
     )?;
     let report_json = serde_json::to_string(&report)?;
-    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_JSON={report_json}");
+    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_HEALTH_REPORT_JSON={report_json}");
     write_report_if_needed(&report_json);
-    if !report.summary.passed {
+    if report.report.verdict == ViewerGpuOutputHealthVerdict::Fail {
         anyhow::bail!("viewer GPU output display baseline smoke failed: {report_json}");
     }
     Ok(())
@@ -1543,7 +1537,7 @@ fn preview_color_health_budget_reports_failures() {
 }
 
 #[test]
-fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
+fn viewer_gpu_output_budget_smoke_report_serializes_health_report() {
     let jsonl = r#"
 {"health":{"status":"Waiting"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":0}}
 {"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"last_frame_context":{"sequence_id":"seq","frame":12,"width":1280,"height":720,"external_texture_key":"key","output_target":"Display","output_color_space":"Srgb","tone_map":false}}
@@ -1559,37 +1553,52 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     let json = serde_json::to_value(&report).expect("serialize viewer GPU output budget report");
 
     assert_eq!(json["scenario"], "viewer_gpu_output_budget");
-    assert_eq!(json["health_report"]["schema_version"], 1);
-    assert_eq!(json["health_report"]["profile"], "viewer_gpu_output_budget");
-    assert_eq!(json["health_report"]["verdict"], "Pass");
-    assert_eq!(json["summary"]["passed"], true);
-    assert_eq!(json["summary"]["records"], 2);
-    assert_eq!(json["summary"]["budget"]["min_records"], 1);
-    assert_eq!(json["summary"]["counts"]["ready"], 1);
-    assert_eq!(json["summary"]["counts"]["waiting"], 1);
-    assert_eq!(json["summary"]["display_issues"]["total"], 0);
-    assert_eq!(json["summary"]["display_contract_refreshes"]["total"], 0);
+    assert_eq!(json["report"]["schema_version"], 1);
+    assert_eq!(json["report"]["profile"], "viewer_gpu_output_budget");
     assert_eq!(
-        json["summary"]["display_issue_refresh_correlations"]["total"],
+        json["report"]["source_path"],
+        "target/perf/viewer-gpu-output.jsonl"
+    );
+    assert_eq!(json["report"]["verdict"], "Pass");
+    assert!(json.get("summary").is_none());
+    assert!(json.get("health_report").is_none());
+    assert!(json.get("source_path").is_none());
+    assert_eq!(json["report"]["summary"]["passed"], true);
+    assert_eq!(json["report"]["summary"]["records"], 2);
+    assert_eq!(json["report"]["summary"]["budget"]["min_records"], 1);
+    assert_eq!(json["report"]["summary"]["counts"]["ready"], 1);
+    assert_eq!(json["report"]["summary"]["counts"]["waiting"], 1);
+    assert_eq!(json["report"]["summary"]["display_issues"]["total"], 0);
+    assert_eq!(
+        json["report"]["summary"]["display_contract_refreshes"]["total"],
         0
     );
     assert_eq!(
-        json["summary"]["budget"]["max_display_contract_refreshes"],
-        u64::MAX
-    );
-    assert_eq!(
-        json["health_report"]["summary"]["budget"]["max_display_contract_refreshes"],
-        u64::MAX
-    );
-    assert_eq!(
-        json["summary"]["budget"]["max_hdr_output_requires_hdr_surface"],
+        json["report"]["summary"]["display_issue_refresh_correlations"]["total"],
         0
     );
-    assert_eq!(json["summary"]["budget"]["max_display_payload_blockers"], 0);
-    assert_eq!(json["summary"]["budget"]["max_color_rejections"], 0);
-    assert_eq!(json["summary"]["color_rejections"], 0);
-    assert_eq!(json["summary"]["reported_counts_match_replay"], true);
-    assert_eq!(json["summary"]["last_frame_context"]["frame"], 12);
+    assert_eq!(
+        json["report"]["summary"]["budget"]["max_display_contract_refreshes"],
+        u64::MAX
+    );
+    assert_eq!(
+        json["report"]["summary"]["budget"]["max_hdr_output_requires_hdr_surface"],
+        0
+    );
+    assert_eq!(
+        json["report"]["summary"]["budget"]["max_display_payload_blockers"],
+        0
+    );
+    assert_eq!(
+        json["report"]["summary"]["budget"]["max_color_rejections"],
+        0
+    );
+    assert_eq!(json["report"]["summary"]["color_rejections"], 0);
+    assert_eq!(
+        json["report"]["summary"]["reported_counts_match_replay"],
+        true
+    );
+    assert_eq!(json["report"]["summary"]["last_frame_context"]["frame"], 12);
 }
 
 #[test]

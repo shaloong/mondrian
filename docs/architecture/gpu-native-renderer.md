@@ -307,16 +307,16 @@ playback/scrubbing sessions a persistent health stream that can be budgeted and
 correlated back to specific frames in addition to trace logs; the
 `viewer_gpu_output_budget` developer binary consumes that JSONL and exits
 non-zero when the configured health thresholds or display-issue thresholds are
-violated. Its report includes structured display issue reason counts,
-payload-blocker counts, and aggregated media issue counts, so HDR/P3/surface-contract
-problems and metadata-policy rejections remain visible even when a temporary
-smoke run allows degraded viewer output. The same evaluator also builds a
-versioned `health_report` for CI walls and issue attachments. That report keeps
-the raw budget summary intact, then adds fixed diagnostic checks, root causes,
-actions, and evidence across capture integrity, viewer output state, GPU color
-path, display contract, display capability drift, and media color policy.
-Reports must use these structured sections instead of parsing trace text or
-reconstructing readiness from ad hoc counters. The same session also owns
+violated. It emits a versioned health report for CI walls and issue
+attachments. That report carries the diagnostics stream source path and keeps
+the raw budget summary intact, including
+structured display issue reason counts, payload-blocker counts, aggregated
+media issue counts, stage counters, and last health flags, then adds fixed
+diagnostic checks, root causes, actions, and evidence across capture integrity,
+viewer output state, GPU color path, display contract, display capability
+drift, and media color policy. Reports must use this single structured shape
+instead of parsing trace text, reconstructing readiness from ad hoc counters,
+or depending on a legacy summary-only output. The same session also owns
 the display-output contract for the current wgpu 30 surface and monitor:
 selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,

@@ -281,22 +281,23 @@ rejects an asset.
 The same records include cumulative ready/degraded/blocked/failed/rejected/waiting
 health counts so smoke tooling can enforce viewer GPU-output budgets directly
 from the JSONL stream. `viewer_gpu_output_budget` consumes this stream, emits a
-structured summary, and fails closed when ready/failed/blocked/rejected/degraded
-thresholds are not met or when the reported cumulative `health_counts` disagree
-with the statuses replayed from the JSONL records. Empty streams fail explicitly
-with a `records` budget failure instead of being reported only as missing ready
-frames. The same budget also replays `display_issue_summary` records into
-reason counts and payload-blocker counts, and it replays viewer color
-rejections into a `VideoColorDiagnosticIssueAggregate`, allowing smoke runs to
-fail on HDR, wide-gamut, unsupported presentation, UI payload blockers, or
-metadata-policy rejections even when a temporary health budget permits degraded
-frames. Per-reason display thresholds are part of the contract, so CI can relax
-one failure class for investigation without silently tolerating the rest, and
+versioned health report, and fails closed when ready/failed/blocked/rejected/
+degraded thresholds are not met or when the reported cumulative `health_counts`
+disagree with the statuses replayed from the JSONL records. Empty streams fail
+explicitly with a `records` budget failure instead of being reported only as
+missing ready frames. The report's embedded summary replays
+`display_issue_summary` records into reason counts and payload-blocker counts,
+and it replays viewer color rejections into a
+`VideoColorDiagnosticIssueAggregate`, allowing smoke runs to fail on HDR,
+wide-gamut, unsupported presentation, UI payload blockers, or metadata-policy
+rejections even when a temporary health budget permits degraded frames.
+Per-reason display thresholds are part of the contract, so CI can relax one
+failure class for investigation without silently tolerating the rest, and
 unknown future display reasons still fail closed instead of disappearing inside
 an aggregate display-issue allowance. The same evaluator lives in
 `app_ui::viewer_gpu_output_budget` so Rust smoke tests and the CLI share one
 budget implementation; the ignored `viewer_gpu_output_budget_smoke` test reads
-`MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same summary into
+`MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same health report into
 `MONDRIAN_PERF_OUTPUT` when configured, and fails the test on budget violations.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.

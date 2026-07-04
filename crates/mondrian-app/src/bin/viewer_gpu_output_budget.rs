@@ -21,12 +21,11 @@ fn main() -> anyhow::Result<()> {
     })?;
     let summary = evaluate_jsonl(&contents, &args.budget)?;
     let summary_passed = summary.passed;
-    let output_json = match args.format {
-        BudgetOutputFormat::Summary => serde_json::to_string(&summary)?,
-        BudgetOutputFormat::HealthReport => {
-            serde_json::to_string(&build_health_report(summary, args.profile))?
-        }
-    };
+    let output_json = serde_json::to_string(&build_health_report(
+        summary,
+        args.profile,
+        Some(args.path.display().to_string()),
+    ))?;
     println!("{output_json}");
     if !summary_passed {
         bail!("viewer GPU output budget failed: {output_json}");
@@ -38,36 +37,21 @@ fn main() -> anyhow::Result<()> {
 struct BudgetArgs {
     path: std::path::PathBuf,
     budget: ViewerGpuOutputBudget,
-    format: BudgetOutputFormat,
     profile: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BudgetOutputFormat {
-    Summary,
-    HealthReport,
 }
 
 impl BudgetArgs {
     fn parse(args: &[String]) -> anyhow::Result<Self> {
         let Some(first) = args.first() else {
             bail!(
-                "usage: viewer_gpu_output_budget <jsonl-path> [--format summary|health-report] [--profile NAME] [--preset display-baseline] [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N]"
+                "usage: viewer_gpu_output_budget <jsonl-path> [--profile NAME] [--preset display-baseline] [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N]"
             );
         };
         let mut budget = ViewerGpuOutputBudget::default();
-        let mut format = BudgetOutputFormat::Summary;
         let mut profile = CUSTOM_PROFILE.to_owned();
         let mut index = 1usize;
         while index < args.len() {
             let flag = args[index].as_str();
-            if flag == "--format" {
-                let value =
-                    args.get(index + 1).with_context(|| format!("missing value for {flag}"))?;
-                format = parse_output_format(value)?;
-                index += 2;
-                continue;
-            }
             if flag == "--profile" {
                 profile = args
                     .get(index + 1)
@@ -83,6 +67,9 @@ impl BudgetArgs {
                 profile = preset.to_owned();
                 index += 2;
                 continue;
+            }
+            if !is_budget_threshold_flag(flag) {
+                bail!("unknown argument: {flag}");
             }
             let value = args.get(index + 1).with_context(|| format!("missing value for {flag}"))?;
             let parsed = value
@@ -134,25 +121,45 @@ impl BudgetArgs {
                     budget.max_display_payload_blockers = parsed;
                 }
                 "--max-color-rejections" => budget.max_color_rejections = parsed,
-                _ => bail!("unknown argument: {flag}"),
+                _ => unreachable!("budget threshold flag prevalidated"),
             }
             index += 2;
         }
         Ok(Self {
             path: Path::new(first).to_path_buf(),
             budget,
-            format,
             profile,
         })
     }
 }
 
-fn parse_output_format(name: &str) -> anyhow::Result<BudgetOutputFormat> {
-    match name {
-        "summary" => Ok(BudgetOutputFormat::Summary),
-        "health-report" => Ok(BudgetOutputFormat::HealthReport),
-        _ => bail!("unknown output format: {name}"),
-    }
+fn is_budget_threshold_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--min-records"
+            | "--min-ready"
+            | "--max-failed"
+            | "--max-blocked"
+            | "--max-rejected"
+            | "--max-degraded"
+            | "--max-waiting"
+            | "--max-display-issues"
+            | "--max-hdr-output-requires-hdr-surface"
+            | "--max-output-color-space-requires-surface-color-space"
+            | "--max-reconfigure-blocked-by-payload"
+            | "--max-unsupported-presentation-intent"
+            | "--max-unsupported-surface-contract"
+            | "--max-unknown-display-issues"
+            | "--max-display-contract-refreshes"
+            | "--max-display-issue-refresh-correlations"
+            | "--max-display-tone-map-headroom-changes"
+            | "--max-available-surface-format-changes"
+            | "--max-format-color-space-changes"
+            | "--max-present-mode-changes"
+            | "--max-alpha-mode-changes"
+            | "--max-display-payload-blockers"
+            | "--max-color-rejections"
+    )
 }
 
 fn parse_budget_preset(name: &str) -> anyhow::Result<ViewerGpuOutputBudget> {
@@ -215,7 +222,6 @@ mod tests {
         let parsed = BudgetArgs::parse(&args).expect("parse budget args");
 
         assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
-        assert_eq!(parsed.format, BudgetOutputFormat::Summary);
         assert_eq!(parsed.profile, CUSTOM_PROFILE);
         assert_eq!(
             parsed.budget,
@@ -256,7 +262,6 @@ mod tests {
         let parsed = BudgetArgs::parse(&args).expect("parse preset args");
 
         assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
-        assert_eq!(parsed.format, BudgetOutputFormat::Summary);
         assert_eq!(parsed.profile, DISPLAY_BASELINE_PRESET);
         assert_eq!(parsed.budget, ViewerGpuOutputBudget::display_baseline());
     }
@@ -276,7 +281,6 @@ mod tests {
         let parsed = BudgetArgs::parse(&args).expect("parse preset override args");
 
         assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
-        assert_eq!(parsed.format, BudgetOutputFormat::Summary);
         assert_eq!(parsed.profile, DISPLAY_BASELINE_PRESET);
         assert_eq!(
             parsed.budget,
@@ -289,20 +293,30 @@ mod tests {
     }
 
     #[test]
-    fn budget_args_parse_health_report_format_and_profile() {
+    fn budget_args_parse_profile() {
         let args = vec![
             "target/perf/viewer.jsonl".to_owned(),
-            "--format".to_owned(),
-            "health-report".to_owned(),
             "--profile".to_owned(),
             "ci-display-wall".to_owned(),
         ];
 
-        let parsed = BudgetArgs::parse(&args).expect("parse health report args");
+        let parsed = BudgetArgs::parse(&args).expect("parse profile args");
 
         assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
-        assert_eq!(parsed.format, BudgetOutputFormat::HealthReport);
         assert_eq!(parsed.profile, "ci-display-wall");
         assert_eq!(parsed.budget, ViewerGpuOutputBudget::default());
+    }
+
+    #[test]
+    fn budget_args_reject_legacy_format_switch() {
+        let args = vec![
+            "target/perf/viewer.jsonl".to_owned(),
+            "--format".to_owned(),
+            "summary".to_owned(),
+        ];
+
+        let err = BudgetArgs::parse(&args).expect_err("legacy format switch should fail");
+
+        assert!(err.to_string().contains("unknown argument: --format"));
     }
 }

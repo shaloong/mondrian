@@ -150,6 +150,8 @@ pub struct ViewerGpuOutputHealthReport {
     pub schema_version: u32,
     /// Applied reporting profile or preset.
     pub profile: String,
+    /// Source diagnostics stream path, when the report came from a persisted JSONL file.
+    pub source_path: Option<String>,
     /// Overall diagnostic verdict.
     pub verdict: ViewerGpuOutputHealthVerdict,
     /// Budget/evaluator summary used as the evidence base.
@@ -610,6 +612,7 @@ fn push_max_failure(
 pub fn build_health_report(
     summary: ViewerGpuOutputBudgetSummary,
     profile: impl Into<String>,
+    source_path: Option<String>,
 ) -> ViewerGpuOutputHealthReport {
     let mut checks = Vec::new();
     let mut root_causes = Vec::new();
@@ -710,6 +713,7 @@ pub fn build_health_report(
     ViewerGpuOutputHealthReport {
         schema_version: VIEWER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
         profile: profile.into(),
+        source_path,
         verdict,
         summary,
         checks,
@@ -1696,13 +1700,21 @@ mod tests {
 
         let summary =
             evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
-        let report = build_health_report(summary, "display-baseline");
+        let report = build_health_report(
+            summary,
+            "display-baseline",
+            Some("target/perf/viewer-gpu-output.jsonl".to_owned()),
+        );
 
         assert_eq!(
             report.schema_version,
             VIEWER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION
         );
         assert_eq!(report.profile, "display-baseline");
+        assert_eq!(
+            report.source_path,
+            Some("target/perf/viewer-gpu-output.jsonl".to_owned())
+        );
         assert_eq!(report.verdict, ViewerGpuOutputHealthVerdict::Pass);
         assert!(report.root_causes.is_empty());
         assert!(report.actions.is_empty());
@@ -1720,7 +1732,7 @@ mod tests {
 
         let summary =
             evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
-        let report = build_health_report(summary, "display-baseline");
+        let report = build_health_report(summary, "display-baseline", None);
 
         assert_eq!(report.verdict, ViewerGpuOutputHealthVerdict::Fail);
         assert!(report.root_causes.iter().any(|root| root.code == "viewer_output_not_healthy"));
