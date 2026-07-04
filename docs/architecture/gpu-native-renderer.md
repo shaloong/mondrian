@@ -300,7 +300,9 @@ timeline frame, preview dimensions, external texture key, output target, output
 color space, tone-map flag, optional OCIO display/view, and cumulative health
 counts for ready/degraded/blocked/failed/rejected/waiting outcomes. This gives
 playback/scrubbing sessions a persistent health stream that can be budgeted and
-correlated back to specific frames in addition to trace logs. The same session
+correlated back to specific frames in addition to trace logs; the
+`viewer_gpu_output_budget` developer binary consumes that JSONL and exits
+non-zero when the configured health thresholds are violated. The same session
 also owns the display-output contract for the current wgpu 30 surface and monitor:
 selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,

@@ -29,6 +29,10 @@ path = "src/bin/ui_widget_test.rs"
 name = "ui_pipeline_test"
 path = "src/bin/ui_pipeline_test.rs"
 
+[[bin]]
+name = "viewer_gpu_output_budget"
+path = "src/bin/viewer_gpu_output_budget.rs"
+
 [dependencies]
 mondrian-core     = { workspace = true }
 mondrian-media    = { workspace = true }
