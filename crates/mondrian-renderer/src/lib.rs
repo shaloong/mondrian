@@ -43,7 +43,12 @@ pub use color_stage::{
     RenderGpuOutputBoundaryBackendContext, RenderGpuOutputBoundaryRecordError,
     RenderGpuOutputBoundaryRecordRequest, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputStageBackendContext,
+    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputDiagnosticArea,
+    RenderGpuOutputFrameReport, RenderGpuOutputHealthAction, RenderGpuOutputHealthCheck,
+    RenderGpuOutputHealthEvidence, RenderGpuOutputHealthReport, RenderGpuOutputHealthRootCause,
+    RenderGpuOutputHealthSeverity, RenderGpuOutputHealthStatus, RenderGpuOutputHealthSummary,
+    RenderGpuOutputHealthVerdict, RenderGpuOutputRuntimeDiagnosticsReport,
+    RenderGpuOutputStageBackendContext, RenderGpuOutputStageDiagnosticsReport,
     RenderGpuOutputStageMaterializeError, RenderGpuOutputStageMaterializedResources,
     RenderGpuOutputStageReadbackError, RenderGpuOutputStageRecord, RenderGpuOutputStageRecordError,
     RenderGpuOutputStageRecordRequest, RenderGpuOutputStageResourcePlan,
@@ -51,6 +56,7 @@ pub use color_stage::{
     RenderOutputColorBoundaryExecutor, RenderOutputColorBoundaryGpuRecordError,
     RenderOutputColorBoundaryPlanner, RenderOutputColorBoundaryRgba8,
     RenderOutputColorBoundaryStagePlan, RenderOutputColorBoundaryTarget,
+    RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,

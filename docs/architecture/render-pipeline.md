@@ -192,7 +192,12 @@ sole high-level contract. That report embeds the derived health summary, fixed
 checks, root causes, actions, and evidence so dashboards can distinguish
 skipped adapters, incomplete native GPU sequencing, backend-cache/object
 preparation failures, readback-size mismatches, GPU blockers, and CPU/GPU
-parity failures without reverse-engineering the counters.
+parity failures without reverse-engineering the counters. The renderer owns the
+serializable contract types for this layer directly in production code:
+`RenderGpuOutputFrameReport`, `RenderGpuOutputStageDiagnosticsReport`,
+`RenderGpuOutputRuntimeDiagnosticsReport`, and `RenderGpuOutputHealthReport`.
+Smoke tests, perf tooling, and future app/export integrations must build on
+those types instead of carrying a test-private schema copy.
 
 ## Required Semantics
 

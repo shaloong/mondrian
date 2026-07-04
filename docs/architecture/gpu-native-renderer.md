@@ -284,7 +284,10 @@ raw stage/runtime diagnostics: native GPU output readiness, upload + GPU OCIO +
 readback stage completeness, blocker-free execution, shader/backend runtime
 readiness, readback byte completeness, expected readback bytes, and CPU/GPU
 parity within tolerance, then adds fixed checks, root causes, actions, and
-evidence. This smoke proves renderer-side upload + native GPU OCIO + readback sequencing; it does not prove OS
+evidence. The renderer exposes that contract through
+`RenderGpuOutputHealthReport` plus the serializable frame/stage/runtime report
+types, so smoke output and downstream tooling share one schema owned by
+`mondrian-renderer`. This smoke proves renderer-side upload + native GPU OCIO + readback sequencing; it does not prove OS
 swapchain/display-management correctness, which remains the app-window display
 contract's responsibility.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for

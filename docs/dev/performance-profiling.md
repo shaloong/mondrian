@@ -48,7 +48,10 @@ legacy `health`, `health_failures`, or `passed` fields. Default renderer smoke
 expectations are fail-closed: the run must not be skipped, the native GPU stage
 sequence must be complete, GPU blockers must be absent, backend runtime and
 shader cache must be ready, readback must be byte-complete, and CPU/GPU parity
-must stay within tolerance.
+must stay within tolerance. The schema is owned by
+`mondrian-renderer::RenderGpuOutputHealthReport` and its companion
+frame/stage/runtime report types, so perf tooling should not redefine the JSON
+shape locally.
 
 Preview media smoke reports include `preview_color_report` and
 `media_color_issues`. The decode/cache and continuous-playback smokes fail
