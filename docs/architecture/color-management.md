@@ -348,6 +348,10 @@ metadata table; absence of an asset id means "resolve via policy", not
 "fallback to Rec.709". Export `asset_color_diagnostics` carries the matching
 per-asset diagnostic snapshot, including `color_interpretation`, and must be
 used for failure messages and reports, not for choosing the transform.
+`VideoColorDiagnosticIssueAggregate` is the stable rollup for these per-asset
+snapshots: export job diagnostics carry it as `asset_issue_summary`, and
+preview media smoke reports serialize the same aggregate as `media_color_issues`
+for CI/perf JSONL.
 Preview diagnostics count every `InputColorResolutionSource` branch and perf
 smoke reports derive both `explicit_metadata_or_override` and
 `policy_assumptions` totals from those counters. A production color-path report

@@ -238,6 +238,10 @@ classification, or by project policy. Aggregated report fields such as
 `policy_assumptions` and `explicit_metadata_or_override` must be derived from
 `InputColorResolutionSourceCounts` in `mondrian-timeline`, not hand-maintained
 in preview/export reporting code.
+Media metadata quality must travel through the same reporting path: export job
+diagnostics carry `asset_issue_summary`, and preview media smokes serialize
+`media_color_issues`, both derived from `VideoColorDiagnosticIssueAggregate`
+rather than from parsed warning strings.
 Timeline export writes accumulated render-path color diagnostics into
 `RenderJob.diagnostics.color`. The worker updates this snapshot while frames are
 actually rendered. App panels, logs, and future JSONL reports should consume

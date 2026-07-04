@@ -359,6 +359,69 @@ pub struct VideoColorDiagnosticIssueSummary {
     pub has_user_visible_warnings: bool,
 }
 
+/// Aggregated issue summary across multiple probed video color diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct VideoColorDiagnosticIssueAggregate {
+    /// Number of diagnostics aggregated.
+    pub diagnostics: u64,
+    /// Diagnostics that resolved to an explicit Mondrian color space.
+    pub diagnostics_with_detected_color_space: u64,
+    /// Diagnostics that carried one or more user-visible warnings.
+    pub diagnostics_with_warnings: u64,
+    /// Diagnostics that preserved raw CICP/FFmpeg metadata.
+    pub diagnostics_with_raw_cicp_metadata: u64,
+    /// Diagnostics that carried one or more metadata hints.
+    pub diagnostics_with_metadata_hints: u64,
+    /// Diagnostics that carried one or more HDR side-data records.
+    pub diagnostics_with_hdr_metadata: u64,
+    /// Diagnostics whose final decision came from metadata hints.
+    pub method_metadata_hint: u64,
+    /// Diagnostics whose final decision came from CICP tags.
+    pub method_cicp_tags: u64,
+    /// Diagnostics that fell through to missing-metadata handling.
+    pub method_missing_metadata: u64,
+    /// Diagnostics that could not probe due to decoder unavailability.
+    pub method_decoder_unavailable: u64,
+    /// Diagnostics reported with high confidence.
+    pub confidence_high: u64,
+    /// Diagnostics reported with medium confidence.
+    pub confidence_medium: u64,
+    /// Diagnostics reported with low confidence.
+    pub confidence_low: u64,
+    /// Diagnostics reported with no confidence.
+    pub confidence_none: u64,
+    /// Total metadata hints observed across all diagnostics.
+    pub metadata_hint_count: u64,
+    /// Total evidence records observed across all diagnostics.
+    pub evidence_count: u64,
+    /// Total warnings observed across all diagnostics.
+    pub warning_count: u64,
+    /// Total multiple-hint ambiguity warnings.
+    pub multiple_metadata_hints: u64,
+    /// Total ignored metadata hints across multiple-hint warnings.
+    pub ignored_metadata_hints: u64,
+    /// Total hint-vs-CICP conflict warnings.
+    pub metadata_hint_overrides_cicp_tags: u64,
+    /// Total partial CICP inference warnings.
+    pub partial_cicp_tags: u64,
+    /// Total missing or unsupported CICP warnings.
+    pub missing_or_unsupported_cicp_tags: u64,
+    /// Total decoder-unavailable warnings.
+    pub decoder_unavailable: u64,
+    /// Total HDR side-data records observed across all diagnostics.
+    pub hdr_side_data_count: u64,
+    /// Diagnostics that carried mastering-display HDR metadata.
+    pub diagnostics_with_mastering_display_metadata: u64,
+    /// Diagnostics that carried content-light HDR metadata.
+    pub diagnostics_with_content_light_metadata: u64,
+    /// Diagnostics that carried HDR10+ metadata.
+    pub diagnostics_with_dynamic_hdr10_plus: u64,
+    /// Diagnostics that carried Dolby Vision configuration metadata.
+    pub diagnostics_with_dolby_vision_config: u64,
+    /// Diagnostics that carried ICC profile metadata.
+    pub diagnostics_with_icc_profile: u64,
+}
+
 impl VideoColorTag {
     /// Compact diagnostic representation for logs and export errors.
     pub fn summary(&self) -> String {
@@ -518,6 +581,109 @@ impl VideoColorDiagnostic {
         }
 
         summary
+    }
+}
+
+impl VideoColorDiagnosticIssueAggregate {
+    /// Observe one diagnostic summary.
+    pub fn observe_summary(&mut self, summary: VideoColorDiagnosticIssueSummary) {
+        self.diagnostics = self.diagnostics.saturating_add(1);
+        self.diagnostics_with_detected_color_space = self
+            .diagnostics_with_detected_color_space
+            .saturating_add(u64::from(summary.detected_color_space.is_some()));
+        self.diagnostics_with_warnings = self
+            .diagnostics_with_warnings
+            .saturating_add(u64::from(summary.has_user_visible_warnings));
+        self.diagnostics_with_raw_cicp_metadata = self
+            .diagnostics_with_raw_cicp_metadata
+            .saturating_add(u64::from(summary.has_raw_cicp_metadata));
+        self.diagnostics_with_metadata_hints = self
+            .diagnostics_with_metadata_hints
+            .saturating_add(u64::from(summary.metadata_hint_count > 0));
+        self.diagnostics_with_hdr_metadata = self
+            .diagnostics_with_hdr_metadata
+            .saturating_add(u64::from(summary.hdr_side_data_count > 0));
+        self.metadata_hint_count =
+            self.metadata_hint_count.saturating_add(summary.metadata_hint_count);
+        self.evidence_count = self.evidence_count.saturating_add(summary.evidence_count);
+        self.warning_count = self.warning_count.saturating_add(summary.warning_count);
+        self.multiple_metadata_hints =
+            self.multiple_metadata_hints.saturating_add(summary.multiple_metadata_hints);
+        self.ignored_metadata_hints =
+            self.ignored_metadata_hints.saturating_add(summary.ignored_metadata_hints);
+        self.metadata_hint_overrides_cicp_tags = self
+            .metadata_hint_overrides_cicp_tags
+            .saturating_add(summary.metadata_hint_overrides_cicp_tags);
+        self.partial_cicp_tags = self.partial_cicp_tags.saturating_add(summary.partial_cicp_tags);
+        self.missing_or_unsupported_cicp_tags = self
+            .missing_or_unsupported_cicp_tags
+            .saturating_add(summary.missing_or_unsupported_cicp_tags);
+        self.decoder_unavailable =
+            self.decoder_unavailable.saturating_add(summary.decoder_unavailable);
+        self.hdr_side_data_count =
+            self.hdr_side_data_count.saturating_add(summary.hdr_side_data_count);
+        self.diagnostics_with_mastering_display_metadata = self
+            .diagnostics_with_mastering_display_metadata
+            .saturating_add(u64::from(summary.has_mastering_display_metadata));
+        self.diagnostics_with_content_light_metadata = self
+            .diagnostics_with_content_light_metadata
+            .saturating_add(u64::from(summary.has_content_light_metadata));
+        self.diagnostics_with_dynamic_hdr10_plus = self
+            .diagnostics_with_dynamic_hdr10_plus
+            .saturating_add(u64::from(summary.has_dynamic_hdr10_plus));
+        self.diagnostics_with_dolby_vision_config = self
+            .diagnostics_with_dolby_vision_config
+            .saturating_add(u64::from(summary.has_dolby_vision_config));
+        self.diagnostics_with_icc_profile = self
+            .diagnostics_with_icc_profile
+            .saturating_add(u64::from(summary.has_icc_profile));
+
+        match summary.method {
+            VideoColorDetectionMethod::MetadataHint => {
+                self.method_metadata_hint = self.method_metadata_hint.saturating_add(1);
+            }
+            VideoColorDetectionMethod::CicpTags => {
+                self.method_cicp_tags = self.method_cicp_tags.saturating_add(1);
+            }
+            VideoColorDetectionMethod::MissingMetadata => {
+                self.method_missing_metadata = self.method_missing_metadata.saturating_add(1);
+            }
+            VideoColorDetectionMethod::DecoderUnavailable => {
+                self.method_decoder_unavailable = self.method_decoder_unavailable.saturating_add(1);
+            }
+        }
+
+        match summary.confidence {
+            VideoColorInterpretationConfidence::High => {
+                self.confidence_high = self.confidence_high.saturating_add(1);
+            }
+            VideoColorInterpretationConfidence::Medium => {
+                self.confidence_medium = self.confidence_medium.saturating_add(1);
+            }
+            VideoColorInterpretationConfidence::Low => {
+                self.confidence_low = self.confidence_low.saturating_add(1);
+            }
+            VideoColorInterpretationConfidence::None => {
+                self.confidence_none = self.confidence_none.saturating_add(1);
+            }
+        }
+    }
+
+    /// Observe one full video color diagnostic.
+    pub fn observe(&mut self, diagnostic: &VideoColorDiagnostic) {
+        self.observe_summary(diagnostic.issue_summary());
+    }
+
+    /// Aggregate multiple full video color diagnostics.
+    pub fn from_diagnostics<'a, I>(diagnostics: I) -> Self
+    where
+        I: IntoIterator<Item = &'a VideoColorDiagnostic>,
+    {
+        let mut aggregate = Self::default();
+        for diagnostic in diagnostics {
+            aggregate.observe(diagnostic);
+        }
+        aggregate
     }
 }
 
@@ -1666,6 +1832,104 @@ mod tests {
         assert_eq!(unavailable_summary.decoder_unavailable, 1);
         assert_eq!(unavailable_summary.missing_or_unsupported_cicp_tags, 0);
         assert!(unavailable_summary.has_user_visible_warnings);
+    }
+
+    #[test]
+    fn video_color_diagnostic_issue_aggregate_accumulates_machine_readable_totals() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT709,
+        );
+        let hints = vec![
+            VideoColorMetadataHint {
+                scope: VideoColorMetadataHintScope::Stream,
+                key: "camera_profile".to_string(),
+                value: "ARRI LogC4".to_string(),
+                detected_color_space: ColorSpace::ArriLogC4,
+            },
+            VideoColorMetadataHint {
+                scope: VideoColorMetadataHintScope::Container,
+                key: "camera_profile".to_string(),
+                value: "S-Log3".to_string(),
+                detected_color_space: ColorSpace::SLog3,
+            },
+        ];
+        let metadata_interpretation = detect_color_space_from_metadata(&metadata, &hints);
+        let metadata_diagnostic = VideoColorDiagnostic {
+            detected_color_space: metadata_interpretation.color_space,
+            interpretation: metadata_interpretation,
+            source: VideoColorSpaceSource::Metadata,
+            method: VideoColorDetectionMethod::MetadataHint,
+            metadata: Some(metadata),
+            metadata_hints: hints,
+            hdr_metadata: vec![
+                VideoHdrMetadataSummary {
+                    kind: VideoHdrSideDataKind::MasteringDisplayMetadata,
+                    payload_size: 88,
+                    payload: None,
+                },
+                VideoHdrMetadataSummary {
+                    kind: VideoHdrSideDataKind::ContentLightLevel,
+                    payload_size: 8,
+                    payload: None,
+                },
+            ],
+        };
+        let unavailable_interpretation = DetectedColorInterpretation::decoder_unavailable();
+        let unavailable_diagnostic = VideoColorDiagnostic {
+            detected_color_space: unavailable_interpretation.color_space,
+            interpretation: unavailable_interpretation,
+            source: VideoColorSpaceSource::DecoderUnavailable,
+            method: VideoColorDetectionMethod::DecoderUnavailable,
+            metadata: None,
+            metadata_hints: Vec::new(),
+            hdr_metadata: vec![VideoHdrMetadataSummary {
+                kind: VideoHdrSideDataKind::IccProfile,
+                payload_size: 128,
+                payload: None,
+            }],
+        };
+
+        let aggregate = VideoColorDiagnosticIssueAggregate::from_diagnostics([
+            &metadata_diagnostic,
+            &unavailable_diagnostic,
+        ]);
+
+        assert_eq!(
+            aggregate,
+            VideoColorDiagnosticIssueAggregate {
+                diagnostics: 2,
+                diagnostics_with_detected_color_space: 1,
+                diagnostics_with_warnings: 2,
+                diagnostics_with_raw_cicp_metadata: 1,
+                diagnostics_with_metadata_hints: 1,
+                diagnostics_with_hdr_metadata: 2,
+                method_metadata_hint: 1,
+                method_cicp_tags: 0,
+                method_missing_metadata: 0,
+                method_decoder_unavailable: 1,
+                confidence_high: 0,
+                confidence_medium: 1,
+                confidence_low: 0,
+                confidence_none: 1,
+                metadata_hint_count: 2,
+                evidence_count: 3,
+                warning_count: 3,
+                multiple_metadata_hints: 1,
+                ignored_metadata_hints: 1,
+                metadata_hint_overrides_cicp_tags: 1,
+                partial_cicp_tags: 0,
+                missing_or_unsupported_cicp_tags: 0,
+                decoder_unavailable: 1,
+                hdr_side_data_count: 3,
+                diagnostics_with_mastering_display_metadata: 1,
+                diagnostics_with_content_light_metadata: 1,
+                diagnostics_with_dynamic_hdr10_plus: 0,
+                diagnostics_with_dolby_vision_config: 0,
+                diagnostics_with_icc_profile: 1,
+            }
+        );
     }
 
     #[test]

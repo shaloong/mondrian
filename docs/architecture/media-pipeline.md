@@ -39,6 +39,8 @@ stable compact form for logs/export errors and should include those warning
 details. `VideoColorDiagnostic::issue_summary()` is the machine-readable
 contract for UI, telemetry, smoke JSONL, and export reports; callers must
 consume its counters and flags instead of parsing the compact summary string.
+`VideoColorDiagnosticIssueAggregate` is the shared rollup for combining many
+per-stream diagnostics into one report surface.
 Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.
 
 Asset library records store persistent user intent separately as
