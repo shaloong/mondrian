@@ -1,0 +1,389 @@
+//! Budget evaluation for live viewer GPU-output diagnostics JSONL.
+
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
+
+/// Thresholds for evaluating a viewer GPU-output diagnostics JSONL stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewerGpuOutputBudget {
+    /// Minimum number of ready viewer GPU-output attempts.
+    pub min_ready: u64,
+    /// Maximum allowed failed attempts.
+    pub max_failed: u64,
+    /// Maximum allowed display-contract-blocked attempts.
+    pub max_blocked: u64,
+    /// Maximum allowed external texture registration rejections.
+    pub max_rejected: u64,
+    /// Maximum allowed degraded attempts.
+    pub max_degraded: u64,
+    /// Maximum allowed waiting attempts.
+    pub max_waiting: u64,
+}
+
+impl Default for ViewerGpuOutputBudget {
+    fn default() -> Self {
+        Self {
+            min_ready: 1,
+            max_failed: 0,
+            max_blocked: 0,
+            max_rejected: 0,
+            max_degraded: 0,
+            max_waiting: u64::MAX,
+        }
+    }
+}
+
+/// Structured result of evaluating a viewer GPU-output diagnostics JSONL stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputBudgetSummary {
+    /// Number of non-empty JSONL records consumed.
+    pub records: u64,
+    /// Counts replayed from each record's health status.
+    pub counts: ViewerGpuOutputHealthCounts,
+    /// Last cumulative counts reported by the JSONL stream, when present.
+    pub reported_counts: Option<ViewerGpuOutputHealthCounts>,
+    /// Whether reported cumulative counts match status replay.
+    pub reported_counts_match_replay: bool,
+    /// Line-level mismatches between reported and replayed counts.
+    pub count_mismatches: Vec<ViewerGpuOutputCountMismatch>,
+    /// Budget thresholds used for evaluation.
+    pub budget: ViewerGpuOutputBudgetReport,
+    /// Whether the stream satisfied the budget and consistency checks.
+    pub passed: bool,
+    /// Structured budget failures.
+    pub failures: Vec<ViewerGpuOutputBudgetFailure>,
+    /// Last health status observed in the stream.
+    pub last_status: Option<ViewerGpuOutputHealthStatus>,
+    /// Last frame context observed in the stream.
+    pub last_frame_context: Option<ViewerGpuOutputFrameContext>,
+}
+
+/// Serializable representation of the applied budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputBudgetReport {
+    /// Minimum number of ready viewer GPU-output attempts.
+    pub min_ready: u64,
+    /// Maximum allowed failed attempts.
+    pub max_failed: u64,
+    /// Maximum allowed display-contract-blocked attempts.
+    pub max_blocked: u64,
+    /// Maximum allowed external texture registration rejections.
+    pub max_rejected: u64,
+    /// Maximum allowed degraded attempts.
+    pub max_degraded: u64,
+    /// Maximum allowed waiting attempts.
+    pub max_waiting: u64,
+}
+
+impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
+    fn from(budget: ViewerGpuOutputBudget) -> Self {
+        Self {
+            min_ready: budget.min_ready,
+            max_failed: budget.max_failed,
+            max_blocked: budget.max_blocked,
+            max_rejected: budget.max_rejected,
+            max_degraded: budget.max_degraded,
+            max_waiting: budget.max_waiting,
+        }
+    }
+}
+
+/// One budget failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputBudgetFailure {
+    /// Metric that violated the budget.
+    pub metric: &'static str,
+    /// Actual metric value.
+    pub actual: u64,
+    /// Configured limit.
+    pub limit: u64,
+}
+
+/// One mismatch between replayed and reported cumulative health counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputCountMismatch {
+    /// 1-based JSONL line number.
+    pub line: u64,
+    /// Counts replayed from health statuses up to this line.
+    pub replayed: ViewerGpuOutputHealthCounts,
+    /// Counts reported by the record at this line.
+    pub reported: ViewerGpuOutputHealthCounts,
+}
+
+/// Evaluate a viewer GPU-output diagnostics JSONL stream.
+pub fn evaluate_jsonl(
+    contents: &str,
+    budget: &ViewerGpuOutputBudget,
+) -> anyhow::Result<ViewerGpuOutputBudgetSummary> {
+    let mut counts = ViewerGpuOutputHealthCounts::default();
+    let mut records = 0u64;
+    let mut last_status = None;
+    let mut last_frame_context = None;
+    let mut reported_counts = None;
+    let mut count_mismatches = Vec::new();
+
+    for (line_index, line) in contents.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let record: ViewerGpuOutputDiagnosticRecord = serde_json::from_str(trimmed)
+            .with_context(|| format!("invalid JSONL record at line {}", line_index + 1))?;
+        records = records.saturating_add(1);
+        counts.record(record.health.status);
+        if let Some(record_counts) = record.health_counts {
+            reported_counts = Some(record_counts);
+            if record_counts != counts {
+                count_mismatches.push(ViewerGpuOutputCountMismatch {
+                    line: (line_index + 1) as u64,
+                    replayed: counts,
+                    reported: record_counts,
+                });
+            }
+        }
+        last_status = Some(record.health.status);
+        last_frame_context = record.last_frame_context;
+    }
+
+    let mut failures = Vec::new();
+    if !count_mismatches.is_empty() {
+        failures.push(ViewerGpuOutputBudgetFailure {
+            metric: "health_counts_match_replay",
+            actual: count_mismatches.len() as u64,
+            limit: 0,
+        });
+    }
+    if counts.ready < budget.min_ready {
+        failures.push(ViewerGpuOutputBudgetFailure {
+            metric: "ready",
+            actual: counts.ready,
+            limit: budget.min_ready,
+        });
+    }
+    push_max_failure(&mut failures, "failed", counts.failed, budget.max_failed);
+    push_max_failure(&mut failures, "blocked", counts.blocked, budget.max_blocked);
+    push_max_failure(
+        &mut failures,
+        "rejected",
+        counts.rejected,
+        budget.max_rejected,
+    );
+    push_max_failure(
+        &mut failures,
+        "degraded",
+        counts.degraded,
+        budget.max_degraded,
+    );
+    push_max_failure(&mut failures, "waiting", counts.waiting, budget.max_waiting);
+
+    Ok(ViewerGpuOutputBudgetSummary {
+        records,
+        counts,
+        reported_counts,
+        reported_counts_match_replay: count_mismatches.is_empty(),
+        count_mismatches,
+        budget: (*budget).into(),
+        passed: failures.is_empty(),
+        failures,
+        last_status,
+        last_frame_context,
+    })
+}
+
+fn push_max_failure(
+    failures: &mut Vec<ViewerGpuOutputBudgetFailure>,
+    metric: &'static str,
+    actual: u64,
+    limit: u64,
+) {
+    if actual > limit {
+        failures.push(ViewerGpuOutputBudgetFailure { metric, actual, limit });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct ViewerGpuOutputDiagnosticRecord {
+    health: ViewerGpuOutputHealthSummary,
+    health_counts: Option<ViewerGpuOutputHealthCounts>,
+    last_frame_context: Option<ViewerGpuOutputFrameContext>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+struct ViewerGpuOutputHealthSummary {
+    status: ViewerGpuOutputHealthStatus,
+}
+
+/// Health-status counts for viewer GPU-output attempts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputHealthCounts {
+    /// No invocation status count.
+    pub no_invocation: u64,
+    /// Waiting status count.
+    pub waiting: u64,
+    /// Blocked status count.
+    pub blocked: u64,
+    /// Failed status count.
+    pub failed: u64,
+    /// Rejected status count.
+    pub rejected: u64,
+    /// Degraded status count.
+    pub degraded: u64,
+    /// Ready status count.
+    pub ready: u64,
+}
+
+impl ViewerGpuOutputHealthCounts {
+    fn record(&mut self, status: ViewerGpuOutputHealthStatus) {
+        match status {
+            ViewerGpuOutputHealthStatus::NoInvocation => {
+                self.no_invocation = self.no_invocation.saturating_add(1);
+            }
+            ViewerGpuOutputHealthStatus::Waiting => {
+                self.waiting = self.waiting.saturating_add(1);
+            }
+            ViewerGpuOutputHealthStatus::Blocked => {
+                self.blocked = self.blocked.saturating_add(1);
+            }
+            ViewerGpuOutputHealthStatus::Failed => {
+                self.failed = self.failed.saturating_add(1);
+            }
+            ViewerGpuOutputHealthStatus::Rejected => {
+                self.rejected = self.rejected.saturating_add(1);
+            }
+            ViewerGpuOutputHealthStatus::Degraded => {
+                self.degraded = self.degraded.saturating_add(1);
+            }
+            ViewerGpuOutputHealthStatus::Ready => {
+                self.ready = self.ready.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Viewer GPU-output health status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum ViewerGpuOutputHealthStatus {
+    /// No invocation has been observed.
+    NoInvocation,
+    /// The viewer output path is waiting for app state, media, or a valid key.
+    Waiting,
+    /// Display contract blocked the output request.
+    Blocked,
+    /// Recording or output texture lookup failed.
+    Failed,
+    /// External texture registration was rejected.
+    Rejected,
+    /// Output registered, but presentation or native-boundary health is degraded.
+    Degraded,
+    /// Output registered through the native GPU boundary and is presentation-ready.
+    Ready,
+}
+
+/// Frame context associated with a viewer GPU-output diagnostic record.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputFrameContext {
+    /// Sequence id that produced the frame.
+    pub sequence_id: String,
+    /// Timeline frame number.
+    pub frame: i64,
+    /// Preview frame width.
+    pub width: u32,
+    /// Preview frame height.
+    pub height: u32,
+    /// External texture key used by the app UI renderer.
+    pub external_texture_key: String,
+    /// Output target.
+    pub output_target: String,
+    /// Output color space.
+    pub output_color_space: String,
+    /// Whether tone mapping was requested.
+    pub tone_map: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_passes_clean_ready_stream() {
+        let jsonl = r#"
+{"health":{"status":"Waiting"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":0}}
+{"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"last_frame_context":{"sequence_id":"seq","frame":7,"width":1920,"height":1080,"external_texture_key":"key","output_target":"Display","output_color_space":"Srgb","tone_map":false}}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+
+        assert!(summary.passed);
+        assert_eq!(summary.records, 2);
+        assert_eq!(summary.counts.waiting, 1);
+        assert_eq!(summary.counts.ready, 1);
+        assert!(summary.reported_counts_match_replay);
+        assert_eq!(summary.reported_counts, Some(summary.counts));
+        assert!(summary.count_mismatches.is_empty());
+        assert_eq!(
+            summary.last_status,
+            Some(ViewerGpuOutputHealthStatus::Ready)
+        );
+        assert_eq!(summary.last_frame_context.expect("frame context").frame, 7);
+    }
+
+    #[test]
+    fn budget_fails_failed_blocked_and_missing_ready_stream() {
+        let jsonl = r#"
+{"health":{"status":"Failed"}}
+{"health":{"status":"Blocked"}}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert_eq!(summary.counts.failed, 1);
+        assert_eq!(summary.counts.blocked, 1);
+        assert_eq!(
+            summary.failures,
+            vec![
+                ViewerGpuOutputBudgetFailure { metric: "ready", actual: 0, limit: 1 },
+                ViewerGpuOutputBudgetFailure { metric: "failed", actual: 1, limit: 0 },
+                ViewerGpuOutputBudgetFailure { metric: "blocked", actual: 1, limit: 0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn budget_fails_when_reported_counts_do_not_match_replay() {
+        let jsonl = r#"
+{"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":2}}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert!(!summary.reported_counts_match_replay);
+        assert_eq!(summary.counts.ready, 1);
+        assert_eq!(
+            summary.count_mismatches,
+            vec![ViewerGpuOutputCountMismatch {
+                line: 2,
+                replayed: ViewerGpuOutputHealthCounts {
+                    ready: 1,
+                    ..ViewerGpuOutputHealthCounts::default()
+                },
+                reported: ViewerGpuOutputHealthCounts {
+                    ready: 2,
+                    ..ViewerGpuOutputHealthCounts::default()
+                },
+            }]
+        );
+        assert_eq!(
+            summary.failures,
+            vec![ViewerGpuOutputBudgetFailure {
+                metric: "health_counts_match_replay",
+                actual: 1,
+                limit: 0,
+            }]
+        );
+    }
+}
