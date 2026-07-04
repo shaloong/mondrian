@@ -102,6 +102,9 @@ struct ViewerGpuOutputBudgetSmokeReport {
     summary: ViewerGpuOutputBudgetSummary,
 }
 
+const VIEWER_GPU_OUTPUT_BUDGET_SCENARIO: &str = "viewer_gpu_output_budget";
+const VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_SCENARIO: &str = "viewer_gpu_output_display_baseline";
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 struct PreviewPerfColorHealthBudget {
     require_color_health: bool,
@@ -406,6 +409,16 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
     }
 }
 
+fn viewer_gpu_output_display_baseline_budget_from_env() -> ViewerGpuOutputBudget {
+    ViewerGpuOutputBudget {
+        max_display_contract_refreshes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
+            2,
+        ),
+        ..viewer_gpu_output_budget_from_env()
+    }
+}
+
 fn preview_color_health_budget_from_env() -> PreviewPerfColorHealthBudget {
     PreviewPerfColorHealthBudget {
         require_color_health: env_bool("MONDRIAN_PREVIEW_REQUIRE_COLOR_HEALTH", true),
@@ -488,12 +501,13 @@ fn push_max_preview_color_health_failure(
 }
 
 fn viewer_gpu_output_budget_report_from_jsonl(
+    scenario: &'static str,
     source_path: impl Into<String>,
     contents: &str,
     budget: &ViewerGpuOutputBudget,
 ) -> anyhow::Result<ViewerGpuOutputBudgetSmokeReport> {
     Ok(ViewerGpuOutputBudgetSmokeReport {
-        scenario: "viewer_gpu_output_budget",
+        scenario,
         source_path: source_path.into(),
         summary: evaluate_jsonl(contents, budget)?,
     })
@@ -548,6 +562,7 @@ fn viewer_gpu_output_budget_smoke() -> anyhow::Result<()> {
     })?;
     let budget = viewer_gpu_output_budget_from_env();
     let report = viewer_gpu_output_budget_report_from_jsonl(
+        VIEWER_GPU_OUTPUT_BUDGET_SCENARIO,
         output_path.display().to_string(),
         &contents,
         &budget,
@@ -557,6 +572,37 @@ fn viewer_gpu_output_budget_smoke() -> anyhow::Result<()> {
     write_report_if_needed(&report_json);
     if !report.summary.passed {
         anyhow::bail!("viewer GPU output budget smoke failed: {report_json}");
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "development baseline viewer display smoke; run after capturing MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT JSONL"]
+fn viewer_gpu_output_display_baseline_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf smoke lock");
+    let output_path = std::env::var_os("MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT")
+        .map(PathBuf::from)
+        .context(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT must point to a viewer GPU output JSONL file",
+        )?;
+    let contents = std::fs::read_to_string(&output_path).with_context(|| {
+        format!(
+            "failed to read viewer GPU output JSONL: {}",
+            output_path.display()
+        )
+    })?;
+    let budget = viewer_gpu_output_display_baseline_budget_from_env();
+    let report = viewer_gpu_output_budget_report_from_jsonl(
+        VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_SCENARIO,
+        output_path.display().to_string(),
+        &contents,
+        &budget,
+    )?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_JSON={report_json}");
+    write_report_if_needed(&report_json);
+    if !report.summary.passed {
+        anyhow::bail!("viewer GPU output display baseline smoke failed: {report_json}");
     }
     Ok(())
 }
@@ -1499,6 +1545,7 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
 "#;
 
     let report = viewer_gpu_output_budget_report_from_jsonl(
+        VIEWER_GPU_OUTPUT_BUDGET_SCENARIO,
         "target/perf/viewer-gpu-output.jsonl",
         jsonl,
         &ViewerGpuOutputBudget::default(),
@@ -1531,6 +1578,35 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     assert_eq!(json["summary"]["color_rejections"], 0);
     assert_eq!(json["summary"]["reported_counts_match_replay"], true);
     assert_eq!(json["summary"]["last_frame_context"]["frame"], 12);
+}
+
+#[test]
+fn viewer_gpu_output_display_baseline_budget_defaults_to_refresh_headroom() {
+    let _lock = perf_lock().lock().expect("perf lock");
+    let key = "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES";
+    let previous = std::env::var(key).ok();
+
+    unsafe {
+        std::env::remove_var(key);
+    }
+
+    let budget = viewer_gpu_output_display_baseline_budget_from_env();
+    assert_eq!(budget.max_display_contract_refreshes, 2);
+    assert_eq!(budget.max_display_issue_refresh_correlations, 0);
+    assert_eq!(budget.max_display_tone_map_headroom_changes, 0);
+    assert_eq!(budget.max_available_surface_format_changes, 0);
+    assert_eq!(budget.max_format_color_space_changes, 0);
+    assert_eq!(budget.max_present_mode_changes, 0);
+    assert_eq!(budget.max_alpha_mode_changes, 0);
+
+    match previous {
+        Some(value) => unsafe {
+            std::env::set_var(key, value);
+        },
+        None => unsafe {
+            std::env::remove_var(key);
+        },
+    }
 }
 
 #[test]

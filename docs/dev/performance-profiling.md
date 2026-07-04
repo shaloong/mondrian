@@ -63,6 +63,7 @@ Viewer GPU-output sessions can persist live health records from the app window:
 $env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; cargo run -p mondrian-app
 cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-gpu-output.jsonl --min-records 1 --min-ready 1 --max-failed 0 --max-blocked 0 --max-rejected 0 --max-degraded 0 --max-display-issues 0 --max-hdr-output-requires-hdr-surface 0 --max-output-color-space-requires-surface-color-space 0 --max-reconfigure-blocked-by-payload 0 --max-unsupported-presentation-intent 0 --max-unsupported-surface-contract 0 --max-unknown-display-issues 0 --max-display-contract-refreshes 999999 --max-display-issue-refresh-correlations 0 --max-display-tone-map-headroom-changes 0 --max-available-surface-format-changes 0 --max-format-color-space-changes 0 --max-present-mode-changes 0 --max-alpha-mode-changes 0 --max-display-payload-blockers 0 --max-color-rejections 0
 cargo test -p mondrian-app viewer_gpu_output_budget_smoke -- --ignored --nocapture
+$env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; cargo test -p mondrian-app viewer_gpu_output_display_baseline_smoke -- --ignored --nocapture
 ```
 
 The budget command prints a JSON summary and exits non-zero when the health
@@ -105,5 +106,11 @@ its own gates too: `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES`,
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FORMAT_COLOR_SPACE_CHANGES`,
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PRESENT_MODE_CHANGES`, and
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES`.
+`viewer_gpu_output_budget_smoke` uses the fully environment-driven budget, while
+`viewer_gpu_output_display_baseline_smoke` keeps the same fail-closed display
+issue and capability-drift gates but defaults
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES` to `2` so a normal
+window bring-up can tolerate a small amount of display-contract settling
+without hiding real monitor, surface, or payload drift.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.
