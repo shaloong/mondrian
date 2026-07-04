@@ -376,6 +376,28 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
             0,
         ),
+        max_display_contract_refreshes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
+            u64::MAX,
+        ),
+        max_display_issue_refresh_correlations: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUE_REFRESH_CORRELATIONS",
+            0,
+        ),
+        max_display_tone_map_headroom_changes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_TONE_MAP_HEADROOM_CHANGES",
+            0,
+        ),
+        max_available_surface_format_changes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_AVAILABLE_SURFACE_FORMAT_CHANGES",
+            0,
+        ),
+        max_format_color_space_changes: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FORMAT_COLOR_SPACE_CHANGES",
+            0,
+        ),
+        max_present_mode_changes: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PRESENT_MODE_CHANGES", 0),
+        max_alpha_mode_changes: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES", 0),
         max_display_payload_blockers: env_u64(
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
             0,
@@ -1497,6 +1519,10 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
         0
     );
     assert_eq!(
+        json["summary"]["budget"]["max_display_contract_refreshes"],
+        u64::MAX
+    );
+    assert_eq!(
         json["summary"]["budget"]["max_hdr_output_requires_hdr_surface"],
         0
     );
@@ -1525,6 +1551,13 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
         "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_PRESENTATION_INTENT",
         "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT",
         "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUE_REFRESH_CORRELATIONS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_TONE_MAP_HEADROOM_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_AVAILABLE_SURFACE_FORMAT_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FORMAT_COLOR_SPACE_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PRESENT_MODE_CHANGES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES",
         "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
         "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS",
     ];
@@ -1567,10 +1600,32 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
             "16",
         );
         std::env::set_var(
-            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES",
             "17",
         );
-        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS", "18");
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUE_REFRESH_CORRELATIONS",
+            "18",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_TONE_MAP_HEADROOM_CHANGES",
+            "19",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_AVAILABLE_SURFACE_FORMAT_CHANGES",
+            "20",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FORMAT_COLOR_SPACE_CHANGES",
+            "21",
+        );
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PRESENT_MODE_CHANGES", "22");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES", "23");
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
+            "24",
+        );
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS", "25");
     }
 
     let budget = viewer_gpu_output_budget_from_env();
@@ -1602,8 +1657,15 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
             max_unsupported_presentation_intent: 14,
             max_unsupported_surface_contract: 15,
             max_unknown_display_issues: 16,
-            max_display_payload_blockers: 17,
-            max_color_rejections: 18,
+            max_display_contract_refreshes: 17,
+            max_display_issue_refresh_correlations: 18,
+            max_display_tone_map_headroom_changes: 19,
+            max_available_surface_format_changes: 20,
+            max_format_color_space_changes: 21,
+            max_present_mode_changes: 22,
+            max_alpha_mode_changes: 23,
+            max_display_payload_blockers: 24,
+            max_color_rejections: 25,
         }
     );
 }

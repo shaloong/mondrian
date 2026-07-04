@@ -35,6 +35,20 @@ pub struct ViewerGpuOutputBudget {
     pub max_unsupported_surface_contract: u64,
     /// Maximum allowed records carrying an unknown display issue reason.
     pub max_unknown_display_issues: u64,
+    /// Maximum allowed display-contract refresh events.
+    pub max_display_contract_refreshes: u64,
+    /// Maximum allowed display issues correlated to a preceding refresh event.
+    pub max_display_issue_refresh_correlations: u64,
+    /// Maximum allowed refreshes that changed tone-map headroom evidence.
+    pub max_display_tone_map_headroom_changes: u64,
+    /// Maximum allowed refreshes that changed available surface formats.
+    pub max_available_surface_format_changes: u64,
+    /// Maximum allowed refreshes that changed per-format color-space capabilities.
+    pub max_format_color_space_changes: u64,
+    /// Maximum allowed refreshes that changed present modes.
+    pub max_present_mode_changes: u64,
+    /// Maximum allowed refreshes that changed alpha modes.
+    pub max_alpha_mode_changes: u64,
     /// Maximum allowed records with a display presentation payload blocker.
     pub max_display_payload_blockers: u64,
     /// Maximum allowed records carrying a viewer color rejection.
@@ -58,6 +72,13 @@ impl Default for ViewerGpuOutputBudget {
             max_unsupported_presentation_intent: 0,
             max_unsupported_surface_contract: 0,
             max_unknown_display_issues: 0,
+            max_display_contract_refreshes: u64::MAX,
+            max_display_issue_refresh_correlations: 0,
+            max_display_tone_map_headroom_changes: 0,
+            max_available_surface_format_changes: 0,
+            max_format_color_space_changes: 0,
+            max_present_mode_changes: 0,
+            max_alpha_mode_changes: 0,
             max_display_payload_blockers: 0,
             max_color_rejections: 0,
         }
@@ -136,6 +157,20 @@ pub struct ViewerGpuOutputBudgetReport {
     pub max_unsupported_surface_contract: u64,
     /// Maximum allowed records carrying an unknown display issue reason.
     pub max_unknown_display_issues: u64,
+    /// Maximum allowed display-contract refresh events.
+    pub max_display_contract_refreshes: u64,
+    /// Maximum allowed display issues correlated to a preceding refresh event.
+    pub max_display_issue_refresh_correlations: u64,
+    /// Maximum allowed refreshes that changed tone-map headroom evidence.
+    pub max_display_tone_map_headroom_changes: u64,
+    /// Maximum allowed refreshes that changed available surface formats.
+    pub max_available_surface_format_changes: u64,
+    /// Maximum allowed refreshes that changed per-format color-space capabilities.
+    pub max_format_color_space_changes: u64,
+    /// Maximum allowed refreshes that changed present modes.
+    pub max_present_mode_changes: u64,
+    /// Maximum allowed refreshes that changed alpha modes.
+    pub max_alpha_mode_changes: u64,
     /// Maximum allowed records with a display presentation payload blocker.
     pub max_display_payload_blockers: u64,
     /// Maximum allowed records carrying a viewer color rejection.
@@ -160,6 +195,13 @@ impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
             max_unsupported_presentation_intent: budget.max_unsupported_presentation_intent,
             max_unsupported_surface_contract: budget.max_unsupported_surface_contract,
             max_unknown_display_issues: budget.max_unknown_display_issues,
+            max_display_contract_refreshes: budget.max_display_contract_refreshes,
+            max_display_issue_refresh_correlations: budget.max_display_issue_refresh_correlations,
+            max_display_tone_map_headroom_changes: budget.max_display_tone_map_headroom_changes,
+            max_available_surface_format_changes: budget.max_available_surface_format_changes,
+            max_format_color_space_changes: budget.max_format_color_space_changes,
+            max_present_mode_changes: budget.max_present_mode_changes,
+            max_alpha_mode_changes: budget.max_alpha_mode_changes,
             max_display_payload_blockers: budget.max_display_payload_blockers,
             max_color_rejections: budget.max_color_rejections,
         }
@@ -334,6 +376,48 @@ pub fn evaluate_jsonl(
         "unknown_display_issues",
         display_issues.unknown,
         budget.max_unknown_display_issues,
+    );
+    push_max_failure(
+        &mut failures,
+        "display_contract_refreshes",
+        display_contract_refreshes.total,
+        budget.max_display_contract_refreshes,
+    );
+    push_max_failure(
+        &mut failures,
+        "display_issue_refresh_correlations",
+        display_issue_refresh_correlations.total,
+        budget.max_display_issue_refresh_correlations,
+    );
+    push_max_failure(
+        &mut failures,
+        "display_tone_map_headroom_changes",
+        display_contract_refreshes.display_tone_map_headroom_changed,
+        budget.max_display_tone_map_headroom_changes,
+    );
+    push_max_failure(
+        &mut failures,
+        "available_surface_format_changes",
+        display_contract_refreshes.available_surface_formats_changed,
+        budget.max_available_surface_format_changes,
+    );
+    push_max_failure(
+        &mut failures,
+        "format_color_space_changes",
+        display_contract_refreshes.format_color_spaces_changed,
+        budget.max_format_color_space_changes,
+    );
+    push_max_failure(
+        &mut failures,
+        "present_mode_changes",
+        display_contract_refreshes.present_modes_changed,
+        budget.max_present_mode_changes,
+    );
+    push_max_failure(
+        &mut failures,
+        "alpha_mode_changes",
+        display_contract_refreshes.alpha_modes_changed,
+        budget.max_alpha_mode_changes,
     );
     push_max_failure(
         &mut failures,
@@ -1042,6 +1126,7 @@ mod tests {
             max_blocked: 1,
             max_display_issues: 1,
             max_hdr_output_requires_hdr_surface: 1,
+            max_display_issue_refresh_correlations: 1,
             ..ViewerGpuOutputBudget::default()
         };
 
@@ -1077,6 +1162,11 @@ mod tests {
             min_ready: 0,
             max_waiting: 1,
             max_blocked: 1,
+            max_display_contract_refreshes: 2,
+            max_available_surface_format_changes: 1,
+            max_format_color_space_changes: 1,
+            max_present_mode_changes: 1,
+            max_alpha_mode_changes: 1,
             ..ViewerGpuOutputBudget::default()
         };
 

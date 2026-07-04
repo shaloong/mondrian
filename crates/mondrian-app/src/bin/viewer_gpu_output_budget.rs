@@ -33,7 +33,7 @@ impl BudgetArgs {
     fn parse(args: &[String]) -> anyhow::Result<Self> {
         let Some(first) = args.first() else {
             bail!(
-                "usage: viewer_gpu_output_budget <jsonl-path> [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-payload-blockers N] [--max-color-rejections N]"
+                "usage: viewer_gpu_output_budget <jsonl-path> [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N]"
             );
         };
         let mut budget = ViewerGpuOutputBudget::default();
@@ -69,6 +69,23 @@ impl BudgetArgs {
                     budget.max_unsupported_surface_contract = parsed;
                 }
                 "--max-unknown-display-issues" => budget.max_unknown_display_issues = parsed,
+                "--max-display-contract-refreshes" => {
+                    budget.max_display_contract_refreshes = parsed;
+                }
+                "--max-display-issue-refresh-correlations" => {
+                    budget.max_display_issue_refresh_correlations = parsed;
+                }
+                "--max-display-tone-map-headroom-changes" => {
+                    budget.max_display_tone_map_headroom_changes = parsed;
+                }
+                "--max-available-surface-format-changes" => {
+                    budget.max_available_surface_format_changes = parsed;
+                }
+                "--max-format-color-space-changes" => {
+                    budget.max_format_color_space_changes = parsed;
+                }
+                "--max-present-mode-changes" => budget.max_present_mode_changes = parsed,
+                "--max-alpha-mode-changes" => budget.max_alpha_mode_changes = parsed,
                 "--max-display-payload-blockers" => {
                     budget.max_display_payload_blockers = parsed;
                 }
@@ -111,6 +128,20 @@ mod tests {
             "4".to_owned(),
             "--max-unknown-display-issues".to_owned(),
             "0".to_owned(),
+            "--max-display-contract-refreshes".to_owned(),
+            "9".to_owned(),
+            "--max-display-issue-refresh-correlations".to_owned(),
+            "1".to_owned(),
+            "--max-display-tone-map-headroom-changes".to_owned(),
+            "2".to_owned(),
+            "--max-available-surface-format-changes".to_owned(),
+            "3".to_owned(),
+            "--max-format-color-space-changes".to_owned(),
+            "4".to_owned(),
+            "--max-present-mode-changes".to_owned(),
+            "5".to_owned(),
+            "--max-alpha-mode-changes".to_owned(),
+            "6".to_owned(),
             "--max-display-payload-blockers".to_owned(),
             "0".to_owned(),
             "--max-color-rejections".to_owned(),
@@ -134,6 +165,13 @@ mod tests {
                 max_unsupported_presentation_intent: 2,
                 max_unsupported_surface_contract: 4,
                 max_unknown_display_issues: 0,
+                max_display_contract_refreshes: 9,
+                max_display_issue_refresh_correlations: 1,
+                max_display_tone_map_headroom_changes: 2,
+                max_available_surface_format_changes: 3,
+                max_format_color_space_changes: 4,
+                max_present_mode_changes: 5,
+                max_alpha_mode_changes: 6,
                 max_display_payload_blockers: 0,
                 max_color_rejections: 2,
                 ..ViewerGpuOutputBudget::default()
