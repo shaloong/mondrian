@@ -253,6 +253,11 @@ Preview perf JSONL follows the same pattern with `preview_color_health` and
 `preview_playback_color_health`; the app preview service owns the derivation
 from raw counters to summary fields so perf tests do not hand-maintain color
 health semantics.
+Live app-window viewer output diagnostics can additionally be persisted with
+`MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`. That JSONL stream records the last viewer
+GPU output attempt, including the derived health summary, display/presentation
+readiness, native GPU stage sequence, blocker breakdown, output texture state,
+and external texture registration outcome.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from
