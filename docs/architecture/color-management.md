@@ -224,7 +224,12 @@ Preview performance JSONL reports written through `MONDRIAN_PERF_OUTPUT` expose
 the same idea as `preview_color_health` and, for playback probes,
 `preview_playback_color_health`. Older `preview_color_path` fields remain during
 dashboard migration, but new tooling should budget against the structured
-health summary instead of reconstructing it from flat preview counters.
+health summary instead of reconstructing it from flat preview counters. Preview
+media decode/cache and continuous-playback smokes now fail closed on that
+summary by default: health must be present, composites must be fully
+float/linear, GPU path readiness must hold, and GPU blockers, transfer stages,
+legacy RGBA8 reasons, and missing-metadata policy rejections must remain zero
+unless the budget is explicitly relaxed for investigation.
 Headless preview smoke reports must also carry GPU preview candidate counters:
 request, ready/current/loading/unavailable outcomes, candidate pixels, and
 external texture registration handoff counters. These counters prove that the

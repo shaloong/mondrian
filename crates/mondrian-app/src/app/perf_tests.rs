@@ -62,6 +62,9 @@ struct PreviewMediaPerfReport {
     cache_iterations: usize,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_health: Option<AppUiPreviewColorHealthSummary>,
+    preview_color_health_budget: PreviewPerfColorHealthBudget,
+    preview_color_health_passed: bool,
+    preview_color_health_failures: Vec<PreviewPerfColorHealthBudgetFailure>,
     preview_color_path: PreviewColorPathReport,
     cases: Vec<PerfCaseReport>,
 }
@@ -82,6 +85,9 @@ struct PreviewMediaPlaybackPerfReport {
     readiness: PreviewReadinessCounts,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_health: Option<AppUiPreviewColorHealthSummary>,
+    preview_color_health_budget: PreviewPerfColorHealthBudget,
+    preview_color_health_passed: bool,
+    preview_color_health_failures: Vec<PreviewPerfColorHealthBudgetFailure>,
     preview_color_path: PreviewColorPathReport,
     cases: Vec<PerfCaseReport>,
 }
@@ -91,6 +97,38 @@ struct ViewerGpuOutputBudgetSmokeReport {
     scenario: &'static str,
     source_path: String,
     summary: ViewerGpuOutputBudgetSummary,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+struct PreviewPerfColorHealthBudget {
+    require_color_health: bool,
+    require_fully_float_linear: bool,
+    require_gpu_path_ready: bool,
+    max_gpu_blockers: u64,
+    max_legacy_reason_total: u64,
+    max_transfer_stages: u64,
+    max_policy_rejections: u64,
+}
+
+impl Default for PreviewPerfColorHealthBudget {
+    fn default() -> Self {
+        Self {
+            require_color_health: true,
+            require_fully_float_linear: true,
+            require_gpu_path_ready: true,
+            max_gpu_blockers: 0,
+            max_legacy_reason_total: 0,
+            max_transfer_stages: 0,
+            max_policy_rejections: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PreviewPerfColorHealthBudgetFailure {
+    metric: &'static str,
+    actual: u64,
+    limit: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -266,6 +304,17 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_bool(key: &str, default: bool) -> bool {
+    let Some(value) = std::env::var(key).ok() else {
+        return default;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => default,
+    }
+}
+
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()
@@ -304,6 +353,87 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
             0,
         ),
+    }
+}
+
+fn preview_color_health_budget_from_env() -> PreviewPerfColorHealthBudget {
+    PreviewPerfColorHealthBudget {
+        require_color_health: env_bool("MONDRIAN_PREVIEW_REQUIRE_COLOR_HEALTH", true),
+        require_fully_float_linear: env_bool("MONDRIAN_PREVIEW_REQUIRE_FULLY_FLOAT_LINEAR", true),
+        require_gpu_path_ready: env_bool("MONDRIAN_PREVIEW_REQUIRE_GPU_PATH_READY", true),
+        max_gpu_blockers: env_u64("MONDRIAN_PREVIEW_MAX_GPU_BLOCKERS", 0),
+        max_legacy_reason_total: env_u64("MONDRIAN_PREVIEW_MAX_LEGACY_REASONS", 0),
+        max_transfer_stages: env_u64("MONDRIAN_PREVIEW_MAX_TRANSFER_STAGES", 0),
+        max_policy_rejections: env_u64("MONDRIAN_PREVIEW_MAX_POLICY_REJECTIONS", 0),
+    }
+}
+
+fn evaluate_preview_color_health_budget(
+    color_health: Option<AppUiPreviewColorHealthSummary>,
+    budget: PreviewPerfColorHealthBudget,
+) -> Vec<PreviewPerfColorHealthBudgetFailure> {
+    let Some(color_health) = color_health else {
+        return if budget.require_color_health {
+            vec![PreviewPerfColorHealthBudgetFailure {
+                metric: "color_health_present",
+                actual: 0,
+                limit: 1,
+            }]
+        } else {
+            Vec::new()
+        };
+    };
+
+    let mut failures = Vec::new();
+    if budget.require_fully_float_linear && !color_health.fully_float_linear {
+        failures.push(PreviewPerfColorHealthBudgetFailure {
+            metric: "fully_float_linear",
+            actual: 0,
+            limit: 1,
+        });
+    }
+    if budget.require_gpu_path_ready && !color_health.gpu_path_ready {
+        failures.push(PreviewPerfColorHealthBudgetFailure {
+            metric: "gpu_path_ready",
+            actual: 0,
+            limit: 1,
+        });
+    }
+    push_max_preview_color_health_failure(
+        &mut failures,
+        "gpu_blockers",
+        color_health.gpu_blockers,
+        budget.max_gpu_blockers,
+    );
+    push_max_preview_color_health_failure(
+        &mut failures,
+        "legacy_reason_total",
+        color_health.legacy_reason_total,
+        budget.max_legacy_reason_total,
+    );
+    push_max_preview_color_health_failure(
+        &mut failures,
+        "transfer_stages",
+        color_health.transfer_stages,
+        budget.max_transfer_stages,
+    );
+    push_max_preview_color_health_failure(
+        &mut failures,
+        "policy_rejections",
+        color_health.policy_rejections,
+        budget.max_policy_rejections,
+    );
+    failures
+}
+
+fn push_max_preview_color_health_failure(
+    failures: &mut Vec<PreviewPerfColorHealthBudgetFailure>,
+    metric: &'static str,
+    actual: u64,
+    limit: u64,
+) {
+    if actual > limit {
+        failures.push(PreviewPerfColorHealthBudgetFailure { metric, actual, limit });
     }
 }
 
@@ -703,12 +833,20 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
         )?;
 
         let preview_diagnostics = preview_service.diagnostics();
+        let preview_color_health = preview_diagnostics.color_health_summary();
+        let preview_color_health_budget = preview_color_health_budget_from_env();
+        let preview_color_health_failures =
+            evaluate_preview_color_health_budget(preview_color_health, preview_color_health_budget);
+        let preview_color_health_passed = preview_color_health_failures.is_empty();
         Ok(PreviewMediaPerfReport {
             scenario: "preview_media_decode_cache",
             frames: frame_count,
             cache_iterations,
             preview_diagnostics,
-            preview_color_health: preview_diagnostics.color_health_summary(),
+            preview_color_health,
+            preview_color_health_budget,
+            preview_color_health_passed,
+            preview_color_health_failures,
             preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
             cases: vec![
                 first_frame_case,
@@ -734,6 +872,9 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             failed_cases,
             report_json
         );
+    }
+    if !report.preview_color_health_passed {
+        anyhow::bail!("preview media color-health budget failed: {report_json}");
     }
 
     Ok(())
@@ -820,13 +961,21 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         );
 
         let preview_diagnostics = preview_service.diagnostics();
+        let preview_color_health = preview_diagnostics.color_health_summary();
+        let preview_color_health_budget = preview_color_health_budget_from_env();
+        let preview_color_health_failures =
+            evaluate_preview_color_health_budget(preview_color_health, preview_color_health_budget);
+        let preview_color_health_passed = preview_color_health_failures.is_empty();
         Ok(PreviewMediaPlaybackPerfReport {
             scenario: "preview_media_continuous_playback",
             frames: frame_count,
             frame_interval_ms,
             readiness,
             preview_diagnostics,
-            preview_color_health: preview_diagnostics.color_health_summary(),
+            preview_color_health,
+            preview_color_health_budget,
+            preview_color_health_passed,
+            preview_color_health_failures,
             preview_color_path: PreviewColorPathReport::from_diagnostics(preview_diagnostics),
             cases: vec![playback_case, gpu_candidate_case],
         })
@@ -847,6 +996,9 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             failed_cases,
             report_json
         );
+    }
+    if !report.preview_color_health_passed {
+        anyhow::bail!("preview media playback color-health budget failed: {report_json}");
     }
 
     Ok(())
@@ -1149,12 +1301,19 @@ fn preview_perf_report_serializes_color_health_summary() {
         color_stage_cpu_output_stages: 1,
         ..AppUiPreviewDiagnostics::default()
     };
+    let preview_color_health = diagnostics.color_health_summary();
+    let preview_color_health_budget = PreviewPerfColorHealthBudget::default();
+    let preview_color_health_failures =
+        evaluate_preview_color_health_budget(preview_color_health, preview_color_health_budget);
     let report = PreviewMediaPerfReport {
         scenario: "preview-color-health-test",
         frames: 1,
         cache_iterations: 1,
         preview_diagnostics: diagnostics,
-        preview_color_health: diagnostics.color_health_summary(),
+        preview_color_health,
+        preview_color_health_budget,
+        preview_color_health_passed: preview_color_health_failures.is_empty(),
+        preview_color_health_failures,
         preview_color_path: PreviewColorPathReport::from_diagnostics(diagnostics),
         cases: Vec::new(),
     };
@@ -1176,6 +1335,64 @@ fn preview_perf_report_serializes_color_health_summary() {
     assert_eq!(
         json["preview_color_health"]["legacy_breakdown"]["media_transform"],
         0
+    );
+    assert_eq!(json["preview_color_health_passed"], true);
+    assert_eq!(
+        json["preview_color_health_budget"]["max_legacy_reason_total"],
+        0
+    );
+    assert!(json["preview_color_health_failures"]
+        .as_array()
+        .expect("preview color-health failures array")
+        .is_empty());
+}
+
+#[test]
+fn preview_color_health_budget_reports_failures() {
+    let failures = evaluate_preview_color_health_budget(
+        Some(AppUiPreviewColorHealthSummary {
+            policy_rejections: 1,
+            gpu_blockers: 2,
+            transfer_stages: 3,
+            legacy_reason_total: 4,
+            fully_float_linear: false,
+            gpu_path_ready: false,
+            ..AppUiPreviewColorHealthSummary::default()
+        }),
+        PreviewPerfColorHealthBudget::default(),
+    );
+
+    assert_eq!(
+        failures,
+        vec![
+            PreviewPerfColorHealthBudgetFailure {
+                metric: "fully_float_linear",
+                actual: 0,
+                limit: 1,
+            },
+            PreviewPerfColorHealthBudgetFailure { metric: "gpu_path_ready", actual: 0, limit: 1 },
+            PreviewPerfColorHealthBudgetFailure { metric: "gpu_blockers", actual: 2, limit: 0 },
+            PreviewPerfColorHealthBudgetFailure {
+                metric: "legacy_reason_total",
+                actual: 4,
+                limit: 0,
+            },
+            PreviewPerfColorHealthBudgetFailure { metric: "transfer_stages", actual: 3, limit: 0 },
+            PreviewPerfColorHealthBudgetFailure {
+                metric: "policy_rejections",
+                actual: 1,
+                limit: 0,
+            },
+        ]
+    );
+
+    assert_eq!(
+        evaluate_preview_color_health_budget(None, PreviewPerfColorHealthBudget::default()),
+        vec![PreviewPerfColorHealthBudgetFailure {
+            metric: "color_health_present",
+            actual: 0,
+            limit: 1,
+        }]
     );
 }
 

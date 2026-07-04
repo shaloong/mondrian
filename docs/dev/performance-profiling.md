@@ -26,6 +26,8 @@
 $env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
 $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo test -p mondrian-app preview_1080p2997_simulated_perf -- --ignored --nocapture
 $env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-1080p2997.jsonl'; cargo test -p mondrian-export export_1080p2997_simulated_perf -- --ignored --nocapture
+$env:MONDRIAN_PERF_OUTPUT='target/perf/preview-media.jsonl'; cargo test -p mondrian-app preview_media_decode_cache_smoke -- --ignored --nocapture
+$env:MONDRIAN_PERF_OUTPUT='target/perf/preview-playback.jsonl'; cargo test -p mondrian-app preview_media_continuous_playback_smoke -- --ignored --nocapture
 ```
 
 Export simulation reports include `color_health`, `color_health_budget`,
@@ -38,6 +40,19 @@ Use `MONDRIAN_EXPORT_SIM_REQUIRE_FULLY_FLOAT_LINEAR`,
 `MONDRIAN_EXPORT_SIM_MAX_LEGACY_REASONS`, and
 `MONDRIAN_EXPORT_SIM_MAX_TRANSFER_STAGES` only when intentionally relaxing the
 budget for an investigation.
+
+Preview media smoke reports include `preview_color_health`,
+`preview_color_health_budget`, `preview_color_health_passed`, and
+`preview_color_health_failures`. The decode/cache and continuous-playback
+smokes fail closed unless preview emits color-health diagnostics, stays fully
+float/linear, has no GPU blockers, has no upload/readback transfer stages,
+reports no structured legacy RGBA8 reasons, and has no missing-metadata policy
+rejections. Use `MONDRIAN_PREVIEW_REQUIRE_COLOR_HEALTH`,
+`MONDRIAN_PREVIEW_REQUIRE_FULLY_FLOAT_LINEAR`,
+`MONDRIAN_PREVIEW_REQUIRE_GPU_PATH_READY`, `MONDRIAN_PREVIEW_MAX_GPU_BLOCKERS`,
+`MONDRIAN_PREVIEW_MAX_LEGACY_REASONS`, `MONDRIAN_PREVIEW_MAX_TRANSFER_STAGES`,
+and `MONDRIAN_PREVIEW_MAX_POLICY_REJECTIONS` only when intentionally relaxing
+the budget for an investigation.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 
