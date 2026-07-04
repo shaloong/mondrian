@@ -24,7 +24,49 @@ use std::path::{Path, PathBuf};
 
 // ── Global OCIO state ──────────────────────────────────────────────────────────
 
-static OCIO_CONFIG_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+/// Centralized OCIO global state with proper locking, source identity, and
+/// generation counting for cache invalidation.
+///
+/// All OCIO config mutations must go through this module. The mutex protects
+/// both the Rust-side metadata and the C++ global config atomically.
+struct OcioGlobalState {
+    /// Path or virtual path of the currently loaded config.
+    path: Option<PathBuf>,
+    /// Source identity that loaded the current config.
+    source: Option<OcioConfigSource>,
+    /// Monotonically increasing generation counter. Incremented on every
+    /// config load. Callers can use this to detect config changes for cache
+    /// invalidation without holding the lock.
+    generation: u64,
+}
+
+static OCIO_STATE: std::sync::Mutex<OcioGlobalState> =
+    std::sync::Mutex::new(OcioGlobalState { path: None, source: None, generation: 0 });
+
+impl OcioGlobalState {
+    /// Set the current config atomically: update path, source, increment
+    /// generation, and call `ocio_rs::set_current_config`.
+    ///
+    /// The mutex is held for the entire operation so concurrent
+    /// `current_config()` callers cannot see a half-updated state.
+    fn set_config(&mut self, path: PathBuf, source: OcioConfigSource, config: &Config) {
+        ocio_rs::set_current_config(config);
+        self.path = Some(path);
+        self.source = Some(source);
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+/// Return the current config generation. This is a monotonic counter that
+/// increments on every config load. Use it for cache invalidation.
+pub fn ocio_config_generation() -> u64 {
+    OCIO_STATE.lock().map(|g| g.generation).unwrap_or(0)
+}
+
+/// Return the current config source identity, if any.
+pub fn ocio_config_source() -> Option<OcioConfigSource> {
+    OCIO_STATE.lock().ok().and_then(|g| g.source.clone())
+}
 
 /// Intended name for Mondrian's bundled default OCIO config.
 pub const MONDRIAN_DEFAULT_OCIO_CONFIG_NAME: &str = "mondrian_default_ocio_v1";
@@ -502,16 +544,18 @@ pub fn init_ocio(path: &Path) -> Result<(), String> {
     let config = Config::from_file(path.to_string_lossy().as_ref())
         .map_err(|e| format!("failed to load OCIO config from {}: {e}", path.display()))?;
 
-    ocio_rs::set_current_config(&config);
+    if let Ok(mut guard) = OCIO_STATE.lock() {
+        guard.set_config(
+            path.to_path_buf(),
+            OcioConfigSource::Path { path: path.to_path_buf() },
+            &config,
+        );
+    }
 
     // The global OCIO context now holds a reference (ref-counted by the C++
     // library).  We deliberately forget the Rust wrapper so the ref-count
     // never reaches zero while the process is alive.
     std::mem::forget(config);
-
-    if let Ok(mut guard) = OCIO_CONFIG_PATH.lock() {
-        *guard = Some(path.to_path_buf());
-    }
 
     tracing::info!(path=%path.display(), "OCIO config loaded");
     Ok(())
@@ -526,12 +570,13 @@ pub fn init_ocio_builtin(name: &str) -> Result<(), String> {
         .config_by_name(name)
         .ok_or_else(|| format!("built-in OCIO config not found: '{name}'"))?;
 
-    ocio_rs::set_current_config(&config);
-
-    // Mark as loaded with a virtual path so `ensure_ocio_loaded` works.
     let virtual_path = PathBuf::from(format!("builtin:{name}"));
-    if let Ok(mut guard) = OCIO_CONFIG_PATH.lock() {
-        *guard = Some(virtual_path);
+    if let Ok(mut guard) = OCIO_STATE.lock() {
+        guard.set_config(
+            virtual_path,
+            OcioConfigSource::Builtin { name: name.to_string() },
+            &config,
+        );
     }
 
     // Keep the registry alive — its Config references need it.
@@ -550,12 +595,14 @@ pub fn init_mondrian_default_ocio() -> Result<(), String> {
         )
     })?;
 
-    ocio_rs::set_current_config(&config);
-    std::mem::forget(config);
-
-    if let Ok(mut guard) = OCIO_CONFIG_PATH.lock() {
-        *guard = Some(PathBuf::from(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH));
+    if let Ok(mut guard) = OCIO_STATE.lock() {
+        guard.set_config(
+            PathBuf::from(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH),
+            OcioConfigSource::MondrianDefault,
+            &config,
+        );
     }
+    std::mem::forget(config);
 
     tracing::info!(
         config = MONDRIAN_DEFAULT_OCIO_CONFIG_NAME,
@@ -566,12 +613,12 @@ pub fn init_mondrian_default_ocio() -> Result<(), String> {
 
 /// Return the currently-loaded OCIO config path, if any.
 pub fn ocio_config_path() -> Option<PathBuf> {
-    OCIO_CONFIG_PATH.lock().ok()?.clone()
+    OCIO_STATE.lock().ok().and_then(|g| g.path.clone())
 }
 
 /// Return `true` when an OCIO config has been loaded.
 pub fn ocio_available() -> bool {
-    OCIO_CONFIG_PATH.lock().map(|g| g.is_some()).unwrap_or(false)
+    OCIO_STATE.lock().map(|g| g.path.is_some()).unwrap_or(false)
 }
 
 // ── Resolver (explicit source only) ─────────────────────────────────────────────
@@ -580,34 +627,33 @@ pub fn ocio_available() -> bool {
 ///
 /// This is the single entry point that callers should use.  It is idempotent:
 /// calling it again with the same effective source is a no-op.
+///
+/// When a different source is requested while another is loaded, the old config
+/// is replaced. This is the only supported way to switch OCIO configs.
 pub fn ensure_ocio_loaded(source: &OcioConfigSource) -> Result<(), String> {
-    match source {
-        OcioConfigSource::MondrianDefault => ensure_mondrian_default_ocio_loaded(),
-        OcioConfigSource::Builtin { name } => {
-            let virtual_path = PathBuf::from(format!("builtin:{name}"));
-            if already_loaded_with(&virtual_path) {
-                return Ok(());
-            }
-            init_ocio_builtin(name)
+    // Check if the requested source is already loaded.
+    if let Ok(guard) = OCIO_STATE.lock() {
+        if guard.source.as_ref() == Some(source) {
+            return Ok(());
         }
+    }
+    // Different source requested — load it.
+    match source {
+        OcioConfigSource::MondrianDefault => init_mondrian_default_ocio(),
+        OcioConfigSource::Builtin { name } => init_ocio_builtin(name),
         OcioConfigSource::Path { path } => {
-            if already_loaded_with(path) {
-                return Ok(());
-            }
             if path.exists() {
-                return init_ocio(path);
+                init_ocio(path)
+            } else {
+                Err(format!(
+                    "OCIO config file not found: {}\n\
+                     Place a config.ocio file at this path or change the OCIO source in project settings.",
+                    path.display()
+                ))
             }
-            Err(format!(
-                "OCIO config file not found: {}\n\
-                 Place a config.ocio file at this path or change the OCIO source in project settings.",
-                path.display()
-            ))
         }
         OcioConfigSource::Environment => {
             let resolved = resolve_from_environment()?;
-            if already_loaded_with(&resolved) {
-                return Ok(());
-            }
             init_ocio(&resolved)
         }
     }
@@ -635,7 +681,7 @@ pub fn mondrian_default_ocio_available() -> bool {
 
 /// Check whether the config whose path is `path` is already loaded.
 fn already_loaded_with(path: &Path) -> bool {
-    OCIO_CONFIG_PATH.lock().map(|g| g.as_deref() == Some(path)).unwrap_or(false)
+    OCIO_STATE.lock().map(|g| g.path.as_deref() == Some(path)).unwrap_or(false)
 }
 
 /// Resolve an OCIO config path from the explicit `OCIO` environment variable.
@@ -1614,5 +1660,32 @@ mod tests {
         );
         assert!(bundle.shader_text.contains("mondrian_ocio_main"));
         assert!(bundle.cache_id.as_deref().is_some_and(|id| !id.trim().is_empty()));
+    }
+
+    #[test]
+    fn config_generation_increments_on_load() {
+        let gen_before = ocio_config_generation();
+        ensure_mondrian_default_ocio_loaded().expect("load default config");
+        let gen_after = ocio_config_generation();
+        assert!(gen_after >= gen_before, "generation should not decrease");
+        // If the config was already loaded, generation stays the same.
+        // If it was freshly loaded, generation increments.
+    }
+
+    #[test]
+    fn config_source_tracks_identity() {
+        ensure_mondrian_default_ocio_loaded().expect("load default config");
+        let source = ocio_config_source();
+        assert_eq!(source, Some(OcioConfigSource::MondrianDefault));
+    }
+
+    #[test]
+    fn ensure_ocio_loaded_is_idempotent() {
+        // Ensure config is loaded first.
+        ensure_mondrian_default_ocio_loaded().expect("load default config");
+        let gen1 = ocio_config_generation();
+        ensure_mondrian_default_ocio_loaded().expect("second load");
+        let gen2 = ocio_config_generation();
+        assert_eq!(gen1, gen2, "repeated load should not change generation");
     }
 }

@@ -43,6 +43,27 @@ The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
 invalid instead of scanning machine-specific standard paths.
 
+## OCIO Global State Management
+
+All OCIO config mutations are centralized in `mondrian_core::ocio` through
+`OcioGlobalState`, a mutex-protected struct that owns:
+- The loaded config path (or virtual path for built-in/embedded configs)
+- The source identity (`OcioConfigSource`) that loaded the current config
+- A monotonic generation counter for cache invalidation
+
+`ocio_rs::set_current_config` is called inside the mutex guard so the C++ global
+and Rust metadata are updated atomically. Concurrent `current_config()` callers
+cannot see a half-updated state.
+
+`ocio_config_generation()` returns the current generation counter. Renderer GPU
+caches (e.g., `OcioGpuShaderCache`) include this generation in their cache keys
+so stale entries are automatically invalidated when the config changes. Callers
+can also explicitly call `OcioGpuShaderCache::clear()` when a config switch is
+detected.
+
+`ocio_config_source()` returns the source identity of the currently loaded
+config, enabling diagnostics and source-aware idempotency checks.
+
 ## Project and Sequence
 
 `ProjectColorManagement` stores the project-level engine. `SequenceColorManagement` can inherit from the project or override its own engine and policies.

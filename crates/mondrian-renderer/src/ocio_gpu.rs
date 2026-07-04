@@ -4501,6 +4501,12 @@ impl OcioGpuShaderCache {
         }
     }
 
+    /// Clear all cached entries. Call this when the OCIO config changes to
+    /// prevent stale shader plans from being served.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     /// Resolve a request to an OCIO GPU shader plan, using the cache when possible.
     pub fn get_or_extract(
         &mut self,
@@ -4858,7 +4864,13 @@ fn plan_from_bundle(
 }
 
 fn request_hash(request: &OcioGpuShaderRequest) -> u64 {
-    hash_value(request)
+    let mut hasher = DefaultHasher::new();
+    request.hash(&mut hasher);
+    // Include OCIO config generation so cache entries are invalidated when the
+    // config changes. This prevents stale shader plans from being served after
+    // a config switch.
+    mondrian_core::ocio_config_generation().hash(&mut hasher);
+    hasher.finish()
 }
 
 fn hash_request_and_processor(
