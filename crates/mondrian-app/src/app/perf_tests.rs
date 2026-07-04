@@ -292,6 +292,7 @@ fn write_report_if_needed(report_json: &str) {
 
 fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
     ViewerGpuOutputBudget {
+        min_records: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MIN_RECORDS", 1),
         min_ready: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MIN_READY", 1),
         max_failed: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FAILED", 0),
         max_blocked: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_BLOCKED", 0),
@@ -1191,6 +1192,7 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     assert_eq!(json["scenario"], "viewer_gpu_output_budget");
     assert_eq!(json["summary"]["passed"], true);
     assert_eq!(json["summary"]["records"], 2);
+    assert_eq!(json["summary"]["budget"]["min_records"], 1);
     assert_eq!(json["summary"]["counts"]["ready"], 1);
     assert_eq!(json["summary"]["counts"]["waiting"], 1);
     assert_eq!(json["summary"]["reported_counts_match_replay"], true);

@@ -33,7 +33,7 @@ impl BudgetArgs {
     fn parse(args: &[String]) -> anyhow::Result<Self> {
         let Some(first) = args.first() else {
             bail!(
-                "usage: viewer_gpu_output_budget <jsonl-path> [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N]"
+                "usage: viewer_gpu_output_budget <jsonl-path> [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N]"
             );
         };
         let mut budget = ViewerGpuOutputBudget::default();
@@ -45,6 +45,7 @@ impl BudgetArgs {
                 .parse::<u64>()
                 .with_context(|| format!("invalid numeric value for {flag}: {value}"))?;
             match flag {
+                "--min-records" => budget.min_records = parsed,
                 "--min-ready" => budget.min_ready = parsed,
                 "--max-failed" => budget.max_failed = parsed,
                 "--max-blocked" => budget.max_blocked = parsed,
@@ -69,6 +70,8 @@ mod tests {
             "target/perf/viewer.jsonl".to_owned(),
             "--min-ready".to_owned(),
             "4".to_owned(),
+            "--min-records".to_owned(),
+            "3".to_owned(),
             "--max-degraded".to_owned(),
             "2".to_owned(),
             "--max-waiting".to_owned(),
@@ -81,6 +84,7 @@ mod tests {
         assert_eq!(
             parsed.budget,
             ViewerGpuOutputBudget {
+                min_records: 3,
                 min_ready: 4,
                 max_degraded: 2,
                 max_waiting: 8,
