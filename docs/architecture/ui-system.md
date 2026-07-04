@@ -149,7 +149,13 @@ directly and only use the compact human-readable summary as supporting context.
 The viewer GPU-output budget evaluator consumes the same JSONL summary and
 replays display issue reason counts plus payload-blocker counts, so smoke tests
 can budget real display/surface regressions independently from broad health
-status totals.
+status totals. That budget must stay fail-closed per reason as well as in
+aggregate, so HDR-surface regressions, surface-color-space mismatches, payload
+contract blockers, unsupported presentation intents, and unsupported surface
+contracts can each trip their own threshold instead of disappearing inside one
+combined display-issue count. Unknown future reason strings must also budget as
+their own fail-closed class so diagnostics schema drift cannot hide inside a
+temporarily relaxed aggregate threshold.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.

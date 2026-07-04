@@ -290,7 +290,10 @@ reason counts and payload-blocker counts, and it replays viewer color
 rejections into a `VideoColorDiagnosticIssueAggregate`, allowing smoke runs to
 fail on HDR, wide-gamut, unsupported presentation, UI payload blockers, or
 metadata-policy rejections even when a temporary health budget permits degraded
-frames. The same evaluator lives in
+frames. Per-reason display thresholds are part of the contract, so CI can relax
+one failure class for investigation without silently tolerating the rest, and
+unknown future display reasons still fail closed instead of disappearing inside
+an aggregate display-issue allowance. The same evaluator lives in
 `app_ui::viewer_gpu_output_budget` so Rust smoke tests and the CLI share one
 budget implementation; the ignored `viewer_gpu_output_budget_smoke` test reads
 `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same summary into

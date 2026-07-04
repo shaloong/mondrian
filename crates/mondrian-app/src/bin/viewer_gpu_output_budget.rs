@@ -33,7 +33,7 @@ impl BudgetArgs {
     fn parse(args: &[String]) -> anyhow::Result<Self> {
         let Some(first) = args.first() else {
             bail!(
-                "usage: viewer_gpu_output_budget <jsonl-path> [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-display-payload-blockers N] [--max-color-rejections N]"
+                "usage: viewer_gpu_output_budget <jsonl-path> [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-payload-blockers N] [--max-color-rejections N]"
             );
         };
         let mut budget = ViewerGpuOutputBudget::default();
@@ -53,6 +53,22 @@ impl BudgetArgs {
                 "--max-degraded" => budget.max_degraded = parsed,
                 "--max-waiting" => budget.max_waiting = parsed,
                 "--max-display-issues" => budget.max_display_issues = parsed,
+                "--max-hdr-output-requires-hdr-surface" => {
+                    budget.max_hdr_output_requires_hdr_surface = parsed;
+                }
+                "--max-output-color-space-requires-surface-color-space" => {
+                    budget.max_output_color_space_requires_surface_color_space = parsed;
+                }
+                "--max-reconfigure-blocked-by-payload" => {
+                    budget.max_reconfigure_blocked_by_payload = parsed;
+                }
+                "--max-unsupported-presentation-intent" => {
+                    budget.max_unsupported_presentation_intent = parsed;
+                }
+                "--max-unsupported-surface-contract" => {
+                    budget.max_unsupported_surface_contract = parsed;
+                }
+                "--max-unknown-display-issues" => budget.max_unknown_display_issues = parsed,
                 "--max-display-payload-blockers" => {
                     budget.max_display_payload_blockers = parsed;
                 }
@@ -83,6 +99,18 @@ mod tests {
             "8".to_owned(),
             "--max-display-issues".to_owned(),
             "1".to_owned(),
+            "--max-hdr-output-requires-hdr-surface".to_owned(),
+            "0".to_owned(),
+            "--max-output-color-space-requires-surface-color-space".to_owned(),
+            "3".to_owned(),
+            "--max-reconfigure-blocked-by-payload".to_owned(),
+            "1".to_owned(),
+            "--max-unsupported-presentation-intent".to_owned(),
+            "2".to_owned(),
+            "--max-unsupported-surface-contract".to_owned(),
+            "4".to_owned(),
+            "--max-unknown-display-issues".to_owned(),
+            "0".to_owned(),
             "--max-display-payload-blockers".to_owned(),
             "0".to_owned(),
             "--max-color-rejections".to_owned(),
@@ -100,6 +128,12 @@ mod tests {
                 max_degraded: 2,
                 max_waiting: 8,
                 max_display_issues: 1,
+                max_hdr_output_requires_hdr_surface: 0,
+                max_output_color_space_requires_surface_color_space: 3,
+                max_reconfigure_blocked_by_payload: 1,
+                max_unsupported_presentation_intent: 2,
+                max_unsupported_surface_contract: 4,
+                max_unknown_display_issues: 0,
                 max_display_payload_blockers: 0,
                 max_color_rejections: 2,
                 ..ViewerGpuOutputBudget::default()

@@ -352,6 +352,30 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
         max_degraded: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DEGRADED", 0),
         max_waiting: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_WAITING", u64::MAX),
         max_display_issues: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUES", 0),
+        max_hdr_output_requires_hdr_surface: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE",
+            0,
+        ),
+        max_output_color_space_requires_surface_color_space: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE",
+            0,
+        ),
+        max_reconfigure_blocked_by_payload: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_RECONFIGURE_BLOCKED_BY_PAYLOAD",
+            0,
+        ),
+        max_unsupported_presentation_intent: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_PRESENTATION_INTENT",
+            0,
+        ),
+        max_unsupported_surface_contract: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT",
+            0,
+        ),
+        max_unknown_display_issues: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
+            0,
+        ),
         max_display_payload_blockers: env_u64(
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
             0,
@@ -1467,11 +1491,116 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     assert_eq!(json["summary"]["counts"]["ready"], 1);
     assert_eq!(json["summary"]["counts"]["waiting"], 1);
     assert_eq!(json["summary"]["display_issues"]["total"], 0);
+    assert_eq!(
+        json["summary"]["budget"]["max_hdr_output_requires_hdr_surface"],
+        0
+    );
     assert_eq!(json["summary"]["budget"]["max_display_payload_blockers"], 0);
     assert_eq!(json["summary"]["budget"]["max_color_rejections"], 0);
     assert_eq!(json["summary"]["color_rejections"], 0);
     assert_eq!(json["summary"]["reported_counts_match_replay"], true);
     assert_eq!(json["summary"]["last_frame_context"]["frame"], 12);
+}
+
+#[test]
+fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
+    let _lock = perf_lock().lock().expect("perf lock");
+    let keys = [
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MIN_RECORDS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MIN_READY",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FAILED",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_BLOCKED",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_REJECTED",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DEGRADED",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_WAITING",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_RECONFIGURE_BLOCKED_BY_PAYLOAD",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_PRESENTATION_INTENT",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS",
+    ];
+    let previous = keys
+        .iter()
+        .map(|key| ((*key).to_owned(), std::env::var(key).ok()))
+        .collect::<Vec<_>>();
+
+    unsafe {
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MIN_RECORDS", "3");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MIN_READY", "4");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FAILED", "5");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_BLOCKED", "6");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_REJECTED", "7");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DEGRADED", "8");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_WAITING", "9");
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_ISSUES", "10");
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE",
+            "11",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE",
+            "12",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_RECONFIGURE_BLOCKED_BY_PAYLOAD",
+            "13",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_PRESENTATION_INTENT",
+            "14",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT",
+            "15",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
+            "16",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
+            "17",
+        );
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS", "18");
+    }
+
+    let budget = viewer_gpu_output_budget_from_env();
+
+    for (key, value) in previous {
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    assert_eq!(
+        budget,
+        ViewerGpuOutputBudget {
+            min_records: 3,
+            min_ready: 4,
+            max_failed: 5,
+            max_blocked: 6,
+            max_rejected: 7,
+            max_degraded: 8,
+            max_waiting: 9,
+            max_display_issues: 10,
+            max_hdr_output_requires_hdr_surface: 11,
+            max_output_color_space_requires_surface_color_space: 12,
+            max_reconfigure_blocked_by_payload: 13,
+            max_unsupported_presentation_intent: 14,
+            max_unsupported_surface_contract: 15,
+            max_unknown_display_issues: 16,
+            max_display_payload_blockers: 17,
+            max_color_rejections: 18,
+        }
+    );
 }
 
 fn paint_command_count(

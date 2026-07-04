@@ -61,7 +61,7 @@ Viewer GPU-output sessions can persist live health records from the app window:
 
 ```powershell
 $env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; cargo run -p mondrian-app
-cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-gpu-output.jsonl --min-records 1 --min-ready 1 --max-failed 0 --max-blocked 0 --max-rejected 0 --max-degraded 0 --max-display-issues 0 --max-display-payload-blockers 0 --max-color-rejections 0
+cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-gpu-output.jsonl --min-records 1 --min-ready 1 --max-failed 0 --max-blocked 0 --max-rejected 0 --max-degraded 0 --max-display-issues 0 --max-hdr-output-requires-hdr-surface 0 --max-output-color-space-requires-surface-color-space 0 --max-reconfigure-blocked-by-payload 0 --max-unsupported-presentation-intent 0 --max-unsupported-surface-contract 0 --max-unknown-display-issues 0 --max-display-payload-blockers 0 --max-color-rejections 0
 cargo test -p mondrian-app viewer_gpu_output_budget_smoke -- --ignored --nocapture
 ```
 
@@ -75,5 +75,14 @@ some degraded frames for investigation. The same summary now reports
 `color_rejections`, the last structured viewer color rejection, and aggregated
 `media_issues`; `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS` keeps viewer
 GPU-output smokes fail-closed when metadata policy starts rejecting media.
+Use the per-reason viewer display thresholds
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE`,
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE`,
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_RECONFIGURE_BLOCKED_BY_PAYLOAD`,
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_PRESENTATION_INTENT`, and
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT`, plus
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES`, when an investigation
+needs to relax one specific display contract failure without masking the others
+or silently accepting a new reason emitted by the app.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.

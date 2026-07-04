@@ -23,6 +23,18 @@ pub struct ViewerGpuOutputBudget {
     pub max_waiting: u64,
     /// Maximum allowed records with a display issue summary.
     pub max_display_issues: u64,
+    /// Maximum allowed records blocked by missing HDR presentation support.
+    pub max_hdr_output_requires_hdr_surface: u64,
+    /// Maximum allowed records requiring a different surface color space.
+    pub max_output_color_space_requires_surface_color_space: u64,
+    /// Maximum allowed records blocked by the viewer/UI payload contract.
+    pub max_reconfigure_blocked_by_payload: u64,
+    /// Maximum allowed records targeting a non-presentation output intent.
+    pub max_unsupported_presentation_intent: u64,
+    /// Maximum allowed records lacking a supported surface contract.
+    pub max_unsupported_surface_contract: u64,
+    /// Maximum allowed records carrying an unknown display issue reason.
+    pub max_unknown_display_issues: u64,
     /// Maximum allowed records with a display presentation payload blocker.
     pub max_display_payload_blockers: u64,
     /// Maximum allowed records carrying a viewer color rejection.
@@ -40,6 +52,12 @@ impl Default for ViewerGpuOutputBudget {
             max_degraded: 0,
             max_waiting: u64::MAX,
             max_display_issues: 0,
+            max_hdr_output_requires_hdr_surface: 0,
+            max_output_color_space_requires_surface_color_space: 0,
+            max_reconfigure_blocked_by_payload: 0,
+            max_unsupported_presentation_intent: 0,
+            max_unsupported_surface_contract: 0,
+            max_unknown_display_issues: 0,
             max_display_payload_blockers: 0,
             max_color_rejections: 0,
         }
@@ -100,6 +118,18 @@ pub struct ViewerGpuOutputBudgetReport {
     pub max_waiting: u64,
     /// Maximum allowed records with a display issue summary.
     pub max_display_issues: u64,
+    /// Maximum allowed records blocked by missing HDR presentation support.
+    pub max_hdr_output_requires_hdr_surface: u64,
+    /// Maximum allowed records requiring a different surface color space.
+    pub max_output_color_space_requires_surface_color_space: u64,
+    /// Maximum allowed records blocked by the viewer/UI payload contract.
+    pub max_reconfigure_blocked_by_payload: u64,
+    /// Maximum allowed records targeting a non-presentation output intent.
+    pub max_unsupported_presentation_intent: u64,
+    /// Maximum allowed records lacking a supported surface contract.
+    pub max_unsupported_surface_contract: u64,
+    /// Maximum allowed records carrying an unknown display issue reason.
+    pub max_unknown_display_issues: u64,
     /// Maximum allowed records with a display presentation payload blocker.
     pub max_display_payload_blockers: u64,
     /// Maximum allowed records carrying a viewer color rejection.
@@ -117,6 +147,13 @@ impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
             max_degraded: budget.max_degraded,
             max_waiting: budget.max_waiting,
             max_display_issues: budget.max_display_issues,
+            max_hdr_output_requires_hdr_surface: budget.max_hdr_output_requires_hdr_surface,
+            max_output_color_space_requires_surface_color_space: budget
+                .max_output_color_space_requires_surface_color_space,
+            max_reconfigure_blocked_by_payload: budget.max_reconfigure_blocked_by_payload,
+            max_unsupported_presentation_intent: budget.max_unsupported_presentation_intent,
+            max_unsupported_surface_contract: budget.max_unsupported_surface_contract,
+            max_unknown_display_issues: budget.max_unknown_display_issues,
             max_display_payload_blockers: budget.max_display_payload_blockers,
             max_color_rejections: budget.max_color_rejections,
         }
@@ -236,6 +273,42 @@ pub fn evaluate_jsonl(
         "display_issues",
         display_issues.total,
         budget.max_display_issues,
+    );
+    push_max_failure(
+        &mut failures,
+        "hdr_output_requires_hdr_surface",
+        display_issues.hdr_output_requires_hdr_surface,
+        budget.max_hdr_output_requires_hdr_surface,
+    );
+    push_max_failure(
+        &mut failures,
+        "output_color_space_requires_surface_color_space",
+        display_issues.output_color_space_requires_surface_color_space,
+        budget.max_output_color_space_requires_surface_color_space,
+    );
+    push_max_failure(
+        &mut failures,
+        "reconfigure_blocked_by_payload",
+        display_issues.reconfigure_blocked_by_payload,
+        budget.max_reconfigure_blocked_by_payload,
+    );
+    push_max_failure(
+        &mut failures,
+        "unsupported_presentation_intent",
+        display_issues.unsupported_presentation_intent,
+        budget.max_unsupported_presentation_intent,
+    );
+    push_max_failure(
+        &mut failures,
+        "unsupported_surface_contract",
+        display_issues.unsupported_surface_contract,
+        budget.max_unsupported_surface_contract,
+    );
+    push_max_failure(
+        &mut failures,
+        "unknown_display_issues",
+        display_issues.unknown,
+        budget.max_unknown_display_issues,
     );
     push_max_failure(
         &mut failures,
@@ -594,6 +667,8 @@ mod tests {
             max_blocked: 1,
             max_degraded: 1,
             max_display_issues: 2,
+            max_hdr_output_requires_hdr_surface: 1,
+            max_reconfigure_blocked_by_payload: 1,
             max_display_payload_blockers: 1,
             ..ViewerGpuOutputBudget::default()
         };
@@ -701,6 +776,7 @@ mod tests {
             min_ready: 0,
             max_degraded: 1,
             max_display_issues: 0,
+            max_reconfigure_blocked_by_payload: 0,
             max_display_payload_blockers: 0,
             ..ViewerGpuOutputBudget::default()
         };
@@ -712,6 +788,11 @@ mod tests {
             summary.failures,
             vec![
                 ViewerGpuOutputBudgetFailure { metric: "display_issues", actual: 1, limit: 0 },
+                ViewerGpuOutputBudgetFailure {
+                    metric: "reconfigure_blocked_by_payload",
+                    actual: 1,
+                    limit: 0,
+                },
                 ViewerGpuOutputBudgetFailure {
                     metric: "display_payload_blockers",
                     actual: 1,
@@ -739,5 +820,73 @@ mod tests {
             actual: 1,
             limit: 0,
         }));
+    }
+
+    #[test]
+    fn budget_fails_specific_display_issue_reason_thresholds() {
+        let jsonl = r#"
+{"health":{"status":"Blocked"},"display_issue_summary":{"reason":"HdrOutputRequiresHdrSurface","output_color_space":"Rec2100Pq","payload_blocker":null}}
+{"health":{"status":"Blocked"},"display_issue_summary":{"reason":"UnsupportedSurfaceContract","output_color_space":"DisplayP3","payload_blocker":null}}
+{"health":{"status":"Blocked"},"display_issue_summary":{"reason":"UnsupportedPresentationIntent","output_color_space":"SceneLinear","payload_blocker":null}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 0,
+            max_blocked: 3,
+            max_display_issues: 3,
+            max_hdr_output_requires_hdr_surface: 0,
+            max_unsupported_presentation_intent: 0,
+            max_unsupported_surface_contract: 0,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert_eq!(
+            summary.failures,
+            vec![
+                ViewerGpuOutputBudgetFailure {
+                    metric: "hdr_output_requires_hdr_surface",
+                    actual: 1,
+                    limit: 0,
+                },
+                ViewerGpuOutputBudgetFailure {
+                    metric: "unsupported_presentation_intent",
+                    actual: 1,
+                    limit: 0,
+                },
+                ViewerGpuOutputBudgetFailure {
+                    metric: "unsupported_surface_contract",
+                    actual: 1,
+                    limit: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn budget_fails_unknown_display_issue_reason_threshold() {
+        let jsonl = r#"
+{"health":{"status":"Degraded"},"display_issue_summary":{"reason":"FutureDisplayReason","output_color_space":"DisplayP3","payload_blocker":null}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 0,
+            max_degraded: 1,
+            max_display_issues: 1,
+            max_unknown_display_issues: 0,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert_eq!(
+            summary.failures,
+            vec![ViewerGpuOutputBudgetFailure {
+                metric: "unknown_display_issues",
+                actual: 1,
+                limit: 0,
+            },]
+        );
     }
 }
