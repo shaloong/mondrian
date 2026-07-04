@@ -77,10 +77,18 @@ The budget command prints a versioned health report and exits non-zero when the
 health stream violates the thresholds or when reported cumulative
 `health_counts` do not match the statuses replayed from the JSONL records.
 Empty JSONL streams fail with a `records` budget failure. The report's embedded
-summary also replays
-`display_issue_summary` records by reason and payload-blocker presence, so CI
-budgets can fail on display/surface contract problems even when a run allows
-some degraded frames for investigation. The same summary now reports
+summary now fails closed on missing renderer-owned stage/runtime evidence and on
+preview-candidate discontinuity unless explicitly tolerated:
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_RUNTIME_REPORTS`,
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_STAGE_REPORTS`,
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_READY_RECORDS_MISSING_PREVIEW_CANDIDATE_CONTEXT`,
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PREVIEW_CANDIDATE_ID_REGRESSIONS`.
+A `Ready` record should carry preview-candidate identity/state and stable
+`accumulated_stage_report`/`runtime_report` fields for CI-grade traceability.
+The report also replays `display_issue_summary` records by reason and
+payload-blocker presence, so CI budgets can fail on display/surface contract
+problems even when a run allows some degraded frames for investigation. The same
+summary now reports
 `color_rejections`, the last structured viewer color rejection, and aggregated
 `media_issues`; `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS` keeps viewer
 GPU-output smokes fail-closed when metadata policy starts rejecting media.
@@ -117,6 +125,11 @@ its own gates too: `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_CONTRACT_REFRESHES`,
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_FORMAT_COLOR_SPACE_CHANGES`,
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PRESENT_MODE_CHANGES`, and
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES`.
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_RUNTIME_REPORTS`,
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_STAGE_REPORTS`,
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_READY_RECORDS_MISSING_PREVIEW_CANDIDATE_CONTEXT`, and
+`MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PREVIEW_CANDIDATE_ID_REGRESSIONS`
+are part of the same per-reason gate style.
 `viewer_gpu_output_budget_smoke` uses the fully environment-driven budget, while
 `viewer_gpu_output_display_baseline_smoke` keeps the same fail-closed display
 issue and capability-drift gates but defaults

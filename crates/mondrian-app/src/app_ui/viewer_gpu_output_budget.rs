@@ -59,6 +59,14 @@ pub struct ViewerGpuOutputBudget {
     pub max_display_payload_blockers: u64,
     /// Maximum allowed records carrying a viewer color rejection.
     pub max_color_rejections: u64,
+    /// Maximum allowed records missing renderer-owned runtime report snapshots.
+    pub max_missing_runtime_reports: u64,
+    /// Maximum allowed records missing renderer-owned stage report snapshots.
+    pub max_missing_stage_reports: u64,
+    /// Maximum allowed ready records without structured preview candidate context.
+    pub max_ready_records_missing_preview_candidate_context: u64,
+    /// Maximum allowed preview-candidate id regressions across stream.
+    pub max_preview_candidate_id_regressions: u64,
 }
 
 impl Default for ViewerGpuOutputBudget {
@@ -87,6 +95,10 @@ impl Default for ViewerGpuOutputBudget {
             max_alpha_mode_changes: 0,
             max_display_payload_blockers: 0,
             max_color_rejections: 0,
+            max_missing_runtime_reports: 0,
+            max_missing_stage_reports: 0,
+            max_ready_records_missing_preview_candidate_context: 0,
+            max_preview_candidate_id_regressions: 0,
         }
     }
 }
@@ -146,6 +158,20 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub last_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
     /// Last viewer color rejection observed in the stream.
     pub last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
+    /// Number of records carrying a structured runtime report.
+    pub runtime_reports: u64,
+    /// Number of records carrying a structured stage report.
+    pub stage_reports: u64,
+    /// Number of records missing structured runtime report.
+    pub missing_runtime_reports: u64,
+    /// Number of records missing structured stage report.
+    pub missing_stage_reports: u64,
+    /// Number of ready records missing structured preview candidate context.
+    pub ready_records_missing_preview_candidate_context: u64,
+    /// Number of preview-candidate id regressions across stream.
+    pub preview_candidate_id_regressions: u64,
+    /// Last preview-candidate id observed in a ready attempt.
+    pub last_preview_candidate_id: Option<u64>,
 }
 
 /// High-level, stable health report for CI, perf walls, and human diagnostics.
@@ -321,6 +347,14 @@ pub struct ViewerGpuOutputBudgetReport {
     pub max_display_payload_blockers: u64,
     /// Maximum allowed records carrying a viewer color rejection.
     pub max_color_rejections: u64,
+    /// Maximum allowed records missing renderer-owned runtime snapshots.
+    pub max_missing_runtime_reports: u64,
+    /// Maximum allowed records missing renderer-owned stage snapshots.
+    pub max_missing_stage_reports: u64,
+    /// Maximum allowed ready records without structured preview-candidate context.
+    pub max_ready_records_missing_preview_candidate_context: u64,
+    /// Maximum allowed preview-candidate id regressions.
+    pub max_preview_candidate_id_regressions: u64,
 }
 
 impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
@@ -350,6 +384,11 @@ impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
             max_alpha_mode_changes: budget.max_alpha_mode_changes,
             max_display_payload_blockers: budget.max_display_payload_blockers,
             max_color_rejections: budget.max_color_rejections,
+            max_missing_runtime_reports: budget.max_missing_runtime_reports,
+            max_missing_stage_reports: budget.max_missing_stage_reports,
+            max_ready_records_missing_preview_candidate_context: budget
+                .max_ready_records_missing_preview_candidate_context,
+            max_preview_candidate_id_regressions: budget.max_preview_candidate_id_regressions,
         }
     }
 }
@@ -397,6 +436,11 @@ pub fn evaluate_jsonl(
     let mut media_issues = VideoColorDiagnosticIssueAggregate::default();
     let mut last_color_rejection = None;
     let mut last_runtime_report = None;
+    let mut runtime_reports = 0u64;
+    let mut stage_reports = 0u64;
+    let mut ready_records_missing_preview_candidate_context = 0u64;
+    let mut preview_candidate_id_regressions = 0u64;
+    let mut last_ready_preview_candidate_id = None;
     let mut reported_counts = None;
     let mut count_mismatches = Vec::new();
 
@@ -410,7 +454,30 @@ pub fn evaluate_jsonl(
         records = records.saturating_add(1);
         counts.record(record.health.status);
         stage.merge_max(record.stage_counts());
-        last_runtime_report = record.runtime_report;
+        if record.runtime_report.is_some() {
+            runtime_reports = runtime_reports.saturating_add(1);
+            last_runtime_report = record.runtime_report;
+        }
+        if record.accumulated_stage_report.is_some() {
+            stage_reports = stage_reports.saturating_add(1);
+        }
+        if record.health.status == ViewerGpuOutputHealthStatus::Ready {
+            match record.preview_candidate_id() {
+                None => {
+                    ready_records_missing_preview_candidate_context =
+                        ready_records_missing_preview_candidate_context.saturating_add(1)
+                }
+                Some(candidate_id) => {
+                    if let Some(last_candidate_id) = last_ready_preview_candidate_id {
+                        if candidate_id < last_candidate_id {
+                            preview_candidate_id_regressions =
+                                preview_candidate_id_regressions.saturating_add(1);
+                        }
+                    }
+                    last_ready_preview_candidate_id = Some(candidate_id);
+                }
+            }
+        }
         if let Some(record_counts) = record.health_counts {
             reported_counts = Some(record_counts);
             if record_counts != counts {
@@ -583,6 +650,30 @@ pub fn evaluate_jsonl(
         color_rejections,
         budget.max_color_rejections,
     );
+    push_max_failure(
+        &mut failures,
+        "missing_runtime_reports",
+        records.saturating_sub(runtime_reports),
+        budget.max_missing_runtime_reports,
+    );
+    push_max_failure(
+        &mut failures,
+        "missing_stage_reports",
+        records.saturating_sub(stage_reports),
+        budget.max_missing_stage_reports,
+    );
+    push_max_failure(
+        &mut failures,
+        "ready_records_missing_preview_candidate_context",
+        ready_records_missing_preview_candidate_context,
+        budget.max_ready_records_missing_preview_candidate_context,
+    );
+    push_max_failure(
+        &mut failures,
+        "preview_candidate_id_regressions",
+        preview_candidate_id_regressions,
+        budget.max_preview_candidate_id_regressions,
+    );
 
     Ok(ViewerGpuOutputBudgetSummary {
         records,
@@ -605,6 +696,13 @@ pub fn evaluate_jsonl(
         last_display_issue,
         last_display_contract_refresh,
         last_color_rejection,
+        runtime_reports,
+        stage_reports,
+        missing_runtime_reports: records.saturating_sub(runtime_reports),
+        missing_stage_reports: records.saturating_sub(stage_reports),
+        ready_records_missing_preview_candidate_context,
+        preview_candidate_id_regressions,
+        last_preview_candidate_id: last_ready_preview_candidate_id,
         last_runtime_report,
     })
 }
@@ -677,6 +775,20 @@ pub fn build_health_report(
         "degraded_frames",
         summary.counts.degraded,
         summary.budget.max_degraded,
+    );
+    push_max_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::ViewerOutput,
+        "ready_records_missing_preview_candidate_context",
+        summary.ready_records_missing_preview_candidate_context,
+        summary.budget.max_ready_records_missing_preview_candidate_context,
+    );
+    push_max_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::ViewerOutput,
+        "preview_candidate_id_regressions",
+        summary.preview_candidate_id_regressions,
+        summary.budget.max_preview_candidate_id_regressions,
     );
     push_gpu_color_checks(&mut checks, &summary);
     push_backend_runtime_checks(&mut checks, &summary);
@@ -853,12 +965,34 @@ fn push_gpu_color_checks(
         observed: summary.stage.gpu_blockers,
         limit: Some(0),
     });
+    checks.push(ViewerGpuOutputHealthCheck {
+        area: ViewerGpuOutputDiagnosticArea::GpuColorPath,
+        code: "stage_report_coverage",
+        severity: if summary.missing_stage_reports > summary.budget.max_missing_stage_reports {
+            ViewerGpuOutputHealthSeverity::Fail
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed: summary.missing_stage_reports,
+        limit: Some(summary.budget.max_missing_stage_reports),
+    });
 }
 
 fn push_backend_runtime_checks(
     checks: &mut Vec<ViewerGpuOutputHealthCheck>,
     summary: &ViewerGpuOutputBudgetSummary,
 ) {
+    checks.push(ViewerGpuOutputHealthCheck {
+        area: ViewerGpuOutputDiagnosticArea::BackendRuntime,
+        code: "runtime_report_coverage",
+        severity: if summary.missing_runtime_reports > summary.budget.max_missing_runtime_reports {
+            ViewerGpuOutputHealthSeverity::Fail
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed: summary.missing_runtime_reports,
+        limit: Some(summary.budget.max_missing_runtime_reports),
+    });
     let Some(runtime) = summary.last_runtime_report else {
         return;
     };
@@ -1016,6 +1150,51 @@ fn push_root_causes_and_actions(
                 format!("ready={} required={}", failure.actual, failure.limit),
                 "drive_viewer_until_ready",
                 "Drive playback or scrubbing until at least one viewer GPU-output frame reaches Ready.",
+            ),
+            "missing_runtime_reports" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::BackendRuntime,
+                "missing_runtime_report",
+                format!(
+                    "missing_runtime_reports={} limit={}",
+                    failure.actual, failure.limit
+                ),
+                "restore_viewer_runtime_reporting",
+                "Emit per-record renderer-owned runtime reports in viewer GPU-output JSONL.",
+            ),
+            "missing_stage_reports" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::GpuColorPath,
+                "missing_stage_report",
+                format!("missing_stage_reports={} limit={}", failure.actual, failure.limit),
+                "restore_viewer_stage_reporting",
+                "Emit per-record renderer-owned stage report snapshots in viewer GPU-output JSONL.",
+            ),
+            "ready_records_missing_preview_candidate_context" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::ViewerOutput,
+                "missing_preview_candidate_context",
+                format!(
+                    "ready_records_missing_preview_candidate_context={} limit={}",
+                    failure.actual, failure.limit
+                ),
+                "write_viewer_preview_candidate_context",
+                "Persist preview-candidate identity/state fields with each ready viewer output record.",
+            ),
+            "preview_candidate_id_regressions" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::ViewerOutput,
+                "preview_candidate_id_regression",
+                format!(
+                    "preview_candidate_id_regressions={} limit={}",
+                    failure.actual, failure.limit
+                ),
+                "investigate_preview_candidate_id_sequence",
+                "Inspect preview candidate ID generation and ensure IDs are monotonic across output attempts.",
             ),
             "failed" | "blocked" | "rejected" | "degraded" => push_root_cause_with_action(
                 root_causes,
@@ -1537,9 +1716,23 @@ struct ViewerGpuOutputDiagnosticRecord {
     recent_display_contract_refreshes: Vec<ViewerGpuOutputDisplayContractRefreshEvent>,
     last_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
     last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
+    #[serde(default)]
+    last_preview_candidate_id: Option<u64>,
+    #[serde(default)]
+    last_preview_candidate_state: Option<ViewerGpuOutputPreviewCandidateState>,
+    #[serde(default)]
+    preview_candidate_id: Option<u64>,
 }
 
 impl ViewerGpuOutputDiagnosticRecord {
+    fn preview_candidate_id(&self) -> Option<u64> {
+        self.last_preview_candidate_id.or(self.preview_candidate_id).or_else(|| {
+            self.last_frame_context
+                .as_ref()
+                .and_then(|context| context.preview_candidate_id)
+        })
+    }
+
     fn stage_counts(&self) -> ViewerGpuOutputStageCounts {
         if let Some(report) = self.accumulated_stage_report {
             return report.into();
@@ -2071,11 +2264,35 @@ pub struct ViewerGpuOutputFrameContext {
     pub output_color_space: String,
     /// Whether tone mapping was requested.
     pub tone_map: bool,
+    /// Preview candidate identifier associated with this ready record, when available.
+    #[serde(default)]
+    pub preview_candidate_id: Option<u64>,
+    /// Preview candidate state for this record.
+    #[serde(default)]
+    pub preview_candidate_state: Option<ViewerGpuOutputPreviewCandidateState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum ViewerGpuOutputPreviewCandidateState {
+    Current,
+    Loading,
+    Unavailable,
+    Ready,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn viewer_gpu_output_budget_allow_missing() -> ViewerGpuOutputBudget {
+        ViewerGpuOutputBudget {
+            max_missing_runtime_reports: u64::MAX,
+            max_missing_stage_reports: u64::MAX,
+            max_ready_records_missing_preview_candidate_context: u64::MAX,
+            max_preview_candidate_id_regressions: u64::MAX,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn budget_passes_clean_ready_stream() {
@@ -2084,8 +2301,8 @@ mod tests {
 {"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"last_frame_context":{"sequence_id":"seq","frame":7,"width":1920,"height":1080,"external_texture_key":"key","output_target":"Display","output_color_space":"Srgb","tone_map":false}}
 "#;
 
-        let summary =
-            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let summary = evaluate_jsonl(jsonl, &viewer_gpu_output_budget_allow_missing())
+            .expect("budget summary");
 
         assert!(summary.passed);
         assert_eq!(summary.records, 2);
@@ -2111,13 +2328,82 @@ mod tests {
     }
 
     #[test]
+    fn budget_fails_when_runtime_and_stage_reports_missing_by_default() {
+        let jsonl = r#"
+{"health":{"status":"Ready"}}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert!(summary
+            .failures
+            .iter()
+            .any(|failure| failure.metric == "missing_runtime_reports"));
+        assert!(summary.failures.iter().any(|failure| failure.metric == "missing_stage_reports"));
+        assert_eq!(summary.missing_runtime_reports, 1);
+        assert_eq!(summary.missing_stage_reports, 1);
+    }
+
+    #[test]
+    fn budget_fails_when_ready_record_missing_preview_candidate_context() {
+        let jsonl = r#"
+{"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"last_frame_context":{"sequence_id":"seq","frame":10,"width":1920,"height":1080,"external_texture_key":"key","output_target":"Display","output_color_space":"Srgb","tone_map":false}}
+"#;
+
+        let summary = evaluate_jsonl(
+            jsonl,
+            &ViewerGpuOutputBudget {
+                max_missing_runtime_reports: u64::MAX,
+                max_missing_stage_reports: u64::MAX,
+                ..ViewerGpuOutputBudget::default()
+            },
+        )
+        .expect("budget summary");
+
+        assert!(!summary.passed);
+        assert!(summary
+            .failures
+            .iter()
+            .any(|failure| failure.metric == "ready_records_missing_preview_candidate_context"));
+        assert_eq!(summary.ready_records_missing_preview_candidate_context, 1);
+    }
+
+    #[test]
+    fn budget_fails_when_preview_candidate_id_regresses() {
+        let jsonl = r#"
+{"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"last_frame_context":{"sequence_id":"seq","frame":10,"width":1920,"height":1080,"external_texture_key":"key-1","output_target":"Display","output_color_space":"Srgb","tone_map":false,"preview_candidate_id":2}}
+{"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":2},"last_frame_context":{"sequence_id":"seq","frame":11,"width":1920,"height":1080,"external_texture_key":"key-2","output_target":"Display","output_color_space":"Srgb","tone_map":false,"preview_candidate_id":1}}
+"#;
+
+        let summary = evaluate_jsonl(
+            jsonl,
+            &ViewerGpuOutputBudget {
+                max_missing_runtime_reports: u64::MAX,
+                max_missing_stage_reports: u64::MAX,
+                ..ViewerGpuOutputBudget::default()
+            },
+        )
+        .expect("budget summary");
+
+        assert!(!summary.passed);
+        assert!(summary
+            .failures
+            .iter()
+            .any(|failure| failure.metric == "preview_candidate_id_regressions"));
+        assert_eq!(summary.preview_candidate_id_regressions, 1);
+        assert_eq!(summary.last_preview_candidate_id, Some(1));
+    }
+
+    #[test]
     fn budget_replays_stage_and_health_flags() {
         let jsonl = r#"
 {"health":{"status":"Ready","viewer_output_ready":true,"native_gpu_boundary_ready":true,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":true},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"stage_total_stages":99,"stage_gpu_color_stages":99,"stage_pixels":1,"accumulated_stage_report":{"total_stages":2,"upload_stages":0,"gpu_color_stages":1,"readback_stages":0,"gpu_blockers":0,"gpu_blocker_breakdown":{"shader_module_not_prepared":0,"ocio_resource_bind_group_not_prepared":0,"fullscreen_wrapper_not_prepared":0,"render_pipeline_not_prepared":0},"stage_pixels":2073600},"runtime_report":{"shader_cache_entries":1,"shader_cache_hits":2,"shader_cache_misses":3,"shader_cache_extraction_failures":0,"backend_prep_resource_entries":4,"backend_object_entries":5,"backend_object_hits":6,"backend_object_misses":7,"backend_object_failures":0,"frame_table_entries":8,"next_frame_id":9}}
 "#;
 
-        let summary =
-            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let summary = evaluate_jsonl(jsonl, &viewer_gpu_output_budget_allow_missing())
+            .expect("budget summary");
 
         assert!(summary.passed);
         assert_eq!(
@@ -2167,8 +2453,8 @@ mod tests {
 {"health":{"status":"Failed","viewer_output_ready":false,"native_gpu_boundary_ready":false,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":false},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":1,"rejected":0,"degraded":0,"ready":0},"accumulated_stage_report":{"total_stages":2,"upload_stages":0,"gpu_color_stages":1,"readback_stages":0,"gpu_blockers":0,"gpu_blocker_breakdown":{"shader_module_not_prepared":0,"ocio_resource_bind_group_not_prepared":0,"fullscreen_wrapper_not_prepared":0,"render_pipeline_not_prepared":0},"stage_pixels":4096},"runtime_report":{"shader_cache_entries":1,"shader_cache_hits":0,"shader_cache_misses":1,"shader_cache_extraction_failures":1,"backend_prep_resource_entries":1,"backend_object_entries":1,"backend_object_hits":0,"backend_object_misses":1,"backend_object_failures":1,"frame_table_entries":2,"next_frame_id":3}}
 "#;
 
-        let summary =
-            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let summary = evaluate_jsonl(jsonl, &viewer_gpu_output_budget_allow_missing())
+            .expect("budget summary");
         let report = build_health_report(summary, "display-baseline", None);
 
         assert_eq!(report.verdict, ViewerGpuOutputHealthVerdict::Fail);
@@ -2213,8 +2499,8 @@ mod tests {
 {"health":{"status":"Ready","viewer_output_ready":true,"native_gpu_boundary_ready":true,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":true},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"stage_total_stages":1,"stage_gpu_color_stages":1,"stage_pixels":4096}
 "#;
 
-        let summary =
-            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let summary = evaluate_jsonl(jsonl, &viewer_gpu_output_budget_allow_missing())
+            .expect("budget summary");
         let report = build_health_report(
             summary,
             "display-baseline",
@@ -2245,8 +2531,8 @@ mod tests {
 {"health":{"status":"Blocked","viewer_output_ready":false,"native_gpu_boundary_ready":false,"display_boundary_ready":false,"presentation_ready":false,"stage_sequence_ready":true,"no_gpu_blockers":false,"output_texture_available":true,"external_texture_registered":false},"health_counts":{"no_invocation":0,"waiting":0,"blocked":1,"failed":0,"rejected":0,"degraded":0,"ready":0},"stage_total_stages":3,"stage_upload_stages":1,"stage_gpu_color_stages":1,"stage_readback_stages":1,"stage_gpu_blockers":1,"stage_gpu_render_pipeline_blockers":1,"display_issue_summary":{"reason":"HdrOutputRequiresHdrSurface","output_color_space":"Rec2100Pq","payload_blocker":null}}
 "#;
 
-        let summary =
-            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let summary = evaluate_jsonl(jsonl, &viewer_gpu_output_budget_allow_missing())
+            .expect("budget summary");
         let report = build_health_report(summary, "display-baseline", None);
 
         assert_eq!(report.verdict, ViewerGpuOutputHealthVerdict::Fail);
@@ -2285,7 +2571,7 @@ mod tests {
             max_alpha_mode_changes: 0,
             max_display_issues: 1,
             max_output_color_space_requires_surface_color_space: 1,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2348,8 +2634,8 @@ mod tests {
 {"health":{"status":"Blocked"}}
 "#;
 
-        let summary =
-            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let summary = evaluate_jsonl(jsonl, &viewer_gpu_output_budget_allow_missing())
+            .expect("budget summary");
 
         assert!(!summary.passed);
         assert_eq!(summary.counts.failed, 1);
@@ -2366,8 +2652,8 @@ mod tests {
 
     #[test]
     fn budget_fails_empty_stream_with_record_failure() {
-        let summary =
-            evaluate_jsonl("\n\n", &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let summary = evaluate_jsonl("\n\n", &viewer_gpu_output_budget_allow_missing())
+            .expect("budget summary");
 
         assert!(!summary.passed);
         assert_eq!(summary.records, 0);
@@ -2386,8 +2672,8 @@ mod tests {
 {"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":2}}
 "#;
 
-        let summary =
-            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let summary = evaluate_jsonl(jsonl, &viewer_gpu_output_budget_allow_missing())
+            .expect("budget summary");
 
         assert!(!summary.passed);
         assert!(!summary.reported_counts_match_replay);
@@ -2430,7 +2716,7 @@ mod tests {
             max_hdr_output_requires_hdr_surface: 1,
             max_reconfigure_blocked_by_payload: 1,
             max_display_payload_blockers: 1,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2481,7 +2767,7 @@ mod tests {
             max_blocked: 1,
             max_display_issues: 1,
             max_output_color_space_requires_surface_color_space: 1,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2529,7 +2815,7 @@ mod tests {
             max_display_issues: 1,
             max_hdr_output_requires_hdr_surface: 1,
             max_display_issue_refresh_correlations: 1,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2569,7 +2855,7 @@ mod tests {
             max_format_color_space_changes: 1,
             max_present_mode_changes: 1,
             max_alpha_mode_changes: 1,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2691,7 +2977,7 @@ mod tests {
             max_format_color_space_changes: 0,
             max_present_mode_changes: 0,
             max_alpha_mode_changes: 0,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2734,7 +3020,7 @@ mod tests {
             min_ready: 1,
             max_waiting: 1,
             max_color_rejections: 2,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2806,7 +3092,7 @@ mod tests {
             max_display_issues: 0,
             max_reconfigure_blocked_by_payload: 0,
             max_display_payload_blockers: 0,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2837,7 +3123,7 @@ mod tests {
 "#;
         let budget = ViewerGpuOutputBudget {
             max_color_rejections: 0,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2864,7 +3150,7 @@ mod tests {
             max_hdr_output_requires_hdr_surface: 0,
             max_unsupported_presentation_intent: 0,
             max_unsupported_surface_contract: 0,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
@@ -2902,7 +3188,7 @@ mod tests {
             max_degraded: 1,
             max_display_issues: 1,
             max_unknown_display_issues: 0,
-            ..ViewerGpuOutputBudget::default()
+            ..viewer_gpu_output_budget_allow_missing()
         };
 
         let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");

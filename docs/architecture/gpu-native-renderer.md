@@ -432,4 +432,21 @@ readback callers must use `GpuColorFrameReadbackPlan`; ad hoc
 
 ## Display and Export Boundary
 
-Display owns swapchain/surface presentation. Export owns encode scheduling and file output. Neither should reinterpret timeline state; both consume the same evaluated render plan and color-management context.
+Display owns swapchain/surface presentation. Export owns encode scheduling and file
+output. Neither should reinterpret timeline state; both consume the same evaluated
+render plan and color-management context.
+
+The renderer-owned `RenderGpuOutputBoundaryRuntime` is the execution boundary for
+native GPU final-output boundaries in both display and export paths. Export code
+must call the shared runtime with an export boundary, then serialize explicit
+`gpu_output_attempts`, `gpu_output_cpu_fallbacks`, and
+`gpu_output_fallback_reasons` into its color report instead of hiding fallback as a
+local "works well enough" path. A successful export path must not assume that a
+scheduled GPU plan executed if the runtime returns no materialized readback handle or
+no recorded stage/runtime evidence.
+
+Exporting still reads back encoded pixels for encoder interoperability today, but
+that readback must remain explicit in the plan and report. A future encoder path
+may move readback behind an API that still reports parity or staged transfer
+intent. Until that exists, readback reasons and blockers stay part of the
+export color health contract.

@@ -188,10 +188,16 @@ excess preview jobs are dropped instead of back-pressuring the UI thread.
 `AppUiPreviewService::diagnostics()` exposes render, cache, queue, decode, and
 scheduler counters so performance tooling can distinguish cache misses,
 backpressure drops, stale completions, decode failures, and GPU preview
-candidate readiness without changing timeline evaluation. GPU preview candidate
-counters are intentionally scoped to the headless service boundary: they prove
-that a working-space frame was produced for the app-window GPU output path, not
-that wgpu presentation recording succeeded. The app UI scale smoke test
+candidate readiness without changing timeline evaluation. Each service call produces
+`preview_candidate_id`, and the same id is propagated into `AppUiGpuPreviewFrame`
+when the frame is ready. Window-level telemetry records this candidate id and state
+alongside structured runtime/stage evidence so a JSONL record can be linked
+against the exact working-space attempt that fed it.
+
+GPU preview candidate counters are intentionally scoped to the headless service
+boundary: they prove that a working-space frame was produced for the app-window
+GPU output path, not that wgpu presentation recording succeeded. The app UI scale
+smoke test
 serializes a preview diagnostics probe into its JSON report and includes a
 separate preview-playback refresh case without changing the existing UI-only
 refresh benchmark paths.

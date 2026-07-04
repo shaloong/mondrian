@@ -457,6 +457,8 @@ fn export_color_health_report_reports_root_causes() {
         diagnosed_frames: 1,
         policy_rejections: 1,
         gpu_blockers: 2,
+        gpu_output_cpu_fallbacks: 1,
+        gpu_output_attempts: 1,
         transfer_stages: 1,
         legacy_reason_total: 3,
         fully_float_linear: false,
@@ -477,10 +479,7 @@ fn export_color_health_report_reports_root_causes() {
         .root_causes
         .iter()
         .any(|root| root.code == "export_gpu_color_stage_blocked"));
-    assert!(report
-        .root_causes
-        .iter()
-        .any(|root| root.code == "export_transfer_stage_present"));
+    assert!(report.root_causes.iter().any(|root| root.code == "export_gpu_output_fallback"));
     assert!(report.root_causes.iter().any(|root| root.code == "legacy_rgba8_composite_path"));
 }
 

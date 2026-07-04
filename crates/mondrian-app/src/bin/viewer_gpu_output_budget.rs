@@ -44,7 +44,7 @@ impl BudgetArgs {
     fn parse(args: &[String]) -> anyhow::Result<Self> {
         let Some(first) = args.first() else {
             bail!(
-                "usage: viewer_gpu_output_budget <jsonl-path> [--profile NAME] [--preset display-baseline] [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N]"
+            "usage: viewer_gpu_output_budget <jsonl-path> [--profile NAME] [--preset display-baseline] [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N] [--max-missing-runtime-reports N] [--max-missing-stage-reports N] [--max-ready-records-missing-preview-candidate-context N] [--max-preview-candidate-id-regressions N]"
             );
         };
         let mut budget = ViewerGpuOutputBudget::default();
@@ -121,6 +121,14 @@ impl BudgetArgs {
                     budget.max_display_payload_blockers = parsed;
                 }
                 "--max-color-rejections" => budget.max_color_rejections = parsed,
+                "--max-missing-runtime-reports" => budget.max_missing_runtime_reports = parsed,
+                "--max-missing-stage-reports" => budget.max_missing_stage_reports = parsed,
+                "--max-ready-records-missing-preview-candidate-context" => {
+                    budget.max_ready_records_missing_preview_candidate_context = parsed;
+                }
+                "--max-preview-candidate-id-regressions" => {
+                    budget.max_preview_candidate_id_regressions = parsed;
+                }
                 _ => unreachable!("budget threshold flag prevalidated"),
             }
             index += 2;
@@ -159,6 +167,10 @@ fn is_budget_threshold_flag(flag: &str) -> bool {
             | "--max-alpha-mode-changes"
             | "--max-display-payload-blockers"
             | "--max-color-rejections"
+            | "--max-missing-runtime-reports"
+            | "--max-missing-stage-reports"
+            | "--max-ready-records-missing-preview-candidate-context"
+            | "--max-preview-candidate-id-regressions"
     )
 }
 
@@ -217,6 +229,14 @@ mod tests {
             "0".to_owned(),
             "--max-color-rejections".to_owned(),
             "2".to_owned(),
+            "--max-missing-runtime-reports".to_owned(),
+            "3".to_owned(),
+            "--max-missing-stage-reports".to_owned(),
+            "4".to_owned(),
+            "--max-ready-records-missing-preview-candidate-context".to_owned(),
+            "28".to_owned(),
+            "--max-preview-candidate-id-regressions".to_owned(),
+            "29".to_owned(),
         ];
 
         let parsed = BudgetArgs::parse(&args).expect("parse budget args");
@@ -246,6 +266,10 @@ mod tests {
                 max_alpha_mode_changes: 6,
                 max_display_payload_blockers: 0,
                 max_color_rejections: 2,
+                max_missing_runtime_reports: 3,
+                max_missing_stage_reports: 4,
+                max_ready_records_missing_preview_candidate_context: 28,
+                max_preview_candidate_id_regressions: 29,
                 ..ViewerGpuOutputBudget::default()
             }
         );

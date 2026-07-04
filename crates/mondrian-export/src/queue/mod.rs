@@ -17,13 +17,15 @@ use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_media::VideoColorDiagnosticIssueAggregate;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
-    execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
-    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics, TimelineCompositeElement,
-    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, ColorFrameResidency, CpuColorFrame,
+    CpuEncodedColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext,
+    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, ExportBitDepth, InputColorResolutionSourceCounts, SequenceSettings, VideoRange,
@@ -36,8 +38,127 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
+use tokio::runtime::Builder as TokioRuntimeBuilder;
+
+const EXPORT_GPU_OUTPUT_TEXTURE_FORMAT: GpuColorFrameTextureFormat =
+    GpuColorFrameTextureFormat::Rgba8Unorm;
+
+struct ExportGpuOutputBackend {
+    context: Arc<GpuContext>,
+    runtime: StdMutex<RenderGpuOutputBoundaryRuntime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct ExportGpuOutputAttemptOutcome {
+    rgba: Vec<u8>,
+    stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+static EXPORT_GPU_OUTPUT_RUNTIME: OnceLock<Result<Arc<ExportGpuOutputBackend>, String>> =
+    OnceLock::new();
+
+fn build_export_gpu_output_runtime() -> Result<Arc<ExportGpuOutputBackend>, String> {
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("build gpu runtime failed: {err}"))?;
+    let context = runtime
+        .block_on(GpuContext::new())
+        .map_err(|err| format!("create gpu context failed: {err}"))?;
+    Ok(Arc::new(ExportGpuOutputBackend {
+        context,
+        runtime: StdMutex::new(RenderGpuOutputBoundaryRuntime::default()),
+    }))
+}
+
+fn export_gpu_output_runtime() -> Result<&'static Arc<ExportGpuOutputBackend>, String> {
+    if let Some(result) = EXPORT_GPU_OUTPUT_RUNTIME.get() {
+        return result.as_ref().map_err(|err| err.clone());
+    }
+
+    let result = match EXPORT_GPU_OUTPUT_RUNTIME.set(build_export_gpu_output_runtime()) {
+        Ok(()) => EXPORT_GPU_OUTPUT_RUNTIME.get().expect("runtime init must be set"),
+        Err(_already_set) => EXPORT_GPU_OUTPUT_RUNTIME
+            .get()
+            .expect("runtime state must be available after concurrent init"),
+    };
+    result.as_ref().map_err(|err| err.clone())
+}
+
+fn map_readback_buffer_sync(
+    device: &wgpu::Device,
+    readback: &wgpu::Buffer,
+) -> Result<Vec<u8>, String> {
+    let slice = readback.slice(..);
+    let (tx, rx) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+    let _ = rx
+        .recv()
+        .map_err(|err| format!("readback map callback channel closed: {err}"))?;
+    let mapped = slice
+        .get_mapped_range()
+        .map_err(|err| format!("readback mapped range unavailable: {err:?}"))?;
+    Ok(mapped.to_vec())
+}
+
+fn execute_export_gpu_output_boundary_rgba8(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputFallbackReason> {
+    let backend = export_gpu_output_runtime()
+        .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)?;
+    let mut runtime = backend
+        .runtime
+        .lock()
+        .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)?;
+
+    let mut encoder =
+        backend.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-export-gpu-output-boundary"),
+        });
+
+    let record = runtime
+        .record_wgpu_output_boundary_owned_backend(
+            boundary,
+            frame,
+            EXPORT_GPU_OUTPUT_TEXTURE_FORMAT,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+            RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                device: &backend.context.device,
+                queue: &backend.context.queue,
+                encoder: &mut encoder,
+                load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            },
+        )
+        .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
+
+    backend.context.queue.submit(std::iter::once(encoder.finish()));
+    let readback_buffer = record
+        .readback_buffer
+        .ok_or(ExportGpuOutputFallbackReason::MissingReadbackBuffer)?;
+    let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
+        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+    let mapped = map_readback_buffer_sync(&backend.context.device, &readback_buffer)
+        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackMapFailed)?;
+    let actual = readback_plan
+        .unpack_mapped_rgba8(&mapped)
+        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+    readback_buffer.unmap();
+
+    Ok(ExportGpuOutputAttemptOutcome {
+        rgba: actual.rgba().to_vec(),
+        stage_diagnostics: record.stage_diagnostics,
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum JobStatus {
@@ -89,6 +210,105 @@ pub struct ExportJobColorDiagnostics {
     pub composite_diagnostics: TimelineCompositeDiagnostics,
     /// Number of timeline video frames that contributed color diagnostics.
     pub diagnosed_frames: u64,
+    /// GPU export boundary attempts.
+    pub gpu_output_attempts: u64,
+    /// GPU export boundary attempts that fell back to CPU output transform.
+    pub gpu_output_cpu_fallbacks: u64,
+    /// Structured GPU export fallback reasons.
+    pub gpu_output_fallback_reasons: ExportGpuOutputFallbackBreakdown,
+}
+
+impl ExportJobColorDiagnostics {
+    /// Record one export output boundary execution outcome.
+    pub fn record_export_output_boundary(
+        &mut self,
+        attempts: u64,
+        cpu_fallbacks: u64,
+        fallback_reasons: ExportGpuOutputFallbackBreakdown,
+    ) {
+        self.gpu_output_attempts = self.gpu_output_attempts.saturating_add(attempts);
+        self.gpu_output_cpu_fallbacks = self.gpu_output_cpu_fallbacks.saturating_add(cpu_fallbacks);
+        self.gpu_output_fallback_reasons =
+            self.gpu_output_fallback_reasons.accumulate(fallback_reasons);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExportGpuOutputFallbackReason {
+    /// GPU context could not be created and color pipeline stayed on CPU.
+    ContextUnavailable,
+    /// GPU recording failed before command submission.
+    RecordBoundaryFailed,
+    /// GPU output path lacked an explicit readback buffer.
+    MissingReadbackBuffer,
+    /// GPU output readback map failed.
+    ReadbackMapFailed,
+    /// GPU output readback unpacking failed.
+    ReadbackUnpackFailed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExportGpuOutputFallbackBreakdown {
+    /// GPU context was unavailable or initialization failed.
+    pub context_unavailable: u64,
+    /// GPU recording failed before submission.
+    pub record_boundary_failed: u64,
+    /// GPU output planned readback buffer missing.
+    pub missing_readback_buffer: u64,
+    /// Readback map failed.
+    pub readback_map_failed: u64,
+    /// Unpacking readback bytes failed.
+    pub readback_unpack_failed: u64,
+}
+
+impl ExportGpuOutputFallbackBreakdown {
+    /// Return total fallback count across all recorded reasons.
+    pub fn total(&self) -> u64 {
+        self.context_unavailable
+            .saturating_add(self.record_boundary_failed)
+            .saturating_add(self.missing_readback_buffer)
+            .saturating_add(self.readback_map_failed)
+            .saturating_add(self.readback_unpack_failed)
+    }
+
+    /// Merge another breakdown in place.
+    pub fn accumulate(self, other: Self) -> Self {
+        Self {
+            context_unavailable: self.context_unavailable.saturating_add(other.context_unavailable),
+            record_boundary_failed: self
+                .record_boundary_failed
+                .saturating_add(other.record_boundary_failed),
+            missing_readback_buffer: self
+                .missing_readback_buffer
+                .saturating_add(other.missing_readback_buffer),
+            readback_map_failed: self.readback_map_failed.saturating_add(other.readback_map_failed),
+            readback_unpack_failed: self
+                .readback_unpack_failed
+                .saturating_add(other.readback_unpack_failed),
+        }
+    }
+
+    /// Map one reason into a mut accumulator entry.
+    pub fn add_reason(mut self, reason: ExportGpuOutputFallbackReason) -> Self {
+        match reason {
+            ExportGpuOutputFallbackReason::ContextUnavailable => {
+                self.context_unavailable = self.context_unavailable.saturating_add(1)
+            }
+            ExportGpuOutputFallbackReason::RecordBoundaryFailed => {
+                self.record_boundary_failed = self.record_boundary_failed.saturating_add(1)
+            }
+            ExportGpuOutputFallbackReason::MissingReadbackBuffer => {
+                self.missing_readback_buffer = self.missing_readback_buffer.saturating_add(1)
+            }
+            ExportGpuOutputFallbackReason::ReadbackMapFailed => {
+                self.readback_map_failed = self.readback_map_failed.saturating_add(1)
+            }
+            ExportGpuOutputFallbackReason::ReadbackUnpackFailed => {
+                self.readback_unpack_failed = self.readback_unpack_failed.saturating_add(1)
+            }
+        }
+        self
+    }
 }
 
 /// Stable summary of export color-path diagnostics for UI, telemetry, and reports.
@@ -122,6 +342,12 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
     /// Upload/readback transfer stages around color work.
     pub transfer_stages: u64,
+    /// Export output attempts through GPU final-output boundary recording.
+    pub gpu_output_attempts: u64,
+    /// GPU output attempts that fell back to CPU output transform.
+    pub gpu_output_cpu_fallbacks: u64,
+    /// Structured GPU output fallback reasons for export output boundary.
+    pub gpu_output_fallback_reasons: ExportGpuOutputFallbackBreakdown,
     /// Float/linear timeline composites.
     pub float_linear_composites: u64,
     /// Legacy RGBA8 timeline composites.
@@ -270,6 +496,13 @@ impl ExportJobColorDiagnosticsSummary {
             ExportColorHealthArea::StageScheduling,
             "transfer_stages",
             self.transfer_stages,
+            0,
+        );
+        push_export_max_check(
+            &mut checks,
+            ExportColorHealthArea::StageScheduling,
+            "export_gpu_output_cpu_fallbacks",
+            self.gpu_output_cpu_fallbacks,
             0,
         );
         push_export_max_check(
@@ -447,16 +680,25 @@ fn push_export_root_causes_and_actions(
             "Inspect renderer GPU color blocker breakdown before relying on export GPU scheduling.",
         );
     }
-    if summary.transfer_stages > 0 {
+    if summary.gpu_output_cpu_fallbacks > 0 || summary.gpu_output_fallback_reasons.total() > 0 {
         push_export_root_cause_with_action(
             root_causes,
             actions,
             ExportColorHealthArea::StageScheduling,
-            "export_transfer_stage_present",
+            "export_gpu_output_fallback",
             ExportColorHealthSeverity::Fail,
-            format!("transfer_stages={}", summary.transfer_stages),
-            "remove_export_transfer_stage",
-            "Trace why export color work introduced upload/readback transfer stages.",
+            format!(
+                "gpu_output_attempts={} cpu_fallbacks={} context_unavailable={} record_failed={} missing_readback_buffer={} readback_map_failed={} readback_unpack_failed={}",
+                summary.gpu_output_attempts,
+                summary.gpu_output_cpu_fallbacks,
+                summary.gpu_output_fallback_reasons.context_unavailable,
+                summary.gpu_output_fallback_reasons.record_boundary_failed,
+                summary.gpu_output_fallback_reasons.missing_readback_buffer,
+                summary.gpu_output_fallback_reasons.readback_map_failed,
+                summary.gpu_output_fallback_reasons.readback_unpack_failed
+            ),
+            "inspect_export_gpu_output_fallback",
+            "Trace export GPU output attempts and keep CPU fallback reasons explicit.",
         );
     }
     if !summary.fully_float_linear || summary.legacy_reason_total > 0 {
@@ -561,14 +803,23 @@ impl ExportJobColorDiagnostics {
             gpu_blockers: stages.gpu_blockers,
             gpu_blocker_breakdown: stages.gpu_blocker_breakdown,
             transfer_stages: stages.upload_stages.saturating_add(stages.readback_stages),
+            gpu_output_attempts: self.gpu_output_attempts,
+            gpu_output_cpu_fallbacks: self.gpu_output_cpu_fallbacks,
+            gpu_output_fallback_reasons: self.gpu_output_fallback_reasons,
             float_linear_composites: composite.float_linear_composites,
             legacy_rgba8_composites: composite.legacy_rgba8_composites,
             legacy_reason_total: composite.legacy_breakdown.total(),
             legacy_breakdown: composite.legacy_breakdown,
             fully_float_linear: composite.is_fully_float_linear(),
-            gpu_path_ready: stages.gpu_blockers == 0
-                && stages.upload_stages == 0
-                && stages.readback_stages == 0,
+            gpu_path_ready: {
+                if self.gpu_output_attempts == 0 && self.gpu_output_cpu_fallbacks == 0 {
+                    true
+                } else {
+                    self.gpu_output_cpu_fallbacks == 0
+                        && self.gpu_output_fallback_reasons.total() == 0
+                        && stages.gpu_blockers == 0
+                }
+            },
         })
     }
 }
@@ -1414,6 +1665,7 @@ fn write_timeline_frames_to_writer<W: Write>(
             Some(&mut frame_color_counts),
             Some(&mut frame_stage_diagnostics),
             Some(&mut frame_composite_diagnostics),
+            Some(&mut diagnostics.color),
         );
         diagnostics.color.record_frame_diagnostics(
             frame_color_counts,
@@ -1460,6 +1712,7 @@ fn render_timeline_frame_into(
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
     composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
+    export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<(), String> {
     let required_len = width as usize * height as usize * 4;
     if canvas.len() != required_len {
@@ -1483,6 +1736,7 @@ fn render_timeline_frame_into(
         input_color_counts,
         stage_diagnostics,
         composite_diagnostics,
+        export_diagnostics,
     )
 }
 
@@ -1529,6 +1783,7 @@ pub fn export_composite_diagnostics_for_frame(
         None,
         None,
         Some(&mut composite_diagnostics),
+        None,
     )?;
     Ok(composite_diagnostics)
 }
@@ -1553,6 +1808,7 @@ pub fn export_color_stage_diagnostics_for_frame(
         &mut canvas,
         None,
         Some(&mut stage_diagnostics),
+        None,
         None,
     )?;
     Ok(stage_diagnostics)
@@ -1679,6 +1935,7 @@ fn render_sequence_frame_into(
     mut input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     mut stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
     mut composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
+    mut export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<(), String> {
     if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
@@ -1824,6 +2081,7 @@ fn render_sequence_frame_into(
             input_color_counts.as_deref_mut(),
             stage_diagnostics.as_deref_mut(),
             composite_diagnostics.as_deref_mut(),
+            export_diagnostics.as_deref_mut(),
         )?;
         let nested_source = CpuEncodedColorFrame::source_rgba8(
             nested_width,
@@ -1917,18 +2175,49 @@ fn render_sequence_frame_into(
     if let Some(diagnostics) = composite_diagnostics {
         diagnostics.accumulate(rendered.diagnostics);
     }
+
+    let mut gpu_output_fallback_reasons = ExportGpuOutputFallbackBreakdown::default();
+    let mut gpu_output_attempts = 0u64;
+    let mut gpu_output_cpu_fallbacks = 0u64;
     let boundary = RenderOutputColorBoundary::export(
         color_context.output_color_space,
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
-        .map_err(|err| format!("final color transform failed: {err}"))?;
-    if let Some(diagnostics) = stage_diagnostics {
-        diagnostics.accumulate(encoded.stage_diagnostics);
+    let attempt = execute_export_gpu_output_boundary_rgba8(&rendered.frame, &boundary)
+        .inspect_err(|reason| {
+            gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
+            gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(*reason);
+        })
+        .ok();
+    gpu_output_attempts = gpu_output_attempts.saturating_add(1);
+
+    let final_bytes = match attempt {
+        Some(attempt) => {
+            if let Some(diagnostics) = stage_diagnostics.as_deref_mut() {
+                diagnostics.accumulate(attempt.stage_diagnostics);
+            }
+            attempt.rgba
+        }
+        None => {
+            let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
+                .map_err(|err| format!("final color transform failed: {err}"))?;
+            if let Some(diagnostics) = stage_diagnostics {
+                diagnostics.accumulate(encoded.stage_diagnostics);
+            }
+            encoded.rgba
+        }
+    };
+
+    if let Some(diagnostics) = export_diagnostics {
+        diagnostics.record_export_output_boundary(
+            gpu_output_attempts,
+            gpu_output_cpu_fallbacks,
+            gpu_output_fallback_reasons,
+        );
     }
     canvas.clear();
-    canvas.extend_from_slice(&encoded.rgba);
+    canvas.extend_from_slice(&final_bytes);
     Ok(())
 }
 
@@ -2559,6 +2848,7 @@ mod tests {
                     media_transform: 1,
                     ..TimelineCompositeLegacyBreakdown::default()
                 },
+                gpu_path_ready: true,
                 ..ExportJobColorDiagnosticsSummary::default()
             })
         );
@@ -2663,6 +2953,7 @@ mod tests {
             },
             float_linear_composites: 2,
             fully_float_linear: true,
+            gpu_path_ready: true,
             ..ExportJobColorDiagnosticsSummary::default()
         };
         assert_eq!(diagnostics.summary(), Some(expected_summary));
@@ -3107,7 +3398,7 @@ mod tests {
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];
-        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas, None, None, None)
+        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas, None, None, None, None)
             .expect("render should pass");
 
         for px in canvas.chunks_exact(4) {
@@ -3248,6 +3539,7 @@ mod tests {
             1,
             &mut canvas,
             Some(&mut counts),
+            None,
             None,
             None,
         )

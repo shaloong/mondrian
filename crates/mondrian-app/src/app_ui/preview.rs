@@ -60,6 +60,7 @@ pub struct AppUiPreviewService {
     media_failures: RefCell<MediaPreviewFailureCache>,
     viewer_frame_cache: RefCell<ViewerPreviewFrameCache>,
     external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
+    next_gpu_preview_candidate_id: Cell<u64>,
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
@@ -95,6 +96,7 @@ impl AppUiPreviewService {
                 VIEWER_PREVIEW_FRAME_CACHE_CAPACITY,
             )),
             external_viewer_frame: RefCell::new(None),
+            next_gpu_preview_candidate_id: Cell::new(0),
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             current_generation: Cell::new(0),
@@ -427,6 +429,8 @@ impl AppUiPreviewService {
             bump(&self.metrics.gpu_preview_candidate_unavailable);
             return AppUiGpuPreviewFrameState::Unavailable;
         };
+        let candidate_id = self.next_gpu_preview_candidate_id.get().saturating_add(1);
+        self.next_gpu_preview_candidate_id.set(candidate_id);
         if self.external_viewer_frame_for_key(&cache_key).is_some() {
             self.schedule_media_prefetches(state, sequence, frame, width, height);
             self.scheduler.prune_obsolete();
@@ -464,6 +468,7 @@ impl AppUiPreviewService {
             height,
             working_frame: output.frame,
             boundary: output.boundary,
+            preview_candidate_id: candidate_id,
         }))
     }
 
@@ -1497,6 +1502,8 @@ pub(crate) struct AppUiGpuPreviewFrame {
     pub working_frame: CpuColorFrame,
     /// Display/output boundary to execute on the GPU.
     pub boundary: RenderOutputColorBoundary,
+    /// Monotonic identifier for this working-frame candidate.
+    preview_candidate_id: u64,
 }
 
 impl AppUiGpuPreviewFrame {
@@ -1506,6 +1513,11 @@ impl AppUiGpuPreviewFrame {
             "app-ui.viewer.gpu:{}:{}x{}:{:016x}",
             self.sequence_id, self.width, self.height, self.cache_key.plan_signature
         )
+    }
+
+    /// Candidate identifier for viewer output attempt correlation.
+    pub(crate) fn preview_candidate_id(&self) -> u64 {
+        self.preview_candidate_id
     }
 }
 
@@ -2852,6 +2864,7 @@ mod tests {
         assert_eq!(frame.working_frame.descriptor().width, 960);
         assert_eq!(frame.working_frame.descriptor().height, 540);
         assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
+        assert_eq!(frame.preview_candidate_id(), 1);
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.gpu_preview_candidate_requests, 1);
@@ -2871,6 +2884,7 @@ mod tests {
             _ => panic!("expected ready GPU preview candidate"),
         };
         let key = frame.external_texture_key();
+        let first_candidate_id = frame.preview_candidate_id();
 
         assert!(service.set_external_viewer_frame(&frame, key.clone()));
         match service.gpu_preview_frame_for_state(&state) {
@@ -2886,12 +2900,20 @@ mod tests {
             other => panic!("expected external GPU preview frame, got {other:?}"),
         }
         let diagnostics = service.diagnostics();
+        assert_eq!(frame.preview_candidate_id(), first_candidate_id);
         assert_eq!(diagnostics.gpu_preview_candidate_requests, 2);
         assert_eq!(diagnostics.gpu_preview_candidate_ready, 1);
         assert_eq!(diagnostics.gpu_preview_candidate_current, 1);
         assert_eq!(diagnostics.gpu_preview_external_frames_registered, 1);
         assert_eq!(diagnostics.gpu_preview_external_frames_rejected, 0);
         assert_eq!(diagnostics.gpu_preview_external_frames_cleared, 0);
+
+        service.clear_external_viewer_frame();
+        let second_frame = match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Ready(frame) => frame,
+            _ => panic!("expected new ready GPU preview candidate after external frame clear"),
+        };
+        assert!(second_frame.preview_candidate_id() > first_candidate_id);
     }
 
     #[test]

@@ -206,6 +206,22 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
             0,
         ),
         max_color_rejections: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS", 0),
+        max_missing_runtime_reports: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_RUNTIME_REPORTS",
+            0,
+        ),
+        max_missing_stage_reports: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_STAGE_REPORTS",
+            0,
+        ),
+        max_ready_records_missing_preview_candidate_context: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_READY_RECORDS_MISSING_PREVIEW_CANDIDATE_CONTEXT",
+            u64::MAX,
+        ),
+        max_preview_candidate_id_regressions: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PREVIEW_CANDIDATE_ID_REGRESSIONS",
+            u64::MAX,
+        ),
     }
 }
 
@@ -1228,7 +1244,13 @@ fn viewer_gpu_output_budget_smoke_report_serializes_health_report() {
         VIEWER_GPU_OUTPUT_BUDGET_SCENARIO,
         "target/perf/viewer-gpu-output.jsonl",
         jsonl,
-        &ViewerGpuOutputBudget::default(),
+        &ViewerGpuOutputBudget {
+            max_missing_runtime_reports: u64::MAX,
+            max_missing_stage_reports: u64::MAX,
+            max_ready_records_missing_preview_candidate_context: u64::MAX,
+            max_preview_candidate_id_regressions: u64::MAX,
+            ..ViewerGpuOutputBudget::default()
+        },
     )
     .expect("viewer GPU output budget report");
     let json = serde_json::to_value(&report).expect("serialize viewer GPU output budget report");
@@ -1338,6 +1360,10 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
         "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_ALPHA_MODE_CHANGES",
         "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
         "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_RUNTIME_REPORTS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_STAGE_REPORTS",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_READY_RECORDS_MISSING_PREVIEW_CANDIDATE_CONTEXT",
+        "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PREVIEW_CANDIDATE_ID_REGRESSIONS",
     ];
     let previous = keys
         .iter()
@@ -1404,6 +1430,19 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
             "24",
         );
         std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS", "25");
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_RUNTIME_REPORTS",
+            "26",
+        );
+        std::env::set_var("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_STAGE_REPORTS", "27");
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_READY_RECORDS_MISSING_PREVIEW_CANDIDATE_CONTEXT",
+            "28",
+        );
+        std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_PREVIEW_CANDIDATE_ID_REGRESSIONS",
+            "29",
+        );
     }
 
     let budget = viewer_gpu_output_budget_from_env();
@@ -1444,6 +1483,10 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
             max_alpha_mode_changes: 23,
             max_display_payload_blockers: 24,
             max_color_rejections: 25,
+            max_missing_runtime_reports: 26,
+            max_missing_stage_reports: 27,
+            max_ready_records_missing_preview_candidate_context: 28,
+            max_preview_candidate_id_regressions: 29,
         }
     );
 }

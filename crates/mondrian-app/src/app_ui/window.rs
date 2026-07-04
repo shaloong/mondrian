@@ -115,6 +115,8 @@ struct AppUiViewerGpuOutputTelemetry {
     accumulated_stage_diagnostics: RenderColorStageDiagnostics,
     last_stage_diagnostics: Option<RenderColorStageDiagnostics>,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
+    last_preview_candidate_id: Option<u64>,
+    last_preview_candidate_state: Option<AppUiViewerGpuOutputPreviewCandidateState>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
     last_display_issue_refresh_generation: Option<u64>,
@@ -158,6 +160,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     health: AppUiViewerGpuOutputHealthSummary,
     health_counts: AppUiViewerGpuOutputHealthCounts,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
+    last_preview_candidate_id: Option<u64>,
+    last_preview_candidate_state: Option<AppUiViewerGpuOutputPreviewCandidateState>,
     last_color_rejection: Option<AppUiPreviewColorRejection>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
@@ -227,6 +231,8 @@ struct AppUiViewerGpuOutputFrameContext {
     output_target: AppUiViewerGpuOutputTarget,
     output_color_space: ColorSpace,
     tone_map: bool,
+    preview_candidate_id: Option<u64>,
+    preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState,
     display_view: Option<AppUiViewerGpuOutputDisplayView>,
 }
 
@@ -247,6 +253,14 @@ enum AppUiDisplayContractRefreshReasonDiagnostic {
     Resize,
     ScaleFactorChanged,
     WindowMoved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum AppUiViewerGpuOutputPreviewCandidateState {
+    Current,
+    Loading,
+    Unavailable,
+    Ready,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -409,6 +423,8 @@ impl AppUiViewerGpuOutputTelemetry {
             health,
             health_counts: self.health_counts,
             last_frame_context: self.last_frame_context.clone(),
+            last_preview_candidate_id: self.last_preview_candidate_id,
+            last_preview_candidate_state: self.last_preview_candidate_state,
             last_color_rejection: None,
             last_display_contract_blocker: self.last_display_contract_blocker,
             last_display_presentation_readiness: self.last_display_presentation_readiness,
@@ -423,10 +439,21 @@ impl AppUiViewerGpuOutputTelemetry {
         self.invocations = self.invocations.saturating_add(1);
         self.last_stage_diagnostics = None;
         self.last_frame_context = None;
+        self.last_preview_candidate_id = None;
+        self.last_preview_candidate_state = None;
         self.last_display_contract_blocker = None;
         self.last_display_presentation_readiness = None;
         self.last_display_issue_refresh_generation = None;
         self.last_outcome = None;
+    }
+
+    fn record_preview_candidate_state(
+        &mut self,
+        state: AppUiViewerGpuOutputPreviewCandidateState,
+        preview_candidate_id: Option<u64>,
+    ) {
+        self.last_preview_candidate_id = preview_candidate_id;
+        self.last_preview_candidate_state = Some(state);
     }
 
     fn record_frame_context(&mut self, frame: &AppUiGpuPreviewFrame, external_texture_key: String) {
@@ -604,6 +631,8 @@ impl AppUiViewerGpuOutputFrameContext {
             output_target: AppUiViewerGpuOutputTarget::from(frame.boundary.target),
             output_color_space: frame.boundary.output_color_space,
             tone_map: frame.boundary.tone_map,
+            preview_candidate_id: Some(frame.preview_candidate_id()),
+            preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState::Ready,
             display_view: frame.boundary.display_view.as_ref().map(|display_view| {
                 AppUiViewerGpuOutputDisplayView {
                     display: display_view.display.clone(),
@@ -2530,6 +2559,8 @@ fn trace_viewer_gpu_output_telemetry(
         health_count_rejected = diagnostics.health_counts.rejected,
         health_count_degraded = diagnostics.health_counts.degraded,
         health_count_ready = diagnostics.health_counts.ready,
+        last_preview_candidate_id = diagnostics.last_preview_candidate_id,
+        last_preview_candidate_state = ?diagnostics.last_preview_candidate_state,
         last_frame_context = ?diagnostics.last_frame_context,
         last_color_rejection = ?diagnostics.last_color_rejection,
         last_display_contract_blocker = ?diagnostics.last_display_contract_blocker,
@@ -2585,14 +2616,26 @@ fn prepare_viewer_gpu_preview(
     let frame = match host.gpu_preview_frame_for_current_state() {
         AppUiGpuPreviewFrameState::Ready(frame) => frame,
         AppUiGpuPreviewFrameState::Current => {
+            session.viewer_gpu_output_telemetry.record_preview_candidate_state(
+                AppUiViewerGpuOutputPreviewCandidateState::Current,
+                None,
+            );
             session.viewer_gpu_output_telemetry.record_current_skip();
             return;
         }
         AppUiGpuPreviewFrameState::Loading => {
+            session.viewer_gpu_output_telemetry.record_preview_candidate_state(
+                AppUiViewerGpuOutputPreviewCandidateState::Loading,
+                None,
+            );
             session.viewer_gpu_output_telemetry.record_loading_skip();
             return;
         }
         AppUiGpuPreviewFrameState::Unavailable => {
+            session.viewer_gpu_output_telemetry.record_preview_candidate_state(
+                AppUiViewerGpuOutputPreviewCandidateState::Unavailable,
+                None,
+            );
             session.viewer_gpu_output_telemetry.record_unavailable_skip();
             return;
         }
@@ -2610,6 +2653,10 @@ fn prepare_viewer_gpu_preview(
     session
         .viewer_gpu_output_telemetry
         .record_frame_context(&frame, texture_key.as_str().to_owned());
+    session.viewer_gpu_output_telemetry.record_preview_candidate_state(
+        AppUiViewerGpuOutputPreviewCandidateState::Ready,
+        Some(frame.preview_candidate_id()),
+    );
     let presentation_readiness = session
         .display_output_contract
         .presentation_readiness_for_boundary(&frame.boundary);
@@ -4386,6 +4433,30 @@ mod tests {
             AppUiViewerGpuOutputDiagnostics {
                 registered_frames: 1,
                 rejected_external_frames: 1,
+                accumulated_stage_report: RenderGpuOutputStageDiagnosticsReport {
+                    total_stages: 5,
+                    upload_stages: 2,
+                    gpu_color_stages: 2,
+                    readback_stages: 1,
+                    gpu_blockers: 1,
+                    gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
+                        render_pipeline_not_prepared: 1,
+                        ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
+                    },
+                    stage_pixels: 50,
+                },
+                last_stage_report: Some(RenderGpuOutputStageDiagnosticsReport {
+                    total_stages: 3,
+                    upload_stages: 1,
+                    gpu_color_stages: 1,
+                    readback_stages: 1,
+                    gpu_blockers: 1,
+                    gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
+                        render_pipeline_not_prepared: 1,
+                        ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
+                    },
+                    stage_pixels: 30,
+                }),
                 stage_total_stages: 5,
                 stage_upload_stages: 2,
                 stage_gpu_color_stages: 2,
@@ -4585,6 +4656,8 @@ mod tests {
             output_target: AppUiViewerGpuOutputTarget::Display,
             output_color_space: ColorSpace::Srgb,
             tone_map: false,
+            preview_candidate_id: Some(2),
+            preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState::Ready,
             display_view: Some(AppUiViewerGpuOutputDisplayView {
                 display: "sRGB Display".to_owned(),
                 view: "Standard".to_owned(),
@@ -4676,6 +4749,11 @@ mod tests {
         assert_eq!(json["last_frame_context"]["height"], 1080);
         assert_eq!(json["last_frame_context"]["output_target"], "Display");
         assert_eq!(json["last_frame_context"]["output_color_space"], "Srgb");
+        assert_eq!(json["last_frame_context"]["preview_candidate_id"], 2);
+        assert_eq!(
+            json["last_frame_context"]["preview_candidate_state"],
+            "Ready"
+        );
         assert_eq!(
             json["last_frame_context"]["display_view"]["view"],
             "Standard"

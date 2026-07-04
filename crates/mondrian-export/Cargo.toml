@@ -11,6 +11,7 @@ mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
 mondrian-renderer = { workspace = true }
 mondrian-effects  = { workspace = true }
+wgpu             = { workspace = true }
 
 tokio       = { workspace = true }
 async-trait = { workspace = true }

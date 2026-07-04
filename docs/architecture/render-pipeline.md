@@ -299,7 +299,11 @@ missing ready frames. The report's embedded summary replays
 and it replays viewer color rejections into a
 `VideoColorDiagnosticIssueAggregate`, allowing smoke runs to fail on HDR,
 wide-gamut, unsupported presentation, UI payload blockers, or metadata-policy
-rejections even when a temporary health budget permits degraded frames.
+rejections even when a temporary health budget permits degraded frames. It also
+fails closed when renderer-owned evidence is missing by default: each record is
+expected to include both `accumulated_stage_report` and `runtime_report`, and
+budget thresholds `max_missing_stage_reports` / `max_missing_runtime_reports`
+govern temporary exceptions.
 Per-reason display thresholds are part of the contract, so CI can relax one
 failure class for investigation without silently tolerating the rest, and
 unknown future display reasons still fail closed instead of disappearing inside
