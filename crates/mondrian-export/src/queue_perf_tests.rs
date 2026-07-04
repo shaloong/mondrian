@@ -51,39 +51,8 @@ struct ExportPerfSimReport {
     color_stage_readback_stages: u64,
     color_stage_gpu_blockers: u64,
     color_stage_pixels: u64,
-    color_health: ExportJobColorDiagnosticsSummary,
-    color_health_budget: ExportPerfColorHealthBudget,
-    color_health_passed: bool,
-    color_health_failures: Vec<ExportPerfColorHealthBudgetFailure>,
+    color_report: ExportColorHealthReport,
     passed: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-struct ExportPerfColorHealthBudget {
-    require_fully_float_linear: bool,
-    require_gpu_path_ready: bool,
-    max_gpu_blockers: u64,
-    max_legacy_reason_total: u64,
-    max_transfer_stages: u64,
-}
-
-impl Default for ExportPerfColorHealthBudget {
-    fn default() -> Self {
-        Self {
-            require_fully_float_linear: true,
-            require_gpu_path_ready: true,
-            max_gpu_blockers: 0,
-            max_legacy_reason_total: 0,
-            max_transfer_stages: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ExportPerfColorHealthBudgetFailure {
-    metric: &'static str,
-    actual: u64,
-    limit: u64,
 }
 
 fn perf_lock() -> &'static Mutex<()> {
@@ -113,88 +82,6 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|v| v.is_finite() && *v > 0.0)
         .unwrap_or(default)
-}
-
-fn env_bool(key: &str, default: bool) -> bool {
-    let Some(value) = std::env::var(key).ok() else {
-        return default;
-    };
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        _ => default,
-    }
-}
-
-fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(default)
-}
-
-fn export_color_health_budget_from_env() -> ExportPerfColorHealthBudget {
-    ExportPerfColorHealthBudget {
-        require_fully_float_linear: env_bool(
-            "MONDRIAN_EXPORT_SIM_REQUIRE_FULLY_FLOAT_LINEAR",
-            true,
-        ),
-        require_gpu_path_ready: env_bool("MONDRIAN_EXPORT_SIM_REQUIRE_GPU_PATH_READY", true),
-        max_gpu_blockers: env_u64("MONDRIAN_EXPORT_SIM_MAX_GPU_BLOCKERS", 0),
-        max_legacy_reason_total: env_u64("MONDRIAN_EXPORT_SIM_MAX_LEGACY_REASONS", 0),
-        max_transfer_stages: env_u64("MONDRIAN_EXPORT_SIM_MAX_TRANSFER_STAGES", 0),
-    }
-}
-
-fn evaluate_export_color_health_budget(
-    color_health: ExportJobColorDiagnosticsSummary,
-    budget: ExportPerfColorHealthBudget,
-) -> Vec<ExportPerfColorHealthBudgetFailure> {
-    let mut failures = Vec::new();
-    if budget.require_fully_float_linear && !color_health.fully_float_linear {
-        failures.push(ExportPerfColorHealthBudgetFailure {
-            metric: "fully_float_linear",
-            actual: 0,
-            limit: 1,
-        });
-    }
-    if budget.require_gpu_path_ready && !color_health.gpu_path_ready {
-        failures.push(ExportPerfColorHealthBudgetFailure {
-            metric: "gpu_path_ready",
-            actual: 0,
-            limit: 1,
-        });
-    }
-    push_max_color_health_failure(
-        &mut failures,
-        "gpu_blockers",
-        color_health.gpu_blockers,
-        budget.max_gpu_blockers,
-    );
-    push_max_color_health_failure(
-        &mut failures,
-        "legacy_reason_total",
-        color_health.legacy_reason_total,
-        budget.max_legacy_reason_total,
-    );
-    push_max_color_health_failure(
-        &mut failures,
-        "transfer_stages",
-        color_health.transfer_stages,
-        budget.max_transfer_stages,
-    );
-    failures
-}
-
-fn push_max_color_health_failure(
-    failures: &mut Vec<ExportPerfColorHealthBudgetFailure>,
-    metric: &'static str,
-    actual: u64,
-    limit: u64,
-) {
-    if actual > limit {
-        failures.push(ExportPerfColorHealthBudgetFailure { metric, actual, limit });
-    }
 }
 
 fn report_output_path() -> Option<PathBuf> {
@@ -322,7 +209,7 @@ fn run_export_render_simulation(
     fps_max_threshold: f64,
     pattern: OpacityPattern,
 ) -> Result<ExportPerfSimReport, Box<dyn std::error::Error>> {
-    run_export_render_simulation_with_budget(
+    run_export_render_simulation_with_report(
         scenario,
         width,
         height,
@@ -333,11 +220,10 @@ fn run_export_render_simulation(
         fps_min_threshold,
         fps_max_threshold,
         pattern,
-        export_color_health_budget_from_env(),
     )
 }
 
-fn run_export_render_simulation_with_budget(
+fn run_export_render_simulation_with_report(
     scenario: &'static str,
     width: u32,
     height: u32,
@@ -348,7 +234,6 @@ fn run_export_render_simulation_with_budget(
     fps_min_threshold: f64,
     fps_max_threshold: f64,
     pattern: OpacityPattern,
-    color_health_budget: ExportPerfColorHealthBudget,
 ) -> Result<ExportPerfSimReport, Box<dyn std::error::Error>> {
     let frame_budget_ms = 1000.0 / target_fps;
     let layer_count = layer_count.max(1);
@@ -426,10 +311,9 @@ fn run_export_render_simulation_with_budget(
     } else {
         0.0
     };
-    let color_health = color_diagnostics.summary().expect("export perf color diagnostics");
-    let color_health_failures =
-        evaluate_export_color_health_budget(color_health, color_health_budget);
-    let color_health_passed = color_health_failures.is_empty();
+    let color_report = color_diagnostics
+        .health_report(scenario)
+        .expect("export perf color diagnostics");
 
     let simulated_total = sim_frames.saturating_add(1);
     let passthrough_ratio_pct = if simulated_total > 0 {
@@ -442,7 +326,7 @@ fn run_export_render_simulation_with_budget(
     let passed = first_frame_ms <= first_frame_threshold_ms
         && achieved_fps + FPS_EPSILON >= fps_min_threshold
         && achieved_fps <= fps_max_threshold + FPS_EPSILON
-        && color_health_passed;
+        && color_report.verdict != ExportColorHealthVerdict::Fail;
 
     Ok(ExportPerfSimReport {
         scenario,
@@ -473,10 +357,7 @@ fn run_export_render_simulation_with_budget(
         color_stage_readback_stages: color_stage_diagnostics.readback_stages,
         color_stage_gpu_blockers: color_stage_diagnostics.gpu_blockers,
         color_stage_pixels: color_stage_diagnostics.stage_pixels,
-        color_health,
-        color_health_budget,
-        color_health_passed,
-        color_health_failures,
+        color_report,
         passed,
     })
 }
@@ -518,8 +399,8 @@ fn run_and_report_scenario(
 }
 
 #[test]
-fn export_perf_sim_report_includes_color_health_summary() {
-    let report = run_export_render_simulation_with_budget(
+fn export_perf_sim_report_includes_color_report() {
+    let report = run_export_render_simulation_with_report(
         "export-color-health-test",
         8,
         4,
@@ -530,81 +411,77 @@ fn export_perf_sim_report_includes_color_health_summary() {
         1.0,
         60.0,
         OpacityPattern::Passthrough,
-        ExportPerfColorHealthBudget::default(),
     )
     .expect("export perf report");
 
-    assert_eq!(report.color_health.diagnosed_frames, 3);
+    assert_eq!(report.color_report.schema_version, 1);
+    assert_eq!(report.color_report.profile, "export-color-health-test");
+    assert_eq!(report.color_report.verdict, ExportColorHealthVerdict::Pass);
+    assert_eq!(report.color_report.summary.diagnosed_frames, 3);
     assert_eq!(
-        report.color_health.cpu_input_stages,
+        report.color_report.summary.cpu_input_stages,
         report.color_stage_cpu_input_stages
     );
     assert_eq!(
-        report.color_health.gpu_blockers,
+        report.color_report.summary.gpu_blockers,
         report.color_stage_gpu_blockers
     );
-    assert_eq!(report.color_health.legacy_reason_total, 0);
-    assert!(report.color_health.fully_float_linear);
-    assert!(report.color_health.gpu_path_ready);
-    assert_eq!(
-        report.color_health_budget,
-        ExportPerfColorHealthBudget::default()
-    );
-    assert!(report.color_health_passed);
-    assert!(report.color_health_failures.is_empty());
+    assert_eq!(report.color_report.summary.legacy_reason_total, 0);
+    assert!(report.color_report.summary.fully_float_linear);
+    assert!(report.color_report.summary.gpu_path_ready);
+    assert!(report.color_report.root_causes.is_empty());
+    assert!(report.color_report.actions.is_empty());
     assert!(report.passed);
 
     let report_json = serde_json::to_value(&report).expect("serialize report");
-    assert!(report_json.get("color_health").is_some());
-    assert_eq!(report_json["color_health_passed"], true);
-    assert!(report_json.get("color_health_budget").is_some());
-    assert!(report_json["color_health_failures"]
-        .as_array()
-        .expect("color health failures array")
-        .is_empty());
+    assert!(report_json.get("color_health").is_none());
+    assert!(report_json.get("color_health_passed").is_none());
+    assert!(report_json.get("color_health_budget").is_none());
+    assert!(report_json.get("color_health_failures").is_none());
+    assert_eq!(report_json["color_report"]["schema_version"], 1);
+    assert_eq!(report_json["color_report"]["verdict"], "Pass");
     assert_eq!(
-        report_json["color_health"]["gpu_blocker_breakdown"]["render_pipeline_not_prepared"],
+        report_json["color_report"]["summary"]["gpu_blocker_breakdown"]
+            ["render_pipeline_not_prepared"],
         0
     );
     assert_eq!(
-        report_json["color_health"]["legacy_breakdown"]["media_transform"],
+        report_json["color_report"]["summary"]["legacy_breakdown"]["media_transform"],
         0
     );
 }
 
 #[test]
-fn export_perf_color_health_budget_reports_failures() {
-    let budget = ExportPerfColorHealthBudget::default();
-    let failures = evaluate_export_color_health_budget(
-        ExportJobColorDiagnosticsSummary {
-            gpu_blockers: 2,
-            transfer_stages: 1,
-            legacy_reason_total: 3,
-            fully_float_linear: false,
-            gpu_path_ready: false,
-            ..ExportJobColorDiagnosticsSummary::default()
-        },
-        budget,
-    );
+fn export_color_health_report_reports_root_causes() {
+    let report = ExportJobColorDiagnosticsSummary {
+        diagnosed_frames: 1,
+        policy_rejections: 1,
+        gpu_blockers: 2,
+        transfer_stages: 1,
+        legacy_reason_total: 3,
+        fully_float_linear: false,
+        gpu_path_ready: false,
+        ..ExportJobColorDiagnosticsSummary::default()
+    }
+    .health_report("export-ci");
 
-    assert_eq!(
-        failures,
-        vec![
-            ExportPerfColorHealthBudgetFailure {
-                metric: "fully_float_linear",
-                actual: 0,
-                limit: 1,
-            },
-            ExportPerfColorHealthBudgetFailure { metric: "gpu_path_ready", actual: 0, limit: 1 },
-            ExportPerfColorHealthBudgetFailure { metric: "gpu_blockers", actual: 2, limit: 0 },
-            ExportPerfColorHealthBudgetFailure {
-                metric: "legacy_reason_total",
-                actual: 3,
-                limit: 0,
-            },
-            ExportPerfColorHealthBudgetFailure { metric: "transfer_stages", actual: 1, limit: 0 },
-        ]
-    );
+    assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
+    assert!(report.checks.iter().any(|check| {
+        check.code == "gpu_blockers" && check.severity == ExportColorHealthSeverity::Fail
+    }));
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "input_color_policy_rejected_source"));
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "export_gpu_color_stage_blocked"));
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "export_transfer_stage_present"));
+    assert!(report.root_causes.iter().any(|root| root.code == "legacy_rgba8_composite_path"));
 }
 
 #[test]

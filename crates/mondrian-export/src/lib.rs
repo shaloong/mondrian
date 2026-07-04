@@ -12,5 +12,8 @@ pub use preset::{
     ExportConfig, ExportInput, ExportPreset, TimelineExportInput, TimelineExportRange,
 };
 pub use queue::{
-    ExportJobColorDiagnostics, ExportJobDiagnostics, JobStatus, RenderJob, RenderQueue,
+    ExportColorHealthAction, ExportColorHealthArea, ExportColorHealthCheck,
+    ExportColorHealthReport, ExportColorHealthRootCause, ExportColorHealthSeverity,
+    ExportColorHealthVerdict, ExportJobColorDiagnostics, ExportJobColorDiagnosticsSummary,
+    ExportJobDiagnostics, JobStatus, RenderJob, RenderQueue,
 };

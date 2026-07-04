@@ -206,30 +206,32 @@ Preview performance smoke reports and export job diagnostics must also include
 structured legacy RGBA8 composite reasons (`layer`, `reason`, `count`) derived
 from renderer composite diagnostics via `TimelineCompositeColorPathSummary`.
 These reason details are the migration contract for removing old
-blend/effect/transform paths; dashboards, job panels, and CI budgets should
-consume the summary directly instead of re-inferring fallback causes from
-aggregate counters.
-Export job color summaries also carry the renderer-owned GPU blocker breakdown
+blend/effect/transform paths. The summary is evidence; the versioned health
+report is the external contract. Dashboards, job panels, JSONL artifacts, and
+CI gates must consume the report verdict/check/root-cause/action model instead
+of re-inferring fallback causes from aggregate counters.
+Export job color reports also carry the renderer-owned GPU blocker breakdown
 and legacy RGBA8 breakdown next to the health booleans (`fully_float_linear`,
 `gpu_path_ready`). UI labels, JSONL reports, and future CI budgets must read
-those structured fields rather than parsing totals or rebuilding reason lists.
+those structured fields through the report rather than parsing totals or
+rebuilding reason lists.
 Export simulation performance reports written through `MONDRIAN_EXPORT_SIM_OUTPUT`
-include this same summary as `color_health` while retaining legacy flat stage
-counters for dashboard continuity. The nested summary is the authoritative
-machine-readable color health contract, and export simulation smoke tests fail
-closed against it by default: no GPU blockers, no transfer stages, no structured
-legacy RGBA8 reasons, fully float/linear composites, and GPU path readiness are
-required unless an operator explicitly relaxes the budget for investigation.
+include a versioned `color_report` as the sole export color report contract.
+`ExportJobDiagnostics::color_report` and `ExportJobColorDiagnostics::health_report`
+are the shared constructors for job panels, telemetry, and perf artifacts. That
+report embeds the same summary as threshold evidence, then adds a verdict, fixed
+checks, root causes, and actions. Export simulation smoke tests fail closed
+against the report by default: diagnosed frames must be present, no GPU
+blockers, no transfer stages, no structured legacy RGBA8 reasons, fully
+float/linear composites, and GPU path readiness are required.
 Preview performance JSONL reports written through `MONDRIAN_PERF_OUTPUT` expose
-the same idea as `preview_color_health` and, for playback probes,
-`preview_playback_color_health`. Older `preview_color_path` fields remain during
-dashboard migration, but new tooling should budget against the structured
-health summary instead of reconstructing it from flat preview counters. Preview
-media decode/cache and continuous-playback smokes now fail closed on that
-summary by default: health must be present, composites must be fully
-float/linear, GPU path readiness must hold, and GPU blockers, transfer stages,
-legacy RGBA8 reasons, and missing-metadata policy rejections must remain zero
-unless the budget is explicitly relaxed for investigation.
+the same idea as versioned preview color reports. Decode/cache and
+continuous-playback smokes write `preview_color_report` as the sole preview
+color report contract; it embeds the structured health summary, verdict, fixed
+checks, root causes, and actions. Preview smokes fail closed on that report by
+default: health must be present, composites must be fully float/linear, GPU path
+readiness must hold, and GPU blockers, transfer stages, legacy RGBA8 reasons,
+and missing-metadata policy rejections must remain zero.
 Headless preview smoke reports must also carry GPU preview candidate counters:
 request, ready/current/loading/unavailable outcomes, candidate pixels, and
 external texture registration handoff counters. These counters prove that the
