@@ -3,9 +3,12 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{bail, Context};
-use mondrian_app::app_ui::viewer_gpu_output_budget::{evaluate_jsonl, ViewerGpuOutputBudget};
+use mondrian_app::app_ui::viewer_gpu_output_budget::{
+    build_health_report, evaluate_jsonl, ViewerGpuOutputBudget,
+};
 
 const DISPLAY_BASELINE_PRESET: &str = "display-baseline";
+const CUSTOM_PROFILE: &str = "custom";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -17,10 +20,16 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
     let summary = evaluate_jsonl(&contents, &args.budget)?;
-    let summary_json = serde_json::to_string(&summary)?;
-    println!("{summary_json}");
-    if !summary.passed {
-        bail!("viewer GPU output budget failed: {summary_json}");
+    let summary_passed = summary.passed;
+    let output_json = match args.format {
+        BudgetOutputFormat::Summary => serde_json::to_string(&summary)?,
+        BudgetOutputFormat::HealthReport => {
+            serde_json::to_string(&build_health_report(summary, args.profile))?
+        }
+    };
+    println!("{output_json}");
+    if !summary_passed {
+        bail!("viewer GPU output budget failed: {output_json}");
     }
     Ok(())
 }
@@ -29,23 +38,49 @@ fn main() -> anyhow::Result<()> {
 struct BudgetArgs {
     path: std::path::PathBuf,
     budget: ViewerGpuOutputBudget,
+    format: BudgetOutputFormat,
+    profile: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetOutputFormat {
+    Summary,
+    HealthReport,
 }
 
 impl BudgetArgs {
     fn parse(args: &[String]) -> anyhow::Result<Self> {
         let Some(first) = args.first() else {
             bail!(
-                "usage: viewer_gpu_output_budget <jsonl-path> [--preset display-baseline] [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N]"
+                "usage: viewer_gpu_output_budget <jsonl-path> [--format summary|health-report] [--profile NAME] [--preset display-baseline] [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-hdr-output-requires-hdr-surface N] [--max-output-color-space-requires-surface-color-space N] [--max-reconfigure-blocked-by-payload N] [--max-unsupported-presentation-intent N] [--max-unsupported-surface-contract N] [--max-unknown-display-issues N] [--max-display-contract-refreshes N] [--max-display-issue-refresh-correlations N] [--max-display-tone-map-headroom-changes N] [--max-available-surface-format-changes N] [--max-format-color-space-changes N] [--max-present-mode-changes N] [--max-alpha-mode-changes N] [--max-display-payload-blockers N] [--max-color-rejections N]"
             );
         };
         let mut budget = ViewerGpuOutputBudget::default();
+        let mut format = BudgetOutputFormat::Summary;
+        let mut profile = CUSTOM_PROFILE.to_owned();
         let mut index = 1usize;
         while index < args.len() {
             let flag = args[index].as_str();
+            if flag == "--format" {
+                let value =
+                    args.get(index + 1).with_context(|| format!("missing value for {flag}"))?;
+                format = parse_output_format(value)?;
+                index += 2;
+                continue;
+            }
+            if flag == "--profile" {
+                profile = args
+                    .get(index + 1)
+                    .with_context(|| format!("missing value for {flag}"))?
+                    .to_owned();
+                index += 2;
+                continue;
+            }
             if flag == "--preset" {
                 let preset =
                     args.get(index + 1).with_context(|| format!("missing value for {flag}"))?;
                 budget = parse_budget_preset(preset)?;
+                profile = preset.to_owned();
                 index += 2;
                 continue;
             }
@@ -103,7 +138,20 @@ impl BudgetArgs {
             }
             index += 2;
         }
-        Ok(Self { path: Path::new(first).to_path_buf(), budget })
+        Ok(Self {
+            path: Path::new(first).to_path_buf(),
+            budget,
+            format,
+            profile,
+        })
+    }
+}
+
+fn parse_output_format(name: &str) -> anyhow::Result<BudgetOutputFormat> {
+    match name {
+        "summary" => Ok(BudgetOutputFormat::Summary),
+        "health-report" => Ok(BudgetOutputFormat::HealthReport),
+        _ => bail!("unknown output format: {name}"),
     }
 }
 
@@ -167,6 +215,8 @@ mod tests {
         let parsed = BudgetArgs::parse(&args).expect("parse budget args");
 
         assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
+        assert_eq!(parsed.format, BudgetOutputFormat::Summary);
+        assert_eq!(parsed.profile, CUSTOM_PROFILE);
         assert_eq!(
             parsed.budget,
             ViewerGpuOutputBudget {
@@ -206,6 +256,8 @@ mod tests {
         let parsed = BudgetArgs::parse(&args).expect("parse preset args");
 
         assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
+        assert_eq!(parsed.format, BudgetOutputFormat::Summary);
+        assert_eq!(parsed.profile, DISPLAY_BASELINE_PRESET);
         assert_eq!(parsed.budget, ViewerGpuOutputBudget::display_baseline());
     }
 
@@ -224,6 +276,8 @@ mod tests {
         let parsed = BudgetArgs::parse(&args).expect("parse preset override args");
 
         assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
+        assert_eq!(parsed.format, BudgetOutputFormat::Summary);
+        assert_eq!(parsed.profile, DISPLAY_BASELINE_PRESET);
         assert_eq!(
             parsed.budget,
             ViewerGpuOutputBudget {
@@ -232,5 +286,23 @@ mod tests {
                 ..ViewerGpuOutputBudget::display_baseline()
             }
         );
+    }
+
+    #[test]
+    fn budget_args_parse_health_report_format_and_profile() {
+        let args = vec![
+            "target/perf/viewer.jsonl".to_owned(),
+            "--format".to_owned(),
+            "health-report".to_owned(),
+            "--profile".to_owned(),
+            "ci-display-wall".to_owned(),
+        ];
+
+        let parsed = BudgetArgs::parse(&args).expect("parse health report args");
+
+        assert_eq!(parsed.path, Path::new("target/perf/viewer.jsonl"));
+        assert_eq!(parsed.format, BudgetOutputFormat::HealthReport);
+        assert_eq!(parsed.profile, "ci-display-wall");
+        assert_eq!(parsed.budget, ViewerGpuOutputBudget::default());
     }
 }

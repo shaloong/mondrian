@@ -4,6 +4,9 @@ use anyhow::Context;
 use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
 use serde::{Deserialize, Serialize};
 
+/// Schema version for the high-level viewer GPU-output health report.
+pub const VIEWER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION: u32 = 1;
+
 /// Thresholds for evaluating a viewer GPU-output diagnostics JSONL stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewerGpuOutputBudget {
@@ -108,6 +111,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub display_contract_refreshes: ViewerGpuOutputDisplayContractRefreshCounts,
     /// Counts replayed from display issues correlated to a preceding refresh event.
     pub display_issue_refresh_correlations: ViewerGpuOutputDisplayIssueRefreshCorrelationCounts,
+    /// Latest cumulative color-stage/runtime counters observed in the stream.
+    pub stage: ViewerGpuOutputStageCounts,
     /// Records carrying a structured viewer color rejection.
     pub color_rejections: u64,
     /// Aggregated machine-readable media issue summaries from color rejections.
@@ -126,6 +131,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub failures: Vec<ViewerGpuOutputBudgetFailure>,
     /// Last health status observed in the stream.
     pub last_status: Option<ViewerGpuOutputHealthStatus>,
+    /// Last full health summary observed in the stream.
+    pub last_health: Option<ViewerGpuOutputHealthSummary>,
     /// Last frame context observed in the stream.
     pub last_frame_context: Option<ViewerGpuOutputFrameContext>,
     /// Last display issue summary observed in the stream.
@@ -134,6 +141,124 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub last_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
     /// Last viewer color rejection observed in the stream.
     pub last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
+}
+
+/// High-level, stable health report for CI, perf walls, and human diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputHealthReport {
+    /// Report schema version.
+    pub schema_version: u32,
+    /// Applied reporting profile or preset.
+    pub profile: String,
+    /// Overall diagnostic verdict.
+    pub verdict: ViewerGpuOutputHealthVerdict,
+    /// Budget/evaluator summary used as the evidence base.
+    pub summary: ViewerGpuOutputBudgetSummary,
+    /// Layered checks grouped by industrial color-pipeline responsibility.
+    pub checks: Vec<ViewerGpuOutputHealthCheck>,
+    /// Prioritized machine-readable root causes.
+    pub root_causes: Vec<ViewerGpuOutputHealthRootCause>,
+    /// Suggested next diagnostic or engineering actions.
+    pub actions: Vec<ViewerGpuOutputHealthAction>,
+    /// Compact evidence pointers for dashboards and issue templates.
+    pub evidence: ViewerGpuOutputHealthEvidence,
+}
+
+/// Overall verdict for a viewer GPU-output health report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ViewerGpuOutputHealthVerdict {
+    /// The stream satisfied the budget and produced no warning-level diagnostic checks.
+    Pass,
+    /// The stream satisfied the budget, but one or more diagnostic checks need attention.
+    Warn,
+    /// The stream violated the budget or a fail-closed diagnostic check.
+    Fail,
+}
+
+/// Diagnostic area used by high-level viewer GPU-output checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ViewerGpuOutputDiagnosticArea {
+    /// JSONL capture completeness and replay consistency.
+    CaptureIntegrity,
+    /// Viewer output state machine health.
+    ViewerOutput,
+    /// Renderer color-stage and native GPU path health.
+    GpuColorPath,
+    /// Display boundary and presentation contract health.
+    DisplayContract,
+    /// Monitor/surface capability drift across refresh events.
+    DisplayCapabilityDrift,
+    /// Media metadata and color-policy rejections.
+    MediaColorPolicy,
+}
+
+/// Severity for an individual health check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ViewerGpuOutputHealthSeverity {
+    /// The check passed.
+    Pass,
+    /// The check is not a budget failure, but should be tracked.
+    Warn,
+    /// The check is a blocking diagnostic failure.
+    Fail,
+}
+
+/// One layered diagnostic check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputHealthCheck {
+    /// Pipeline area the check belongs to.
+    pub area: ViewerGpuOutputDiagnosticArea,
+    /// Stable machine-readable check code.
+    pub code: &'static str,
+    /// Check severity.
+    pub severity: ViewerGpuOutputHealthSeverity,
+    /// Observed value.
+    pub observed: u64,
+    /// Optional threshold or target value.
+    pub limit: Option<u64>,
+}
+
+/// One prioritized root cause inferred from the summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputHealthRootCause {
+    /// Pipeline area the root cause belongs to.
+    pub area: ViewerGpuOutputDiagnosticArea,
+    /// Stable machine-readable root-cause code.
+    pub code: &'static str,
+    /// Root-cause severity.
+    pub severity: ViewerGpuOutputHealthSeverity,
+    /// Compact evidence string for dashboards.
+    pub evidence: String,
+}
+
+/// One suggested follow-up action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputHealthAction {
+    /// Pipeline area the action belongs to.
+    pub area: ViewerGpuOutputDiagnosticArea,
+    /// Stable machine-readable action code.
+    pub code: &'static str,
+    /// Human-readable action text.
+    pub description: &'static str,
+}
+
+/// Compact evidence pointers for a health report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ViewerGpuOutputHealthEvidence {
+    /// Last health status observed in the stream.
+    pub last_status: Option<ViewerGpuOutputHealthStatus>,
+    /// Last full health summary observed in the stream.
+    pub last_health: Option<ViewerGpuOutputHealthSummary>,
+    /// Last frame context observed in the stream.
+    pub last_frame_context: Option<ViewerGpuOutputFrameContext>,
+    /// Last display issue observed in the stream.
+    pub last_display_issue: Option<ViewerGpuOutputDisplayIssueSummary>,
+    /// Last display-contract refresh observed in the stream.
+    pub last_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
+    /// Last media color rejection observed in the stream.
+    pub last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
+    /// Budget failures that drove a fail verdict.
+    pub budget_failures: Vec<ViewerGpuOutputBudgetFailure>,
 }
 
 /// Serializable representation of the applied budget.
@@ -253,6 +378,8 @@ pub fn evaluate_jsonl(
     let mut display_contract_refreshes = ViewerGpuOutputDisplayContractRefreshCounts::default();
     let mut display_issue_refresh_correlations =
         ViewerGpuOutputDisplayIssueRefreshCorrelationCounts::default();
+    let mut stage = ViewerGpuOutputStageCounts::default();
+    let mut last_health = None;
     let mut last_display_issue = None;
     let mut last_display_contract_refresh = None;
     let mut color_rejections = 0u64;
@@ -270,6 +397,7 @@ pub fn evaluate_jsonl(
             .with_context(|| format!("invalid JSONL record at line {}", line_index + 1))?;
         records = records.saturating_add(1);
         counts.record(record.health.status);
+        stage.merge_max(record.stage_counts());
         if let Some(record_counts) = record.health_counts {
             reported_counts = Some(record_counts);
             if record_counts != counts {
@@ -305,6 +433,7 @@ pub fn evaluate_jsonl(
             last_color_rejection = Some(rejection);
         }
         last_status = Some(record.health.status);
+        last_health = Some(record.health);
         last_frame_context = record.last_frame_context;
     }
 
@@ -448,6 +577,7 @@ pub fn evaluate_jsonl(
         display_issues,
         display_contract_refreshes,
         display_issue_refresh_correlations,
+        stage,
         color_rejections,
         media_issues,
         reported_counts,
@@ -457,6 +587,7 @@ pub fn evaluate_jsonl(
         passed: failures.is_empty(),
         failures,
         last_status,
+        last_health,
         last_frame_context,
         last_display_issue,
         last_display_contract_refresh,
@@ -475,16 +606,519 @@ fn push_max_failure(
     }
 }
 
+/// Build the high-level diagnostic report from a budget summary.
+pub fn build_health_report(
+    summary: ViewerGpuOutputBudgetSummary,
+    profile: impl Into<String>,
+) -> ViewerGpuOutputHealthReport {
+    let mut checks = Vec::new();
+    let mut root_causes = Vec::new();
+    let mut actions = Vec::new();
+
+    push_min_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::CaptureIntegrity,
+        "records_present",
+        summary.records,
+        summary.budget.min_records,
+    );
+    push_bool_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::CaptureIntegrity,
+        "health_counts_match_replay",
+        summary.reported_counts_match_replay,
+    );
+    push_min_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::ViewerOutput,
+        "ready_frames",
+        summary.counts.ready,
+        summary.budget.min_ready,
+    );
+    push_max_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::ViewerOutput,
+        "failed_frames",
+        summary.counts.failed,
+        summary.budget.max_failed,
+    );
+    push_max_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::ViewerOutput,
+        "blocked_frames",
+        summary.counts.blocked,
+        summary.budget.max_blocked,
+    );
+    push_max_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::ViewerOutput,
+        "rejected_frames",
+        summary.counts.rejected,
+        summary.budget.max_rejected,
+    );
+    push_max_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::ViewerOutput,
+        "degraded_frames",
+        summary.counts.degraded,
+        summary.budget.max_degraded,
+    );
+    push_gpu_color_checks(&mut checks, &summary);
+    push_display_contract_checks(&mut checks, &summary);
+    push_display_drift_checks(&mut checks, &summary);
+    push_max_check(
+        &mut checks,
+        ViewerGpuOutputDiagnosticArea::MediaColorPolicy,
+        "color_rejections",
+        summary.color_rejections,
+        summary.budget.max_color_rejections,
+    );
+    if summary.media_issues.diagnostics_with_warnings > 0 {
+        checks.push(ViewerGpuOutputHealthCheck {
+            area: ViewerGpuOutputDiagnosticArea::MediaColorPolicy,
+            code: "media_warnings",
+            severity: ViewerGpuOutputHealthSeverity::Warn,
+            observed: summary.media_issues.diagnostics_with_warnings,
+            limit: Some(0),
+        });
+    }
+
+    push_root_causes_and_actions(&summary, &mut root_causes, &mut actions);
+
+    let has_failures = !summary.passed
+        || checks.iter().any(|check| check.severity == ViewerGpuOutputHealthSeverity::Fail);
+    let has_warnings =
+        checks.iter().any(|check| check.severity == ViewerGpuOutputHealthSeverity::Warn);
+    let verdict = if has_failures {
+        ViewerGpuOutputHealthVerdict::Fail
+    } else if has_warnings {
+        ViewerGpuOutputHealthVerdict::Warn
+    } else {
+        ViewerGpuOutputHealthVerdict::Pass
+    };
+
+    let evidence = ViewerGpuOutputHealthEvidence {
+        last_status: summary.last_status,
+        last_health: summary.last_health,
+        last_frame_context: summary.last_frame_context.clone(),
+        last_display_issue: summary.last_display_issue.clone(),
+        last_display_contract_refresh: summary.last_display_contract_refresh.clone(),
+        last_color_rejection: summary.last_color_rejection.clone(),
+        budget_failures: summary.failures.clone(),
+    };
+
+    ViewerGpuOutputHealthReport {
+        schema_version: VIEWER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
+        profile: profile.into(),
+        verdict,
+        summary,
+        checks,
+        root_causes,
+        actions,
+        evidence,
+    }
+}
+
+fn push_min_check(
+    checks: &mut Vec<ViewerGpuOutputHealthCheck>,
+    area: ViewerGpuOutputDiagnosticArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(ViewerGpuOutputHealthCheck {
+        area,
+        code,
+        severity: if observed < limit {
+            ViewerGpuOutputHealthSeverity::Fail
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_max_check(
+    checks: &mut Vec<ViewerGpuOutputHealthCheck>,
+    area: ViewerGpuOutputDiagnosticArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(ViewerGpuOutputHealthCheck {
+        area,
+        code,
+        severity: if observed > limit {
+            ViewerGpuOutputHealthSeverity::Fail
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_bool_check(
+    checks: &mut Vec<ViewerGpuOutputHealthCheck>,
+    area: ViewerGpuOutputDiagnosticArea,
+    code: &'static str,
+    passed: bool,
+) {
+    checks.push(ViewerGpuOutputHealthCheck {
+        area,
+        code,
+        severity: if passed {
+            ViewerGpuOutputHealthSeverity::Pass
+        } else {
+            ViewerGpuOutputHealthSeverity::Fail
+        },
+        observed: if passed { 1 } else { 0 },
+        limit: Some(1),
+    });
+}
+
+fn push_warn_check(
+    checks: &mut Vec<ViewerGpuOutputHealthCheck>,
+    area: ViewerGpuOutputDiagnosticArea,
+    code: &'static str,
+    observed: u64,
+) {
+    checks.push(ViewerGpuOutputHealthCheck {
+        area,
+        code,
+        severity: if observed > 0 {
+            ViewerGpuOutputHealthSeverity::Warn
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed,
+        limit: Some(0),
+    });
+}
+
+fn push_gpu_color_checks(
+    checks: &mut Vec<ViewerGpuOutputHealthCheck>,
+    summary: &ViewerGpuOutputBudgetSummary,
+) {
+    push_warn_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::GpuColorPath,
+        "upload_stages",
+        summary.stage.upload_stages,
+    );
+    push_warn_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::GpuColorPath,
+        "readback_stages",
+        summary.stage.readback_stages,
+    );
+    checks.push(ViewerGpuOutputHealthCheck {
+        area: ViewerGpuOutputDiagnosticArea::GpuColorPath,
+        code: "gpu_color_stages_present",
+        severity: if summary.stage.total_stages > 0 && summary.stage.gpu_color_stages == 0 {
+            ViewerGpuOutputHealthSeverity::Warn
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed: summary.stage.gpu_color_stages,
+        limit: None,
+    });
+    checks.push(ViewerGpuOutputHealthCheck {
+        area: ViewerGpuOutputDiagnosticArea::GpuColorPath,
+        code: "gpu_blockers",
+        severity: if summary.stage.gpu_blockers > 0 {
+            ViewerGpuOutputHealthSeverity::Fail
+        } else {
+            ViewerGpuOutputHealthSeverity::Pass
+        },
+        observed: summary.stage.gpu_blockers,
+        limit: Some(0),
+    });
+}
+
+fn push_display_contract_checks(
+    checks: &mut Vec<ViewerGpuOutputHealthCheck>,
+    summary: &ViewerGpuOutputBudgetSummary,
+) {
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayContract,
+        "display_issues",
+        summary.display_issues.total,
+        summary.budget.max_display_issues,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayContract,
+        "hdr_surface_blockers",
+        summary.display_issues.hdr_output_requires_hdr_surface,
+        summary.budget.max_hdr_output_requires_hdr_surface,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayContract,
+        "surface_color_space_blockers",
+        summary.display_issues.output_color_space_requires_surface_color_space,
+        summary.budget.max_output_color_space_requires_surface_color_space,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayContract,
+        "payload_blockers",
+        summary.display_issues.payload_blockers,
+        summary.budget.max_display_payload_blockers,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayContract,
+        "unknown_display_issues",
+        summary.display_issues.unknown,
+        summary.budget.max_unknown_display_issues,
+    );
+}
+
+fn push_display_drift_checks(
+    checks: &mut Vec<ViewerGpuOutputHealthCheck>,
+    summary: &ViewerGpuOutputBudgetSummary,
+) {
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+        "display_contract_refreshes",
+        summary.display_contract_refreshes.total,
+        summary.budget.max_display_contract_refreshes,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+        "display_issue_refresh_correlations",
+        summary.display_issue_refresh_correlations.total,
+        summary.budget.max_display_issue_refresh_correlations,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+        "tone_map_headroom_changes",
+        summary.display_contract_refreshes.display_tone_map_headroom_changed,
+        summary.budget.max_display_tone_map_headroom_changes,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+        "available_surface_format_changes",
+        summary.display_contract_refreshes.available_surface_formats_changed,
+        summary.budget.max_available_surface_format_changes,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+        "format_color_space_changes",
+        summary.display_contract_refreshes.format_color_spaces_changed,
+        summary.budget.max_format_color_space_changes,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+        "present_mode_changes",
+        summary.display_contract_refreshes.present_modes_changed,
+        summary.budget.max_present_mode_changes,
+    );
+    push_max_check(
+        checks,
+        ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+        "alpha_mode_changes",
+        summary.display_contract_refreshes.alpha_modes_changed,
+        summary.budget.max_alpha_mode_changes,
+    );
+}
+
+fn push_root_causes_and_actions(
+    summary: &ViewerGpuOutputBudgetSummary,
+    root_causes: &mut Vec<ViewerGpuOutputHealthRootCause>,
+    actions: &mut Vec<ViewerGpuOutputHealthAction>,
+) {
+    for failure in &summary.failures {
+        match failure.metric {
+            "records" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::CaptureIntegrity,
+                "jsonl_capture_missing",
+                format!("records={} required={}", failure.actual, failure.limit),
+                "capture_viewer_jsonl",
+                "Capture a live viewer GPU-output JSONL stream before evaluating the budget.",
+            ),
+            "health_counts_match_replay" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::CaptureIntegrity,
+                "health_count_replay_mismatch",
+                format!("mismatches={}", failure.actual),
+                "inspect_jsonl_writer",
+                "Inspect cumulative health-count emission; replayed statuses must match reported counters.",
+            ),
+            "ready" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::ViewerOutput,
+                "no_ready_viewer_frames",
+                format!("ready={} required={}", failure.actual, failure.limit),
+                "drive_viewer_until_ready",
+                "Drive playback or scrubbing until at least one viewer GPU-output frame reaches Ready.",
+            ),
+            "failed" | "blocked" | "rejected" | "degraded" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::ViewerOutput,
+                "viewer_output_not_healthy",
+                format!("{}={} limit={}", failure.metric, failure.actual, failure.limit),
+                "inspect_viewer_outcome",
+                "Inspect last_outcome, health flags, and frame context for the failing viewer state.",
+            ),
+            "color_rejections" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::MediaColorPolicy,
+                "media_color_policy_rejected_source",
+                format!("color_rejections={} limit={}", failure.actual, failure.limit),
+                "inspect_media_color_metadata",
+                "Inspect the last color rejection and source metadata evidence before relaxing policy.",
+            ),
+            "display_contract_refreshes"
+            | "display_issue_refresh_correlations"
+            | "display_tone_map_headroom_changes"
+            | "available_surface_format_changes"
+            | "format_color_space_changes"
+            | "present_mode_changes"
+            | "alpha_mode_changes" => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::DisplayCapabilityDrift,
+                "display_capability_drift",
+                format!("{}={} limit={}", failure.metric, failure.actual, failure.limit),
+                "inspect_display_refresh_evidence",
+                "Inspect the preceding display-contract refresh and OS surface capability diff.",
+            ),
+            _ => push_root_cause_with_action(
+                root_causes,
+                actions,
+                ViewerGpuOutputDiagnosticArea::DisplayContract,
+                "display_contract_blocked_output",
+                format!("{}={} limit={}", failure.metric, failure.actual, failure.limit),
+                "inspect_display_contract",
+                "Inspect display issue reason, desired surface contract, and payload blocker evidence.",
+            ),
+        }
+    }
+
+    if summary.stage.gpu_blockers > 0 {
+        push_root_cause_with_action(
+            root_causes,
+            actions,
+            ViewerGpuOutputDiagnosticArea::GpuColorPath,
+            "gpu_color_stage_blocked",
+            format!(
+                "gpu_blockers={} shader={} ocio={} wrapper={} pipeline={}",
+                summary.stage.gpu_blockers,
+                summary.stage.gpu_shader_module_blockers,
+                summary.stage.gpu_ocio_resource_blockers,
+                summary.stage.gpu_wrapper_blockers,
+                summary.stage.gpu_render_pipeline_blockers
+            ),
+            "inspect_gpu_blocker_breakdown",
+            "Inspect shader module, OCIO resource, fullscreen wrapper, and render pipeline preparation.",
+        );
+    }
+    if summary.stage.upload_stages > 0 || summary.stage.readback_stages > 0 {
+        push_root_cause_with_action(
+            root_causes,
+            actions,
+            ViewerGpuOutputDiagnosticArea::GpuColorPath,
+            "cpu_gpu_transfer_stage_present",
+            format!(
+                "upload_stages={} readback_stages={}",
+                summary.stage.upload_stages, summary.stage.readback_stages
+            ),
+            "remove_transfer_stage",
+            "Trace why the viewer output path left the native GPU color path and introduced transfer stages.",
+        );
+    }
+}
+
+fn push_root_cause_with_action(
+    root_causes: &mut Vec<ViewerGpuOutputHealthRootCause>,
+    actions: &mut Vec<ViewerGpuOutputHealthAction>,
+    area: ViewerGpuOutputDiagnosticArea,
+    root_code: &'static str,
+    evidence: String,
+    action_code: &'static str,
+    action_description: &'static str,
+) {
+    if !root_causes.iter().any(|root| root.code == root_code) {
+        root_causes.push(ViewerGpuOutputHealthRootCause {
+            area,
+            code: root_code,
+            severity: ViewerGpuOutputHealthSeverity::Fail,
+            evidence,
+        });
+    }
+    if !actions.iter().any(|action| action.code == action_code) {
+        actions.push(ViewerGpuOutputHealthAction {
+            area,
+            code: action_code,
+            description: action_description,
+        });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct ViewerGpuOutputDiagnosticRecord {
     health: ViewerGpuOutputHealthSummary,
     health_counts: Option<ViewerGpuOutputHealthCounts>,
+    #[serde(default)]
+    stage_total_stages: u64,
+    #[serde(default)]
+    stage_upload_stages: u64,
+    #[serde(default)]
+    stage_gpu_color_stages: u64,
+    #[serde(default)]
+    stage_readback_stages: u64,
+    #[serde(default)]
+    stage_gpu_blockers: u64,
+    #[serde(default)]
+    stage_gpu_shader_module_blockers: u64,
+    #[serde(default)]
+    stage_gpu_ocio_resource_blockers: u64,
+    #[serde(default)]
+    stage_gpu_wrapper_blockers: u64,
+    #[serde(default)]
+    stage_gpu_render_pipeline_blockers: u64,
+    #[serde(default)]
+    stage_pixels: u64,
     last_frame_context: Option<ViewerGpuOutputFrameContext>,
     display_issue_summary: Option<ViewerGpuOutputDisplayIssueSummary>,
     #[serde(default)]
     recent_display_contract_refreshes: Vec<ViewerGpuOutputDisplayContractRefreshEvent>,
     last_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
     last_color_rejection: Option<ViewerGpuOutputColorRejectionSummary>,
+}
+
+impl ViewerGpuOutputDiagnosticRecord {
+    fn stage_counts(&self) -> ViewerGpuOutputStageCounts {
+        ViewerGpuOutputStageCounts {
+            total_stages: self.stage_total_stages,
+            upload_stages: self.stage_upload_stages,
+            gpu_color_stages: self.stage_gpu_color_stages,
+            readback_stages: self.stage_readback_stages,
+            gpu_blockers: self.stage_gpu_blockers,
+            gpu_shader_module_blockers: self.stage_gpu_shader_module_blockers,
+            gpu_ocio_resource_blockers: self.stage_gpu_ocio_resource_blockers,
+            gpu_wrapper_blockers: self.stage_gpu_wrapper_blockers,
+            gpu_render_pipeline_blockers: self.stage_gpu_render_pipeline_blockers,
+            pixels: self.stage_pixels,
+        }
+    }
 }
 
 /// Viewer color rejection summary consumed from viewer GPU-output JSONL records.
@@ -510,9 +1144,78 @@ pub struct ViewerGpuOutputColorRejectionSummary {
     pub diagnostic_issue_summary: VideoColorDiagnosticIssueSummary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-struct ViewerGpuOutputHealthSummary {
-    status: ViewerGpuOutputHealthStatus,
+/// Full health flags consumed from viewer GPU-output JSONL records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputHealthSummary {
+    /// Coarse health status for the current record.
+    pub status: ViewerGpuOutputHealthStatus,
+    /// Viewer output is registered and ready.
+    #[serde(default)]
+    pub viewer_output_ready: bool,
+    /// Native GPU output boundary is ready.
+    #[serde(default)]
+    pub native_gpu_boundary_ready: bool,
+    /// Display boundary accepted the output request.
+    #[serde(default)]
+    pub display_boundary_ready: bool,
+    /// Presentation path is ready for the requested output.
+    #[serde(default)]
+    pub presentation_ready: bool,
+    /// Color-stage sequence has been recorded.
+    #[serde(default)]
+    pub stage_sequence_ready: bool,
+    /// No GPU-stage blockers were reported.
+    #[serde(default)]
+    pub no_gpu_blockers: bool,
+    /// Output texture was available to the viewer.
+    #[serde(default)]
+    pub output_texture_available: bool,
+    /// External texture registration succeeded.
+    #[serde(default)]
+    pub external_texture_registered: bool,
+}
+
+/// Cumulative color-stage counters observed in viewer GPU-output diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputStageCounts {
+    /// Total color stages scheduled.
+    pub total_stages: u64,
+    /// Upload stages scheduled.
+    pub upload_stages: u64,
+    /// Native GPU color stages scheduled.
+    pub gpu_color_stages: u64,
+    /// Readback stages scheduled.
+    pub readback_stages: u64,
+    /// Total GPU blockers.
+    pub gpu_blockers: u64,
+    /// Shader module preparation blockers.
+    pub gpu_shader_module_blockers: u64,
+    /// OCIO resource bind group preparation blockers.
+    pub gpu_ocio_resource_blockers: u64,
+    /// Fullscreen wrapper preparation blockers.
+    pub gpu_wrapper_blockers: u64,
+    /// Render pipeline preparation blockers.
+    pub gpu_render_pipeline_blockers: u64,
+    /// Pixels processed by recorded stages.
+    pub pixels: u64,
+}
+
+impl ViewerGpuOutputStageCounts {
+    fn merge_max(&mut self, other: Self) {
+        self.total_stages = self.total_stages.max(other.total_stages);
+        self.upload_stages = self.upload_stages.max(other.upload_stages);
+        self.gpu_color_stages = self.gpu_color_stages.max(other.gpu_color_stages);
+        self.readback_stages = self.readback_stages.max(other.readback_stages);
+        self.gpu_blockers = self.gpu_blockers.max(other.gpu_blockers);
+        self.gpu_shader_module_blockers =
+            self.gpu_shader_module_blockers.max(other.gpu_shader_module_blockers);
+        self.gpu_ocio_resource_blockers =
+            self.gpu_ocio_resource_blockers.max(other.gpu_ocio_resource_blockers);
+        self.gpu_wrapper_blockers = self.gpu_wrapper_blockers.max(other.gpu_wrapper_blockers);
+        self.gpu_render_pipeline_blockers =
+            self.gpu_render_pipeline_blockers.max(other.gpu_render_pipeline_blockers);
+        self.pixels = self.pixels.max(other.pixels);
+    }
 }
 
 /// Health-status counts for viewer GPU-output attempts.
@@ -873,9 +1576,10 @@ impl ViewerGpuOutputHealthCounts {
 }
 
 /// Viewer GPU-output health status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ViewerGpuOutputHealthStatus {
     /// No invocation has been observed.
+    #[default]
     NoInvocation,
     /// The viewer output path is waiting for app state, media, or a valid key.
     Waiting,
@@ -947,6 +1651,92 @@ mod tests {
             Some(ViewerGpuOutputHealthStatus::Ready)
         );
         assert_eq!(summary.last_frame_context.expect("frame context").frame, 7);
+    }
+
+    #[test]
+    fn budget_replays_stage_and_health_flags() {
+        let jsonl = r#"
+{"health":{"status":"Ready","viewer_output_ready":true,"native_gpu_boundary_ready":true,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":true},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"stage_total_stages":2,"stage_upload_stages":0,"stage_gpu_color_stages":1,"stage_readback_stages":0,"stage_gpu_blockers":0,"stage_pixels":2073600}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+
+        assert!(summary.passed);
+        assert_eq!(
+            summary.stage,
+            ViewerGpuOutputStageCounts {
+                total_stages: 2,
+                gpu_color_stages: 1,
+                pixels: 2_073_600,
+                ..ViewerGpuOutputStageCounts::default()
+            }
+        );
+        assert_eq!(
+            summary.last_health,
+            Some(ViewerGpuOutputHealthSummary {
+                status: ViewerGpuOutputHealthStatus::Ready,
+                viewer_output_ready: true,
+                native_gpu_boundary_ready: true,
+                display_boundary_ready: true,
+                presentation_ready: true,
+                stage_sequence_ready: true,
+                no_gpu_blockers: true,
+                output_texture_available: true,
+                external_texture_registered: true,
+            })
+        );
+    }
+
+    #[test]
+    fn health_report_passes_clean_native_gpu_stream() {
+        let jsonl = r#"
+{"health":{"status":"Ready","viewer_output_ready":true,"native_gpu_boundary_ready":true,"display_boundary_ready":true,"presentation_ready":true,"stage_sequence_ready":true,"no_gpu_blockers":true,"output_texture_available":true,"external_texture_registered":true},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"stage_total_stages":1,"stage_gpu_color_stages":1,"stage_pixels":4096}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let report = build_health_report(summary, "display-baseline");
+
+        assert_eq!(
+            report.schema_version,
+            VIEWER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION
+        );
+        assert_eq!(report.profile, "display-baseline");
+        assert_eq!(report.verdict, ViewerGpuOutputHealthVerdict::Pass);
+        assert!(report.root_causes.is_empty());
+        assert!(report.actions.is_empty());
+        assert!(
+            report.checks.iter().any(|check| check.code == "gpu_color_stages_present"
+                && check.severity == ViewerGpuOutputHealthSeverity::Pass)
+        );
+    }
+
+    #[test]
+    fn health_report_reports_gpu_and_display_root_causes() {
+        let jsonl = r#"
+{"health":{"status":"Blocked","viewer_output_ready":false,"native_gpu_boundary_ready":false,"display_boundary_ready":false,"presentation_ready":false,"stage_sequence_ready":true,"no_gpu_blockers":false,"output_texture_available":true,"external_texture_registered":false},"health_counts":{"no_invocation":0,"waiting":0,"blocked":1,"failed":0,"rejected":0,"degraded":0,"ready":0},"stage_total_stages":3,"stage_upload_stages":1,"stage_gpu_color_stages":1,"stage_readback_stages":1,"stage_gpu_blockers":1,"stage_gpu_render_pipeline_blockers":1,"display_issue_summary":{"reason":"HdrOutputRequiresHdrSurface","output_color_space":"Rec2100Pq","payload_blocker":null}}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+        let report = build_health_report(summary, "display-baseline");
+
+        assert_eq!(report.verdict, ViewerGpuOutputHealthVerdict::Fail);
+        assert!(report.root_causes.iter().any(|root| root.code == "viewer_output_not_healthy"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "display_contract_blocked_output"));
+        assert!(report.root_causes.iter().any(|root| root.code == "gpu_color_stage_blocked"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "cpu_gpu_transfer_stage_present"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_gpu_blocker_breakdown"));
     }
 
     #[test]

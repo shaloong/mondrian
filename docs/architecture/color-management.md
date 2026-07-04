@@ -236,6 +236,14 @@ external texture registration handoff counters. These counters prove that the
 preview service produced a working-space candidate for the app-window GPU
 output boundary; the window-session GPU output telemetry remains the authority
 for whether wgpu recording and external texture registration actually succeeded.
+Viewer GPU-output budget summaries now also retain the latest cumulative
+`RenderColorStageDiagnostics` counters and the last full health flag set from
+the app-window JSONL stream. The versioned viewer health report is the
+operator-facing diagnostic layer above that summary: it groups checks into
+capture integrity, viewer output, GPU color path, display contract, display
+capability drift, and media color policy, and emits stable root-cause/action
+codes. Tooling should treat the budget summary as the threshold evidence and
+the health report as the canonical diagnostic interpretation.
 
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative

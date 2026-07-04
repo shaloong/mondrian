@@ -63,6 +63,7 @@ Viewer GPU-output sessions can persist live health records from the app window:
 $env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; cargo run -p mondrian-app
 cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-gpu-output.jsonl --min-records 1 --min-ready 1 --max-failed 0 --max-blocked 0 --max-rejected 0 --max-degraded 0 --max-display-issues 0 --max-hdr-output-requires-hdr-surface 0 --max-output-color-space-requires-surface-color-space 0 --max-reconfigure-blocked-by-payload 0 --max-unsupported-presentation-intent 0 --max-unsupported-surface-contract 0 --max-unknown-display-issues 0 --max-display-contract-refreshes 999999 --max-display-issue-refresh-correlations 0 --max-display-tone-map-headroom-changes 0 --max-available-surface-format-changes 0 --max-format-color-space-changes 0 --max-present-mode-changes 0 --max-alpha-mode-changes 0 --max-display-payload-blockers 0 --max-color-rejections 0
 $env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-gpu-output.jsonl --preset display-baseline
+$env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-gpu-output.jsonl --preset display-baseline --format health-report
 cargo test -p mondrian-app viewer_gpu_output_budget_smoke -- --ignored --nocapture
 $env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; cargo test -p mondrian-app viewer_gpu_output_display_baseline_smoke -- --ignored --nocapture
 ```
@@ -115,5 +116,8 @@ window bring-up can tolerate a small amount of display-contract settling
 without hiding real monitor, surface, or payload drift.
 The CLI now exposes the same baseline through `--preset display-baseline`, and
 explicit threshold flags still override the preset afterwards.
+Use `--format health-report` when a CI wall or issue attachment needs the
+versioned diagnostic interpretation: fixed area checks, verdict, root causes,
+actions, compact evidence, and the raw budget summary in one JSON object.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.

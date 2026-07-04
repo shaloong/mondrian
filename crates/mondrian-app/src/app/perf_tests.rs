@@ -5,7 +5,8 @@ use crate::app_ui::preview::{
 };
 use crate::app_ui::shell::AppUiAppRoot;
 use crate::app_ui::viewer_gpu_output_budget::{
-    evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputBudgetSummary,
+    build_health_report, evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputBudgetSummary,
+    ViewerGpuOutputHealthReport,
 };
 use anyhow::Context;
 use serde::Serialize;
@@ -100,6 +101,7 @@ struct ViewerGpuOutputBudgetSmokeReport {
     scenario: &'static str,
     source_path: String,
     summary: ViewerGpuOutputBudgetSummary,
+    health_report: ViewerGpuOutputHealthReport,
 }
 
 const VIEWER_GPU_OUTPUT_BUDGET_SCENARIO: &str = "viewer_gpu_output_budget";
@@ -506,10 +508,13 @@ fn viewer_gpu_output_budget_report_from_jsonl(
     contents: &str,
     budget: &ViewerGpuOutputBudget,
 ) -> anyhow::Result<ViewerGpuOutputBudgetSmokeReport> {
+    let summary = evaluate_jsonl(contents, budget)?;
+    let health_report = build_health_report(summary.clone(), scenario);
     Ok(ViewerGpuOutputBudgetSmokeReport {
         scenario,
         source_path: source_path.into(),
-        summary: evaluate_jsonl(contents, budget)?,
+        summary,
+        health_report,
     })
 }
 
@@ -1554,6 +1559,9 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     let json = serde_json::to_value(&report).expect("serialize viewer GPU output budget report");
 
     assert_eq!(json["scenario"], "viewer_gpu_output_budget");
+    assert_eq!(json["health_report"]["schema_version"], 1);
+    assert_eq!(json["health_report"]["profile"], "viewer_gpu_output_budget");
+    assert_eq!(json["health_report"]["verdict"], "Pass");
     assert_eq!(json["summary"]["passed"], true);
     assert_eq!(json["summary"]["records"], 2);
     assert_eq!(json["summary"]["budget"]["min_records"], 1);
@@ -1567,6 +1575,10 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     );
     assert_eq!(
         json["summary"]["budget"]["max_display_contract_refreshes"],
+        u64::MAX
+    );
+    assert_eq!(
+        json["health_report"]["summary"]["budget"]["max_display_contract_refreshes"],
         u64::MAX
     );
     assert_eq!(
