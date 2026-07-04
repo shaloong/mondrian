@@ -142,6 +142,10 @@ target output color space, current or selected surface contract, desired surface
 contract, payload blocker, and whether the target surface color space is
 reported as supported. UI, perf JSON, and diagnostics tooling should consume this
 summary rather than parsing Debug-formatted blocker/readiness payloads.
+The viewer GPU-output budget evaluator consumes the same JSONL summary and
+replays display issue reason counts plus payload-blocker counts, so smoke tests
+can budget real display/surface regressions independently from broad health
+status totals.
 Playback requests may enqueue a small forward prefetch window, but prefetching is
 best-effort: it must not rebuild UI state, block the current frame, or bypass the
 generation checks that protect continuous playback from stale decode work.
