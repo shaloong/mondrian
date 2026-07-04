@@ -154,7 +154,10 @@ preceding refresh event instead of forcing downstream tooling to infer that
 relationship from separate records. The refresh snapshots should include enough
 capability evidence to explain why the contract changed: surface format set,
 per-format color-space support, present modes, alpha modes, and HDR headroom
-diagnostics.
+diagnostics. Health reports derived from these summaries should surface refresh
+churn, issue-after-refresh correlation, HDR headroom drift, surface-format set
+drift, per-format color-space drift, present-mode drift, and alpha-mode drift
+as separate root causes instead of one generic capability-drift bucket.
 The same rule applies to media interpretation failures: viewer empty-state
 diagnostics and export queue job summaries should consume
 `VideoColorDiagnosticIssueSummary` / `VideoColorDiagnosticIssueAggregate`
