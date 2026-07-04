@@ -31,12 +31,13 @@ Viewer GPU-output sessions can persist live health records from the app window:
 
 ```powershell
 $env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; cargo run -p mondrian-app
-cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-gpu-output.jsonl --min-ready 1 --max-failed 0 --max-blocked 0 --max-rejected 0 --max-degraded 0
+cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-gpu-output.jsonl --min-records 1 --min-ready 1 --max-failed 0 --max-blocked 0 --max-rejected 0 --max-degraded 0
 cargo test -p mondrian-app viewer_gpu_output_budget_smoke -- --ignored --nocapture
 ```
 
 The budget command prints a JSON summary and exits non-zero when the health
 stream violates the thresholds or when reported cumulative `health_counts` do
-not match the statuses replayed from the JSONL records.
+not match the statuses replayed from the JSONL records. Empty JSONL streams fail
+with a `records` budget failure.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.

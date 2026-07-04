@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 /// Thresholds for evaluating a viewer GPU-output diagnostics JSONL stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewerGpuOutputBudget {
+    /// Minimum number of non-empty JSONL records.
+    pub min_records: u64,
     /// Minimum number of ready viewer GPU-output attempts.
     pub min_ready: u64,
     /// Maximum allowed failed attempts.
@@ -23,6 +25,7 @@ pub struct ViewerGpuOutputBudget {
 impl Default for ViewerGpuOutputBudget {
     fn default() -> Self {
         Self {
+            min_records: 1,
             min_ready: 1,
             max_failed: 0,
             max_blocked: 0,
@@ -61,6 +64,8 @@ pub struct ViewerGpuOutputBudgetSummary {
 /// Serializable representation of the applied budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ViewerGpuOutputBudgetReport {
+    /// Minimum number of non-empty JSONL records.
+    pub min_records: u64,
     /// Minimum number of ready viewer GPU-output attempts.
     pub min_ready: u64,
     /// Maximum allowed failed attempts.
@@ -78,6 +83,7 @@ pub struct ViewerGpuOutputBudgetReport {
 impl From<ViewerGpuOutputBudget> for ViewerGpuOutputBudgetReport {
     fn from(budget: ViewerGpuOutputBudget) -> Self {
         Self {
+            min_records: budget.min_records,
             min_ready: budget.min_ready,
             max_failed: budget.max_failed,
             max_blocked: budget.max_blocked,
@@ -151,6 +157,13 @@ pub fn evaluate_jsonl(
             metric: "health_counts_match_replay",
             actual: count_mismatches.len() as u64,
             limit: 0,
+        });
+    }
+    if records < budget.min_records {
+        failures.push(ViewerGpuOutputBudgetFailure {
+            metric: "records",
+            actual: records,
+            limit: budget.min_records,
         });
     }
     if counts.ready < budget.min_ready {
@@ -347,6 +360,22 @@ mod tests {
                 ViewerGpuOutputBudgetFailure { metric: "ready", actual: 0, limit: 1 },
                 ViewerGpuOutputBudgetFailure { metric: "failed", actual: 1, limit: 0 },
                 ViewerGpuOutputBudgetFailure { metric: "blocked", actual: 1, limit: 0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn budget_fails_empty_stream_with_record_failure() {
+        let summary =
+            evaluate_jsonl("\n\n", &ViewerGpuOutputBudget::default()).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert_eq!(summary.records, 0);
+        assert_eq!(
+            summary.failures,
+            vec![
+                ViewerGpuOutputBudgetFailure { metric: "records", actual: 0, limit: 1 },
+                ViewerGpuOutputBudgetFailure { metric: "ready", actual: 0, limit: 1 },
             ]
         );
     }
