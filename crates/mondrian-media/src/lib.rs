@@ -24,10 +24,10 @@ pub use cache::FrameCache;
 pub use decoder::DecoderPool;
 pub use info::{
     AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoColorDetectionMethod,
-    VideoColorDiagnostic, VideoColorInterpretationConfidence, VideoColorInterpretationEvidence,
-    VideoColorInterpretationWarning, VideoColorMetadata, VideoColorMetadataHint,
-    VideoColorMetadataHintScope, VideoColorSpaceSource, VideoColorTag, VideoHdrMetadataSummary,
-    VideoHdrSideDataKind, VideoStreamInfo,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary, VideoColorInterpretationConfidence,
+    VideoColorInterpretationEvidence, VideoColorInterpretationWarning, VideoColorMetadata,
+    VideoColorMetadataHint, VideoColorMetadataHintScope, VideoColorSpaceSource, VideoColorTag,
+    VideoHdrMetadataSummary, VideoHdrSideDataKind, VideoStreamInfo,
 };
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
