@@ -86,6 +86,9 @@ impl Default for ViewerGpuOutputBudget {
 struct ViewerGpuOutputBudgetSummary {
     records: u64,
     counts: ViewerGpuOutputHealthCounts,
+    reported_counts: Option<ViewerGpuOutputHealthCounts>,
+    reported_counts_match_replay: bool,
+    count_mismatches: Vec<ViewerGpuOutputCountMismatch>,
     budget: ViewerGpuOutputBudgetReport,
     passed: bool,
     failures: Vec<ViewerGpuOutputBudgetFailure>,
@@ -123,6 +126,13 @@ struct ViewerGpuOutputBudgetFailure {
     limit: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ViewerGpuOutputCountMismatch {
+    line: u64,
+    replayed: ViewerGpuOutputHealthCounts,
+    reported: ViewerGpuOutputHealthCounts,
+}
+
 fn evaluate_jsonl(
     contents: &str,
     budget: &ViewerGpuOutputBudget,
@@ -131,6 +141,8 @@ fn evaluate_jsonl(
     let mut records = 0u64;
     let mut last_status = None;
     let mut last_frame_context = None;
+    let mut reported_counts = None;
+    let mut count_mismatches = Vec::new();
 
     for (line_index, line) in contents.lines().enumerate() {
         let trimmed = line.trim();
@@ -141,11 +153,28 @@ fn evaluate_jsonl(
             .with_context(|| format!("invalid JSONL record at line {}", line_index + 1))?;
         records = records.saturating_add(1);
         counts.record(record.health.status);
+        if let Some(record_counts) = record.health_counts {
+            reported_counts = Some(record_counts);
+            if record_counts != counts {
+                count_mismatches.push(ViewerGpuOutputCountMismatch {
+                    line: (line_index + 1) as u64,
+                    replayed: counts,
+                    reported: record_counts,
+                });
+            }
+        }
         last_status = Some(record.health.status);
         last_frame_context = record.last_frame_context;
     }
 
     let mut failures = Vec::new();
+    if !count_mismatches.is_empty() {
+        failures.push(ViewerGpuOutputBudgetFailure {
+            metric: "health_counts_match_replay",
+            actual: count_mismatches.len() as u64,
+            limit: 0,
+        });
+    }
     if counts.ready < budget.min_ready {
         failures.push(ViewerGpuOutputBudgetFailure {
             metric: "ready",
@@ -172,6 +201,9 @@ fn evaluate_jsonl(
     Ok(ViewerGpuOutputBudgetSummary {
         records,
         counts,
+        reported_counts,
+        reported_counts_match_replay: count_mismatches.is_empty(),
+        count_mismatches,
         budget: (*budget).into(),
         passed: failures.is_empty(),
         failures,
@@ -194,6 +226,7 @@ fn push_max_failure(
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct ViewerGpuOutputDiagnosticRecord {
     health: ViewerGpuOutputHealthSummary,
+    health_counts: Option<ViewerGpuOutputHealthCounts>,
     last_frame_context: Option<ViewerGpuOutputFrameContext>,
 }
 
@@ -202,7 +235,7 @@ struct ViewerGpuOutputHealthSummary {
     status: ViewerGpuOutputHealthStatus,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 struct ViewerGpuOutputHealthCounts {
     no_invocation: u64,
     waiting: u64,
@@ -271,8 +304,8 @@ mod tests {
     #[test]
     fn budget_passes_clean_ready_stream() {
         let jsonl = r#"
-{"health":{"status":"Waiting"}}
-{"health":{"status":"Ready"},"last_frame_context":{"sequence_id":"seq","frame":7,"width":1920,"height":1080,"external_texture_key":"key","output_target":"Display","output_color_space":"Srgb","tone_map":false}}
+{"health":{"status":"Waiting"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":0}}
+{"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":1,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":1},"last_frame_context":{"sequence_id":"seq","frame":7,"width":1920,"height":1080,"external_texture_key":"key","output_target":"Display","output_color_space":"Srgb","tone_map":false}}
 "#;
 
         let summary =
@@ -282,6 +315,9 @@ mod tests {
         assert_eq!(summary.records, 2);
         assert_eq!(summary.counts.waiting, 1);
         assert_eq!(summary.counts.ready, 1);
+        assert!(summary.reported_counts_match_replay);
+        assert_eq!(summary.reported_counts, Some(summary.counts));
+        assert!(summary.count_mismatches.is_empty());
         assert_eq!(
             summary.last_status,
             Some(ViewerGpuOutputHealthStatus::Ready)
@@ -309,6 +345,42 @@ mod tests {
                 ViewerGpuOutputBudgetFailure { metric: "failed", actual: 1, limit: 0 },
                 ViewerGpuOutputBudgetFailure { metric: "blocked", actual: 1, limit: 0 },
             ]
+        );
+    }
+
+    #[test]
+    fn budget_fails_when_reported_counts_do_not_match_replay() {
+        let jsonl = r#"
+{"health":{"status":"Ready"},"health_counts":{"no_invocation":0,"waiting":0,"blocked":0,"failed":0,"rejected":0,"degraded":0,"ready":2}}
+"#;
+
+        let summary =
+            evaluate_jsonl(jsonl, &ViewerGpuOutputBudget::default()).expect("budget summary");
+
+        assert!(!summary.passed);
+        assert!(!summary.reported_counts_match_replay);
+        assert_eq!(summary.counts.ready, 1);
+        assert_eq!(
+            summary.count_mismatches,
+            vec![ViewerGpuOutputCountMismatch {
+                line: 2,
+                replayed: ViewerGpuOutputHealthCounts {
+                    ready: 1,
+                    ..ViewerGpuOutputHealthCounts::default()
+                },
+                reported: ViewerGpuOutputHealthCounts {
+                    ready: 2,
+                    ..ViewerGpuOutputHealthCounts::default()
+                },
+            }]
+        );
+        assert_eq!(
+            summary.failures,
+            vec![ViewerGpuOutputBudgetFailure {
+                metric: "health_counts_match_replay",
+                actual: 1,
+                limit: 0,
+            }]
         );
     }
 

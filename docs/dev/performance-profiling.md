@@ -35,6 +35,7 @@ cargo run -p mondrian-app --bin viewer_gpu_output_budget -- target/perf/viewer-g
 ```
 
 The budget command prints a JSON summary and exits non-zero when the health
-stream violates the thresholds.
+stream violates the thresholds or when reported cumulative `health_counts` do
+not match the statuses replayed from the JSONL records.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.
