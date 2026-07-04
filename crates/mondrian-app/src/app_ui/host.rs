@@ -38,7 +38,8 @@ use crate::app_ui::preferences_store::{
     AppUiPreferences,
 };
 use crate::app_ui::preview::{
-    AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiPreviewService,
+    AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiPreviewColorRejection,
+    AppUiPreviewService,
 };
 use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
 use crate::app_ui::shortcuts::{
@@ -210,6 +211,11 @@ impl AppUiHost {
     pub(crate) fn clear_external_viewer_frame(&self) {
         self.preview_service.clear_external_viewer_frame();
         self.mark_dirty();
+    }
+
+    /// Latest structured preview color rejection, if the current viewer request was rejected.
+    pub(crate) fn current_viewer_color_rejection(&self) -> Option<AppUiPreviewColorRejection> {
+        self.preview_service.last_color_rejection()
     }
 
     /// Current persisted app UI preferences snapshot.

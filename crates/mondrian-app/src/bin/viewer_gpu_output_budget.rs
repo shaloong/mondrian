@@ -33,7 +33,7 @@ impl BudgetArgs {
     fn parse(args: &[String]) -> anyhow::Result<Self> {
         let Some(first) = args.first() else {
             bail!(
-                "usage: viewer_gpu_output_budget <jsonl-path> [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-display-payload-blockers N]"
+                "usage: viewer_gpu_output_budget <jsonl-path> [--min-records N] [--min-ready N] [--max-failed N] [--max-blocked N] [--max-rejected N] [--max-degraded N] [--max-waiting N] [--max-display-issues N] [--max-display-payload-blockers N] [--max-color-rejections N]"
             );
         };
         let mut budget = ViewerGpuOutputBudget::default();
@@ -56,6 +56,7 @@ impl BudgetArgs {
                 "--max-display-payload-blockers" => {
                     budget.max_display_payload_blockers = parsed;
                 }
+                "--max-color-rejections" => budget.max_color_rejections = parsed,
                 _ => bail!("unknown argument: {flag}"),
             }
             index += 2;
@@ -84,6 +85,8 @@ mod tests {
             "1".to_owned(),
             "--max-display-payload-blockers".to_owned(),
             "0".to_owned(),
+            "--max-color-rejections".to_owned(),
+            "2".to_owned(),
         ];
 
         let parsed = BudgetArgs::parse(&args).expect("parse budget args");
@@ -98,6 +101,7 @@ mod tests {
                 max_waiting: 8,
                 max_display_issues: 1,
                 max_display_payload_blockers: 0,
+                max_color_rejections: 2,
                 ..ViewerGpuOutputBudget::default()
             }
         );

@@ -356,6 +356,7 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_DISPLAY_PAYLOAD_BLOCKERS",
             0,
         ),
+        max_color_rejections: env_u64("MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS", 0),
     }
 }
 
@@ -1467,6 +1468,8 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     assert_eq!(json["summary"]["counts"]["waiting"], 1);
     assert_eq!(json["summary"]["display_issues"]["total"], 0);
     assert_eq!(json["summary"]["budget"]["max_display_payload_blockers"], 0);
+    assert_eq!(json["summary"]["budget"]["max_color_rejections"], 0);
+    assert_eq!(json["summary"]["color_rejections"], 0);
     assert_eq!(json["summary"]["reported_counts_match_replay"], true);
     assert_eq!(json["summary"]["last_frame_context"]["frame"], 12);
 }

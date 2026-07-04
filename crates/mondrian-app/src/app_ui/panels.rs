@@ -22,6 +22,7 @@ use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
 use mondrian_export::queue::{ExportJobColorDiagnostics, JobStatus};
+use mondrian_media::VideoColorDiagnosticIssueSummary;
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::{
     InputColorResolutionSource, MissingColorMetadataPolicy, Sequence,
@@ -155,6 +156,8 @@ pub struct ViewerPreviewColorRejectionModel {
     pub working_color_space: ColorSpace,
     /// Compact media diagnostic summary.
     pub diagnostic_summary: String,
+    /// Machine-readable media diagnostic issue summary.
+    pub diagnostic_issue_summary: VideoColorDiagnosticIssueSummary,
 }
 
 /// Current thumbnail lifecycle state for one asset card.
@@ -6780,6 +6783,29 @@ mod tests {
                     working_color_space: ColorSpace::Rec2020,
                     diagnostic_summary:
                         "source=MissingMetadata,warnings=missing_or_unsupported_cicp".to_string(),
+                    diagnostic_issue_summary: VideoColorDiagnosticIssueSummary {
+                        detected_color_space: None,
+                        source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                        method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                        confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                        has_raw_cicp_metadata: false,
+                        metadata_hint_count: 0,
+                        evidence_count: 0,
+                        warning_count: 1,
+                        multiple_metadata_hints: 0,
+                        ignored_metadata_hints: 0,
+                        metadata_hint_overrides_cicp_tags: 0,
+                        partial_cicp_tags: 0,
+                        missing_or_unsupported_cicp_tags: 1,
+                        decoder_unavailable: 0,
+                        hdr_side_data_count: 0,
+                        has_mastering_display_metadata: false,
+                        has_content_light_metadata: false,
+                        has_dynamic_hdr10_plus: false,
+                        has_dolby_vision_config: false,
+                        has_icc_profile: false,
+                        has_user_visible_warnings: true,
+                    },
                 })
             }
         }
