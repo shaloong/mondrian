@@ -2792,6 +2792,47 @@ mod tests {
         assert_eq!(preview.gpu_path_ready, export.gpu_path_ready);
     }
 
+    fn preview_asset_issue_summary_for_sequence(
+        sequence: &Sequence,
+        nested_sequences: &[Sequence],
+        asset_color_diagnostics: &HashMap<AssetId, VideoColorDiagnostic>,
+        depth: usize,
+        asset_ids: &mut std::collections::HashSet<AssetId>,
+    ) {
+        if depth > mondrian_timeline::sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH {
+            return;
+        }
+
+        for track in &sequence.video_tracks {
+            for clip in &track.clips {
+                if clip.is_disabled {
+                    continue;
+                }
+                if clip.is_nested_sequence() {
+                    let Some(nested_sequence_id) = clip.nested_sequence_id else {
+                        continue;
+                    };
+                    let Some(nested) =
+                        nested_sequences.iter().find(|sequence| sequence.id == nested_sequence_id)
+                    else {
+                        continue;
+                    };
+                    preview_asset_issue_summary_for_sequence(
+                        nested,
+                        nested_sequences,
+                        asset_color_diagnostics,
+                        depth + 1,
+                        asset_ids,
+                    );
+                    continue;
+                }
+                if asset_color_diagnostics.contains_key(&clip.asset_id) {
+                    asset_ids.insert(clip.asset_id);
+                }
+            }
+        }
+    }
+
     #[test]
     fn preview_dimensions_clamp_invalid_resolution_scale() {
         let mut below_min = Sequence::new("below");
@@ -3527,6 +3568,152 @@ mod tests {
             ),
             1
         );
+    }
+
+    #[test]
+    fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
+        let mut parent = Sequence::new("parent-asset-issue-parity");
+        let mut nested = Sequence::new("nested-asset-issue-parity");
+        let nested_id = nested.id;
+        let parent_tb = parent.time_base();
+        let nested_tb = nested.time_base();
+        let direct_id = AssetId::new();
+        let nested_asset_id = AssetId::new();
+        let unused_id = AssetId::new();
+
+        parent.video_tracks[0]
+            .add_clip(Clip::new(
+                direct_id,
+                TimeCode::new(0, parent_tb),
+                TimeCode::new(10, parent_tb),
+            ))
+            .expect("add direct media clip");
+        let mut nested_track = Track::new_video("nested");
+        nested_track
+            .add_clip(Clip::new_nested_sequence(
+                nested_id,
+                TimeCode::new(0, parent_tb),
+                TimeCode::new(10, parent_tb),
+                Some("Nested".to_owned()),
+            ))
+            .expect("add nested sequence clip");
+        parent.video_tracks.push(nested_track);
+
+        nested.video_tracks[0]
+            .add_clip(Clip::new(
+                nested_asset_id,
+                TimeCode::new(0, nested_tb),
+                TimeCode::new(10, nested_tb),
+            ))
+            .expect("add nested media clip");
+
+        let mut asset_color_diagnostics = HashMap::new();
+        asset_color_diagnostics.insert(
+            direct_id,
+            mondrian_media::VideoColorDiagnostic {
+                detected_color_space: None,
+                interpretation: mondrian_media::DetectedColorInterpretation {
+                    color_space: None,
+                    confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                    source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                    method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                    evidence: Vec::new(),
+                    warnings: vec![
+                        mondrian_media::VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags,
+                    ],
+                    user_overridable: true,
+                },
+                source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                metadata: None,
+                metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
+            },
+        );
+        asset_color_diagnostics.insert(
+            nested_asset_id,
+            mondrian_media::VideoColorDiagnostic {
+                detected_color_space: None,
+                interpretation: mondrian_media::DetectedColorInterpretation {
+                    color_space: None,
+                    confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                    source: mondrian_media::VideoColorSpaceSource::DecoderUnavailable,
+                    method: mondrian_media::VideoColorDetectionMethod::DecoderUnavailable,
+                    evidence: vec![
+                        mondrian_media::VideoColorInterpretationEvidence::DecoderUnavailable,
+                    ],
+                    warnings: vec![
+                        mondrian_media::VideoColorInterpretationWarning::DecoderUnavailable,
+                    ],
+                    user_overridable: true,
+                },
+                source: mondrian_media::VideoColorSpaceSource::DecoderUnavailable,
+                method: mondrian_media::VideoColorDetectionMethod::DecoderUnavailable,
+                metadata: None,
+                metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
+            },
+        );
+        asset_color_diagnostics.insert(
+            unused_id,
+            mondrian_media::VideoColorDiagnostic {
+                detected_color_space: Some(ColorSpace::Rec709),
+                interpretation: mondrian_media::DetectedColorInterpretation {
+                    color_space: Some(ColorSpace::Rec709),
+                    confidence: mondrian_media::VideoColorInterpretationConfidence::Low,
+                    source: mondrian_media::VideoColorSpaceSource::Metadata,
+                    method: mondrian_media::VideoColorDetectionMethod::MetadataHint,
+                    evidence: Vec::new(),
+                    warnings: vec![
+                        mondrian_media::VideoColorInterpretationWarning::PartialCicpTags {
+                            detected_color_space: ColorSpace::Rec709,
+                        },
+                    ],
+                    user_overridable: true,
+                },
+                source: mondrian_media::VideoColorSpaceSource::Metadata,
+                method: mondrian_media::VideoColorDetectionMethod::MetadataHint,
+                metadata: None,
+                metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
+            },
+        );
+
+        let nested_sequences = vec![nested.clone()];
+        let mut preview_asset_ids = std::collections::HashSet::new();
+        preview_asset_issue_summary_for_sequence(
+            &parent,
+            &nested_sequences,
+            &asset_color_diagnostics,
+            0,
+            &mut preview_asset_ids,
+        );
+        let mut preview_summary = mondrian_media::VideoColorDiagnosticIssueAggregate::default();
+        for asset_id in preview_asset_ids {
+            preview_summary.observe(
+                asset_color_diagnostics.get(&asset_id).expect("preview referenced diagnostic"),
+            );
+        }
+
+        let export_summary = mondrian_export::queue::export_asset_issue_summary(
+            &mondrian_export::preset::TimelineExportInput {
+                sequence: parent,
+                sequences: nested_sequences,
+                asset_paths: HashMap::new(),
+                asset_color_spaces: HashMap::new(),
+                asset_interpretations: HashMap::new(),
+                asset_color_diagnostics,
+                range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
+                project_color_management: ProjectColorManagement::default(),
+            },
+        );
+
+        assert_eq!(preview_summary, export_summary);
+        assert_eq!(preview_summary.diagnostics, 2);
+        assert_eq!(preview_summary.method_missing_metadata, 1);
+        assert_eq!(preview_summary.method_decoder_unavailable, 1);
+        assert_eq!(preview_summary.method_metadata_hint, 0);
+        assert_eq!(preview_summary.warning_count, 2);
     }
 
     #[test]

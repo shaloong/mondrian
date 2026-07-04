@@ -351,7 +351,9 @@ used for failure messages and reports, not for choosing the transform.
 `VideoColorDiagnosticIssueAggregate` is the stable rollup for these per-asset
 snapshots: export job diagnostics carry it as `asset_issue_summary`, and
 preview media smoke reports serialize the same aggregate as `media_color_issues`
-for CI/perf JSONL.
+for CI/perf JSONL. Both surfaces must scope the aggregate to assets actually
+referenced by the active sequence graph, including nested sequences, instead of
+blindly folding every cached diagnostic record in memory.
 Preview diagnostics count every `InputColorResolutionSource` branch and perf
 smoke reports derive both `explicit_metadata_or_override` and
 `policy_assumptions` totals from those counters. A production color-path report

@@ -31,7 +31,7 @@ use mondrian_timeline::sequence::{
 };
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -1018,11 +1018,9 @@ fn write_timeline_frames_to_writer<W: Write>(
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; width as usize * height as usize * 4];
     let mut diagnostics = ExportJobDiagnostics::default();
-    diagnostics.color.record_asset_issue_summary(
-        VideoColorDiagnosticIssueAggregate::from_diagnostics(
-            timeline.asset_color_diagnostics.values(),
-        ),
-    );
+    diagnostics
+        .color
+        .record_asset_issue_summary(export_asset_issue_summary(timeline));
 
     for index in 0..total {
         if cancel.load(Ordering::Relaxed) {
@@ -1184,6 +1182,54 @@ pub fn export_color_stage_diagnostics_for_frame(
         None,
     )?;
     Ok(stage_diagnostics)
+}
+
+/// Aggregate media color-diagnostic issues for assets actually referenced by this export timeline.
+pub fn export_asset_issue_summary(
+    timeline: &TimelineExportInput,
+) -> VideoColorDiagnosticIssueAggregate {
+    let mut asset_ids = HashSet::new();
+    collect_sequence_asset_ids(timeline, &timeline.sequence, 0, &mut asset_ids);
+
+    let mut summary = VideoColorDiagnosticIssueAggregate::default();
+    for asset_id in asset_ids {
+        if let Some(diagnostic) = timeline.asset_color_diagnostics.get(&asset_id) {
+            summary.observe(diagnostic);
+        }
+    }
+    summary
+}
+
+fn collect_sequence_asset_ids(
+    timeline: &TimelineExportInput,
+    sequence: &mondrian_timeline::sequence::Sequence,
+    depth: usize,
+    asset_ids: &mut HashSet<AssetId>,
+) {
+    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
+        return;
+    }
+
+    for track in &sequence.video_tracks {
+        for clip in &track.clips {
+            if clip.is_disabled {
+                continue;
+            }
+            if clip.is_nested_sequence() {
+                let Some(nested_sequence_id) = clip.nested_sequence_id else {
+                    continue;
+                };
+                let Some(nested_sequence) =
+                    timeline.sequences.iter().find(|sequence| sequence.id == nested_sequence_id)
+                else {
+                    continue;
+                };
+                collect_sequence_asset_ids(timeline, nested_sequence, depth + 1, asset_ids);
+                continue;
+            }
+            asset_ids.insert(clip.asset_id);
+        }
+    }
 }
 
 fn export_sequence_input_color_resolution_counts(
@@ -1936,6 +1982,31 @@ mod tests {
         }
     }
 
+    fn test_color_diagnostic(
+        source: mondrian_media::VideoColorSpaceSource,
+        method: mondrian_media::VideoColorDetectionMethod,
+        warning: Option<mondrian_media::VideoColorInterpretationWarning>,
+    ) -> mondrian_media::VideoColorDiagnostic {
+        let warnings = warning.into_iter().collect::<Vec<_>>();
+        mondrian_media::VideoColorDiagnostic {
+            detected_color_space: None,
+            interpretation: mondrian_media::DetectedColorInterpretation {
+                color_space: None,
+                confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                source,
+                method,
+                evidence: Vec::new(),
+                warnings: warnings.clone(),
+                user_overridable: true,
+            },
+            source,
+            method,
+            metadata: None,
+            metadata_hints: Vec::new(),
+            hdr_metadata: Vec::new(),
+        }
+    }
+
     fn wait_until(timeout_ms: u64, mut predicate: impl FnMut() -> bool) -> bool {
         let start = std::time::Instant::now();
         while start.elapsed().as_millis() < timeout_ms as u128 {
@@ -2228,6 +2299,101 @@ mod tests {
                 gpu_path_ready: true,
                 ..ExportJobColorDiagnosticsSummary::default()
             })
+        );
+    }
+
+    #[test]
+    fn export_asset_issue_summary_scopes_to_referenced_assets_only() {
+        let mut sequence = Sequence::new("export-asset-issue-scope");
+        let tb = sequence.time_base();
+        let direct_id = AssetId::new();
+        let nested_id = AssetId::new();
+        let unused_id = AssetId::new();
+        let nested_sequence_id = mondrian_core::types::SequenceId::new();
+
+        sequence.video_tracks[0]
+            .add_clip(Clip::new(
+                direct_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(10, tb),
+            ))
+            .expect("add direct clip");
+        let mut nested_track = Track::new_video("nested");
+        nested_track
+            .add_clip(Clip::new_nested_sequence(
+                nested_sequence_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(10, tb),
+                Some("Nested".to_owned()),
+            ))
+            .expect("add nested clip");
+        sequence.video_tracks.push(nested_track);
+
+        let mut nested = Sequence::new("nested-issues");
+        nested.id = nested_sequence_id;
+        let nested_tb = nested.time_base();
+        nested.video_tracks[0]
+            .add_clip(Clip::new(
+                nested_id,
+                TimeCode::new(0, nested_tb),
+                TimeCode::new(10, nested_tb),
+            ))
+            .expect("add nested media clip");
+
+        let mut asset_color_diagnostics = HashMap::new();
+        asset_color_diagnostics.insert(
+            direct_id,
+            test_color_diagnostic(
+                mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                Some(mondrian_media::VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags),
+            ),
+        );
+        asset_color_diagnostics.insert(
+            nested_id,
+            test_color_diagnostic(
+                mondrian_media::VideoColorSpaceSource::DecoderUnavailable,
+                mondrian_media::VideoColorDetectionMethod::DecoderUnavailable,
+                Some(mondrian_media::VideoColorInterpretationWarning::DecoderUnavailable),
+            ),
+        );
+        asset_color_diagnostics.insert(
+            unused_id,
+            test_color_diagnostic(
+                mondrian_media::VideoColorSpaceSource::Metadata,
+                mondrian_media::VideoColorDetectionMethod::MetadataHint,
+                Some(
+                    mondrian_media::VideoColorInterpretationWarning::PartialCicpTags {
+                        detected_color_space: ColorSpace::Rec709,
+                    },
+                ),
+            ),
+        );
+
+        let timeline = TimelineExportInput {
+            sequence,
+            sequences: vec![nested],
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
+            asset_color_diagnostics,
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+
+        assert_eq!(
+            export_asset_issue_summary(&timeline),
+            VideoColorDiagnosticIssueAggregate {
+                diagnostics: 2,
+                diagnostics_with_warnings: 2,
+                method_missing_metadata: 1,
+                method_decoder_unavailable: 1,
+                confidence_none: 2,
+                warning_count: 2,
+                missing_or_unsupported_cicp_tags: 1,
+                decoder_unavailable: 1,
+                ..VideoColorDiagnosticIssueAggregate::default()
+            }
         );
     }
 
