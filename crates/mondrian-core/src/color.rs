@@ -71,14 +71,21 @@ impl ColorEngine {
     /// Preview, export and timeline compositing should use this form whenever a
     /// sequence working space is known. The shorter [`Self::convert`] API is for
     /// direct source -> output conversions.
+    ///
+    /// For OCIO engines, `tone_map` is intentionally ignored here because tone
+    /// mapping is applied through the OCIO display/view transform
+    /// ([`Self::display_transform`]), not through the pipeline color-space
+    /// conversion. Callers that need tone mapping must use display/view
+    /// boundaries, not the pipeline path.
     pub fn convert_pipeline(
         &self,
         data: &mut [u8],
         src: ColorSpace,
         working: ColorSpace,
         dst: ColorSpace,
-        _tone_map: bool,
+        tone_map: bool,
     ) -> Result<(), String> {
+        let _ = tone_map; // Intentionally ignored: tone mapping belongs in display/view transform.
         match self {
             Self::MondrianSmart => {
                 crate::ocio::ensure_mondrian_default_ocio_loaded()?;
@@ -119,13 +126,19 @@ impl ColorEngine {
     ///
     /// This is the precision-preserving alternative to [`Self::convert_pipeline`].
     /// The data must be RGBA f32 pixels (4 floats per pixel, linear light).
+    ///
+    /// For OCIO engines, `tone_map` is intentionally ignored here because tone
+    /// mapping is applied through the OCIO display/view transform
+    /// ([`Self::display_transform_float`]), not through the pipeline conversion.
     pub fn convert_pipeline_float(
         &self,
         data: &mut [f32],
         src: ColorSpace,
         working: ColorSpace,
         dst: ColorSpace,
+        tone_map: bool,
     ) -> Result<(), String> {
+        let _ = tone_map; // Intentionally ignored: tone mapping belongs in display/view transform.
         match self {
             Self::MondrianSmart => {
                 crate::ocio::ensure_mondrian_default_ocio_loaded()?;

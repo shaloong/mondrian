@@ -270,6 +270,7 @@ impl CpuColorTransformExecutor {
                 descriptor.color_space,
                 transform.working_color_space,
                 transform.working_color_space,
+                false,
             )
             .map_err(|reason| RenderColorTransformError::ExecutionFailed {
                 direction: RenderColorTransformDirection::InputToWorking,
@@ -484,6 +485,7 @@ impl CpuColorTransformExecutor {
                     descriptor.color_space,
                     descriptor.color_space,
                     transform.output_color_space,
+                    false,
                 )
                 .map_err(|reason| RenderColorTransformError::ExecutionFailed {
                     direction: RenderColorTransformDirection::WorkingToOutput,
