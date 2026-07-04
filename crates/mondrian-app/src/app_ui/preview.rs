@@ -3855,6 +3855,7 @@ mod tests {
                 has_dynamic_hdr10_plus: false,
                 has_dolby_vision_config: false,
                 has_icc_profile: false,
+                icc_cicp_mismatch: 0,
                 has_user_visible_warnings: false,
             }
         };
@@ -3920,6 +3921,7 @@ mod tests {
                 has_dynamic_hdr10_plus: false,
                 has_dolby_vision_config: false,
                 has_icc_profile: false,
+                icc_cicp_mismatch: 0,
                 has_user_visible_warnings: false,
             },
         ));

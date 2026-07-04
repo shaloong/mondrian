@@ -189,6 +189,13 @@ pub enum VideoColorInterpretationEvidence {
     },
     /// FFmpeg could not open the decoder, so no decoder-side color tags were available.
     DecoderUnavailable,
+    /// An ICC profile was present in the media and inferred a color space.
+    IccProfile {
+        /// Color space inferred from the ICC profile.
+        inferred_color_space: ColorSpace,
+        /// ICC profile name, if available.
+        profile_name: Option<String>,
+    },
 }
 
 /// Warning emitted while interpreting video color metadata.
@@ -219,6 +226,13 @@ pub enum VideoColorInterpretationWarning {
     MissingOrUnsupportedCicpTags,
     /// Decoder metadata was unavailable.
     DecoderUnavailable,
+    /// ICC profile color space conflicts with CICP-detected color space.
+    IccCicpMismatch {
+        /// Color space inferred from ICC profile.
+        icc_color_space: ColorSpace,
+        /// Color space detected from CICP tags.
+        cicp_color_space: ColorSpace,
+    },
 }
 
 /// Structured interpretation of a video stream's input color metadata.
@@ -355,6 +369,8 @@ pub struct VideoColorDiagnosticIssueSummary {
     pub has_dolby_vision_config: bool,
     /// Whether ICC profile side data was present.
     pub has_icc_profile: bool,
+    /// Number of ICC-vs-CICP mismatch warnings.
+    pub icc_cicp_mismatch: u64,
     /// Whether the stream has warnings that should be shown to users.
     pub has_user_visible_warnings: bool,
 }
@@ -420,6 +436,8 @@ pub struct VideoColorDiagnosticIssueAggregate {
     pub diagnostics_with_dolby_vision_config: u64,
     /// Diagnostics that carried ICC profile metadata.
     pub diagnostics_with_icc_profile: u64,
+    /// Diagnostics with ICC-vs-CICP mismatch warnings.
+    pub diagnostics_with_icc_cicp_mismatch: u64,
 }
 
 impl VideoColorTag {
@@ -532,6 +550,7 @@ impl VideoColorDiagnostic {
             has_dynamic_hdr10_plus: false,
             has_dolby_vision_config: false,
             has_icc_profile: false,
+            icc_cicp_mismatch: 0,
             has_user_visible_warnings: !self.interpretation.warnings.is_empty(),
         };
 
@@ -556,6 +575,9 @@ impl VideoColorDiagnostic {
                 }
                 VideoColorInterpretationWarning::DecoderUnavailable => {
                     summary.decoder_unavailable = summary.decoder_unavailable.saturating_add(1);
+                }
+                VideoColorInterpretationWarning::IccCicpMismatch { .. } => {
+                    summary.icc_cicp_mismatch = summary.icc_cicp_mismatch.saturating_add(1);
                 }
             }
         }
@@ -637,6 +659,9 @@ impl VideoColorDiagnosticIssueAggregate {
         self.diagnostics_with_icc_profile = self
             .diagnostics_with_icc_profile
             .saturating_add(u64::from(summary.has_icc_profile));
+        self.diagnostics_with_icc_cicp_mismatch = self
+            .diagnostics_with_icc_cicp_mismatch
+            .saturating_add(summary.icc_cicp_mismatch);
 
         match summary.method {
             VideoColorDetectionMethod::MetadataHint => {
@@ -730,6 +755,9 @@ impl VideoColorInterpretationWarning {
             }
             Self::MissingOrUnsupportedCicpTags => "missing_or_unsupported_cicp".to_string(),
             Self::DecoderUnavailable => "decoder_unavailable".to_string(),
+            Self::IccCicpMismatch { icc_color_space, cicp_color_space } => {
+                format!("icc_cicp_mismatch(icc={icc_color_space:?},cicp={cicp_color_space:?})")
+            }
         }
     }
 }
@@ -1780,6 +1808,7 @@ mod tests {
                 has_dynamic_hdr10_plus: false,
                 has_dolby_vision_config: false,
                 has_icc_profile: true,
+                icc_cicp_mismatch: 0,
                 has_user_visible_warnings: true,
             }
         );
@@ -1928,6 +1957,7 @@ mod tests {
                 diagnostics_with_dynamic_hdr10_plus: 0,
                 diagnostics_with_dolby_vision_config: 0,
                 diagnostics_with_icc_profile: 1,
+                diagnostics_with_icc_cicp_mismatch: 0,
             }
         );
     }
