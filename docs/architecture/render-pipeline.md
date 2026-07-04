@@ -248,7 +248,11 @@ bypasses, legacy RGBA8 reason totals, float/linear completeness, GPU blockers,
 GPU blocker breakdowns, legacy RGBA8 reason breakdowns, and GPU path readiness.
 Export simulation perf JSONL includes this summary as `color_health` so
 continuous perf runs can budget against structured color-path health while old
-flat stage counters remain available during dashboard migration.
+flat stage counters remain available during dashboard migration. Export
+simulation `passed` must include that color-health budget: default runs require
+fully float/linear composites, GPU path readiness, zero GPU blockers, zero
+upload/readback transfer stages, and zero structured legacy RGBA8 reasons unless
+the operator explicitly relaxes a budget for investigation.
 Preview perf JSONL follows the same pattern with `preview_color_health` and
 `preview_playback_color_health`; the app preview service owns the derivation
 from raw counters to summary fields so perf tests do not hand-maintain color
