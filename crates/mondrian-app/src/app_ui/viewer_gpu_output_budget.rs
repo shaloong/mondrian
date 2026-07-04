@@ -75,6 +75,8 @@ pub struct ViewerGpuOutputBudgetSummary {
     pub display_issues: ViewerGpuOutputDisplayIssueCounts,
     /// Counts replayed from structured display-contract refresh events.
     pub display_contract_refreshes: ViewerGpuOutputDisplayContractRefreshCounts,
+    /// Counts replayed from display issues correlated to a preceding refresh event.
+    pub display_issue_refresh_correlations: ViewerGpuOutputDisplayIssueRefreshCorrelationCounts,
     /// Records carrying a structured viewer color rejection.
     pub color_rejections: u64,
     /// Aggregated machine-readable media issue summaries from color rejections.
@@ -197,6 +199,8 @@ pub fn evaluate_jsonl(
     let mut last_frame_context = None;
     let mut display_issues = ViewerGpuOutputDisplayIssueCounts::default();
     let mut display_contract_refreshes = ViewerGpuOutputDisplayContractRefreshCounts::default();
+    let mut display_issue_refresh_correlations =
+        ViewerGpuOutputDisplayIssueRefreshCorrelationCounts::default();
     let mut last_display_issue = None;
     let mut last_display_contract_refresh = None;
     let mut color_rejections = 0u64;
@@ -226,6 +230,7 @@ pub fn evaluate_jsonl(
         }
         if let Some(issue) = record.display_issue_summary {
             display_issues.record(&issue);
+            display_issue_refresh_correlations.record(&issue);
             last_display_issue = Some(issue);
         }
         for refresh in record.recent_display_contract_refreshes {
@@ -348,6 +353,7 @@ pub fn evaluate_jsonl(
         counts,
         display_issues,
         display_contract_refreshes,
+        display_issue_refresh_correlations,
         color_rejections,
         media_issues,
         reported_counts,
@@ -478,6 +484,19 @@ pub struct ViewerGpuOutputDisplayContractRefreshCounts {
     pub surface_hdr_mode_changed: u64,
 }
 
+/// Counts replayed from display issues that followed a specific refresh event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputDisplayIssueRefreshCorrelationCounts {
+    /// Display issues carrying a correlated preceding refresh event.
+    pub total: u64,
+    /// Display issues correlated to a resize refresh.
+    pub after_resize: u64,
+    /// Display issues correlated to a scale-factor change refresh.
+    pub after_scale_factor_changed: u64,
+    /// Display issues correlated to a window-move refresh.
+    pub after_window_moved: u64,
+}
+
 impl ViewerGpuOutputDisplayContractRefreshCounts {
     fn record(&mut self, refresh: &ViewerGpuOutputDisplayContractRefreshEvent) {
         self.total = self.total.saturating_add(1);
@@ -503,6 +522,25 @@ impl ViewerGpuOutputDisplayContractRefreshCounts {
         }
         if refresh.surface_hdr_mode_changed {
             self.surface_hdr_mode_changed = self.surface_hdr_mode_changed.saturating_add(1);
+        }
+    }
+}
+
+impl ViewerGpuOutputDisplayIssueRefreshCorrelationCounts {
+    fn record(&mut self, issue: &ViewerGpuOutputDisplayIssueSummary) {
+        let Some(refresh) = issue.preceding_display_contract_refresh.as_ref() else {
+            return;
+        };
+        self.total = self.total.saturating_add(1);
+        match refresh.reason.as_str() {
+            "Resize" => self.after_resize = self.after_resize.saturating_add(1),
+            "ScaleFactorChanged" => {
+                self.after_scale_factor_changed = self.after_scale_factor_changed.saturating_add(1);
+            }
+            "WindowMoved" => {
+                self.after_window_moved = self.after_window_moved.saturating_add(1);
+            }
+            _ => {}
         }
     }
 }
@@ -548,6 +586,8 @@ pub struct ViewerGpuOutputDisplayIssueSummary {
     pub reason: String,
     /// Output color space requested by the viewer boundary.
     pub output_color_space: Option<String>,
+    /// Most recent display-contract refresh correlated to this issue, when present.
+    pub preceding_display_contract_refresh: Option<ViewerGpuOutputDisplayContractRefreshEvent>,
     /// Display target active when the issue was recorded.
     pub display_target: Option<ViewerGpuOutputDisplayTarget>,
     /// Current surface format, when presentation is already configured.
@@ -847,6 +887,7 @@ mod tests {
             Some(ViewerGpuOutputDisplayIssueSummary {
                 reason: "ReconfigureBlockedByPayload".to_owned(),
                 output_color_space: Some("DciP3".to_owned()),
+                preceding_display_contract_refresh: None,
                 display_target: None,
                 current_surface_format: None,
                 current_surface_color_space: None,
@@ -887,6 +928,7 @@ mod tests {
             Some(ViewerGpuOutputDisplayIssueSummary {
                 reason: "OutputColorSpaceRequiresSurfaceColorSpace".to_owned(),
                 output_color_space: Some("DciP3".to_owned()),
+                preceding_display_contract_refresh: None,
                 display_target: Some(ViewerGpuOutputDisplayTarget {
                     name: Some("Reference Monitor".to_owned()),
                     position: (1920, 0),
@@ -909,6 +951,41 @@ mod tests {
                 supported_surface_color_space_count: Some(2),
                 target_surface_color_space_supported: Some(true),
             })
+        );
+    }
+
+    #[test]
+    fn budget_correlates_display_issue_with_preceding_refresh() {
+        let jsonl = r#"
+{"health":{"status":"Blocked"},"display_issue_summary":{"reason":"HdrOutputRequiresHdrSurface","output_color_space":"Rec2100Pq","preceding_display_contract_refresh":{"reason":"WindowMoved","previous":{"display_target":{"name":"Office SDR","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly"},"next":{"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly"},"renderer_rebuilt":false,"display_target_changed":true,"surface_format_changed":false,"surface_color_space_changed":false,"surface_hdr_mode_changed":false},"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"current_surface_format":null,"current_surface_color_space":null,"current_surface_encoding":null,"selected_surface_format":"Bgra8UnormSrgb","selected_surface_color_space":"Srgb","selected_surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly","desired_surface_format":null,"desired_surface_color_space":"Bt2100Pq","desired_surface_encoding":"Pq","desired_surface_hdr_mode":"HdrPq","payload_blocker":null,"supported_surface_color_space_count":1,"target_surface_color_space_supported":false}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 0,
+            max_blocked: 1,
+            max_display_issues: 1,
+            max_hdr_output_requires_hdr_surface: 1,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(summary.passed);
+        assert_eq!(
+            summary.display_issue_refresh_correlations,
+            ViewerGpuOutputDisplayIssueRefreshCorrelationCounts {
+                total: 1,
+                after_window_moved: 1,
+                ..ViewerGpuOutputDisplayIssueRefreshCorrelationCounts::default()
+            }
+        );
+        assert_eq!(
+            summary
+                .last_display_issue
+                .expect("last display issue")
+                .preceding_display_contract_refresh
+                .expect("preceding refresh")
+                .reason,
+            "WindowMoved"
         );
     }
 

@@ -148,7 +148,10 @@ happened on the wrong monitor, on the wrong surface contract, or only because
 the current payload path cannot yet present that contract. Contract refreshes
 caused by resize, scale-factor change, or moving onto another monitor must also
 be persisted as structured events with previous/next surface snapshots so
-diagnostics can explain how the current contract was reached.
+diagnostics can explain how the current contract was reached. When an issue is
+recorded after such a refresh, the issue summary should carry the correlated
+preceding refresh event instead of forcing downstream tooling to infer that
+relationship from separate records.
 The same rule applies to media interpretation failures: viewer empty-state
 diagnostics and export queue job summaries should consume
 `VideoColorDiagnosticIssueSummary` / `VideoColorDiagnosticIssueAggregate`

@@ -1493,6 +1493,10 @@ fn viewer_gpu_output_budget_smoke_report_serializes_summary() {
     assert_eq!(json["summary"]["display_issues"]["total"], 0);
     assert_eq!(json["summary"]["display_contract_refreshes"]["total"], 0);
     assert_eq!(
+        json["summary"]["display_issue_refresh_correlations"]["total"],
+        0
+    );
+    assert_eq!(
         json["summary"]["budget"]["max_hdr_output_requires_hdr_surface"],
         0
     );

@@ -105,6 +105,7 @@ struct AppUiViewerGpuOutputTelemetry {
     display_presentation_payload_blockers: u64,
     display_presentation_unsupported_contracts: u64,
     display_contract_refreshes: u64,
+    display_contract_refresh_generation: u64,
     record_failures: u64,
     missing_output_textures: u64,
     registered_frames: u64,
@@ -115,6 +116,7 @@ struct AppUiViewerGpuOutputTelemetry {
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
+    last_display_issue_refresh_generation: Option<u64>,
     recent_display_contract_refreshes: Vec<AppUiDisplayContractRefreshEvent>,
     last_display_contract_refresh: Option<AppUiDisplayContractRefreshEvent>,
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
@@ -277,6 +279,7 @@ enum AppUiDisplayIssueReason {
 struct AppUiDisplayIssueSummary {
     reason: AppUiDisplayIssueReason,
     output_color_space: ColorSpace,
+    preceding_display_contract_refresh: Option<AppUiDisplayContractRefreshEvent>,
     display_target: Option<AppUiDisplayTarget>,
     current_surface_format: Option<AppUiSurfaceFormatDiagnostic>,
     current_surface_color_space: Option<AppUiSurfaceColorSpaceDiagnostic>,
@@ -296,10 +299,18 @@ struct AppUiDisplayIssueSummary {
 
 impl AppUiViewerGpuOutputTelemetry {
     fn diagnostics(&self) -> AppUiViewerGpuOutputDiagnostics {
-        let display_issue_summary = display_issue_summary(
+        let mut display_issue_summary = display_issue_summary(
             self.last_display_contract_blocker,
             self.last_display_presentation_readiness,
         );
+        if self.last_display_issue_refresh_generation
+            == Some(self.display_contract_refresh_generation)
+        {
+            if let Some(issue) = display_issue_summary.as_mut() {
+                issue.preceding_display_contract_refresh =
+                    self.last_display_contract_refresh.clone();
+            }
+        }
         let health = AppUiViewerGpuOutputHealthSummary::from_telemetry(self);
         AppUiViewerGpuOutputDiagnostics {
             invocations: self.invocations,
@@ -363,6 +374,7 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_frame_context = None;
         self.last_display_contract_blocker = None;
         self.last_display_presentation_readiness = None;
+        self.last_display_issue_refresh_generation = None;
         self.last_outcome = None;
     }
 
@@ -417,6 +429,7 @@ impl AppUiViewerGpuOutputTelemetry {
             }
         }
         self.last_display_contract_blocker = Some(diagnostics);
+        self.last_display_issue_refresh_generation = Some(self.display_contract_refresh_generation);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked);
         self.record_health_count(AppUiViewerGpuOutputHealthStatus::Blocked);
     }
@@ -426,17 +439,23 @@ impl AppUiViewerGpuOutputTelemetry {
         diagnostics: AppUiDisplayPresentationReadinessDiagnostics,
     ) {
         match diagnostics.status {
-            AppUiDisplayPresentationReadinessStatus::Current => {}
+            AppUiDisplayPresentationReadinessStatus::Current => {
+                self.last_display_issue_refresh_generation = None;
+            }
             AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload => {
                 self.display_presentation_reconfigure_candidates =
                     self.display_presentation_reconfigure_candidates.saturating_add(1);
                 self.display_presentation_payload_blockers =
                     self.display_presentation_payload_blockers.saturating_add(1);
+                self.last_display_issue_refresh_generation =
+                    Some(self.display_contract_refresh_generation);
             }
             AppUiDisplayPresentationReadinessStatus::UnsupportedPresentationIntent
             | AppUiDisplayPresentationReadinessStatus::UnsupportedSurfaceContract => {
                 self.display_presentation_unsupported_contracts =
                     self.display_presentation_unsupported_contracts.saturating_add(1);
+                self.last_display_issue_refresh_generation =
+                    Some(self.display_contract_refresh_generation);
             }
         }
         self.last_display_presentation_readiness = Some(diagnostics);
@@ -450,6 +469,8 @@ impl AppUiViewerGpuOutputTelemetry {
         renderer_rebuilt: bool,
     ) {
         self.display_contract_refreshes = self.display_contract_refreshes.saturating_add(1);
+        self.display_contract_refresh_generation =
+            self.display_contract_refresh_generation.saturating_add(1);
         let event = AppUiDisplayContractRefreshEvent::new(reason, previous, next, renderer_rebuilt);
         if self.recent_display_contract_refreshes.len()
             >= APP_UI_DISPLAY_CONTRACT_REFRESH_HISTORY_LIMIT
@@ -653,6 +674,7 @@ impl AppUiDisplayIssueSummary {
         Self {
             reason,
             output_color_space: blocker.output_color_space,
+            preceding_display_contract_refresh: None,
             display_target: None,
             current_surface_format: None,
             current_surface_color_space: None,
@@ -699,6 +721,7 @@ impl AppUiDisplayIssueSummary {
         Some(Self {
             reason,
             output_color_space: readiness.output_color_space,
+            preceding_display_contract_refresh: None,
             display_target: None,
             current_surface_format: Some(readiness.current_surface_format),
             current_surface_color_space: Some(readiness.current_surface_color_space),
@@ -3859,6 +3882,7 @@ mod tests {
                 display_issue_summary: Some(AppUiDisplayIssueSummary {
                     reason: AppUiDisplayIssueReason::OutputColorSpaceRequiresSurfaceColorSpace,
                     output_color_space: ColorSpace::DciP3,
+                    preceding_display_contract_refresh: None,
                     display_target: None,
                     current_surface_format: None,
                     current_surface_color_space: None,
@@ -3921,6 +3945,7 @@ mod tests {
                 display_issue_summary: Some(AppUiDisplayIssueSummary {
                     reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
                     output_color_space: ColorSpace::DciP3,
+                    preceding_display_contract_refresh: None,
                     display_target: None,
                     current_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                     current_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
@@ -3968,6 +3993,7 @@ mod tests {
             Some(AppUiDisplayIssueSummary {
                 reason: AppUiDisplayIssueReason::HdrOutputRequiresHdrSurface,
                 output_color_space: ColorSpace::Rec2100Pq,
+                preceding_display_contract_refresh: None,
                 display_target: None,
                 current_surface_format: None,
                 current_surface_color_space: None,
@@ -4012,6 +4038,7 @@ mod tests {
             Some(AppUiDisplayIssueSummary {
                 reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
                 output_color_space: ColorSpace::DciP3,
+                preceding_display_contract_refresh: None,
                 display_target: None,
                 current_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                 current_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
@@ -4101,6 +4128,42 @@ mod tests {
                 surface_color_space_changed: true,
                 surface_hdr_mode_changed: true,
             })
+        );
+    }
+
+    #[test]
+    fn viewer_gpu_output_diagnostics_correlate_issue_with_latest_refresh() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        let previous = test_display_output_contract();
+        let mut next = previous.clone();
+        next.display_target.position = (3840, 0);
+        telemetry.record_display_contract_refresh(
+            DisplayOutputContractRefreshReason::WindowMoved,
+            &previous,
+            &next,
+            false,
+        );
+        telemetry.record_display_contract_blocker(
+            &AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
+                output_color_space: ColorSpace::Rec2100Pq,
+                selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
+                surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+                supported_surface_color_spaces: vec![wgpu::SurfaceColorSpace::Srgb],
+            },
+        );
+
+        let diagnostics = telemetry.diagnostics();
+
+        assert_eq!(
+            diagnostics
+                .display_issue_summary
+                .expect("display issue summary")
+                .preceding_display_contract_refresh
+                .expect("preceding refresh")
+                .reason,
+            AppUiDisplayContractRefreshReasonDiagnostic::WindowMoved
         );
     }
 

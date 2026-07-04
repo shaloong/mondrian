@@ -82,6 +82,10 @@ whether the required target surface color space was actually supported.
 It also replays recent display-contract refresh events and reports the last
 refresh event, so resize, scale-factor, and window-move monitor transitions can
 be diagnosed from the same JSONL summary instead of only from trace logs.
+When a display issue follows a recorded refresh, the summary preserves that
+preceding refresh on the issue itself and reports correlation counts by refresh
+reason, so a smoke report can show that a blocker started only after a monitor
+move or scale-factor transition.
 Use the per-reason viewer display thresholds
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE`,
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE`,

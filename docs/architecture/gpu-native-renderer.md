@@ -342,7 +342,9 @@ Display-contract refreshes are part of the same persisted evidence: the session
 records structured resize / scale-factor / window-move events with previous and
 next contract snapshots, allowing multi-monitor or swapchain reconfiguration
 problems to be reconstructed from JSONL without depending on trace log
-retention.
+retention. When a subsequent display issue is emitted, it should preserve the
+preceding correlated refresh event so diagnostics can attribute the blocker to
+the contract transition that introduced it.
 The window session also owns viewer GPU output telemetry next to the runtime:
 each preparation attempt records whether it skipped because the external
 texture was already current, media was loading, the preview was unavailable, the
