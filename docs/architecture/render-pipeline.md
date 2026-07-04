@@ -257,7 +257,9 @@ Live app-window viewer output diagnostics can additionally be persisted with
 `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`. That JSONL stream records the last viewer
 GPU output attempt, including the derived health summary, display/presentation
 readiness, native GPU stage sequence, blocker breakdown, output texture state,
-and external texture registration outcome.
+external texture registration outcome, and frame context needed to correlate
+failures with a concrete sequence id, timeline frame, preview size, external
+texture key, output target/color space, tone-map flag, and optional display/view.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from

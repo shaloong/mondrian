@@ -15,7 +15,7 @@ use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
-use crate::app_ui::preview::AppUiGpuPreviewFrameState;
+use crate::app_ui::preview::{AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState};
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };
@@ -87,7 +87,7 @@ enum SurfaceLifecycleReason {
     ScaleFactorChanged,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AppUiViewerGpuOutputTelemetry {
     invocations: u64,
     non_workspace_skips: u64,
@@ -107,12 +107,13 @@ struct AppUiViewerGpuOutputTelemetry {
     rejected_external_frames: u64,
     accumulated_stage_diagnostics: RenderColorStageDiagnostics,
     last_stage_diagnostics: Option<RenderColorStageDiagnostics>,
+    last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 struct AppUiViewerGpuOutputDiagnostics {
     invocations: u64,
     non_workspace_skips: u64,
@@ -141,6 +142,7 @@ struct AppUiViewerGpuOutputDiagnostics {
     stage_gpu_render_pipeline_blockers: u64,
     stage_pixels: u64,
     health: AppUiViewerGpuOutputHealthSummary,
+    last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
     display_issue_summary: Option<AppUiDisplayIssueSummary>,
@@ -186,6 +188,31 @@ enum AppUiViewerGpuOutputHealthStatus {
     Ready,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiViewerGpuOutputFrameContext {
+    sequence_id: String,
+    frame: i64,
+    width: u32,
+    height: u32,
+    external_texture_key: String,
+    output_target: AppUiViewerGpuOutputTarget,
+    output_color_space: ColorSpace,
+    tone_map: bool,
+    display_view: Option<AppUiViewerGpuOutputDisplayView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum AppUiViewerGpuOutputTarget {
+    Display,
+    Export,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiViewerGpuOutputDisplayView {
+    display: String,
+    view: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiDisplayIssueReason {
     HdrOutputRequiresHdrSurface,
@@ -212,7 +239,7 @@ struct AppUiDisplayIssueSummary {
 }
 
 impl AppUiViewerGpuOutputTelemetry {
-    fn diagnostics(self) -> AppUiViewerGpuOutputDiagnostics {
+    fn diagnostics(&self) -> AppUiViewerGpuOutputDiagnostics {
         let display_issue_summary = display_issue_summary(
             self.last_display_contract_blocker,
             self.last_display_presentation_readiness,
@@ -261,6 +288,7 @@ impl AppUiViewerGpuOutputTelemetry {
                 .render_pipeline_not_prepared,
             stage_pixels: self.accumulated_stage_diagnostics.stage_pixels,
             health,
+            last_frame_context: self.last_frame_context.clone(),
             last_display_contract_blocker: self.last_display_contract_blocker,
             last_display_presentation_readiness: self.last_display_presentation_readiness,
             display_issue_summary,
@@ -271,9 +299,17 @@ impl AppUiViewerGpuOutputTelemetry {
     fn record_invocation(&mut self) {
         self.invocations = self.invocations.saturating_add(1);
         self.last_stage_diagnostics = None;
+        self.last_frame_context = None;
         self.last_display_contract_blocker = None;
         self.last_display_presentation_readiness = None;
         self.last_outcome = None;
+    }
+
+    fn record_frame_context(&mut self, frame: &AppUiGpuPreviewFrame, external_texture_key: String) {
+        self.last_frame_context = Some(AppUiViewerGpuOutputFrameContext::from_frame(
+            frame,
+            external_texture_key,
+        ));
     }
 
     fn record_non_workspace_skip(&mut self) {
@@ -364,8 +400,38 @@ impl AppUiViewerGpuOutputTelemetry {
     }
 }
 
+impl AppUiViewerGpuOutputFrameContext {
+    fn from_frame(frame: &AppUiGpuPreviewFrame, external_texture_key: String) -> Self {
+        Self {
+            sequence_id: frame.sequence_id.to_string(),
+            frame: frame.frame,
+            width: frame.width,
+            height: frame.height,
+            external_texture_key,
+            output_target: AppUiViewerGpuOutputTarget::from(frame.boundary.target),
+            output_color_space: frame.boundary.output_color_space,
+            tone_map: frame.boundary.tone_map,
+            display_view: frame.boundary.display_view.as_ref().map(|display_view| {
+                AppUiViewerGpuOutputDisplayView {
+                    display: display_view.display.clone(),
+                    view: display_view.view.clone(),
+                }
+            }),
+        }
+    }
+}
+
+impl From<RenderOutputColorBoundaryTarget> for AppUiViewerGpuOutputTarget {
+    fn from(target: RenderOutputColorBoundaryTarget) -> Self {
+        match target {
+            RenderOutputColorBoundaryTarget::Display => Self::Display,
+            RenderOutputColorBoundaryTarget::Export => Self::Export,
+        }
+    }
+}
+
 impl AppUiViewerGpuOutputHealthSummary {
-    fn from_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) -> Self {
+    fn from_telemetry(telemetry: &AppUiViewerGpuOutputTelemetry) -> Self {
         if telemetry.last_outcome.is_none() {
             return Self::default();
         }
@@ -817,7 +883,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.color_output_runtime.diagnostics(),
                             &session.display_output_contract,
                         );
-                        trace_viewer_gpu_output_telemetry(session.viewer_gpu_output_telemetry);
+                        trace_viewer_gpu_output_telemetry(&session.viewer_gpu_output_telemetry);
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
                         }
@@ -2004,7 +2070,7 @@ fn trace_color_output_runtime(
     );
 }
 
-fn trace_viewer_gpu_output_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) {
+fn trace_viewer_gpu_output_telemetry(telemetry: &AppUiViewerGpuOutputTelemetry) {
     let diagnostics = telemetry.diagnostics();
     tracing::trace!(
         invocations = diagnostics.invocations,
@@ -2045,6 +2111,7 @@ fn trace_viewer_gpu_output_telemetry(telemetry: AppUiViewerGpuOutputTelemetry) {
         no_gpu_blockers = diagnostics.health.no_gpu_blockers,
         output_texture_available = diagnostics.health.output_texture_available,
         external_texture_registered = diagnostics.health.external_texture_registered,
+        last_frame_context = ?diagnostics.last_frame_context,
         last_display_contract_blocker = ?diagnostics.last_display_contract_blocker,
         last_display_presentation_readiness = ?diagnostics.last_display_presentation_readiness,
         display_issue_summary = ?diagnostics.display_issue_summary,
@@ -2120,6 +2187,9 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         return;
     };
+    session
+        .viewer_gpu_output_telemetry
+        .record_frame_context(&frame, texture_key.as_str().to_owned());
     let presentation_readiness = session
         .display_output_contract
         .presentation_readiness_for_boundary(&frame.boundary);
@@ -3844,6 +3914,20 @@ mod tests {
             stage_pixels: 20,
             ..RenderColorStageDiagnostics::default()
         });
+        telemetry.last_frame_context = Some(AppUiViewerGpuOutputFrameContext {
+            sequence_id: "sequence-for-jsonl".to_owned(),
+            frame: 42,
+            width: 1920,
+            height: 1080,
+            external_texture_key: "app-ui.viewer.gpu:sequence-for-jsonl:1920x1080:feed".to_owned(),
+            output_target: AppUiViewerGpuOutputTarget::Display,
+            output_color_space: ColorSpace::Srgb,
+            tone_map: false,
+            display_view: Some(AppUiViewerGpuOutputDisplayView {
+                display: "sRGB Display".to_owned(),
+                view: "Standard".to_owned(),
+            }),
+        });
         let diagnostics = telemetry.diagnostics();
         let output_path = std::env::temp_dir().join(format!(
             "mondrian-viewer-gpu-output-diagnostics-{}-{}.jsonl",
@@ -3867,6 +3951,19 @@ mod tests {
         assert_eq!(json["health"]["presentation_ready"], true);
         assert_eq!(json["stage_gpu_color_stages"], 1);
         assert_eq!(json["last_outcome"], "Registered");
+        assert_eq!(
+            json["last_frame_context"]["sequence_id"],
+            "sequence-for-jsonl"
+        );
+        assert_eq!(json["last_frame_context"]["frame"], 42);
+        assert_eq!(json["last_frame_context"]["width"], 1920);
+        assert_eq!(json["last_frame_context"]["height"], 1080);
+        assert_eq!(json["last_frame_context"]["output_target"], "Display");
+        assert_eq!(json["last_frame_context"]["output_color_space"], "Srgb");
+        assert_eq!(
+            json["last_frame_context"]["display_view"]["view"],
+            "Standard"
+        );
     }
 
     #[test]
