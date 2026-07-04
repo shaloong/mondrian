@@ -293,3 +293,160 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
     assert_eq!(export.color_diagnostics.output, export.output_descriptor);
     assert_eq!(stable_rgba_hash(&preview.rgba), 0x41cc_83bb_cef6_83d2);
 }
+
+#[test]
+fn golden_rec2020_working_to_srgb_output() {
+    let w = 32;
+    let h = 24;
+    let source_rgba = gradient_rgba(w, h, 42);
+    let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec2020, source_rgba);
+    let frame = execute_cpu_input_stage(
+        &source,
+        &RenderInputTransform::to_working(ColorSpace::Rec2020, false, ColorEngine::MondrianSmart),
+    )
+    .expect("input to Rec.2020 working")
+    .result
+    .frame;
+
+    let preview = execute_cpu_output_boundary_rgba8(
+        &frame,
+        &RenderOutputColorBoundary::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+    )
+    .expect("Rec.2020->sRGB display");
+    let export = execute_cpu_output_boundary_rgba8(
+        &frame,
+        &RenderOutputColorBoundary::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+    )
+    .expect("Rec.2020->sRGB export");
+
+    assert_rgba8_equal(
+        &preview.rgba,
+        &export.rgba,
+        w,
+        h,
+        "rec2020-preview-export-parity",
+    );
+    check_golden("rec2020_working_to_srgb_32x24.png", w, h, &preview.rgba);
+}
+
+#[test]
+fn golden_multilayer_float_linear_blend() {
+    let w = 32;
+    let h = 24;
+    let bg = working_frame(w, h, gradient_rgba(w, h, 10));
+    let fg = working_frame(w, h, gradient_rgba(w, h, 20));
+    let elements = vec![
+        TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &bg,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: IDENTITY_TRANSFORM,
+            effect_graph: identity_graph(),
+            frame_seed: 0,
+        }),
+        TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &fg,
+            opacity: 0.6,
+            blend_mode: BlendMode::Screen,
+            transform: IDENTITY_TRANSFORM,
+            effect_graph: identity_graph(),
+            frame_seed: 1,
+        }),
+    ];
+    let mut scratch = TimelineCompositeScratch::default();
+    let frame = composite_timeline_elements_color_frame(
+        w,
+        h,
+        &elements,
+        TimelineCompositeOptions { empty_canvas_transparent: true },
+        ColorSpace::Rec709,
+        &mut scratch,
+    );
+    let result = encode_rec709(&frame);
+    check_golden("multilayer_screen_blend_32x24.png", w, h, &result);
+}
+
+#[test]
+fn golden_non_identity_transform_float_path() {
+    let w = 32;
+    let h = 24;
+    let media = working_frame(w, h, gradient_rgba(w, h, 55));
+    let elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
+        frame: &media,
+        opacity: 1.0,
+        blend_mode: BlendMode::Normal,
+        transform: [1.5, 0.0, 0.0, 0.0, 1.5, 0.0],
+        effect_graph: identity_graph(),
+        frame_seed: 0,
+    })];
+    let mut scratch = TimelineCompositeScratch::default();
+    let frame = composite_timeline_elements_color_frame(
+        w,
+        h,
+        &elements,
+        TimelineCompositeOptions { empty_canvas_transparent: true },
+        ColorSpace::Rec709,
+        &mut scratch,
+    );
+    let result = encode_rec709(&frame);
+    check_golden("scaled_transform_float_32x24.png", w, h, &result);
+}
+
+#[test]
+fn golden_preview_export_parity_across_color_spaces() {
+    let w = 32;
+    let h = 24;
+    let bg = working_frame(w, h, gradient_rgba(w, h, 7));
+    let fg = working_frame(w, h, gradient_rgba(w, h, 13));
+    let elements = vec![
+        TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &bg,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: IDENTITY_TRANSFORM,
+            effect_graph: identity_graph(),
+            frame_seed: 0,
+        }),
+        TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &fg,
+            opacity: 0.5,
+            blend_mode: BlendMode::Multiply,
+            transform: IDENTITY_TRANSFORM,
+            effect_graph: identity_graph(),
+            frame_seed: 2,
+        }),
+    ];
+    let mut scratch = TimelineCompositeScratch::default();
+    let frame = composite_timeline_elements_color_frame(
+        w,
+        h,
+        &elements,
+        TimelineCompositeOptions { empty_canvas_transparent: true },
+        ColorSpace::Rec709,
+        &mut scratch,
+    );
+
+    let preview = execute_cpu_output_boundary_rgba8(
+        &frame,
+        &RenderOutputColorBoundary::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+    )
+    .expect("preview display");
+    let export = execute_cpu_output_boundary_rgba8(
+        &frame,
+        &RenderOutputColorBoundary::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+    )
+    .expect("export delivery");
+
+    assert_rgba8_equal(
+        &preview.rgba,
+        &export.rgba,
+        w,
+        h,
+        "multilayer-preview-export-rec709",
+    );
+    assert_eq!(
+        stable_rgba_hash(&preview.rgba),
+        stable_rgba_hash(&export.rgba),
+        "preview and export must produce identical pixels for the same working frame"
+    );
+}
