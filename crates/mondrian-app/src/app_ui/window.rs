@@ -252,6 +252,11 @@ struct AppUiDisplayOutputContractSnapshot {
     surface_color_space: AppUiSurfaceColorSpaceDiagnostic,
     surface_encoding: AppUiSurfaceEncodingDiagnostic,
     surface_hdr_mode: AppUiSurfaceHdrMode,
+    display_tone_map_headroom_ppm: Option<u32>,
+    available_surface_formats: Vec<AppUiSurfaceFormatDiagnostic>,
+    format_color_spaces: Vec<AppUiSurfaceFormatColorSpacesDiagnostic>,
+    present_modes: Vec<AppUiPresentModeDiagnostic>,
+    alpha_modes: Vec<AppUiCompositeAlphaModeDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -264,6 +269,42 @@ struct AppUiDisplayContractRefreshEvent {
     surface_format_changed: bool,
     surface_color_space_changed: bool,
     surface_hdr_mode_changed: bool,
+    display_tone_map_headroom_changed: bool,
+    available_surface_formats_changed: bool,
+    format_color_spaces_changed: bool,
+    present_modes_changed: bool,
+    alpha_modes_changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum AppUiPresentModeDiagnostic {
+    Fifo,
+    FifoRelaxed,
+    Immediate,
+    Mailbox,
+    AutoVsync,
+    AutoNoVsync,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum AppUiCompositeAlphaModeDiagnostic {
+    Auto,
+    Opaque,
+    PreMultiplied,
+    PostMultiplied,
+    Inherit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiSurfaceFormatColorSpacesDiagnostic {
+    format: AppUiSurfaceFormatDiagnostic,
+    srgb: bool,
+    extended_srgb_linear: bool,
+    display_p3: bool,
+    bt2100_pq: bool,
+    bt2100_hlg: bool,
+    extended_srgb: bool,
+    extended_display_p3: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -753,6 +794,32 @@ impl AppUiDisplayOutputContractSnapshot {
             ),
             surface_encoding: app_ui_surface_encoding_diagnostic(contract.surface_color.encoding),
             surface_hdr_mode: contract.surface_color.hdr_mode,
+            display_tone_map_headroom_ppm: app_ui_display_tone_map_headroom_ppm(
+                &contract.display_hdr_info,
+            ),
+            available_surface_formats: contract
+                .available_formats
+                .iter()
+                .copied()
+                .map(app_ui_surface_format_diagnostic)
+                .collect(),
+            format_color_spaces: contract
+                .format_color_spaces
+                .iter()
+                .map(AppUiSurfaceFormatColorSpacesDiagnostic::from_contract)
+                .collect(),
+            present_modes: contract
+                .present_modes
+                .iter()
+                .copied()
+                .map(app_ui_present_mode_diagnostic)
+                .collect(),
+            alpha_modes: contract
+                .alpha_modes
+                .iter()
+                .copied()
+                .map(app_ui_composite_alpha_mode_diagnostic)
+                .collect(),
         }
     }
 }
@@ -775,6 +842,30 @@ impl AppUiDisplayContractRefreshEvent {
                 != next.surface_color.color_space,
             surface_hdr_mode_changed: previous.surface_color.hdr_mode
                 != next.surface_color.hdr_mode,
+            display_tone_map_headroom_changed: app_ui_display_tone_map_headroom_ppm(
+                &previous.display_hdr_info,
+            ) != app_ui_display_tone_map_headroom_ppm(
+                &next.display_hdr_info,
+            ),
+            available_surface_formats_changed: previous.available_formats != next.available_formats,
+            format_color_spaces_changed: previous.format_color_spaces != next.format_color_spaces,
+            present_modes_changed: previous.present_modes != next.present_modes,
+            alpha_modes_changed: previous.alpha_modes != next.alpha_modes,
+        }
+    }
+}
+
+impl AppUiSurfaceFormatColorSpacesDiagnostic {
+    fn from_contract(value: &AppUiSurfaceFormatColorSpaces) -> Self {
+        Self {
+            format: app_ui_surface_format_diagnostic(value.format),
+            srgb: value.srgb,
+            extended_srgb_linear: value.extended_srgb_linear,
+            display_p3: value.display_p3,
+            bt2100_pq: value.bt2100_pq,
+            bt2100_hlg: value.bt2100_hlg,
+            extended_srgb: value.extended_srgb,
+            extended_display_p3: value.extended_display_p3,
         }
     }
 }
@@ -1949,6 +2040,37 @@ fn app_ui_surface_encoding_diagnostic(
         AppUiSurfaceEncoding::Pq => AppUiSurfaceEncodingDiagnostic::Pq,
         AppUiSurfaceEncoding::Hlg => AppUiSurfaceEncodingDiagnostic::Hlg,
     }
+}
+
+fn app_ui_present_mode_diagnostic(mode: wgpu::PresentMode) -> AppUiPresentModeDiagnostic {
+    match mode {
+        wgpu::PresentMode::Fifo => AppUiPresentModeDiagnostic::Fifo,
+        wgpu::PresentMode::FifoRelaxed => AppUiPresentModeDiagnostic::FifoRelaxed,
+        wgpu::PresentMode::Immediate => AppUiPresentModeDiagnostic::Immediate,
+        wgpu::PresentMode::Mailbox => AppUiPresentModeDiagnostic::Mailbox,
+        wgpu::PresentMode::AutoVsync => AppUiPresentModeDiagnostic::AutoVsync,
+        wgpu::PresentMode::AutoNoVsync => AppUiPresentModeDiagnostic::AutoNoVsync,
+    }
+}
+
+fn app_ui_composite_alpha_mode_diagnostic(
+    mode: wgpu::CompositeAlphaMode,
+) -> AppUiCompositeAlphaModeDiagnostic {
+    match mode {
+        wgpu::CompositeAlphaMode::Auto => AppUiCompositeAlphaModeDiagnostic::Auto,
+        wgpu::CompositeAlphaMode::Opaque => AppUiCompositeAlphaModeDiagnostic::Opaque,
+        wgpu::CompositeAlphaMode::PreMultiplied => AppUiCompositeAlphaModeDiagnostic::PreMultiplied,
+        wgpu::CompositeAlphaMode::PostMultiplied => {
+            AppUiCompositeAlphaModeDiagnostic::PostMultiplied
+        }
+        wgpu::CompositeAlphaMode::Inherit => AppUiCompositeAlphaModeDiagnostic::Inherit,
+    }
+}
+
+fn app_ui_display_tone_map_headroom_ppm(display_hdr_info: &wgpu::DisplayHdrInfo) -> Option<u32> {
+    display_hdr_info.tone_map_headroom().map(|headroom| {
+        ((headroom as f64) * 1_000_000.0).round().clamp(0.0, u32::MAX as f64) as u32
+    })
 }
 
 fn app_ui_surface_color_space_matches_display_output(
@@ -4104,6 +4226,19 @@ mod tests {
         next.surface_color.color_space = wgpu::SurfaceColorSpace::Bt2100Pq;
         next.surface_color.encoding = AppUiSurfaceEncoding::Pq;
         next.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
+        next.available_formats.push(wgpu::TextureFormat::Rgba16Float);
+        next.format_color_spaces.push(AppUiSurfaceFormatColorSpaces {
+            format: wgpu::TextureFormat::Rgba16Float,
+            srgb: false,
+            extended_srgb_linear: false,
+            display_p3: false,
+            bt2100_pq: true,
+            bt2100_hlg: false,
+            extended_srgb: false,
+            extended_display_p3: false,
+        });
+        next.present_modes.push(wgpu::PresentMode::Immediate);
+        next.alpha_modes.push(wgpu::CompositeAlphaMode::Opaque);
 
         telemetry.record_display_contract_refresh(
             DisplayOutputContractRefreshReason::WindowMoved,
@@ -4127,6 +4262,11 @@ mod tests {
                 surface_format_changed: true,
                 surface_color_space_changed: true,
                 surface_hdr_mode_changed: true,
+                display_tone_map_headroom_changed: false,
+                available_surface_formats_changed: true,
+                format_color_spaces_changed: true,
+                present_modes_changed: true,
+                alpha_modes_changed: true,
             })
         );
     }

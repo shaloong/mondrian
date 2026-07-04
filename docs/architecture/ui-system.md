@@ -151,7 +151,10 @@ be persisted as structured events with previous/next surface snapshots so
 diagnostics can explain how the current contract was reached. When an issue is
 recorded after such a refresh, the issue summary should carry the correlated
 preceding refresh event instead of forcing downstream tooling to infer that
-relationship from separate records.
+relationship from separate records. The refresh snapshots should include enough
+capability evidence to explain why the contract changed: surface format set,
+per-format color-space support, present modes, alpha modes, and HDR headroom
+diagnostics.
 The same rule applies to media interpretation failures: viewer empty-state
 diagnostics and export queue job summaries should consume
 `VideoColorDiagnosticIssueSummary` / `VideoColorDiagnosticIssueAggregate`

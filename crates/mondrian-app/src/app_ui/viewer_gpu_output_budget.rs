@@ -482,6 +482,16 @@ pub struct ViewerGpuOutputDisplayContractRefreshCounts {
     pub surface_color_space_changed: u64,
     /// Refreshes that changed the active HDR mode.
     pub surface_hdr_mode_changed: u64,
+    /// Refreshes that changed tone-map headroom evidence.
+    pub display_tone_map_headroom_changed: u64,
+    /// Refreshes that changed the available surface format set.
+    pub available_surface_formats_changed: u64,
+    /// Refreshes that changed per-format color-space capabilities.
+    pub format_color_spaces_changed: u64,
+    /// Refreshes that changed available present modes.
+    pub present_modes_changed: u64,
+    /// Refreshes that changed available alpha modes.
+    pub alpha_modes_changed: u64,
 }
 
 /// Counts replayed from display issues that followed a specific refresh event.
@@ -522,6 +532,23 @@ impl ViewerGpuOutputDisplayContractRefreshCounts {
         }
         if refresh.surface_hdr_mode_changed {
             self.surface_hdr_mode_changed = self.surface_hdr_mode_changed.saturating_add(1);
+        }
+        if refresh.display_tone_map_headroom_changed {
+            self.display_tone_map_headroom_changed =
+                self.display_tone_map_headroom_changed.saturating_add(1);
+        }
+        if refresh.available_surface_formats_changed {
+            self.available_surface_formats_changed =
+                self.available_surface_formats_changed.saturating_add(1);
+        }
+        if refresh.format_color_spaces_changed {
+            self.format_color_spaces_changed = self.format_color_spaces_changed.saturating_add(1);
+        }
+        if refresh.present_modes_changed {
+            self.present_modes_changed = self.present_modes_changed.saturating_add(1);
+        }
+        if refresh.alpha_modes_changed {
+            self.alpha_modes_changed = self.alpha_modes_changed.saturating_add(1);
         }
     }
 }
@@ -655,6 +682,21 @@ pub struct ViewerGpuOutputDisplayContractRefreshEvent {
     pub surface_color_space_changed: bool,
     /// Whether the refresh changed the active HDR mode.
     pub surface_hdr_mode_changed: bool,
+    /// Whether the refresh changed reported display tone-map headroom.
+    #[serde(default)]
+    pub display_tone_map_headroom_changed: bool,
+    /// Whether the refresh changed the available surface format set.
+    #[serde(default)]
+    pub available_surface_formats_changed: bool,
+    /// Whether the refresh changed per-format color-space capabilities.
+    #[serde(default)]
+    pub format_color_spaces_changed: bool,
+    /// Whether the refresh changed the available present modes.
+    #[serde(default)]
+    pub present_modes_changed: bool,
+    /// Whether the refresh changed the available alpha modes.
+    #[serde(default)]
+    pub alpha_modes_changed: bool,
 }
 
 /// Display-output contract snapshot consumed from viewer GPU-output diagnostics.
@@ -670,6 +712,42 @@ pub struct ViewerGpuOutputDisplayContractSnapshot {
     pub surface_encoding: String,
     /// Surface HDR mode chosen for the snapshot.
     pub surface_hdr_mode: String,
+    /// Reported tone-map headroom in parts per million, when available.
+    #[serde(default)]
+    pub display_tone_map_headroom_ppm: Option<u32>,
+    /// Available surface formats for the snapshot.
+    #[serde(default)]
+    pub available_surface_formats: Vec<String>,
+    /// Per-format surface color-space capabilities for the snapshot.
+    #[serde(default)]
+    pub format_color_spaces: Vec<ViewerGpuOutputSurfaceFormatColorSpaces>,
+    /// Available present modes for the snapshot.
+    #[serde(default)]
+    pub present_modes: Vec<String>,
+    /// Available alpha modes for the snapshot.
+    #[serde(default)]
+    pub alpha_modes: Vec<String>,
+}
+
+/// Per-format surface color-space capability snapshot consumed from diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputSurfaceFormatColorSpaces {
+    /// Surface format.
+    pub format: String,
+    /// Supports SRGB presentation.
+    pub srgb: bool,
+    /// Supports extended linear SRGB presentation.
+    pub extended_srgb_linear: bool,
+    /// Supports Display P3 presentation.
+    pub display_p3: bool,
+    /// Supports BT.2100 PQ presentation.
+    pub bt2100_pq: bool,
+    /// Supports BT.2100 HLG presentation.
+    pub bt2100_hlg: bool,
+    /// Supports extended SRGB presentation.
+    pub extended_srgb: bool,
+    /// Supports extended Display P3 presentation.
+    pub extended_display_p3: bool,
 }
 
 impl ViewerGpuOutputHealthCounts {
@@ -992,8 +1070,8 @@ mod tests {
     #[test]
     fn budget_replays_display_contract_refresh_history() {
         let jsonl = r#"
-{"health":{"status":"Waiting"},"recent_display_contract_refreshes":[{"reason":"Resize","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[1920,1080],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly"},"next":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly"},"renderer_rebuilt":false,"display_target_changed":true,"surface_format_changed":false,"surface_color_space_changed":false,"surface_hdr_mode_changed":false}]}
-{"health":{"status":"Blocked"},"last_display_contract_refresh":{"reason":"WindowMoved","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly"},"next":{"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"surface_format":"Rgba16Float","surface_color_space":"Bt2100Pq","surface_encoding":"Pq","surface_hdr_mode":"HdrPq"},"renderer_rebuilt":true,"display_target_changed":true,"surface_format_changed":true,"surface_color_space_changed":true,"surface_hdr_mode_changed":true}}
+{"health":{"status":"Waiting"},"recent_display_contract_refreshes":[{"reason":"Resize","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[1920,1080],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly","display_tone_map_headroom_ppm":null,"available_surface_formats":["Bgra8UnormSrgb"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo"],"alpha_modes":["Auto"]},"next":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly","display_tone_map_headroom_ppm":null,"available_surface_formats":["Bgra8UnormSrgb"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo"],"alpha_modes":["Auto"]},"renderer_rebuilt":false,"display_target_changed":true,"surface_format_changed":false,"surface_color_space_changed":false,"surface_hdr_mode_changed":false,"display_tone_map_headroom_changed":false,"available_surface_formats_changed":false,"format_color_spaces_changed":false,"present_modes_changed":false,"alpha_modes_changed":false}]}
+{"health":{"status":"Blocked"},"last_display_contract_refresh":{"reason":"WindowMoved","previous":{"display_target":{"name":"Panel A","position":[0,0],"physical_size":[2560,1440],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"surface_format":"Bgra8UnormSrgb","surface_color_space":"Srgb","surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly","display_tone_map_headroom_ppm":null,"available_surface_formats":["Bgra8UnormSrgb"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo"],"alpha_modes":["Auto"]},"next":{"display_target":{"name":"HDR Monitor","position":[2560,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":120000},"surface_format":"Rgba16Float","surface_color_space":"Bt2100Pq","surface_encoding":"Pq","surface_hdr_mode":"HdrPq","display_tone_map_headroom_ppm":null,"available_surface_formats":["Bgra8UnormSrgb","Rgba16Float"],"format_color_spaces":[{"format":"Bgra8UnormSrgb","srgb":true,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":false,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false},{"format":"Rgba16Float","srgb":false,"extended_srgb_linear":false,"display_p3":false,"bt2100_pq":true,"bt2100_hlg":false,"extended_srgb":false,"extended_display_p3":false}],"present_modes":["Fifo","Immediate"],"alpha_modes":["Auto","Opaque"]},"renderer_rebuilt":true,"display_target_changed":true,"surface_format_changed":true,"surface_color_space_changed":true,"surface_hdr_mode_changed":true,"display_tone_map_headroom_changed":false,"available_surface_formats_changed":true,"format_color_spaces_changed":true,"present_modes_changed":true,"alpha_modes_changed":true}}
 "#;
         let budget = ViewerGpuOutputBudget {
             min_ready: 0,
@@ -1016,6 +1094,10 @@ mod tests {
                 surface_format_changed: 1,
                 surface_color_space_changed: 1,
                 surface_hdr_mode_changed: 1,
+                available_surface_formats_changed: 1,
+                format_color_spaces_changed: 1,
+                present_modes_changed: 1,
+                alpha_modes_changed: 1,
                 ..ViewerGpuOutputDisplayContractRefreshCounts::default()
             }
         );
@@ -1035,6 +1117,20 @@ mod tests {
                     surface_color_space: "Srgb".to_owned(),
                     surface_encoding: "Srgb".to_owned(),
                     surface_hdr_mode: "SdrOnly".to_owned(),
+                    display_tone_map_headroom_ppm: None,
+                    available_surface_formats: vec!["Bgra8UnormSrgb".to_owned()],
+                    format_color_spaces: vec![ViewerGpuOutputSurfaceFormatColorSpaces {
+                        format: "Bgra8UnormSrgb".to_owned(),
+                        srgb: true,
+                        extended_srgb_linear: false,
+                        display_p3: false,
+                        bt2100_pq: false,
+                        bt2100_hlg: false,
+                        extended_srgb: false,
+                        extended_display_p3: false,
+                    }],
+                    present_modes: vec!["Fifo".to_owned()],
+                    alpha_modes: vec!["Auto".to_owned()],
                 },
                 next: ViewerGpuOutputDisplayContractSnapshot {
                     display_target: ViewerGpuOutputDisplayTarget {
@@ -1048,12 +1144,46 @@ mod tests {
                     surface_color_space: "Bt2100Pq".to_owned(),
                     surface_encoding: "Pq".to_owned(),
                     surface_hdr_mode: "HdrPq".to_owned(),
+                    display_tone_map_headroom_ppm: None,
+                    available_surface_formats: vec![
+                        "Bgra8UnormSrgb".to_owned(),
+                        "Rgba16Float".to_owned(),
+                    ],
+                    format_color_spaces: vec![
+                        ViewerGpuOutputSurfaceFormatColorSpaces {
+                            format: "Bgra8UnormSrgb".to_owned(),
+                            srgb: true,
+                            extended_srgb_linear: false,
+                            display_p3: false,
+                            bt2100_pq: false,
+                            bt2100_hlg: false,
+                            extended_srgb: false,
+                            extended_display_p3: false,
+                        },
+                        ViewerGpuOutputSurfaceFormatColorSpaces {
+                            format: "Rgba16Float".to_owned(),
+                            srgb: false,
+                            extended_srgb_linear: false,
+                            display_p3: false,
+                            bt2100_pq: true,
+                            bt2100_hlg: false,
+                            extended_srgb: false,
+                            extended_display_p3: false,
+                        },
+                    ],
+                    present_modes: vec!["Fifo".to_owned(), "Immediate".to_owned()],
+                    alpha_modes: vec!["Auto".to_owned(), "Opaque".to_owned()],
                 },
                 renderer_rebuilt: true,
                 display_target_changed: true,
                 surface_format_changed: true,
                 surface_color_space_changed: true,
                 surface_hdr_mode_changed: true,
+                display_tone_map_headroom_changed: false,
+                available_surface_formats_changed: true,
+                format_color_spaces_changed: true,
+                present_modes_changed: true,
+                alpha_modes_changed: true,
             })
         );
     }

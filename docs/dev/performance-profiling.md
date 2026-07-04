@@ -86,6 +86,9 @@ When a display issue follows a recorded refresh, the summary preserves that
 preceding refresh on the issue itself and reports correlation counts by refresh
 reason, so a smoke report can show that a blocker started only after a monitor
 move or scale-factor transition.
+Refresh events now also preserve capability-difference evidence: available
+surface formats, per-format color-space support, present modes, alpha modes,
+and tone-map headroom summaries before and after the transition.
 Use the per-reason viewer display thresholds
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE`,
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE`,
