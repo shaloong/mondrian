@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
+use mondrian_media::{VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate};
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
 use mondrian_ui_core::types::Rect;
@@ -60,6 +61,7 @@ struct PreviewMediaPerfReport {
     scenario: &'static str,
     frames: usize,
     cache_iterations: usize,
+    media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_health: Option<AppUiPreviewColorHealthSummary>,
     preview_color_health_budget: PreviewPerfColorHealthBudget,
@@ -83,6 +85,7 @@ struct PreviewMediaPlaybackPerfReport {
     frames: usize,
     frame_interval_ms: u64,
     readiness: PreviewReadinessCounts,
+    media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_health: Option<AppUiPreviewColorHealthSummary>,
     preview_color_health_budget: PreviewPerfColorHealthBudget,
@@ -833,6 +836,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
         )?;
 
         let preview_diagnostics = preview_service.diagnostics();
+        let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
         let preview_color_health = preview_diagnostics.color_health_summary();
         let preview_color_health_budget = preview_color_health_budget_from_env();
         let preview_color_health_failures =
@@ -842,6 +846,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             scenario: "preview_media_decode_cache",
             frames: frame_count,
             cache_iterations,
+            media_color_issues,
             preview_diagnostics,
             preview_color_health,
             preview_color_health_budget,
@@ -961,6 +966,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         );
 
         let preview_diagnostics = preview_service.diagnostics();
+        let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
         let preview_color_health = preview_diagnostics.color_health_summary();
         let preview_color_health_budget = preview_color_health_budget_from_env();
         let preview_color_health_failures =
@@ -971,6 +977,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             frames: frame_count,
             frame_interval_ms,
             readiness,
+            media_color_issues,
             preview_diagnostics,
             preview_color_health,
             preview_color_health_budget,
@@ -1159,6 +1166,37 @@ fn build_preview_media_perf_state(
     Ok(state)
 }
 
+fn summarize_active_sequence_media_color_issues(
+    state: &AppState,
+) -> anyhow::Result<VideoColorDiagnosticIssueAggregate> {
+    let Some(sequence) = state.sequence.as_ref() else {
+        return Ok(VideoColorDiagnosticIssueAggregate::default());
+    };
+    let Some(library) = state.asset_library.as_ref() else {
+        return Ok(VideoColorDiagnosticIssueAggregate::default());
+    };
+
+    let mut asset_ids = std::collections::HashSet::new();
+    for track in &sequence.video_tracks {
+        for clip in &track.clips {
+            asset_ids.insert(clip.asset_id);
+        }
+    }
+
+    let mut aggregate = VideoColorDiagnosticIssueAggregate::default();
+    for asset_id in asset_ids {
+        let Some(asset) = library.get_asset(asset_id)? else {
+            continue;
+        };
+        let Some(video) = asset.media_info.primary_video() else {
+            continue;
+        };
+        aggregate.observe(&VideoColorDiagnostic::from_stream(video));
+    }
+
+    Ok(aggregate)
+}
+
 fn wait_for_preview_ready(
     preview_service: &AppUiPreviewService,
     state: &AppState,
@@ -1309,6 +1347,14 @@ fn preview_perf_report_serializes_color_health_summary() {
         scenario: "preview-color-health-test",
         frames: 1,
         cache_iterations: 1,
+        media_color_issues: VideoColorDiagnosticIssueAggregate {
+            diagnostics: 1,
+            diagnostics_with_detected_color_space: 1,
+            method_cicp_tags: 1,
+            confidence_high: 1,
+            diagnostics_with_raw_cicp_metadata: 1,
+            ..VideoColorDiagnosticIssueAggregate::default()
+        },
         preview_diagnostics: diagnostics,
         preview_color_health,
         preview_color_health_budget,
@@ -1336,6 +1382,8 @@ fn preview_perf_report_serializes_color_health_summary() {
         json["preview_color_health"]["legacy_breakdown"]["media_transform"],
         0
     );
+    assert_eq!(json["media_color_issues"]["diagnostics"], 1);
+    assert_eq!(json["media_color_issues"]["method_cicp_tags"], 1);
     assert_eq!(json["preview_color_health_passed"], true);
     assert_eq!(
         json["preview_color_health_budget"]["max_legacy_reason_total"],

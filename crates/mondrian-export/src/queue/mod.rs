@@ -14,6 +14,7 @@ use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
 use mondrian_media::decode_video_frame_at_time_rgba_scaled;
+use mondrian_media::VideoColorDiagnosticIssueAggregate;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics, evaluate_timeline_render_plan,
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuColorFrame,
@@ -71,6 +72,8 @@ pub struct ExportJobDiagnostics {
 /// Export color diagnostics observed on the real render path.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExportJobColorDiagnostics {
+    /// Aggregated media color-diagnostic issues carried in the export input.
+    pub asset_issue_summary: VideoColorDiagnosticIssueAggregate,
     /// Aggregated input color-resolution branches across rendered frames.
     pub input_resolution_source_counts: InputColorResolutionSourceCounts,
     /// Aggregated color-stage scheduling diagnostics across rendered frames.
@@ -84,6 +87,8 @@ pub struct ExportJobColorDiagnostics {
 /// Stable summary of export color-path diagnostics for UI, telemetry, and reports.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExportJobColorDiagnosticsSummary {
+    /// Aggregated media color-diagnostic issues carried in the export input.
+    pub asset_issue_summary: VideoColorDiagnosticIssueAggregate,
     /// Timeline video frames that contributed color diagnostics.
     pub diagnosed_frames: u64,
     /// Inputs resolved from detected media metadata.
@@ -125,6 +130,11 @@ pub struct ExportJobColorDiagnosticsSummary {
 }
 
 impl ExportJobColorDiagnostics {
+    /// Record the aggregated media color-diagnostic issues for this export job.
+    pub fn record_asset_issue_summary(&mut self, summary: VideoColorDiagnosticIssueAggregate) {
+        self.asset_issue_summary = summary;
+    }
+
     /// Record color-resolution counts observed while rendering one frame.
     pub fn record_input_resolution_counts(&mut self, counts: InputColorResolutionSourceCounts) {
         self.input_resolution_source_counts.accumulate(counts);
@@ -154,7 +164,8 @@ impl ExportJobColorDiagnostics {
         let counts = self.input_resolution_source_counts;
         let stages = self.stage_diagnostics;
         let composite = self.composite_color_path_summary();
-        if self.diagnosed_frames == 0
+        if self.asset_issue_summary.diagnostics == 0
+            && self.diagnosed_frames == 0
             && counts.total() == 0
             && stages.total_stages == 0
             && composite.composite_plans() == 0
@@ -162,6 +173,7 @@ impl ExportJobColorDiagnostics {
             return None;
         }
         Some(ExportJobColorDiagnosticsSummary {
+            asset_issue_summary: self.asset_issue_summary,
             diagnosed_frames: self.diagnosed_frames,
             detected_metadata: counts.detected_metadata,
             override_count: counts.override_count,
@@ -1006,6 +1018,11 @@ fn write_timeline_frames_to_writer<W: Write>(
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; width as usize * height as usize * 4];
     let mut diagnostics = ExportJobDiagnostics::default();
+    diagnostics.color.record_asset_issue_summary(
+        VideoColorDiagnosticIssueAggregate::from_diagnostics(
+            timeline.asset_color_diagnostics.values(),
+        ),
+    );
 
     for index in 0..total {
         if cancel.load(Ordering::Relaxed) {
@@ -2114,6 +2131,17 @@ mod tests {
         assert_eq!(ExportJobColorDiagnostics::default().summary(), None);
 
         let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_asset_issue_summary(VideoColorDiagnosticIssueAggregate {
+            diagnostics: 2,
+            diagnostics_with_warnings: 1,
+            method_missing_metadata: 1,
+            method_decoder_unavailable: 1,
+            confidence_none: 1,
+            confidence_medium: 1,
+            missing_or_unsupported_cicp_tags: 1,
+            decoder_unavailable: 1,
+            ..VideoColorDiagnosticIssueAggregate::default()
+        });
         let mut counts = InputColorResolutionSourceCounts::default();
         counts.record(InputColorResolutionSource::DetectedMetadata);
         counts.record(InputColorResolutionSource::Override);
@@ -2144,6 +2172,17 @@ mod tests {
         assert_eq!(
             diagnostics.summary(),
             Some(ExportJobColorDiagnosticsSummary {
+                asset_issue_summary: VideoColorDiagnosticIssueAggregate {
+                    diagnostics: 2,
+                    diagnostics_with_warnings: 1,
+                    method_missing_metadata: 1,
+                    method_decoder_unavailable: 1,
+                    confidence_none: 1,
+                    confidence_medium: 1,
+                    missing_or_unsupported_cicp_tags: 1,
+                    decoder_unavailable: 1,
+                    ..VideoColorDiagnosticIssueAggregate::default()
+                },
                 diagnosed_frames: 1,
                 detected_metadata: 1,
                 override_count: 1,
@@ -2160,6 +2199,33 @@ mod tests {
                 },
                 float_linear_composites: 2,
                 fully_float_linear: true,
+                ..ExportJobColorDiagnosticsSummary::default()
+            })
+        );
+    }
+
+    #[test]
+    fn export_color_diagnostics_summary_surfaces_asset_issues_without_frame_evidence() {
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_asset_issue_summary(VideoColorDiagnosticIssueAggregate {
+            diagnostics: 1,
+            method_missing_metadata: 1,
+            confidence_none: 1,
+            missing_or_unsupported_cicp_tags: 1,
+            ..VideoColorDiagnosticIssueAggregate::default()
+        });
+
+        assert_eq!(
+            diagnostics.summary(),
+            Some(ExportJobColorDiagnosticsSummary {
+                asset_issue_summary: VideoColorDiagnosticIssueAggregate {
+                    diagnostics: 1,
+                    method_missing_metadata: 1,
+                    confidence_none: 1,
+                    missing_or_unsupported_cicp_tags: 1,
+                    ..VideoColorDiagnosticIssueAggregate::default()
+                },
+                gpu_path_ready: true,
                 ..ExportJobColorDiagnosticsSummary::default()
             })
         );

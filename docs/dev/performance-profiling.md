@@ -42,12 +42,15 @@ Use `MONDRIAN_EXPORT_SIM_REQUIRE_FULLY_FLOAT_LINEAR`,
 budget for an investigation.
 
 Preview media smoke reports include `preview_color_health`,
-`preview_color_health_budget`, `preview_color_health_passed`, and
-`preview_color_health_failures`. The decode/cache and continuous-playback
-smokes fail closed unless preview emits color-health diagnostics, stays fully
-float/linear, has no GPU blockers, has no upload/readback transfer stages,
-reports no structured legacy RGBA8 reasons, and has no missing-metadata policy
-rejections. Use `MONDRIAN_PREVIEW_REQUIRE_COLOR_HEALTH`,
+`preview_color_health_budget`, `preview_color_health_passed`,
+`preview_color_health_failures`, and `media_color_issues`. The decode/cache and
+continuous-playback smokes fail closed unless preview emits color-health
+diagnostics, stays fully float/linear, has no GPU blockers, has no
+upload/readback transfer stages, reports no structured legacy RGBA8 reasons,
+and has no missing-metadata policy rejections. `media_color_issues` is the
+machine-readable rollup of active-sequence asset diagnostics, including missing
+metadata, decoder-unavailable assets, hint conflicts, and HDR side-data
+presence. Use `MONDRIAN_PREVIEW_REQUIRE_COLOR_HEALTH`,
 `MONDRIAN_PREVIEW_REQUIRE_FULLY_FLOAT_LINEAR`,
 `MONDRIAN_PREVIEW_REQUIRE_GPU_PATH_READY`, `MONDRIAN_PREVIEW_MAX_GPU_BLOCKERS`,
 `MONDRIAN_PREVIEW_MAX_LEGACY_REASONS`, `MONDRIAN_PREVIEW_MAX_TRANSFER_STAGES`,
