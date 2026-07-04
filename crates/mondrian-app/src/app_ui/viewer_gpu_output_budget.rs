@@ -471,9 +471,52 @@ pub struct ViewerGpuOutputDisplayIssueSummary {
     pub reason: String,
     /// Output color space requested by the viewer boundary.
     pub output_color_space: Option<String>,
+    /// Display target active when the issue was recorded.
+    pub display_target: Option<ViewerGpuOutputDisplayTarget>,
+    /// Current surface format, when presentation is already configured.
+    pub current_surface_format: Option<String>,
+    /// Current surface color space, when presentation is already configured.
+    pub current_surface_color_space: Option<String>,
+    /// Current surface encoding, when presentation is already configured.
+    pub current_surface_encoding: Option<String>,
+    /// Selected surface format, when the blocker is tied to the current swapchain choice.
+    pub selected_surface_format: Option<String>,
+    /// Selected surface color space, when the blocker is tied to the current swapchain choice.
+    pub selected_surface_color_space: Option<String>,
+    /// Selected surface encoding, when the blocker is tied to the current swapchain choice.
+    pub selected_surface_encoding: Option<String>,
+    /// Surface HDR mode active when the issue was recorded.
+    pub surface_hdr_mode: Option<String>,
+    /// Desired surface format for satisfying the requested output.
+    pub desired_surface_format: Option<String>,
+    /// Desired surface color space for satisfying the requested output.
+    pub desired_surface_color_space: Option<String>,
+    /// Desired surface encoding for satisfying the requested output.
+    pub desired_surface_encoding: Option<String>,
+    /// Desired surface HDR mode for satisfying the requested output.
+    pub desired_surface_hdr_mode: Option<String>,
     /// Viewer/UI payload blocker, when the surface could be promoted but the
     /// frame payload path cannot yet present that contract.
     pub payload_blocker: Option<String>,
+    /// Number of supported surface color spaces on the selected format, when relevant.
+    pub supported_surface_color_space_count: Option<u8>,
+    /// Whether the target surface color space is supported on the selected format.
+    pub target_surface_color_space_supported: Option<bool>,
+}
+
+/// Stable monitor/display-target fingerprint consumed from viewer GPU-output diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ViewerGpuOutputDisplayTarget {
+    /// Display name reported by the OS, when available.
+    pub name: Option<String>,
+    /// Display origin in the virtual desktop space.
+    pub position: (i32, i32),
+    /// Physical display size in pixels.
+    pub physical_size: (u32, u32),
+    /// Display scale factor in parts per million.
+    pub scale_factor_ppm: u32,
+    /// Display refresh rate in millihertz, when available.
+    pub refresh_rate_millihertz: Option<u32>,
 }
 
 impl ViewerGpuOutputHealthCounts {
@@ -691,7 +734,67 @@ mod tests {
             Some(ViewerGpuOutputDisplayIssueSummary {
                 reason: "ReconfigureBlockedByPayload".to_owned(),
                 output_color_space: Some("DciP3".to_owned()),
+                display_target: None,
+                current_surface_format: None,
+                current_surface_color_space: None,
+                current_surface_encoding: None,
+                selected_surface_format: None,
+                selected_surface_color_space: None,
+                selected_surface_encoding: None,
+                surface_hdr_mode: None,
+                desired_surface_format: None,
+                desired_surface_color_space: None,
+                desired_surface_encoding: None,
+                desired_surface_hdr_mode: None,
                 payload_blocker: Some("UiExternalTextureCompositingRequiresSdrSrgb".to_owned()),
+                supported_surface_color_space_count: None,
+                target_surface_color_space_supported: None,
+            })
+        );
+    }
+
+    #[test]
+    fn budget_preserves_structured_display_issue_evidence() {
+        let jsonl = r#"
+{"health":{"status":"Blocked"},"display_issue_summary":{"reason":"OutputColorSpaceRequiresSurfaceColorSpace","output_color_space":"DciP3","display_target":{"name":"Reference Monitor","position":[1920,0],"physical_size":[3840,2160],"scale_factor_ppm":1000000,"refresh_rate_millihertz":60000},"current_surface_format":null,"current_surface_color_space":null,"current_surface_encoding":null,"selected_surface_format":"Bgra8UnormSrgb","selected_surface_color_space":"Srgb","selected_surface_encoding":"Srgb","surface_hdr_mode":"SdrOnly","desired_surface_format":null,"desired_surface_color_space":"DisplayP3","desired_surface_encoding":"Srgb","desired_surface_hdr_mode":"SdrOnly","payload_blocker":null,"supported_surface_color_space_count":2,"target_surface_color_space_supported":true}}
+"#;
+        let budget = ViewerGpuOutputBudget {
+            min_ready: 0,
+            max_blocked: 1,
+            max_display_issues: 1,
+            max_output_color_space_requires_surface_color_space: 1,
+            ..ViewerGpuOutputBudget::default()
+        };
+
+        let summary = evaluate_jsonl(jsonl, &budget).expect("budget summary");
+
+        assert!(summary.passed);
+        assert_eq!(
+            summary.last_display_issue,
+            Some(ViewerGpuOutputDisplayIssueSummary {
+                reason: "OutputColorSpaceRequiresSurfaceColorSpace".to_owned(),
+                output_color_space: Some("DciP3".to_owned()),
+                display_target: Some(ViewerGpuOutputDisplayTarget {
+                    name: Some("Reference Monitor".to_owned()),
+                    position: (1920, 0),
+                    physical_size: (3840, 2160),
+                    scale_factor_ppm: 1_000_000,
+                    refresh_rate_millihertz: Some(60_000),
+                }),
+                current_surface_format: None,
+                current_surface_color_space: None,
+                current_surface_encoding: None,
+                selected_surface_format: Some("Bgra8UnormSrgb".to_owned()),
+                selected_surface_color_space: Some("Srgb".to_owned()),
+                selected_surface_encoding: Some("Srgb".to_owned()),
+                surface_hdr_mode: Some("SdrOnly".to_owned()),
+                desired_surface_format: None,
+                desired_surface_color_space: Some("DisplayP3".to_owned()),
+                desired_surface_encoding: Some("Srgb".to_owned()),
+                desired_surface_hdr_mode: Some("SdrOnly".to_owned()),
+                payload_blocker: None,
+                supported_surface_color_space_count: Some(2),
+                target_surface_color_space_supported: Some(true),
             })
         );
     }

@@ -333,6 +333,11 @@ selected surface color-space change follows the same rebuild path. The preview
 service may keep a CPU `RasterImage` as the correctness/fallback path, but it
 does not own wgpu objects and must not create short-lived GPU output runtimes
 inside CPU media workers.
+The persisted `display_issue_summary` is not just a reason string: it carries
+the active display target fingerprint plus current/selected/desired surface
+format, color space, encoding, HDR mode, payload blocker, and support evidence
+so smoke tooling can diagnose the exact presentation contract mismatch from the
+JSONL report alone.
 The window session also owns viewer GPU output telemetry next to the runtime:
 each preparation attempt records whether it skipped because the external
 texture was already current, media was loading, the preview was unavailable, the

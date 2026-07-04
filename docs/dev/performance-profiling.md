@@ -75,6 +75,10 @@ some degraded frames for investigation. The same summary now reports
 `color_rejections`, the last structured viewer color rejection, and aggregated
 `media_issues`; `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_COLOR_REJECTIONS` keeps viewer
 GPU-output smokes fail-closed when metadata policy starts rejecting media.
+The summary preserves the last display issue's structured surface-contract
+evidence as well: display target fingerprint, current/selected/desired surface
+format and color space, SDR/PQ/HLG encoding, HDR mode, payload blocker, and
+whether the required target surface color space was actually supported.
 Use the per-reason viewer display thresholds
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_HDR_OUTPUT_REQUIRES_HDR_SURFACE`,
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OUTPUT_COLOR_SPACE_REQUIRES_SURFACE_COLOR_SPACE`,

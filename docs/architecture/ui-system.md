@@ -141,7 +141,11 @@ Telemetry must also expose a stable display issue summary that names the reason,
 target output color space, current or selected surface contract, desired surface
 contract, payload blocker, and whether the target surface color space is
 reported as supported. UI, perf JSON, and diagnostics tooling should consume this
-summary rather than parsing Debug-formatted blocker/readiness payloads.
+summary rather than parsing Debug-formatted blocker/readiness payloads. The
+summary must preserve the display-target fingerprint and surface encoding
+evidence end to end, so viewer smoke/budget reports can tell whether a failure
+happened on the wrong monitor, on the wrong surface contract, or only because
+the current payload path cannot yet present that contract.
 The same rule applies to media interpretation failures: viewer empty-state
 diagnostics and export queue job summaries should consume
 `VideoColorDiagnosticIssueSummary` / `VideoColorDiagnosticIssueAggregate`

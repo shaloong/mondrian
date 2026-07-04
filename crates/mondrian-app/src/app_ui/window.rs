@@ -238,16 +238,21 @@ enum AppUiDisplayIssueReason {
     UnsupportedSurfaceContract,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 struct AppUiDisplayIssueSummary {
     reason: AppUiDisplayIssueReason,
     output_color_space: ColorSpace,
+    display_target: Option<AppUiDisplayTarget>,
     current_surface_format: Option<AppUiSurfaceFormatDiagnostic>,
     current_surface_color_space: Option<AppUiSurfaceColorSpaceDiagnostic>,
+    current_surface_encoding: Option<AppUiSurfaceEncodingDiagnostic>,
+    selected_surface_format: Option<AppUiSurfaceFormatDiagnostic>,
     selected_surface_color_space: Option<AppUiSurfaceColorSpaceDiagnostic>,
+    selected_surface_encoding: Option<AppUiSurfaceEncodingDiagnostic>,
     surface_hdr_mode: Option<AppUiSurfaceHdrMode>,
     desired_surface_format: Option<AppUiSurfaceFormatDiagnostic>,
     desired_surface_color_space: Option<AppUiSurfaceColorSpaceDiagnostic>,
+    desired_surface_encoding: Option<AppUiSurfaceEncodingDiagnostic>,
     desired_surface_hdr_mode: Option<AppUiSurfaceHdrMode>,
     payload_blocker: Option<AppUiDisplayPresentationPayloadBlocker>,
     supported_surface_color_space_count: Option<u8>,
@@ -592,14 +597,22 @@ impl AppUiDisplayIssueSummary {
         Self {
             reason,
             output_color_space: blocker.output_color_space,
+            display_target: None,
             current_surface_format: None,
             current_surface_color_space: None,
+            current_surface_encoding: None,
+            selected_surface_format: Some(blocker.selected_surface_format),
             selected_surface_color_space: Some(blocker.selected_surface_color_space),
+            selected_surface_encoding: Some(blocker.selected_surface_encoding),
             surface_hdr_mode: Some(blocker.surface_hdr_mode),
             desired_surface_format: None,
             desired_surface_color_space: target_display_surface_color_space(
                 blocker.output_color_space,
             ),
+            desired_surface_encoding: target_display_surface_color_space(
+                blocker.output_color_space,
+            )
+            .map(app_ui_surface_color_space_diagnostic_to_encoding),
             desired_surface_hdr_mode: target_display_surface_color_space(
                 blocker.output_color_space,
             )
@@ -630,12 +643,17 @@ impl AppUiDisplayIssueSummary {
         Some(Self {
             reason,
             output_color_space: readiness.output_color_space,
+            display_target: None,
             current_surface_format: Some(readiness.current_surface_format),
             current_surface_color_space: Some(readiness.current_surface_color_space),
+            current_surface_encoding: Some(readiness.current_surface_encoding),
+            selected_surface_format: None,
             selected_surface_color_space: None,
+            selected_surface_encoding: None,
             surface_hdr_mode: Some(readiness.current_surface_hdr_mode),
             desired_surface_format: readiness.desired_surface_format,
             desired_surface_color_space: readiness.desired_surface_color_space,
+            desired_surface_encoding: readiness.desired_surface_encoding,
             desired_surface_hdr_mode: readiness.desired_surface_hdr_mode,
             payload_blocker: readiness.payload_blocker,
             supported_surface_color_space_count: None,
@@ -946,6 +964,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                         trace_viewer_gpu_output_telemetry(
                             &host,
                             &session.viewer_gpu_output_telemetry,
+                            &session.display_output_contract.display_target,
                         );
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
@@ -1324,7 +1343,7 @@ struct AppUiSurfaceFormatColorSpaces {
     extended_display_p3: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 struct AppUiDisplayTarget {
     name: Option<String>,
     position: (i32, i32),
@@ -1360,6 +1379,9 @@ impl AppUiDisplayOutputContract {
                 ),
                 current_surface_color_space: app_ui_surface_color_space_diagnostic(
                     self.surface_color.color_space,
+                ),
+                current_surface_encoding: app_ui_surface_encoding_diagnostic(
+                    self.surface_color.encoding,
                 ),
                 current_surface_hdr_mode: self.surface_color.hdr_mode,
                 desired_surface_format: Some(app_ui_surface_format_diagnostic(
@@ -1402,6 +1424,9 @@ impl AppUiDisplayOutputContract {
             current_surface_color_space: app_ui_surface_color_space_diagnostic(
                 self.surface_color.color_space,
             ),
+            current_surface_encoding: app_ui_surface_encoding_diagnostic(
+                self.surface_color.encoding,
+            ),
             current_surface_hdr_mode: self.surface_color.hdr_mode,
             desired_surface_format: Some(app_ui_surface_format_diagnostic(
                 self.surface_color.format,
@@ -1430,6 +1455,9 @@ impl AppUiDisplayOutputContract {
             current_surface_color_space: app_ui_surface_color_space_diagnostic(
                 self.surface_color.color_space,
             ),
+            current_surface_encoding: app_ui_surface_encoding_diagnostic(
+                self.surface_color.encoding,
+            ),
             current_surface_hdr_mode: self.surface_color.hdr_mode,
             desired_surface_format: None,
             desired_surface_color_space: desired_color_space
@@ -1456,7 +1484,9 @@ impl AppUiDisplayOutputContract {
         {
             return Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
                 output_color_space: boundary.output_color_space,
+                selected_surface_format: self.surface_color.format,
                 selected_surface_color_space: self.surface_color.color_space,
+                selected_surface_encoding: self.surface_color.encoding,
                 surface_hdr_mode: self.surface_color.hdr_mode,
                 supported_surface_color_spaces,
             });
@@ -1472,7 +1502,9 @@ impl AppUiDisplayOutputContract {
         Some(
             AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
                 output_color_space: boundary.output_color_space,
+                selected_surface_format: self.surface_color.format,
                 selected_surface_color_space: self.surface_color.color_space,
+                selected_surface_encoding: self.surface_color.encoding,
                 surface_hdr_mode: self.surface_color.hdr_mode,
                 supported_surface_color_spaces,
             },
@@ -1521,13 +1553,17 @@ fn display_output_contract_requires_renderer_rebuild(
 enum AppUiDisplayBoundaryBlocker {
     HdrOutputRequiresHdrSurface {
         output_color_space: ColorSpace,
+        selected_surface_format: wgpu::TextureFormat,
         selected_surface_color_space: wgpu::SurfaceColorSpace,
+        selected_surface_encoding: AppUiSurfaceEncoding,
         surface_hdr_mode: AppUiSurfaceHdrMode,
         supported_surface_color_spaces: Vec<wgpu::SurfaceColorSpace>,
     },
     OutputColorSpaceRequiresSurfaceColorSpace {
         output_color_space: ColorSpace,
+        selected_surface_format: wgpu::TextureFormat,
         selected_surface_color_space: wgpu::SurfaceColorSpace,
+        selected_surface_encoding: AppUiSurfaceEncoding,
         surface_hdr_mode: AppUiSurfaceHdrMode,
         supported_surface_color_spaces: Vec<wgpu::SurfaceColorSpace>,
     },
@@ -1586,6 +1622,7 @@ struct AppUiDisplayPresentationReadinessDiagnostics {
     output_color_space: ColorSpace,
     current_surface_format: AppUiSurfaceFormatDiagnostic,
     current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic,
+    current_surface_encoding: AppUiSurfaceEncodingDiagnostic,
     current_surface_hdr_mode: AppUiSurfaceHdrMode,
     desired_surface_format: Option<AppUiSurfaceFormatDiagnostic>,
     desired_surface_color_space: Option<AppUiSurfaceColorSpaceDiagnostic>,
@@ -1598,7 +1635,9 @@ struct AppUiDisplayPresentationReadinessDiagnostics {
 struct AppUiDisplayBoundaryBlockerDiagnostics {
     kind: AppUiDisplayBoundaryBlockerKind,
     output_color_space: ColorSpace,
+    selected_surface_format: AppUiSurfaceFormatDiagnostic,
     selected_surface_color_space: AppUiSurfaceColorSpaceDiagnostic,
+    selected_surface_encoding: AppUiSurfaceEncodingDiagnostic,
     surface_hdr_mode: AppUiSurfaceHdrMode,
     supported_surface_color_space_count: u8,
     supports_srgb: bool,
@@ -1615,25 +1654,33 @@ impl AppUiDisplayBoundaryBlocker {
         match self {
             Self::HdrOutputRequiresHdrSurface {
                 output_color_space,
+                selected_surface_format,
                 selected_surface_color_space,
+                selected_surface_encoding,
                 surface_hdr_mode,
                 supported_surface_color_spaces,
             } => AppUiDisplayBoundaryBlockerDiagnostics::new(
                 AppUiDisplayBoundaryBlockerKind::HdrOutputRequiresHdrSurface,
                 *output_color_space,
+                *selected_surface_format,
                 *selected_surface_color_space,
+                *selected_surface_encoding,
                 *surface_hdr_mode,
                 supported_surface_color_spaces,
             ),
             Self::OutputColorSpaceRequiresSurfaceColorSpace {
                 output_color_space,
+                selected_surface_format,
                 selected_surface_color_space,
+                selected_surface_encoding,
                 surface_hdr_mode,
                 supported_surface_color_spaces,
             } => AppUiDisplayBoundaryBlockerDiagnostics::new(
                 AppUiDisplayBoundaryBlockerKind::OutputColorSpaceRequiresSurfaceColorSpace,
                 *output_color_space,
+                *selected_surface_format,
                 *selected_surface_color_space,
+                *selected_surface_encoding,
                 *surface_hdr_mode,
                 supported_surface_color_spaces,
             ),
@@ -1645,15 +1692,21 @@ impl AppUiDisplayBoundaryBlockerDiagnostics {
     fn new(
         kind: AppUiDisplayBoundaryBlockerKind,
         output_color_space: ColorSpace,
+        selected_surface_format: wgpu::TextureFormat,
         selected_surface_color_space: wgpu::SurfaceColorSpace,
+        selected_surface_encoding: AppUiSurfaceEncoding,
         surface_hdr_mode: AppUiSurfaceHdrMode,
         supported_surface_color_spaces: &[wgpu::SurfaceColorSpace],
     ) -> Self {
         Self {
             kind,
             output_color_space,
+            selected_surface_format: app_ui_surface_format_diagnostic(selected_surface_format),
             selected_surface_color_space: app_ui_surface_color_space_diagnostic(
                 selected_surface_color_space,
+            ),
+            selected_surface_encoding: app_ui_surface_encoding_diagnostic(
+                selected_surface_encoding,
             ),
             surface_hdr_mode,
             supported_surface_color_space_count: supported_surface_color_spaces
@@ -1799,6 +1852,21 @@ fn app_ui_surface_hdr_mode_from_diagnostic(
         | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgb
         | AppUiSurfaceColorSpaceDiagnostic::ExtendedDisplayP3
         | AppUiSurfaceColorSpaceDiagnostic::Other => AppUiSurfaceHdrMode::SdrOnly,
+    }
+}
+
+fn app_ui_surface_color_space_diagnostic_to_encoding(
+    color_space: AppUiSurfaceColorSpaceDiagnostic,
+) -> AppUiSurfaceEncodingDiagnostic {
+    match color_space {
+        AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq => AppUiSurfaceEncodingDiagnostic::Pq,
+        AppUiSurfaceColorSpaceDiagnostic::Bt2100Hlg => AppUiSurfaceEncodingDiagnostic::Hlg,
+        AppUiSurfaceColorSpaceDiagnostic::Srgb
+        | AppUiSurfaceColorSpaceDiagnostic::DisplayP3
+        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgbLinear
+        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgb
+        | AppUiSurfaceColorSpaceDiagnostic::ExtendedDisplayP3
+        | AppUiSurfaceColorSpaceDiagnostic::Other => AppUiSurfaceEncodingDiagnostic::Srgb,
     }
 }
 
@@ -2136,14 +2204,22 @@ fn trace_color_output_runtime(
 fn viewer_gpu_output_diagnostics(
     host: &AppUiHost,
     telemetry: &AppUiViewerGpuOutputTelemetry,
+    display_target: &AppUiDisplayTarget,
 ) -> AppUiViewerGpuOutputDiagnostics {
     let mut diagnostics = telemetry.diagnostics();
     diagnostics.last_color_rejection = host.current_viewer_color_rejection();
+    if let Some(issue) = diagnostics.display_issue_summary.as_mut() {
+        issue.display_target = Some(display_target.clone());
+    }
     diagnostics
 }
 
-fn trace_viewer_gpu_output_telemetry(host: &AppUiHost, telemetry: &AppUiViewerGpuOutputTelemetry) {
-    let diagnostics = viewer_gpu_output_diagnostics(host, telemetry);
+fn trace_viewer_gpu_output_telemetry(
+    host: &AppUiHost,
+    telemetry: &AppUiViewerGpuOutputTelemetry,
+    display_target: &AppUiDisplayTarget,
+) {
+    let diagnostics = viewer_gpu_output_diagnostics(host, telemetry, display_target);
     tracing::trace!(
         invocations = diagnostics.invocations,
         non_workspace_skips = diagnostics.non_workspace_skips,
@@ -3242,7 +3318,9 @@ mod tests {
             contract.boundary_blocker(&boundary),
             Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
                 output_color_space: ColorSpace::Rec2100Pq,
+                selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
                 selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
                 surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 supported_surface_color_spaces: vec![wgpu::SurfaceColorSpace::Srgb],
             })
@@ -3252,7 +3330,9 @@ mod tests {
             Some(AppUiDisplayBoundaryBlockerDiagnostics {
                 kind: AppUiDisplayBoundaryBlockerKind::HdrOutputRequiresHdrSurface,
                 output_color_space: ColorSpace::Rec2100Pq,
+                selected_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 selected_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                selected_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
                 surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 supported_surface_color_space_count: 1,
                 supports_srgb: true,
@@ -3306,6 +3386,7 @@ mod tests {
                 output_color_space: ColorSpace::Rec709,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
                 current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                 desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
@@ -3331,7 +3412,9 @@ mod tests {
             Some(
                 AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
                     output_color_space: ColorSpace::DciP3,
+                    selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
                     selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                    selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
                     surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                     supported_surface_color_spaces: vec![
                         wgpu::SurfaceColorSpace::Srgb,
@@ -3359,6 +3442,7 @@ mod tests {
                 output_color_space: ColorSpace::DciP3,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
                 current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                 desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
@@ -3389,6 +3473,7 @@ mod tests {
     fn display_output_contract_accepts_pq_boundary_on_pq_surface() {
         let mut contract = test_display_output_contract();
         contract.surface_color.color_space = wgpu::SurfaceColorSpace::Bt2100Pq;
+        contract.surface_color.encoding = AppUiSurfaceEncoding::Pq;
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
         contract.format_color_spaces[0].bt2100_pq = true;
         let boundary = RenderOutputColorBoundary::display(
@@ -3404,6 +3489,7 @@ mod tests {
     fn display_output_contract_blocks_pq_boundary_on_hlg_surface_as_color_space_mismatch() {
         let mut contract = test_display_output_contract();
         contract.surface_color.color_space = wgpu::SurfaceColorSpace::Bt2100Hlg;
+        contract.surface_color.encoding = AppUiSurfaceEncoding::Hlg;
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrHlg;
         contract.format_color_spaces[0].bt2100_pq = true;
         contract.format_color_spaces[0].bt2100_hlg = true;
@@ -3418,7 +3504,9 @@ mod tests {
             Some(
                 AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
                     output_color_space: ColorSpace::Rec2100Pq,
+                    selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
                     selected_surface_color_space: wgpu::SurfaceColorSpace::Bt2100Hlg,
+                    selected_surface_encoding: AppUiSurfaceEncoding::Hlg,
                     surface_hdr_mode: AppUiSurfaceHdrMode::HdrHlg,
                     supported_surface_color_spaces: vec![
                         wgpu::SurfaceColorSpace::Srgb,
@@ -3447,7 +3535,9 @@ mod tests {
             Some(
                 AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
                     output_color_space: ColorSpace::Rec2020,
+                    selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
                     selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                    selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
                     surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                     supported_surface_color_spaces: vec![
                         wgpu::SurfaceColorSpace::Srgb,
@@ -3474,7 +3564,9 @@ mod tests {
             Some(
                 AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
                     output_color_space: ColorSpace::SLog3,
+                    selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
                     selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                    selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
                     surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                     supported_surface_color_spaces: vec![wgpu::SurfaceColorSpace::Srgb],
                 }
@@ -3498,6 +3590,7 @@ mod tests {
                 output_color_space: ColorSpace::SLog3,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
                 current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 desired_surface_format: None,
                 desired_surface_color_space: None,
@@ -3540,7 +3633,9 @@ mod tests {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let blocker = AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
             output_color_space: ColorSpace::Rec2100Pq,
+            selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
             selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+            selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
             surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
             supported_surface_color_spaces: vec![wgpu::SurfaceColorSpace::Srgb],
         };
@@ -3603,7 +3698,9 @@ mod tests {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let hdr_blocker = AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
             output_color_space: ColorSpace::Rec2100Pq,
+            selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
             selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+            selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
             surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
             supported_surface_color_spaces: vec![
                 wgpu::SurfaceColorSpace::Srgb,
@@ -3612,7 +3709,9 @@ mod tests {
         };
         let p3_blocker = AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
             output_color_space: ColorSpace::DciP3,
+            selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
             selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+            selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
             surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
             supported_surface_color_spaces: vec![
                 wgpu::SurfaceColorSpace::Srgb,
@@ -3633,7 +3732,9 @@ mod tests {
                     kind:
                         AppUiDisplayBoundaryBlockerKind::OutputColorSpaceRequiresSurfaceColorSpace,
                     output_color_space: ColorSpace::DciP3,
+                    selected_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                     selected_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                    selected_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
                     surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                     supported_surface_color_space_count: 2,
                     supports_srgb: true,
@@ -3647,12 +3748,17 @@ mod tests {
                 display_issue_summary: Some(AppUiDisplayIssueSummary {
                     reason: AppUiDisplayIssueReason::OutputColorSpaceRequiresSurfaceColorSpace,
                     output_color_space: ColorSpace::DciP3,
+                    display_target: None,
                     current_surface_format: None,
                     current_surface_color_space: None,
+                    current_surface_encoding: None,
+                    selected_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                     selected_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
+                    selected_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                     surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                     desired_surface_format: None,
                     desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3,),
+                    desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                     desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                     payload_blocker: None,
                     supported_surface_color_space_count: Some(2),
@@ -3682,6 +3788,7 @@ mod tests {
             output_color_space: ColorSpace::DciP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+            current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
             current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
             desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
@@ -3703,14 +3810,19 @@ mod tests {
                 display_issue_summary: Some(AppUiDisplayIssueSummary {
                     reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
                     output_color_space: ColorSpace::DciP3,
+                    display_target: None,
                     current_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                     current_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
+                    current_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
+                    selected_surface_format: None,
                     selected_surface_color_space: None,
+                    selected_surface_encoding: None,
                     surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                     desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                     desired_surface_color_space: Some(
                         AppUiSurfaceColorSpaceDiagnostic::DisplayP3,
                     ),
+                    desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                     desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                     payload_blocker: Some(
                         AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
@@ -3729,7 +3841,9 @@ mod tests {
         telemetry.record_display_contract_blocker(
             &AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
                 output_color_space: ColorSpace::Rec2100Pq,
+                selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
                 selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
                 surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 supported_surface_color_spaces: vec![
                     wgpu::SurfaceColorSpace::Srgb,
@@ -3743,12 +3857,17 @@ mod tests {
             Some(AppUiDisplayIssueSummary {
                 reason: AppUiDisplayIssueReason::HdrOutputRequiresHdrSurface,
                 output_color_space: ColorSpace::Rec2100Pq,
+                display_target: None,
                 current_surface_format: None,
                 current_surface_color_space: None,
+                current_surface_encoding: None,
+                selected_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                 selected_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
+                selected_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                 surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                 desired_surface_format: None,
                 desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq),
+                desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Pq),
                 desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::HdrPq),
                 payload_blocker: None,
                 supported_surface_color_space_count: Some(2),
@@ -3765,6 +3884,7 @@ mod tests {
             output_color_space: ColorSpace::DciP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+            current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
             current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
             desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
@@ -3781,12 +3901,17 @@ mod tests {
             Some(AppUiDisplayIssueSummary {
                 reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
                 output_color_space: ColorSpace::DciP3,
+                display_target: None,
                 current_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                 current_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Srgb),
+                current_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
+                selected_surface_format: None,
                 selected_surface_color_space: None,
+                selected_surface_encoding: None,
                 surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                 desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
                 desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
+                desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                 desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                 payload_blocker: Some(
                     AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
@@ -3794,6 +3919,39 @@ mod tests {
                 supported_surface_color_space_count: None,
                 target_surface_color_space_supported: Some(true),
             })
+        );
+    }
+
+    #[test]
+    fn viewer_gpu_output_diagnostics_attach_display_target_to_issue_summary() {
+        let host = AppUiHost::new(AppState::new());
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        telemetry.record_display_contract_blocker(
+            &AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
+                output_color_space: ColorSpace::Rec2100Pq,
+                selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
+                selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
+                surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
+                supported_surface_color_spaces: vec![
+                    wgpu::SurfaceColorSpace::Srgb,
+                    wgpu::SurfaceColorSpace::Bt2100Pq,
+                ],
+            },
+        );
+        let display_target = AppUiDisplayTarget {
+            name: Some("Reference Monitor".to_owned()),
+            position: (1920, 0),
+            physical_size: (3840, 2160),
+            scale_factor_ppm: 1_000_000,
+            refresh_rate_millihertz: Some(60_000),
+        };
+
+        let diagnostics = viewer_gpu_output_diagnostics(&host, &telemetry, &display_target);
+
+        assert_eq!(
+            diagnostics.display_issue_summary.expect("display issue summary").display_target,
+            Some(display_target)
         );
     }
 
@@ -3886,6 +4044,7 @@ mod tests {
                 output_color_space: ColorSpace::Srgb,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
                 current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 desired_surface_format: None,
                 desired_surface_color_space: None,
@@ -3934,6 +4093,7 @@ mod tests {
             output_color_space: ColorSpace::DciP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+            current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
             current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
             desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
@@ -4010,6 +4170,7 @@ mod tests {
                 output_color_space: ColorSpace::Srgb,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
+                current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
                 current_surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 desired_surface_format: None,
                 desired_surface_color_space: None,
