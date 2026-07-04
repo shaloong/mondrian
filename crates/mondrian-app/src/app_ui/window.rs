@@ -332,6 +332,10 @@ enum AppUiDisplayIssueReason {
     ReconfigureBlockedByPayload,
     UnsupportedPresentationIntent,
     UnsupportedSurfaceContract,
+    /// OS-level ICC profile, EDR, or HDR behavior is not supported on this
+    /// platform. Display management cannot guarantee correct color presentation.
+    #[allow(dead_code)] // Used by budget evaluator for forward-compat classification
+    OsDisplayProfileUnsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

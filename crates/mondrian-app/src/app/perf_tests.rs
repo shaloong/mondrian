@@ -175,6 +175,10 @@ fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNSUPPORTED_SURFACE_CONTRACT",
             0,
         ),
+        max_os_display_profile_unsupported: env_u64(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OS_DISPLAY_PROFILE_UNSUPPORTED",
+            0,
+        ),
         max_unknown_display_issues: env_u64(
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
             0,
@@ -1400,6 +1404,10 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
             "15",
         );
         std::env::set_var(
+            "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_OS_DISPLAY_PROFILE_UNSUPPORTED",
+            "30",
+        );
+        std::env::set_var(
             "MONDRIAN_VIEWER_GPU_OUTPUT_MAX_UNKNOWN_DISPLAY_ISSUES",
             "16",
         );
@@ -1473,6 +1481,7 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
             max_reconfigure_blocked_by_payload: 13,
             max_unsupported_presentation_intent: 14,
             max_unsupported_surface_contract: 15,
+            max_os_display_profile_unsupported: 30,
             max_unknown_display_issues: 16,
             max_display_contract_refreshes: 17,
             max_display_issue_refresh_correlations: 18,

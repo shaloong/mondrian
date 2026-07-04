@@ -39,6 +39,8 @@ pub struct ViewerGpuOutputBudget {
     pub max_unsupported_presentation_intent: u64,
     /// Maximum allowed records lacking a supported surface contract.
     pub max_unsupported_surface_contract: u64,
+    /// Maximum allowed records where OS display profile is unsupported.
+    pub max_os_display_profile_unsupported: u64,
     /// Maximum allowed records carrying an unknown display issue reason.
     pub max_unknown_display_issues: u64,
     /// Maximum allowed display-contract refresh events.
@@ -85,6 +87,7 @@ impl Default for ViewerGpuOutputBudget {
             max_reconfigure_blocked_by_payload: 0,
             max_unsupported_presentation_intent: 0,
             max_unsupported_surface_contract: 0,
+            max_os_display_profile_unsupported: 0,
             max_unknown_display_issues: 0,
             max_display_contract_refreshes: u64::MAX,
             max_display_issue_refresh_correlations: 0,
@@ -1383,6 +1386,11 @@ fn push_display_contract_root_cause(
             "inspect_unsupported_surface_contract",
             "Inspect the desired output contract and confirm the current monitor/surface can present it.",
         ),
+        "os_display_profile_unsupported" => (
+            "os_display_profile_unsupported",
+            "inspect_os_display_profile_support",
+            "OS-level ICC profile, EDR, or HDR behavior is not supported. Display management cannot guarantee correct color presentation on this platform.",
+        ),
         "unknown_display_issues" => (
             "unknown_display_issue_reason",
             "inspect_unknown_display_issue_reason",
@@ -1902,6 +1910,8 @@ pub struct ViewerGpuOutputDisplayIssueCounts {
     pub unsupported_presentation_intent: u64,
     /// No supported surface contract exists for the requested output.
     pub unsupported_surface_contract: u64,
+    /// OS display profile is unsupported on this platform.
+    pub os_display_profile_unsupported: u64,
     /// Records whose display issue includes a payload blocker.
     pub payload_blockers: u64,
     /// Unknown reason strings from newer diagnostics.
@@ -2042,6 +2052,10 @@ impl ViewerGpuOutputDisplayIssueCounts {
             "UnsupportedSurfaceContract" => {
                 self.unsupported_surface_contract =
                     self.unsupported_surface_contract.saturating_add(1);
+            }
+            "OsDisplayProfileUnsupported" => {
+                self.os_display_profile_unsupported =
+                    self.os_display_profile_unsupported.saturating_add(1);
             }
             _ => {
                 self.unknown = self.unknown.saturating_add(1);

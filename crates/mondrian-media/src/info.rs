@@ -370,6 +370,7 @@ pub struct VideoColorDiagnosticIssueSummary {
     /// Whether ICC profile side data was present.
     pub has_icc_profile: bool,
     /// Number of ICC-vs-CICP mismatch warnings.
+    #[serde(default)]
     pub icc_cicp_mismatch: u64,
     /// Whether the stream has warnings that should be shown to users.
     pub has_user_visible_warnings: bool,
@@ -437,6 +438,7 @@ pub struct VideoColorDiagnosticIssueAggregate {
     /// Diagnostics that carried ICC profile metadata.
     pub diagnostics_with_icc_profile: u64,
     /// Diagnostics with ICC-vs-CICP mismatch warnings.
+    #[serde(default)]
     pub diagnostics_with_icc_cicp_mismatch: u64,
 }
 
