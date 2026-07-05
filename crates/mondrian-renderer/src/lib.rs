@@ -35,11 +35,11 @@ pub use color_frame::{
 };
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,
-    execute_cpu_output_boundary_rgba8, execute_cpu_output_stage, CpuRenderColorStageExecutor,
-    RenderColorStage, RenderColorStageDiagnostics, RenderColorStageExecution,
-    RenderColorStageGpuBlockerBreakdown, RenderColorStageMode, RenderColorStagePlan,
-    RenderColorStagePlanner, RenderGpuColorPassExecutionError, RenderGpuColorPassInputView,
-    RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
+    execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8, execute_cpu_output_stage,
+    CpuRenderColorStageExecutor, RenderColorStage, RenderColorStageDiagnostics,
+    RenderColorStageExecution, RenderColorStageGpuBlockerBreakdown, RenderColorStageMode,
+    RenderColorStagePlan, RenderColorStagePlanner, RenderGpuColorPassExecutionError,
+    RenderGpuColorPassInputView, RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
     RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView,
     RenderGpuOutputBoundaryBackendContext, RenderGpuOutputBoundaryRecordError,
     RenderGpuOutputBoundaryRecordRequest, RenderGpuOutputBoundaryRuntime,
@@ -54,17 +54,17 @@ pub use color_stage::{
     RenderGpuOutputStageReadbackError, RenderGpuOutputStageRecord, RenderGpuOutputStageRecordError,
     RenderGpuOutputStageRecordRequest, RenderGpuOutputStageResourcePlan,
     RenderGpuOutputStageResourcePlanError, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryExecutor, RenderOutputColorBoundaryGpuRecordError,
-    RenderOutputColorBoundaryPlanner, RenderOutputColorBoundaryRgba8,
-    RenderOutputColorBoundaryStagePlan, RenderOutputColorBoundaryTarget,
-    RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
+    RenderOutputColorBoundaryExecutor, RenderOutputColorBoundaryFloat,
+    RenderOutputColorBoundaryGpuRecordError, RenderOutputColorBoundaryPlanner,
+    RenderOutputColorBoundaryRgba8, RenderOutputColorBoundaryStagePlan,
+    RenderOutputColorBoundaryTarget, RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,
     RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderColorTransformError,
     RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
     RenderInputTransform, RenderInputTransformResult, RenderOcioDisplayView,
-    RenderOutputTransformResult,
+    RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;

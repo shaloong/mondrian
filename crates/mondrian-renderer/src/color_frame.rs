@@ -828,11 +828,16 @@ pub struct CpuColorFrame {
 impl CpuColorFrame {
     /// Wrap a linear-light frame as a working-space render-graph frame.
     pub fn working(frame: RgbaF32Frame) -> Self {
+        Self::linear(frame, ColorFrameDomain::Working)
+    }
+
+    /// Wrap a linear-light frame with an explicit render-graph domain.
+    pub fn linear(frame: RgbaF32Frame, domain: ColorFrameDomain) -> Self {
         let descriptor = ColorFrameDescriptor {
             width: frame.width,
             height: frame.height,
             color_space: frame.color_space,
-            domain: ColorFrameDomain::Working,
+            domain,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
         };

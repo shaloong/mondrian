@@ -16,7 +16,7 @@ use crate::{
     OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
     RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
     RenderInputTransform, RenderInputTransformResult, RenderOcioDisplayView,
-    RenderOutputTransformResult,
+    RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
 use serde::{Deserialize, Serialize};
@@ -2192,6 +2192,43 @@ impl CpuRenderColorStageExecutor {
         Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
     }
 
+    /// Execute a CPU working-space -> display/export stage plan, returning
+    /// float output without u8 quantization.
+    ///
+    /// The stage plan may declare an `EncodedRgba8` output descriptor (from the
+    /// CPU-only planner), but this executor intentionally produces a
+    /// `LinearFloat` result. Output descriptor validation is relaxed to the
+    /// color space and domain contract because the final pipe/presentation
+    /// encoding happens after this renderer-owned color transform.
+    pub fn output_transform_float(
+        frame: &CpuColorFrame,
+        plan: &RenderColorStagePlan,
+    ) -> Result<
+        RenderColorStageExecution<RenderOutputTransformFloatResult>,
+        RenderColorTransformError,
+    > {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "output stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuOutputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "output stage execution only supports CPU output transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result = CpuColorTransformExecutor::transform_float(frame, transform)?;
+        let actual = result.frame.descriptor();
+        if actual.color_space != output.color_space || actual.domain != output.domain {
+            return Err(RenderColorTransformError::StageDescriptorMismatch {
+                expected: *output,
+                actual,
+            });
+        }
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+    }
+
     /// Execute a CPU source/import -> working-space stage plan from a linear
     /// float source, bypassing RGBA8 quantization.
     pub fn input_to_working_float(
@@ -2266,6 +2303,52 @@ pub fn execute_cpu_output_boundary_rgba8(
     let output_descriptor = output.result.frame.descriptor();
     Ok(RenderOutputColorBoundaryRgba8 {
         rgba: output.result.frame.into_rgba(),
+        color_diagnostics: output.result.diagnostics,
+        stage_diagnostics: output.stage_diagnostics,
+        output_descriptor,
+    })
+}
+
+/// Float output plus diagnostics for a final preview/export color boundary.
+///
+/// This is the precision-preserving alternative to [`RenderOutputColorBoundaryRgba8`].
+/// The caller receives a float display/export frame with the output transform
+/// applied, avoiding an intermediate u8 quantization round-trip.
+#[derive(Debug)]
+pub struct RenderOutputColorBoundaryFloat {
+    /// Float display/export frame with output transform applied.
+    pub frame: CpuColorFrame,
+    /// Color transform diagnostics emitted by the boundary executor.
+    pub color_diagnostics: crate::RenderColorTransformDiagnostics,
+    /// Stage diagnostics for the executed boundary plan.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Descriptor of the output frame.
+    pub output_descriptor: ColorFrameDescriptor,
+}
+
+/// Plan and execute a CPU final-output boundary, returning float output without
+/// u8 quantization.
+///
+/// This is the renderer-owned CPU float/high-bit output boundary for
+/// high-bit-depth export. It applies the working -> output color transform
+/// through OCIO float processors, preserving HDR/wide-gamut precision.
+///
+/// For export use: the caller can flatten the float frame into `[f32]` and use
+/// `ExportFrameContract::pack_rgba_f32()` to produce `rgba64le` pipe bytes
+/// without an intermediate RGBA8 round-trip.
+///
+/// For display/view use: the caller receives the same float precision without
+/// an intermediate u8 boundary, but must still encode for presentation.
+pub fn execute_cpu_output_boundary_float(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+) -> Result<RenderOutputColorBoundaryFloat, RenderColorTransformError> {
+    let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
+    let plan = planner.plan(frame, boundary)?;
+    let output = CpuRenderColorStageExecutor::output_transform_float(frame, &plan.stage_plan)?;
+    let output_descriptor = output.result.frame.descriptor();
+    Ok(RenderOutputColorBoundaryFloat {
+        frame: output.result.frame,
         color_diagnostics: output.result.diagnostics,
         stage_diagnostics: output.stage_diagnostics,
         output_descriptor,
@@ -2599,7 +2682,7 @@ mod tests {
     use crate::{
         GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadbackPlan,
         GpuColorFrameTextureFormat, GpuContext, OcioGpuShaderRequest, OcioGpuWgpuBlocker,
-        OcioGpuWgpuWrapperColorContract,
+        OcioGpuWgpuWrapperColorContract, RenderColorTransformBackend,
     };
     use mondrian_core::types::{ColorEngine, ColorSpace};
     use mondrian_core::RgbaF32Frame;
@@ -4326,6 +4409,76 @@ mod tests {
                 "rgba byte {index}: expected {expected}, got {actual}, tolerance {tolerance}"
             );
         }
+    }
+
+    #[test]
+    fn cpu_float_output_boundary_returns_float_frame_without_rgba8_quantization() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
+
+        let result = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("float output boundary should execute");
+
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            crate::ColorFrameEncoding::LinearFloat
+        );
+        assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Export);
+        assert_eq!(result.output_descriptor.domain, ColorFrameDomain::Export);
+        assert_eq!(
+            result.color_diagnostics.input.domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            result.color_diagnostics.output.domain,
+            ColorFrameDomain::Export
+        );
+        assert_eq!(result.color_diagnostics.pixel_count, 8);
+        assert!(!result.color_diagnostics.used_rgba8_boundary);
+        assert_eq!(
+            result.color_diagnostics.backend,
+            RenderColorTransformBackend::CpuOcioFloat
+        );
+        let pixels = &result.frame.rgba_f32().data;
+        assert_eq!(pixels.len(), 8);
+        for px in pixels {
+            let [r, g, b, a] = *px;
+            assert!((0.0..=1.0).contains(&r));
+            assert!((0.0..=1.0).contains(&g));
+            assert!((0.0..=1.0).contains(&b));
+            assert!((0.0..=1.0).contains(&a));
+        }
+    }
+
+    #[test]
+    fn cpu_float_output_boundary_display_view_returns_float_frame() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display_view(
+            ColorSpace::Srgb,
+            display,
+            view,
+            false,
+            ColorEngine::MondrianSmart,
+        );
+
+        let result = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("float display/view output boundary");
+
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            crate::ColorFrameEncoding::LinearFloat
+        );
+        assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Display);
+        assert_eq!(result.output_descriptor.domain, ColorFrameDomain::Display);
+        assert_eq!(result.color_diagnostics.pixel_count, 8);
+        assert!(!result.color_diagnostics.used_rgba8_boundary);
     }
 
     fn emit_gpu_output_smoke_report(report: &GpuOutputBoundarySmokeReport) -> anyhow::Result<()> {

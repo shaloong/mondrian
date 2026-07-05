@@ -17,9 +17,9 @@ use mondrian_media::decode_video_frame_at_time_rgba_scaled;
 use mondrian_media::VideoColorDiagnosticIssueAggregate;
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_rgba8,
-    ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame, GpuColorFrameReadbackPlan,
-    GpuColorFrameTextureFormat, GpuContext, RenderColorStageDiagnostics,
+    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_float,
+    execute_cpu_output_boundary_rgba8, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
+    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext, RenderColorStageDiagnostics,
     RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
     RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
     RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
@@ -93,11 +93,147 @@ impl ExportFrameContract {
     pub fn canvas_len(&self, width: u32, height: u32) -> usize {
         width as usize * height as usize * self.bytes_per_pixel()
     }
+
+    /// Whether this output contract requires more precision than an RGBA8 CPU boundary provides.
+    pub fn requires_high_precision_boundary(&self) -> bool {
+        matches!(self, Self::Rgba16Float)
+    }
+
+    /// Pack RGBA8 pixels into the raw-video pipe format described by this contract.
+    pub fn pack_rgba8(&self, rgba: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Rgba8 => rgba.to_vec(),
+            Self::Rgba16Float => pack_rgba8_to_rgba64le(rgba),
+        }
+    }
+
+    /// Pack normalized float RGBA pixels into the raw-video pipe format.
+    pub fn pack_rgba_f32(&self, rgba: &[f32]) -> Vec<u8> {
+        match self {
+            Self::Rgba8 => {
+                rgba.iter().map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8).collect()
+            }
+            Self::Rgba16Float => pack_rgba_f32_to_rgba64le(rgba),
+        }
+    }
+
+    /// Convert this contract's raw-video pipe bytes back to an RGBA8 source boundary.
+    pub fn to_rgba8_boundary(&self, pixels: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Rgba8 => pixels.to_vec(),
+            Self::Rgba16Float => unpack_rgba64le_to_rgba8(pixels),
+        }
+    }
 }
 
 /// Resolve the export frame contract from sequence settings.
 fn export_frame_contract(settings: &SequenceSettings) -> ExportFrameContract {
     ExportFrameContract::from_bit_depth(settings.color_management.export_bit_depth)
+}
+
+/// Renderer-owned CPU float/high-bit output boundary for export.
+///
+/// In production this is a transparent pass-through to the renderer's
+/// `execute_cpu_output_boundary_float`. Test builds support failure injection
+/// via `FORCE_FLOAT_BOUNDARY_FAILURE` so integration tests can exercise the
+/// RGBA8 precision-fallback branch without mocking the color engine.
+fn cpu_output_boundary_float(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+) -> Result<
+    mondrian_renderer::RenderOutputColorBoundaryFloat,
+    mondrian_renderer::RenderColorTransformError,
+> {
+    #[cfg(test)]
+    {
+        if FORCE_FLOAT_BOUNDARY_FAILURE.with(|cell| cell.get()) {
+            return Err(
+                mondrian_renderer::RenderColorTransformError::UnsupportedStagePlan {
+                    reason: "test-injected float boundary failure",
+                },
+            );
+        }
+    }
+    execute_cpu_output_boundary_float(frame, boundary)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only flag that forces `cpu_output_boundary_float` to return
+    /// `Err`, exercising the RGBA8 precision-fallback branch in real render code.
+    static FORCE_FLOAT_BOUNDARY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Guard that sets and clears `FORCE_FLOAT_BOUNDARY_FAILURE` for the duration
+/// of a scope, ensuring the flag is always reset even on panic.
+#[cfg(test)]
+struct FloatBoundaryFailureGuard;
+
+#[cfg(test)]
+impl FloatBoundaryFailureGuard {
+    fn activate() -> Self {
+        FORCE_FLOAT_BOUNDARY_FAILURE.with(|cell| cell.set(true));
+        FloatBoundaryFailureGuard
+    }
+}
+
+#[cfg(test)]
+impl Drop for FloatBoundaryFailureGuard {
+    fn drop(&mut self) {
+        FORCE_FLOAT_BOUNDARY_FAILURE.with(|cell| cell.set(false));
+    }
+}
+
+fn pack_rgba8_to_rgba64le(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len() * 2);
+    for channel in rgba {
+        out.extend_from_slice(&u16::from(*channel).saturating_mul(257).to_le_bytes());
+    }
+    out
+}
+
+fn pack_rgba_f32_to_rgba64le(rgba: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len() * 2);
+    for channel in rgba {
+        let value = (channel.clamp(0.0, 1.0) * 65_535.0).round() as u16;
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+fn unpack_rgba64le_to_rgba8(rgba64le: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba64le.len() / 2);
+    for channel in rgba64le.chunks_exact(2) {
+        let value = u16::from_le_bytes([channel[0], channel[1]]);
+        out.push((value / 257) as u8);
+    }
+    out
+}
+
+fn fill_canvas_black_opaque(
+    canvas: &mut Vec<u8>,
+    contract: ExportFrameContract,
+    width: u32,
+    height: u32,
+) {
+    canvas.clear();
+    match contract {
+        ExportFrameContract::Rgba8 => {
+            canvas.resize(contract.canvas_len(width, height), 0);
+            for px in canvas.chunks_exact_mut(4) {
+                px[3] = 255;
+            }
+        }
+        ExportFrameContract::Rgba16Float => {
+            canvas.reserve(contract.canvas_len(width, height));
+            for _ in 0..width as usize * height as usize {
+                canvas.extend_from_slice(&0u16.to_le_bytes());
+                canvas.extend_from_slice(&0u16.to_le_bytes());
+                canvas.extend_from_slice(&0u16.to_le_bytes());
+                canvas.extend_from_slice(&u16::MAX.to_le_bytes());
+            }
+        }
+    }
 }
 
 struct ExportGpuOutputBackend {
@@ -165,7 +301,7 @@ fn map_readback_buffer_sync(
 fn execute_export_gpu_output_boundary(
     frame: &CpuColorFrame,
     boundary: &RenderOutputColorBoundary,
-    texture_format: GpuColorFrameTextureFormat,
+    frame_contract: ExportFrameContract,
 ) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputFallbackReason> {
     let backend = export_gpu_output_runtime()
         .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)?;
@@ -183,7 +319,7 @@ fn execute_export_gpu_output_boundary(
         .record_wgpu_output_boundary_owned_backend(
             boundary,
             frame,
-            texture_format,
+            frame_contract.gpu_texture_format(),
             RenderColorTransformGpuOptions {
                 output_residency: ColorFrameResidency::Cpu,
                 ..RenderColorTransformGpuOptions::default()
@@ -201,7 +337,7 @@ fn execute_export_gpu_output_boundary(
     let readback_buffer = record
         .readback_buffer
         .ok_or(ExportGpuOutputFallbackReason::MissingReadbackBuffer)?;
-    let readback_plan = match texture_format {
+    let readback_plan = match frame_contract.gpu_texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
@@ -217,20 +353,18 @@ fn execute_export_gpu_output_boundary(
     };
     let mapped = map_readback_buffer_sync(&backend.context.device, &readback_buffer)
         .map_err(|_| ExportGpuOutputFallbackReason::ReadbackMapFailed)?;
-    let rgba = match texture_format {
+    let rgba = match frame_contract.gpu_texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             let actual = readback_plan
                 .unpack_mapped_rgba8(&mapped)
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            actual.rgba().to_vec()
+            frame_contract.pack_rgba8(actual.rgba())
         }
         GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
             let f32_data = readback_plan
                 .unpack_mapped_rgba16float(&mapped)
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            // Convert f32 to RGBA8 for the canvas writer (temporary: until
-            // the full float canvas path is wired through).
-            f32_data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect()
+            frame_contract.pack_rgba_f32(&f32_data)
         }
     };
     readback_buffer.unmap();
@@ -294,6 +428,14 @@ pub struct ExportJobColorDiagnostics {
     pub gpu_output_cpu_fallbacks: u64,
     /// Structured GPU export fallback reasons.
     pub gpu_output_fallback_reasons: ExportGpuOutputFallbackBreakdown,
+    /// Final export output precision fallbacks observed while encoding.
+    pub output_precision_fallbacks: u64,
+    /// Structured final export output precision fallback reasons.
+    pub output_precision_fallback_reasons: ExportOutputPrecisionFallbackBreakdown,
+    /// Final export output transform semantic issues observed while encoding.
+    pub output_transform_issues: u64,
+    /// Structured final export output transform semantic issue reasons.
+    pub output_transform_issue_reasons: ExportOutputTransformIssueBreakdown,
 }
 
 impl ExportJobColorDiagnostics {
@@ -308,6 +450,23 @@ impl ExportJobColorDiagnostics {
         self.gpu_output_cpu_fallbacks = self.gpu_output_cpu_fallbacks.saturating_add(cpu_fallbacks);
         self.gpu_output_fallback_reasons =
             self.gpu_output_fallback_reasons.accumulate(fallback_reasons);
+    }
+
+    /// Record one precision fallback at the final export output contract.
+    pub fn record_output_precision_fallback(
+        &mut self,
+        reason: ExportOutputPrecisionFallbackReason,
+    ) {
+        self.output_precision_fallbacks = self.output_precision_fallbacks.saturating_add(1);
+        self.output_precision_fallback_reasons =
+            self.output_precision_fallback_reasons.add_reason(reason);
+    }
+
+    /// Record one semantic issue at the final export output transform.
+    pub fn record_output_transform_issue(&mut self, reason: ExportOutputTransformIssueReason) {
+        self.output_transform_issues = self.output_transform_issues.saturating_add(1);
+        self.output_transform_issue_reasons =
+            self.output_transform_issue_reasons.add_reason(reason);
     }
 }
 
@@ -389,6 +548,88 @@ impl ExportGpuOutputFallbackBreakdown {
     }
 }
 
+/// Structured reason for final export output precision fallback.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExportOutputPrecisionFallbackReason {
+    /// High-bit-depth export fell back to an RGBA8 CPU output boundary before pipe packing.
+    CpuRgba8BoundaryPackedToHighBitDepthPipe,
+}
+
+/// Structured final export output precision fallback counts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExportOutputPrecisionFallbackBreakdown {
+    /// High-bit-depth export used an RGBA8 CPU output boundary before `rgba64le` pipe packing.
+    pub cpu_rgba8_boundary_packed_to_high_bit_depth_pipe: u64,
+}
+
+impl ExportOutputPrecisionFallbackBreakdown {
+    /// Return total fallback count across all recorded reasons.
+    pub fn total(&self) -> u64 {
+        self.cpu_rgba8_boundary_packed_to_high_bit_depth_pipe
+    }
+
+    /// Merge another breakdown in place.
+    pub fn accumulate(self, other: Self) -> Self {
+        Self {
+            cpu_rgba8_boundary_packed_to_high_bit_depth_pipe: self
+                .cpu_rgba8_boundary_packed_to_high_bit_depth_pipe
+                .saturating_add(other.cpu_rgba8_boundary_packed_to_high_bit_depth_pipe),
+        }
+    }
+
+    /// Map one reason into a mut accumulator entry.
+    pub fn add_reason(mut self, reason: ExportOutputPrecisionFallbackReason) -> Self {
+        match reason {
+            ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToHighBitDepthPipe => {
+                self.cpu_rgba8_boundary_packed_to_high_bit_depth_pipe =
+                    self.cpu_rgba8_boundary_packed_to_high_bit_depth_pipe.saturating_add(1)
+            }
+        }
+        self
+    }
+}
+
+/// Structured reason for final export output transform semantic issues.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExportOutputTransformIssueReason {
+    /// Tone mapping was requested but the export output boundary did not carry an OCIO view transform.
+    ToneMapRequestedWithoutExportViewTransform,
+}
+
+/// Structured final export output transform semantic issue counts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExportOutputTransformIssueBreakdown {
+    /// Tone mapping was requested without an export view/display-view transform.
+    pub tone_map_requested_without_export_view_transform: u64,
+}
+
+impl ExportOutputTransformIssueBreakdown {
+    /// Return total issue count across all recorded reasons.
+    pub fn total(&self) -> u64 {
+        self.tone_map_requested_without_export_view_transform
+    }
+
+    /// Merge another breakdown in place.
+    pub fn accumulate(self, other: Self) -> Self {
+        Self {
+            tone_map_requested_without_export_view_transform: self
+                .tone_map_requested_without_export_view_transform
+                .saturating_add(other.tone_map_requested_without_export_view_transform),
+        }
+    }
+
+    /// Map one reason into a mut accumulator entry.
+    pub fn add_reason(mut self, reason: ExportOutputTransformIssueReason) -> Self {
+        match reason {
+            ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform => {
+                self.tone_map_requested_without_export_view_transform =
+                    self.tone_map_requested_without_export_view_transform.saturating_add(1)
+            }
+        }
+        self
+    }
+}
+
 /// Stable summary of export color-path diagnostics for UI, telemetry, and reports.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExportJobColorDiagnosticsSummary {
@@ -426,6 +667,14 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub gpu_output_cpu_fallbacks: u64,
     /// Structured GPU output fallback reasons for export output boundary.
     pub gpu_output_fallback_reasons: ExportGpuOutputFallbackBreakdown,
+    /// Final export output precision fallbacks.
+    pub output_precision_fallbacks: u64,
+    /// Structured final export output precision fallback reasons.
+    pub output_precision_fallback_reasons: ExportOutputPrecisionFallbackBreakdown,
+    /// Final export output transform semantic issues.
+    pub output_transform_issues: u64,
+    /// Structured final export output transform semantic issue reasons.
+    pub output_transform_issue_reasons: ExportOutputTransformIssueBreakdown,
     /// Float/linear timeline composites.
     pub float_linear_composites: u64,
     /// Legacy RGBA8 timeline composites.
@@ -581,6 +830,20 @@ impl ExportJobColorDiagnosticsSummary {
             ExportColorHealthArea::StageScheduling,
             "export_gpu_output_cpu_fallbacks",
             self.gpu_output_cpu_fallbacks,
+            0,
+        );
+        push_export_max_check(
+            &mut checks,
+            ExportColorHealthArea::CompositePath,
+            "export_output_precision_fallbacks",
+            self.output_precision_fallbacks,
+            0,
+        );
+        push_export_max_check(
+            &mut checks,
+            ExportColorHealthArea::CompositePath,
+            "export_output_transform_issues",
+            self.output_transform_issues,
             0,
         );
         push_export_max_check(
@@ -779,6 +1042,44 @@ fn push_export_root_causes_and_actions(
             "Trace export GPU output attempts and keep CPU fallback reasons explicit.",
         );
     }
+    if summary.output_precision_fallbacks > 0
+        || summary.output_precision_fallback_reasons.total() > 0
+    {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::CompositePath,
+            "export_output_precision_fallback",
+            ExportColorHealthSeverity::Fail,
+            format!(
+                "output_precision_fallbacks={} cpu_rgba8_boundary_packed_to_high_bit_depth_pipe={}",
+                summary.output_precision_fallbacks,
+                summary
+                    .output_precision_fallback_reasons
+                    .cpu_rgba8_boundary_packed_to_high_bit_depth_pipe
+            ),
+            "replace_export_cpu_rgba8_output_boundary",
+            "Replace high-bit-depth export CPU fallback with a renderer-owned float/high-bit output boundary.",
+        );
+    }
+    if summary.output_transform_issues > 0 || summary.output_transform_issue_reasons.total() > 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::CompositePath,
+            "export_output_transform_issue",
+            ExportColorHealthSeverity::Fail,
+            format!(
+                "output_transform_issues={} tone_map_requested_without_export_view_transform={}",
+                summary.output_transform_issues,
+                summary
+                    .output_transform_issue_reasons
+                    .tone_map_requested_without_export_view_transform
+            ),
+            "define_export_view_transform_contract",
+            "Define and route an explicit OCIO export view transform before treating tone-mapped export as color-correct.",
+        );
+    }
     if !summary.fully_float_linear || summary.legacy_reason_total > 0 {
         push_export_root_cause_with_action(
             root_causes,
@@ -863,6 +1164,10 @@ impl ExportJobColorDiagnostics {
             && counts.total() == 0
             && stages.total_stages == 0
             && composite.composite_plans() == 0
+            && self.output_precision_fallbacks == 0
+            && self.output_precision_fallback_reasons.total() == 0
+            && self.output_transform_issues == 0
+            && self.output_transform_issue_reasons.total() == 0
         {
             return None;
         }
@@ -884,6 +1189,10 @@ impl ExportJobColorDiagnostics {
             gpu_output_attempts: self.gpu_output_attempts,
             gpu_output_cpu_fallbacks: self.gpu_output_cpu_fallbacks,
             gpu_output_fallback_reasons: self.gpu_output_fallback_reasons,
+            output_precision_fallbacks: self.output_precision_fallbacks,
+            output_precision_fallback_reasons: self.output_precision_fallback_reasons,
+            output_transform_issues: self.output_transform_issues,
+            output_transform_issue_reasons: self.output_transform_issue_reasons,
             float_linear_composites: composite.float_linear_composites,
             legacy_rgba8_composites: composite.legacy_rgba8_composites,
             legacy_reason_total: composite.legacy_breakdown.total(),
@@ -891,10 +1200,17 @@ impl ExportJobColorDiagnostics {
             fully_float_linear: composite.is_fully_float_linear(),
             gpu_path_ready: {
                 if self.gpu_output_attempts == 0 && self.gpu_output_cpu_fallbacks == 0 {
-                    true
+                    self.output_precision_fallbacks == 0
+                        && self.output_precision_fallback_reasons.total() == 0
+                        && self.output_transform_issues == 0
+                        && self.output_transform_issue_reasons.total() == 0
                 } else {
                     self.gpu_output_cpu_fallbacks == 0
                         && self.gpu_output_fallback_reasons.total() == 0
+                        && self.output_precision_fallbacks == 0
+                        && self.output_precision_fallback_reasons.total() == 0
+                        && self.output_transform_issues == 0
+                        && self.output_transform_issue_reasons.total() == 0
                         && stages.gpu_blockers == 0
                 }
             },
@@ -1794,7 +2110,8 @@ fn render_timeline_frame_into(
     composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
     export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<(), String> {
-    let required_len = width as usize * height as usize * 4;
+    let frame_contract = export_frame_contract(&timeline.sequence.settings);
+    let required_len = frame_contract.canvas_len(width, height);
     if canvas.len() != required_len {
         canvas.resize(required_len, 0);
     }
@@ -2030,7 +2347,7 @@ fn render_sequence_frame_into(
     let render_plan =
         evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame));
     if render_plan.is_empty() {
-        clear_canvas_black_opaque(canvas);
+        fill_canvas_black_opaque(canvas, frame_contract, width, height);
         return Ok(());
     }
 
@@ -2164,6 +2481,8 @@ fn render_sequence_frame_into(
             composite_diagnostics.as_deref_mut(),
             export_diagnostics.as_deref_mut(),
         )?;
+        let nested_canvas =
+            export_frame_contract(&nested_sequence.settings).to_rgba8_boundary(&nested_canvas);
         let nested_source = CpuEncodedColorFrame::source_rgba8(
             nested_width,
             nested_height,
@@ -2236,11 +2555,7 @@ fn render_sequence_frame_into(
     }
 
     if composite_elements.is_empty() {
-        canvas.clear();
-        canvas.resize(width as usize * height as usize * 4, 0);
-        for px in canvas.chunks_exact_mut(4) {
-            px[3] = 255;
-        }
+        fill_canvas_black_opaque(canvas, frame_contract, width, height);
         return Ok(());
     }
 
@@ -2265,16 +2580,19 @@ fn render_sequence_frame_into(
         color_context.tone_map,
         color_context.engine.clone(),
     );
-    let attempt = execute_export_gpu_output_boundary(
-        &rendered.frame,
-        &boundary,
-        frame_contract.gpu_texture_format(),
-    )
-    .inspect_err(|reason| {
-        gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
-        gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(*reason);
-    })
-    .ok();
+    if color_context.tone_map && boundary.display_view.is_none() {
+        if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
+            diagnostics.record_output_transform_issue(
+                ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
+            );
+        }
+    }
+    let attempt = execute_export_gpu_output_boundary(&rendered.frame, &boundary, frame_contract)
+        .inspect_err(|reason| {
+            gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
+            gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(*reason);
+        })
+        .ok();
     gpu_output_attempts = gpu_output_attempts.saturating_add(1);
 
     let final_bytes = match attempt {
@@ -2285,12 +2603,43 @@ fn render_sequence_frame_into(
             attempt.rgba
         }
         None => {
-            let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
-                .map_err(|err| format!("final color transform failed: {err}"))?;
-            if let Some(diagnostics) = stage_diagnostics {
-                diagnostics.accumulate(encoded.stage_diagnostics);
+            if frame_contract.requires_high_precision_boundary() {
+                match cpu_output_boundary_float(&rendered.frame, &boundary) {
+                    Ok(float_result) => {
+                        if let Some(diagnostics) = stage_diagnostics {
+                            diagnostics.accumulate(float_result.stage_diagnostics);
+                        }
+                        let flat: Vec<f32> = float_result
+                            .frame
+                            .rgba_f32()
+                            .data
+                            .iter()
+                            .flat_map(|px| px.iter().copied())
+                            .collect();
+                        frame_contract.pack_rgba_f32(&flat)
+                    }
+                    Err(_float_err) => {
+                        let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
+                            .map_err(|err| format!("final color transform failed: {err}"))?;
+                        if let Some(diagnostics) = stage_diagnostics {
+                            diagnostics.accumulate(encoded.stage_diagnostics);
+                        }
+                        if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
+                            diagnostics.record_output_precision_fallback(
+                                ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToHighBitDepthPipe,
+                            );
+                        }
+                        frame_contract.pack_rgba8(&encoded.rgba)
+                    }
+                }
+            } else {
+                let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
+                    .map_err(|err| format!("final color transform failed: {err}"))?;
+                if let Some(diagnostics) = stage_diagnostics {
+                    diagnostics.accumulate(encoded.stage_diagnostics);
+                }
+                frame_contract.pack_rgba8(&encoded.rgba)
             }
-            encoded.rgba
         }
     };
 
@@ -2394,17 +2743,6 @@ fn normalize_output_dimension(value: u32) -> u32 {
         dim = dim.saturating_sub(1);
     }
     dim.max(1)
-}
-
-fn clear_canvas_black_opaque(canvas: &mut [u8]) {
-    canvas.fill(0);
-    force_canvas_alpha_opaque(canvas);
-}
-
-fn force_canvas_alpha_opaque(canvas: &mut [u8]) {
-    for px in canvas.chunks_exact_mut(4) {
-        px[3] = 255;
-    }
 }
 
 /// 异步后台渲染队列
@@ -3066,6 +3404,142 @@ mod tests {
             .any(|root| root.code == "export_gpu_color_stage_blocked"));
     }
 
+    /// Exercise the real CPU fallback render branch with float-path failure
+    /// injection.
+    ///
+    /// This test sets `FORCE_FLOAT_BOUNDARY_FAILURE` so that the renderer's
+    /// `execute_cpu_output_boundary_float` returns `Err` immediately. The
+    /// export pipeline then falls back to the RGBA8 output boundary and packs
+    /// into the `rgba64le` pipe contract. We verify:
+    ///
+    /// 1. The canvas is the correct high-bit `rgba64le` size.
+    /// 2. `output_precision_fallback` is recorded (the fallback happened).
+    /// 3. The health report verdict is `Fail` with the expected root cause.
+    ///
+    /// **Scope note:** both the float and RGBA8 paths share the same
+    /// `ColorEngine` (OCIO config). We cannot make the float path fail
+    /// independently of the RGBA8 path through config alone. The test hook
+    /// `cpu_output_boundary_float` bypasses the engine at the
+    /// wrapper level, allowing the RGBA8 path to still succeed while the
+    /// float path is force-failed. This is the sanctioned injection point
+    /// for long-term fallback-path testing.
+    #[test]
+    fn precision_fallback_path_still_records_fallback_when_float_helper_unavailable() {
+        let mut seq = Sequence::new("precision-fallback-injected");
+        seq.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        let tb = seq.time_base();
+        seq.video_tracks[0]
+            .add_clip(Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(200, 100, 50, 255),
+                TimeCode::new(0, tb),
+                TimeCode::new(1, tb),
+            ))
+            .expect("add solid clip");
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+
+        let mut export_diagnostics = ExportJobColorDiagnostics::default();
+        let mut canvas = vec![0u8; 2 * 2 * 8];
+
+        let _guard = FloatBoundaryFailureGuard::activate();
+        render_timeline_frame_into(
+            &timeline,
+            0,
+            2,
+            2,
+            &mut canvas,
+            None,
+            None,
+            None,
+            Some(&mut export_diagnostics),
+        )
+        .expect("render should succeed via RGBA8 fallback");
+
+        // Canvas is high-bit rgba64le
+        assert_eq!(canvas.len(), 2 * 2 * 8);
+
+        // The precision fallback was recorded through real render code
+        assert_eq!(
+            export_diagnostics.output_precision_fallbacks, 1,
+            "real render fallback path must record output_precision_fallback"
+        );
+        assert_eq!(
+            export_diagnostics
+                .output_precision_fallback_reasons
+                .cpu_rgba8_boundary_packed_to_high_bit_depth_pipe,
+            1
+        );
+
+        // Health report reflects the fallback
+        let report = export_diagnostics
+            .health_report("precision-fallback-real-path")
+            .expect("health report");
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "export_output_precision_fallbacks"
+                && check.severity == ExportColorHealthSeverity::Fail
+        }));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "export_output_precision_fallback"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "replace_export_cpu_rgba8_output_boundary"));
+    }
+
+    #[test]
+    fn export_color_report_fails_tone_map_without_export_view_transform() {
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_frame_diagnostics(
+            InputColorResolutionSourceCounts::default(),
+            RenderColorStageDiagnostics::default(),
+            TimelineCompositeDiagnostics {
+                elements: 1,
+                float_linear_composites: 1,
+                ..TimelineCompositeDiagnostics::default()
+            },
+        );
+        diagnostics.record_output_transform_issue(
+            ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
+        );
+
+        let summary = diagnostics.summary().expect("summary");
+        assert_eq!(summary.output_transform_issues, 1);
+        assert_eq!(
+            summary
+                .output_transform_issue_reasons
+                .tone_map_requested_without_export_view_transform,
+            1
+        );
+        assert!(!summary.gpu_path_ready);
+
+        let report = diagnostics.health_report("export-output-transform").expect("health report");
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "export_output_transform_issues"
+                && check.severity == ExportColorHealthSeverity::Fail
+        }));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "export_output_transform_issue"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "define_export_view_transform_contract"));
+    }
+
     #[test]
     fn export_color_diagnostics_report_fails_closed_without_frame_evidence() {
         let mut diagnostics = ExportJobColorDiagnostics::default();
@@ -3469,6 +3943,7 @@ mod tests {
     #[test]
     fn render_timeline_frame_into_clears_canvas_when_no_layers() {
         let mut seq = Sequence::new("empty");
+        seq.settings.color_management.export_bit_depth = ExportBitDepth::Eight;
         seq.in_point_frame = Some(0);
         seq.out_point_frame = Some(10);
         let timeline = TimelineExportInput {
@@ -3489,6 +3964,52 @@ mod tests {
         for px in canvas.chunks_exact(4) {
             assert_eq!(px, &[0, 0, 0, 255]);
         }
+    }
+
+    #[test]
+    fn render_timeline_frame_into_uses_rgba64le_canvas_for_high_bit_depth_no_layers() {
+        let mut seq = Sequence::new("empty-high-bit-depth");
+        seq.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        seq.in_point_frame = Some(0);
+        seq.out_point_frame = Some(10);
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+
+        let mut canvas = vec![77u8; 4 * 2 * 4];
+        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas, None, None, None, None)
+            .expect("render should pass");
+
+        assert_eq!(canvas.len(), 4 * 2 * 8);
+        for px in canvas.chunks_exact(8) {
+            assert_eq!(px, &[0, 0, 0, 0, 0, 0, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn export_frame_contract_packs_rgba8_and_float_to_pipe_format() {
+        let rgba8 = [0, 128, 255, 64];
+        assert_eq!(ExportFrameContract::Rgba8.pack_rgba8(&rgba8), rgba8);
+        assert_eq!(
+            ExportFrameContract::Rgba16Float.pack_rgba8(&rgba8),
+            vec![0, 0, 128, 128, 255, 255, 64, 64]
+        );
+
+        assert_eq!(
+            ExportFrameContract::Rgba16Float.pack_rgba_f32(&[0.0, 0.5, 1.0, 1.5]),
+            vec![0, 0, 0, 128, 255, 255, 255, 255]
+        );
+        assert_eq!(
+            ExportFrameContract::Rgba16Float.to_rgba8_boundary(&[0, 0, 128, 128, 255, 255, 64, 64]),
+            rgba8
+        );
     }
 
     #[test]
@@ -3731,6 +4252,122 @@ mod tests {
 
         assert_eq!(&output[0..4], &[54, 54, 54, 255]);
         assert_eq!(&output[4..8], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn export_frame_contract_rgba64le_packing_preserves_precision() {
+        let f32_input = [0.0f32, 0.5, 1.0, 0.75];
+        let packed = ExportFrameContract::Rgba16Float.pack_rgba_f32(&f32_input);
+        assert_eq!(packed.len(), 8);
+
+        let r = u16::from_le_bytes([packed[0], packed[1]]);
+        let g = u16::from_le_bytes([packed[2], packed[3]]);
+        let b = u16::from_le_bytes([packed[4], packed[5]]);
+        let a = u16::from_le_bytes([packed[6], packed[7]]);
+
+        assert_eq!(r, 0);
+        assert_eq!(g, 32768);
+        assert_eq!(b, 65535);
+        assert_eq!(a, 49151);
+        assert_eq!(packed.len(), 8);
+    }
+
+    #[test]
+    fn export_frame_contract_rgba8_canvas_len_is_correct() {
+        assert_eq!(ExportFrameContract::Rgba8.canvas_len(4, 3), 48);
+        assert_eq!(ExportFrameContract::Rgba16Float.canvas_len(4, 3), 96);
+    }
+
+    #[test]
+    fn high_bit_depth_cpu_fallback_does_not_record_precision_fallback() {
+        let mut seq = Sequence::new("high-bit-float-fallback");
+        seq.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        let tb = seq.time_base();
+        seq.video_tracks[0]
+            .add_clip(Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(128, 128, 128, 255),
+                TimeCode::new(0, tb),
+                TimeCode::new(1, tb),
+            ))
+            .expect("add solid clip");
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+
+        let mut export_diagnostics = ExportJobColorDiagnostics::default();
+        let mut canvas = vec![0u8; 2 * 2 * 8];
+        render_timeline_frame_into(
+            &timeline,
+            0,
+            2,
+            2,
+            &mut canvas,
+            None,
+            None,
+            None,
+            Some(&mut export_diagnostics),
+        )
+        .expect("render high-bit should pass");
+
+        assert_eq!(canvas.len(), 2 * 2 * 8);
+        assert_eq!(
+            export_diagnostics.output_precision_fallbacks, 0,
+            "high-bit float path should not record precision fallback"
+        );
+        assert_eq!(
+            export_diagnostics.output_precision_fallback_reasons.total(),
+            0,
+            "high-bit float path should have zero precision fallback reasons"
+        );
+    }
+
+    #[test]
+    fn high_bit_depth_cpu_fallback_produces_correct_rgba64le_canvas() {
+        let mut seq = Sequence::new("high-bit-canvas-check");
+        seq.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        let tb = seq.time_base();
+        seq.video_tracks[0]
+            .add_clip(Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(200, 100, 50, 255),
+                TimeCode::new(0, tb),
+                TimeCode::new(1, tb),
+            ))
+            .expect("add solid clip");
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+
+        let mut canvas = vec![0u8; 2 * 2 * 8];
+        render_timeline_frame_into(&timeline, 0, 2, 2, &mut canvas, None, None, None, None)
+            .expect("render high-bit canvas");
+
+        assert_eq!(canvas.len(), 2 * 2 * 8);
+        for px in canvas.chunks_exact(8) {
+            let r = u16::from_le_bytes([px[0], px[1]]);
+            let g = u16::from_le_bytes([px[2], px[3]]);
+            let b = u16::from_le_bytes([px[4], px[5]]);
+            let a = u16::from_le_bytes([px[6], px[7]]);
+            assert!(r > 0, "R channel should be nonzero in rgba64le");
+            assert!(g > 0, "G channel should be nonzero in rgba64le");
+            assert!(b > 0, "B channel should be nonzero in rgba64le");
+            assert_eq!(a, u16::MAX, "alpha should be 1.0 in rgba64le");
+        }
     }
 }
 

@@ -66,7 +66,7 @@ pub struct RenderOutputTransformResult {
 
 /// Result of a float output transform that bypasses RGBA8 quantization.
 pub struct RenderOutputTransformFloatResult {
-    /// Linear float working frame with output transform applied.
+    /// Linear float display/export frame with output transform applied.
     pub frame: CpuColorFrame,
     /// Execution diagnostics.
     pub diagnostics: RenderColorTransformDiagnostics,
@@ -498,12 +498,15 @@ impl CpuColorTransformExecutor {
         // Re-pack flat f32 into Vec<[f32; 4]>.
         let pixels: Vec<[f32; 4]> =
             flat.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
-        let out_frame = CpuColorFrame::working(RgbaF32Frame {
-            width: descriptor.width,
-            height: descriptor.height,
-            data: pixels,
-            color_space: transform.output_color_space,
-        });
+        let out_frame = CpuColorFrame::linear(
+            RgbaF32Frame {
+                width: descriptor.width,
+                height: descriptor.height,
+                data: pixels,
+                color_space: transform.output_color_space,
+            },
+            transform.output_domain,
+        );
         let diagnostics = RenderColorTransformDiagnostics {
             backend: RenderColorTransformBackend::CpuOcioFloat,
             direction: RenderColorTransformDirection::WorkingToOutput,
@@ -1043,12 +1046,13 @@ mod tests {
         let result = CpuColorTransformExecutor::transform_float(&source, &transform)
             .expect("float output transform");
 
-        // Float output produces a CpuColorFrame (Working domain) with LinearFloat encoding.
-        // This is the precision-preserving path that avoids u8 quantization.
+        // Float output keeps the output graph domain while avoiding u8 quantization.
+        assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Export);
         assert_eq!(
             result.frame.descriptor().encoding,
             ColorFrameEncoding::LinearFloat
         );
+        assert_eq!(result.diagnostics.output.domain, ColorFrameDomain::Export);
         assert_eq!(result.diagnostics.pixel_count, 4);
         assert!(!result.diagnostics.used_rgba8_boundary);
         assert_eq!(
