@@ -594,6 +594,8 @@ impl ExportOutputPrecisionFallbackBreakdown {
 pub enum ExportOutputTransformIssueReason {
     /// Tone mapping was requested but the export output boundary did not carry an OCIO view transform.
     ToneMapRequestedWithoutExportViewTransform,
+    /// An export delivery view policy was configured but failed validation/resolution.
+    InvalidExportDeliveryView,
 }
 
 /// Structured final export output transform semantic issue counts.
@@ -601,12 +603,15 @@ pub enum ExportOutputTransformIssueReason {
 pub struct ExportOutputTransformIssueBreakdown {
     /// Tone mapping was requested without an export view/display-view transform.
     pub tone_map_requested_without_export_view_transform: u64,
+    /// Export delivery view policy was configured but invalid or unresolved.
+    pub invalid_export_delivery_view: u64,
 }
 
 impl ExportOutputTransformIssueBreakdown {
     /// Return total issue count across all recorded reasons.
     pub fn total(&self) -> u64 {
         self.tone_map_requested_without_export_view_transform
+            .saturating_add(self.invalid_export_delivery_view)
     }
 
     /// Merge another breakdown in place.
@@ -615,6 +620,9 @@ impl ExportOutputTransformIssueBreakdown {
             tone_map_requested_without_export_view_transform: self
                 .tone_map_requested_without_export_view_transform
                 .saturating_add(other.tone_map_requested_without_export_view_transform),
+            invalid_export_delivery_view: self
+                .invalid_export_delivery_view
+                .saturating_add(other.invalid_export_delivery_view),
         }
     }
 
@@ -624,6 +632,10 @@ impl ExportOutputTransformIssueBreakdown {
             ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform => {
                 self.tone_map_requested_without_export_view_transform =
                     self.tone_map_requested_without_export_view_transform.saturating_add(1)
+            }
+            ExportOutputTransformIssueReason::InvalidExportDeliveryView => {
+                self.invalid_export_delivery_view =
+                    self.invalid_export_delivery_view.saturating_add(1)
             }
         }
         self
@@ -1070,14 +1082,17 @@ fn push_export_root_causes_and_actions(
             "export_output_transform_issue",
             ExportColorHealthSeverity::Fail,
             format!(
-                "output_transform_issues={} tone_map_requested_without_export_view_transform={}",
+                "output_transform_issues={} tone_map_requested_without_export_view_transform={} invalid_export_delivery_view={}",
                 summary.output_transform_issues,
                 summary
                     .output_transform_issue_reasons
-                    .tone_map_requested_without_export_view_transform
+                    .tone_map_requested_without_export_view_transform,
+                summary
+                    .output_transform_issue_reasons
+                    .invalid_export_delivery_view
             ),
-            "define_export_view_transform_contract",
-            "Define and route an explicit OCIO export view transform before treating tone-mapped export as color-correct.",
+            "configure_export_delivery_view",
+            "Configure an export delivery view policy in project or sequence display management.",
         );
     }
     if !summary.fully_float_linear || summary.legacy_reason_total > 0 {
@@ -2099,6 +2114,38 @@ fn write_timeline_frames_to_writer<W: Write>(
     JobExecutionResult::Completed
 }
 
+/// Build the export output boundary from the resolved color context.
+///
+/// When `tone_map` is requested and an OCIO delivery view is available,
+/// returns an [`RenderOutputColorBoundary::export_view`] boundary that
+/// carries the OCIO display/view transform (which includes tone mapping).
+///
+/// When `tone_map` is requested but no delivery view is available, returns
+/// a plain [`RenderOutputColorBoundary::export`] boundary. The caller
+/// should record `ToneMapRequestedWithoutExportViewTransform` in this case.
+///
+/// When `tone_map` is not requested, returns a plain export boundary
+/// without any view transform.
+fn export_output_boundary_from_context(color_context: &ColorContext) -> RenderOutputColorBoundary {
+    if color_context.tone_map {
+        if let (Some(display), Some(view)) = (&color_context.ocio_display, &color_context.ocio_view)
+        {
+            return RenderOutputColorBoundary::export_view(
+                color_context.output_color_space,
+                display.clone(),
+                view.clone(),
+                true,
+                color_context.engine.clone(),
+            );
+        }
+    }
+    RenderOutputColorBoundary::export(
+        color_context.output_color_space,
+        color_context.tone_map,
+        color_context.engine.clone(),
+    )
+}
+
 fn render_timeline_frame_into(
     timeline: &TimelineExportInput,
     timeline_frame: i64,
@@ -2575,13 +2622,14 @@ fn render_sequence_frame_into(
     let mut gpu_output_fallback_reasons = ExportGpuOutputFallbackBreakdown::default();
     let mut gpu_output_attempts = 0u64;
     let mut gpu_output_cpu_fallbacks = 0u64;
-    let boundary = RenderOutputColorBoundary::export(
-        color_context.output_color_space,
-        color_context.tone_map,
-        color_context.engine.clone(),
-    );
+    let boundary = export_output_boundary_from_context(&color_context);
     if color_context.tone_map && boundary.display_view.is_none() {
         if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
+            if color_context.export_delivery_view_error.is_some() {
+                diagnostics.record_output_transform_issue(
+                    ExportOutputTransformIssueReason::InvalidExportDeliveryView,
+                );
+            }
             diagnostics.record_output_transform_issue(
                 ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
             );
@@ -2957,6 +3005,7 @@ mod tests {
     use mondrian_core::types::{AssetId, BlendMode, TimeCode};
     use mondrian_core::{VideoContentLightMetadata, VideoMasteringDisplayMetadata};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
+    use mondrian_renderer::RenderOutputColorBoundaryTarget;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{
         InputColorResolutionSource, MissingColorMetadataPolicy, Sequence,
@@ -3537,7 +3586,257 @@ mod tests {
         assert!(report
             .actions
             .iter()
-            .any(|action| action.code == "define_export_view_transform_contract"));
+            .any(|action| action.code == "configure_export_delivery_view"));
+    }
+
+    #[test]
+    fn export_output_boundary_from_context_uses_export_view_when_view_present() {
+        let ctx = ColorContext {
+            working_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Srgb,
+            tone_map: true,
+            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
+            nested_processing:
+                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
+            engine: ColorEngine::MondrianSmart,
+            missing_metadata_policy:
+                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
+            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            ocio_display: Some("sRGB - Display".to_string()),
+            ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
+            export_delivery_view_error: None,
+        };
+
+        let boundary = export_output_boundary_from_context(&ctx);
+        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
+        assert!(boundary.display_view.is_some());
+        assert!(boundary.tone_map);
+        let dv = boundary.display_view.as_ref().unwrap();
+        assert_eq!(dv.display, "sRGB - Display");
+        assert_eq!(dv.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+    }
+
+    #[test]
+    fn export_output_boundary_from_context_plain_export_when_no_view() {
+        let ctx = ColorContext {
+            working_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Srgb,
+            tone_map: true,
+            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
+            nested_processing:
+                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
+            engine: ColorEngine::MondrianSmart,
+            missing_metadata_policy:
+                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
+            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            ocio_display: None,
+            ocio_view: None,
+            export_delivery_view_error: None,
+        };
+
+        let boundary = export_output_boundary_from_context(&ctx);
+        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
+        assert!(boundary.display_view.is_none());
+        assert!(boundary.tone_map);
+    }
+
+    #[test]
+    fn export_output_boundary_from_context_plain_export_when_no_tone_map() {
+        let ctx = ColorContext {
+            working_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Rec709,
+            tone_map: false,
+            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
+            nested_processing:
+                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
+            engine: ColorEngine::MondrianSmart,
+            missing_metadata_policy:
+                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
+            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            ocio_display: Some("sRGB - Display".to_string()),
+            ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
+            export_delivery_view_error: None,
+        };
+
+        let boundary = export_output_boundary_from_context(&ctx);
+        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
+        assert!(boundary.display_view.is_none());
+        assert!(!boundary.tone_map);
+    }
+
+    #[test]
+    fn export_health_report_no_issue_when_view_present_with_tone_map() {
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_frame_diagnostics(
+            InputColorResolutionSourceCounts::default(),
+            RenderColorStageDiagnostics::default(),
+            TimelineCompositeDiagnostics {
+                elements: 1,
+                float_linear_composites: 1,
+                ..TimelineCompositeDiagnostics::default()
+            },
+        );
+        // No record_output_transform_issue call — the view was present.
+
+        let summary = diagnostics.summary().expect("summary");
+        assert_eq!(summary.output_transform_issues, 0);
+        assert_eq!(summary.output_transform_issue_reasons.total(), 0);
+        assert_eq!(
+            summary
+                .output_transform_issue_reasons
+                .tone_map_requested_without_export_view_transform,
+            0
+        );
+
+        let report = diagnostics.health_report("export-with-view").expect("health report");
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Pass);
+        assert!(!report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "export_output_transform_issue"));
+    }
+
+    /// When an explicit delivery view is configured, the real export render
+    /// path produces an export_view boundary and records no transform issue.
+    /// This uses a hand-built ColorContext with ocio_display/ocio_view set,
+    /// since root_export_color_context intentionally clears them.
+    #[test]
+    fn export_real_render_with_view_records_no_transform_issue() {
+        let mut seq = Sequence::new("explicit-delivery-view");
+        seq.settings.color_management.export_bit_depth = ExportBitDepth::Eight;
+        let tb = seq.time_base();
+        seq.video_tracks[0]
+            .add_clip(Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(128, 128, 128, 255),
+                TimeCode::new(0, tb),
+                TimeCode::new(1, tb),
+            ))
+            .expect("add solid clip");
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+        let ctx = ColorContext {
+            working_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Rec709,
+            tone_map: true,
+            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
+            nested_processing:
+                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
+            engine: ColorEngine::MondrianSmart,
+            missing_metadata_policy:
+                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
+            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            ocio_display: Some("sRGB - Display".to_string()),
+            ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
+            export_delivery_view_error: None,
+        };
+
+        let boundary = export_output_boundary_from_context(&ctx);
+        // The boundary has a view -> no issue should be recorded.
+        assert!(boundary.display_view.is_some());
+        assert!(boundary.tone_map);
+        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
+
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        let mut canvas = vec![0u8; 2 * 2 * 4];
+        render_sequence_frame_into(
+            &timeline,
+            &timeline.sequence,
+            0,
+            2,
+            2,
+            ctx,
+            &mut canvas,
+            0,
+            None,
+            None,
+            None,
+            Some(&mut diagnostics),
+        )
+        .expect("render with explicit delivery view");
+
+        assert_eq!(canvas.len(), 2 * 2 * 4);
+        assert_eq!(diagnostics.output_transform_issues, 0);
+        assert_eq!(diagnostics.output_transform_issue_reasons.total(), 0);
+    }
+
+    #[test]
+    fn export_real_render_with_invalid_delivery_view_records_invalid_transform_issue() {
+        let mut seq = Sequence::new("invalid-delivery-view");
+        seq.settings.color_management.export_bit_depth = ExportBitDepth::Eight;
+        let tb = seq.time_base();
+        seq.video_tracks[0]
+            .add_clip(Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(128, 128, 128, 255),
+                TimeCode::new(0, tb),
+                TimeCode::new(1, tb),
+            ))
+            .expect("add solid clip");
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+        let ctx = ColorContext {
+            working_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Rec709,
+            tone_map: true,
+            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
+            nested_processing:
+                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
+            engine: ColorEngine::MondrianSmart,
+            missing_metadata_policy:
+                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
+            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            ocio_display: None,
+            ocio_view: None,
+            export_delivery_view_error: Some("invalid delivery view".to_string()),
+        };
+
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        let mut canvas = vec![0u8; 2 * 2 * 4];
+        render_sequence_frame_into(
+            &timeline,
+            &timeline.sequence,
+            0,
+            2,
+            2,
+            ctx,
+            &mut canvas,
+            0,
+            None,
+            None,
+            None,
+            Some(&mut diagnostics),
+        )
+        .expect("render with invalid delivery view should fail closed through diagnostics");
+
+        assert_eq!(canvas.len(), 2 * 2 * 4);
+        assert_eq!(diagnostics.output_transform_issues, 2);
+        assert_eq!(
+            diagnostics
+                .output_transform_issue_reasons
+                .tone_map_requested_without_export_view_transform,
+            1
+        );
+        assert_eq!(
+            diagnostics.output_transform_issue_reasons.invalid_export_delivery_view,
+            1
+        );
     }
 
     #[test]

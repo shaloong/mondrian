@@ -6,7 +6,7 @@
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
-use mondrian_core::{ColorSpace, ProjectSettings, Rational, Resolution};
+use mondrian_core::{ColorSpace, ExportDeliveryViewPolicy, ProjectSettings, Rational, Resolution};
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
@@ -955,6 +955,8 @@ pub enum SequenceSettingsDraftUpdatePayload {
     ColorSpace(ColorSpace),
     /// Whether source media is auto tone-mapped into the sequence.
     AutoToneMapMedia(bool),
+    /// Whether the sequence inherits project-level color-management settings.
+    ColorManagementInherit(bool),
     /// Sequence color workflow.
     ColorWorkflow(ColorWorkflow),
     /// Policy for media with missing color metadata.
@@ -969,6 +971,8 @@ pub enum SequenceSettingsDraftUpdatePayload {
     ExportBitDepth(ExportBitDepth),
     /// Whether HDR metadata should be preserved for HDR output spaces.
     PreserveHdrMetadata(bool),
+    /// Export delivery view transform policy used by tone-mapped exports.
+    ExportDeliveryViewPolicy(ExportDeliveryViewPolicy),
     /// Active sequence audio sample rate in Hz.
     AudioSampleRate(u32),
     /// Active sequence audio channel layout.

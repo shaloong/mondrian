@@ -415,21 +415,29 @@ Display transforms belong at preview presentation. Export transforms belong at e
 `SequenceSettings::root_preview_color_context(...)` builds the monitor
 presentation context with a caller-provided display/output color space.
 `SequenceSettings::root_export_color_context(...)` builds the delivery context
-from the sequence output color space. Callers must choose one of these explicit
+from the sequence output color space. The export delivery view is resolved from
+the effective `ExportDeliveryViewPolicy` in `display_management` (inherited from
+project or overridden by sequence). Callers must choose one of these explicit
 entry points instead of using a generic root render context.
 
 Display management is explicit in the resolved `ColorContext`. Project settings
 own the default `DisplayManagementPolicy`; sequences inherit that policy unless
 they disable color-management inheritance. The policy carries the monitor/profile
-reference, viewer SDR/HDR mode, and tone-map policy. `DisplayToneMapPolicy`
-resolves the concrete `tone_map` flag for working -> output boundaries,
-including HDR-working to SDR-output presentation, so preview, export, cache
-keys, and future diagnostics do not infer tone mapping from scattered booleans.
+reference, viewer SDR/HDR mode, tone-map policy, and export delivery view policy.
+The app sequence settings panel must expose that inheritance boundary before
+sequence-level color controls. When inheritance is enabled, sequence-local color
+controls are presentation-only draft state and must not be shown as active
+render/export policy.
+`DisplayToneMapPolicy` resolves the concrete `tone_map` flag for working -> output
+boundaries, including HDR-working to SDR-output presentation, so preview, export,
+cache keys, and future diagnostics do not infer tone mapping from scattered booleans.
 
-For `MondrianSmart` and explicit `Ocio` engines, root sequence contexts copy
-the currently loaded OCIO config's default display/view into the context when
-one is available. Absence of a display/view is only valid when no current OCIO
-config exposes defaults; it is not a fallback color pipeline.
+For preview contexts, root sequence contexts copy the currently loaded OCIO
+config's default display/view into the context when one is available. For export
+contexts, the delivery view is resolved from `ExportDeliveryViewPolicy` — the OCIO
+config defaults are NOT automatically used as export delivery views. Absence of a
+delivery view in the export context is valid when no policy is configured; it
+triggers a fail-closed diagnostic when tone mapping is requested.
 Preview cache keys and timeline color diagnostics treat display/view as part of
 the effective presentation context. A display/view change must invalidate cached
 viewer frames even when the output `ColorSpace` enum is unchanged.

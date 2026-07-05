@@ -128,6 +128,11 @@ pub struct DisplayManagementPolicy {
     /// Tone-map policy for output boundaries.
     #[serde(default)]
     pub tone_map_policy: DisplayToneMapPolicy,
+    /// Export delivery view policy. Controls which OCIO display/view pair
+    /// is used as the export delivery transform when tone mapping is
+    /// requested. Defaults to `None` (no delivery view configured).
+    #[serde(default)]
+    pub export_delivery_view: ExportDeliveryViewPolicy,
 }
 
 impl Default for DisplayManagementPolicy {
@@ -136,8 +141,54 @@ impl Default for DisplayManagementPolicy {
             monitor_profile: MonitorProfileReference::MatchOutputColorSpace,
             viewer_mode: ViewerDisplayMode::MatchOutputColorSpace,
             tone_map_policy: DisplayToneMapPolicy::Automatic,
+            export_delivery_view: ExportDeliveryViewPolicy::None,
         }
     }
+}
+
+/// Policy for resolving the export delivery view transform.
+///
+/// When tone mapping is requested at an export output boundary, an OCIO
+/// delivery view transform must be explicitly configured. This policy
+/// controls which display/view pair is used.
+///
+/// The default is `None`, which means no delivery view is configured and
+/// tone-mapped export will fail closed with a diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExportDeliveryViewPolicy {
+    /// No delivery view transform is configured. When `tone_map` is
+    /// requested, the export will fail closed and record
+    /// `ToneMapRequestedWithoutExportViewTransform`.
+    #[default]
+    None,
+    /// Use the OCIO config's default display/view as the export delivery
+    /// view. This is resolved at render time via
+    /// `ocio_default_display_view()`.
+    OcioConfigDefault,
+    /// Use a named OCIO display/view pair as the export delivery view.
+    /// The display and view names must match entries in the active OCIO
+    /// config.
+    OcioDisplayView {
+        /// OCIO display name.
+        display: String,
+        /// OCIO view name under the display.
+        view: String,
+    },
+}
+
+/// Source of a resolved export delivery view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExportDeliveryViewSource {
+    /// Resolved from the OCIO config's default display/view.
+    ConfigDefault,
+    /// Explicitly configured at the sequence level.
+    ExplicitSequence,
+    /// Inherited from the project-level policy.
+    ExplicitProject,
+    /// No delivery view was configured.
+    Missing,
+    /// The configured display/view was not found in the OCIO config.
+    Invalid,
 }
 
 /// Error returned when parsing a hex color string fails.

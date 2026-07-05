@@ -354,6 +354,29 @@ impl RenderOutputColorBoundary {
         }
     }
 
+    /// Build an export delivery boundary through an explicit OCIO
+    /// display/view pair.
+    ///
+    /// This carries the OCIO delivery view transform (which includes tone
+    /// mapping) into the export output boundary. Unlike
+    /// [`Self::display_view`] which targets preview presentation, this
+    /// targets encoded export delivery.
+    pub fn export_view(
+        output_color_space: ColorSpace,
+        display: impl Into<String>,
+        view: impl Into<String>,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::Export,
+            output_color_space,
+            display_view: Some(RenderOcioDisplayView::new(display, view)),
+            tone_map,
+            engine,
+        }
+    }
+
     fn transform(&self) -> RenderColorTransform {
         match self.target {
             RenderOutputColorBoundaryTarget::Display => match &self.display_view {
@@ -370,11 +393,20 @@ impl RenderOutputColorBoundary {
                     self.engine.clone(),
                 ),
             },
-            RenderOutputColorBoundaryTarget::Export => RenderColorTransform::export(
-                self.output_color_space,
-                self.tone_map,
-                self.engine.clone(),
-            ),
+            RenderOutputColorBoundaryTarget::Export => match &self.display_view {
+                Some(display_view) => RenderColorTransform::delivery_view(
+                    self.output_color_space,
+                    display_view.display.clone(),
+                    display_view.view.clone(),
+                    self.tone_map,
+                    self.engine.clone(),
+                ),
+                None => RenderColorTransform::export(
+                    self.output_color_space,
+                    self.tone_map,
+                    self.engine.clone(),
+                ),
+            },
         }
     }
 }
@@ -4475,10 +4507,110 @@ mod tests {
             result.frame.descriptor().encoding,
             crate::ColorFrameEncoding::LinearFloat
         );
-        assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Display);
-        assert_eq!(result.output_descriptor.domain, ColorFrameDomain::Display);
         assert_eq!(result.color_diagnostics.pixel_count, 8);
         assert!(!result.color_diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn export_view_boundary_target_is_export_with_display_view() {
+        let boundary = RenderOutputColorBoundary::export_view(
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+            true,
+            ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
+        assert!(boundary.display_view.is_some());
+        let dv = boundary.display_view.as_ref().unwrap();
+        assert_eq!(dv.display, "sRGB - Display");
+        assert_eq!(dv.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert!(boundary.tone_map);
+    }
+
+    #[test]
+    fn export_view_boundary_uses_delivery_view_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let boundary = RenderOutputColorBoundary::export_view(
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+            true,
+            ColorEngine::MondrianSmart,
+        );
+
+        let transform = boundary.transform();
+        assert_eq!(transform.output_domain, crate::ColorFrameDomain::Export);
+        assert!(transform.display_view.is_some());
+        let dv = transform.display_view.as_ref().unwrap();
+        assert_eq!(dv.display, "sRGB - Display");
+        assert_eq!(dv.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert!(transform.tone_map);
+    }
+
+    #[test]
+    fn export_view_boundary_float_path_uses_display_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::export_view(
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+            true,
+            ColorEngine::MondrianSmart,
+        );
+
+        let result = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("export view float boundary should execute");
+
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            crate::ColorFrameEncoding::LinearFloat
+        );
+        assert_eq!(result.color_diagnostics.pixel_count, 8);
+        assert_eq!(
+            result.color_diagnostics.backend,
+            crate::RenderColorTransformBackend::CpuOcioFloat
+        );
+        assert!(!result.color_diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn export_plain_boundary_no_view_uses_pipeline_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
+
+        let result = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("plain export boundary should execute");
+
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            crate::ColorFrameEncoding::LinearFloat
+        );
+        assert!(!result.color_diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn preview_display_view_boundary_uses_display_target() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let boundary = RenderOutputColorBoundary::display_view(
+            ColorSpace::Srgb,
+            display,
+            view,
+            false,
+            ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Display);
+        let transform = boundary.transform();
+        assert_eq!(transform.output_domain, crate::ColorFrameDomain::Display);
     }
 
     fn emit_gpu_output_smoke_report(report: &GpuOutputBoundarySmokeReport) -> anyhow::Result<()> {

@@ -398,3 +398,65 @@ changes must update that hash with the same care as image golden references.
 The app preview suite also pins a stable Rec.2020-working to sRGB-output
 multilayer preview/export RGBA hash, so preview and export cannot drift together
 without an explicit golden update.
+
+## Export Delivery View Transform
+
+Export tone mapping is delivered through an explicit OCIO delivery view
+transform, not through the color-space pipeline. The three transform
+contracts are:
+
+- **Color-space transform**: `source → working → output` conversion via
+  `convert_pipeline*`. Does not carry tone mapping.
+- **Preview display/view transform**: viewer presentation via
+  `RenderOutputColorBoundary::display_view(...)` with `target: Display`.
+ 受 monitor/surface/display policy 影响。
+- **Export delivery view transform**: encoded delivery output via
+  `RenderOutputColorBoundary::export_view(...)` with `target: Export`.
+  Carries the OCIO display/view transform (which includes tone mapping)
+  into the export boundary. Uses `RenderColorTransform::delivery_view(...)`
+  internally, which dispatches to `display_transform_float` / `display_transform`
+  on the OCIO engine.
+
+### Export Delivery View Policy
+
+The export delivery view is configured through
+`DisplayManagementPolicy::export_delivery_view: ExportDeliveryViewPolicy`,
+which lives in both `ProjectColorManagement` and
+`SequenceColorManagement`. Sequences inherit the project policy unless they
+override it.
+
+The sequence settings UI exposes this as a color-management source selector plus
+an export delivery view selector. Sequence-local delivery view edits are active
+only when color-management inheritance is disabled; otherwise export resolution
+continues to use the project policy. UI code must write the typed
+`ExportDeliveryViewPolicy` into `SequenceColorManagement.display_management`
+instead of passing ad-hoc display/view strings directly to the export queue.
+
+Policies:
+- `None` (default) — no delivery view configured. Tone-mapped export fails
+  closed with `ToneMapRequestedWithoutExportViewTransform`.
+- `OcioConfigDefault` — uses the OCIO config's default display/view,
+  resolved at render time via `ocio_default_display_view()`.
+- `OcioDisplayView { display, view }` — uses a named OCIO display/view
+  pair. Validated against the current OCIO config at resolve time.
+
+`SequenceSettings::resolve_export_delivery_view(project_cm)` resolves the
+effective policy into a `ResolvedExportDeliveryView` (or `None`/`Err`).
+`root_export_color_context()` calls this resolver and populates
+`ocio_display`/`ocio_view` from the result. If the resolver fails
+(invalid display/view), the error is stored in
+`ColorContext::export_delivery_view_error` for diagnostics.
+
+`export_output_boundary_from_context(...)` in the export crate resolves
+the boundary:
+
+- `tone_map=true` + `ocio_display`/`ocio_view` present →
+  `RenderOutputColorBoundary::export_view(...)` (delivery view path)
+- `tone_map=true` + no view → plain `RenderOutputColorBoundary::export(...)`
+  + `ToneMapRequestedWithoutExportViewTransform` diagnostic
+- `tone_map=false` → plain export boundary, no view, no issue
+
+Health reports distinguish export delivery view availability from preview
+display/view: `output_transform_issues` records when tone mapping was
+requested but no delivery view was available. This is a Fail condition
+in the health report. The action code is `configure_export_delivery_view`.

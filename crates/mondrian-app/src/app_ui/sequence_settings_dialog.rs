@@ -3,7 +3,7 @@
 //! The dialog owns shell-local draft state. It emits a typed sequence update
 //! only on Apply, keeping editor mutations in `AppState`.
 
-use mondrian_core::{ColorSpace, Rational, Resolution};
+use mondrian_core::{ColorSpace, ExportDeliveryViewPolicy, Rational, Resolution};
 use mondrian_timeline::{
     sequence::{
         ColorWorkflow, ExportBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
@@ -100,6 +100,9 @@ impl AppUiSequenceSettingsDraft {
             SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled) => {
                 self.settings.auto_tone_map_media = enabled;
             }
+            SequenceSettingsDraftUpdatePayload::ColorManagementInherit(inherit) => {
+                self.settings.color_management.inherit = inherit;
+            }
             SequenceSettingsDraftUpdatePayload::ColorWorkflow(workflow) => {
                 self.settings.color_management.workflow = workflow;
             }
@@ -120,6 +123,9 @@ impl AppUiSequenceSettingsDraft {
             }
             SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(enabled) => {
                 self.settings.color_management.preserve_hdr_metadata = enabled;
+            }
+            SequenceSettingsDraftUpdatePayload::ExportDeliveryViewPolicy(policy) => {
+                self.settings.color_management.display_management.export_delivery_view = policy;
             }
             SequenceSettingsDraftUpdatePayload::AudioSampleRate(sample_rate) => {
                 if SequenceSettings::AUDIO_SAMPLE_RATES.contains(&sample_rate) {
@@ -654,6 +660,82 @@ fn export_bit_depth_items() -> Vec<MenuItem> {
         .collect()
 }
 
+fn color_management_inherit_label(inherit: bool) -> &'static str {
+    if inherit {
+        "继承项目色彩设置"
+    } else {
+        "使用序列色彩设置"
+    }
+}
+
+fn color_management_inherit_items() -> Vec<MenuItem> {
+    [true, false]
+        .into_iter()
+        .map(|inherit| {
+            MenuItem::new(
+                color_management_inherit_label(inherit),
+                app_shell_sequence_settings_draft_changed_action(
+                    SequenceSettingsDraftUpdatePayload::ColorManagementInherit(inherit),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn export_delivery_view_policy_label(policy: &ExportDeliveryViewPolicy) -> &'static str {
+    match policy {
+        ExportDeliveryViewPolicy::None => "无导出交付视图",
+        ExportDeliveryViewPolicy::OcioConfigDefault => "OCIO 默认交付视图",
+        ExportDeliveryViewPolicy::OcioDisplayView { .. } => "指定 OCIO display/view",
+    }
+}
+
+fn export_delivery_view_pair(policy: &ExportDeliveryViewPolicy) -> (String, String) {
+    match policy {
+        ExportDeliveryViewPolicy::OcioDisplayView { display, view } => {
+            (display.clone(), view.clone())
+        }
+        ExportDeliveryViewPolicy::None | ExportDeliveryViewPolicy::OcioConfigDefault => {
+            (String::new(), String::new())
+        }
+    }
+}
+
+fn export_delivery_view_policy_items(draft: &AppUiSequenceSettingsDraft) -> Vec<MenuItem> {
+    let (display, view) = export_delivery_view_pair(
+        &draft.settings.color_management.display_management.export_delivery_view,
+    );
+    vec![
+        MenuItem::new(
+            export_delivery_view_policy_label(&ExportDeliveryViewPolicy::None),
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ExportDeliveryViewPolicy(
+                    ExportDeliveryViewPolicy::None,
+                ),
+            ),
+        ),
+        MenuItem::new(
+            export_delivery_view_policy_label(&ExportDeliveryViewPolicy::OcioConfigDefault),
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ExportDeliveryViewPolicy(
+                    ExportDeliveryViewPolicy::OcioConfigDefault,
+                ),
+            ),
+        ),
+        MenuItem::new(
+            export_delivery_view_policy_label(&ExportDeliveryViewPolicy::OcioDisplayView {
+                display: String::new(),
+                view: String::new(),
+            }),
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ExportDeliveryViewPolicy(
+                    ExportDeliveryViewPolicy::OcioDisplayView { display, view },
+                ),
+            ),
+        ),
+    ]
+}
+
 fn editing_mode_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
         editing_mode_label(draft.settings.editing_mode),
@@ -748,61 +830,172 @@ fn video_display_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Drop
 }
 
 fn color_space_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
-    Dropdown::new(
-        color_space_label(draft.settings.color_space),
-        color_space_items(SequenceSettingsDraftUpdatePayload::ColorSpace),
+    maybe_disable_dropdown(
+        Dropdown::new(
+            color_space_label(draft.settings.color_space),
+            color_space_items(SequenceSettingsDraftUpdatePayload::ColorSpace),
+        )
+        .with_max_visible_items(6),
+        draft.settings.color_management.inherit,
     )
-    .with_max_visible_items(6)
 }
 
-fn output_color_space_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
-    Dropdown::new(
-        color_space_label(draft.settings.color_management.output_color_space),
-        color_space_items(SequenceSettingsDraftUpdatePayload::OutputColorSpace),
-    )
-    .with_max_visible_items(6)
+fn maybe_disable_dropdown(dropdown: Dropdown, disabled: bool) -> Dropdown {
+    if disabled {
+        dropdown.disabled()
+    } else {
+        dropdown
+    }
 }
 
-fn color_workflow_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
-    Dropdown::new(
-        color_workflow_label(draft.settings.color_management.workflow),
-        color_workflow_items(),
-    )
-    .with_max_visible_items(3)
+fn maybe_disable_checkbox(checkbox: Checkbox, disabled: bool) -> Checkbox {
+    if disabled {
+        checkbox.disabled()
+    } else {
+        checkbox
+    }
 }
 
-fn missing_color_metadata_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
-    Dropdown::new(
-        missing_color_metadata_policy_label(
-            draft.settings.color_management.missing_metadata_policy,
-        ),
-        missing_color_metadata_items(),
-    )
-    .with_max_visible_items(3)
+fn maybe_disable_text_input(input: TextInput, disabled: bool) -> TextInput {
+    if disabled {
+        input.disabled()
+    } else {
+        input
+    }
 }
 
-fn nested_color_processing_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn color_management_inherit_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
-        nested_color_processing_label(draft.settings.color_management.nested_processing),
-        nested_color_processing_items(),
-    )
-    .with_max_visible_items(3)
-}
-
-fn video_range_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
-    Dropdown::new(
-        video_range_label(draft.settings.color_management.video_range),
-        video_range_items(),
+        color_management_inherit_label(draft.settings.color_management.inherit),
+        color_management_inherit_items(),
     )
     .with_max_visible_items(2)
 }
 
-fn export_bit_depth_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
-    Dropdown::new(
-        export_bit_depth_label(draft.settings.color_management.export_bit_depth),
-        export_bit_depth_items(),
+fn output_color_space_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+    maybe_disable_dropdown(
+        Dropdown::new(
+            color_space_label(draft.settings.color_management.output_color_space),
+            color_space_items(SequenceSettingsDraftUpdatePayload::OutputColorSpace),
+        )
+        .with_max_visible_items(6),
+        draft.settings.color_management.inherit,
     )
-    .with_max_visible_items(3)
+}
+
+fn export_delivery_view_policy_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+    maybe_disable_dropdown(
+        Dropdown::new(
+            export_delivery_view_policy_label(
+                &draft.settings.color_management.display_management.export_delivery_view,
+            ),
+            export_delivery_view_policy_items(draft),
+        )
+        .with_max_visible_items(3),
+        draft.settings.color_management.inherit,
+    )
+}
+
+fn export_delivery_view_display_input_for(draft: &AppUiSequenceSettingsDraft) -> TextInput {
+    let (display, view) = export_delivery_view_pair(
+        &draft.settings.color_management.display_management.export_delivery_view,
+    );
+    maybe_disable_text_input(
+        TextInput::new("OCIO display").with_text(display).on_change(move |display| {
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ExportDeliveryViewPolicy(
+                    ExportDeliveryViewPolicy::OcioDisplayView {
+                        display: display.into(),
+                        view: view.clone(),
+                    },
+                ),
+            )
+        }),
+        draft.settings.color_management.inherit,
+    )
+}
+
+fn export_delivery_view_name_input_for(draft: &AppUiSequenceSettingsDraft) -> TextInput {
+    let (display, view) = export_delivery_view_pair(
+        &draft.settings.color_management.display_management.export_delivery_view,
+    );
+    maybe_disable_text_input(
+        TextInput::new("OCIO view").with_text(view).on_change(move |view| {
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ExportDeliveryViewPolicy(
+                    ExportDeliveryViewPolicy::OcioDisplayView {
+                        display: display.clone(),
+                        view: view.into(),
+                    },
+                ),
+            )
+        }),
+        draft.settings.color_management.inherit,
+    )
+}
+
+fn is_named_export_delivery_view(draft: &AppUiSequenceSettingsDraft) -> bool {
+    matches!(
+        draft.settings.color_management.display_management.export_delivery_view,
+        ExportDeliveryViewPolicy::OcioDisplayView { .. }
+    )
+}
+
+fn color_workflow_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+    maybe_disable_dropdown(
+        Dropdown::new(
+            color_workflow_label(draft.settings.color_management.workflow),
+            color_workflow_items(),
+        )
+        .with_max_visible_items(3),
+        draft.settings.color_management.inherit,
+    )
+}
+
+fn missing_color_metadata_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+    maybe_disable_dropdown(
+        Dropdown::new(
+            missing_color_metadata_policy_label(
+                draft.settings.color_management.missing_metadata_policy,
+            ),
+            missing_color_metadata_items(),
+        )
+        .with_max_visible_items(3),
+        draft.settings.color_management.inherit,
+    )
+}
+
+fn nested_color_processing_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+    maybe_disable_dropdown(
+        Dropdown::new(
+            nested_color_processing_label(draft.settings.color_management.nested_processing),
+            nested_color_processing_items(),
+        )
+        .with_max_visible_items(3),
+        draft.settings.color_management.inherit,
+    )
+}
+
+fn video_range_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+    maybe_disable_dropdown(
+        Dropdown::new(
+            video_range_label(draft.settings.color_management.video_range),
+            video_range_items(),
+        )
+        .with_max_visible_items(2),
+        draft.settings.color_management.inherit,
+    )
+}
+
+fn export_bit_depth_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+    maybe_disable_dropdown(
+        Dropdown::new(
+            export_bit_depth_label(draft.settings.color_management.export_bit_depth),
+            export_bit_depth_items(),
+        )
+        .with_max_visible_items(3),
+        draft.settings.color_management.inherit,
+    )
 }
 
 fn audio_sample_rate_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
@@ -856,29 +1049,37 @@ fn preview_cache_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
 }
 
 fn auto_tone_map_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
-    Checkbox::new("自动色调映射媒体", draft.settings.auto_tone_map_media).on_change(|enabled| {
-        app_shell_sequence_settings_draft_changed_action(
-            SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled),
-        )
-    })
+    maybe_disable_checkbox(
+        Checkbox::new("自动色调映射媒体", draft.settings.auto_tone_map_media).on_change(
+            |enabled| {
+                app_shell_sequence_settings_draft_changed_action(
+                    SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled),
+                )
+            },
+        ),
+        draft.settings.color_management.inherit,
+    )
 }
 
 fn preserve_hdr_metadata_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
-    Checkbox::new(
-        "保留 HDR 元数据",
-        draft.settings.color_management.preserve_hdr_metadata,
-    )
-    .on_change(|enabled| {
-        app_shell_sequence_settings_draft_changed_action(
-            SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(enabled),
+    maybe_disable_checkbox(
+        Checkbox::new(
+            "保留 HDR 元数据",
+            draft.settings.color_management.preserve_hdr_metadata,
         )
-    })
+        .on_change(|enabled| {
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(enabled),
+            )
+        }),
+        draft.settings.color_management.inherit,
+    )
 }
 
 const CARD_MIN_WIDTH: f32 = 420.0;
 const CARD_WIDTH: f32 = 680.0;
 const CARD_MIN_HEIGHT: f32 = 500.0;
-const CARD_HEIGHT: f32 = 620.0;
+const CARD_HEIGHT: f32 = 660.0;
 const CONTENT_PADDING: f32 = 20.0;
 const FIELD_HEIGHT: f32 = 34.0;
 const DROPDOWN_HEIGHT: f32 = 28.0;
@@ -940,6 +1141,10 @@ pub struct SequenceSettingsDialog {
     start_timecode_input: NumberInput,
     color_space_dropdown: Dropdown,
     output_color_space_dropdown: Dropdown,
+    color_management_inherit_dropdown: Dropdown,
+    export_delivery_view_policy_dropdown: Dropdown,
+    export_delivery_view_display_input: TextInput,
+    export_delivery_view_name_input: TextInput,
     color_workflow_dropdown: Dropdown,
     missing_color_metadata_dropdown: Dropdown,
     nested_color_processing_dropdown: Dropdown,
@@ -1027,6 +1232,10 @@ impl SequenceSettingsDialog {
         let start_timecode_input = start_timecode_input_for(&draft);
         let color_space_dropdown = color_space_dropdown_for(&draft);
         let output_color_space_dropdown = output_color_space_dropdown_for(&draft);
+        let color_management_inherit_dropdown = color_management_inherit_dropdown_for(&draft);
+        let export_delivery_view_policy_dropdown = export_delivery_view_policy_dropdown_for(&draft);
+        let export_delivery_view_display_input = export_delivery_view_display_input_for(&draft);
+        let export_delivery_view_name_input = export_delivery_view_name_input_for(&draft);
         let color_workflow_dropdown = color_workflow_dropdown_for(&draft);
         let missing_color_metadata_dropdown = missing_color_metadata_dropdown_for(&draft);
         let nested_color_processing_dropdown = nested_color_processing_dropdown_for(&draft);
@@ -1074,6 +1283,10 @@ impl SequenceSettingsDialog {
             start_timecode_input,
             color_space_dropdown,
             output_color_space_dropdown,
+            color_management_inherit_dropdown,
+            export_delivery_view_policy_dropdown,
+            export_delivery_view_display_input,
+            export_delivery_view_name_input,
             color_workflow_dropdown,
             missing_color_metadata_dropdown,
             nested_color_processing_dropdown,
@@ -1110,6 +1323,13 @@ impl SequenceSettingsDialog {
             self.start_timecode_input = start_timecode_input_for(&self.draft);
             self.color_space_dropdown = color_space_dropdown_for(&self.draft);
             self.output_color_space_dropdown = output_color_space_dropdown_for(&self.draft);
+            self.color_management_inherit_dropdown =
+                color_management_inherit_dropdown_for(&self.draft);
+            self.export_delivery_view_policy_dropdown =
+                export_delivery_view_policy_dropdown_for(&self.draft);
+            self.export_delivery_view_display_input =
+                export_delivery_view_display_input_for(&self.draft);
+            self.export_delivery_view_name_input = export_delivery_view_name_input_for(&self.draft);
             self.color_workflow_dropdown = color_workflow_dropdown_for(&self.draft);
             self.missing_color_metadata_dropdown = missing_color_metadata_dropdown_for(&self.draft);
             self.nested_color_processing_dropdown =
@@ -1305,57 +1525,86 @@ impl Widget for SequenceSettingsDialog {
                     content.width,
                     LABEL_FONT_SIZE * 1.5,
                 ));
+                let mut row_y = content.y + NAME_Y;
+                self.color_management_inherit_dropdown.layout(Rect::new(
+                    content.x,
+                    row_y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                self.export_delivery_view_policy_dropdown.layout(Rect::new(
+                    right_x,
+                    row_y,
+                    half,
+                    DROPDOWN_HEIGHT,
+                ));
+                row_y += 48.0;
+                if is_named_export_delivery_view(&self.draft) {
+                    self.export_delivery_view_display_input.layout(Rect::new(
+                        content.x,
+                        row_y,
+                        half,
+                        FIELD_HEIGHT,
+                    ));
+                    self.export_delivery_view_name_input.layout(Rect::new(
+                        right_x,
+                        row_y,
+                        half,
+                        FIELD_HEIGHT,
+                    ));
+                    row_y += 48.0;
+                }
                 self.color_space_dropdown.layout(Rect::new(
                     content.x,
-                    content.y + NAME_Y,
+                    row_y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
                 self.output_color_space_dropdown.layout(Rect::new(
                     right_x,
-                    content.y + NAME_Y,
+                    row_y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
+                row_y += 48.0;
                 self.color_workflow_dropdown.layout(Rect::new(
                     content.x,
-                    content.y + FORMAT_ROW_1_Y,
+                    row_y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
                 self.missing_color_metadata_dropdown.layout(Rect::new(
                     right_x,
-                    content.y + FORMAT_ROW_1_Y,
+                    row_y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
+                row_y += 48.0;
                 self.nested_color_processing_dropdown.layout(Rect::new(
                     content.x,
-                    content.y + FORMAT_ROW_2_Y,
+                    row_y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
-                self.video_range_dropdown.layout(Rect::new(
-                    right_x,
-                    content.y + FORMAT_ROW_2_Y,
-                    half,
-                    DROPDOWN_HEIGHT,
-                ));
+                self.video_range_dropdown
+                    .layout(Rect::new(right_x, row_y, half, DROPDOWN_HEIGHT));
+                row_y += 48.0;
                 self.export_bit_depth_dropdown.layout(Rect::new(
                     content.x,
-                    content.y + FORMAT_ROW_3_Y,
+                    row_y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
                 self.auto_tone_map_checkbox.layout(Rect::new(
                     right_x,
-                    content.y + FORMAT_ROW_3_Y,
+                    row_y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
+                row_y += 48.0;
                 self.preserve_hdr_metadata_checkbox.layout(Rect::new(
                     content.x,
-                    content.y + AUDIO_ROW_Y,
+                    row_y,
                     half,
                     DROPDOWN_HEIGHT,
                 ));
@@ -1458,7 +1707,16 @@ impl Widget for SequenceSettingsDialog {
                 }
             }
             SequenceSettingsTabPayload::Color => {
-                if self.color_space_dropdown.event(event, ctx) == EventResult::Handled
+                let delivery_view_inputs_handled = is_named_export_delivery_view(&self.draft)
+                    && (self.export_delivery_view_display_input.event(event, ctx)
+                        == EventResult::Handled
+                        || self.export_delivery_view_name_input.event(event, ctx)
+                            == EventResult::Handled);
+                if self.color_management_inherit_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.export_delivery_view_policy_dropdown.event(event, ctx)
+                        == EventResult::Handled
+                    || delivery_view_inputs_handled
+                    || self.color_space_dropdown.event(event, ctx) == EventResult::Handled
                     || self.output_color_space_dropdown.event(event, ctx) == EventResult::Handled
                     || self.color_workflow_dropdown.event(event, ctx) == EventResult::Handled
                     || self.missing_color_metadata_dropdown.event(event, ctx)
@@ -1515,6 +1773,12 @@ impl Widget for SequenceSettingsDialog {
             }
             SequenceSettingsTabPayload::Color => {
                 self.color_label.paint(ctx);
+                self.color_management_inherit_dropdown.paint(ctx);
+                self.export_delivery_view_policy_dropdown.paint(ctx);
+                if is_named_export_delivery_view(&self.draft) {
+                    self.export_delivery_view_display_input.paint(ctx);
+                    self.export_delivery_view_name_input.paint(ctx);
+                }
                 self.color_space_dropdown.paint(ctx);
                 self.output_color_space_dropdown.paint(ctx);
                 self.color_workflow_dropdown.paint(ctx);
@@ -1542,7 +1806,7 @@ impl Widget for SequenceSettingsDialog {
     }
 
     fn child_count(&self) -> usize {
-        40
+        44
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -1570,21 +1834,25 @@ impl Widget for SequenceSettingsDialog {
             22 => Some(&self.start_timecode_input),
             23 => Some(&self.color_space_dropdown),
             24 => Some(&self.output_color_space_dropdown),
-            25 => Some(&self.color_workflow_dropdown),
-            26 => Some(&self.missing_color_metadata_dropdown),
-            27 => Some(&self.nested_color_processing_dropdown),
-            28 => Some(&self.video_range_dropdown),
-            29 => Some(&self.export_bit_depth_dropdown),
-            30 => Some(&self.auto_tone_map_checkbox),
-            31 => Some(&self.preserve_hdr_metadata_checkbox),
-            32 => Some(&self.audio_sample_rate_dropdown),
-            33 => Some(&self.audio_channel_layout_dropdown),
-            34 => Some(&self.audio_display_format_dropdown),
-            35 => Some(&self.preview_render_format_dropdown),
-            36 => Some(&self.preview_cache_checkbox),
-            37 => Some(&self.preview_scale_slider),
-            38 => Some(&self.cancel_button),
-            39 => Some(&self.apply_button),
+            25 => Some(&self.color_management_inherit_dropdown),
+            26 => Some(&self.export_delivery_view_policy_dropdown),
+            27 => Some(&self.export_delivery_view_display_input),
+            28 => Some(&self.export_delivery_view_name_input),
+            29 => Some(&self.color_workflow_dropdown),
+            30 => Some(&self.missing_color_metadata_dropdown),
+            31 => Some(&self.nested_color_processing_dropdown),
+            32 => Some(&self.video_range_dropdown),
+            33 => Some(&self.export_bit_depth_dropdown),
+            34 => Some(&self.auto_tone_map_checkbox),
+            35 => Some(&self.preserve_hdr_metadata_checkbox),
+            36 => Some(&self.audio_sample_rate_dropdown),
+            37 => Some(&self.audio_channel_layout_dropdown),
+            38 => Some(&self.audio_display_format_dropdown),
+            39 => Some(&self.preview_render_format_dropdown),
+            40 => Some(&self.preview_cache_checkbox),
+            41 => Some(&self.preview_scale_slider),
+            42 => Some(&self.cancel_button),
+            43 => Some(&self.apply_button),
             _ => None,
         }
     }
@@ -1614,21 +1882,25 @@ impl Widget for SequenceSettingsDialog {
             22 => Some(&mut self.start_timecode_input),
             23 => Some(&mut self.color_space_dropdown),
             24 => Some(&mut self.output_color_space_dropdown),
-            25 => Some(&mut self.color_workflow_dropdown),
-            26 => Some(&mut self.missing_color_metadata_dropdown),
-            27 => Some(&mut self.nested_color_processing_dropdown),
-            28 => Some(&mut self.video_range_dropdown),
-            29 => Some(&mut self.export_bit_depth_dropdown),
-            30 => Some(&mut self.auto_tone_map_checkbox),
-            31 => Some(&mut self.preserve_hdr_metadata_checkbox),
-            32 => Some(&mut self.audio_sample_rate_dropdown),
-            33 => Some(&mut self.audio_channel_layout_dropdown),
-            34 => Some(&mut self.audio_display_format_dropdown),
-            35 => Some(&mut self.preview_render_format_dropdown),
-            36 => Some(&mut self.preview_cache_checkbox),
-            37 => Some(&mut self.preview_scale_slider),
-            38 => Some(&mut self.cancel_button),
-            39 => Some(&mut self.apply_button),
+            25 => Some(&mut self.color_management_inherit_dropdown),
+            26 => Some(&mut self.export_delivery_view_policy_dropdown),
+            27 => Some(&mut self.export_delivery_view_display_input),
+            28 => Some(&mut self.export_delivery_view_name_input),
+            29 => Some(&mut self.color_workflow_dropdown),
+            30 => Some(&mut self.missing_color_metadata_dropdown),
+            31 => Some(&mut self.nested_color_processing_dropdown),
+            32 => Some(&mut self.video_range_dropdown),
+            33 => Some(&mut self.export_bit_depth_dropdown),
+            34 => Some(&mut self.auto_tone_map_checkbox),
+            35 => Some(&mut self.preserve_hdr_metadata_checkbox),
+            36 => Some(&mut self.audio_sample_rate_dropdown),
+            37 => Some(&mut self.audio_channel_layout_dropdown),
+            38 => Some(&mut self.audio_display_format_dropdown),
+            39 => Some(&mut self.preview_render_format_dropdown),
+            40 => Some(&mut self.preview_cache_checkbox),
+            41 => Some(&mut self.preview_scale_slider),
+            42 => Some(&mut self.cancel_button),
+            43 => Some(&mut self.apply_button),
             _ => None,
         }
     }

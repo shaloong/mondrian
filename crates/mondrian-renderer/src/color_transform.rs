@@ -201,6 +201,30 @@ impl RenderColorTransform {
         }
     }
 
+    /// Build an export/delivery transform through an explicit OCIO
+    /// display/view pair.
+    ///
+    /// Unlike [`Self::display_view`] which targets preview presentation
+    /// (`Display` domain), this targets encoded export delivery (`Export`
+    /// domain). The OCIO display/view transform (which carries tone mapping)
+    /// is applied identically; only the diagnostic domain differs.
+    pub fn delivery_view(
+        output_color_space: ColorSpace,
+        display: impl Into<String>,
+        view: impl Into<String>,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            output_color_space,
+            output_domain: ColorFrameDomain::Export,
+            display_view: Some(RenderOcioDisplayView::new(display, view)),
+            tone_map,
+            engine,
+            backend: RenderColorTransformBackend::CpuOcioRgba8Boundary,
+        }
+    }
+
     /// Build a display transform through an explicit OCIO display/view pair.
     pub fn display_view(
         output_color_space: ColorSpace,
@@ -1085,5 +1109,61 @@ mod tests {
         let output_data = &result.frame.rgba_f32().data[0];
         assert!(output_data[0] > 0.0 && output_data[0] < 1.0);
         assert!(output_data[3] > 0.9); // Alpha should be preserved
+    }
+
+    #[test]
+    fn delivery_view_constructor_sets_export_domain_with_display_view() {
+        let transform = RenderColorTransform::delivery_view(
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+            true,
+            ColorEngine::MondrianSmart,
+        );
+
+        assert_eq!(transform.output_domain, ColorFrameDomain::Export);
+        assert!(transform.display_view.is_some());
+        let dv = transform.display_view.as_ref().unwrap();
+        assert_eq!(dv.display, "sRGB - Display");
+        assert_eq!(dv.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert!(transform.tone_map);
+        assert_eq!(transform.output_color_space, ColorSpace::Srgb);
+    }
+
+    #[test]
+    fn delivery_view_float_path_dispatches_to_display_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let source = CpuColorFrame::working(RgbaF32Frame {
+            width: 2,
+            height: 2,
+            data: vec![
+                [0.5, 0.25, 0.125, 1.0],
+                [0.8, 0.6, 0.4, 1.0],
+                [0.2, 0.4, 0.6, 1.0],
+                [1.0, 0.5, 0.0, 1.0],
+            ],
+            color_space: ColorSpace::Rec709,
+        });
+        let transform = RenderColorTransform::delivery_view(
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+            true,
+            ColorEngine::MondrianSmart,
+        );
+
+        let result = CpuColorTransformExecutor::transform_float(&source, &transform)
+            .expect("delivery view float transform");
+
+        assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Export);
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+        assert!(!result.diagnostics.used_rgba8_boundary);
+        assert_eq!(
+            result.diagnostics.backend,
+            RenderColorTransformBackend::CpuOcioFloat
+        );
     }
 }

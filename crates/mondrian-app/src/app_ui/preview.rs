@@ -2784,14 +2784,19 @@ mod tests {
     use super::*;
 
     use mondrian_core::types::{AssetId, TimeCode};
-    use mondrian_core::{Color, ProjectColorManagement};
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, ProjectColorManagement};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_renderer::{ColorFrameDomain, RenderColorStageGpuBlockerBreakdown};
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
     use mondrian_timeline::track::Track;
 
+    fn ensure_test_ocio_loaded() {
+        ensure_mondrian_default_ocio_loaded().expect("preview tests require Mondrian default OCIO");
+    }
+
     fn state_with_solid_color_clip(color: Color) -> AppState {
+        ensure_test_ocio_loaded();
         let mut state = AppState::new();
         let mut sequence = Sequence::new("preview");
         let tb = sequence.time_base();
@@ -2809,6 +2814,7 @@ mod tests {
     }
 
     fn test_color_context(output_color_space: ColorSpace) -> ColorContext {
+        ensure_test_ocio_loaded();
         Sequence::new("color-context")
             .settings
             .root_preview_color_context(&ProjectColorManagement::default(), output_color_space)
@@ -2825,6 +2831,7 @@ mod tests {
                 ),
                 viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+                ..Default::default()
             };
 
         assert_eq!(
@@ -2844,6 +2851,7 @@ mod tests {
                 ),
                 viewer_mode: mondrian_core::ViewerDisplayMode::HdrPq,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+                ..Default::default()
             };
 
         assert_eq!(
@@ -3649,12 +3657,14 @@ mod tests {
             monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Rec709),
             viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
             tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+            ..Default::default()
         };
         let mut p3 = sdr.clone();
         p3.display_management = mondrian_core::DisplayManagementPolicy {
             monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::DciP3),
             viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
             tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+            ..Default::default()
         };
         let first =
             viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &sdr);
@@ -4470,7 +4480,7 @@ mod tests {
 
     #[test]
     fn preview_multilayer_color_output_matches_export_frame_hash() {
-        const REC2020_TO_SRGB_MULTILAYER_GOLDEN_HASH: u64 = 14_322_780_855_923_385_797;
+        const REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH: u64 = 6_377_061_385_888_487_029;
 
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
@@ -4504,6 +4514,8 @@ mod tests {
         };
         let mut color_context = test_color_context(ColorSpace::Srgb);
         color_context.working_color_space = ColorSpace::Rec2020;
+        assert!(color_context.ocio_display.is_some());
+        assert!(color_context.ocio_view.is_some());
 
         let resolved = vec![
             ResolvedPreviewElement::Media {
@@ -4542,21 +4554,32 @@ mod tests {
                 color_context.working_color_space,
                 &mut export_scratch,
             );
-        let export_output = mondrian_renderer::execute_cpu_output_boundary(
-            &export_working.frame,
-            &RenderOutputColorBoundary::export(
+        let export_boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
+            (Some(display), Some(view)) => RenderOutputColorBoundary::export_view(
+                color_context.output_color_space,
+                display.clone(),
+                view.clone(),
+                color_context.tone_map,
+                color_context.engine.clone(),
+            ),
+            _ => RenderOutputColorBoundary::export(
                 color_context.output_color_space,
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
-        )
-        .expect("export multilayer color transform");
+        };
+        let export_output =
+            mondrian_renderer::execute_cpu_output_boundary(&export_working.frame, &export_boundary)
+                .expect("export multilayer color transform");
         let export = export_output.result.frame.clone().into_rgba();
 
         assert_eq!(preview.rgba, export);
         let preview_export_hash = stable_rgba_hash(&preview.rgba);
         assert_eq!(preview_export_hash, stable_rgba_hash(&export));
-        assert_eq!(preview_export_hash, REC2020_TO_SRGB_MULTILAYER_GOLDEN_HASH);
+        assert_eq!(
+            preview_export_hash,
+            REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH
+        );
         assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 0);
         assert_eq!(preview.composite_diagnostics.legacy_media_blend_mode, 0);
         assert_eq!(preview.composite_diagnostics.legacy_media_transform, 0);

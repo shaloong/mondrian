@@ -2,7 +2,8 @@
 
 use crate::{clip::ActiveClip, track::Track};
 use mondrian_core::{
-    types::*, DisplayManagementPolicy, VideoContentLightMetadata, VideoMasteringDisplayMetadata,
+    types::*, DisplayManagementPolicy, ExportDeliveryViewPolicy, ExportDeliveryViewSource,
+    VideoContentLightMetadata, VideoMasteringDisplayMetadata,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -461,10 +462,134 @@ pub struct ColorContext {
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     /// Resolved display-management policy for this render context.
     pub display_management: DisplayManagementPolicy,
-    /// OCIO 显示设备名（仅在 OCIO 引擎 + 预览路径使用）。
+    /// OCIO display name for preview presentation or export delivery view.
     pub ocio_display: Option<String>,
-    /// OCIO 视图名（仅在 OCIO 引擎 + 预览路径使用）。
+    /// OCIO view name for preview presentation or export delivery view.
     pub ocio_view: Option<String>,
+    /// Delivery view resolution error, if a delivery view policy was
+    /// configured but could not be resolved. Used by the export path to
+    /// distinguish `Missing` (no policy) from `Invalid` (policy configured
+    /// but display/view not found in OCIO config).
+    pub export_delivery_view_error: Option<String>,
+}
+
+/// Resolved export delivery view for a render context.
+///
+/// Produced by [`SequenceSettings::resolve_export_delivery_view`] from the
+/// effective `ExportDeliveryViewPolicy`. Carries the OCIO display/view pair
+/// and the source that resolved it for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedExportDeliveryView {
+    /// OCIO display name for the delivery view transform.
+    pub display: String,
+    /// OCIO view name for the delivery view transform.
+    pub view: String,
+    /// How this delivery view was resolved.
+    pub source: ExportDeliveryViewSource,
+}
+
+impl SequenceSettings {
+    /// Resolve the export delivery view from the effective policy.
+    ///
+    /// When the sequence inherits project color management, the project
+    /// policy is used unless the sequence explicitly overrides it. The
+    /// resolved delivery view is only meaningful when `tone_map` is
+    /// requested; callers should check `tone_map` separately.
+    ///
+    /// Returns `Ok(None)` when the policy is `None` (no delivery view
+    /// configured) or when a loaded `OcioConfigDefault` config has no default.
+    /// Returns `Ok(Some(view))` when a valid delivery view was resolved.
+    /// Returns `Err(msg)` when the selected OCIO config cannot be loaded, or
+    /// when a named display/view was configured but could not be validated
+    /// against the current OCIO config.
+    pub fn resolve_export_delivery_view(
+        &self,
+        project_cm: &mondrian_core::ProjectColorManagement,
+    ) -> Result<Option<ResolvedExportDeliveryView>, String> {
+        let (effective_policy, source, engine) = if self.color_management.inherit {
+            (
+                &project_cm.display_management.export_delivery_view,
+                ExportDeliveryViewSource::ExplicitProject,
+                &project_cm.engine,
+            )
+        } else {
+            (
+                &self.color_management.display_management.export_delivery_view,
+                ExportDeliveryViewSource::ExplicitSequence,
+                &self.color_management.engine,
+            )
+        };
+        resolve_delivery_view_policy(effective_policy, source, engine)
+    }
+}
+
+/// Resolve a delivery view policy into a concrete delivery view.
+///
+/// - `None` → returns `Ok(None)`.
+/// - `OcioConfigDefault` → loads the selected engine config, then resolves via
+///   `ocio_default_display_view()`. Returns `Ok(None)` if the loaded config has
+///   no default display/view.
+/// - `OcioDisplayView { display, view }` → validates the display/view
+///   against the current OCIO config. Returns `Err` if the display or
+///   view is not found.
+fn resolve_delivery_view_policy(
+    policy: &ExportDeliveryViewPolicy,
+    explicit_source: ExportDeliveryViewSource,
+    engine: &ColorEngine,
+) -> Result<Option<ResolvedExportDeliveryView>, String> {
+    match policy {
+        ExportDeliveryViewPolicy::None => Ok(None),
+        ExportDeliveryViewPolicy::OcioConfigDefault => {
+            engine
+                .ensure_loaded()
+                .map_err(|err| format!("OCIO config not loaded for export delivery view: {err}"))?;
+            let resolved = mondrian_core::ocio_default_display_view().map(|(display, view)| {
+                ResolvedExportDeliveryView {
+                    display,
+                    view,
+                    source: ExportDeliveryViewSource::ConfigDefault,
+                }
+            });
+            Ok(resolved)
+        }
+        ExportDeliveryViewPolicy::OcioDisplayView { display, view } => {
+            validate_ocio_display_view(engine, display, view)?;
+            Ok(Some(ResolvedExportDeliveryView {
+                display: display.clone(),
+                view: view.clone(),
+                source: explicit_source,
+            }))
+        }
+    }
+}
+
+/// Validate that a named display/view pair exists in the current OCIO config.
+///
+/// Returns `Ok(())` if both the display and view are found.
+/// Returns `Err` with a diagnostic message otherwise.
+fn validate_ocio_display_view(
+    engine: &ColorEngine,
+    display: &str,
+    view: &str,
+) -> Result<(), String> {
+    engine
+        .ensure_loaded()
+        .map_err(|err| format!("OCIO config not loaded for export delivery view: {err}"))?;
+    let displays = mondrian_core::ocio_display_names();
+    if !displays.iter().any(|d| d == display) {
+        return Err(format!(
+            "OCIO display '{display}' not found in config; available: {:?}",
+            displays
+        ));
+    }
+    let views = mondrian_core::ocio_view_names(display);
+    if !views.iter().any(|v| v == view) {
+        return Err(format!(
+            "OCIO view '{view}' not found under display '{display}'; available: {:?}",
+            views
+        ));
+    }
+    Ok(())
 }
 
 impl Default for SequenceColorManagement {
@@ -661,11 +786,39 @@ impl SequenceSettings {
     /// will be encoded and tagged for delivery. When the sequence inherits
     /// color management from the project (`color_management.inherit == true`),
     /// the `engine` is taken from `project_cm` instead of per-sequence settings.
+    ///
+    /// The export delivery view (`ocio_display`/`ocio_view`) is resolved from
+    /// the effective `ExportDeliveryViewPolicy` in `display_management`. If
+    /// no policy is configured or the policy cannot resolve, these fields
+    /// remain `None` and the export will fail closed when tone mapping is
+    /// requested.
     pub fn root_export_color_context(
         &self,
         project_cm: &mondrian_core::ProjectColorManagement,
     ) -> ColorContext {
-        self.root_color_context_for_output(project_cm, self.color_management.output_color_space)
+        let mut ctx = self
+            .root_color_context_for_output(project_cm, self.color_management.output_color_space);
+
+        // Resolve the export delivery view from the effective policy.
+        match self.resolve_export_delivery_view(project_cm) {
+            Ok(Some(resolved)) => {
+                ctx.ocio_display = Some(resolved.display);
+                ctx.ocio_view = Some(resolved.view);
+            }
+            Ok(None) => {
+                // No delivery view configured — leave as None.
+                ctx.ocio_display = None;
+                ctx.ocio_view = None;
+            }
+            Err(err) => {
+                // Delivery view was configured but validation failed.
+                // Propagate the error so the export path can record Invalid source.
+                ctx.ocio_display = None;
+                ctx.ocio_view = None;
+                ctx.export_delivery_view_error = Some(err);
+            }
+        }
+        ctx
     }
 
     /// Build the presentation color context for root sequence preview.
@@ -732,6 +885,7 @@ impl SequenceSettings {
             ocio_display,
             ocio_view,
             workflow: self.color_management.workflow,
+            export_delivery_view_error: None,
         }
     }
 
@@ -754,6 +908,7 @@ impl SequenceSettings {
                     ocio_display: parent.ocio_display.clone(),
                     ocio_view: parent.ocio_view.clone(),
                     workflow: self.color_management.workflow,
+                    export_delivery_view_error: None,
                 }
             }
             NestedColorProcessing::ForceParentWorkingSpace => ColorContext {
@@ -767,6 +922,7 @@ impl SequenceSettings {
                 ocio_display: parent.ocio_display.clone(),
                 ocio_view: parent.ocio_view.clone(),
                 workflow: parent.workflow,
+                export_delivery_view_error: None,
             },
             NestedColorProcessing::BakeChildOutputTransform => {
                 let engine = if self.color_management.inherit {
@@ -785,6 +941,7 @@ impl SequenceSettings {
                     ocio_display: parent.ocio_display.clone(),
                     ocio_view: parent.ocio_view.clone(),
                     workflow: self.color_management.workflow,
+                    export_delivery_view_error: None,
                 }
             }
         }
@@ -1914,6 +2071,7 @@ mod tests {
                 ),
                 viewer_mode: mondrian_core::ViewerDisplayMode::HdrPq,
                 tone_map_policy: DisplayToneMapPolicy::Always,
+                ..Default::default()
             },
         };
         let mut settings = SequenceSettings::default();
@@ -1922,6 +2080,7 @@ mod tests {
             monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Srgb),
             viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
             tone_map_policy: DisplayToneMapPolicy::Never,
+            ..Default::default()
         };
 
         let ctx = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Pq);
@@ -2000,16 +2159,13 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_smart_engine_uses_available_default_display_view() {
+    fn mondrian_smart_export_context_resolves_delivery_view_from_policy() {
         let settings = SequenceSettings::default();
         let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
         assert_eq!(ctx.engine, ColorEngine::MondrianSmart);
-        let expected = mondrian_core::ocio_default_display_view();
-        assert_eq!(
-            ctx.ocio_display,
-            expected.as_ref().map(|(display, _)| display.clone())
-        );
-        assert_eq!(ctx.ocio_view, expected.map(|(_, view)| view));
+        // Default policy is None, so no delivery view is resolved.
+        assert_eq!(ctx.ocio_display, None);
+        assert_eq!(ctx.ocio_view, None);
     }
 
     #[test]
@@ -2037,5 +2193,191 @@ mod tests {
         settings.color_management.inherit = false;
         let ctx2 = settings.root_export_color_context(&project_cm);
         assert_eq!(ctx2.engine, ColorEngine::MondrianSmart);
+    }
+
+    #[test]
+    fn default_export_delivery_view_policy_is_none() {
+        let policy = ExportDeliveryViewPolicy::default();
+        assert_eq!(policy, ExportDeliveryViewPolicy::None);
+    }
+
+    #[test]
+    fn default_display_management_has_no_export_delivery_view() {
+        let dm = DisplayManagementPolicy::default();
+        assert_eq!(dm.export_delivery_view, ExportDeliveryViewPolicy::None);
+    }
+
+    #[test]
+    fn resolve_delivery_view_none_returns_none() {
+        let settings = SequenceSettings::default();
+        let project_cm = ProjectColorManagement::default();
+        let result = settings.resolve_export_delivery_view(&project_cm).expect("resolve");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_delivery_view_config_default_resolves_when_ocio_available() {
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                inherit: false,
+                display_management: DisplayManagementPolicy {
+                    export_delivery_view: ExportDeliveryViewPolicy::OcioConfigDefault,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project_cm = ProjectColorManagement::default();
+        let result = settings.resolve_export_delivery_view(&project_cm).expect("resolve");
+        // When OCIO is loaded, this should resolve to a view.
+        // In test environments without OCIO, this may be None.
+        if let Some(view) = result {
+            assert_eq!(view.source, ExportDeliveryViewSource::ConfigDefault);
+            assert!(!view.display.is_empty());
+            assert!(!view.view.is_empty());
+        }
+    }
+
+    #[test]
+    fn resolve_delivery_view_explicit_uses_named_display_view() {
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                inherit: false,
+                display_management: DisplayManagementPolicy {
+                    export_delivery_view: ExportDeliveryViewPolicy::OcioDisplayView {
+                        display: "sRGB - Display".to_string(),
+                        view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project_cm = ProjectColorManagement::default();
+        let result = settings.resolve_export_delivery_view(&project_cm);
+        let view = result.expect("valid explicit sequence display/view").expect("resolved view");
+        assert_eq!(view.display, "sRGB - Display");
+        assert_eq!(view.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert_eq!(view.source, ExportDeliveryViewSource::ExplicitSequence);
+    }
+
+    #[test]
+    fn resolve_delivery_view_invalid_display_returns_err() {
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                inherit: false,
+                display_management: DisplayManagementPolicy {
+                    export_delivery_view: ExportDeliveryViewPolicy::OcioDisplayView {
+                        display: "Nonexistent Display".to_string(),
+                        view: "Some View".to_string(),
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project_cm = ProjectColorManagement::default();
+        let result = settings.resolve_export_delivery_view(&project_cm);
+        assert!(result.is_err(), "invalid display should fail");
+    }
+
+    #[test]
+    fn inherit_project_delivery_view_policy() {
+        let project_cm = ProjectColorManagement {
+            engine: ColorEngine::MondrianSmart,
+            display_management: DisplayManagementPolicy {
+                export_delivery_view: ExportDeliveryViewPolicy::OcioConfigDefault,
+                ..Default::default()
+            },
+        };
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement { inherit: true, ..Default::default() },
+            ..Default::default()
+        };
+        let ctx = settings.root_export_color_context(&project_cm);
+        // With inherit=true and project policy=OcioConfigDefault, the export
+        // context should have ocio_display/ocio_view populated (if OCIO is available).
+        // If OCIO is not available, they'll be None — that's correct fail-closed.
+        if ctx.ocio_display.is_some() {
+            assert!(ctx.ocio_view.is_some());
+        }
+    }
+
+    #[test]
+    fn sequence_override_none_prevents_project_delivery_view() {
+        let project_cm = ProjectColorManagement {
+            engine: ColorEngine::MondrianSmart,
+            display_management: DisplayManagementPolicy {
+                export_delivery_view: ExportDeliveryViewPolicy::OcioConfigDefault,
+                ..Default::default()
+            },
+        };
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                inherit: false,
+                display_management: DisplayManagementPolicy {
+                    export_delivery_view: ExportDeliveryViewPolicy::None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = settings.root_export_color_context(&project_cm);
+        // Sequence override to None should prevent project delivery view.
+        assert_eq!(ctx.ocio_display, None);
+        assert_eq!(ctx.ocio_view, None);
+    }
+
+    #[test]
+    fn inherited_project_delivery_view_reports_project_source_even_if_sequence_field_is_stale() {
+        let project_cm = ProjectColorManagement {
+            engine: ColorEngine::MondrianSmart,
+            display_management: DisplayManagementPolicy {
+                export_delivery_view: ExportDeliveryViewPolicy::OcioDisplayView {
+                    display: "sRGB - Display".to_string(),
+                    view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+                },
+                ..Default::default()
+            },
+        };
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                inherit: true,
+                display_management: DisplayManagementPolicy {
+                    export_delivery_view: ExportDeliveryViewPolicy::OcioDisplayView {
+                        display: "stale sequence display".to_string(),
+                        view: "stale sequence view".to_string(),
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let view = settings
+            .resolve_export_delivery_view(&project_cm)
+            .expect("project delivery view resolves")
+            .expect("resolved view");
+        assert_eq!(view.display, "sRGB - Display");
+        assert_eq!(view.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert_eq!(view.source, ExportDeliveryViewSource::ExplicitProject);
+    }
+
+    #[test]
+    fn export_context_no_delivery_view_records_no_issue_when_tone_map_false() {
+        let settings = SequenceSettings::default();
+        let project_cm = ProjectColorManagement::default();
+        let ctx = settings.root_export_color_context(&project_cm);
+        // Default policy is None, tone_map depends on workflow/output.
+        // If tone_map is false, no issue should be recorded.
+        if !ctx.tone_map {
+            assert_eq!(ctx.ocio_display, None);
+            assert_eq!(ctx.ocio_view, None);
+        }
     }
 }

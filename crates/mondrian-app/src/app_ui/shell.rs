@@ -1840,7 +1840,8 @@ mod tests {
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::AssetId;
     use mondrian_core::{
-        ColorSpace, Rational, Resolution, VideoContentLightMetadata, VideoMasteringDisplayMetadata,
+        ColorSpace, ExportDeliveryViewPolicy, Rational, Resolution, VideoContentLightMetadata,
+        VideoMasteringDisplayMetadata,
     };
     use mondrian_platform::ClipboardError;
     use mondrian_timeline::sequence::{
@@ -2913,6 +2914,13 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ColorManagementInherit(false),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::OutputColorSpace(ColorSpace::Rec2100Pq),
             ),
             &platform,
@@ -2967,6 +2975,18 @@ mod tests {
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(true),
+            ),
+            &platform,
+            None,
+        );
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::ExportDeliveryViewPolicy(
+                    ExportDeliveryViewPolicy::OcioDisplayView {
+                        display: "sRGB".to_owned(),
+                        view: "ACES 1.0 - SDR Video".to_owned(),
+                    },
+                ),
             ),
             &platform,
             None,
@@ -3056,6 +3076,7 @@ mod tests {
         assert_eq!(payload.settings.start_timecode_frame, 120);
         assert_eq!(payload.settings.color_space, ColorSpace::Rec2100Pq);
         assert!(!payload.settings.auto_tone_map_media);
+        assert!(!payload.settings.color_management.inherit);
         assert_eq!(
             payload.settings.color_management.workflow,
             ColorWorkflow::Aces
@@ -3081,6 +3102,13 @@ mod tests {
             ExportBitDepth::Ten
         );
         assert!(payload.settings.color_management.preserve_hdr_metadata);
+        assert_eq!(
+            payload.settings.color_management.display_management.export_delivery_view,
+            ExportDeliveryViewPolicy::OcioDisplayView {
+                display: "sRGB".to_owned(),
+                view: "ACES 1.0 - SDR Video".to_owned(),
+            }
+        );
         assert_eq!(payload.settings.audio_sample_rate, 96_000);
         assert_eq!(
             payload.settings.audio_channel_layout,

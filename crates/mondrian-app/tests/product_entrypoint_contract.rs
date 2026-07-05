@@ -70,6 +70,7 @@ fn product_default_run_targets_app_ui_main_binary() {
         "ui_color_test",
         "ui_widget_test",
         "ui_pipeline_test",
+        "viewer_gpu_output_budget",
     ];
     for bin in bins {
         assert!(
