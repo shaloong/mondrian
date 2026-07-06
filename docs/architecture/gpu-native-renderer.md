@@ -71,6 +71,15 @@ GPU handle absent, platform import unsupported/missing, renderer backend not
 ready, unsupported handle kind, unsupported source format, or unsupported
 working texture format.
 
+The app layer owns the combined readiness report because it is the first layer
+that can see media decode facts, platform probes, and renderer backend support
+together. `app_ui::native_video_import` evaluates those facts into a stable
+viewer telemetry payload without giving media a renderer dependency or giving
+the renderer a platform dependency. Current media preview frames report
+`CpuDecodedMedia`; this is intentional and must remain distinct from
+`ReadyZeroCopy` / `ReadyLowCopy` until actual decoder GPU surfaces are handed to
+the renderer import path.
+
 ## Effect Integration
 
 `mondrian-effects` already exposes `EffectGpuExecutor` as an acceleration hook. Long-term, effects should compile to graph nodes that the renderer can execute on GPU where supported, with CPU fallback only for unsupported ops/plugins.

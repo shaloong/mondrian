@@ -240,6 +240,13 @@ for each eligible media layer, feeds successful outputs to
 CPU-working-upload fallback only for layers whose GPU input stage fails.
 Telemetry must report the actual path as `GpuOcio`, `CpuOcio`, or a mixed
 variant; it must not infer GPU residency from preview-plan eligibility alone.
+When a preview frame contains media layers, the viewer frame-residency payload
+also carries an app-layer native video import readiness report. That report is
+computed from media decoder residency, platform import probing, and renderer
+native import support. Today it reports `CpuDecodedMedia` for preview media
+because FFmpeg still returns CPU RGBA bytes; zero-copy and low-copy readiness
+must only appear after a real decoder GPU handle and renderer import support are
+both present.
 
 Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
 result. App, export, tests, and benches must read frames from `.result` and

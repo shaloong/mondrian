@@ -15,6 +15,10 @@ use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
+use crate::app_ui::native_video_import::{
+    evaluate_native_video_import_readiness, AppUiNativeVideoImportReadiness,
+    AppUiNativeVideoImportReadinessInput,
+};
 use crate::app_ui::preview::{
     AppUiGpuPreviewCompositeLayer, AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState,
     AppUiGpuPreviewMediaSource, AppUiGpuPreviewWorkingInput, AppUiPreviewColorRejection,
@@ -32,10 +36,12 @@ use crate::app_ui::runtime::{
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::{BlendMode, Color, ColorSpace};
-use mondrian_platform::SystemPlatformService;
+use mondrian_media::DecodedFrameResidency;
+use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::{
     CpuColorFrame, GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuCompositeLayer,
-    GpuCompositeLayerSource, GpuCompositeRequest, GpuFrameCompositor, RenderColorStageDiagnostics,
+    GpuCompositeLayerSource, GpuCompositeRequest, GpuFrameCompositor,
+    GpuNativeDecodedFrameImportSupport, RenderColorStageDiagnostics,
     RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
@@ -320,6 +326,8 @@ struct AppUiViewerGpuOutputFrameResidency {
     upload_count: u32,
     readback_count: u32,
     reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_video_import: Option<AppUiNativeVideoImportReadiness>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -779,6 +787,7 @@ impl AppUiViewerGpuOutputFrameResidency {
                 upload_count: 1,
                 readback_count: 0,
                 reason: "CPU working frame is uploaded before the GPU output boundary".to_owned(),
+                native_video_import: None,
             },
             AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
                 let media_layers = layers
@@ -834,6 +843,9 @@ impl AppUiViewerGpuOutputFrameResidency {
                     } else {
                         "Procedural layers are generated and composited on the GPU without media uploads".to_owned()
                     },
+                    native_video_import: preview_gpu_composite_native_video_import_readiness(
+                        has_media,
+                    ),
                 }
             }
         }
@@ -3199,8 +3211,24 @@ impl PreviewGpuCompositeResidencySummary {
             upload_count: self.gpu_input_layers.saturating_add(self.cpu_upload_layers),
             readback_count: 0,
             reason: preview_gpu_composite_residency_reason(self),
+            native_video_import: preview_gpu_composite_native_video_import_readiness(has_media),
         }
     }
+}
+
+fn preview_gpu_composite_native_video_import_readiness(
+    has_media: bool,
+) -> Option<AppUiNativeVideoImportReadiness> {
+    has_media.then(|| {
+        evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+            decoder_residency: DecodedFrameResidency::CpuRgba,
+            decoder_handle_kind: None,
+            source_texture_format: None,
+            working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
+            platform_probe: SystemPlatformService.native_video_texture_import(),
+            renderer_support: GpuNativeDecodedFrameImportSupport::unavailable(),
+        })
+    })
 }
 
 fn preview_gpu_composite_input_transform_path(
@@ -5241,6 +5269,14 @@ mod tests {
         assert!(residency.low_copy);
         assert_eq!(residency.upload_count, 2);
         assert!(residency.reason.contains("GPU OCIO input"));
+        let native_video_import = residency
+            .native_video_import
+            .expect("media path reports native import readiness");
+        assert_eq!(
+            native_video_import.status,
+            crate::app_ui::native_video_import::AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia
+        );
+        assert!(!native_video_import.zero_copy_ready);
     }
 
     #[test]
@@ -5261,6 +5297,21 @@ mod tests {
         assert_eq!(residency.upload_count, 2);
         assert!(residency.reason.contains("succeeded for 1 media layer"));
         assert!(residency.reason.contains("1 GPU input failure"));
+    }
+
+    #[test]
+    fn preview_gpu_composite_residency_omits_native_video_report_for_procedural_layers() {
+        let residency = PreviewGpuCompositeResidencySummary {
+            procedural_layers: 1,
+            ..PreviewGpuCompositeResidencySummary::default()
+        }
+        .to_frame_residency();
+
+        assert_eq!(
+            residency.decode_residency,
+            AppUiViewerGpuOutputDecodeResidency::ProceduralGpuNative
+        );
+        assert!(residency.native_video_import.is_none());
     }
 
     #[test]
@@ -5453,6 +5504,7 @@ mod tests {
                 upload_count: 1,
                 readback_count: 0,
                 reason: "test residency".to_owned(),
+                native_video_import: None,
             },
         });
         let mut diagnostics =
