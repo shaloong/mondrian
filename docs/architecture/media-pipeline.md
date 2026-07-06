@@ -55,6 +55,11 @@ Generation must also use `ProxyStatus`: a `Fresh` proxy is reused, while a
 `Stale` proxy is regenerated in the background. Failed regeneration must not
 delete the previous proxy file, because preview can keep falling back to source
 until a fresh proxy is finalized.
+`MultiLevelCache` must not weaken this contract: L1 memory hits and L2 proxy
+index hits are valid only while the referenced proxy still resolves to
+`ProxyStatus::Fresh`. A cached source fallback must be re-evaluated when a
+fresh proxy later appears so proxy generation can actually improve playback
+without requiring an app restart or manual cache clear.
 
 `DecodedGpuFrameHandleKind` belongs to media because it describes the decoder
 surface family that FFmpeg/hardware decode produced, such as D3D11 texture,

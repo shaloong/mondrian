@@ -4,7 +4,7 @@
 //! L2: 磁盘代理索引缓存（跨会话保留）
 //! L3: 原始素材路径回退
 
-use crate::proxy::ProxyGenerator;
+use crate::proxy::{ProxyGenerator, ProxyStatus};
 use lru::LruCache;
 use mondrian_core::types::AssetId;
 use parking_lot::Mutex;
@@ -67,13 +67,13 @@ impl MultiLevelCache {
         prefer_proxy: bool,
         proxy_generator: &ProxyGenerator,
     ) -> ResolvedMediaPath {
-        if let Some(hit) = self.l1_path_cache.lock().get(&asset_id).cloned() {
-            return ResolvedMediaPath { tier: CacheTier::MemoryL1, ..hit };
+        if let Some(hit) = self.fresh_l1_hit(asset_id, source_path, prefer_proxy, proxy_generator) {
+            return hit;
         }
 
         if prefer_proxy {
             let proxy_from_generator = proxy_generator.proxy_path(source_path);
-            if proxy_from_generator.exists() {
+            if proxy_generator.proxy_status(source_path) == ProxyStatus::Fresh {
                 let resolved = ResolvedMediaPath {
                     path: proxy_from_generator.clone(),
                     tier: CacheTier::DiskProxyL2,
@@ -85,7 +85,7 @@ impl MultiLevelCache {
             }
 
             if let Some(entry) = self.l2_proxy_index.lock().get(&asset_id).cloned() {
-                if entry.source_path == source_path && entry.proxy_path.exists() {
+                if self.l2_entry_is_fresh(&entry, source_path, &proxy_from_generator) {
                     let resolved = ResolvedMediaPath {
                         path: entry.proxy_path,
                         tier: CacheTier::DiskProxyL2,
@@ -104,6 +104,53 @@ impl MultiLevelCache {
         };
         self.put_l1(asset_id, resolved.clone());
         resolved
+    }
+
+    fn fresh_l1_hit(
+        &self,
+        asset_id: AssetId,
+        source_path: &Path,
+        prefer_proxy: bool,
+        proxy_generator: &ProxyGenerator,
+    ) -> Option<ResolvedMediaPath> {
+        let hit = self.l1_path_cache.lock().get(&asset_id).cloned()?;
+        if !prefer_proxy {
+            if !hit.is_proxy && hit.path == source_path {
+                return Some(ResolvedMediaPath { tier: CacheTier::MemoryL1, ..hit });
+            }
+            self.l1_path_cache.lock().pop(&asset_id);
+            return None;
+        }
+
+        let expected_proxy_path = proxy_generator.proxy_path(source_path);
+        let expected_proxy_status = ProxyStatus::from_paths(source_path, &expected_proxy_path);
+        if hit.is_proxy
+            && hit.path == expected_proxy_path
+            && expected_proxy_status == ProxyStatus::Fresh
+        {
+            return Some(ResolvedMediaPath { tier: CacheTier::MemoryL1, ..hit });
+        }
+        if !hit.is_proxy && hit.path == source_path && expected_proxy_status != ProxyStatus::Fresh {
+            return Some(ResolvedMediaPath { tier: CacheTier::MemoryL1, ..hit });
+        }
+        self.l1_path_cache.lock().pop(&asset_id);
+        None
+    }
+
+    fn l2_entry_is_fresh(
+        &self,
+        entry: &ProxyIndexEntry,
+        source_path: &Path,
+        expected_proxy_path: &Path,
+    ) -> bool {
+        if entry.source_path != source_path
+            || entry.proxy_path != expected_proxy_path
+            || !entry.proxy_path.exists()
+        {
+            return false;
+        }
+
+        ProxyStatus::from_paths(source_path, &entry.proxy_path) == ProxyStatus::Fresh
     }
 
     pub fn invalidate_asset(&self, asset_id: AssetId) {
@@ -159,4 +206,152 @@ fn load_proxy_index(path: &Path) -> HashMap<AssetId, ProxyIndexEntry> {
     };
 
     parsed.entries.into_iter().map(|entry| (entry.asset_id, entry)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CacheTier, MultiLevelCache};
+    use crate::{ProxyConfig, ProxyGenerator};
+    use mondrian_core::types::AssetId;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn test_proxy_config(cache_dir: PathBuf) -> ProxyConfig {
+        ProxyConfig { cache_dir, ..ProxyConfig::default() }
+    }
+
+    fn write_fresh_proxy(
+        root: &tempfile::TempDir,
+        source_name: &str,
+    ) -> (PathBuf, ProxyGenerator, PathBuf) {
+        let source = root.path().join(source_name);
+        std::fs::write(&source, b"source").expect("source");
+        std::thread::sleep(Duration::from_millis(20));
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
+        let proxy = generator.proxy_path(&source);
+        std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
+        std::fs::write(&proxy, b"proxy").expect("proxy");
+        (source, generator, proxy)
+    }
+
+    #[test]
+    fn resolve_playback_path_uses_fresh_proxy() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache = MultiLevelCache::new(root.path().join("cache"), 8);
+        let asset_id = AssetId::new();
+        let (source, generator, proxy) = write_fresh_proxy(&root, "source.mp4");
+
+        let resolved = cache.resolve_playback_path(asset_id, &source, true, &generator);
+
+        assert_eq!(resolved.path, proxy);
+        assert_eq!(resolved.tier, CacheTier::DiskProxyL2);
+        assert!(resolved.is_proxy);
+    }
+
+    #[test]
+    fn resolve_playback_path_falls_back_to_source_when_proxy_is_stale() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache = MultiLevelCache::new(root.path().join("cache"), 8);
+        let asset_id = AssetId::new();
+        let source = root.path().join("source.mp4");
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
+        let proxy = generator.proxy_path(&source);
+        std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
+        std::fs::write(&proxy, b"proxy").expect("proxy");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&source, b"newer source").expect("source");
+
+        let resolved = cache.resolve_playback_path(asset_id, &source, true, &generator);
+
+        assert_eq!(resolved.path, source);
+        assert_eq!(resolved.tier, CacheTier::SourceL3);
+        assert!(!resolved.is_proxy);
+    }
+
+    #[test]
+    fn resolve_playback_path_upgrades_source_l1_when_proxy_becomes_fresh() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache = MultiLevelCache::new(root.path().join("cache"), 8);
+        let asset_id = AssetId::new();
+        let source = root.path().join("source.mp4");
+        std::fs::write(&source, b"source").expect("source");
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
+
+        let first = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        assert_eq!(first.path, source);
+        assert_eq!(first.tier, CacheTier::SourceL3);
+
+        std::thread::sleep(Duration::from_millis(20));
+        let proxy = generator.proxy_path(&source);
+        std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
+        std::fs::write(&proxy, b"proxy").expect("proxy");
+
+        let second = cache.resolve_playback_path(asset_id, &source, true, &generator);
+
+        assert_eq!(second.path, proxy);
+        assert_eq!(second.tier, CacheTier::DiskProxyL2);
+        assert!(second.is_proxy);
+    }
+
+    #[test]
+    fn resolve_playback_path_does_not_return_stale_proxy_from_l1() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache = MultiLevelCache::new(root.path().join("cache"), 8);
+        let asset_id = AssetId::new();
+        let (source, generator, proxy) = write_fresh_proxy(&root, "source.mp4");
+
+        let first = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        assert_eq!(first.path, proxy);
+        assert!(first.is_proxy);
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&source, b"newer source").expect("source");
+
+        let second = cache.resolve_playback_path(asset_id, &source, true, &generator);
+
+        assert_eq!(second.path, source);
+        assert_eq!(second.tier, CacheTier::SourceL3);
+        assert!(!second.is_proxy);
+    }
+
+    #[test]
+    fn resolve_playback_path_does_not_return_stale_proxy_from_l2_index() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache = MultiLevelCache::new(root.path().join("cache"), 8);
+        let asset_id = AssetId::new();
+        let (source, generator, proxy) = write_fresh_proxy(&root, "source.mp4");
+
+        let first = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        assert_eq!(first.path, proxy);
+        cache.clear_l1();
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&source, b"newer source").expect("source");
+
+        let second = cache.resolve_playback_path(asset_id, &source, true, &generator);
+
+        assert_eq!(second.path, source);
+        assert_eq!(second.tier, CacheTier::SourceL3);
+        assert!(!second.is_proxy);
+    }
+
+    #[test]
+    fn resolve_playback_path_does_not_return_l2_proxy_from_old_config() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache = MultiLevelCache::new(root.path().join("cache"), 8);
+        let asset_id = AssetId::new();
+        let (source, first_generator, first_proxy) = write_fresh_proxy(&root, "source.mp4");
+
+        let first = cache.resolve_playback_path(asset_id, &source, true, &first_generator);
+        assert_eq!(first.path, first_proxy);
+        cache.clear_l1();
+
+        let second_generator =
+            ProxyGenerator::new(test_proxy_config(root.path().join("other-proxy-config")));
+        let second = cache.resolve_playback_path(asset_id, &source, true, &second_generator);
+
+        assert_eq!(second.path, source);
+        assert_eq!(second.tier, CacheTier::SourceL3);
+        assert!(!second.is_proxy);
+    }
 }

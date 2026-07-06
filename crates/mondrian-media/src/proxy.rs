@@ -91,6 +91,23 @@ pub enum ProxyStatus {
 }
 
 impl ProxyStatus {
+    /// Resolves freshness from an explicit source/proxy path pair.
+    pub fn from_paths(source_path: &Path, proxy_path: &Path) -> Self {
+        if !proxy_path.exists() {
+            return Self::Missing;
+        }
+
+        let source_modified =
+            std::fs::metadata(source_path).and_then(|metadata| metadata.modified());
+        let proxy_modified = std::fs::metadata(proxy_path).and_then(|metadata| metadata.modified());
+        match (source_modified, proxy_modified) {
+            (Ok(source), Ok(proxy)) if proxy >= source => Self::Fresh,
+            (Ok(_), Ok(_)) => Self::Stale,
+            (Err(_), Ok(_)) => Self::Fresh,
+            _ => Self::Stale,
+        }
+    }
+
     /// Returns true when preview playback may decode the proxy file.
     pub fn is_fresh(self) -> bool {
         self == Self::Fresh
@@ -142,20 +159,7 @@ impl ProxyGenerator {
     /// Returns the freshness state for the configured proxy of `source_path`.
     pub fn proxy_status(&self, source_path: &Path) -> ProxyStatus {
         let proxy_path = self.proxy_path(source_path);
-        if !proxy_path.exists() {
-            return ProxyStatus::Missing;
-        }
-
-        let source_modified =
-            std::fs::metadata(source_path).and_then(|metadata| metadata.modified());
-        let proxy_modified =
-            std::fs::metadata(&proxy_path).and_then(|metadata| metadata.modified());
-        match (source_modified, proxy_modified) {
-            (Ok(source), Ok(proxy)) if proxy >= source => ProxyStatus::Fresh,
-            (Ok(_), Ok(_)) => ProxyStatus::Stale,
-            (Err(_), Ok(_)) => ProxyStatus::Fresh,
-            _ => ProxyStatus::Stale,
-        }
+        ProxyStatus::from_paths(source_path, &proxy_path)
     }
 
     /// Returns true when the configured proxy exists and is safe to decode.
