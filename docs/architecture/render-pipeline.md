@@ -219,8 +219,12 @@ preview playback to move input OCIO off the CPU. The runtime-owned entry point
 is `RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend(...)`,
 which reuses the same renderer-owned shader cache, backend-prep cache,
 backend-object cache, frame-id allocator, and frame table as output boundaries.
-It is not a hardware decode or zero-copy path until `mondrian-media` supplies an
-actual GPU texture/hardware frame instead of CPU RGBA bytes.
+`GpuFrameCompositor` can consume the resulting `GpuColorFrameHandle` directly
+as a media layer through `GpuCompositeLayerSource::GpuFrame`, so the planned
+preview path can become GPU input transform -> GPU working composite -> GPU
+output boundary without re-uploading that media layer. It is not a hardware
+decode or zero-copy path until `mondrian-media` supplies an actual GPU
+texture/hardware frame instead of CPU RGBA bytes.
 
 Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
 result. App, export, tests, and benches must read frames from `.result` and

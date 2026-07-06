@@ -3997,6 +3997,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_input_stage_output_can_feed_gpu_compositor_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu input-to-composite test: no GPU adapter available");
+            return;
+        };
+        let source = cpu_source_frame();
+        let transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_400);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-input-to-composite"),
+        });
+
+        let input_record = runtime
+            .record_wgpu_input_stage_owned_backend(
+                &transform,
+                &source,
+                GpuColorFrameTextureFormat::Rgba16Float,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("runtime-owned GPU input stage should record");
+        let media_handle = input_record.materialized.output.clone();
+        let layers = [crate::GpuCompositeLayer {
+            source: crate::GpuCompositeLayerSource::GpuFrame(&media_handle),
+            opacity: 1.0,
+            blend_mode: mondrian_core::types::BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            has_effect_graph: false,
+        }];
+
+        let composite = runtime
+            .record_wgpu_working_composite(
+                &compositor,
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                GpuCompositeRequest {
+                    width: source.descriptor().width,
+                    height: source.descriptor().height,
+                    working_color_space: ColorSpace::Rec709,
+                    layers: &layers,
+                },
+            )
+            .expect("GPU input output should feed GPU compositor");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(composite.diagnostics.gpu_native_composites, 1);
+        assert_eq!(composite.diagnostics.gpu_with_upload_composites, 0);
+        assert_eq!(composite.diagnostics.cpu_fallback_composites, 0);
+        assert_eq!(
+            composite.output.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            composite.output.descriptor().residency,
+            ColorFrameResidency::Gpu
+        );
+        assert_eq!(runtime.diagnostics().frame_table_entries, 4);
+    }
+
+    #[tokio::test]
     async fn gpu_output_boundary_runtime_matches_cpu_display_view_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {

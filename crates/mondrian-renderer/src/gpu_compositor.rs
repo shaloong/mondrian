@@ -262,6 +262,8 @@ pub fn evaluate_gpu_compositing_capability(
 pub enum GpuCompositeLayerSource<'a> {
     /// CPU working-space frame that will be uploaded to an Rgba32Float texture.
     CpuFrame(&'a CpuColorFrame),
+    /// GPU-resident working-space frame that will be sampled directly.
+    GpuFrame(&'a GpuColorFrameHandle),
     /// Solid working-space color drawn directly by shader uniform.
     SolidColor(Color),
 }
@@ -319,7 +321,7 @@ pub enum GpuCompositeError {
         /// First blocker reason.
         reason: GpuCompositingBlockerReason,
     },
-    /// A CPU source frame has the wrong descriptor for this composite.
+    /// A source frame has the wrong descriptor for this composite.
     #[error("GPU composite source frame descriptor mismatch")]
     SourceDescriptorMismatch {
         /// Expected descriptor.
@@ -373,7 +375,7 @@ impl GpuFrameCompositor {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
@@ -500,6 +502,16 @@ impl GpuFrameCompositor {
                             .expect("uploaded layer just pushed")
                             .resource()
                             .texture_view,
+                        0,
+                        [0.0, 0.0, 0.0, 0.0],
+                        [descriptor.width as f32, descriptor.height as f32],
+                    )
+                }
+                GpuCompositeLayerSource::GpuFrame(handle) => {
+                    let resource = table.get(handle).map_err(GpuCompositeError::ResourceTable)?;
+                    let descriptor = handle.descriptor();
+                    (
+                        &resource.resource().texture_view,
                         0,
                         [0.0, 0.0, 0.0, 0.0],
                         [descriptor.width as f32, descriptor.height as f32],
@@ -633,21 +645,28 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
         request.layers.iter().any(|layer| layer.has_effect_graph),
         request.layers.iter().any(|layer| !gpu_transform_supported(layer)),
         request.layers.iter().any(|layer| layer.blend_mode != BlendMode::Normal),
-        false,
+        request
+            .layers
+            .iter()
+            .all(|layer| !matches!(layer.source, GpuCompositeLayerSource::CpuFrame(_))),
     );
     if let GpuCompositingCapability::CpuFallback { reason } = capability {
         return Err(GpuCompositeError::Blocked { reason });
     }
     for layer in request.layers {
-        if let GpuCompositeLayerSource::CpuFrame(frame) = layer.source {
-            let actual = frame.descriptor();
+        if let Some(actual) = layer_source_descriptor(layer.source) {
+            let expected_residency = match layer.source {
+                GpuCompositeLayerSource::CpuFrame(_) => ColorFrameResidency::Cpu,
+                GpuCompositeLayerSource::GpuFrame(_) => ColorFrameResidency::Gpu,
+                GpuCompositeLayerSource::SolidColor(_) => unreachable!("solid has no descriptor"),
+            };
             let expected = ColorFrameDescriptor {
                 width: actual.width,
                 height: actual.height,
                 color_space: request.working_color_space,
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
-                residency: ColorFrameResidency::Cpu,
+                residency: expected_residency,
             };
             if actual != expected {
                 return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
@@ -659,8 +678,18 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
 
 fn gpu_transform_supported(layer: &GpuCompositeLayer<'_>) -> bool {
     match layer.source {
-        GpuCompositeLayerSource::CpuFrame(_) => invert_affine(layer.transform).is_some(),
+        GpuCompositeLayerSource::CpuFrame(_) | GpuCompositeLayerSource::GpuFrame(_) => {
+            invert_affine(layer.transform).is_some()
+        }
         GpuCompositeLayerSource::SolidColor(_) => is_identity_transform(layer.transform),
+    }
+}
+
+fn layer_source_descriptor(source: GpuCompositeLayerSource<'_>) -> Option<ColorFrameDescriptor> {
+    match source {
+        GpuCompositeLayerSource::CpuFrame(frame) => Some(frame.descriptor()),
+        GpuCompositeLayerSource::GpuFrame(handle) => Some(handle.descriptor()),
+        GpuCompositeLayerSource::SolidColor(_) => None,
     }
 }
 
@@ -700,7 +729,7 @@ fn texture_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
@@ -916,6 +945,52 @@ mod tests {
     }
 
     #[test]
+    fn gpu_composite_request_accepts_gpu_resident_media_frame() {
+        let handle = gpu_working_handle(10, ColorSpace::Rec709);
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(&handle),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [2.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+            has_effect_graph: false,
+        };
+        let request = GpuCompositeRequest {
+            width: 16,
+            height: 16,
+            working_color_space: ColorSpace::Rec709,
+            layers: &[layer],
+        };
+
+        validate_request(&request).expect("GPU compositor should accept GPU-resident media layer");
+    }
+
+    #[test]
+    fn gpu_composite_request_rejects_gpu_frame_color_space_mismatch() {
+        let handle = gpu_working_handle(11, ColorSpace::DciP3);
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(&handle),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            has_effect_graph: false,
+        };
+        let request = GpuCompositeRequest {
+            width: 8,
+            height: 8,
+            working_color_space: ColorSpace::Rec709,
+            layers: &[layer],
+        };
+
+        let err =
+            validate_request(&request).expect_err("GPU frame color-space mismatch should fail");
+
+        assert!(matches!(
+            err,
+            GpuCompositeError::SourceDescriptorMismatch { .. }
+        ));
+    }
+
+    #[test]
     fn gpu_composite_request_rejects_singular_media_transform() {
         let frame = CpuColorFrame::working(RgbaF32Frame {
             width: 8,
@@ -975,5 +1050,22 @@ mod tests {
             err,
             GpuCompositeError::SourceDescriptorMismatch { .. }
         ));
+    }
+
+    fn gpu_working_handle(id: u64, color_space: ColorSpace) -> GpuColorFrameHandle {
+        GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(id),
+            ColorFrameDescriptor {
+                width: 8,
+                height: 8,
+                color_space,
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+            },
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "test-gpu-working-layer",
+        )
+        .expect("test GPU handle")
     }
 }
