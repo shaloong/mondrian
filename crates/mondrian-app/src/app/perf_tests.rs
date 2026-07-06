@@ -1,9 +1,10 @@
 use super::*;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::{
-    build_preview_color_health_report, AppUiPreviewColorHealthReport,
-    AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict, AppUiPreviewDiagnostics,
-    AppUiPreviewService,
+    build_preview_color_health_report, build_preview_decode_performance_report,
+    AppUiPreviewColorHealthReport, AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
+    AppUiPreviewDecodePerformanceReport, AppUiPreviewDiagnostics, AppUiPreviewService,
+    APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app_ui::shell::AppUiAppRoot;
 use crate::app_ui::viewer_gpu_output_budget::{
@@ -22,7 +23,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
-use mondrian_media::{VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate};
+use mondrian_media::{
+    PreviewDecodeStageDurations, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
+};
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
 use mondrian_ui_core::types::Rect;
@@ -65,6 +68,7 @@ struct PreviewMediaPerfReport {
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_report: AppUiPreviewColorHealthReport,
+    preview_decode_report: AppUiPreviewDecodePerformanceReport,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -85,6 +89,7 @@ struct PreviewMediaPlaybackPerfReport {
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_report: AppUiPreviewColorHealthReport,
+    preview_decode_report: AppUiPreviewDecodePerformanceReport,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -674,6 +679,12 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             preview_diagnostics.color_health_summary(),
             "preview_media_decode_cache",
         );
+        let preview_decode_report = build_preview_decode_performance_report(
+            preview_diagnostics
+                .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+            "preview_media_decode_cache",
+            APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+        );
         Ok(PreviewMediaPerfReport {
             scenario: "preview_media_decode_cache",
             frames: frame_count,
@@ -681,6 +692,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             media_color_issues,
             preview_diagnostics,
             preview_color_report,
+            preview_decode_report,
             cases: vec![
                 first_frame_case,
                 cached_frame_case,
@@ -799,6 +811,12 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             preview_diagnostics.color_health_summary(),
             "preview_media_continuous_playback",
         );
+        let preview_decode_report = build_preview_decode_performance_report(
+            preview_diagnostics
+                .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+            "preview_media_continuous_playback",
+            APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+        );
         Ok(PreviewMediaPlaybackPerfReport {
             scenario: "preview_media_continuous_playback",
             frames: frame_count,
@@ -807,6 +825,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             media_color_issues,
             preview_diagnostics,
             preview_color_report,
+            preview_decode_report,
             cases: vec![playback_case, gpu_candidate_case],
         })
     })();
@@ -1144,6 +1163,21 @@ fn preview_color_report_marks_clean_float_linear_path() {
 #[test]
 fn preview_perf_report_serializes_color_report() {
     let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 1,
+        decode_in_process_cpu_rgba_frames: 1,
+        decode_total_duration_us: 80_000,
+        decode_max_duration_us: 80_000,
+        decode_last_duration_us: 80_000,
+        decode_seeked_frames: 1,
+        decode_decoded_frame_count: 24,
+        decode_max_decoded_frame_count: 24,
+        decode_stage_durations: PreviewDecodeStageDurations {
+            packet_decode_us: 70_000,
+            seek_us: 5_000,
+            swscale_us: 4_000,
+            rgba_copy_us: 1_000,
+            ..PreviewDecodeStageDurations::default()
+        },
         color_composite_plans: 1,
         color_composite_elements: 1,
         color_composite_float_linear: 1,
@@ -1167,6 +1201,12 @@ fn preview_perf_report_serializes_color_report() {
         preview_color_report: build_preview_color_health_report(
             diagnostics.color_health_summary(),
             "preview-color-health-test",
+        ),
+        preview_decode_report: build_preview_decode_performance_report(
+            diagnostics
+                .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+            "preview-color-health-test",
+            APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
         ),
         cases: Vec::new(),
     };
@@ -1193,6 +1233,20 @@ fn preview_perf_report_serializes_color_report() {
     assert_eq!(json["media_color_issues"]["diagnostics"], 1);
     assert_eq!(json["media_color_issues"]["method_cicp_tags"], 1);
     assert_eq!(json["preview_color_report"]["verdict"], "Pass");
+    assert_eq!(json["preview_decode_report"]["verdict"], "Fail");
+    assert_eq!(
+        json["preview_decode_report"]["summary"]["primary_bottleneck"],
+        "PacketDecode"
+    );
+    assert_eq!(
+        json["preview_decode_report"]["summary"]["stage_durations"]["packet_decode_us"],
+        70_000
+    );
+    assert!(json["preview_decode_report"]["root_causes"]
+        .as_array()
+        .expect("root causes")
+        .iter()
+        .any(|root| root["code"] == "preview_decode_codec_or_gop_bound"));
     assert!(json.get("preview_color_health").is_none());
     assert!(json.get("preview_color_health_budget").is_none());
     assert!(json.get("preview_color_health_passed").is_none());

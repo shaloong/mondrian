@@ -1352,6 +1352,536 @@ pub struct AppUiPreviewColorHealthSummary {
     pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
 }
 
+/// Stable preview decode performance summary for perf JSONL and diagnostics tooling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewDecodePerformanceSummary {
+    /// Successful preview decode/cache results.
+    pub decode_successes: u64,
+    /// Failed preview decode results.
+    pub decode_failures: u64,
+    /// Successful decodes served from the in-process FFmpeg CPU RGBA path.
+    pub in_process_cpu_rgba_frames: u64,
+    /// Successful decodes served from the external ffmpeg CPU RGBA path.
+    pub external_ffmpeg_cpu_rgba_frames: u64,
+    /// Successful decodes served from preview cache.
+    pub cache_hit_frames: u64,
+    /// Maximum end-to-end decode duration.
+    pub max_duration_us: u64,
+    /// Most recent end-to-end decode duration.
+    pub last_duration_us: u64,
+    /// Total end-to-end decode duration.
+    pub total_duration_us: u64,
+    /// Slow-frame budget applied by the report.
+    pub slow_frame_budget_us: u64,
+    /// Decode requests that required a seek.
+    pub seeked_frames: u64,
+    /// Total decoded frames consumed before frame selection.
+    pub decoded_frame_count: u64,
+    /// Maximum decoded frames consumed by one request.
+    pub max_decoded_frame_count: u64,
+    /// Aggregated media-layer decode stage timings.
+    pub stage_durations: PreviewDecodeStageDurations,
+    /// Dominant stage inferred from aggregated timings.
+    pub primary_bottleneck: AppUiPreviewDecodeBottleneck,
+}
+
+/// Dominant preview decode bottleneck inferred from stage diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewDecodeBottleneck {
+    /// No decode evidence was captured.
+    #[default]
+    None,
+    /// Opening or reconfiguring the decode session dominated.
+    SessionOpen,
+    /// Cache lookup dominated.
+    CacheLookup,
+    /// Seek and decoder flush dominated.
+    Seek,
+    /// Packet demux/decode dominated.
+    PacketDecode,
+    /// FFmpeg software scale or CPU RGBA copy dominated.
+    CpuRgbaBoundary,
+    /// External ffmpeg process wait dominated.
+    ExternalProcess,
+}
+
+/// Schema version for preview decode performance reports.
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 1;
+
+/// Default preview slow-frame budget: one frame should complete in tens of ms.
+pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
+
+/// Versioned preview decode performance report for UI, telemetry, and perf artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewDecodePerformanceReport {
+    /// Report schema version.
+    pub schema_version: u32,
+    /// Applied report profile.
+    pub profile: String,
+    /// Overall preview decode performance verdict.
+    pub verdict: AppUiPreviewDecodePerformanceVerdict,
+    /// Structured decode performance summary used as report evidence.
+    pub summary: Option<AppUiPreviewDecodePerformanceSummary>,
+    /// Structured checks by preview decode area.
+    pub checks: Vec<AppUiPreviewDecodePerformanceCheck>,
+    /// Prioritized machine-readable root causes.
+    pub root_causes: Vec<AppUiPreviewDecodePerformanceRootCause>,
+    /// Suggested engineering or operator actions.
+    pub actions: Vec<AppUiPreviewDecodePerformanceAction>,
+}
+
+/// Overall preview decode performance verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewDecodePerformanceVerdict {
+    /// Preview decode met the applied performance budget.
+    Pass,
+    /// Preview decode has warning evidence but no hard budget failure.
+    Warn,
+    /// Preview decode violated the applied performance budget or had no evidence.
+    Fail,
+}
+
+/// Preview decode performance diagnostic area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewDecodePerformanceArea {
+    /// Evidence capture and summary availability.
+    CaptureIntegrity,
+    /// End-to-end decode latency budget.
+    LatencyBudget,
+    /// Random access, seeking, and GOP pressure.
+    RandomAccess,
+    /// Codec packet/decode work.
+    CodecDecode,
+    /// CPU RGBA software scale/copy boundary.
+    CpuRgbaBoundary,
+    /// Proxy/cache readiness.
+    ProxyCache,
+    /// External process decode path.
+    ExternalProcess,
+}
+
+/// Preview decode performance check severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewDecodePerformanceSeverity {
+    /// Check passed.
+    Pass,
+    /// Check produced warning evidence.
+    Warn,
+    /// Check failed.
+    Fail,
+}
+
+/// One preview decode performance check.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewDecodePerformanceCheck {
+    /// Diagnostic area for this check.
+    pub area: AppUiPreviewDecodePerformanceArea,
+    /// Stable check code.
+    pub code: &'static str,
+    /// Check severity.
+    pub severity: AppUiPreviewDecodePerformanceSeverity,
+    /// Observed value.
+    pub observed: u64,
+    /// Optional target or threshold.
+    pub limit: Option<u64>,
+}
+
+/// One preview decode performance root cause.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewDecodePerformanceRootCause {
+    /// Diagnostic area for this root cause.
+    pub area: AppUiPreviewDecodePerformanceArea,
+    /// Stable root-cause code.
+    pub code: &'static str,
+    /// Root-cause severity.
+    pub severity: AppUiPreviewDecodePerformanceSeverity,
+    /// Compact evidence string.
+    pub evidence: String,
+}
+
+/// One preview decode performance action.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewDecodePerformanceAction {
+    /// Diagnostic area for this action.
+    pub area: AppUiPreviewDecodePerformanceArea,
+    /// Stable action code.
+    pub code: &'static str,
+    /// Human-readable action.
+    pub description: &'static str,
+}
+
+impl AppUiPreviewDecodePerformanceSummary {
+    /// Build the versioned preview decode performance report for this summary.
+    pub fn performance_report(
+        self,
+        profile: impl Into<String>,
+    ) -> AppUiPreviewDecodePerformanceReport {
+        build_preview_decode_performance_report(
+            Some(self),
+            profile,
+            APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+        )
+    }
+}
+
+/// Build a versioned preview decode performance report from an optional summary.
+pub fn build_preview_decode_performance_report(
+    summary: Option<AppUiPreviewDecodePerformanceSummary>,
+    profile: impl Into<String>,
+    slow_frame_budget_us: u64,
+) -> AppUiPreviewDecodePerformanceReport {
+    let mut checks = Vec::new();
+    let mut root_causes = Vec::new();
+    let mut actions = Vec::new();
+
+    push_decode_bool_check(
+        &mut checks,
+        AppUiPreviewDecodePerformanceArea::CaptureIntegrity,
+        "preview_decode_evidence_present",
+        summary.map(|summary| summary.decode_successes > 0).unwrap_or(false),
+    );
+
+    if let Some(mut summary) = summary {
+        summary.slow_frame_budget_us = slow_frame_budget_us;
+        summary.primary_bottleneck = classify_preview_decode_bottleneck(summary.stage_durations);
+        push_decode_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::LatencyBudget,
+            "preview_decode_max_frame_us",
+            summary.max_duration_us,
+            slow_frame_budget_us,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::RandomAccess,
+            "preview_decode_max_decoded_frame_count",
+            summary.max_decoded_frame_count,
+            1,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::RandomAccess,
+            "preview_decode_seeked_frames",
+            summary.seeked_frames,
+            0,
+        );
+        push_decode_warn_min_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::ProxyCache,
+            "preview_decode_cache_hit_frames",
+            summary.cache_hit_frames,
+            1,
+        );
+
+        push_preview_decode_root_causes_and_actions(summary, &mut root_causes, &mut actions);
+
+        let verdict = preview_decode_verdict(&checks);
+        return AppUiPreviewDecodePerformanceReport {
+            schema_version: APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
+            profile: profile.into(),
+            verdict,
+            summary: Some(summary),
+            checks,
+            root_causes,
+            actions,
+        };
+    }
+
+    push_decode_root_cause_with_action(
+        &mut root_causes,
+        &mut actions,
+        AppUiPreviewDecodePerformanceArea::CaptureIntegrity,
+        "missing_preview_decode_evidence",
+        "preview_decode_evidence_present=false".to_owned(),
+        "capture_preview_decode_diagnostics",
+        "Ensure preview media jobs record decode diagnostics from the real playback path.",
+        AppUiPreviewDecodePerformanceSeverity::Fail,
+    );
+
+    let verdict = preview_decode_verdict(&checks);
+    AppUiPreviewDecodePerformanceReport {
+        schema_version: APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
+        profile: profile.into(),
+        verdict,
+        summary: None,
+        checks,
+        root_causes,
+        actions,
+    }
+}
+
+fn preview_decode_verdict(
+    checks: &[AppUiPreviewDecodePerformanceCheck],
+) -> AppUiPreviewDecodePerformanceVerdict {
+    if checks
+        .iter()
+        .any(|check| check.severity == AppUiPreviewDecodePerformanceSeverity::Fail)
+    {
+        AppUiPreviewDecodePerformanceVerdict::Fail
+    } else if checks
+        .iter()
+        .any(|check| check.severity == AppUiPreviewDecodePerformanceSeverity::Warn)
+    {
+        AppUiPreviewDecodePerformanceVerdict::Warn
+    } else {
+        AppUiPreviewDecodePerformanceVerdict::Pass
+    }
+}
+
+fn push_decode_max_check(
+    checks: &mut Vec<AppUiPreviewDecodePerformanceCheck>,
+    area: AppUiPreviewDecodePerformanceArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(AppUiPreviewDecodePerformanceCheck {
+        area,
+        code,
+        severity: if observed > limit {
+            AppUiPreviewDecodePerformanceSeverity::Fail
+        } else {
+            AppUiPreviewDecodePerformanceSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_decode_warn_max_check(
+    checks: &mut Vec<AppUiPreviewDecodePerformanceCheck>,
+    area: AppUiPreviewDecodePerformanceArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(AppUiPreviewDecodePerformanceCheck {
+        area,
+        code,
+        severity: if observed > limit {
+            AppUiPreviewDecodePerformanceSeverity::Warn
+        } else {
+            AppUiPreviewDecodePerformanceSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_decode_warn_min_check(
+    checks: &mut Vec<AppUiPreviewDecodePerformanceCheck>,
+    area: AppUiPreviewDecodePerformanceArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(AppUiPreviewDecodePerformanceCheck {
+        area,
+        code,
+        severity: if observed < limit {
+            AppUiPreviewDecodePerformanceSeverity::Warn
+        } else {
+            AppUiPreviewDecodePerformanceSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_decode_bool_check(
+    checks: &mut Vec<AppUiPreviewDecodePerformanceCheck>,
+    area: AppUiPreviewDecodePerformanceArea,
+    code: &'static str,
+    passed: bool,
+) {
+    checks.push(AppUiPreviewDecodePerformanceCheck {
+        area,
+        code,
+        severity: if passed {
+            AppUiPreviewDecodePerformanceSeverity::Pass
+        } else {
+            AppUiPreviewDecodePerformanceSeverity::Fail
+        },
+        observed: if passed { 1 } else { 0 },
+        limit: Some(1),
+    });
+}
+
+fn push_preview_decode_root_causes_and_actions(
+    summary: AppUiPreviewDecodePerformanceSummary,
+    root_causes: &mut Vec<AppUiPreviewDecodePerformanceRootCause>,
+    actions: &mut Vec<AppUiPreviewDecodePerformanceAction>,
+) {
+    if summary.max_duration_us > summary.slow_frame_budget_us {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::LatencyBudget,
+            "preview_decode_frame_over_budget",
+            format!(
+                "max_duration_us={} slow_frame_budget_us={} primary_bottleneck={:?}",
+                summary.max_duration_us, summary.slow_frame_budget_us, summary.primary_bottleneck
+            ),
+            "inspect_preview_decode_stage_durations",
+            "Inspect preview decode stage timings before changing color or render code.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+
+    match summary.primary_bottleneck {
+        AppUiPreviewDecodeBottleneck::PacketDecode => push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::CodecDecode,
+            "preview_decode_codec_or_gop_bound",
+            format!(
+                "packet_decode_us={} decoded_frame_count={} max_decoded_frame_count={}",
+                summary.stage_durations.packet_decode_us,
+                summary.decoded_frame_count,
+                summary.max_decoded_frame_count
+            ),
+            "enable_proxy_or_hardware_decode",
+            "Prefer fresh proxy playback or implement hardware decode residency for this source.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        ),
+        AppUiPreviewDecodeBottleneck::Seek => push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::RandomAccess,
+            "preview_decode_seek_bound",
+            format!(
+                "seek_us={} seeked_frames={}",
+                summary.stage_durations.seek_us, summary.seeked_frames
+            ),
+            "generate_proxy_or_improve_random_access",
+            "Generate playback proxies or improve random-access/indexing strategy for this media.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        ),
+        AppUiPreviewDecodeBottleneck::CpuRgbaBoundary => push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::CpuRgbaBoundary,
+            "preview_decode_cpu_rgba_boundary_bound",
+            format!(
+                "swscale_us={} rgba_copy_us={}",
+                summary.stage_durations.swscale_us, summary.stage_durations.rgba_copy_us
+            ),
+            "remove_cpu_rgba_decode_boundary",
+            "Move toward high-bit-depth or GPU-resident decode frames instead of CPU RGBA8 preview payloads.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        ),
+        AppUiPreviewDecodeBottleneck::ExternalProcess => push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::ExternalProcess,
+            "preview_decode_external_process_bound",
+            format!(
+                "external_process_us={}",
+                summary.stage_durations.external_process_us
+            ),
+            "avoid_external_ffmpeg_preview_path",
+            "Use in-process decode or a real hardware-resident adapter instead of rawvideo over stdout.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        ),
+        AppUiPreviewDecodeBottleneck::SessionOpen => push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::CodecDecode,
+            "preview_decode_session_open_bound",
+            format!("session_open_us={}", summary.stage_durations.session_open_us),
+            "preserve_decode_session_locality",
+            "Keep decode sessions alive across adjacent playback requests and avoid path/size churn.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        ),
+        AppUiPreviewDecodeBottleneck::CacheLookup | AppUiPreviewDecodeBottleneck::None => {}
+    }
+
+    if summary.cache_hit_frames == 0
+        && summary
+            .in_process_cpu_rgba_frames
+            .saturating_add(summary.external_ffmpeg_cpu_rgba_frames)
+            > 0
+    {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::ProxyCache,
+            "preview_decode_source_path_without_cache_hits",
+            format!(
+                "source_decode_frames={} cache_hit_frames=0",
+                summary
+                    .in_process_cpu_rgba_frames
+                    .saturating_add(summary.external_ffmpeg_cpu_rgba_frames)
+            ),
+            "warm_preview_cache_or_proxy",
+            "Warm preview cache or generate fresh playback proxies before interactive playback.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+}
+
+fn push_decode_root_cause_with_action(
+    root_causes: &mut Vec<AppUiPreviewDecodePerformanceRootCause>,
+    actions: &mut Vec<AppUiPreviewDecodePerformanceAction>,
+    area: AppUiPreviewDecodePerformanceArea,
+    root_code: &'static str,
+    evidence: String,
+    action_code: &'static str,
+    action_description: &'static str,
+    severity: AppUiPreviewDecodePerformanceSeverity,
+) {
+    if !root_causes.iter().any(|root| root.code == root_code) {
+        root_causes.push(AppUiPreviewDecodePerformanceRootCause {
+            area,
+            code: root_code,
+            severity,
+            evidence,
+        });
+    }
+    if !actions.iter().any(|action| action.code == action_code) {
+        actions.push(AppUiPreviewDecodePerformanceAction {
+            area,
+            code: action_code,
+            description: action_description,
+        });
+    }
+}
+
+fn classify_preview_decode_bottleneck(
+    durations: PreviewDecodeStageDurations,
+) -> AppUiPreviewDecodeBottleneck {
+    let candidates = [
+        (
+            AppUiPreviewDecodeBottleneck::SessionOpen,
+            durations.session_open_us,
+        ),
+        (
+            AppUiPreviewDecodeBottleneck::CacheLookup,
+            durations.cache_lookup_us,
+        ),
+        (AppUiPreviewDecodeBottleneck::Seek, durations.seek_us),
+        (
+            AppUiPreviewDecodeBottleneck::PacketDecode,
+            durations.packet_decode_us,
+        ),
+        (
+            AppUiPreviewDecodeBottleneck::CpuRgbaBoundary,
+            durations.swscale_us.saturating_add(durations.rgba_copy_us),
+        ),
+        (
+            AppUiPreviewDecodeBottleneck::ExternalProcess,
+            durations.external_process_us,
+        ),
+    ];
+
+    candidates
+        .into_iter()
+        .max_by_key(|(_, duration)| *duration)
+        .filter(|(_, duration)| *duration > 0)
+        .map(|(bottleneck, _)| bottleneck)
+        .unwrap_or(AppUiPreviewDecodeBottleneck::None)
+}
+
 /// Schema version for preview color health reports.
 pub const APP_UI_PREVIEW_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 1;
 
@@ -1799,6 +2329,34 @@ impl AppUiPreviewColorRejection {
 }
 
 impl AppUiPreviewDiagnostics {
+    /// Return structured preview decode performance evidence when decode activity exists.
+    pub fn decode_performance_summary(
+        self,
+        slow_frame_budget_us: u64,
+    ) -> Option<AppUiPreviewDecodePerformanceSummary> {
+        let decode_successes = self.decode_successes;
+        if decode_successes == 0 {
+            return None;
+        }
+        let stage_durations = self.decode_stage_durations;
+        Some(AppUiPreviewDecodePerformanceSummary {
+            decode_successes,
+            decode_failures: self.decode_failures,
+            in_process_cpu_rgba_frames: self.decode_in_process_cpu_rgba_frames,
+            external_ffmpeg_cpu_rgba_frames: self.decode_external_ffmpeg_cpu_rgba_frames,
+            cache_hit_frames: self.decode_cache_hit_frames,
+            max_duration_us: self.decode_max_duration_us,
+            last_duration_us: self.decode_last_duration_us,
+            total_duration_us: self.decode_total_duration_us,
+            slow_frame_budget_us,
+            seeked_frames: self.decode_seeked_frames,
+            decoded_frame_count: self.decode_decoded_frame_count,
+            max_decoded_frame_count: self.decode_max_decoded_frame_count,
+            stage_durations,
+            primary_bottleneck: classify_preview_decode_bottleneck(stage_durations),
+        })
+    }
+
     /// Return input color-resolution branch counters using the shared timeline model.
     pub fn input_color_resolution_counts(self) -> InputColorResolutionSourceCounts {
         InputColorResolutionSourceCounts {
@@ -4175,6 +4733,53 @@ mod tests {
             diagnostics.decode_stage_durations.external_process_us,
             2_450
         );
+    }
+
+    #[test]
+    fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_total_duration_us: 120_000,
+            decode_max_duration_us: 120_000,
+            decode_last_duration_us: 120_000,
+            decode_seeked_frames: 1,
+            decode_decoded_frame_count: 36,
+            decode_max_decoded_frame_count: 36,
+            decode_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 95_000,
+                seek_us: 10_000,
+                swscale_us: 8_000,
+                rgba_copy_us: 2_000,
+                ..PreviewDecodeStageDurations::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        let summary = report.summary.expect("decode summary");
+        assert_eq!(
+            summary.primary_bottleneck,
+            AppUiPreviewDecodeBottleneck::PacketDecode
+        );
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_frame_over_budget"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_codec_or_gop_bound"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "enable_proxy_or_hardware_decode"));
     }
 
     #[test]

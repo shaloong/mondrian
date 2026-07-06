@@ -96,6 +96,10 @@ external-process wait time. Use these counters to classify slow frames before
 changing color/render code: high `packet_decode_us` usually points at codec/GOP
 or hardware-decode work, high `seek_us` points at random-access/indexing/proxy
 work, and high `swscale_us`/`rgba_copy_us` points at the CPU RGBA boundary.
+Preview media perf artifacts also include a versioned `preview_decode_report`
+with checks, root causes, and actions. The default slow-frame budget is 50 ms;
+over-budget frames should be diagnosed from `preview_decode_report.root_causes`
+before changing renderer/color code.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 
