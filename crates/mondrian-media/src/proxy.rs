@@ -5,8 +5,10 @@
 
 use mondrian_core::{types::AssetId, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use tokio::sync::mpsc;
 
 /// 代理分辨率预设
@@ -228,8 +230,16 @@ impl ProxyGenerator {
         let source_for_cmd = source_path.clone();
         let output_for_cmd = tmp_output_path.clone();
         let codec = self.config.codec;
+        let concurrent_jobs = self.config.concurrent_jobs;
+        let limiter = proxy_generation_limiter(self.config.cache_dir.clone());
+        let permit = tokio::task::spawn_blocking(move || limiter.acquire(concurrent_jobs))
+            .await
+            .map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
+                reason: format!("proxy concurrency permit task join failed: {e}"),
+            })?;
 
         let transcode_result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             run_ffmpeg_proxy_transcode(codec, crf, height, &source_for_cmd, &output_for_cmd)
         })
         .await
@@ -263,6 +273,77 @@ impl ProxyGenerator {
 
         Ok(output_path)
     }
+}
+
+#[derive(Default)]
+struct ProxyConcurrencyState {
+    active_jobs: usize,
+    max_jobs: usize,
+}
+
+struct ProxyConcurrencyLimiter {
+    state: Mutex<ProxyConcurrencyState>,
+    changed: Condvar,
+}
+
+impl ProxyConcurrencyLimiter {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ProxyConcurrencyState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn acquire(self: Arc<Self>, concurrent_jobs: u8) -> ProxyConcurrencyPermit {
+        let max_jobs = usize::from(concurrent_jobs.max(1));
+        let mut state = lock_proxy_concurrency_state(&self.state);
+        state.max_jobs = max_jobs;
+        while state.active_jobs >= state.max_jobs {
+            state = match self.changed.wait(state) {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            state.max_jobs = max_jobs;
+        }
+        state.active_jobs = state.active_jobs.saturating_add(1);
+        drop(state);
+        ProxyConcurrencyPermit { limiter: self }
+    }
+}
+
+struct ProxyConcurrencyPermit {
+    limiter: Arc<ProxyConcurrencyLimiter>,
+}
+
+impl Drop for ProxyConcurrencyPermit {
+    fn drop(&mut self) {
+        let mut state = lock_proxy_concurrency_state(&self.limiter.state);
+        state.active_jobs = state.active_jobs.saturating_sub(1);
+        self.limiter.changed.notify_one();
+    }
+}
+
+fn lock_proxy_concurrency_state(
+    state: &Mutex<ProxyConcurrencyState>,
+) -> MutexGuard<'_, ProxyConcurrencyState> {
+    match state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn proxy_generation_limiter(cache_dir: PathBuf) -> Arc<ProxyConcurrencyLimiter> {
+    static LIMITERS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProxyConcurrencyLimiter>>>> =
+        OnceLock::new();
+    let limiters = LIMITERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match limiters.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .entry(cache_dir)
+        .or_insert_with(|| Arc::new(ProxyConcurrencyLimiter::new()))
+        .clone()
 }
 
 fn run_ffmpeg_proxy_transcode(
@@ -397,7 +478,10 @@ fn finalize_proxy_output(tmp_output_path: &Path, output_path: &Path) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_proxy_output, ProxyConfig, ProxyGenerator, ProxyStatus};
+    use super::{
+        finalize_proxy_output, ProxyConcurrencyLimiter, ProxyConfig, ProxyGenerator, ProxyStatus,
+    };
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn test_proxy_config(cache_dir: std::path::PathBuf) -> ProxyConfig {
@@ -473,5 +557,55 @@ mod tests {
         assert!(err.to_string().contains("previous proxy restored"));
         assert_eq!(std::fs::read(&output).expect("output"), b"old proxy");
         assert!(!root.path().join("proxy.mp4.replace-backup").exists());
+    }
+
+    #[test]
+    fn proxy_concurrency_limiter_blocks_when_single_job_is_active() {
+        let limiter = Arc::new(ProxyConcurrencyLimiter::new());
+        let first_permit = limiter.clone().acquire(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let worker_limiter = Arc::clone(&limiter);
+
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).expect("ready");
+            let _second_permit = worker_limiter.acquire(1);
+            acquired_tx.send(()).expect("acquired");
+        });
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).expect("worker ready");
+        assert!(acquired_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        drop(first_permit);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second permit acquired after release");
+        worker.join().expect("worker");
+    }
+
+    #[test]
+    fn proxy_concurrency_limiter_allows_configured_parallel_jobs() {
+        let limiter = Arc::new(ProxyConcurrencyLimiter::new());
+        let first_permit = limiter.clone().acquire(2);
+        let second_permit = limiter.clone().acquire(2);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let worker_limiter = Arc::clone(&limiter);
+
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).expect("ready");
+            let _third_permit = worker_limiter.acquire(2);
+            acquired_tx.send(()).expect("acquired");
+        });
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).expect("worker ready");
+        assert!(acquired_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        drop(first_permit);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("third permit acquired after one release");
+        worker.join().expect("worker");
+        drop(second_permit);
     }
 }

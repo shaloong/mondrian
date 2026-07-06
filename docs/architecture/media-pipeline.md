@@ -55,6 +55,11 @@ Generation must also use `ProxyStatus`: a `Fresh` proxy is reused, while a
 `Stale` proxy is regenerated in the background. Failed regeneration must not
 delete the previous proxy file, because preview can keep falling back to source
 until a fresh proxy is finalized.
+`ProxyConfig.concurrent_jobs` is an execution contract, not a UI preference:
+`mondrian-media` must limit expensive FFmpeg proxy transcodes per proxy cache
+root before launching the transcode work. Fresh proxy reuse does not consume a
+transcode slot. App code may schedule proxy requests, but it must not bypass the
+media-layer limiter when starting background generation.
 `MultiLevelCache` must not weaken this contract: L1 memory hits and L2 proxy
 index hits are valid only while the referenced proxy still resolves to
 `ProxyStatus::Fresh`. A cached source fallback must be re-evaluated when a
