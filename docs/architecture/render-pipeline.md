@@ -215,9 +215,12 @@ records the OCIO GPU input transform, and produces a GPU-resident linear
 working frame in a float texture (`Rgba16Float` or `Rgba32Float`). It rejects
 CPU-only plans, plans with native GPU blockers, non-source uploads, non-working
 outputs, and `Rgba8Unorm` working outputs. This is the guarded bridge for
-preview playback to move input OCIO off the CPU. It is not a hardware decode or
-zero-copy path until `mondrian-media` supplies an actual GPU texture/hardware
-frame instead of CPU RGBA bytes.
+preview playback to move input OCIO off the CPU. The runtime-owned entry point
+is `RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend(...)`,
+which reuses the same renderer-owned shader cache, backend-prep cache,
+backend-object cache, frame-id allocator, and frame table as output boundaries.
+It is not a hardware decode or zero-copy path until `mondrian-media` supplies an
+actual GPU texture/hardware frame instead of CPU RGBA bytes.
 
 Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
 result. App, export, tests, and benches must read frames from `.result` and

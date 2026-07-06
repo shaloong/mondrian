@@ -556,6 +556,21 @@ pub enum RenderGpuOutputBoundaryRuntimeRecordError {
     Record(RenderGpuOutputStageRecordError),
 }
 
+/// Error returned when runtime-owned GPU backend objects cannot record an input stage.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuInputStageRuntimeRecordError {
+    /// The input transform could not be planned.
+    Plan(RenderColorTransformError),
+    /// The planned input stage could not produce GPU resources.
+    ResourcePlan(RenderGpuInputStageResourcePlanError),
+    /// Pure OCIO backend contracts could not be prepared.
+    BackendPrep(OcioGpuWgpuBackendPrepError),
+    /// Concrete wgpu backend objects could not be prepared.
+    BackendObjects(OcioGpuWgpuBackendObjectError),
+    /// Resource materialization or pass recording failed.
+    Record(RenderGpuOutputStageRecordError),
+}
+
 /// Renderer-owned state for native GPU final-output color boundaries.
 ///
 /// App/export code should hold one runtime per render backend lifetime. The
@@ -661,6 +676,64 @@ impl RenderGpuOutputBoundaryRuntime {
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         let Self { frame_ids, frame_table, .. } = self;
         compositor.record(device, queue, encoder, frame_ids, frame_table, request)
+    }
+
+    /// Plan, prepare runtime-owned backend objects, and record a native GPU
+    /// source/input color transform from decoded CPU RGBA8 into GPU working space.
+    pub fn record_wgpu_input_stage_owned_backend(
+        &mut self,
+        transform: &RenderInputTransform,
+        frame: &CpuEncodedColorFrame,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
+        let Self {
+            shader_cache,
+            backend_prep,
+            backend_objects,
+            frame_ids,
+            frame_table,
+        } = self;
+        let mut planner = RenderColorStagePlanner::prefer_gpu(shader_cache, gpu_options);
+        let stage_plan = planner
+            .plan_input_to_working(frame.descriptor(), transform)
+            .map_err(RenderGpuInputStageRuntimeRecordError::Plan)?;
+        let resources = RenderGpuInputStageResourcePlan::from_cpu_encoded_source_frame(
+            frame_ids,
+            frame,
+            &stage_plan,
+            output_texture_format,
+        )
+        .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let wrapper_color = resources.transform.wgpu.wrapper_color;
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, wrapper_color, output_format)
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_input_stage(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuInputStageRuntimeRecordError::Record)
     }
 
     /// Plan, prepare runtime-owned backend objects, and record a native GPU output boundary.
@@ -3864,6 +3937,63 @@ mod tests {
         assert_eq!(record.stage_diagnostics.upload_stages, 1);
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_input_stage_runtime_records_source_upload_and_working_output_on_real_wgpu_device()
+    {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu input stage test: no GPU adapter available");
+            return;
+        };
+        let source = cpu_source_frame();
+        let transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_300);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-input-stage"),
+        });
+
+        let record = runtime
+            .record_wgpu_input_stage_owned_backend(
+                &transform,
+                &source,
+                GpuColorFrameTextureFormat::Rgba16Float,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("runtime-owned GPU input stage should record");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(record.materialized.input.id().raw(), 1_300);
+        assert_eq!(record.materialized.output.id().raw(), 1_301);
+        assert_eq!(record.stage_diagnostics.total_stages, 2);
+        assert_eq!(record.stage_diagnostics.upload_stages, 1);
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 0);
+        assert_eq!(
+            record.materialized.output.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            record.materialized.output.descriptor().residency,
+            ColorFrameResidency::Gpu
+        );
+        assert!(runtime.frame_table().get(&record.materialized.input).is_ok());
+        assert!(runtime.frame_table().get(&record.materialized.output).is_ok());
+
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.next_frame_id, 1_302);
+        assert_eq!(diagnostics.frame_table_entries, 2);
+        assert_eq!(diagnostics.shader_cache.entries, 1);
+        assert_eq!(diagnostics.backend_prep.resources.entries, 1);
+        assert_eq!(diagnostics.backend_objects.entries, 1);
     }
 
     #[tokio::test]
