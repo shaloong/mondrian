@@ -3019,7 +3019,7 @@ fn prepare_viewer_gpu_preview(
             )
         }
         AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
-            let prepared_composite = prepare_preview_gpu_composite(
+            let prepared_composite = match prepare_preview_gpu_composite(
                 &frame,
                 layers,
                 &mut session.color_output_runtime,
@@ -3027,7 +3027,36 @@ fn prepare_viewer_gpu_preview(
                 queue,
                 &mut encoder,
                 host,
-            );
+            ) {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    host.record_preview_gpu_compositing(
+                        mondrian_renderer::GpuCompositingDiagnostics {
+                            cpu_fallback_composites: 1,
+                            cpu_composited_pixels: u64::from(frame.width)
+                                .saturating_mul(u64::from(frame.height)),
+                            first_blocker: Some(
+                                mondrian_renderer::GpuCompositingBlockerReason::GpuUnavailable,
+                            ),
+                            ..mondrian_renderer::GpuCompositingDiagnostics::default()
+                        },
+                    );
+                    host.record_preview_gpu_output_blocker(
+                        &PreviewGpuOutputBlocker::CpuFallbackRequested {
+                            reason: format!("viewer GPU composite preparation failed: {err}"),
+                        },
+                    );
+                    tracing::warn!(
+                        sequence_id = %frame.sequence_id,
+                        frame = frame.frame,
+                        width = frame.width,
+                        height = frame.height,
+                        "viewer GPU composite preparation failed: {err}"
+                    );
+                    host.clear_external_viewer_frame();
+                    finish_prepare!();
+                }
+            };
             session
                 .viewer_gpu_output_telemetry
                 .record_actual_frame_residency(prepared_composite.residency.to_frame_residency());
@@ -3282,7 +3311,7 @@ fn prepare_preview_gpu_composite<'a>(
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
     host: &AppUiHost,
-) -> PreparedPreviewGpuComposite<'a> {
+) -> Result<PreparedPreviewGpuComposite<'a>, String> {
     let mut prepared = PreparedPreviewGpuComposite {
         gpu_input_handles: Vec::new(),
         layers: Vec::with_capacity(layers.len()),
@@ -3309,24 +3338,36 @@ fn prepare_preview_gpu_composite<'a>(
                         Err(err) => {
                             prepared.residency.gpu_input_failures =
                                 prepared.residency.gpu_input_failures.saturating_add(1);
-                            prepared.residency.cpu_upload_layers =
-                                prepared.residency.cpu_upload_layers.saturating_add(1);
                             host.record_preview_gpu_output_blocker(
                                 &PreviewGpuOutputBlocker::CpuFallbackRequested {
                                     reason: format!("viewer GPU input transform failed: {err:?}"),
                                 },
                             );
-                            tracing::warn!(
-                                sequence_id = %preview_frame.sequence_id,
-                                frame = preview_frame.frame,
-                                width = preview_frame.width,
-                                height = preview_frame.height,
-                                "viewer GPU input transform failed; using CPU working layer upload: {err:?}"
-                            );
-                            PreparedPreviewGpuCompositeLayerSource::CpuFrame(frame)
+                            if let Some(frame) = frame.as_ref() {
+                                prepared.residency.cpu_upload_layers =
+                                    prepared.residency.cpu_upload_layers.saturating_add(1);
+                                tracing::warn!(
+                                    sequence_id = %preview_frame.sequence_id,
+                                    frame = preview_frame.frame,
+                                    width = preview_frame.width,
+                                    height = preview_frame.height,
+                                    "viewer GPU input transform failed; using CPU working layer upload: {err:?}"
+                                );
+                                PreparedPreviewGpuCompositeLayerSource::CpuFrame(frame)
+                            } else {
+                                return Err(format!(
+                                    "viewer GPU input transform failed and no CPU working fallback is materialized: {err:?}"
+                                ));
+                            }
                         }
                     },
                     None => {
+                        let Some(frame) = frame.as_ref() else {
+                            return Err(
+                                "media layer has no GPU source and no CPU working fallback"
+                                    .to_owned(),
+                            );
+                        };
                         prepared.residency.cpu_upload_layers =
                             prepared.residency.cpu_upload_layers.saturating_add(1);
                         PreparedPreviewGpuCompositeLayerSource::CpuFrame(frame)
@@ -3354,7 +3395,7 @@ fn prepare_preview_gpu_composite<'a>(
         }
     }
 
-    prepared
+    Ok(prepared)
 }
 
 fn record_preview_gpu_input_layer(

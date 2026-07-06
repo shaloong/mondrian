@@ -68,9 +68,10 @@ and `*_failures` perf fields are not part of the report contract.
 file. It bypasses app UI scheduling and reports one
 `MONDRIAN_PREVIEW_DECODE_PERF_JSON` record with the in-process FFmpeg preview
 decode path, output dimensions, RGBA byte count, elapsed time, cache-hit flag,
-and CPU-residency flag. Use it when a real 4K/HDR file feels slow to distinguish
-decoder/seek/scaling cost from later app UI, OCIO, compositor, or viewer-output
-cost.
+CPU-residency flag, whether the request performed a decoder seek, and how many
+frames FFmpeg decoded before selecting the output frame. Use it when a real
+4K/HDR file feels slow to distinguish long-GOP seek/decode/scaling cost from
+later app UI, OCIO, compositor, or viewer-output cost.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

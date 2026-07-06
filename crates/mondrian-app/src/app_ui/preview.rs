@@ -177,6 +177,9 @@ impl AppUiPreviewService {
             decode_total_duration_us: self.metrics.decode_total_duration_us.get(),
             decode_max_duration_us: self.metrics.decode_max_duration_us.get(),
             decode_last_duration_us: self.metrics.decode_last_duration_us.get(),
+            decode_seeked_frames: self.metrics.decode_seeked_frames.get(),
+            decode_decoded_frame_count: self.metrics.decode_decoded_frame_count.get(),
+            decode_max_decoded_frame_count: self.metrics.decode_max_decoded_frame_count.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
@@ -541,6 +544,12 @@ impl AppUiPreviewService {
                         return AppUiGpuPreviewFrameState::Unavailable;
                     }
                 };
+                for diagnostics in output.input_color_diagnostics {
+                    self.record_color_transform(diagnostics);
+                }
+                if output.input_color_stage_diagnostics != RenderColorStageDiagnostics::default() {
+                    self.record_color_stage(output.input_color_stage_diagnostics);
+                }
                 self.record_composite(output.composite_diagnostics);
                 if output.composite_diagnostics.legacy_rgba8_composites > 0 {
                     use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
@@ -776,6 +785,19 @@ impl AppUiPreviewService {
             .decode_max_duration_us
             .set(self.metrics.decode_max_duration_us.get().max(diagnostics.elapsed_us));
         self.metrics.decode_last_duration_us.set(diagnostics.elapsed_us);
+        if diagnostics.seek_performed {
+            bump(&self.metrics.decode_seeked_frames);
+        }
+        add_cell(
+            &self.metrics.decode_decoded_frame_count,
+            u64::from(diagnostics.decoded_frame_count),
+        );
+        self.metrics.decode_max_decoded_frame_count.set(
+            self.metrics
+                .decode_max_decoded_frame_count
+                .get()
+                .max(u64::from(diagnostics.decoded_frame_count)),
+        );
     }
 
     fn record_composite(&self, diagnostics: TimelineCompositeDiagnostics) {
@@ -930,7 +952,9 @@ impl AppUiPreviewService {
         self.record_color_transform(frame.result.diagnostics);
         self.record_color_stage(frame.stage_diagnostics);
         Some(MediaPreviewFrame {
-            frame: frame.result.frame,
+            width,
+            height,
+            frame: Some(frame.result.frame),
             gpu_source: None,
             signature,
         })
@@ -1105,6 +1129,12 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_max_duration_us: u64,
     /// Most recent successful preview decode duration in microseconds.
     pub decode_last_duration_us: u64,
+    /// Decode requests that required a decoder seek before frame selection.
+    pub decode_seeked_frames: u64,
+    /// Total decoded frames consumed by preview decode requests.
+    pub decode_decoded_frame_count: u64,
+    /// Largest decoded-frame count consumed by one preview decode request.
+    pub decode_max_decoded_frame_count: u64,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
@@ -1879,7 +1909,7 @@ pub(crate) enum AppUiGpuPreviewCompositeLayer {
     Media {
         /// CPU working frame used as a correctness fallback when GPU input
         /// transform cannot be scheduled for this layer.
-        frame: CpuColorFrame,
+        frame: Option<CpuColorFrame>,
         /// Source/input contract for the preferred GPU color path.
         gpu_source: Option<AppUiGpuPreviewMediaSource>,
         /// Layer opacity.
@@ -2012,18 +2042,20 @@ struct ModifiedStamp {
 
 #[derive(Debug, Clone)]
 struct MediaPreviewFrame {
-    frame: CpuColorFrame,
+    frame: Option<CpuColorFrame>,
     gpu_source: Option<MediaPreviewGpuSourceFrame>,
+    width: u32,
+    height: u32,
     signature: u64,
 }
 
 impl MediaPreviewFrame {
     fn width(&self) -> u32 {
-        self.frame.descriptor().width
+        self.width
     }
 
     fn height(&self) -> u32 {
-        self.frame.descriptor().height
+        self.height
     }
 
     fn gpu_source(&self) -> Option<AppUiGpuPreviewMediaSource> {
@@ -2032,6 +2064,32 @@ impl MediaPreviewFrame {
             input_transform: source.input_transform.clone(),
         })
     }
+
+    fn working_frame(&self) -> Result<MediaPreviewWorkingFrame, String> {
+        if let Some(frame) = self.frame.as_ref() {
+            return Ok(MediaPreviewWorkingFrame {
+                frame: frame.clone(),
+                color_diagnostics: None,
+                stage_diagnostics: RenderColorStageDiagnostics::default(),
+            });
+        }
+        let Some(source) = self.gpu_source.as_ref() else {
+            return Err("media preview frame has no CPU working frame or GPU source".to_owned());
+        };
+        execute_cpu_input_stage(&source.source, &source.input_transform)
+            .map(|output| MediaPreviewWorkingFrame {
+                frame: output.result.frame,
+                color_diagnostics: Some(output.result.diagnostics),
+                stage_diagnostics: output.stage_diagnostics,
+            })
+            .map_err(|err| format!("viewer preview lazy input color transform failed: {err}"))
+    }
+}
+
+struct MediaPreviewWorkingFrame {
+    frame: CpuColorFrame,
+    color_diagnostics: Option<RenderColorTransformDiagnostics>,
+    stage_diagnostics: RenderColorStageDiagnostics,
 }
 
 #[derive(Debug, Clone)]
@@ -2831,6 +2889,9 @@ struct AppUiPreviewMetrics {
     decode_total_duration_us: Cell<u64>,
     decode_max_duration_us: Cell<u64>,
     decode_last_duration_us: Cell<u64>,
+    decode_seeked_frames: Cell<u64>,
+    decode_decoded_frame_count: Cell<u64>,
+    decode_max_decoded_frame_count: Cell<u64>,
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
@@ -3088,6 +3149,21 @@ struct PreviewWorkingCompositeOutput {
     frame: CpuColorFrame,
     boundary: RenderOutputColorBoundary,
     composite_diagnostics: TimelineCompositeDiagnostics,
+    input_color_diagnostics: Vec<RenderColorTransformDiagnostics>,
+    input_color_stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+enum PreviewWorkingElement {
+    SolidColor(TimelineSolidColorLayer),
+    Adjustment(TimelineAdjustmentLayer),
+    Media {
+        frame_index: usize,
+        opacity: f32,
+        blend_mode: BlendMode,
+        transform: [f32; 6],
+        effect_graph: Arc<CompiledEffectGraph>,
+        frame_seed: i64,
+    },
 }
 
 fn composite_resolved_preview_working(
@@ -3097,14 +3173,18 @@ fn composite_resolved_preview_working(
     color_context: &ColorContext,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<PreviewWorkingCompositeOutput, String> {
-    let elements: Vec<_> = resolved
-        .iter()
-        .map(|element| match element {
+    let mut working_frames = Vec::new();
+    let mut working_elements = Vec::with_capacity(resolved.len());
+    let mut input_color_diagnostics = Vec::new();
+    let mut input_color_stage_diagnostics = RenderColorStageDiagnostics::default();
+
+    for element in resolved {
+        match element {
             ResolvedPreviewElement::SolidColor(layer) => {
-                TimelineCompositeElement::SolidColor(layer.clone())
+                working_elements.push(PreviewWorkingElement::SolidColor(layer.clone()));
             }
             ResolvedPreviewElement::Adjustment(layer) => {
-                TimelineCompositeElement::Adjustment(layer.clone())
+                working_elements.push(PreviewWorkingElement::Adjustment(layer.clone()));
             }
             ResolvedPreviewElement::Media {
                 frame,
@@ -3113,8 +3193,44 @@ fn composite_resolved_preview_working(
                 transform,
                 effect_graph,
                 frame_seed,
+            } => {
+                let working = frame.working_frame()?;
+                if let Some(diagnostics) = working.color_diagnostics {
+                    input_color_diagnostics.push(diagnostics);
+                }
+                input_color_stage_diagnostics.accumulate(working.stage_diagnostics);
+                let frame_index = working_frames.len();
+                working_frames.push(working.frame);
+                working_elements.push(PreviewWorkingElement::Media {
+                    frame_index,
+                    opacity: *opacity,
+                    blend_mode: *blend_mode,
+                    transform: *transform,
+                    effect_graph: Arc::clone(effect_graph),
+                    frame_seed: *frame_seed,
+                });
+            }
+        }
+    }
+
+    let elements: Vec<_> = working_elements
+        .iter()
+        .map(|element| match element {
+            PreviewWorkingElement::SolidColor(layer) => {
+                TimelineCompositeElement::SolidColor(layer.clone())
+            }
+            PreviewWorkingElement::Adjustment(layer) => {
+                TimelineCompositeElement::Adjustment(layer.clone())
+            }
+            PreviewWorkingElement::Media {
+                frame_index,
+                opacity,
+                blend_mode,
+                transform,
+                effect_graph,
+                frame_seed,
             } => TimelineCompositeElement::Media(TimelineMediaLayer {
-                frame: &frame.frame,
+                frame: &working_frames[*frame_index],
                 opacity: *opacity,
                 blend_mode: *blend_mode,
                 transform: *transform,
@@ -3136,6 +3252,8 @@ fn composite_resolved_preview_working(
         frame: composite.frame,
         boundary,
         composite_diagnostics: composite.diagnostics,
+        input_color_diagnostics,
+        input_color_stage_diagnostics,
     })
 }
 
@@ -3182,8 +3300,18 @@ fn gpu_composite_layers_for_resolved(
                 if *blend_mode != BlendMode::Normal {
                     return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
                 }
-                let descriptor = frame.frame.descriptor();
-                if descriptor.color_space != working_color_space {
+                let layer_working_color_space = frame
+                    .frame
+                    .as_ref()
+                    .map(|working| working.descriptor().color_space)
+                    .or_else(|| {
+                        frame
+                            .gpu_source
+                            .as_ref()
+                            .map(|source| source.input_transform.working_color_space)
+                    })
+                    .ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
+                if layer_working_color_space != working_color_space {
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
                 if !is_preview_gpu_media_transform_supported(*transform) {
@@ -3241,6 +3369,12 @@ fn composite_resolved_preview(
 ) -> Result<PreviewCompositeOutput, String> {
     let composite =
         composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
+    for diagnostics in composite.input_color_diagnostics {
+        service.record_color_transform(diagnostics);
+    }
+    if composite.input_color_stage_diagnostics != RenderColorStageDiagnostics::default() {
+        service.record_color_stage(composite.input_color_stage_diagnostics);
+    }
     if composite.composite_diagnostics.legacy_rgba8_composites > 0 {
         use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
         service.record_preview_gpu_output_blocker(
@@ -3320,37 +3454,20 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                 job.key.tone_map,
                 job.key.engine.clone(),
             );
-            let working = match execute_cpu_input_stage(&source, &input_transform) {
-                Ok(frame) => frame,
-                Err(err) => {
-                    return MediaPreviewResult {
-                        key: job.key,
-                        frame: None,
-                        error: Some(format!(
-                            "viewer preview input color transform failed: {err}"
-                        )),
-                        generation: job.generation,
-                        decode_diagnostics: Some(decode_diagnostics),
-                        color_diagnostics: None,
-                        color_stage_diagnostics: None,
-                    };
-                }
-            };
-            let color_diagnostics = Some(working.result.diagnostics);
-            let color_stage_diagnostics = Some(working.stage_diagnostics);
-
             MediaPreviewResult {
                 key: job.key,
                 frame: Some(MediaPreviewFrame {
-                    frame: working.result.frame,
+                    width: frame.width,
+                    height: frame.height,
+                    frame: None,
                     gpu_source: Some(MediaPreviewGpuSourceFrame { source, input_transform }),
                     signature,
                 }),
                 error: None,
                 generation: job.generation,
                 decode_diagnostics: Some(decode_diagnostics),
-                color_diagnostics,
-                color_stage_diagnostics,
+                color_diagnostics: None,
+                color_stage_diagnostics: None,
             }
         }
         Err(err) => MediaPreviewResult {
@@ -3646,6 +3763,50 @@ mod tests {
     }
 
     #[test]
+    fn gpu_composite_layers_accept_source_only_media_frame() {
+        let source = CpuEncodedColorFrame::source_rgba8(
+            320,
+            180,
+            ColorSpace::Rec709,
+            vec![0; 320 * 180 * 4],
+        );
+        let input_transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let media = MediaPreviewFrame {
+            width: 320,
+            height: 180,
+            frame: None,
+            gpu_source: Some(MediaPreviewGpuSourceFrame { source, input_transform }),
+            signature: 44,
+        };
+        let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+            &mondrian_effects::EffectRenderPlan::default(),
+        )
+        .expect("compile identity graph");
+        let elements = vec![ResolvedPreviewElement::Media {
+            frame: media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph,
+            frame_seed: 7,
+        }];
+
+        let layers = gpu_composite_layers_for_resolved(960, 540, &elements, ColorSpace::Rec709)
+            .expect("source-only media should stay on GPU input/composite path");
+
+        match &layers[0] {
+            AppUiGpuPreviewCompositeLayer::Media { frame, gpu_source, .. } => {
+                assert!(frame.is_none());
+                assert!(gpu_source.is_some());
+            }
+            AppUiGpuPreviewCompositeLayer::SolidColor { .. } => {
+                panic!("expected media layer")
+            }
+        }
+    }
+
+    #[test]
     fn gpu_composite_layers_reject_singular_media_transform() {
         let media = test_media_frame_with_size(180, 320, 180, 43);
         let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
@@ -3807,6 +3968,8 @@ mod tests {
             cache_hit: false,
             external_process: false,
             cpu_resident: true,
+            seek_performed: true,
+            decoded_frame_count: 48,
         });
         service.record_preview_decode(PreviewDecodeDiagnostics {
             path: PreviewDecodePath::ExternalFfmpegCpuRgba,
@@ -3814,6 +3977,8 @@ mod tests {
             cache_hit: false,
             external_process: true,
             cpu_resident: true,
+            seek_performed: false,
+            decoded_frame_count: 0,
         });
         service.record_preview_decode(PreviewDecodeDiagnostics {
             path: PreviewDecodePath::PreviewCacheHit,
@@ -3821,6 +3986,8 @@ mod tests {
             cache_hit: true,
             external_process: false,
             cpu_resident: true,
+            seek_performed: false,
+            decoded_frame_count: 0,
         });
 
         let diagnostics = service.diagnostics();
@@ -3831,6 +3998,9 @@ mod tests {
         assert_eq!(diagnostics.decode_total_duration_us, 3_525);
         assert_eq!(diagnostics.decode_max_duration_us, 2_500);
         assert_eq!(diagnostics.decode_last_duration_us, 25);
+        assert_eq!(diagnostics.decode_seeked_frames, 1);
+        assert_eq!(diagnostics.decode_decoded_frame_count, 48);
+        assert_eq!(diagnostics.decode_max_decoded_frame_count, 48);
     }
 
     #[test]
@@ -5237,8 +5407,9 @@ mod tests {
         assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 0);
         assert_eq!(preview.composite_diagnostics.legacy_media_transform, 0);
 
+        let export_working_frame = frame.working_frame().expect("export working frame");
         let export_elements = vec![TimelineCompositeElement::Media(TimelineMediaLayer {
-            frame: &frame.frame,
+            frame: &export_working_frame.frame,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -5305,7 +5476,13 @@ mod tests {
         .expect("media input transform")
         .result
         .frame;
-        let media = MediaPreviewFrame { frame, gpu_source: None, signature: 2_020 };
+        let media = MediaPreviewFrame {
+            width: frame.descriptor().width,
+            height: frame.descriptor().height,
+            frame: Some(frame),
+            gpu_source: None,
+            signature: 2_020,
+        };
         let solid = TimelineSolidColorLayer {
             color: Color::from_rgba8(32, 180, 220, 255),
             opacity: 0.35,
@@ -5342,9 +5519,10 @@ mod tests {
         )
         .expect("preview multilayer composite");
 
+        let export_media_working = media.working_frame().expect("export media working frame");
         let export_elements = vec![
             TimelineCompositeElement::Media(TimelineMediaLayer {
-                frame: &media.frame,
+                frame: &export_media_working.frame,
                 opacity: 0.85,
                 blend_mode: BlendMode::Multiply,
                 transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -5567,15 +5745,18 @@ mod tests {
             execute_cpu_input_stage(&source, &input_transform).expect("test media input transform");
         let frame = frame.result.frame;
         MediaPreviewFrame {
-            frame,
+            width,
+            height,
+            frame: Some(frame),
             gpu_source: Some(MediaPreviewGpuSourceFrame { source, input_transform }),
             signature,
         }
     }
 
     fn test_media_frame_rgba8(frame: &MediaPreviewFrame) -> Vec<u8> {
+        let working = frame.working_frame().expect("test media working frame");
         mondrian_renderer::execute_cpu_output_boundary(
-            &frame.frame,
+            &working.frame,
             &RenderOutputColorBoundary::display(
                 ColorSpace::Rec709,
                 false,

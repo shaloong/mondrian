@@ -73,6 +73,12 @@ pub struct PreviewDecodeDiagnostics {
     pub external_process: bool,
     /// Whether the returned payload is CPU-resident memory.
     pub cpu_resident: bool,
+    /// Whether the decoder had to seek before producing this frame.
+    #[serde(default)]
+    pub seek_performed: bool,
+    /// Decoded frames consumed by this request before selecting the output frame.
+    #[serde(default)]
+    pub decoded_frame_count: u32,
 }
 
 impl PreviewDecodeDiagnostics {
@@ -83,6 +89,8 @@ impl PreviewDecodeDiagnostics {
             cache_hit: path == PreviewDecodePath::PreviewCacheHit,
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
             cpu_resident: true,
+            seek_performed: false,
+            decoded_frame_count: 0,
         }
     }
 
@@ -151,6 +159,12 @@ impl RgbaFrame {
         self
     }
 
+    fn with_decode_work(mut self, seek_performed: bool, decoded_frame_count: usize) -> Self {
+        self.diagnostics.seek_performed = seek_performed;
+        self.diagnostics.decoded_frame_count = decoded_frame_count.min(u32::MAX as usize) as u32;
+        self
+    }
+
     fn into_cache_hit(mut self, elapsed: Duration) -> Self {
         self.diagnostics = PreviewDecodeDiagnostics::cache_hit(elapsed);
         self
@@ -195,6 +209,11 @@ struct PreviewDecodeSession {
     target_height: u32,
     last_pts: Option<i64>,
     reached_eof: bool,
+}
+
+struct PreviewDecodeForwardResult {
+    frame: Option<RgbaFrame>,
+    decoded_frame_count: usize,
 }
 
 impl PreviewDecodeSession {
@@ -321,12 +340,14 @@ impl PreviewDecodeSession {
             })
             .unwrap_or(false);
 
-        if !should_continue_forward {
+        let seek_performed = !should_continue_forward;
+        if seek_performed {
             self.seek_to_target(target_pts)?;
         }
 
-        if let Some(frame) = self.decode_forward_until(target_pts)? {
-            return Ok(frame);
+        let result = self.decode_forward_until(target_pts)?;
+        if let Some(frame) = result.frame {
+            return Ok(frame.with_decode_work(seek_performed, result.decoded_frame_count));
         }
 
         Err(MondrianError::DecodeFailed {
@@ -393,7 +414,7 @@ impl PreviewDecodeSession {
         })
     }
 
-    fn decode_forward_until(&mut self, target_pts: i64) -> Result<Option<RgbaFrame>> {
+    fn decode_forward_until(&mut self, target_pts: i64) -> Result<PreviewDecodeForwardResult> {
         let mut best_before: Option<(i64, ffmpeg::util::frame::video::Video)> = None;
         let mut best_after: Option<(i64, ffmpeg::util::frame::video::Video)> = None;
         let mut frames_decoded: usize = 0;
@@ -467,7 +488,10 @@ impl PreviewDecodeSession {
                                 frame_pts,
                                 rgba.clone(),
                             );
-                            return Ok(Some(rgba));
+                            return Ok(PreviewDecodeForwardResult {
+                                frame: Some(rgba),
+                                decoded_frame_count: frames_decoded,
+                            });
                         }
                     } else {
                         best_after = Some((frame_pts, decoded.frame.clone()));
@@ -481,7 +505,10 @@ impl PreviewDecodeSession {
                                 selected_pts,
                                 rgba.clone(),
                             );
-                            return Ok(Some(rgba));
+                            return Ok(PreviewDecodeForwardResult {
+                                frame: Some(rgba),
+                                decoded_frame_count: frames_decoded,
+                            });
                         }
                     }
                 }
@@ -522,7 +549,10 @@ impl PreviewDecodeSession {
                                 rgba.clone(),
                             );
                             self.reached_eof = true;
-                            return Ok(Some(rgba));
+                            return Ok(PreviewDecodeForwardResult {
+                                frame: Some(rgba),
+                                decoded_frame_count: frames_decoded,
+                            });
                         }
                     }
                 }
@@ -545,10 +575,13 @@ impl PreviewDecodeSession {
                 selected_pts,
                 rgba.clone(),
             );
-            return Ok(Some(rgba));
+            return Ok(PreviewDecodeForwardResult {
+                frame: Some(rgba),
+                decoded_frame_count: frames_decoded,
+            });
         }
 
-        Ok(None)
+        Ok(PreviewDecodeForwardResult { frame: None, decoded_frame_count: frames_decoded })
     }
 }
 
@@ -1061,6 +1094,8 @@ mod tests {
             path_kind: frame.diagnostics.path.as_str(),
             cache_hit: frame.diagnostics.cache_hit,
             cpu_resident: frame.diagnostics.cpu_resident,
+            seek_performed: frame.diagnostics.seek_performed,
+            decoded_frame_count: frame.diagnostics.decoded_frame_count,
         };
         let json = serde_json::to_string(&report).expect("serialize decode perf report");
         eprintln!("MONDRIAN_PREVIEW_DECODE_PERF_JSON={json}");
@@ -1080,5 +1115,7 @@ mod tests {
         path_kind: &'static str,
         cache_hit: bool,
         cpu_resident: bool,
+        seek_performed: bool,
+        decoded_frame_count: u32,
     }
 }

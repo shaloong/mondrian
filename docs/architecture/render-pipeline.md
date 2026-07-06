@@ -575,7 +575,7 @@ Resolved preview layers
        -> run OCIO GPU input transform into Rgba16Float working texture
   -> GpuFrameCompositor::record()
      -> sample GPU-resident media layers directly
-     -> upload only media layers whose GPU input transform failed or is absent
+     -> upload only media layers that already have a materialized CPU working fallback
      -> composite media/solid layers into an Rgba32Float working texture
      -> insert the working texture into RenderGpuOutputBoundaryRuntime frame table
   -> RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
@@ -587,9 +587,12 @@ This keeps preview playback GPU-resident from working composite through output
 transform for the supported subset. For ordinary decoded media it is a low-copy
 path, not zero-copy: FFmpeg currently produces CPU RGBA8, so the source upload
 still exists, but the input OCIO transform, working composite, and output
-boundary stay on GPU. It also removes the extra `UploadToGpu` stage between
-working composite and output transform; the renderer contract is covered by
-`from_gpu_working_frame()`.
+boundary stay on GPU. The app media preview cache stores the decoded source
+frame plus the `RenderInputTransform` contract without eagerly materializing a
+CPU working frame. CPU working frames are generated lazily only when the CPU
+reference compositor or a runtime fallback actually needs them. It also removes
+the extra `UploadToGpu` stage between working composite and output transform;
+the renderer contract is covered by `from_gpu_working_frame()`.
 
 ### Capability Classification
 
@@ -598,8 +601,10 @@ working composite and output transform; the renderer contract is covered by
 - **`GpuWithUpload`** — Layer structure supports GPU compositing, but at least
   one layer enters from CPU memory. The preferred media path uploads decoded
   source RGBA8 once and runs GPU OCIO input before compositing. If that input
-  stage is unavailable, the app records a structured fallback and uploads the
-  CPU working frame for that layer instead.
+  stage is unavailable, the app records a structured fallback and uploads an
+  already materialized CPU working frame when one exists. Source-only preview
+  cache entries fail closed for that GPU attempt instead of silently performing
+  an unplanned CPU input transform inside the app-window render pass.
 - **`CpuFallback`** — GPU compositing not possible. Reason is classified as:
   - `EffectRequiresCpu` — Effect graph needs CPU execution
   - `UnsupportedBlendMode` — Only Normal is GPU-supported
@@ -618,8 +623,10 @@ formats with size-class-based LRU reuse (8 per key, 64 total default).
 The production preview path uses GPU compositing when `ResolvedPreviewElement`
 contains only supported media/solid layers:
 
-- media frames must already be in the sequence working color space; differing
-  source/preview extents are supported through inverse-affine GPU sampling;
+- media frames must either already be in the sequence working color space or
+  carry a source/input contract whose target working color space matches the
+  sequence; differing source/preview extents are supported through
+  inverse-affine GPU sampling;
 - solid layers must have identity effect graphs;
 - media layers may use invertible affine transforms; solid layers currently
   require identity transforms to match the float reference compositor;
