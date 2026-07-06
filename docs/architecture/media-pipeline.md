@@ -60,6 +60,11 @@ until a fresh proxy is finalized.
 root before launching the transcode work. Fresh proxy reuse does not consume a
 transcode slot. App code may schedule proxy requests, but it must not bypass the
 media-layer limiter when starting background generation.
+The app layer must enqueue proxy generation requests onto a shared background
+dispatcher instead of creating one OS thread/runtime per asset. Dispatcher
+workers are allowed to keep proxy requests moving, but expensive transcode
+parallelism remains owned by the media-layer `ProxyConfig.concurrent_jobs`
+limiter so batch imports cannot starve preview playback, UI, or export work.
 `MultiLevelCache` must not weaken this contract: L1 memory hits and L2 proxy
 index hits are valid only while the referenced proxy still resolves to
 `ProxyStatus::Fresh`. A cached source fallback must be re-evaluated when a
