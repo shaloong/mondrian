@@ -402,6 +402,19 @@ pub fn get_or_compile_scheduled_effect_graph(
     Some(compiled)
 }
 
+/// Return the process-wide compiled identity effect graph.
+///
+/// Most timeline clips have no enabled effects or masks. Keeping the identity
+/// graph as a static compiled graph avoids rebuilding the same source-only
+/// graph and taking the compiled-graph cache mutex on every preview/export
+/// frame.
+pub fn identity_compiled_effect_graph() -> Option<Arc<CompiledEffectGraph>> {
+    static IDENTITY: OnceLock<Option<Arc<CompiledEffectGraph>>> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| compile_scheduled_effect_graph(&EffectRenderPlan::default()).map(Arc::new))
+        .clone()
+}
+
 pub fn get_or_compile_scheduled_render_graph(
     graph: EffectRenderGraph,
 ) -> Option<Arc<CompiledEffectGraph>> {

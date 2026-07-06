@@ -528,9 +528,13 @@ pub fn compile_clip_effect_graph(
     masks: &[MaskComponent],
     time: TimeCode,
 ) -> Option<Arc<CompiledEffectGraph>> {
-    use crate::graph::get_or_compile_scheduled_render_graph;
+    use crate::graph::{get_or_compile_scheduled_render_graph, identity_compiled_effect_graph};
     use crate::graph::{EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind};
     use mondrian_core::automation::timecode_to_ticks;
+    if effects.iter().all(|effect| !effect.is_enabled) && masks.iter().all(|mask| !mask.enabled) {
+        return identity_compiled_effect_graph();
+    }
+
     let mut graph = build_effect_render_graph(effects, time);
 
     // Inject mask nodes after effects for each enabled mask.
@@ -1161,6 +1165,27 @@ mod tests {
 
     fn tc(frame: i64) -> TimeCode {
         TimeCode::new(frame, Rational::new(1, 25))
+    }
+
+    #[test]
+    fn compile_clip_effect_graph_reuses_static_identity_for_empty_clip() {
+        let first = compile_clip_effect_graph(&[], &[], tc(0)).expect("identity graph");
+        let second = compile_clip_effect_graph(&[], &[], tc(100)).expect("identity graph");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.graph.is_identity());
+    }
+
+    #[test]
+    fn compile_clip_effect_graph_reuses_static_identity_for_disabled_effects() {
+        let mut effect = EffectNode::with_defaults(EffectType::GaussianBlur);
+        effect.is_enabled = false;
+
+        let first = compile_clip_effect_graph(&[effect], &[], tc(0)).expect("identity graph");
+        let second = compile_clip_effect_graph(&[], &[], tc(0)).expect("identity graph");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.graph.is_identity());
     }
 
     #[test]

@@ -51,6 +51,10 @@ Effect stack order affects graph output. UI reorder operations must mutate the c
 ## Optimization
 
 The renderer/effects system may merge deterministic unary ops, cache deterministic subtrees, skip identity graphs, and keep frame-dependent ops such as grain out of cross-frame caches. These optimizations must preserve graph semantics.
+Clips with no enabled effects or masks must reuse the process-wide compiled
+identity graph. Plain media and solid clips dominate preview/export playback,
+so render-plan evaluation should not rebuild a source-only graph or take the
+compiled-effect-graph LRU mutex every frame just to represent the identity path.
 
 ## Float/Linear Execution
 

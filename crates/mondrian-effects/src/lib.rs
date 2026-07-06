@@ -37,9 +37,9 @@ pub use execution::{
 pub use graph::{
     compile_effect_render_graph, compile_scheduled_effect_graph,
     get_or_compile_scheduled_effect_graph, get_or_compile_scheduled_render_graph,
-    schedule_effect_render_graph, CompiledEffectGraph, EffectExecutionSchedule,
-    EffectGraphBuilderState, EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind,
-    EffectGraphValue, EffectRenderGraph,
+    identity_compiled_effect_graph, schedule_effect_render_graph, CompiledEffectGraph,
+    EffectExecutionSchedule, EffectGraphBuilderState, EffectGraphNode, EffectGraphNodeId,
+    EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
 };
 pub use lut::{Lut3D, LutCache, LutLibrary, LutLibraryEntry};
 pub use mask::{BezierPoint, MaskComponent, MaskId, MaskKeyframe, MaskOp, MaskShape};
