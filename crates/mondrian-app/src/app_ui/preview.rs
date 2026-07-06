@@ -21,13 +21,13 @@ use mondrian_renderer::TimelineCompositeColorPath;
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_rgba8,
-    CpuColorFrame, CpuEncodedColorFrame, RenderColorStageDiagnostics,
-    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
-    RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
-    TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    CpuColorFrame, CpuEncodedColorFrame, GpuCompositingBlockerReason, GpuCompositingDiagnostics,
+    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -197,6 +197,18 @@ impl AppUiPreviewService {
                 .metrics
                 .color_stage_gpu_render_pipeline_blockers
                 .get(),
+            color_stage_gpu_ocio_config_blockers: self
+                .metrics
+                .color_stage_gpu_ocio_config_blockers
+                .get(),
+            color_stage_gpu_ocio_processor_blockers: self
+                .metrics
+                .color_stage_gpu_ocio_processor_blockers
+                .get(),
+            color_stage_gpu_ocio_shader_extraction_blockers: self
+                .metrics
+                .color_stage_gpu_ocio_shader_extraction_blockers
+                .get(),
             color_stage_pixels: self.metrics.color_stage_pixels.get(),
             color_composite_plans: self.metrics.color_composite_plans.get(),
             color_composite_elements: self.metrics.color_composite_elements.get(),
@@ -234,6 +246,14 @@ impl AppUiPreviewService {
                 .metrics
                 .color_composite_legacy_adjustment_effect
                 .get(),
+            cpu_output_fallback_frames: self.metrics.cpu_output_fallback_frames.get(),
+            cpu_output_fallback_pixels: self.metrics.cpu_output_fallback_pixels.get(),
+            preview_gpu_output_blocker_frames: self.metrics.preview_gpu_output_blocker_frames.get(),
+            preview_gpu_output_blocker_breakdown: *self
+                .metrics
+                .preview_gpu_output_blocker_breakdown
+                .borrow(),
+            gpu_compositing: *self.metrics.gpu_compositing.borrow(),
         }
     }
 
@@ -292,7 +312,16 @@ impl AppUiPreviewService {
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
         let display_color_space =
-            preview_display_color_space(sequence, &state.project_settings.color_management);
+            match preview_display_color_space(sequence, &state.project_settings.color_management) {
+                Ok(color_space) => color_space,
+                Err(blocker) => {
+                    self.record_preview_gpu_output_blocker(&blocker);
+                    self.scheduler.prune_obsolete();
+                    self.last_ready_frame.replace(None);
+                    bump(&self.metrics.unavailable_frames);
+                    return ViewerPreviewState::Unavailable;
+                }
+            };
         let color_context = sequence.settings.root_preview_color_context(
             &state.project_settings.color_management,
             display_color_space,
@@ -327,6 +356,7 @@ impl AppUiPreviewService {
                     ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
                 } else {
                     let output = match composite_resolved_preview(
+                        self,
                         width,
                         height,
                         &resolved.elements,
@@ -397,7 +427,16 @@ impl AppUiPreviewService {
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
         let display_color_space =
-            preview_display_color_space(sequence, &state.project_settings.color_management);
+            match preview_display_color_space(sequence, &state.project_settings.color_management) {
+                Ok(color_space) => color_space,
+                Err(blocker) => {
+                    self.record_preview_gpu_output_blocker(&blocker);
+                    self.scheduler.prune_obsolete();
+                    self.external_viewer_frame.replace(None);
+                    bump(&self.metrics.gpu_preview_candidate_unavailable);
+                    return AppUiGpuPreviewFrameState::Unavailable;
+                }
+            };
         let color_context = sequence.settings.root_preview_color_context(
             &state.project_settings.color_management,
             display_color_space,
@@ -439,22 +478,55 @@ impl AppUiPreviewService {
             bump(&self.metrics.gpu_preview_candidate_current);
             return AppUiGpuPreviewFrameState::Current;
         }
-        let output = match composite_resolved_preview_working(
+        let boundary = output_boundary_from_color_context(&resolved.color_context);
+        let working_input = match gpu_composite_layers_for_resolved(
             width,
             height,
             &resolved.elements,
-            &resolved.color_context,
-            &mut self.scratch.borrow_mut(),
+            resolved.color_context.working_color_space,
         ) {
-            Ok(output) => output,
-            Err(err) => {
-                tracing::warn!("viewer GPU preview working composite failed: {err}");
-                self.scheduler.prune_obsolete();
-                bump(&self.metrics.gpu_preview_candidate_unavailable);
-                return AppUiGpuPreviewFrameState::Unavailable;
+            Ok(layers) => {
+                self.record_composite(TimelineCompositeDiagnostics {
+                    elements: resolved.elements.len() as u64,
+                    float_linear_composites: 1,
+                    ..TimelineCompositeDiagnostics::default()
+                });
+                AppUiGpuPreviewWorkingInput::GpuComposite { layers }
+            }
+            Err(reason) => {
+                self.record_gpu_compositing(GpuCompositingDiagnostics {
+                    cpu_fallback_composites: 1,
+                    cpu_composited_pixels: (width as u64).saturating_mul(height as u64),
+                    first_blocker: Some(reason),
+                    ..GpuCompositingDiagnostics::default()
+                });
+                let output = match composite_resolved_preview_working(
+                    width,
+                    height,
+                    &resolved.elements,
+                    &resolved.color_context,
+                    &mut self.scratch.borrow_mut(),
+                ) {
+                    Ok(output) => output,
+                    Err(err) => {
+                        tracing::warn!("viewer GPU preview working composite failed: {err}");
+                        self.scheduler.prune_obsolete();
+                        bump(&self.metrics.gpu_preview_candidate_unavailable);
+                        return AppUiGpuPreviewFrameState::Unavailable;
+                    }
+                };
+                self.record_composite(output.composite_diagnostics);
+                if output.composite_diagnostics.legacy_rgba8_composites > 0 {
+                    use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
+                    self.record_preview_gpu_output_blocker(
+                        &PreviewGpuOutputBlocker::LegacyRgba8CompositeBoundary {
+                            legacy_composites: output.composite_diagnostics.legacy_rgba8_composites,
+                        },
+                    );
+                }
+                AppUiGpuPreviewWorkingInput::CpuFrame(output.frame)
             }
         };
-        self.record_composite(output.composite_diagnostics);
         self.schedule_media_prefetches(state, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
         bump(&self.metrics.gpu_preview_candidate_ready);
@@ -468,8 +540,9 @@ impl AppUiPreviewService {
             frame,
             width,
             height,
-            working_frame: output.frame,
-            boundary: output.boundary,
+            working_color_space: resolved.color_context.working_color_space,
+            working_input,
+            boundary,
             preview_candidate_id: candidate_id,
         }))
     }
@@ -618,6 +691,18 @@ impl AppUiPreviewService {
             &self.metrics.color_stage_gpu_render_pipeline_blockers,
             diagnostics.gpu_blocker_breakdown.render_pipeline_not_prepared,
         );
+        add_cell(
+            &self.metrics.color_stage_gpu_ocio_config_blockers,
+            diagnostics.gpu_blocker_breakdown.ocio_config_not_loaded,
+        );
+        add_cell(
+            &self.metrics.color_stage_gpu_ocio_processor_blockers,
+            diagnostics.gpu_blocker_breakdown.ocio_processor_unavailable,
+        );
+        add_cell(
+            &self.metrics.color_stage_gpu_ocio_shader_extraction_blockers,
+            diagnostics.gpu_blocker_breakdown.ocio_gpu_shader_extraction_failed,
+        );
         add_cell(&self.metrics.color_stage_pixels, diagnostics.stage_pixels);
     }
 
@@ -666,6 +751,43 @@ impl AppUiPreviewService {
         );
     }
 
+    pub(crate) fn record_cpu_output_fallback(&self, width: u32, height: u32) {
+        bump(&self.metrics.cpu_output_fallback_frames);
+        add_cell(
+            &self.metrics.cpu_output_fallback_pixels,
+            (width as u64).saturating_mul(height as u64),
+        );
+    }
+
+    pub(crate) fn record_preview_gpu_output_blocker(
+        &self,
+        blocker: &crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker,
+    ) {
+        bump(&self.metrics.preview_gpu_output_blocker_frames);
+        self.metrics.preview_gpu_output_blocker_breakdown.borrow_mut().record(blocker);
+    }
+
+    pub(crate) fn record_preview_gpu_output_blocker_breakdown(
+        &self,
+        breakdown: crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
+    ) {
+        if breakdown.is_empty() {
+            return;
+        }
+        bump(&self.metrics.preview_gpu_output_blocker_frames);
+        self.metrics
+            .preview_gpu_output_blocker_breakdown
+            .borrow_mut()
+            .accumulate(breakdown);
+    }
+
+    pub(crate) fn record_gpu_compositing(&self, diagnostics: GpuCompositingDiagnostics) {
+        if diagnostics == GpuCompositingDiagnostics::default() {
+            return;
+        }
+        self.metrics.gpu_compositing.borrow_mut().accumulate(diagnostics);
+    }
+
     fn stale_frame_for_sequence(
         &self,
         sequence: &Sequence,
@@ -703,9 +825,15 @@ impl AppUiPreviewService {
             )?
             .elements;
         let mut scratch = TimelineCompositeScratch::default();
-        let output =
-            composite_resolved_preview(width, height, &resolved, &color_context, &mut scratch)
-                .ok()?;
+        let output = composite_resolved_preview(
+            self,
+            width,
+            height,
+            &resolved,
+            &color_context,
+            &mut scratch,
+        )
+        .ok()?;
         self.record_composite(output.composite_diagnostics);
         self.record_color_transform(output.color_diagnostics);
         self.record_color_stage(output.color_stage_diagnostics);
@@ -941,6 +1069,12 @@ pub struct AppUiPreviewDiagnostics {
     pub color_stage_gpu_wrapper_blockers: u64,
     /// GPU blockers caused by missing render pipelines.
     pub color_stage_gpu_render_pipeline_blockers: u64,
+    /// GPU blockers caused by missing OCIO config.
+    pub color_stage_gpu_ocio_config_blockers: u64,
+    /// GPU blockers caused by unavailable OCIO processor.
+    pub color_stage_gpu_ocio_processor_blockers: u64,
+    /// GPU blockers caused by failed OCIO GPU shader extraction.
+    pub color_stage_gpu_ocio_shader_extraction_blockers: u64,
     /// Pixels covered by preview color stage plans.
     pub color_stage_pixels: u64,
     /// Timeline composite plans executed by preview.
@@ -967,6 +1101,17 @@ pub struct AppUiPreviewDiagnostics {
     pub color_composite_legacy_adjustment_blend_mode: u64,
     /// Legacy RGBA8 fallbacks caused by adjustment effect graphs.
     pub color_composite_legacy_adjustment_effect: u64,
+    /// Number of raster preview frames that used CPU output transform fallback.
+    pub cpu_output_fallback_frames: u64,
+    /// Pixels processed through CPU output transform fallback.
+    pub cpu_output_fallback_pixels: u64,
+    /// Number of preview frames with structured GPU output blockers.
+    pub preview_gpu_output_blocker_frames: u64,
+    /// Structured GPU output blocker breakdown across preview frames.
+    pub preview_gpu_output_blocker_breakdown:
+        crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
+    /// GPU compositing capability diagnostics.
+    pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
 }
 
 /// Structured color-management rejection captured from the viewer preview path.
@@ -1035,6 +1180,15 @@ pub struct AppUiPreviewColorHealthSummary {
     pub fully_float_linear: bool,
     /// Whether native GPU color scheduling was free of upload/readback and blockers.
     pub gpu_path_ready: bool,
+    /// Number of raster preview frames that used CPU output transform fallback.
+    pub cpu_output_fallback_frames: u64,
+    /// Pixels processed through CPU output transform fallback.
+    pub cpu_output_fallback_pixels: u64,
+    /// Structured GPU output blocker breakdown across preview frames.
+    pub preview_gpu_output_blocker_breakdown:
+        crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
+    /// GPU compositing capability diagnostics.
+    pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
 }
 
 /// Schema version for preview color health reports.
@@ -1081,6 +1235,8 @@ pub enum AppUiPreviewColorHealthArea {
     StageScheduling,
     /// Timeline compositing precision and legacy paths.
     CompositePath,
+    /// Explicitly unsupported features (OS ICC, HDR/EDR, GPU compositing).
+    UnsupportedFeature,
 }
 
 /// Preview color health check severity.
@@ -1195,6 +1351,27 @@ pub fn build_preview_color_health_report(
             AppUiPreviewColorHealthArea::InputColorPolicy,
             color_report_vocab::check::POLICY_REJECTIONS,
             summary.policy_rejections,
+            0,
+        );
+        push_preview_max_check(
+            &mut checks,
+            AppUiPreviewColorHealthArea::StageScheduling,
+            color_report_vocab::check::CPU_OUTPUT_FALLBACK_FRAMES,
+            summary.cpu_output_fallback_frames,
+            0,
+        );
+        push_preview_max_check(
+            &mut checks,
+            AppUiPreviewColorHealthArea::StageScheduling,
+            color_report_vocab::check::GPU_OUTPUT_BLOCKERS,
+            summary.preview_gpu_output_blocker_breakdown.total(),
+            0,
+        );
+        push_preview_max_check(
+            &mut checks,
+            AppUiPreviewColorHealthArea::UnsupportedFeature,
+            "unsupported_feature_count",
+            summary.preview_gpu_output_blocker_breakdown.unsupported_features,
             0,
         );
         push_preview_root_causes_and_actions(summary, &mut root_causes, &mut actions);
@@ -1335,6 +1512,81 @@ fn push_preview_root_causes_and_actions(
             "Use structured legacy RGBA8 reasons to migrate preview composites back to float/linear.",
         );
     }
+    if summary.gpu_compositing.cpu_fallback_composites > 0 {
+        push_preview_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewColorHealthArea::CompositePath,
+            "preview_gpu_compositing_cpu_fallback",
+            format!(
+                "cpu_fallback_composites={} cpu_composited_pixels={} first_blocker={:?}",
+                summary.gpu_compositing.cpu_fallback_composites,
+                summary.gpu_compositing.cpu_composited_pixels,
+                summary.gpu_compositing.first_blocker
+            ),
+            "resolve_gpu_compositing_blocker",
+            "Inspect GPU compositing blocker and either lower the layer feature to GPU or keep the explicit CPU fallback.",
+        );
+    }
+    if summary.cpu_output_fallback_frames > 0 {
+        push_preview_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewColorHealthArea::StageScheduling,
+            "preview_cpu_output_fallback",
+            format!(
+                "cpu_output_fallback_frames={} cpu_output_fallback_pixels={}",
+                summary.cpu_output_fallback_frames, summary.cpu_output_fallback_pixels
+            ),
+            "investigate_cpu_fallback",
+            "Inspect why preview output fell back to CPU RGBA8 boundary instead of GPU color path.",
+        );
+    }
+    let blocker_breakdown = summary.preview_gpu_output_blocker_breakdown;
+    if !blocker_breakdown.is_empty() {
+        push_preview_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewColorHealthArea::StageScheduling,
+            "preview_gpu_output_blocked",
+            format!(
+                "total_blockers={} ocio_config={} ocio_processor={} shader_extraction={} \
+                 shader={} ocio_resource={} wrapper={} pipeline={} \
+                 surface_contract={} display_color={} hdr={} \
+                 frame_resident={} legacy_rgba8_boundary={} cpu_fallback={}",
+                blocker_breakdown.total(),
+                blocker_breakdown.ocio_config_not_loaded,
+                blocker_breakdown.ocio_processor_unavailable,
+                blocker_breakdown.ocio_gpu_shader_extraction_failed,
+                blocker_breakdown.shader_module_not_prepared,
+                blocker_breakdown.ocio_resource_bind_group_not_prepared,
+                blocker_breakdown.fullscreen_wrapper_not_prepared,
+                blocker_breakdown.render_pipeline_not_prepared,
+                blocker_breakdown.surface_contract_mismatch,
+                blocker_breakdown.unsupported_display_color_space,
+                blocker_breakdown.unsupported_hdr_swapchain_or_edr,
+                blocker_breakdown.frame_not_gpu_resident,
+                blocker_breakdown.legacy_rgba8_composite_boundary,
+                blocker_breakdown.cpu_fallback_requested
+            ),
+            "inspect_preview_gpu_output_blockers",
+            "Inspect preview GPU output blocker breakdown to identify the primary blocker.",
+        );
+    }
+    if blocker_breakdown.unsupported_features > 0 {
+        push_preview_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewColorHealthArea::UnsupportedFeature,
+            "preview_unsupported_feature",
+            format!(
+                "unsupported_features={}",
+                blocker_breakdown.unsupported_features
+            ),
+            "document_unsupported_feature",
+            "Document the unsupported feature limitations and track for future implementation.",
+        );
+    }
 }
 
 fn push_preview_root_cause_with_action(
@@ -1432,6 +1684,10 @@ impl AppUiPreviewDiagnostics {
                 ocio_resource_bind_group_not_prepared: self.color_stage_gpu_ocio_resource_blockers,
                 fullscreen_wrapper_not_prepared: self.color_stage_gpu_wrapper_blockers,
                 render_pipeline_not_prepared: self.color_stage_gpu_render_pipeline_blockers,
+                ocio_config_not_loaded: self.color_stage_gpu_ocio_config_blockers,
+                ocio_processor_unavailable: self.color_stage_gpu_ocio_processor_blockers,
+                ocio_gpu_shader_extraction_failed: self
+                    .color_stage_gpu_ocio_shader_extraction_blockers,
             },
             stage_pixels: self.color_stage_pixels,
         }
@@ -1446,6 +1702,8 @@ impl AppUiPreviewDiagnostics {
             && stages.total_stages == 0
             && composite.composite_plans() == 0
             && self.color_rgba8_boundary_calls == 0
+            && self.cpu_output_fallback_frames == 0
+            && self.preview_gpu_output_blocker_breakdown.total() == 0
         {
             return None;
         }
@@ -1474,6 +1732,10 @@ impl AppUiPreviewDiagnostics {
             gpu_path_ready: stages.gpu_blockers == 0
                 && stages.upload_stages == 0
                 && stages.readback_stages == 0,
+            cpu_output_fallback_frames: self.cpu_output_fallback_frames,
+            cpu_output_fallback_pixels: self.cpu_output_fallback_pixels,
+            preview_gpu_output_blocker_breakdown: self.preview_gpu_output_blocker_breakdown,
+            gpu_compositing: self.gpu_compositing,
         })
     }
 }
@@ -1501,12 +1763,42 @@ pub(crate) struct AppUiGpuPreviewFrame {
     pub width: u32,
     /// Preview frame height in pixels.
     pub height: u32,
-    /// CPU working-space composite frame that enters the GPU output boundary.
-    pub working_frame: CpuColorFrame,
+    /// Timeline working color space represented by the working input.
+    pub working_color_space: ColorSpace,
+    /// Working-space input that enters the GPU output boundary.
+    pub working_input: AppUiGpuPreviewWorkingInput,
     /// Display/output boundary to execute on the GPU.
     pub boundary: RenderOutputColorBoundary,
     /// Monotonic identifier for this working-frame candidate.
     preview_candidate_id: u64,
+}
+
+/// Working-space input for the app-window GPU output path.
+pub(crate) enum AppUiGpuPreviewWorkingInput {
+    /// CPU-composited working frame. The window uploads this frame before the
+    /// GPU output transform.
+    CpuFrame(CpuColorFrame),
+    /// Layer stack to composite directly on GPU before the GPU output transform.
+    GpuComposite {
+        /// Layers in bottom-to-top order.
+        layers: Vec<AppUiGpuPreviewCompositeLayer>,
+    },
+}
+
+/// One app-owned layer for GPU working-space preview compositing.
+pub(crate) enum AppUiGpuPreviewCompositeLayer {
+    /// Working-space media frame.
+    Media {
+        /// Working frame to upload and composite.
+        frame: CpuColorFrame,
+        /// Layer opacity.
+        opacity: f32,
+    },
+    /// Full-frame solid color.
+    SolidColor {
+        /// Solid layer.
+        layer: TimelineSolidColorLayer,
+    },
 }
 
 impl AppUiGpuPreviewFrame {
@@ -1559,12 +1851,25 @@ impl ViewerPreviewSource for AppUiPreviewService {
     fn viewer_color_pipeline_status(&self) -> Option<ViewerColorPipelineStatus> {
         let diagnostics = self.diagnostics();
         let summary = diagnostics.composite_color_path_summary();
-        if summary.composite_plans() == 0 {
+        if summary.composite_plans() == 0
+            && diagnostics.cpu_output_fallback_frames == 0
+            && diagnostics.preview_gpu_output_blocker_breakdown.total() == 0
+        {
             return None;
+        }
+        if diagnostics.preview_gpu_output_blocker_breakdown.total() > 0 {
+            return Some(ViewerColorPipelineStatus::GpuBlocked {
+                gpu_blockers: diagnostics.preview_gpu_output_blocker_breakdown.total(),
+            });
         }
         if diagnostics.color_stage_gpu_blockers > 0 {
             return Some(ViewerColorPipelineStatus::GpuBlocked {
                 gpu_blockers: diagnostics.color_stage_gpu_blockers,
+            });
+        }
+        if diagnostics.cpu_output_fallback_frames > 0 {
+            return Some(ViewerColorPipelineStatus::LegacyRgba8 {
+                legacy_reasons: diagnostics.cpu_output_fallback_frames,
             });
         }
         if summary.uses_legacy_rgba8() {
@@ -1978,8 +2283,11 @@ impl AppUiPreviewService {
         if !state.is_playing() {
             return;
         }
-        let display_color_space =
-            preview_display_color_space(sequence, &state.project_settings.color_management);
+        let Ok(display_color_space) =
+            preview_display_color_space(sequence, &state.project_settings.color_management)
+        else {
+            return;
+        };
         let color_context = sequence.settings.root_preview_color_context(
             &state.project_settings.color_management,
             display_color_space,
@@ -2412,6 +2720,9 @@ struct AppUiPreviewMetrics {
     color_stage_gpu_ocio_resource_blockers: Cell<u64>,
     color_stage_gpu_wrapper_blockers: Cell<u64>,
     color_stage_gpu_render_pipeline_blockers: Cell<u64>,
+    color_stage_gpu_ocio_config_blockers: Cell<u64>,
+    color_stage_gpu_ocio_processor_blockers: Cell<u64>,
+    color_stage_gpu_ocio_shader_extraction_blockers: Cell<u64>,
     color_stage_pixels: Cell<u64>,
     color_composite_plans: Cell<u64>,
     color_composite_elements: Cell<u64>,
@@ -2425,6 +2736,12 @@ struct AppUiPreviewMetrics {
     color_composite_legacy_solid_effect: Cell<u64>,
     color_composite_legacy_adjustment_blend_mode: Cell<u64>,
     color_composite_legacy_adjustment_effect: Cell<u64>,
+    cpu_output_fallback_frames: Cell<u64>,
+    cpu_output_fallback_pixels: Cell<u64>,
+    preview_gpu_output_blocker_frames: Cell<u64>,
+    preview_gpu_output_blocker_breakdown:
+        RefCell<crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown>,
+    gpu_compositing: RefCell<mondrian_renderer::GpuCompositingDiagnostics>,
 }
 
 fn bump(counter: &Cell<u64>) {
@@ -2454,6 +2771,7 @@ fn viewer_preview_cache_key_for_resolved_plan(
     color_context.display_management.hash(&mut hasher);
     color_context.ocio_display.hash(&mut hasher);
     color_context.ocio_view.hash(&mut hasher);
+    mondrian_core::ocio_config_generation().hash(&mut hasher);
     elements.len().hash(&mut hasher);
     for element in elements {
         match element {
@@ -2560,29 +2878,38 @@ fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
 fn preview_display_color_space(
     sequence: &Sequence,
     project_cm: &mondrian_core::ProjectColorManagement,
-) -> ColorSpace {
+) -> Result<ColorSpace, crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
     let sequence_output = sequence.settings.color_management.output_color_space;
     let display_management = if sequence.settings.color_management.inherit {
         &project_cm.display_management
     } else {
         &sequence.settings.color_management.display_management
     };
-    let profile_space = display_management
-        .monitor_profile
-        .managed_color_space(sequence_output)
-        .unwrap_or(sequence_output);
-
-    match display_management.viewer_mode.resolve(profile_space) {
-        mondrian_core::ResolvedViewerDisplayMode::Sdr => {
-            if profile_space.is_hdr() {
-                ColorSpace::Rec709
-            } else {
-                profile_space
-            }
+    let profile_space = match display_management.monitor_profile {
+        mondrian_core::MonitorProfileReference::IccProfile { .. } => {
+            return Err(
+                crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                    feature: "os_icc_profile".to_owned(),
+                    reason: "MonitorProfileReference::IccProfile is configured but OS ICC profile reading is not implemented".to_owned(),
+                },
+            );
         }
-        mondrian_core::ResolvedViewerDisplayMode::HdrPq => ColorSpace::Rec2100Pq,
-        mondrian_core::ResolvedViewerDisplayMode::HdrHlg => ColorSpace::Rec2100Hlg,
-    }
+        ref monitor => monitor.managed_color_space(sequence_output).unwrap_or(sequence_output),
+    };
+
+    Ok(
+        match display_management.viewer_mode.resolve(profile_space) {
+            mondrian_core::ResolvedViewerDisplayMode::Sdr => {
+                if profile_space.is_hdr() {
+                    ColorSpace::Rec709
+                } else {
+                    profile_space
+                }
+            }
+            mondrian_core::ResolvedViewerDisplayMode::HdrPq => ColorSpace::Rec2100Pq,
+            mondrian_core::ResolvedViewerDisplayMode::HdrHlg => ColorSpace::Rec2100Hlg,
+        },
+    )
 }
 
 struct PreviewCompositeOutput {
@@ -2639,7 +2966,16 @@ fn composite_resolved_preview_working(
         color_context.working_color_space,
         scratch,
     );
-    let boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
+    let boundary = output_boundary_from_color_context(color_context);
+    Ok(PreviewWorkingCompositeOutput {
+        frame: composite.frame,
+        boundary,
+        composite_diagnostics: composite.diagnostics,
+    })
+}
+
+fn output_boundary_from_color_context(color_context: &ColorContext) -> RenderOutputColorBoundary {
+    match (&color_context.ocio_display, &color_context.ocio_view) {
         (Some(display), Some(view)) => RenderOutputColorBoundary::display_view(
             color_context.output_color_space,
             display.clone(),
@@ -2652,15 +2988,82 @@ fn composite_resolved_preview_working(
             color_context.tone_map,
             color_context.engine.clone(),
         ),
-    };
-    Ok(PreviewWorkingCompositeOutput {
-        frame: composite.frame,
-        boundary,
-        composite_diagnostics: composite.diagnostics,
-    })
+    }
+}
+
+fn gpu_composite_layers_for_resolved(
+    width: u32,
+    height: u32,
+    resolved: &[ResolvedPreviewElement],
+    working_color_space: ColorSpace,
+) -> Result<Vec<AppUiGpuPreviewCompositeLayer>, GpuCompositingBlockerReason> {
+    if resolved.len() > 5 {
+        return Err(GpuCompositingBlockerReason::TooManyLayers);
+    }
+    let mut layers = Vec::with_capacity(resolved.len());
+    for element in resolved {
+        match element {
+            ResolvedPreviewElement::Media {
+                frame,
+                opacity,
+                blend_mode,
+                transform,
+                effect_graph,
+                ..
+            } => {
+                if !effect_graph.graph.is_identity() {
+                    return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+                }
+                if *blend_mode != BlendMode::Normal {
+                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
+                }
+                if !is_preview_identity_transform(*transform) {
+                    return Err(GpuCompositingBlockerReason::NonIdentityTransform);
+                }
+                let descriptor = frame.frame.descriptor();
+                if descriptor.width != width
+                    || descriptor.height != height
+                    || descriptor.color_space != working_color_space
+                {
+                    return Err(GpuCompositingBlockerReason::NonIdentityTransform);
+                }
+                layers.push(AppUiGpuPreviewCompositeLayer::Media {
+                    frame: frame.frame.clone(),
+                    opacity: *opacity,
+                });
+            }
+            ResolvedPreviewElement::SolidColor(layer) => {
+                if !layer.effect_graph.graph.is_identity() {
+                    return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+                }
+                if layer.blend_mode != BlendMode::Normal {
+                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
+                }
+                if !is_preview_identity_transform(layer.transform) {
+                    return Err(GpuCompositingBlockerReason::NonIdentityTransform);
+                }
+                layers.push(AppUiGpuPreviewCompositeLayer::SolidColor { layer: layer.clone() });
+            }
+            ResolvedPreviewElement::Adjustment(_) => {
+                return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+            }
+        }
+    }
+    Ok(layers)
+}
+
+fn is_preview_identity_transform(transform: [f32; 6]) -> bool {
+    const EPSILON: f32 = 1.0e-6;
+    (transform[0] - 1.0).abs() <= EPSILON
+        && transform[1].abs() <= EPSILON
+        && transform[2].abs() <= EPSILON
+        && transform[3].abs() <= EPSILON
+        && (transform[4] - 1.0).abs() <= EPSILON
+        && transform[5].abs() <= EPSILON
 }
 
 fn composite_resolved_preview(
+    service: &AppUiPreviewService,
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
@@ -2669,6 +3072,14 @@ fn composite_resolved_preview(
 ) -> Result<PreviewCompositeOutput, String> {
     let composite =
         composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
+    if composite.composite_diagnostics.legacy_rgba8_composites > 0 {
+        use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
+        service.record_preview_gpu_output_blocker(
+            &PreviewGpuOutputBlocker::LegacyRgba8CompositeBoundary {
+                legacy_composites: composite.composite_diagnostics.legacy_rgba8_composites,
+            },
+        );
+    }
     execute_cpu_output_boundary_rgba8(&composite.frame, &composite.boundary)
         .map(|output| PreviewCompositeOutput {
             rgba: output.rgba,
@@ -2835,7 +3246,8 @@ mod tests {
             };
 
         assert_eq!(
-            preview_display_color_space(&sequence, &ProjectColorManagement::default()),
+            preview_display_color_space(&sequence, &ProjectColorManagement::default())
+                .expect("display color space"),
             ColorSpace::DciP3
         );
     }
@@ -2855,9 +3267,36 @@ mod tests {
             };
 
         assert_eq!(
-            preview_display_color_space(&sequence, &ProjectColorManagement::default()),
+            preview_display_color_space(&sequence, &ProjectColorManagement::default())
+                .expect("display color space"),
             ColorSpace::Rec2100Pq
         );
+    }
+
+    #[test]
+    fn preview_display_color_space_rejects_unimplemented_icc_profile() {
+        let mut sequence = Sequence::new("icc-preview");
+        sequence.settings.color_management.inherit = false;
+        sequence.settings.color_management.display_management =
+            mondrian_core::DisplayManagementPolicy {
+                monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
+                    profile_id: "display-profile".to_owned(),
+                },
+                viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+                tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+                ..Default::default()
+            };
+
+        let err = preview_display_color_space(&sequence, &ProjectColorManagement::default())
+            .expect_err("ICC profile reading is not implemented and must fail closed");
+
+        assert!(matches!(
+            err,
+            crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                ref feature,
+                ..
+            } if feature == "os_icc_profile"
+        ));
     }
 
     fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {
@@ -2885,7 +3324,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_preview_frame_for_state_returns_working_frame_candidate() {
+    fn gpu_preview_frame_for_state_returns_gpu_composite_candidate() {
         let service = AppUiPreviewService::new();
         let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
 
@@ -2900,8 +3339,19 @@ mod tests {
 
         assert_eq!(frame.width, 960);
         assert_eq!(frame.height, 540);
-        assert_eq!(frame.working_frame.descriptor().width, 960);
-        assert_eq!(frame.working_frame.descriptor().height, 540);
+        assert_eq!(frame.working_color_space, ColorSpace::Rec709);
+        match &frame.working_input {
+            AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
+                assert_eq!(layers.len(), 1);
+                assert!(matches!(
+                    layers[0],
+                    AppUiGpuPreviewCompositeLayer::SolidColor { .. }
+                ));
+            }
+            AppUiGpuPreviewWorkingInput::CpuFrame(_) => {
+                panic!("solid-only preview should use GPU working composite candidate")
+            }
+        }
         assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
         assert_eq!(frame.preview_candidate_id(), 1);
 
@@ -3028,6 +3478,7 @@ mod tests {
                 ocio_resource_bind_group_not_prepared: 1,
                 fullscreen_wrapper_not_prepared: 1,
                 render_pipeline_not_prepared: 1,
+                ..RenderColorStageGpuBlockerBreakdown::default()
             },
             ..RenderColorStageDiagnostics::default()
         });
@@ -3143,6 +3594,9 @@ mod tests {
         assert_eq!(summary.legacy_breakdown.media_transform, 1);
         assert!(!summary.fully_float_linear);
         assert!(!summary.gpu_path_ready);
+        assert_eq!(summary.cpu_output_fallback_frames, 0);
+        assert_eq!(summary.cpu_output_fallback_pixels, 0);
+        assert!(summary.preview_gpu_output_blocker_breakdown.is_empty());
     }
 
     fn assert_preview_export_color_health_match(
@@ -4424,9 +4878,16 @@ mod tests {
             frame_seed: 0,
         }];
         let mut preview_scratch = TimelineCompositeScratch::default();
-        let preview =
-            composite_resolved_preview(1, 1, &resolved, &color_context, &mut preview_scratch)
-                .expect("preview color composite");
+        let preview_service = AppUiPreviewService::new();
+        let preview = composite_resolved_preview(
+            &preview_service,
+            1,
+            1,
+            &resolved,
+            &color_context,
+            &mut preview_scratch,
+        )
+        .expect("preview color composite");
         assert_eq!(
             preview.color_diagnostics.output.domain,
             ColorFrameDomain::Display
@@ -4529,9 +4990,16 @@ mod tests {
             ResolvedPreviewElement::SolidColor(solid.clone()),
         ];
         let mut preview_scratch = TimelineCompositeScratch::default();
-        let preview =
-            composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
-                .expect("preview multilayer composite");
+        let preview_service = AppUiPreviewService::new();
+        let preview = composite_resolved_preview(
+            &preview_service,
+            2,
+            2,
+            &resolved,
+            &color_context,
+            &mut preview_scratch,
+        )
+        .expect("preview multilayer composite");
 
         let export_elements = vec![
             TimelineCompositeElement::Media(TimelineMediaLayer {

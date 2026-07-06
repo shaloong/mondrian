@@ -16,6 +16,7 @@ pub mod color_transform;
 pub mod compositor;
 pub mod context;
 pub mod gpu_backend;
+pub mod gpu_compositor;
 pub mod ocio_gpu;
 pub mod pipeline;
 pub mod profile;
@@ -70,6 +71,11 @@ pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
 pub use gpu_backend::{
     gpu_enabled, set_gpu_enabled, GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason,
+};
+pub use gpu_compositor::{
+    evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,
+    GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositingBlockerReason,
+    GpuCompositingCapability, GpuCompositingDiagnostics, GpuFrameCompositor,
 };
 pub use ocio_gpu::{
     OcioGpuBindingContract, OcioGpuBindingContractValidationError,

@@ -1022,12 +1022,16 @@ fn push_export_root_causes_and_actions(
             "export_gpu_color_stage_blocked",
             ExportColorHealthSeverity::Fail,
             format!(
-                "gpu_blockers={} shader={} ocio={} wrapper={} pipeline={}",
+                "gpu_blockers={} shader={} ocio_resource={} wrapper={} pipeline={} \
+                 ocio_config={} ocio_processor={} shader_extraction={}",
                 summary.gpu_blockers,
                 summary.gpu_blocker_breakdown.shader_module_not_prepared,
                 summary.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared,
                 summary.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
-                summary.gpu_blocker_breakdown.render_pipeline_not_prepared
+                summary.gpu_blocker_breakdown.render_pipeline_not_prepared,
+                summary.gpu_blocker_breakdown.ocio_config_not_loaded,
+                summary.gpu_blocker_breakdown.ocio_processor_unavailable,
+                summary.gpu_blocker_breakdown.ocio_gpu_shader_extraction_failed
             ),
             color_report_vocab::action::INSPECT_GPU_BLOCKERS,
             "Inspect renderer GPU color blocker breakdown before relying on export GPU scheduling.",

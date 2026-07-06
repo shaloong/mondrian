@@ -16,7 +16,11 @@ use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
 use crate::app_ui::preview::{
-    AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiPreviewColorRejection,
+    AppUiGpuPreviewCompositeLayer, AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState,
+    AppUiGpuPreviewWorkingInput, AppUiPreviewColorRejection,
+};
+use crate::app_ui::preview_gpu_output_blocker::{
+    PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
 };
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
@@ -30,10 +34,12 @@ use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
 use mondrian_platform::SystemPlatformService;
 use mondrian_renderer::{
-    GpuColorFrameTextureFormat, RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
+    GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
+    GpuFrameCompositor, RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
     RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputRuntimeDiagnosticsReport,
-    RenderGpuOutputStageDiagnosticsReport, RenderOutputColorBoundary,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
+    RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
+    RenderGpuOutputStageResourcePlanError, RenderOutputColorBoundary,
     RenderOutputColorBoundaryTarget,
 };
 use mondrian_ui_core::focus::FocusManager;
@@ -968,6 +974,7 @@ struct AppUiWindowSession {
     display_output_contract: AppUiDisplayOutputContract,
     frame_renderer: AppUiFrameRenderer,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
+    working_compositor: GpuFrameCompositor,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
     viewer_gpu_preview_texture_key: Option<ExternalTextureKey>,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
@@ -2679,6 +2686,32 @@ fn prepare_viewer_gpu_preview(
     }
     if let Some(blocker) = session.display_output_contract.boundary_blocker(&frame.boundary) {
         session.viewer_gpu_output_telemetry.record_display_contract_blocker(&blocker);
+        match &blocker {
+            AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
+                output_color_space,
+                selected_surface_format,
+                ..
+            } => {
+                host.record_preview_gpu_output_blocker(
+                    &PreviewGpuOutputBlocker::SurfaceContractMismatch {
+                        surface_format: format!("{selected_surface_format:?}"),
+                        output_color_space: format!("{output_color_space:?}"),
+                    },
+                );
+            }
+            AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
+                output_color_space,
+                selected_surface_format,
+                ..
+            } => {
+                host.record_preview_gpu_output_blocker(
+                    &PreviewGpuOutputBlocker::SurfaceContractMismatch {
+                        surface_format: format!("{selected_surface_format:?}"),
+                        output_color_space: format!("{output_color_space:?}"),
+                    },
+                );
+            }
+        }
         let supported_surface_color_spaces = session
             .display_output_contract
             .supported_surface_color_spaces_for_selected_format();
@@ -2708,22 +2741,101 @@ fn prepare_viewer_gpu_preview(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("app_ui_viewer_gpu_preview_output_encoder"),
     });
-    let record = session.color_output_runtime.record_wgpu_output_boundary_owned_backend(
-        &frame.boundary,
-        &frame.working_frame,
-        GpuColorFrameTextureFormat::Rgba8Unorm,
-        RenderColorTransformGpuOptions::default(),
-        RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-            device,
-            queue,
-            encoder: &mut encoder,
-            load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-        },
-    );
+    let record = match &frame.working_input {
+        AppUiGpuPreviewWorkingInput::CpuFrame(working_frame) => {
+            session.color_output_runtime.record_wgpu_output_boundary_owned_backend(
+                &frame.boundary,
+                working_frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device,
+                    queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                },
+            )
+        }
+        AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
+            let gpu_layers = preview_gpu_composite_layers(layers);
+            match session.color_output_runtime.record_wgpu_working_composite(
+                &session.working_compositor,
+                device,
+                queue,
+                &mut encoder,
+                GpuCompositeRequest {
+                    width: frame.width,
+                    height: frame.height,
+                    working_color_space: frame.working_color_space,
+                    layers: &gpu_layers,
+                },
+            ) {
+                Ok(composite) => {
+                    host.record_preview_gpu_compositing(composite.diagnostics);
+                    session
+                        .color_output_runtime
+                        .record_wgpu_output_boundary_gpu_frame_owned_backend(
+                            &frame.boundary,
+                            &composite.output,
+                            GpuColorFrameTextureFormat::Rgba8Unorm,
+                            RenderColorTransformGpuOptions::default(),
+                            RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                                device,
+                                queue,
+                                encoder: &mut encoder,
+                                load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            },
+                        )
+                }
+                Err(err) => {
+                    host.record_preview_gpu_compositing(
+                        mondrian_renderer::GpuCompositingDiagnostics {
+                            cpu_fallback_composites: 1,
+                            cpu_composited_pixels: u64::from(frame.width)
+                                .saturating_mul(u64::from(frame.height)),
+                            first_blocker: match err {
+                                mondrian_renderer::GpuCompositeError::Blocked { reason } => {
+                                    Some(reason)
+                                }
+                                _ => Some(
+                                    mondrian_renderer::GpuCompositingBlockerReason::GpuUnavailable,
+                                ),
+                            },
+                            ..mondrian_renderer::GpuCompositingDiagnostics::default()
+                        },
+                    );
+                    tracing::warn!(
+                        sequence_id = %frame.sequence_id,
+                        frame = frame.frame,
+                        width = frame.width,
+                        height = frame.height,
+                        "viewer GPU working composite failed: {err:?}"
+                    );
+                    host.clear_external_viewer_frame();
+                    return;
+                }
+            }
+        }
+    };
     let record = match record {
         Ok(record) => record,
         Err(err) => {
             session.viewer_gpu_output_telemetry.record_record_failure();
+            host.record_preview_cpu_output_fallback(frame.width, frame.height);
+            if let RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan(
+                RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
+                    breakdown, ..
+                },
+            ) = &err
+            {
+                host.record_preview_gpu_output_blocker_breakdown(
+                    PreviewGpuOutputBlockerBreakdown::from_renderer_breakdown(*breakdown),
+                );
+            } else {
+                host.record_preview_gpu_output_blocker(
+                    &PreviewGpuOutputBlocker::CpuFallbackRequested { reason: format!("{err:?}") },
+                );
+            }
             tracing::warn!(
                 sequence_id = %frame.sequence_id,
                 frame = frame.frame,
@@ -2764,6 +2876,30 @@ fn prepare_viewer_gpu_preview(
             .record_rejected_external_frame(stage_diagnostics);
         session.frame_renderer.unregister_external_texture(&texture_key);
     }
+}
+
+fn preview_gpu_composite_layers(
+    layers: &[AppUiGpuPreviewCompositeLayer],
+) -> Vec<GpuCompositeLayer<'_>> {
+    layers
+        .iter()
+        .map(|layer| match layer {
+            AppUiGpuPreviewCompositeLayer::Media { frame, opacity } => GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(frame),
+                opacity: *opacity,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                has_effect_graph: false,
+            },
+            AppUiGpuPreviewCompositeLayer::SolidColor { layer } => GpuCompositeLayer {
+                source: GpuCompositeLayerSource::SolidColor(layer.color),
+                opacity: layer.opacity,
+                blend_mode: layer.blend_mode,
+                transform: layer.transform,
+                has_effect_graph: !layer.effect_graph.graph.is_identity(),
+            },
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3014,6 +3150,7 @@ impl AppUiWindowSession {
             display_output_contract,
             frame_renderer: AppUiFrameRenderer::new(device, config.format),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
+            working_compositor: GpuFrameCompositor::new(device),
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
             viewer_gpu_preview_texture_key: None,
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),

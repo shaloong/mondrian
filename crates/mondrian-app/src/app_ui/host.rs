@@ -213,6 +213,34 @@ impl AppUiHost {
         self.mark_dirty();
     }
 
+    /// Record a structured GPU output blocker from the window/GPU path.
+    pub(crate) fn record_preview_gpu_output_blocker(
+        &self,
+        blocker: &crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker,
+    ) {
+        self.preview_service.record_preview_gpu_output_blocker(blocker);
+    }
+
+    /// Record a structured GPU output blocker breakdown from the window/GPU path.
+    pub(crate) fn record_preview_gpu_output_blocker_breakdown(
+        &self,
+        breakdown: crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
+    ) {
+        self.preview_service.record_preview_gpu_output_blocker_breakdown(breakdown);
+    }
+
+    /// Record a CPU output fallback caused by failed native GPU preview output.
+    pub(crate) fn record_preview_cpu_output_fallback(&self, width: u32, height: u32) {
+        self.preview_service.record_cpu_output_fallback(width, height);
+    }
+
+    pub(crate) fn record_preview_gpu_compositing(
+        &self,
+        diagnostics: mondrian_renderer::GpuCompositingDiagnostics,
+    ) {
+        self.preview_service.record_gpu_compositing(diagnostics);
+    }
+
     /// Latest structured preview color rejection, if the current viewer request was rejected.
     pub(crate) fn current_viewer_color_rejection(&self) -> Option<AppUiPreviewColorRejection> {
         self.preview_service.last_color_rejection()

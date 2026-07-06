@@ -460,3 +460,121 @@ Health reports distinguish export delivery view availability from preview
 display/view: `output_transform_issues` records when tone mapping was
 requested but no delivery view was available. This is a Fail condition
 in the health report. The action code is `configure_export_delivery_view`.
+
+## Preview/Viewer GPU Output Boundary
+
+The preview/viewer path connects to the GPU color output boundary through
+the app-window `prepare_viewer_gpu_preview()` function. The call chain is:
+
+```
+User scrub/play
+  → RedrawRequested
+  → prepare_viewer_gpu_preview(device, queue, session, host)
+    → host.gpu_preview_frame_for_current_state()
+      → AppUiPreviewService::gpu_preview_frame_for_state()
+        → resolve_sequence_elements()  [timeline render plan]
+        → returns AppUiGpuPreviewFrame { working_input, boundary }
+          where working_input is either:
+            - GpuComposite { layers } for supported simple layer stacks
+            - CpuFrame(frame) after explicit CPU composite fallback
+    → if GpuComposite:
+        RenderGpuOutputBoundaryRuntime::record_wgpu_working_composite()
+        RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
+      else CpuFrame:
+        RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend()
+      → GPU output transform (OCIO display/view)
+    → frame_renderer.register_external_texture_view()
+    → queue.submit()
+```
+
+The `working_input` is either a GPU-composited working texture or a CPU
+working-space fallback frame.
+The `boundary` is a `RenderOutputColorBoundary` carrying the target display/view
+for presentation. The GPU path executes the display transform on the GPU via
+`RenderGpuOutputBoundaryRuntime`.
+
+### CPU Fallback Path
+
+When the window GPU output path cannot execute, the viewer falls back to the
+raster preview path (`composite_resolved_preview`), which uses
+`execute_cpu_output_boundary_rgba8()` as the explicit CPU presentation path.
+GPU-output failures are recorded at the window boundary:
+
+- `cpu_output_fallback_frames` — Number of frames using CPU fallback.
+- `cpu_output_fallback_pixels` — Total pixels through CPU fallback.
+- `PreviewGpuOutputBlocker::CpuFallbackRequested` — Typed blocker with reason.
+
+CPU fallback is never silently used. Health reports distinguish:
+- `Pass` — Clean GPU color output.
+- `Warn` — GPU blocked but CPU fallback succeeded.
+- `Fail` — Fail-closed color rejection.
+
+### GPU Preview Cache Key
+
+The `ViewerPreviewCacheKey` includes:
+- `sequence_id`, `width`, `height` — Frame geometry.
+- `plan_signature` — Hash of: working color space, output color space,
+  tone map flag, color engine, display management policy, OCIO display/view,
+  element signatures (media frame signatures, effects, transforms).
+
+Changing display/view, OCIO config generation, or display contract
+invalidates the cache key and forces re-rendering.
+
+## GPU Working-Space Compositing
+
+The preview/viewer path has a bounded native GPU working-space compositing path
+through `gpu_compositor.rs`. For supported layer stacks, the app window records:
+
+```
+Resolved preview layers
+  -> GpuFrameCompositor::record()
+     -> upload CPU media layers as Rgba32Float textures
+     -> composite media/solid layers into an Rgba32Float working texture
+     -> insert the working texture into RenderGpuOutputBoundaryRuntime frame table
+  -> RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
+     -> OCIO GPU display/output transform
+  -> frame_renderer.register_external_texture_view()
+```
+
+This keeps preview playback GPU-resident from working composite through output
+transform for the supported subset. It also removes the extra `UploadToGpu`
+stage between working composite and output transform; the renderer contract is
+covered by `from_gpu_working_frame()`.
+
+### Capability Classification
+
+- **`GpuNative`** — All layers are GPU-resident, use Normal blend mode,
+  have no effect graphs, and ≤5 layers. No CPU round-trip needed.
+- **`GpuWithUpload`** — Layer structure supports GPU compositing, but layers
+  must be uploaded from CPU first. This is the current preview production path
+  for media/solid layers decoded into CPU working frames; the composited result
+  stays on GPU for OCIO output.
+- **`CpuFallback`** — GPU compositing not possible. Reason is classified as:
+  - `EffectRequiresCpu` — Effect graph needs CPU execution
+  - `UnsupportedBlendMode` — Only Normal is GPU-supported
+  - `NonIdentityTransform` — Transform needs CPU bilinear sampling
+  - `FrameNotGpuResident` — Frame must be uploaded
+  - `TooManyLayers` — Exceeds 5-layer fused shader limit
+  - `GpuUnavailable` — No GPU device/queue
+
+### Texture Pool
+
+`TexturePool` supports `Rgba8Unorm`, `Rgba16Float`, and `Rgba32Float`
+formats with size-class-based LRU reuse (8 per key, 64 total default).
+
+### Integration Status
+
+The production preview path uses GPU compositing when `ResolvedPreviewElement`
+contains only supported media/solid layers:
+
+- media frames must already be in the sequence working color space and match
+  the preview extent;
+- solid layers must have identity effect graphs;
+- all layers must use identity transforms and `BlendMode::Normal`;
+- layer count must be ≤5.
+
+If any condition is not met, the preview service records
+`GpuCompositingDiagnostics { cpu_fallback_composites, first_blocker }` and uses
+the CPU reference compositor. This fail-closed gate is intentional: unsupported
+effects, blend modes, transforms, or resampling must not silently run through a
+visually different GPU approximation.

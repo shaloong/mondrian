@@ -544,6 +544,134 @@ Preview and export may therefore target different output color spaces while
 sharing the same working color space, engine inheritance, workflow,
 missing-metadata policy, and nested-processing policy.
 
+## GPU Output Blocker Taxonomy
+
+Every reason the GPU color output boundary cannot execute is captured as a typed
+enum variant rather than an opaque counter. The taxonomy covers three layers:
+
+### Renderer-Level Blockers (`OcioGpuWgpuBlocker`)
+
+These are detected during OCIO shader extraction, backend preparation, and
+pipeline construction in `RenderGpuOutputBoundaryRuntime`:
+
+- `OcioConfigNotLoaded` — OCIO config is not loaded or unavailable.
+- `OcioProcessorUnavailable` — OCIO processor could not be created.
+- `OcioGpuShaderExtractionFailed` — Shader extraction failed (transpilation,
+  Naga, or backend error).
+- `ShaderModuleNotPrepared` — Backend shader module not prepared.
+- `OcioResourceBindGroupNotPrepared` — OCIO LUT/uniform resources not bound.
+- `FullscreenWrapperNotPrepared` — Fullscreen wrapper shader missing.
+- `RenderPipelineNotPrepared` — Final render pipeline not prepared.
+
+These feed into `RenderColorStageGpuBlockerBreakdown` which carries per-reason
+u64 counters (all 7 fields) and is part of `RenderColorStageDiagnostics` and
+the renderer `RenderGpuOutputHealthReport`.
+
+### App/Window-Level Blockers (`PreviewGpuOutputBlocker`)
+
+These are detected during app-window GPU scheduling in `prepare_viewer_gpu_preview()`:
+
+- `SurfaceContractMismatch` — Surface format does not support the output color
+  space.
+- `UnsupportedDisplayColorSpace` — Display color space not supported.
+- `UnsupportedHdrSwapchainOrEdr` — HDR swapchain/EDR mode not supported.
+- `FrameNotGpuResident` — Working frame is not GPU-resident.
+- `LegacyRgba8CompositeBoundary` — Compositing fell back to legacy RGBA8.
+- `CpuFallbackRequested` — CPU fallback was explicitly requested.
+
+These are recorded per-frame in `PreviewGpuOutputBlockerBreakdown` (all 14
+fields from both renderer and app layers) and surface in the preview health
+report with structured root causes and action codes.
+
+### Health Report Action Codes
+
+Every blocker variant carries a machine-readable `action_code()` for health
+report follow-up:
+
+- `prepare_ocio_gpu_resources` — Load/reload OCIO config and verify processor.
+- `inspect_gpu_blocker_breakdown` — Inspect renderer GPU blocker breakdown.
+- `configure_display_contract` — Reconfigure display output contract.
+- `ensure_gpu_frame_residency` — Ensure working frame is GPU-resident.
+- `avoid_legacy_rgba8_boundary` — Migrate legacy RGBA8 composites.
+- `investigate_cpu_fallback` — Investigate why CPU fallback was requested.
+
+## CPU Correctness Path vs GPU Playback Path
+
+Preview and export share one color pipeline: the CPU correctness path
+(`CpuRenderColorStageExecutor`) produces bit-exact reference output, and the
+GPU playback path (`RenderGpuOutputBoundaryRuntime`) produces the production
+texture for presentation or encoding.
+
+- **CPU correctness path**: Uses `execute_cpu_output_boundary()` or
+  `execute_cpu_output_boundary_rgba8()` for reference output. It is the
+  authoritative semantic path when OCIO config and processors are available;
+  if they are missing, the request fails closed with diagnostics rather than
+  silently substituting a fallback color space.
+- **GPU playback path**: Uses `record_wgpu_output_boundary_owned_backend()` to
+  produce a GPU-resident output texture. Requires all 7 renderer-level OCIO
+  blockers to be resolved. The app-window path validates display contract
+  compatibility before recording.
+
+CPU fallback is always explicitly recorded — never silently used as "GPU ready".
+Preview and export never independently interpret color spaces; they share the
+same `ColorContext`, `RenderOutputColorBoundary`, and `RenderColorTransform`
+resolution through the renderer layer.
+
+## Structured Fallback Diagnostics
+
+When GPU path cannot execute, diagnostics include:
+
+- **Preview raster path** (`composite_resolved_preview`): Executes the explicit
+  CPU presentation boundary and records structured legacy RGBA8 composite
+  blockers when the working composite had to leave the float/linear path. This
+  path is the fallback target, so it must not self-report every successful
+  raster frame as a GPU-output fallback.
+- **Window GPU path** (`prepare_viewer_gpu_preview`): Records
+  `cpu_output_fallback_frames`, `cpu_output_fallback_pixels`, and typed
+  `PreviewGpuOutputBlocker` evidence when native GPU output recording fails.
+  Display contract blockers and GPU record failures are captured with structured
+  evidence.
+- **Export path**: Records `gpu_output_cpu_fallbacks` and
+  `gpu_output_fallback_reasons` in `ExportJobColorDiagnosticsSummary`.
+
+All three paths share the same `color_report_vocab` canonical root-cause and
+action codes, enabling cross-report comparison between preview and export.
+
+## Explicitly Unsupported Features
+
+These features are defined in the type system but not implemented. Diagnostics
+use `PreviewGpuOutputBlocker::UnsupportedFeature` with stable `feature` codes
+and `document_unsupported_feature` action code.
+
+- **`MonitorProfileReference::IccProfile`** — OS ICC profile reading is not
+  implemented. When configured, preview/viewer presentation fails closed for
+  that request and records `PreviewGpuOutputBlocker::UnsupportedFeature` with
+  the stable `os_icc_profile` feature code. It must not silently fall back to
+  Rec.709, sRGB, or the sequence output color space.
+- **Real OS HDR/EDR detection** — `ViewerDisplayMode::HdrPq` /
+  `ViewerDisplayMode::HdrHlg` are explicit user selections, not OS-queried
+  capabilities. The surface contract validates wgpu `SurfaceColorSpace`
+  compatibility but does not verify actual monitor HDR support. Diagnostics
+  do not record a blocker for this — it is a design choice, not a bug.
+- **GPU compositing** — The `gpu_compositor.rs` module is wired into the
+  preview/viewer GPU path for the safe production subset: identity transforms,
+  Normal blend mode, no effect graphs, and at most five media/solid layers.
+  It composites into an `Rgba32Float` working-space GPU texture, then feeds the
+  same renderer-owned OCIO GPU output boundary used by the rest of preview.
+  Unsupported layer stacks fail back to the CPU reference compositor with
+  structured `GpuCompositingDiagnostics` blocker reasons (`EffectRequiresCpu`,
+  `UnsupportedBlendMode`, `NonIdentityTransform`, `TooManyLayers`,
+  `GpuUnavailable`).
+- **`FrameNotGpuResident` blocker** — The current preview GPU compositing path
+  supports CPU-layer upload into GPU compositing (`GpuWithUpload`) and then keeps
+  the composited working frame GPU-resident for OCIO output. This blocker is
+  reserved for future paths that require already-resident media textures and
+  intentionally disallow upload.
+
+The `UnsupportedFeature` blocker variant exists precisely so that when these
+limitations are resolved, the diagnostic path can be updated without changing
+the taxonomy.
+
 ## HDR/SDR
 
 HDR output spaces include Rec.2100 PQ/HLG. Tone mapping is required when scene/HDR working data targets SDR output. HDR metadata can only be preserved for HDR output spaces.

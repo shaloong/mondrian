@@ -19,13 +19,16 @@ struct TextureKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TexturePoolFormat {
     Rgba8Unorm,
-    // Add more formats as needed
+    Rgba16Float,
+    Rgba32Float,
 }
 
 impl From<wgpu::TextureFormat> for TexturePoolFormat {
     fn from(f: wgpu::TextureFormat) -> Self {
         match f {
             wgpu::TextureFormat::Rgba8Unorm => Self::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float => Self::Rgba16Float,
+            wgpu::TextureFormat::Rgba32Float => Self::Rgba32Float,
             other => {
                 debug_assert!(
                     false,

@@ -26,6 +26,10 @@ pub mod check {
     pub const LEGACY_REASON_TOTAL: &str = "legacy_reason_total";
     /// Inputs rejected by missing-metadata policy.
     pub const POLICY_REJECTIONS: &str = "policy_rejections";
+    /// Number of CPU output fallback frames.
+    pub const CPU_OUTPUT_FALLBACK_FRAMES: &str = "cpu_output_fallback_frames";
+    /// Total structured GPU output blockers.
+    pub const GPU_OUTPUT_BLOCKERS: &str = "gpu_output_blockers";
 }
 
 /// All shared check codes for iteration/comparison.
@@ -36,6 +40,8 @@ pub const SHARED_CHECK_CODES: &[&str] = &[
     check::TRANSFER_STAGES,
     check::LEGACY_REASON_TOTAL,
     check::POLICY_REJECTIONS,
+    check::CPU_OUTPUT_FALLBACK_FRAMES,
+    check::GPU_OUTPUT_BLOCKERS,
 ];
 
 // ── Shared root cause codes ───────────────────────────────────────────────────
@@ -54,6 +60,10 @@ pub mod root_cause {
     pub const LEGACY_RGBA8_COMPOSITE_PATH: &str = "legacy_rgba8_composite_path";
     /// Missing-metadata policy rejected a media source.
     pub const INPUT_COLOR_POLICY_REJECTED_SOURCE: &str = "input_color_policy_rejected_source";
+    /// Preview output boundary fell back to CPU RGBA8.
+    pub const CPU_OUTPUT_FALLBACK: &str = "cpu_output_fallback";
+    /// Preview GPU output boundary has structured blockers.
+    pub const GPU_OUTPUT_BLOCKED: &str = "gpu_output_blocked";
 }
 
 // ── Shared action codes ───────────────────────────────────────────────────────
@@ -70,6 +80,14 @@ pub mod action {
     pub const REMOVE_TRANSFER_STAGE: &str = "remove_transfer_stage";
     /// Migrate legacy RGBA8 composite reasons back to float/linear.
     pub const MIGRATE_LEGACY_COMPOSITE_REASON: &str = "migrate_legacy_composite_reason";
+    /// Investigate why CPU output fallback was used.
+    pub const INVESTIGATE_CPU_FALLBACK: &str = "investigate_cpu_fallback";
+    /// Prepare OCIO GPU resources (config, processor, shader extraction).
+    pub const PREPARE_OCIO_GPU_RESOURCES: &str = "prepare_ocio_gpu_resources";
+    /// Configure display output contract to match the output boundary.
+    pub const CONFIGURE_DISPLAY_CONTRACT: &str = "configure_display_contract";
+    /// Inspect preview GPU output blocker breakdown.
+    pub const INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS: &str = "inspect_preview_gpu_output_blockers";
 }
 
 // ── Normalization functions ───────────────────────────────────────────────────
@@ -91,6 +109,10 @@ pub fn normalize_root_cause_code(code: &str) -> &str {
         "preview_transfer_stage_present" | "export_transfer_stage_present" => {
             root_cause::TRANSFER_STAGE_PRESENT
         }
+        "preview_cpu_output_fallback" | "export_cpu_output_fallback" => {
+            root_cause::CPU_OUTPUT_FALLBACK
+        }
+        "preview_gpu_output_blocked" => root_cause::GPU_OUTPUT_BLOCKED,
         other => other,
     }
 }
@@ -113,6 +135,10 @@ pub fn normalize_action_code(code: &str) -> &str {
         "migrate_preview_legacy_composite_reason" | "migrate_legacy_composite_reason" => {
             action::MIGRATE_LEGACY_COMPOSITE_REASON
         }
+        "investigate_cpu_fallback" => action::INVESTIGATE_CPU_FALLBACK,
+        "prepare_ocio_gpu_resources" => action::PREPARE_OCIO_GPU_RESOURCES,
+        "configure_display_contract" => action::CONFIGURE_DISPLAY_CONTRACT,
+        "inspect_preview_gpu_output_blockers" => action::INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS,
         other => other,
     }
 }
@@ -134,6 +160,11 @@ mod tests {
         assert_eq!(check::TRANSFER_STAGES, "transfer_stages");
         assert_eq!(check::LEGACY_REASON_TOTAL, "legacy_reason_total");
         assert_eq!(check::POLICY_REJECTIONS, "policy_rejections");
+        assert_eq!(
+            check::CPU_OUTPUT_FALLBACK_FRAMES,
+            "cpu_output_fallback_frames"
+        );
+        assert_eq!(check::GPU_OUTPUT_BLOCKERS, "gpu_output_blockers");
     }
 
     #[test]
@@ -154,6 +185,18 @@ mod tests {
             normalize_root_cause_code("legacy_rgba8_composite_path"),
             "legacy_rgba8_composite_path"
         );
+        assert_eq!(
+            normalize_root_cause_code("preview_cpu_output_fallback"),
+            root_cause::CPU_OUTPUT_FALLBACK
+        );
+        assert_eq!(
+            normalize_root_cause_code("export_cpu_output_fallback"),
+            root_cause::CPU_OUTPUT_FALLBACK
+        );
+        assert_eq!(
+            normalize_root_cause_code("preview_gpu_output_blocked"),
+            root_cause::GPU_OUTPUT_BLOCKED
+        );
     }
 
     #[test]
@@ -170,12 +213,30 @@ mod tests {
             normalize_action_code("migrate_legacy_composite_reason"),
             action::MIGRATE_LEGACY_COMPOSITE_REASON
         );
+        assert_eq!(
+            normalize_action_code("investigate_cpu_fallback"),
+            action::INVESTIGATE_CPU_FALLBACK
+        );
+        assert_eq!(
+            normalize_action_code("prepare_ocio_gpu_resources"),
+            action::PREPARE_OCIO_GPU_RESOURCES
+        );
+        assert_eq!(
+            normalize_action_code("configure_display_contract"),
+            action::CONFIGURE_DISPLAY_CONTRACT
+        );
+        assert_eq!(
+            normalize_action_code("inspect_preview_gpu_output_blockers"),
+            action::INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS
+        );
     }
 
     #[test]
     fn is_shared_check_code_works() {
         assert!(is_shared_check_code("fully_float_linear"));
         assert!(is_shared_check_code("gpu_blockers"));
+        assert!(is_shared_check_code("cpu_output_fallback_frames"));
+        assert!(is_shared_check_code("gpu_output_blockers"));
         assert!(!is_shared_check_code("diagnosed_frames_present"));
         assert!(!is_shared_check_code("media_warnings"));
     }

@@ -1422,6 +1422,43 @@ impl OcioGpuWgpuResourcePlan {
             .saturating_add(self.ocio_texture_2d_bindings)
             .saturating_add(self.ocio_texture_3d_bindings)
     }
+
+    /// An empty resource plan for blocked GPU execution.
+    ///
+    /// Used when shader extraction fails and a blocked plan must be returned
+    /// with the appropriate blocker recorded instead of propagating an error.
+    pub fn empty() -> Self {
+        Self {
+            resource_key: 0,
+            shader_hash: 0,
+            binding_contract_hash: 0,
+            binding_contract: OcioGpuBindingContract {
+                descriptor_set_index: 0,
+                uniform_buffer_binding: 0,
+                texture_binding_start: 0,
+                uniform_buffer_size: 0,
+                uniform_count: 0,
+                uniforms: Vec::new(),
+                textures_2d: Vec::new(),
+                textures_3d: Vec::new(),
+            },
+            wrapper_contract: OcioGpuFullscreenWrapperContract {
+                bind_group: 0,
+                input_texture_binding: 0,
+                input_sampler_binding: 0,
+                output_location: 0,
+            },
+            input_textures: 0,
+            output_textures: 0,
+            ocio_texture_2d_bindings: 0,
+            ocio_texture_3d_bindings: 0,
+            uniform_buffers: 0,
+            samplers: 0,
+            bind_group_entries: 0,
+            bind_groups: 0,
+            pipeline_layout_hash: 0,
+        }
+    }
 }
 
 /// Bind-group layout contract for an OCIO GPU color pass.
@@ -4480,6 +4517,15 @@ pub enum OcioGpuWgpuBlocker {
     FullscreenWrapperNotPrepared,
     /// The final render pipeline/render-pass node is not implemented yet.
     RenderPipelineNotPrepared,
+    /// OCIO config is not loaded or unavailable for GPU shader extraction.
+    OcioConfigNotLoaded,
+    /// OCIO processor could not be created for the requested transform.
+    OcioProcessorUnavailable,
+    /// OCIO GPU shader extraction failed (transpilation, Naga, or backend error).
+    OcioGpuShaderExtractionFailed {
+        /// Human-readable extraction failure reason.
+        reason: String,
+    },
 }
 
 /// Bounded cache for OCIO GPU shader extraction results.
@@ -4534,25 +4580,60 @@ impl OcioGpuShaderCache {
     /// object creation is owned by `OcioGpuWgpuBackendPrepRuntime` and
     /// `OcioGpuWgpuBackendObjectRuntime`, so missing shader modules, bind
     /// groups, wrappers, and pipelines are not blockers at this planning layer.
+    ///
+    /// When shader extraction fails, a blocked plan is returned with the
+    /// appropriate `OcioGpuWgpuBlocker` populated instead of propagating an
+    /// error.  This ensures the stage plan is always produced and the blocker
+    /// is recorded in diagnostics.
     pub fn prepare_wgpu_execution(
         &mut self,
         request: OcioGpuShaderRequest,
     ) -> Result<OcioGpuWgpuExecutionPlan, OcioGpuShaderError> {
-        let shader_plan = self.get_or_extract(request)?;
-        let resources =
-            OcioGpuWgpuResourcePlan::for_shader_plan(&shader_plan).map_err(|reason| {
-                OcioGpuShaderError {
-                    request: shader_plan.request.clone(),
-                    reason: reason.to_string(),
-                }
-            })?;
-
-        Ok(OcioGpuWgpuExecutionPlan {
-            shader_plan,
-            resources,
-            wrapper_color: OcioGpuWgpuWrapperColorContract::default(),
-            blockers: Vec::new(),
-        })
+        match self.get_or_extract(request.clone()) {
+            Ok(shader_plan) => {
+                let resources =
+                    OcioGpuWgpuResourcePlan::for_shader_plan(&shader_plan).map_err(|reason| {
+                        OcioGpuShaderError {
+                            request: shader_plan.request.clone(),
+                            reason: reason.to_string(),
+                        }
+                    })?;
+                Ok(OcioGpuWgpuExecutionPlan {
+                    shader_plan,
+                    resources,
+                    wrapper_color: OcioGpuWgpuWrapperColorContract::default(),
+                    blockers: Vec::new(),
+                })
+            }
+            Err(err) => {
+                let blocker = classify_ocio_shader_error(&err.reason);
+                let dummy_bundle = Arc::new(OcioGpuShaderBundle {
+                    src_color_space: String::new(),
+                    dst_color_space: String::new(),
+                    language: request.language(),
+                    shader_text: String::new(),
+                    descriptor_set_index: 0,
+                    texture_binding_start: 0,
+                    uniform_buffer_binding: 0,
+                    uniform_buffer_size: 0,
+                    texture_2d_count: 0,
+                    texture_3d_count: 0,
+                    uniform_count: 0,
+                    textures_2d: Vec::new(),
+                    textures_3d: Vec::new(),
+                    uniforms: Vec::new(),
+                    cache_id: None,
+                });
+                let shader_plan = Arc::new(plan_from_bundle(err.request.clone(), dummy_bundle));
+                let resources = OcioGpuWgpuResourcePlan::empty();
+                Ok(OcioGpuWgpuExecutionPlan {
+                    shader_plan,
+                    resources,
+                    wrapper_color: OcioGpuWgpuWrapperColorContract::default(),
+                    blockers: vec![blocker],
+                })
+            }
+        }
     }
 
     /// Return cache health counters.
@@ -4606,6 +4687,22 @@ impl std::fmt::Display for OcioGpuShaderError {
 }
 
 impl std::error::Error for OcioGpuShaderError {}
+
+/// Classify an OCIO GPU shader extraction error reason into a typed blocker.
+///
+/// The core OCIO layer returns flat `String` errors. This function maps known
+/// error message prefixes to structured `OcioGpuWgpuBlocker` variants so the
+/// stage diagnostics can record the specific failure reason.
+pub fn classify_ocio_shader_error(reason: &str) -> OcioGpuWgpuBlocker {
+    let lower = reason.to_lowercase();
+    if lower.contains("no ocio config loaded") || lower.contains("call ensure_ocio_loaded") {
+        OcioGpuWgpuBlocker::OcioConfigNotLoaded
+    } else if lower.contains("processor") && !lower.contains("gpu processor") {
+        OcioGpuWgpuBlocker::OcioProcessorUnavailable
+    } else {
+        OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { reason: reason.to_owned() }
+    }
+}
 
 fn extract_bundle(request: &OcioGpuShaderRequest) -> Result<OcioGpuShaderBundle, String> {
     match request {

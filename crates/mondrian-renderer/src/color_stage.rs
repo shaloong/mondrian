@@ -5,8 +5,9 @@ use crate::{
     GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, LinearFloatSource, OcioGpuShaderCache,
-    OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
+    GpuColorFrameWgpuResource, GpuCompositeError, GpuCompositeRecord, GpuCompositeRequest,
+    GpuFrameCompositor, LinearFloatSource, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
+    OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
     OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
     OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
     OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuBlocker,
@@ -143,6 +144,12 @@ pub struct RenderColorStageGpuBlockerBreakdown {
     pub fullscreen_wrapper_not_prepared: u64,
     /// Final render pipeline/render-pass node is missing.
     pub render_pipeline_not_prepared: u64,
+    /// OCIO config is not loaded or unavailable for GPU shader extraction.
+    pub ocio_config_not_loaded: u64,
+    /// OCIO processor could not be created for the requested transform.
+    pub ocio_processor_unavailable: u64,
+    /// OCIO GPU shader extraction failed (transpilation, Naga, or backend error).
+    pub ocio_gpu_shader_extraction_failed: u64,
 }
 
 impl RenderColorStageGpuBlockerBreakdown {
@@ -152,6 +159,9 @@ impl RenderColorStageGpuBlockerBreakdown {
             .saturating_add(self.ocio_resource_bind_group_not_prepared)
             .saturating_add(self.fullscreen_wrapper_not_prepared)
             .saturating_add(self.render_pipeline_not_prepared)
+            .saturating_add(self.ocio_config_not_loaded)
+            .saturating_add(self.ocio_processor_unavailable)
+            .saturating_add(self.ocio_gpu_shader_extraction_failed)
     }
 
     /// Record one native GPU blocker.
@@ -172,6 +182,16 @@ impl RenderColorStageGpuBlockerBreakdown {
                 self.render_pipeline_not_prepared =
                     self.render_pipeline_not_prepared.saturating_add(1);
             }
+            OcioGpuWgpuBlocker::OcioConfigNotLoaded => {
+                self.ocio_config_not_loaded = self.ocio_config_not_loaded.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::OcioProcessorUnavailable => {
+                self.ocio_processor_unavailable = self.ocio_processor_unavailable.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { .. } => {
+                self.ocio_gpu_shader_extraction_failed =
+                    self.ocio_gpu_shader_extraction_failed.saturating_add(1);
+            }
         }
     }
 
@@ -188,6 +208,13 @@ impl RenderColorStageGpuBlockerBreakdown {
         self.render_pipeline_not_prepared = self
             .render_pipeline_not_prepared
             .saturating_add(other.render_pipeline_not_prepared);
+        self.ocio_config_not_loaded =
+            self.ocio_config_not_loaded.saturating_add(other.ocio_config_not_loaded);
+        self.ocio_processor_unavailable =
+            self.ocio_processor_unavailable.saturating_add(other.ocio_processor_unavailable);
+        self.ocio_gpu_shader_extraction_failed = self
+            .ocio_gpu_shader_extraction_failed
+            .saturating_add(other.ocio_gpu_shader_extraction_failed);
     }
 }
 
@@ -618,6 +645,24 @@ impl RenderGpuOutputBoundaryRuntime {
         &mut self.backend_objects
     }
 
+    /// Record a native GPU working-space composite into this runtime's shared
+    /// frame resource table.
+    ///
+    /// The returned GPU working frame can be passed directly to
+    /// [`Self::record_wgpu_output_boundary_gpu_frame_owned_backend`], avoiding
+    /// the legacy CPU working-frame composite before preview output.
+    pub fn record_wgpu_working_composite(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        request: GpuCompositeRequest<'_>,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let Self { frame_ids, frame_table, .. } = self;
+        compositor.record(device, queue, encoder, frame_ids, frame_table, request)
+    }
+
     /// Plan, prepare runtime-owned backend objects, and record a native GPU output boundary.
     pub fn record_wgpu_output_boundary_owned_backend(
         &mut self,
@@ -641,6 +686,64 @@ impl RenderGpuOutputBoundaryRuntime {
         let resources = plan
             .gpu_resource_plan(frame_ids, frame, output_texture_format)
             .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let wrapper_color = resources.transform.wgpu.wrapper_color;
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, wrapper_color, output_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_output_stage(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Record)
+    }
+
+    /// Plan, prepare runtime-owned backend objects, and record a native GPU
+    /// output boundary from an upstream GPU-resident working frame.
+    pub fn record_wgpu_output_boundary_gpu_frame_owned_backend(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRuntimeRecordError> {
+        let Self {
+            shader_cache,
+            backend_prep,
+            backend_objects,
+            frame_ids,
+            frame_table,
+        } = self;
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
+        let plan = planner
+            .plan_descriptor(input.descriptor(), boundary)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
+        let resources = RenderGpuOutputStageResourcePlan::from_gpu_working_frame(
+            frame_ids,
+            input,
+            &plan.stage_plan,
+            output_texture_format,
+        )
+        .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan)?;
         let output_format = color_target_format_for_gpu_frame(&resources.output);
         let shader_plan = resources.transform.wgpu.shader_plan.clone();
         let wrapper_color = resources.transform.wgpu.wrapper_color;
@@ -1209,15 +1312,19 @@ fn push_render_gpu_output_root_causes_and_actions(
             RenderGpuOutputDiagnosticArea::GpuColorPath,
             "gpu_stage_blocked",
             format!(
-                "gpu_blockers={} shader={} ocio={} wrapper={} pipeline={}",
+                "gpu_blockers={} shader={} ocio_resource={} wrapper={} pipeline={} \
+                 ocio_config={} ocio_processor={} shader_extraction={}",
                 stage.gpu_blockers,
                 stage.gpu_blocker_breakdown.shader_module_not_prepared,
                 stage.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared,
                 stage.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
-                stage.gpu_blocker_breakdown.render_pipeline_not_prepared
+                stage.gpu_blocker_breakdown.render_pipeline_not_prepared,
+                stage.gpu_blocker_breakdown.ocio_config_not_loaded,
+                stage.gpu_blocker_breakdown.ocio_processor_unavailable,
+                stage.gpu_blocker_breakdown.ocio_gpu_shader_extraction_failed
             ),
             "inspect_gpu_blocker_breakdown",
-            "Inspect shader module, OCIO resource, fullscreen wrapper, and render pipeline blockers.",
+            "Inspect shader module, OCIO resource, fullscreen wrapper, render pipeline, OCIO config, processor, and shader extraction blockers.",
         );
     }
     if !summary.backend_runtime_ready {
@@ -1336,9 +1443,20 @@ impl<'a> RenderOutputColorBoundaryPlanner<'a> {
         frame: &CpuColorFrame,
         boundary: &RenderOutputColorBoundary,
     ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
-        let stage_plan = self
-            .stage_planner
-            .plan_output_transform(frame.descriptor(), &boundary.transform())?;
+        self.plan_descriptor(frame.descriptor(), boundary)
+    }
+
+    /// Plan the final output boundary for an already-described working frame.
+    ///
+    /// This is used by GPU-resident upstream stages that have a
+    /// `GpuColorFrameHandle` but no CPU pixel container.
+    pub fn plan_descriptor(
+        &mut self,
+        descriptor: ColorFrameDescriptor,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
+        let stage_plan =
+            self.stage_planner.plan_output_transform(descriptor, &boundary.transform())?;
         Ok(RenderOutputColorBoundaryStagePlan { boundary: boundary.clone(), stage_plan })
     }
 }
@@ -1465,8 +1583,11 @@ pub struct RenderGpuOutputStageResourcePlan {
     pub output: GpuColorFrameHandle,
     /// Readback contract when the planned output returns to a CPU encoded boundary.
     pub readback: Option<GpuColorFrameReadbackPlan>,
-    /// Upload plan that moves the CPU working frame into the input GPU frame.
-    pub input_upload: GpuColorFrameUploadPlan,
+    /// Optional upload plan that moves a CPU working frame into the input GPU frame.
+    ///
+    /// This is `None` when the input frame was produced by an upstream GPU
+    /// stage, such as native GPU working-space compositing.
+    pub input_upload: Option<GpuColorFrameUploadPlan>,
     /// Allocation plan for the output GPU target frame.
     pub output_allocation: GpuColorFrameAllocationPlan,
     /// GPU transform plan that these resources satisfy.
@@ -1539,8 +1660,8 @@ impl RenderGpuOutputStageResourcePlan {
     /// Return the stage diagnostics represented by this executable GPU output resource plan.
     pub fn stage_diagnostics(&self) -> RenderColorStageDiagnostics {
         let mut diagnostics = RenderColorStageDiagnostics {
-            total_stages: 2,
-            upload_stages: 1,
+            total_stages: 1 + u64::from(self.input_upload.is_some()),
+            upload_stages: u64::from(self.input_upload.is_some()),
             gpu_color_stages: 1,
             stage_pixels: self
                 .input
@@ -1569,9 +1690,14 @@ impl RenderGpuOutputStageResourcePlan {
     ) -> Result<Self, RenderGpuOutputStageResourcePlanError> {
         let planned = planned_gpu_upload_transform_readback(stage_plan)?;
         if !planned.transform.wgpu.can_execute() {
+            let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+            for blocker in &planned.transform.wgpu.blockers {
+                breakdown.record(blocker);
+            }
             return Err(
                 RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
                     blockers: planned.transform.wgpu.blockers.len(),
+                    breakdown,
                 },
             );
         }
@@ -1623,7 +1749,67 @@ impl RenderGpuOutputStageResourcePlan {
             input: input_upload.handle.clone(),
             output,
             readback,
-            input_upload,
+            input_upload: Some(input_upload),
+            output_allocation,
+            transform,
+        })
+    }
+
+    /// Build resource plans for an already GPU-resident working frame entering
+    /// a planned native GPU output transform.
+    pub fn from_gpu_working_frame(
+        ids: &mut GpuColorFrameIdAllocator,
+        input: &GpuColorFrameHandle,
+        stage_plan: &RenderColorStagePlan,
+        output_texture_format: GpuColorFrameTextureFormat,
+    ) -> Result<Self, RenderGpuOutputStageResourcePlanError> {
+        let planned = planned_gpu_transform_readback(stage_plan)?;
+        if !planned.transform.wgpu.can_execute() {
+            let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+            for blocker in &planned.transform.wgpu.blockers {
+                breakdown.record(blocker);
+            }
+            return Err(
+                RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
+                    blockers: planned.transform.wgpu.blockers.len(),
+                    breakdown,
+                },
+            );
+        }
+        if planned.gpu_input != input.descriptor() {
+            return Err(
+                RenderGpuOutputStageResourcePlanError::InputDescriptorMismatch {
+                    expected: planned.gpu_input,
+                    actual: input.descriptor(),
+                },
+            );
+        }
+        let output = GpuColorFrameHandle::new(
+            ids.allocate(),
+            planned.gpu_output,
+            output_texture_format,
+            "color-stage-output-target",
+        )
+        .map_err(RenderGpuOutputStageResourcePlanError::OutputHandle)?;
+        let readback = if planned.readback_output.is_some() {
+            Some(
+                GpuColorFrameReadbackPlan::encoded_rgba8(output.clone())
+                    .map_err(RenderGpuOutputStageResourcePlanError::OutputReadback)?,
+            )
+        } else {
+            None
+        };
+        let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+        let mut transform = (*planned.transform).clone();
+        transform.diagnostics.input = planned.gpu_input;
+        transform.diagnostics.output = planned.gpu_output;
+        transform.requires_source_upload = false;
+        transform.requires_output_readback = false;
+        Ok(Self {
+            input: input.clone(),
+            output,
+            readback,
+            input_upload: None,
             output_allocation,
             transform,
         })
@@ -1677,9 +1863,22 @@ impl RenderGpuOutputStageResourcePlan {
     {
         validate_materialization_table_slot(table, &self.input)?;
         validate_materialization_table_slot(table, &self.output)?;
-        let input = GpuColorFrameUploader::upload(device, queue, &self.input_upload);
         let output = GpuColorFrameUploader::allocate(device, &self.output_allocation);
-        self.insert_resources(table, input, output)
+        if let Some(input_upload) = &self.input_upload {
+            let input = GpuColorFrameUploader::upload(device, queue, input_upload);
+            self.insert_resources(table, input, output)
+        } else {
+            table
+                .get(&self.input)
+                .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+            table
+                .insert(output)
+                .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+            Ok(RenderGpuOutputStageMaterializedResources {
+                input: self.input.clone(),
+                output: self.output.clone(),
+            })
+        }
     }
 
     /// Build a schedulable color pass for these materialized frame handles.
@@ -1770,6 +1969,8 @@ pub enum RenderGpuOutputStageResourcePlanError {
     NativeBlockersRemaining {
         /// Number of blockers in the GPU execution plan.
         blockers: usize,
+        /// Structured blocker breakdown from the planned GPU transform.
+        breakdown: RenderColorStageGpuBlockerBreakdown,
     },
     /// The stage plan is not a supported upload -> GPU transform shape.
     UnsupportedStagePlan {
@@ -2558,6 +2759,13 @@ struct PlannedGpuUploadTransform<'a> {
     transform: &'a RenderColorTransformGpuPlan,
 }
 
+struct PlannedGpuTransform<'a> {
+    gpu_input: ColorFrameDescriptor,
+    gpu_output: ColorFrameDescriptor,
+    readback_output: Option<ColorFrameDescriptor>,
+    transform: &'a RenderColorTransformGpuPlan,
+}
+
 fn planned_gpu_upload_transform_readback(
     stage_plan: &RenderColorStagePlan,
 ) -> Result<PlannedGpuUploadTransform<'_>, RenderGpuOutputStageResourcePlanError> {
@@ -2626,6 +2834,70 @@ fn planned_gpu_upload_transform_readback(
 
     Ok(PlannedGpuUploadTransform {
         upload_input: *upload_input,
+        gpu_input: *gpu_input,
+        gpu_output: *gpu_output,
+        readback_output: readback.map(|stage| match stage {
+            RenderColorStage::ReadbackToCpu { output, .. } => *output,
+            _ => unreachable!("matched optional readback stage"),
+        }),
+        transform,
+    })
+}
+
+fn planned_gpu_transform_readback(
+    stage_plan: &RenderColorStagePlan,
+) -> Result<PlannedGpuTransform<'_>, RenderGpuOutputStageResourcePlanError> {
+    let stages = stage_plan.stages.as_slice();
+    let (transform, readback) = match stages {
+        [transform @ RenderColorStage::GpuColorTransform { .. }] => (transform, None),
+        [transform @ RenderColorStage::GpuColorTransform { .. }, readback @ RenderColorStage::ReadbackToCpu { .. }] => {
+            (transform, Some(readback))
+        }
+        _ => {
+            return Err(RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "GPU-resident output resources require GpuColorTransform with optional ReadbackToCpu",
+            });
+        }
+    };
+
+    let RenderColorStage::GpuColorTransform {
+        input: gpu_input,
+        output: gpu_output,
+        plan: transform,
+    } = transform
+    else {
+        unreachable!("matched GPU transform stage")
+    };
+    if gpu_input.residency != ColorFrameResidency::Gpu
+        || gpu_output.residency != ColorFrameResidency::Gpu
+    {
+        return Err(
+            RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "GPU transform input and output descriptors must be GPU-resident",
+            },
+        );
+    }
+    match readback {
+        Some(RenderColorStage::ReadbackToCpu { input, output }) => {
+            if input != gpu_output || *output != stage_plan.final_descriptor {
+                return Err(
+                    RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                        reason: "readback descriptors must connect GPU output to final descriptor",
+                    },
+                );
+            }
+        }
+        None => {
+            if *gpu_output != stage_plan.final_descriptor {
+                return Err(RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                    reason: "GPU output descriptor must equal final descriptor when there is no readback",
+                });
+            }
+        }
+        Some(_) => unreachable!("matched optional readback stage"),
+    }
+
+    Ok(PlannedGpuTransform {
         gpu_input: *gpu_input,
         gpu_output: *gpu_output,
         readback_output: readback.map(|stage| match stage {
@@ -3541,6 +3813,7 @@ mod tests {
                 ocio_resource_bind_group_not_prepared: 1,
                 fullscreen_wrapper_not_prepared: 1,
                 render_pipeline_not_prepared: 1,
+                ..RenderColorStageGpuBlockerBreakdown::default()
             }
         );
     }
@@ -3586,10 +3859,17 @@ mod tests {
             .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
             .expect_err("blocked GPU output boundary cannot build resources");
 
-        assert!(matches!(
-            err,
-            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining { blockers } if blockers > 0
-        ));
+        match err {
+            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
+                blockers,
+                breakdown,
+            } => {
+                assert!(blockers > 0);
+                assert_eq!(breakdown.total(), blockers as u64);
+                assert!(breakdown.render_pipeline_not_prepared > 0);
+            }
+            other => panic!("expected native blockers, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4005,9 +4285,13 @@ mod tests {
         assert_eq!(resources.input.id().raw(), 500);
         assert_eq!(resources.output.id().raw(), 501);
         assert_eq!(ids.next_raw(), 502);
-        assert_eq!(resources.input_upload.handle, resources.input);
+        let input_upload = resources
+            .input_upload
+            .as_ref()
+            .expect("CPU working frame path must include upload");
+        assert_eq!(input_upload.handle, resources.input);
         assert_eq!(
-            resources.input_upload.texture_format,
+            input_upload.texture_format,
             GpuColorFrameTextureFormat::Rgba32Float
         );
         assert_eq!(resources.output_allocation.handle, resources.output);
@@ -4035,6 +4319,47 @@ mod tests {
             pass_node,
         )
         .expect("resource-planned transform should schedule");
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_accepts_gpu_resident_working_input_without_upload() {
+        let frame = cpu_working_frame();
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let input_descriptor = frame.descriptor().with_residency(ColorFrameResidency::Gpu);
+        let input = gpu_handle_with_format(
+            600,
+            input_descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "gpu-composited-working",
+        );
+        let transform =
+            RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let stage_plan = planner
+            .plan_output_transform(input_descriptor, &transform)
+            .expect("GPU-resident output stage plan");
+        let mut ids = GpuColorFrameIdAllocator::new(601);
+
+        let resources = RenderGpuOutputStageResourcePlan::from_gpu_working_frame(
+            &mut ids,
+            &input,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+        )
+        .expect("GPU-resident working frame output resources");
+
+        assert_eq!(resources.input, input);
+        assert!(resources.input_upload.is_none());
+        assert_eq!(resources.output.id().raw(), 601);
+        assert_eq!(ids.next_raw(), 602);
+        let diagnostics = resources.stage_diagnostics();
+        assert_eq!(diagnostics.upload_stages, 0);
+        assert_eq!(diagnostics.gpu_color_stages, 1);
+        assert_eq!(diagnostics.readback_stages, 0);
     }
 
     #[test]
@@ -4079,7 +4404,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining { blockers } if blockers > 0
+            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining { blockers, .. } if blockers > 0
         ));
     }
 
@@ -4703,5 +5028,186 @@ mod tests {
             vertex_count: 4,
             node_hash: 15,
         }
+    }
+
+    #[test]
+    fn classify_ocio_shader_error_maps_known_error_messages() {
+        // Verify the error classifier correctly maps known OCIO error messages
+        // to typed blockers.
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error(
+                "no OCIO config loaded (call ensure_ocio_loaded first)"
+            ),
+            OcioGpuWgpuBlocker::OcioConfigNotLoaded
+        ));
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error(
+                "OCIO processor 'srgb' -> 'rec709': processor not found"
+            ),
+            OcioGpuWgpuBlocker::OcioProcessorUnavailable
+        ));
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error(
+                "OCIO display processor 'srgb' -> 'srgb/view': failed"
+            ),
+            OcioGpuWgpuBlocker::OcioProcessorUnavailable
+        ));
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error(
+                "OCIO GPU shader extraction returned empty shader text"
+            ),
+            OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { .. }
+        ));
+        // Unknown error messages fall through to ExtractionFailed.
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error("some unknown error"),
+            OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn prepare_wgpu_execution_never_propagates_extraction_error() {
+        // Core invariant: prepare_wgpu_execution must always return Ok,
+        // converting extraction failures into blocked plans with typed
+        // blockers. This ensures the stage plan is always produced and
+        // diagnostics always have evidence.
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut cache = OcioGpuShaderCache::default();
+        // Use a nonexistent display/view to trigger extraction failure.
+        let result = cache.prepare_wgpu_execution(OcioGpuShaderRequest::DisplayView {
+            src: ColorSpace::Rec709,
+            display: "nonexistent_display_for_structural_test".to_owned(),
+            view: "nonexistent_view_for_structural_test".to_owned(),
+            language: GpuLanguage::Glsl4_0,
+        });
+        // Must always be Ok - extraction errors become blocked plans.
+        let plan = result.expect("prepare_wgpu_execution must never return Err");
+        // The display/view doesn't exist, so we should have blockers.
+        assert!(
+            !plan.can_execute(),
+            "nonexistent display/view should produce blockers"
+        );
+        assert!(!plan.blockers.is_empty());
+        assert!(matches!(
+            plan.blockers[0],
+            OcioGpuWgpuBlocker::OcioProcessorUnavailable
+                | OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_shader_extraction_failure_does_not_mask_cpu_fallback_path() {
+        // When the GPU path fails with a blocker, the CPU path should still
+        // be available and produce a clean result without GPU stages.
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary =
+            RenderOutputColorBoundary::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+
+        // CPU-only path should work regardless of GPU state.
+        let cpu_output =
+            execute_cpu_output_boundary(&frame, &boundary).expect("CPU boundary should succeed");
+        assert_eq!(cpu_output.stage_diagnostics.gpu_color_stages, 0);
+        assert_eq!(cpu_output.stage_diagnostics.gpu_blockers, 0);
+        assert_eq!(
+            cpu_output.stage_diagnostics.gpu_blocker_breakdown.total(),
+            0
+        );
+
+        // The GPU path with a nonexistent display/view should produce a blocked plan.
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let boundary_blocked = RenderOutputColorBoundary::display_view(
+            ColorSpace::Srgb,
+            "nonexistent_display_for_cpu_mask_test",
+            "nonexistent_view_for_cpu_mask_test",
+            false,
+            ColorEngine::MondrianSmart,
+        );
+        let gpu_plan = planner.plan(&frame, &boundary_blocked).expect("GPU plan");
+        // If it contains GPU transform, it must have blockers.
+        if gpu_plan.stage_plan.contains_gpu_transform() {
+            let d = gpu_plan.stage_plan.diagnostics();
+            assert!(d.gpu_blockers > 0, "blocked GPU plan should have blockers");
+        }
+
+        // The CPU path diagnostics must not show GPU stages.
+        assert_eq!(cpu_output.stage_diagnostics.gpu_color_stages, 0);
+    }
+
+    #[test]
+    fn gpu_plan_blocker_breakdown_records_all_renderer_blocker_types() {
+        // Verify that the breakdown correctly accumulates all 7 renderer-level
+        // blocker types through the record() method.
+        let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+
+        breakdown.record(&OcioGpuWgpuBlocker::OcioConfigNotLoaded);
+        breakdown.record(&OcioGpuWgpuBlocker::OcioProcessorUnavailable);
+        breakdown.record(&OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed {
+            reason: "test".to_owned(),
+        });
+        breakdown.record(&OcioGpuWgpuBlocker::ShaderModuleNotPrepared {
+            language: GpuLanguage::Glsl4_0,
+        });
+        breakdown.record(&OcioGpuWgpuBlocker::OcioResourceBindGroupNotPrepared {
+            texture_2d_count: 0,
+            texture_3d_count: 0,
+            uniform_buffers: 0,
+        });
+        breakdown.record(&OcioGpuWgpuBlocker::FullscreenWrapperNotPrepared);
+        breakdown.record(&OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+
+        assert_eq!(breakdown.total(), 7);
+        assert_eq!(breakdown.ocio_config_not_loaded, 1);
+        assert_eq!(breakdown.ocio_processor_unavailable, 1);
+        assert_eq!(breakdown.ocio_gpu_shader_extraction_failed, 1);
+        assert_eq!(breakdown.shader_module_not_prepared, 1);
+        assert_eq!(breakdown.ocio_resource_bind_group_not_prepared, 1);
+        assert_eq!(breakdown.fullscreen_wrapper_not_prepared, 1);
+        assert_eq!(breakdown.render_pipeline_not_prepared, 1);
+    }
+
+    #[test]
+    fn gpu_output_health_report_classifies_extraction_failure() {
+        // Verify that the health report correctly classifies a sample with
+        // OcioGpuShaderExtractionFailed as Failed.
+        let frame = RenderGpuOutputFrameReport {
+            width: 64,
+            height: 64,
+            pixel_count: 4096,
+            input_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Srgb,
+        };
+        let stage = RenderGpuOutputStageDiagnosticsReport {
+            total_stages: 1,
+            gpu_color_stages: 1,
+            gpu_blockers: 1,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                ocio_gpu_shader_extraction_failed: 1,
+                ..RenderColorStageGpuBlockerBreakdown::default()
+            },
+            ..RenderGpuOutputStageDiagnosticsReport::default()
+        };
+        let runtime = RenderGpuOutputRuntimeDiagnosticsReport::default();
+
+        let report = RenderGpuOutputHealthReport::from_sample(
+            "test-extraction-failure",
+            None,
+            &frame,
+            &stage,
+            &runtime,
+            0,
+            0,
+            0,
+        );
+
+        assert_eq!(report.verdict, RenderGpuOutputHealthVerdict::Fail);
+        assert!(!report.summary.native_gpu_output_ready);
+        assert!(!report.summary.no_gpu_blockers);
+        assert!(report.evidence.gpu_blocker_breakdown.ocio_gpu_shader_extraction_failed > 0);
+        assert!(report.root_causes.iter().any(|rc| rc.code == "gpu_stage_blocked"));
     }
 }
