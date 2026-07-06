@@ -402,8 +402,8 @@ pub struct GpuColorFrameUploadPlan {
     pub bytes_per_row: u32,
     /// Rows per uploaded image.
     pub rows_per_image: u32,
-    /// Packed upload bytes.
-    pub bytes: Vec<u8>,
+    /// Shared packed upload bytes.
+    pub bytes: Arc<Vec<u8>>,
 }
 
 impl GpuColorFrameUploadPlan {
@@ -424,7 +424,7 @@ impl GpuColorFrameUploadPlan {
         let handle = GpuColorFrameHandle::new(id, descriptor, texture_format, label)
             .map_err(GpuColorFrameUploadError::Handle)?;
         let bytes = bytemuck::cast_slice(&frame.rgba_f32().data).to_vec();
-        Self::new(handle, bytes)
+        Self::new(handle, Arc::new(bytes))
     }
 
     /// Build an upload plan for a CPU encoded RGBA8 boundary frame.
@@ -443,10 +443,13 @@ impl GpuColorFrameUploadPlan {
         validate_cpu_byte_count(descriptor, frame.rgba().len())?;
         let handle = GpuColorFrameHandle::new(id, descriptor, texture_format, label)
             .map_err(GpuColorFrameUploadError::Handle)?;
-        Self::new(handle, frame.rgba().to_vec())
+        Self::new(handle, frame.rgba_shared())
     }
 
-    fn new(handle: GpuColorFrameHandle, bytes: Vec<u8>) -> Result<Self, GpuColorFrameUploadError> {
+    fn new(
+        handle: GpuColorFrameHandle,
+        bytes: Arc<Vec<u8>>,
+    ) -> Result<Self, GpuColorFrameUploadError> {
         let descriptor = handle.descriptor();
         let texture_format = handle.texture_format();
         let bytes_per_row = descriptor
@@ -519,7 +522,7 @@ impl GpuColorFrameUploader {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &plan.bytes,
+            plan.bytes.as_slice(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(plan.bytes_per_row),
@@ -1164,6 +1167,11 @@ impl CpuEncodedColorFrame {
         self.rgba.as_slice()
     }
 
+    /// Return shared RGBA8 pixels.
+    pub fn rgba_shared(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.rgba)
+    }
+
     /// Consume this wrapper and return RGBA8 pixels.
     pub fn into_rgba(self) -> Vec<u8> {
         Arc::try_unwrap(self.rgba).unwrap_or_else(|rgba| rgba.as_ref().clone())
@@ -1727,7 +1735,7 @@ mod tests {
         assert_eq!(plan.bytes_per_row, 2 * 16);
         assert_eq!(plan.rows_per_image, 1);
         assert_eq!(plan.bytes.len(), 2 * 16);
-        let floats: &[f32] = bytemuck::cast_slice(&plan.bytes);
+        let floats: &[f32] = bytemuck::cast_slice(plan.bytes.as_slice());
         assert_eq!(floats, &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 0.5]);
     }
 
@@ -1776,7 +1784,9 @@ mod tests {
         assert_eq!(plan.texture_format, GpuColorFrameTextureFormat::Rgba8Unorm);
         assert_eq!(plan.bytes_per_row, 2 * 4);
         assert_eq!(plan.rows_per_image, 1);
-        assert_eq!(plan.bytes, frame.rgba());
+        assert_eq!(plan.bytes.as_slice(), frame.rgba());
+        assert!(Arc::ptr_eq(&plan.bytes, &frame.rgba));
+        assert!(Arc::ptr_eq(&plan.bytes, &plan.clone().bytes));
     }
 
     #[test]
