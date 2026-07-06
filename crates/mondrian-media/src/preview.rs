@@ -24,10 +24,17 @@ const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewDecodeBackend {
+    /// Use the normal in-process FFmpeg decode session.
     #[default]
     Auto,
+    /// Force the normal in-process FFmpeg software decode session.
     Software,
-    GpuAssist,
+    /// Experimental external `ffmpeg` process path that may request platform
+    /// hwaccel, but always returns CPU RGBA bytes through stdout.
+    ///
+    /// This is not Mondrian hardware decode residency and must never be
+    /// reported as zero-copy or GPU-resident decode.
+    ExternalFfmpegCpuRgba,
 }
 
 impl PreviewDecodeBackend {
@@ -35,20 +42,20 @@ impl PreviewDecodeBackend {
         match self {
             Self::Auto => 0,
             Self::Software => 1,
-            Self::GpuAssist => 2,
+            Self::ExternalFfmpegCpuRgba => 2,
         }
     }
 
     fn from_u8(value: u8) -> Self {
         match value {
             1 => Self::Software,
-            2 => Self::GpuAssist,
+            2 => Self::ExternalFfmpegCpuRgba,
             _ => Self::Auto,
         }
     }
 }
 
-static PREVIEW_DECODE_BACKEND: AtomicU8 = AtomicU8::new(PreviewDecodeBackend::Auto as u8);
+static PREVIEW_DECODE_BACKEND: AtomicU8 = AtomicU8::new(0);
 
 pub fn set_preview_decode_backend(backend: PreviewDecodeBackend) {
     PREVIEW_DECODE_BACKEND.store(backend.as_u8(), Ordering::Relaxed);
@@ -484,8 +491,8 @@ fn decode_video_frame_at_time_impl(
 
         let session = slot.as_mut().expect("preview decode session must exist");
 
-        if preview_hwaccel_enabled() {
-            if let Some(result) = try_decode_with_ffmpeg_hwaccel(
+        if preview_external_ffmpeg_cpu_rgba_enabled() {
+            if let Some(result) = try_decode_with_external_ffmpeg_cpu_rgba(
                 path,
                 timestamp_secs,
                 session.target_width,
@@ -495,7 +502,7 @@ fn decode_video_frame_at_time_impl(
                     Ok(frame) => return Ok(frame),
                     Err(err) => {
                         preview_trace(format!(
-                            "[preview] hwaccel failed, fallback software: {err}"
+                            "[preview] external ffmpeg CPU RGBA decode failed, fallback software: {err}"
                         ));
                     }
                 }
@@ -650,14 +657,14 @@ pub fn clear_global_preview_frame_cache() {
     }
 }
 
-fn preview_hwaccel_enabled() -> bool {
+fn preview_external_ffmpeg_cpu_rgba_enabled() -> bool {
     match preview_decode_backend() {
-        PreviewDecodeBackend::GpuAssist => true,
+        PreviewDecodeBackend::ExternalFfmpegCpuRgba => true,
         PreviewDecodeBackend::Software => false,
         PreviewDecodeBackend::Auto => {
             static ENABLED: OnceLock<bool> = OnceLock::new();
             *ENABLED.get_or_init(|| {
-                std::env::var("MONDRIAN_PREVIEW_HWACCEL")
+                std::env::var("MONDRIAN_PREVIEW_EXTERNAL_FFMPEG_CPU_RGBA")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
             })
@@ -700,7 +707,7 @@ fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
     }
 }
 
-fn try_decode_with_ffmpeg_hwaccel(
+fn try_decode_with_external_ffmpeg_cpu_rgba(
     path: &Path,
     timestamp_secs: f64,
     width: u32,
@@ -743,7 +750,7 @@ fn try_decode_with_ffmpeg_hwaccel(
         return Some(Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
             reason: format!(
-                "ffmpeg hwaccel decode failed: {}",
+                "external ffmpeg CPU RGBA decode failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             ),
         }));
@@ -754,7 +761,7 @@ fn try_decode_with_ffmpeg_hwaccel(
         return Some(Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
             reason: format!(
-                "ffmpeg hwaccel returned insufficient bytes: got {}, expect {}",
+                "external ffmpeg CPU RGBA decode returned insufficient bytes: got {}, expect {}",
                 output.stdout.len(),
                 expected
             ),
@@ -871,4 +878,29 @@ fn convert_decoded_to_rgba(
     };
 
     Ok(RgbaFrame { width, height, data: out })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PreviewDecodeBackend;
+
+    #[test]
+    fn preview_decode_backend_codes_are_explicit_and_cpu_resident() {
+        assert_eq!(PreviewDecodeBackend::from_u8(0), PreviewDecodeBackend::Auto);
+        assert_eq!(
+            PreviewDecodeBackend::from_u8(1),
+            PreviewDecodeBackend::Software
+        );
+        assert_eq!(
+            PreviewDecodeBackend::from_u8(2),
+            PreviewDecodeBackend::ExternalFfmpegCpuRgba
+        );
+        assert_eq!(PreviewDecodeBackend::Auto.as_u8(), 0);
+        assert_eq!(PreviewDecodeBackend::Software.as_u8(), 1);
+        assert_eq!(PreviewDecodeBackend::ExternalFfmpegCpuRgba.as_u8(), 2);
+        assert_eq!(
+            PreviewDecodeBackend::from_u8(255),
+            PreviewDecodeBackend::Auto
+        );
+    }
 }

@@ -28,6 +28,14 @@ return `None`, `hardware_decode_active=false`, `zero_copy_active=false`, and
 `DecodedFrameResidency::CpuRgba`. Platform preference alone is not a valid
 hardware decode signal.
 
+The preview decoder's experimental external-process path is named
+`PreviewDecodeBackend::ExternalFfmpegCpuRgba` and is enabled only by explicitly
+selecting that backend or setting `MONDRIAN_PREVIEW_EXTERNAL_FFMPEG_CPU_RGBA`.
+It may ask the `ffmpeg` CLI for platform hwaccel, but its contract is still
+`rawvideo` RGBA over stdout, so it is CPU-resident and cannot be reported as
+Mondrian hardware decode, zero-copy, low-copy texture residency, or GPU frame
+delivery. The previous "GPU assist" terminology is intentionally not used.
+
 The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
 source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and
 produce a GPU-resident linear working frame in a float texture. This is the
