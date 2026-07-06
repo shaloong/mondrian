@@ -377,6 +377,10 @@ working composite + GPU output transform rather than inferring it from model
 state. The frame-residency payload distinguishes `GpuOcio`, `CpuOcio`, and
 mixed input-transform paths; `GpuOcio` still means low-copy until media decode
 exports real GPU hardware frames.
+The same JSONL also records preview preparation timing
+(`prepare_attempts_timed`, accumulated/max/last microseconds). These timings
+measure the window scheduling + wgpu recording boundary, not decoder latency;
+decode/cache telemetry remains in the preview/media diagnostics.
 Headless smoke tests cannot create this window/session boundary, so
 `AppUiPreviewService::diagnostics()` separately reports GPU preview candidate
 requests, ready/current/loading/unavailable outcomes, candidate pixels, and

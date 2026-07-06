@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
@@ -113,6 +113,10 @@ struct AppUiViewerGpuOutputTelemetry {
     display_presentation_unsupported_contracts: u64,
     display_contract_refreshes: u64,
     display_contract_refresh_generation: u64,
+    prepare_attempts_timed: u64,
+    accumulated_prepare_duration_us: u64,
+    max_prepare_duration_us: u64,
+    last_prepare_duration_us: Option<u64>,
     record_failures: u64,
     missing_output_textures: u64,
     registered_frames: u64,
@@ -146,6 +150,10 @@ struct AppUiViewerGpuOutputDiagnostics {
     display_presentation_payload_blockers: u64,
     display_presentation_unsupported_contracts: u64,
     display_contract_refreshes: u64,
+    prepare_attempts_timed: u64,
+    accumulated_prepare_duration_us: u64,
+    max_prepare_duration_us: u64,
+    last_prepare_duration_us: Option<u64>,
     record_failures: u64,
     missing_output_textures: u64,
     registered_frames: u64,
@@ -486,6 +494,10 @@ impl AppUiViewerGpuOutputTelemetry {
             display_presentation_unsupported_contracts: self
                 .display_presentation_unsupported_contracts,
             display_contract_refreshes: self.display_contract_refreshes,
+            prepare_attempts_timed: self.prepare_attempts_timed,
+            accumulated_prepare_duration_us: self.accumulated_prepare_duration_us,
+            max_prepare_duration_us: self.max_prepare_duration_us,
+            last_prepare_duration_us: self.last_prepare_duration_us,
             record_failures: self.record_failures,
             missing_output_textures: self.missing_output_textures,
             registered_frames: self.registered_frames,
@@ -557,6 +569,15 @@ impl AppUiViewerGpuOutputTelemetry {
             frame,
             external_texture_key,
         ));
+    }
+
+    fn record_prepare_duration(&mut self, duration: Duration) {
+        let elapsed_us = duration.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.prepare_attempts_timed = self.prepare_attempts_timed.saturating_add(1);
+        self.accumulated_prepare_duration_us =
+            self.accumulated_prepare_duration_us.saturating_add(elapsed_us);
+        self.max_prepare_duration_us = self.max_prepare_duration_us.max(elapsed_us);
+        self.last_prepare_duration_us = Some(elapsed_us);
     }
 
     fn record_actual_frame_residency(&mut self, residency: AppUiViewerGpuOutputFrameResidency) {
@@ -2807,10 +2828,20 @@ fn prepare_viewer_gpu_preview(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
 ) {
+    let prepare_started = Instant::now();
+    macro_rules! finish_prepare {
+        () => {{
+            session
+                .viewer_gpu_output_telemetry
+                .record_prepare_duration(prepare_started.elapsed());
+            return;
+        }};
+    }
+
     session.viewer_gpu_output_telemetry.record_invocation();
     if session.role != AppUiWindowRole::Workspace {
         session.viewer_gpu_output_telemetry.record_non_workspace_skip();
-        return;
+        finish_prepare!();
     }
     let frame = match host.gpu_preview_frame_for_current_state() {
         AppUiGpuPreviewFrameState::Ready(frame) => frame,
@@ -2820,7 +2851,7 @@ fn prepare_viewer_gpu_preview(
                 None,
             );
             session.viewer_gpu_output_telemetry.record_current_skip();
-            return;
+            finish_prepare!();
         }
         AppUiGpuPreviewFrameState::Loading => {
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
@@ -2828,7 +2859,7 @@ fn prepare_viewer_gpu_preview(
                 None,
             );
             session.viewer_gpu_output_telemetry.record_loading_skip();
-            return;
+            finish_prepare!();
         }
         AppUiGpuPreviewFrameState::Unavailable => {
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
@@ -2836,7 +2867,7 @@ fn prepare_viewer_gpu_preview(
                 None,
             );
             session.viewer_gpu_output_telemetry.record_unavailable_skip();
-            return;
+            finish_prepare!();
         }
     };
     let Some(texture_key) = ExternalTextureKey::new(frame.external_texture_key()) else {
@@ -2847,7 +2878,7 @@ fn prepare_viewer_gpu_preview(
             "viewer GPU preview produced an invalid external texture key"
         );
         host.clear_external_viewer_frame();
-        return;
+        finish_prepare!();
     };
     session
         .viewer_gpu_output_telemetry
@@ -2899,7 +2930,7 @@ fn prepare_viewer_gpu_preview(
                 );
             }
             host.clear_external_viewer_frame();
-            return;
+            finish_prepare!();
         }
     }
 
@@ -2949,7 +2980,7 @@ fn prepare_viewer_gpu_preview(
             "viewer GPU preview output boundary blocked by display output contract"
         );
         host.clear_external_viewer_frame();
-        return;
+        finish_prepare!();
     }
 
     if let Some(previous) = session.viewer_gpu_preview_texture_key.take() {
@@ -3052,7 +3083,7 @@ fn prepare_viewer_gpu_preview(
                         "viewer GPU working composite failed: {err:?}"
                     );
                     host.clear_external_viewer_frame();
-                    return;
+                    finish_prepare!();
                 }
             }
         }
@@ -3084,7 +3115,7 @@ fn prepare_viewer_gpu_preview(
                 "viewer GPU preview output boundary failed: {err:?}"
             );
             host.clear_external_viewer_frame();
-            return;
+            finish_prepare!();
         }
     };
     let output = record.materialized.output.clone();
@@ -3098,7 +3129,7 @@ fn prepare_viewer_gpu_preview(
                 "viewer GPU preview output texture missing from runtime table: {err:?}"
             );
             host.clear_external_viewer_frame();
-            return;
+            finish_prepare!();
         }
     };
 
@@ -3116,6 +3147,9 @@ fn prepare_viewer_gpu_preview(
             .record_rejected_external_frame(stage_diagnostics);
         session.frame_renderer.unregister_external_texture(&texture_key);
     }
+    session
+        .viewer_gpu_output_telemetry
+        .record_prepare_duration(prepare_started.elapsed());
 }
 
 struct PreparedPreviewGpuComposite<'a> {
@@ -5169,6 +5203,20 @@ mod tests {
     }
 
     #[test]
+    fn viewer_gpu_output_telemetry_records_prepare_duration() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+
+        telemetry.record_prepare_duration(Duration::from_micros(400));
+        telemetry.record_prepare_duration(Duration::from_micros(900));
+
+        let diagnostics = telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
+        assert_eq!(diagnostics.prepare_attempts_timed, 2);
+        assert_eq!(diagnostics.accumulated_prepare_duration_us, 1_300);
+        assert_eq!(diagnostics.max_prepare_duration_us, 900);
+        assert_eq!(diagnostics.last_prepare_duration_us, Some(900));
+    }
+
+    #[test]
     fn preview_gpu_composite_residency_reports_gpu_ocio_input_for_media_layers() {
         let residency = PreviewGpuCompositeResidencySummary {
             media_layers: 2,
@@ -5380,6 +5428,7 @@ mod tests {
             stage_pixels: 20,
             ..RenderColorStageDiagnostics::default()
         });
+        telemetry.record_prepare_duration(Duration::from_micros(1_234));
         telemetry.last_frame_context = Some(AppUiViewerGpuOutputFrameContext {
             sequence_id: "sequence-for-jsonl".to_owned(),
             frame: 42,
@@ -5476,6 +5525,10 @@ mod tests {
         assert_eq!(json["runtime_report"]["backend_object_entries"], 0);
         assert_eq!(json["last_outcome"], "Registered");
         assert_eq!(json["display_contract_refreshes"], 1);
+        assert_eq!(json["prepare_attempts_timed"], 1);
+        assert_eq!(json["accumulated_prepare_duration_us"], 1234);
+        assert_eq!(json["max_prepare_duration_us"], 1234);
+        assert_eq!(json["last_prepare_duration_us"], 1234);
         assert_eq!(
             json["recent_display_contract_refreshes"][0]["reason"],
             "WindowMoved"
