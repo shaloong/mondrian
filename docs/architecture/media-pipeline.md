@@ -21,12 +21,24 @@ Current decode residency is intentionally explicit and fail-closed. The active
 preview/media decode path produces CPU RGBA frames and, for legacy YUV callers,
 CPU YUV420p frames derived from that CPU RGBA decode. `DecoderMetricsSnapshot`
 reports the selected hardware backend, decoded frame residency,
-`hardware_decode_active`, `zero_copy_active`, and a stable reason string. Until
-DXVA/D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC hardware frames are actually
-exported/imported as renderer GPU textures, `HwAccelBackend::probe()` must
-return `None`, `hardware_decode_active=false`, `zero_copy_active=false`, and
-`DecodedFrameResidency::CpuRgba`. Platform preference alone is not a valid
+`hardware_decode_active`, `zero_copy_active`, optional
+`decoded_gpu_frame_handle_kind`, `renderer_import_ready`, and a stable reason
+string. Until DXVA/D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC hardware frames
+are actually exported/imported through the renderer native decoded-frame import
+contract, `HwAccelBackend::probe()` must return `None`,
+`hardware_decode_active=false`, `zero_copy_active=false`,
+`DecodedFrameResidency::CpuRgba`, no GPU handle kind, and
+`renderer_import_ready=false`. Platform preference alone is not a valid
 hardware decode signal.
+
+`DecodedGpuFrameHandleKind` belongs to media because it describes the decoder
+surface family that FFmpeg/hardware decode produced, such as D3D11 texture,
+CVPixelBuffer, VA-API surface, or CUDA device memory. It does not imply that
+the renderer can import or sample that handle. Platform capability discovery is
+reported separately by `mondrian-platform-core` as native texture import support,
+and renderer readiness is reported by `mondrian-renderer` through
+`GpuNativeDecodedFrameImportSupport` / `GpuNativeDecodedFrameImportPlan`. App
+code must not infer zero-copy playback from the media handle kind alone.
 
 The preview decoder's experimental external-process path is named
 `PreviewDecodeBackend::ExternalFfmpegCpuRgba` and is enabled only by explicitly

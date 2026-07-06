@@ -9,7 +9,8 @@ use std::process::Command;
 use mondrian_core::Color;
 pub use mondrian_platform_core::{
     ClipboardError, DisplayHdrProbe, DisplayHdrProbeResult, DisplayIccProfileProbeResult,
-    DisplayProfileProbe, DisplayProfileProbeTarget, FileFilter, NoopPlatformService,
+    DisplayProfileProbe, DisplayProfileProbeTarget, FileFilter, NativeVideoTextureHandleKind,
+    NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, NoopPlatformService,
     PlatformService,
 };
 
@@ -76,6 +77,12 @@ impl DisplayHdrProbe for SystemPlatformService {
     }
 }
 
+impl NativeVideoTextureImportProbe for SystemPlatformService {
+    fn native_video_texture_import(&self) -> NativeVideoTextureImportProbeResult {
+        system_native_video_texture_import()
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn system_display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
     windows_display_profile::display_icc_profile(target)
@@ -98,6 +105,33 @@ fn system_display_hdr_state(_target: DisplayProfileProbeTarget) -> DisplayHdrPro
     DisplayHdrProbeResult::unsupported(
         "OS HDR / Advanced Color discovery is not implemented for this platform",
     )
+}
+
+fn system_native_video_texture_import() -> NativeVideoTextureImportProbeResult {
+    #[cfg(target_os = "windows")]
+    {
+        NativeVideoTextureImportProbeResult::missing(
+            "D3D11VA/DXGI texture import is not connected to the wgpu renderer",
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        NativeVideoTextureImportProbeResult::missing(
+            "VideoToolbox CVPixelBuffer/IOSurface import is not connected to the wgpu renderer",
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
+        NativeVideoTextureImportProbeResult::missing(
+            "VA-API/DMABUF texture import is not connected to the wgpu renderer",
+        )
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        NativeVideoTextureImportProbeResult::unsupported(
+            "native video texture import is not implemented for this platform",
+        )
+    }
 }
 
 fn reveal_path_in_file_manager(path: &Path) {

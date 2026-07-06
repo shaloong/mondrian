@@ -44,6 +44,35 @@ pub enum DecodedFrameResidency {
     GpuTexture,
 }
 
+/// Native hardware-frame handle family produced by a decoder.
+///
+/// This enum names the cross-crate contract only. It does not claim that
+/// Mondrian can import the handle into the renderer; that requires a separate
+/// renderer/platform import probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedGpuFrameHandleKind {
+    /// Windows D3D11 `ID3D11Texture2D` hardware decode surface.
+    D3D11Texture2D,
+    /// macOS/iOS `CVPixelBuffer` backed by an IOSurface.
+    CVPixelBuffer,
+    /// Linux VA-API `VASurfaceID`/DMABUF-exportable surface.
+    VaapiSurface,
+    /// CUDA/NVDEC device allocation.
+    CudaDeviceMemory,
+}
+
+impl DecodedGpuFrameHandleKind {
+    /// Stable handle-kind name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::D3D11Texture2D => "D3D11Texture2D",
+            Self::CVPixelBuffer => "CVPixelBuffer",
+            Self::VaapiSurface => "VaapiSurface",
+            Self::CudaDeviceMemory => "CudaDeviceMemory",
+        }
+    }
+}
+
 /// Hardware decode / zero-copy probe result for the current process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HwAccelProbe {
@@ -55,6 +84,10 @@ pub struct HwAccelProbe {
     pub zero_copy_active: bool,
     /// Residency produced by the active decode path.
     pub frame_residency: DecodedFrameResidency,
+    /// Native handle family produced by the active decoder, if GPU-resident.
+    pub gpu_frame_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    /// Whether the active decode path has a renderer texture-import contract.
+    pub renderer_import_ready: bool,
     /// Stable diagnostic reason for the selected path.
     pub reason: String,
 }
@@ -77,6 +110,8 @@ impl HwAccelBackend {
             hardware_decode_active: false,
             zero_copy_active: false,
             frame_residency: DecodedFrameResidency::CpuRgba,
+            gpu_frame_handle_kind: None,
+            renderer_import_ready: false,
             reason: hardware_decode_unavailable_reason().to_owned(),
         }
     }
@@ -164,6 +199,8 @@ struct DecoderMetrics {
 pub struct DecoderMetricsSnapshot {
     pub hw_accel_backend: HwAccelBackend,
     pub decoded_frame_residency: DecodedFrameResidency,
+    pub decoded_gpu_frame_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    pub renderer_import_ready: bool,
     pub hardware_decode_active: bool,
     pub zero_copy_active: bool,
     pub hw_accel_reason: String,
@@ -191,6 +228,8 @@ impl DecoderMetrics {
         DecoderMetricsSnapshot {
             hw_accel_backend: hw_probe.selected_backend,
             decoded_frame_residency: hw_probe.frame_residency,
+            decoded_gpu_frame_handle_kind: hw_probe.gpu_frame_handle_kind,
+            renderer_import_ready: hw_probe.renderer_import_ready,
             hardware_decode_active: hw_probe.hardware_decode_active,
             zero_copy_active: hw_probe.zero_copy_active,
             hw_accel_reason: hw_probe.reason.clone(),
@@ -835,7 +874,29 @@ mod tests {
         assert!(!probe.hardware_decode_active);
         assert!(!probe.zero_copy_active);
         assert_eq!(probe.frame_residency, DecodedFrameResidency::CpuRgba);
+        assert_eq!(probe.gpu_frame_handle_kind, None);
+        assert!(!probe.renderer_import_ready);
         assert!(probe.reason.contains("CPU RGBA decode"));
+    }
+
+    #[test]
+    fn decoded_gpu_frame_handle_kind_has_stable_names() {
+        assert_eq!(
+            DecodedGpuFrameHandleKind::D3D11Texture2D.as_str(),
+            "D3D11Texture2D"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::CVPixelBuffer.as_str(),
+            "CVPixelBuffer"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::VaapiSurface.as_str(),
+            "VaapiSurface"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::CudaDeviceMemory.as_str(),
+            "CudaDeviceMemory"
+        );
     }
 
     #[test]
@@ -850,6 +911,8 @@ mod tests {
             snapshot.decoded_frame_residency,
             DecodedFrameResidency::CpuRgba
         );
+        assert_eq!(snapshot.decoded_gpu_frame_handle_kind, None);
+        assert!(!snapshot.renderer_import_ready);
         assert!(!snapshot.hardware_decode_active);
         assert!(!snapshot.zero_copy_active);
         assert!(snapshot.hw_accel_reason.contains("CPU RGBA decode"));

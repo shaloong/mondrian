@@ -1,4 +1,5 @@
 use mondrian_core::{types::ColorSpace, RgbaF32Frame};
+use mondrian_media::DecodedGpuFrameHandleKind;
 use std::collections::HashMap;
 
 /// Semantic role of a frame in the color-managed render graph.
@@ -571,6 +572,230 @@ pub enum GpuColorFrameUploadError {
         /// Actual upload byte length.
         actual: usize,
     },
+}
+
+/// Source texture layout produced by a native hardware decoder.
+///
+/// This is the imported decoder-surface format, not the working-frame texture
+/// format that Mondrian composites after input color conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuNativeDecodedFrameTextureFormat {
+    /// 8-bit NV12 two-plane YCbCr surface.
+    Nv12,
+    /// 10/12-bit P010 two-plane YCbCr surface.
+    P010,
+    /// Single-plane 8-bit normalized RGBA surface.
+    Rgba8Unorm,
+    /// Single-plane 8-bit normalized BGRA surface.
+    Bgra8Unorm,
+}
+
+impl GpuNativeDecodedFrameTextureFormat {
+    /// Stable texture-format name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nv12 => "Nv12",
+            Self::P010 => "P010",
+            Self::Rgba8Unorm => "Rgba8Unorm",
+            Self::Bgra8Unorm => "Bgra8Unorm",
+        }
+    }
+}
+
+/// Renderer backend capability contract for importing native decoded frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuNativeDecodedFrameImportSupport {
+    /// Whether the concrete renderer backend has connected native import code.
+    pub renderer_backend_ready: bool,
+    /// Decoder handle families accepted by the backend.
+    pub supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
+    /// Decoder source texture formats accepted by the backend.
+    pub supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+}
+
+impl GpuNativeDecodedFrameImportSupport {
+    /// Build a fail-closed support value for builds without native import.
+    pub fn unavailable() -> Self {
+        Self {
+            renderer_backend_ready: false,
+            supported_handle_kinds: Vec::new(),
+            supported_source_texture_formats: Vec::new(),
+        }
+    }
+
+    /// Build an explicit support value for a renderer backend implementation.
+    pub fn ready(
+        supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
+        supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+    ) -> Self {
+        Self {
+            renderer_backend_ready: true,
+            supported_handle_kinds,
+            supported_source_texture_formats,
+        }
+    }
+
+    /// Whether the backend reports support for a decoder handle family.
+    pub fn supports_handle_kind(&self, handle_kind: DecodedGpuFrameHandleKind) -> bool {
+        self.supported_handle_kinds.contains(&handle_kind)
+    }
+
+    /// Whether the backend reports support for a decoded source texture format.
+    pub fn supports_source_texture_format(
+        &self,
+        texture_format: GpuNativeDecodedFrameTextureFormat,
+    ) -> bool {
+        self.supported_source_texture_formats.contains(&texture_format)
+    }
+}
+
+impl Default for GpuNativeDecodedFrameImportSupport {
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
+
+/// Request to import a hardware-decoded native frame into the renderer graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuNativeDecodedFrameImportContract {
+    /// Source frame width in pixels.
+    pub width: u32,
+    /// Source frame height in pixels.
+    pub height: u32,
+    /// Color space represented by the decoded source surface.
+    pub source_color_space: ColorSpace,
+    /// Timeline working color space to produce after input conversion.
+    pub working_color_space: ColorSpace,
+    /// Decoder handle family.
+    pub handle_kind: DecodedGpuFrameHandleKind,
+    /// Decoder source texture layout.
+    pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    /// Renderer-owned working texture format to produce.
+    pub working_texture_format: GpuColorFrameTextureFormat,
+    /// Human-readable label for diagnostics/profiling.
+    pub label: String,
+}
+
+/// Renderer-owned plan for importing native decoded frames.
+///
+/// The imported decoder surface is not represented as a `GpuColorFrameHandle`
+/// because it may be multi-plane YCbCr. The handle in this plan is the
+/// renderer-owned linear working frame produced after native surface sampling
+/// and the OCIO input transform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuNativeDecodedFrameImportPlan {
+    /// Decoder handle family consumed by the backend.
+    pub handle_kind: DecodedGpuFrameHandleKind,
+    /// Decoder source texture layout consumed by the backend.
+    pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    /// Source color space represented by the decoder surface.
+    pub source_color_space: ColorSpace,
+    /// Renderer-owned output working frame.
+    pub working_frame: GpuColorFrameHandle,
+}
+
+impl GpuNativeDecodedFrameImportPlan {
+    /// Build a native decoded-frame import plan from a validated backend
+    /// support contract.
+    pub fn from_contract(
+        ids: &mut GpuColorFrameIdAllocator,
+        contract: GpuNativeDecodedFrameImportContract,
+        support: &GpuNativeDecodedFrameImportSupport,
+    ) -> Result<Self, GpuNativeDecodedFrameImportPlanError> {
+        if contract.width == 0 || contract.height == 0 {
+            return Err(GpuNativeDecodedFrameImportPlanError::EmptyExtent {
+                width: contract.width,
+                height: contract.height,
+            });
+        }
+        if !support.renderer_backend_ready {
+            return Err(GpuNativeDecodedFrameImportPlanError::RendererBackendUnavailable);
+        }
+        if !support.supports_handle_kind(contract.handle_kind) {
+            return Err(
+                GpuNativeDecodedFrameImportPlanError::UnsupportedHandleKind {
+                    handle_kind: contract.handle_kind,
+                },
+            );
+        }
+        if !support.supports_source_texture_format(contract.source_texture_format) {
+            return Err(
+                GpuNativeDecodedFrameImportPlanError::UnsupportedSourceTextureFormat {
+                    source_texture_format: contract.source_texture_format,
+                },
+            );
+        }
+        if !matches!(
+            contract.working_texture_format,
+            GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
+        ) {
+            return Err(
+                GpuNativeDecodedFrameImportPlanError::UnsupportedWorkingTextureFormat {
+                    working_texture_format: contract.working_texture_format,
+                },
+            );
+        }
+
+        let working_descriptor = ColorFrameDescriptor {
+            width: contract.width,
+            height: contract.height,
+            color_space: contract.working_color_space,
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let working_frame = GpuColorFrameHandle::new(
+            ids.allocate(),
+            working_descriptor,
+            contract.working_texture_format,
+            contract.label,
+        )
+        .map_err(GpuNativeDecodedFrameImportPlanError::WorkingFrameHandle)?;
+
+        Ok(Self {
+            handle_kind: contract.handle_kind,
+            source_texture_format: contract.source_texture_format,
+            source_color_space: contract.source_color_space,
+            working_frame,
+        })
+    }
+}
+
+/// Error returned when native decoded-frame import cannot be planned.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum GpuNativeDecodedFrameImportPlanError {
+    /// The source frame extent is empty.
+    #[error("native decoded frame import requires a non-empty extent, got {width}x{height}")]
+    EmptyExtent {
+        /// Source width.
+        width: u32,
+        /// Source height.
+        height: u32,
+    },
+    /// No concrete renderer backend has connected native import code.
+    #[error("renderer backend does not support native decoded frame import")]
+    RendererBackendUnavailable,
+    /// The decoder handle family is not supported by the renderer backend.
+    #[error("unsupported native decoded frame handle kind {handle_kind:?}")]
+    UnsupportedHandleKind {
+        /// Unsupported handle family.
+        handle_kind: DecodedGpuFrameHandleKind,
+    },
+    /// The decoder source texture format is not supported by the renderer backend.
+    #[error("unsupported native decoded frame source texture format {source_texture_format:?}")]
+    UnsupportedSourceTextureFormat {
+        /// Unsupported decoder source texture format.
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    },
+    /// The requested working texture format cannot carry linear working pixels.
+    #[error("unsupported native decoded frame working texture format {working_texture_format:?}")]
+    UnsupportedWorkingTextureFormat {
+        /// Unsupported working texture format.
+        working_texture_format: GpuColorFrameTextureFormat,
+    },
+    /// The renderer-owned working frame handle could not be built.
+    #[error("failed to create native decoded frame working handle: {0}")]
+    WorkingFrameHandle(GpuColorFrameHandleError),
 }
 
 /// GPU-to-CPU readback plan for one encoded color frame.
@@ -1179,6 +1404,144 @@ mod tests {
     }
 
     #[test]
+    fn native_decoded_frame_texture_format_names_are_stable() {
+        assert_eq!(GpuNativeDecodedFrameTextureFormat::Nv12.as_str(), "Nv12");
+        assert_eq!(GpuNativeDecodedFrameTextureFormat::P010.as_str(), "P010");
+        assert_eq!(
+            GpuNativeDecodedFrameTextureFormat::Rgba8Unorm.as_str(),
+            "Rgba8Unorm"
+        );
+        assert_eq!(
+            GpuNativeDecodedFrameTextureFormat::Bgra8Unorm.as_str(),
+            "Bgra8Unorm"
+        );
+    }
+
+    #[test]
+    fn native_decoded_frame_import_defaults_to_fail_closed() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(
+            &mut ids,
+            native_import_contract(),
+            &GpuNativeDecodedFrameImportSupport::unavailable(),
+        )
+        .expect_err("native import must fail until a renderer backend is connected");
+
+        assert_eq!(
+            err,
+            GpuNativeDecodedFrameImportPlanError::RendererBackendUnavailable
+        );
+        assert_eq!(ids.next_raw(), 500);
+    }
+
+    #[test]
+    fn native_decoded_frame_import_rejects_unsupported_handle_kind() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::CVPixelBuffer],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        );
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(
+            &mut ids,
+            native_import_contract(),
+            &support,
+        )
+        .expect_err("unsupported decoder handle kind must fail");
+
+        assert_eq!(
+            err,
+            GpuNativeDecodedFrameImportPlanError::UnsupportedHandleKind {
+                handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D
+            }
+        );
+    }
+
+    #[test]
+    fn native_decoded_frame_import_rejects_unsupported_source_format() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::P010],
+        );
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(
+            &mut ids,
+            native_import_contract(),
+            &support,
+        )
+        .expect_err("unsupported source texture format must fail");
+
+        assert_eq!(
+            err,
+            GpuNativeDecodedFrameImportPlanError::UnsupportedSourceTextureFormat {
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12
+            }
+        );
+    }
+
+    #[test]
+    fn native_decoded_frame_import_requires_float_working_texture() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        );
+        let mut contract = native_import_contract();
+        contract.working_texture_format = GpuColorFrameTextureFormat::Rgba8Unorm;
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect_err("native input must not produce RGBA8 working frames");
+
+        assert_eq!(
+            err,
+            GpuNativeDecodedFrameImportPlanError::UnsupportedWorkingTextureFormat {
+                working_texture_format: GpuColorFrameTextureFormat::Rgba8Unorm
+            }
+        );
+    }
+
+    #[test]
+    fn native_decoded_frame_import_plan_produces_renderer_owned_working_frame() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        );
+
+        let plan = GpuNativeDecodedFrameImportPlan::from_contract(
+            &mut ids,
+            native_import_contract(),
+            &support,
+        )
+        .expect("ready backend can produce an import plan");
+
+        assert_eq!(plan.handle_kind, DecodedGpuFrameHandleKind::D3D11Texture2D);
+        assert_eq!(
+            plan.source_texture_format,
+            GpuNativeDecodedFrameTextureFormat::Nv12
+        );
+        assert_eq!(plan.source_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(plan.working_frame.id().raw(), 500);
+        assert_eq!(
+            plan.working_frame.descriptor(),
+            ColorFrameDescriptor {
+                width: 3840,
+                height: 2160,
+                color_space: ColorSpace::Rec2020,
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+            }
+        );
+        assert_eq!(
+            plan.working_frame.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float
+        );
+        assert_eq!(ids.next_raw(), 501);
+    }
+
+    #[test]
     fn gpu_color_frame_resource_table_resolves_matching_contract() {
         let handle = gpu_handle(
             100,
@@ -1537,6 +1900,19 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+        }
+    }
+
+    fn native_import_contract() -> GpuNativeDecodedFrameImportContract {
+        GpuNativeDecodedFrameImportContract {
+            width: 3840,
+            height: 2160,
+            source_color_space: ColorSpace::Rec2100Pq,
+            working_color_space: ColorSpace::Rec2020,
+            handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+            source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,
+            working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
+            label: "native-decoded-working".to_owned(),
         }
     }
 

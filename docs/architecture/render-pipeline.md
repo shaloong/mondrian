@@ -225,6 +225,13 @@ preview path can become GPU input transform -> GPU working composite -> GPU
 output boundary without re-uploading that media layer. It is not a hardware
 decode or zero-copy path until `mondrian-media` supplies an actual GPU
 texture/hardware frame instead of CPU RGBA bytes.
+Native hardware-decoded frames must enter through the separate renderer-owned
+`GpuNativeDecodedFrameImportPlan` contract. That contract does not model the
+decoder surface itself as a color-frame handle; it records the decoder handle
+family and source texture format, validates renderer backend support, and
+produces only the post-sampling/post-input-transform linear working
+`GpuColorFrameHandle`. This keeps media residency reporting, OS texture import
+probing, and renderer graph resource ownership decoupled.
 The app viewer path now carries each decoded media layer's `CpuEncodedColorFrame`
 plus `RenderInputTransform` alongside its CPU working-frame fallback. During
 window recording it first tries `record_wgpu_input_stage_owned_backend(...)`

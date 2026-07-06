@@ -41,6 +41,36 @@ UI code may use `mondrian-ui-renderer`; timeline/video rendering should stay in 
   label; it does not expose CPU pixels or claim ownership of a concrete wgpu
   object outside the renderer resource table.
 
+## Native Decoded Frame Import
+
+Hardware decode and renderer texture import are separate contracts. Media owns
+the decoder fact (`DecodedGpuFrameHandleKind` and frame residency), platform
+owns OS/backend capability discovery (`NativeVideoTextureImportProbe`), and
+the renderer owns the graph contract for turning a decoder surface into a
+linear working frame (`GpuNativeDecodedFrameImportPlan`). App code may schedule
+or diagnose this path, but it must not translate OS decoder handles directly
+into renderer resources.
+
+Native decoded surfaces are not modeled as `GpuColorFrameHandle` values because
+they may be multi-plane YCbCr surfaces such as NV12 or P010. The renderer import
+contract records the decoder handle family, source texture format, source color
+space, target working color space, and required float working texture format.
+When a concrete backend reports readiness and support for that handle/format,
+the plan allocates a renderer-owned linear `Working` frame handle; the imported
+decoder surface remains a backend object consumed by the native sampling/input
+transform pass.
+
+The default support contract is fail-closed. Until D3D11/DXGI, CVPixelBuffer /
+IOSurface, DMABUF/VA-API, or CUDA import is actually connected to the wgpu
+renderer backend, `GpuNativeDecodedFrameImportSupport::unavailable()` must be
+used and planning must return `RendererBackendUnavailable`. A decoder reporting
+a GPU handle kind, or a platform probe reporting a potentially importable OS
+family, is not enough to claim hardware decode playback, zero-copy, or low-copy
+frame residency. Diagnostics should report the specific missing layer: decoder
+GPU handle absent, platform import unsupported/missing, renderer backend not
+ready, unsupported handle kind, unsupported source format, or unsupported
+working texture format.
+
 ## Effect Integration
 
 `mondrian-effects` already exposes `EffectGpuExecutor` as an acceleration hook. Long-term, effects should compile to graph nodes that the renderer can execute on GPU where supported, with CPU fallback only for unsupported ops/plugins.

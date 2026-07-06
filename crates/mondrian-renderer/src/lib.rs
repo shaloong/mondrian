@@ -32,7 +32,9 @@ pub use color_frame::{
     GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, LinearFloatSource,
+    GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportContract,
+    GpuNativeDecodedFrameImportPlan, GpuNativeDecodedFrameImportPlanError,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat, LinearFloatSource,
 };
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,
