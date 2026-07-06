@@ -39,6 +39,11 @@ falls back to the source path and records proxy hit/miss/stale counters in
 `AppUiPreviewDiagnostics`. Export continues to use the source/export contract;
 proxy selection is a preview playback scheduling decision, not media color
 interpretation.
+Newly imported video assets enter proxy playback and start background proxy
+generation only when the project `ProjectSettings.proxy_enabled` policy is on.
+The project policy is the scheduling source of truth; app/UI preferences must
+not independently enable proxy generation against a project that has disabled
+proxy workflows.
 
 `DecodedGpuFrameHandleKind` belongs to media because it describes the decoder
 surface family that FFmpeg/hardware decode produced, such as D3D11 texture,

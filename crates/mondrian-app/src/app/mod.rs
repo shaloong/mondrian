@@ -421,6 +421,11 @@ impl AppState {
         self.auto_proxy_enabled = enabled;
     }
 
+    /// Whether newly imported video media should enter proxy playback and start proxy generation.
+    pub fn should_auto_generate_proxy_for_import(&self) -> bool {
+        self.project_settings.proxy_enabled
+    }
+
     pub fn is_asset_proxy_mode(&self, asset_id: AssetId) -> bool {
         self.proxy_mode_assets.contains(&asset_id)
     }

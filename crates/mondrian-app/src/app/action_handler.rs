@@ -373,7 +373,7 @@ impl AppState {
                     }
                     imported_count += 1;
                     let mut proxy_started = false;
-                    if self.auto_proxy_enabled {
+                    if self.should_auto_generate_proxy_for_import() {
                         if let Ok(Some(asset)) = library.get_asset(asset_id) {
                             if matches!(asset.kind, AssetKind::Video) {
                                 self.set_asset_proxy_mode(asset_id, true);
@@ -3586,6 +3586,19 @@ mod tests {
         assert!(assets.is_empty());
 
         remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn proxy_import_policy_follows_project_settings() {
+        let mut state = AppState::new();
+
+        state.auto_proxy_enabled = true;
+        state.project_settings.proxy_enabled = false;
+        assert!(!state.should_auto_generate_proxy_for_import());
+
+        state.auto_proxy_enabled = false;
+        state.project_settings.proxy_enabled = true;
+        assert!(state.should_auto_generate_proxy_for_import());
     }
 
     #[test]

@@ -153,7 +153,7 @@ impl AppUiPreferencesModel {
             project_status,
             workspace: workspace.display_name().to_owned(),
             sequence_summary,
-            proxy_mode: enabled_label(state.auto_proxy_enabled),
+            proxy_mode: enabled_label(state.should_auto_generate_proxy_for_import()),
             audio_clock: format!("{:?}", state.audio_sync.role),
             audio_sample_rate: format!("{} Hz", state.audio_sample_rate),
             export_range: export_range_label(state.export_draft.range).to_owned(),
@@ -2179,7 +2179,7 @@ mod tests {
         let mut state = AppState::new();
         state.current_project_path = Some("E:/projects/edit.mdp".into());
         state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Cut"));
-        state.auto_proxy_enabled = true;
+        state.project_settings.proxy_enabled = true;
         state.export_draft.range = TimelineExportRange::EntireSequence;
         state.export_draft.output_path = "E:/renders/cut.mp4".to_owned();
 
@@ -2199,6 +2199,22 @@ mod tests {
         assert_eq!(model.proxy_mode, "已启用");
         assert_eq!(model.export_range, "整个序列");
         assert_eq!(model.export_output, "E:/renders/cut.mp4");
+    }
+
+    #[test]
+    fn preferences_model_reports_effective_project_proxy_policy() {
+        let mut state = AppState::new();
+        state.auto_proxy_enabled = true;
+        state.project_settings.proxy_enabled = false;
+
+        let model = AppUiPreferencesModel::from_app_state(
+            &state,
+            WorkspacePreset::Editing,
+            ThemePreference::System,
+            ThemePreset::Dark,
+        );
+
+        assert_eq!(model.proxy_mode, "已禁用");
     }
 
     #[test]
