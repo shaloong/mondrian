@@ -8,7 +8,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mondrian_assets::AssetKind;
@@ -3221,13 +3221,31 @@ impl MediaPreviewFrame {
         let Some(source) = self.gpu_source.as_ref() else {
             return Err("media preview frame has no CPU working frame or GPU source".to_owned());
         };
-        execute_cpu_input_stage(&source.source, &source.input_transform)
-            .map(|output| MediaPreviewWorkingFrame {
-                frame: output.result.frame,
-                color_diagnostics: Some(output.result.diagnostics),
-                stage_diagnostics: output.stage_diagnostics,
+        let cached_before = source.working_cache.get().is_some();
+        let entry = source
+            .working_cache
+            .get_or_init(|| {
+                execute_cpu_input_stage(&source.source, &source.input_transform)
+                    .map(|output| MediaPreviewWorkingFrameCacheEntry {
+                        frame: output.result.frame,
+                        color_diagnostics: output.result.diagnostics,
+                        stage_diagnostics: output.stage_diagnostics,
+                    })
+                    .map_err(|err| {
+                        format!("viewer preview lazy input color transform failed: {err}")
+                    })
             })
-            .map_err(|err| format!("viewer preview lazy input color transform failed: {err}"))
+            .as_ref()
+            .map_err(Clone::clone)?;
+        Ok(MediaPreviewWorkingFrame {
+            frame: entry.frame.clone(),
+            color_diagnostics: (!cached_before).then_some(entry.color_diagnostics),
+            stage_diagnostics: if cached_before {
+                RenderColorStageDiagnostics::default()
+            } else {
+                entry.stage_diagnostics
+            },
+        })
     }
 }
 
@@ -3241,6 +3259,24 @@ struct MediaPreviewWorkingFrame {
 struct MediaPreviewGpuSourceFrame {
     source: CpuEncodedColorFrame,
     input_transform: RenderInputTransform,
+    working_cache: Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, String>>>,
+}
+
+impl MediaPreviewGpuSourceFrame {
+    fn new(source: CpuEncodedColorFrame, input_transform: RenderInputTransform) -> Self {
+        Self {
+            source,
+            input_transform,
+            working_cache: Arc::new(OnceLock::new()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MediaPreviewWorkingFrameCacheEntry {
+    frame: CpuColorFrame,
+    color_diagnostics: RenderColorTransformDiagnostics,
+    stage_diagnostics: RenderColorStageDiagnostics,
 }
 
 #[derive(Debug, Clone)]
@@ -4937,7 +4973,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                     width: frame.width,
                     height: frame.height,
                     frame: None,
-                    gpu_source: Some(MediaPreviewGpuSourceFrame { source, input_transform }),
+                    gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
                     signature,
                 }),
                 error: None,
@@ -5253,7 +5289,7 @@ mod tests {
             width: 320,
             height: 180,
             frame: None,
-            gpu_source: Some(MediaPreviewGpuSourceFrame { source, input_transform }),
+            gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             signature: 44,
         };
         let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
@@ -7365,7 +7401,7 @@ mod tests {
             width,
             height,
             frame: Some(frame),
-            gpu_source: Some(MediaPreviewGpuSourceFrame { source, input_transform }),
+            gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             signature,
         }
     }
@@ -7393,6 +7429,37 @@ mod tests {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         hash
+    }
+
+    #[test]
+    fn media_preview_gpu_source_caches_lazy_cpu_working_transform() {
+        let source =
+            CpuEncodedColorFrame::source_rgba8(1, 1, ColorSpace::Rec709, vec![64, 128, 192, 255]);
+        let input_transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let frame = MediaPreviewFrame {
+            width: 1,
+            height: 1,
+            frame: None,
+            gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
+            signature: 42,
+        };
+
+        let first = frame.working_frame().expect("first lazy working transform");
+        let second = frame.working_frame().expect("cached lazy working transform");
+
+        assert!(first.color_diagnostics.is_some());
+        assert!(first.stage_diagnostics.cpu_input_stages > 0);
+        assert!(second.color_diagnostics.is_none());
+        assert_eq!(
+            second.stage_diagnostics,
+            RenderColorStageDiagnostics::default()
+        );
+        assert_eq!(
+            first.frame.rgba_f32().data,
+            second.frame.rgba_f32().data,
+            "cached working transform must preserve the exact CPU fallback frame"
+        );
     }
 
     fn test_proxy_config(cache_dir: PathBuf) -> mondrian_media::ProxyConfig {

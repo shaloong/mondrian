@@ -104,6 +104,12 @@ cache entries when the file fingerprint changes. Preview path resolution should
 capture source/proxy freshness and the resolved file fingerprint in one
 metadata probe path, so playback does not repeatedly stat the same source and
 proxy only to build a cache key.
+When a cached media frame enters a CPU preview fallback, its source/import ->
+working-space transform may be lazily materialized once and reused by clones of
+that same media-frame cache entry. The decoded source `CpuEncodedColorFrame`
+remains available for the GPU input-transform path; the lazy CPU working frame
+is only a fallback materialization cache and must not replace the source
+contract or become a separate color-interpretation path.
 Decode failures are also held in a bounded LRU key cache so repeated bad media
 does not grow memory unbounded during playback.
 Resolved preview plans may reuse a bounded final-frame cache keyed by sequence,
