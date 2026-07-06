@@ -2629,7 +2629,7 @@ impl Default for AppUiPreviewService {
 struct MediaPreviewKey {
     asset_id: AssetId,
     path: PathBuf,
-    modified: Option<ModifiedStamp>,
+    fingerprint: Option<MediaFileFingerprint>,
     source_frame: i64,
     source_micros: i64,
     target_width: u32,
@@ -2641,9 +2641,10 @@ struct MediaPreviewKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ModifiedStamp {
-    secs: u64,
-    nanos: u32,
+struct MediaFileFingerprint {
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -3448,7 +3449,7 @@ impl AppUiPreviewService {
             }
         }
 
-        let modified = modified_stamp(&resolved_path.path);
+        let fingerprint = media_file_fingerprint(&resolved_path.path);
         let detected_color_space = asset
             .media_info
             .video_streams
@@ -3515,7 +3516,7 @@ impl AppUiPreviewService {
             MediaPreviewKey {
                 asset_id: *asset_id,
                 path: resolved_path.path,
-                modified,
+                fingerprint,
                 source_frame: source_frame.max(0),
                 source_micros: source_micros(source_secs),
                 target_width,
@@ -4291,15 +4292,14 @@ fn resolve_preview_media_decode_path(
     }
 }
 
-fn modified_stamp(path: &std::path::Path) -> Option<ModifiedStamp> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| ModifiedStamp {
-            secs: duration.as_secs(),
-            nanos: duration.subsec_nanos(),
-        })
+fn media_file_fingerprint(path: &std::path::Path) -> Option<MediaFileFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some(MediaFileFingerprint {
+        len: metadata.len(),
+        modified_secs: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+    })
 }
 
 fn source_micros(source_secs: f64) -> i64 {
@@ -6655,7 +6655,7 @@ mod tests {
         let key = MediaPreviewKey {
             asset_id: AssetId::new(),
             path: PathBuf::from("E:/definitely-missing/mondrian-preview.mov"),
-            modified: None,
+            fingerprint: None,
             source_frame: 12,
             source_micros: source_micros(0.5),
             target_width: 320,
@@ -6684,7 +6684,7 @@ mod tests {
         MediaPreviewKey {
             asset_id: AssetId::new(),
             path: PathBuf::from(format!("E:/media/{source_frame}.mov")),
-            modified: None,
+            fingerprint: None,
             source_frame,
             source_micros: source_micros(source_frame as f64),
             target_width: 320,
@@ -6880,6 +6880,36 @@ mod tests {
     }
 
     #[test]
+    fn media_preview_key_includes_file_length_in_identity() {
+        let mut first = test_media_key(1);
+        first.path = PathBuf::from("E:/media/replaced.mov");
+        first.fingerprint =
+            Some(MediaFileFingerprint { len: 1_024, modified_secs: 10, modified_nanos: 20 });
+        let mut second = first.clone();
+        second.fingerprint =
+            Some(MediaFileFingerprint { len: 2_048, modified_secs: 10, modified_nanos: 20 });
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn media_preview_cache_does_not_reuse_same_path_with_different_file_length() {
+        let mut old_key = test_media_key(1);
+        old_key.path = PathBuf::from("E:/media/replaced.mov");
+        old_key.fingerprint =
+            Some(MediaFileFingerprint { len: 1_024, modified_secs: 10, modified_nanos: 20 });
+        let mut new_key = old_key.clone();
+        new_key.fingerprint =
+            Some(MediaFileFingerprint { len: 2_048, modified_secs: 10, modified_nanos: 20 });
+        let mut cache = MediaPreviewCache::new(2);
+
+        cache.insert(old_key.clone(), test_media_frame(1));
+
+        assert!(cache.get(&new_key).is_none());
+        assert!(cache.get(&old_key).is_some());
+    }
+
+    #[test]
     fn media_preview_failure_cache_evicts_least_recently_used_key() {
         let mut cache = MediaPreviewFailureCache::new(2);
         let first = test_media_key(1);
@@ -6917,7 +6947,7 @@ mod tests {
         let key = MediaPreviewKey {
             asset_id: AssetId::new(),
             path: PathBuf::from("E:/media/a.mov"),
-            modified: None,
+            fingerprint: None,
             source_frame: 1,
             source_micros: source_micros(1.0),
             target_width: 320,
@@ -6949,7 +6979,7 @@ mod tests {
         let key = MediaPreviewKey {
             asset_id: AssetId::new(),
             path: PathBuf::from("E:/media/a.mov"),
-            modified: None,
+            fingerprint: None,
             source_frame: 1,
             source_micros: source_micros(1.0),
             target_width: 320,
