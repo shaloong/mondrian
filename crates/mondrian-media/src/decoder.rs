@@ -33,24 +33,93 @@ pub enum HwAccelBackend {
     Vaapi,
 }
 
+/// Residency of frames produced by the decoder boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodedFrameResidency {
+    /// Decoder output is CPU RGBA memory.
+    CpuRgba,
+    /// Decoder output is CPU YUV 4:2:0 memory.
+    CpuYuv420p,
+    /// Decoder output is a GPU texture or hardware frame.
+    GpuTexture,
+}
+
+/// Hardware decode / zero-copy probe result for the current process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HwAccelProbe {
+    /// Backend that is actually selected for decode contexts.
+    pub selected_backend: HwAccelBackend,
+    /// Whether decode contexts currently use a hardware decoder.
+    pub hardware_decode_active: bool,
+    /// Whether decoded frames currently remain GPU-resident through the media boundary.
+    pub zero_copy_active: bool,
+    /// Residency produced by the active decode path.
+    pub frame_residency: DecodedFrameResidency,
+    /// Stable diagnostic reason for the selected path.
+    pub reason: String,
+}
+
 impl HwAccelBackend {
-    /// 自动检测当前平台最优硬解后端
+    /// Return the backend that is actually active for decode contexts.
+    ///
+    /// This intentionally fails closed to `None` until Mondrian has a real
+    /// hardware-frame path that exports/imports decoder textures into the
+    /// renderer. Platform preference alone must not be reported as active
+    /// hardware decode.
     pub fn detect() -> Self {
-        #[cfg(target_os = "windows")]
-        {
-            // TODO: 实际检测 CUDA / D3D11VA 可用性
-            return Self::D3D11VA;
+        Self::probe().selected_backend
+    }
+
+    /// Probe the active hardware decode / zero-copy residency state.
+    pub fn probe() -> HwAccelProbe {
+        HwAccelProbe {
+            selected_backend: Self::None,
+            hardware_decode_active: false,
+            zero_copy_active: false,
+            frame_residency: DecodedFrameResidency::CpuRgba,
+            reason: hardware_decode_unavailable_reason().to_owned(),
         }
-        #[cfg(target_os = "macos")]
-        {
-            return Self::VideoToolbox;
+    }
+
+    /// Stable backend name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Cuda => "Cuda",
+            Self::D3D11VA => "D3D11VA",
+            Self::VideoToolbox => "VideoToolbox",
+            Self::Vaapi => "Vaapi",
         }
-        #[cfg(target_os = "linux")]
-        {
-            return Self::Vaapi;
+    }
+}
+
+impl DecodedFrameResidency {
+    /// Stable residency name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CpuRgba => "CpuRgba",
+            Self::CpuYuv420p => "CpuYuv420p",
+            Self::GpuTexture => "GpuTexture",
         }
-        #[allow(unreachable_code)]
-        Self::None
+    }
+}
+
+fn hardware_decode_unavailable_reason() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "D3D11VA/DXVA hardware decode texture residency is not connected; using CPU RGBA decode"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "VideoToolbox hardware decode texture residency is not connected; using CPU RGBA decode"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "VA-API hardware decode texture residency is not connected; using CPU RGBA decode"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        "hardware decode texture residency is not connected for this platform; using CPU RGBA decode"
     }
 }
 
@@ -93,6 +162,11 @@ struct DecoderMetrics {
 
 #[derive(Debug, Clone)]
 pub struct DecoderMetricsSnapshot {
+    pub hw_accel_backend: HwAccelBackend,
+    pub decoded_frame_residency: DecodedFrameResidency,
+    pub hardware_decode_active: bool,
+    pub zero_copy_active: bool,
+    pub hw_accel_reason: String,
     pub yuv_requests: u64,
     pub yuv_cache_hits: u64,
     pub rgba_requests: u64,
@@ -108,13 +182,18 @@ pub struct DecoderMetricsSnapshot {
 }
 
 impl DecoderMetrics {
-    fn snapshot(&self) -> DecoderMetricsSnapshot {
+    fn snapshot(&self, hw_probe: &HwAccelProbe) -> DecoderMetricsSnapshot {
         let yuv_requests = self.yuv_requests.load(Ordering::Relaxed);
         let rgba_requests = self.rgba_requests.load(Ordering::Relaxed);
         let decode_requests = yuv_requests + rgba_requests;
         let decode_executions = self.decode_executions.load(Ordering::Relaxed);
         let total_decode_ns = self.total_decode_ns.load(Ordering::Relaxed);
         DecoderMetricsSnapshot {
+            hw_accel_backend: hw_probe.selected_backend,
+            decoded_frame_residency: hw_probe.frame_residency,
+            hardware_decode_active: hw_probe.hardware_decode_active,
+            zero_copy_active: hw_probe.zero_copy_active,
+            hw_accel_reason: hw_probe.reason.clone(),
             yuv_requests,
             yuv_cache_hits: self.yuv_cache_hits.load(Ordering::Relaxed),
             rgba_requests,
@@ -160,6 +239,7 @@ pub struct DecoderPool {
     frame_cache: Arc<FrameCache>,
     semaphore: Arc<Semaphore>,
     hw_accel: HwAccelBackend,
+    hw_accel_probe: HwAccelProbe,
     prefetch_tasks: DashMap<u64, PrefetchTask>,
     next_prefetch_task_id: AtomicU64,
     rgba_cache: Mutex<LruCache<RgbaFrameKey, Arc<RgbaFrame>>>,
@@ -172,11 +252,13 @@ pub struct DecoderPool {
 impl DecoderPool {
     pub fn new(frame_cache: Arc<FrameCache>) -> Arc<Self> {
         let max_concurrent = (num_cpus() - 2).max(1);
+        let hw_accel_probe = HwAccelBackend::probe();
         Arc::new(Self {
             contexts: DashMap::new(),
             frame_cache,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
-            hw_accel: HwAccelBackend::detect(),
+            hw_accel: hw_accel_probe.selected_backend,
+            hw_accel_probe,
             prefetch_tasks: DashMap::new(),
             next_prefetch_task_id: AtomicU64::new(1),
             rgba_cache: Mutex::new(LruCache::new(
@@ -605,7 +687,7 @@ impl DecoderPool {
     }
 
     pub fn metrics_snapshot(&self) -> DecoderMetricsSnapshot {
-        self.metrics.snapshot()
+        self.metrics.snapshot(&self.hw_accel_probe)
     }
 
     pub fn clear_all_caches(&self) {
@@ -738,4 +820,38 @@ fn rgba_to_yuv420p(frame: &RgbaFrame) -> Result<([Vec<u8>; 3], [u32; 3])> {
         [y_plane, u_plane, v_plane],
         [frame.width, uv_width as u32, uv_width as u32],
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::FrameCacheConfig;
+
+    #[test]
+    fn hw_accel_probe_fails_closed_until_texture_residency_exists() {
+        let probe = HwAccelBackend::probe();
+
+        assert_eq!(probe.selected_backend, HwAccelBackend::None);
+        assert!(!probe.hardware_decode_active);
+        assert!(!probe.zero_copy_active);
+        assert_eq!(probe.frame_residency, DecodedFrameResidency::CpuRgba);
+        assert!(probe.reason.contains("CPU RGBA decode"));
+    }
+
+    #[test]
+    fn decoder_metrics_report_cpu_residency_and_no_zero_copy() {
+        let cache = FrameCache::new(FrameCacheConfig { max_frames: 2 });
+        let pool = DecoderPool::new(cache);
+
+        let snapshot = pool.metrics_snapshot();
+
+        assert_eq!(snapshot.hw_accel_backend, HwAccelBackend::None);
+        assert_eq!(
+            snapshot.decoded_frame_residency,
+            DecodedFrameResidency::CpuRgba
+        );
+        assert!(!snapshot.hardware_decode_active);
+        assert!(!snapshot.zero_copy_active);
+        assert!(snapshot.hw_accel_reason.contains("CPU RGBA decode"));
+    }
 }

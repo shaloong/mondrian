@@ -17,6 +17,24 @@ The probe runs off the UI thread.
 
 Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state.
 
+Current decode residency is intentionally explicit and fail-closed. The active
+preview/media decode path produces CPU RGBA frames and, for legacy YUV callers,
+CPU YUV420p frames derived from that CPU RGBA decode. `DecoderMetricsSnapshot`
+reports the selected hardware backend, decoded frame residency,
+`hardware_decode_active`, `zero_copy_active`, and a stable reason string. Until
+DXVA/D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC hardware frames are actually
+exported/imported as renderer GPU textures, `HwAccelBackend::probe()` must
+return `None`, `hardware_decode_active=false`, `zero_copy_active=false`, and
+`DecodedFrameResidency::CpuRgba`. Platform preference alone is not a valid
+hardware decode signal.
+
+The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
+source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and
+produce a GPU-resident linear working frame in a float texture. This is the
+bridge for guarded rollout of GPU input transforms. It is not yet a hardware
+decode or zero-copy media path because the decoder boundary still hands CPU
+memory to the renderer.
+
 ## Asset Classification
 
 `mondrian-assets` classifies imported files using `MediaInfo`. Audio-only extensions or media without meaningful video streams become `Audio`; media with video becomes `Video`.

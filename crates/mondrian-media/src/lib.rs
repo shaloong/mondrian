@@ -2,7 +2,7 @@
 //!
 //! 媒体处理核心模块。负责：
 //! - 媒体文件探针（格式/编解码/元数据）
-//! - 视频帧解码（FFmpeg + GPU 硬解码）
+//! - 视频帧解码（当前为 FFmpeg CPU RGBA/YUV 路径；硬解/零拷贝必须通过显式 residency 诊断证明）
 //! - 音频采样解码与混合
 //! - 帧缓存（LRU）
 //! - 代理文件生成（Proxy）
@@ -21,7 +21,9 @@ pub use audio::{
     RealtimeAudioOutput,
 };
 pub use cache::FrameCache;
-pub use decoder::DecoderPool;
+pub use decoder::{
+    DecodedFrameResidency, DecoderMetricsSnapshot, DecoderPool, HwAccelBackend, HwAccelProbe,
+};
 pub use info::{
     AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoColorDetectionMethod,
     VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary,

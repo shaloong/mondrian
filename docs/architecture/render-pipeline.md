@@ -208,6 +208,17 @@ not instantiate the final-output executor directly or call
 `CpuColorTransformExecutor` usage is limited to renderer internals and its
 focused unit tests.
 
+GPU input transforms have their own renderer contract instead of piggybacking
+on final-output plans. `RenderGpuInputStageResourcePlan` accepts a decoded CPU
+`CpuEncodedColorFrame` in the `Source` domain, uploads it as `Rgba8Unorm`,
+records the OCIO GPU input transform, and produces a GPU-resident linear
+working frame in a float texture (`Rgba16Float` or `Rgba32Float`). It rejects
+CPU-only plans, plans with native GPU blockers, non-source uploads, non-working
+outputs, and `Rgba8Unorm` working outputs. This is the guarded bridge for
+preview playback to move input OCIO off the CPU. It is not a hardware decode or
+zero-copy path until `mondrian-media` supplies an actual GPU texture/hardware
+frame instead of CPU RGBA bytes.
+
 Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
 result. App, export, tests, and benches must read frames from `.result` and
 aggregate `.stage_diagnostics` where they expose observability. Preview
