@@ -483,9 +483,8 @@ impl CpuColorTransformExecutor {
             residency: ColorFrameResidency::Cpu,
         };
 
-        let data: Vec<[f32; 4]> = frame.rgba_f32().data.clone();
-        // Flatten to contiguous f32 for OCIO processing.
-        let mut flat: Vec<f32> = data.iter().flat_map(|p| p.iter().copied()).collect();
+        // Flatten borrowed typed pixels into the contiguous f32 buffer OCIO expects.
+        let mut flat = flatten_rgba_f32_pixels(&frame.rgba_f32().data);
         if let Some(display_view) = &transform.display_view {
             transform
                 .engine
@@ -543,6 +542,15 @@ impl CpuColorTransformExecutor {
         Ok(RenderOutputTransformFloatResult { frame: out_frame, diagnostics })
     }
 }
+
+fn flatten_rgba_f32_pixels(pixels: &[[f32; 4]]) -> Vec<f32> {
+    let mut flat = Vec::with_capacity(pixels.len().saturating_mul(4));
+    for pixel in pixels {
+        flat.extend_from_slice(pixel);
+    }
+    flat
+}
+
 pub struct RenderColorTransformGpuPlanner<'a> {
     cache: &'a mut OcioGpuShaderCache,
     options: RenderColorTransformGpuOptions,
@@ -1083,6 +1091,16 @@ mod tests {
             result.diagnostics.backend,
             RenderColorTransformBackend::CpuOcioFloat
         );
+    }
+
+    #[test]
+    fn flatten_rgba_f32_pixels_preserves_channel_order() {
+        let pixels = [[0.25, 0.5, 0.75, 1.0], [1.25, 1.5, 1.75, 0.5]];
+
+        let flat = flatten_rgba_f32_pixels(&pixels);
+
+        assert_eq!(flat, vec![0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 0.5]);
+        assert_eq!(flat.capacity(), pixels.len() * 4);
     }
 
     #[test]

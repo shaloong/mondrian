@@ -105,6 +105,9 @@ backend indicates the float path was used, and `used_rgba8_boundary: false`
 proves no intermediate quantization occurred. The existing RGBA8 path remains
 available for decoded media, UI raster, debug/golden boundaries, and legacy
 effects, with `used_rgba8_boundary: true` in diagnostics.
+When a float output transform needs OCIO's contiguous f32 buffer, it must pack
+directly from the borrowed `CpuColorFrame` pixels and avoid cloning the whole
+typed `Vec<[f32; 4]>` before flattening.
 
 Color-transform executors emit `RenderColorTransformDiagnostics` for input and
 output boundaries. Preview diagnostics aggregate transform calls, transformed
