@@ -1,7 +1,7 @@
 //! GPU-resident working-space compositing.
 //!
 //! This module owns the native wgpu path for preview/playback compositing when
-//! a layer stack is simple enough to stay on GPU: identity transforms, Normal
+//! a layer stack is simple enough to stay on GPU: affine transforms, Normal
 //! blend mode, no effect graphs, and a bounded layer count. Unsupported layer
 //! shapes are rejected with typed blockers so callers can fall back to the CPU
 //! reference compositor without losing diagnostic evidence.
@@ -29,6 +29,9 @@ struct CompositeUniforms {
     source_kind: u32,
     _pad0: vec2<u32>,
     solid_color: vec4<f32>,
+    inv_transform0: vec4<f32>,
+    inv_transform1: vec4<f32>,
+    geometry: vec4<f32>,
 };
 
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
@@ -77,11 +80,34 @@ fn over_straight_alpha(base_px: vec4<f32>, blend_px: vec4<f32>, opacity: f32) ->
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base_px = textureSample(accum_tex, linear_sampler, in.uv);
     let layer_px = select(
-        textureSample(layer_tex, linear_sampler, in.uv),
+        sample_layer(in.uv),
         uniforms.solid_color,
         uniforms.source_kind == 1u,
     );
     return over_straight_alpha(base_px, layer_px, uniforms.opacity);
+}
+
+fn sample_layer(dst_uv: vec2<f32>) -> vec4<f32> {
+    let dst_center = vec2<f32>(
+        dst_uv.x * uniforms.geometry.x,
+        dst_uv.y * uniforms.geometry.y,
+    );
+    let src_center = vec2<f32>(
+        uniforms.inv_transform0.x * dst_center.x +
+            uniforms.inv_transform0.y * dst_center.y +
+            uniforms.inv_transform0.z,
+        uniforms.inv_transform0.w * dst_center.x +
+            uniforms.inv_transform1.x * dst_center.y +
+            uniforms.inv_transform1.y,
+    );
+    let src_size = uniforms.geometry.zw;
+    if (src_center.x < 0.5 ||
+        src_center.y < 0.5 ||
+        src_center.x >= src_size.x + 0.5 ||
+        src_center.y >= src_size.y + 0.5) {
+        return vec4<f32>(0.0);
+    }
+    return textureSample(layer_tex, linear_sampler, src_center / src_size);
 }
 "#;
 
@@ -109,8 +135,8 @@ pub enum GpuCompositingBlockerReason {
     EffectRequiresCpu,
     /// A blend mode other than Normal is used.
     UnsupportedBlendMode,
-    /// The layer has a non-identity affine transform or source extent mismatch.
-    NonIdentityTransform,
+    /// The layer has a transform the GPU compositor cannot sample correctly.
+    UnsupportedTransform,
     /// A source frame is not already GPU-resident and uploads were disallowed.
     FrameNotGpuResident,
     /// Too many layers for the bounded GPU composite path.
@@ -125,7 +151,7 @@ impl GpuCompositingBlockerReason {
         match self {
             Self::EffectRequiresCpu => "effect_requires_cpu",
             Self::UnsupportedBlendMode => "unsupported_blend_mode",
-            Self::NonIdentityTransform => "non_identity_transform",
+            Self::UnsupportedTransform => "unsupported_transform",
             Self::FrameNotGpuResident => "frame_not_gpu_resident",
             Self::TooManyLayers => "too_many_layers",
             Self::GpuUnavailable => "gpu_unavailable",
@@ -139,9 +165,7 @@ impl GpuCompositingBlockerReason {
                 "Effect graph requires CPU execution or has no GPU shader lowering"
             }
             Self::UnsupportedBlendMode => "Blend mode not supported by GPU compositor",
-            Self::NonIdentityTransform => {
-                "Non-identity transform or extent mismatch requires CPU sampling"
-            }
+            Self::UnsupportedTransform => "Transform cannot be represented by GPU compositor",
             Self::FrameNotGpuResident => "Frame requires CPU-to-GPU upload before compositing",
             Self::TooManyLayers => "Too many layers for bounded GPU compositing",
             Self::GpuUnavailable => "GPU device/queue not available for compositing",
@@ -202,7 +226,7 @@ impl GpuCompositingDiagnostics {
 pub fn evaluate_gpu_compositing_capability(
     layer_count: usize,
     has_any_effect_graph: bool,
-    has_any_non_identity_transform: bool,
+    has_any_unsupported_transform: bool,
     has_any_non_normal_blend_mode: bool,
     all_frames_gpu_resident: bool,
 ) -> GpuCompositingCapability {
@@ -221,9 +245,9 @@ pub fn evaluate_gpu_compositing_capability(
             reason: GpuCompositingBlockerReason::UnsupportedBlendMode,
         };
     }
-    if has_any_non_identity_transform {
+    if has_any_unsupported_transform {
         return GpuCompositingCapability::CpuFallback {
-            reason: GpuCompositingBlockerReason::NonIdentityTransform,
+            reason: GpuCompositingBlockerReason::UnsupportedTransform,
         };
     }
     if all_frames_gpu_resident {
@@ -329,6 +353,9 @@ struct GpuCompositeUniforms {
     source_kind: u32,
     _pad0: [u32; 2],
     solid_color: [f32; 4],
+    inv_transform0: [f32; 4],
+    inv_transform1: [f32; 4],
+    geometry: [f32; 4],
 }
 
 impl GpuFrameCompositor {
@@ -446,6 +473,7 @@ impl GpuFrameCompositor {
         );
 
         let mut transient_uploads = Vec::new();
+        let mut uploaded_cpu_layers = false;
         let mut src_is_a = true;
         for (index, layer) in request.layers.iter().enumerate() {
             let (accum, dst) = if src_is_a {
@@ -453,8 +481,10 @@ impl GpuFrameCompositor {
             } else {
                 (&target_b, &target_a)
             };
-            let (layer_view, source_kind, solid_color) = match layer.source {
+            let (layer_view, source_kind, solid_color, source_size) = match layer.source {
                 GpuCompositeLayerSource::CpuFrame(frame) => {
+                    uploaded_cpu_layers = true;
+                    let descriptor = frame.descriptor();
                     let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
                         ids.allocate(),
                         frame,
@@ -472,14 +502,18 @@ impl GpuFrameCompositor {
                             .texture_view,
                         0,
                         [0.0, 0.0, 0.0, 0.0],
+                        [descriptor.width as f32, descriptor.height as f32],
                     )
                 }
                 GpuCompositeLayerSource::SolidColor(color) => (
                     &accum.resource().texture_view,
                     1,
                     [color.r, color.g, color.b, color.a],
+                    [width as f32, height as f32],
                 ),
             };
+            let inv_transform = invert_affine(layer.transform)
+                .expect("validate_request rejects unsupported transforms");
             self.record_layer_pass(
                 device,
                 encoder,
@@ -491,6 +525,14 @@ impl GpuFrameCompositor {
                     source_kind,
                     _pad0: [0, 0],
                     solid_color,
+                    inv_transform0: [
+                        inv_transform[0],
+                        inv_transform[1],
+                        inv_transform[2],
+                        inv_transform[3],
+                    ],
+                    inv_transform1: [inv_transform[4], inv_transform[5], 0.0, 0.0],
+                    geometry: [width as f32, height as f32, source_size[0], source_size[1]],
                 },
             );
             src_is_a = !src_is_a;
@@ -504,11 +546,15 @@ impl GpuFrameCompositor {
         let output = output_resource.handle().clone();
         table.insert(retained_resource).map_err(GpuCompositeError::ResourceTable)?;
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
-        let diagnostics = GpuCompositingDiagnostics {
-            gpu_with_upload_composites: 1,
+        let mut diagnostics = GpuCompositingDiagnostics {
             gpu_composited_pixels: u64::from(width).saturating_mul(u64::from(height)),
             ..GpuCompositingDiagnostics::default()
         };
+        if uploaded_cpu_layers {
+            diagnostics.gpu_with_upload_composites = 1;
+        } else {
+            diagnostics.gpu_native_composites = 1;
+        }
         Ok(GpuCompositeRecord { output, diagnostics })
     }
 
@@ -585,26 +631,24 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
     let capability = evaluate_gpu_compositing_capability(
         request.layers.len(),
         request.layers.iter().any(|layer| layer.has_effect_graph),
-        request.layers.iter().any(|layer| {
-            !is_identity_transform(layer.transform) || !source_extents_match(layer, request)
-        }),
+        request.layers.iter().any(|layer| !gpu_transform_supported(layer)),
         request.layers.iter().any(|layer| layer.blend_mode != BlendMode::Normal),
         false,
     );
     if let GpuCompositingCapability::CpuFallback { reason } = capability {
         return Err(GpuCompositeError::Blocked { reason });
     }
-    let expected = ColorFrameDescriptor {
-        width: request.width,
-        height: request.height,
-        color_space: request.working_color_space,
-        domain: ColorFrameDomain::Working,
-        encoding: ColorFrameEncoding::LinearFloat,
-        residency: ColorFrameResidency::Cpu,
-    };
     for layer in request.layers {
         if let GpuCompositeLayerSource::CpuFrame(frame) = layer.source {
             let actual = frame.descriptor();
+            let expected = ColorFrameDescriptor {
+                width: actual.width,
+                height: actual.height,
+                color_space: request.working_color_space,
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Cpu,
+            };
             if actual != expected {
                 return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
             }
@@ -613,13 +657,10 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
     Ok(())
 }
 
-fn source_extents_match(layer: &GpuCompositeLayer<'_>, request: &GpuCompositeRequest<'_>) -> bool {
+fn gpu_transform_supported(layer: &GpuCompositeLayer<'_>) -> bool {
     match layer.source {
-        GpuCompositeLayerSource::CpuFrame(frame) => {
-            let descriptor = frame.descriptor();
-            descriptor.width == request.width && descriptor.height == request.height
-        }
-        GpuCompositeLayerSource::SolidColor(_) => true,
+        GpuCompositeLayerSource::CpuFrame(_) => invert_affine(layer.transform).is_some(),
+        GpuCompositeLayerSource::SolidColor(_) => is_identity_transform(layer.transform),
     }
 }
 
@@ -631,6 +672,27 @@ fn is_identity_transform(transform: [f32; 6]) -> bool {
         && transform[3].abs() <= EPSILON
         && (transform[4] - 1.0).abs() <= EPSILON
         && transform[5].abs() <= EPSILON
+}
+
+fn invert_affine(transform: [f32; 6]) -> Option<[f32; 6]> {
+    let a = transform[0];
+    let c = transform[1];
+    let tx = transform[2];
+    let b = transform[3];
+    let d = transform[4];
+    let ty = transform[5];
+    let det = a * d - b * c;
+    if det.abs() <= 1.0e-8 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let ia = d * inv_det;
+    let ic = -c * inv_det;
+    let ib = -b * inv_det;
+    let id = a * inv_det;
+    let itx = -(ia * tx + ic * ty);
+    let ity = -(ib * tx + id * ty);
+    Some([ia, ic, itx, ib, id, ity])
 }
 
 fn texture_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -691,6 +753,12 @@ mod tests {
     use mondrian_core::RgbaF32Frame;
 
     #[test]
+    fn gpu_compositor_shader_parses_as_wgsl() {
+        naga::front::wgsl::parse_str(GPU_COMPOSITOR_SHADER)
+            .expect("GPU compositor WGSL should parse");
+    }
+
+    #[test]
     fn gpu_compositing_capability_classifies_single_layer() {
         let cap = evaluate_gpu_compositing_capability(1, false, false, false, true);
         assert_eq!(cap, GpuCompositingCapability::GpuNative);
@@ -725,12 +793,12 @@ mod tests {
     }
 
     #[test]
-    fn gpu_compositing_capability_rejects_non_identity_transform() {
+    fn gpu_compositing_capability_rejects_unsupported_transform() {
         let cap = evaluate_gpu_compositing_capability(1, false, true, false, true);
         assert!(matches!(
             cap,
             GpuCompositingCapability::CpuFallback {
-                reason: GpuCompositingBlockerReason::NonIdentityTransform
+                reason: GpuCompositingBlockerReason::UnsupportedTransform
             }
         ));
     }
@@ -781,7 +849,7 @@ mod tests {
         let reasons = [
             GpuCompositingBlockerReason::EffectRequiresCpu,
             GpuCompositingBlockerReason::UnsupportedBlendMode,
-            GpuCompositingBlockerReason::NonIdentityTransform,
+            GpuCompositingBlockerReason::UnsupportedTransform,
             GpuCompositingBlockerReason::FrameNotGpuResident,
             GpuCompositingBlockerReason::TooManyLayers,
             GpuCompositingBlockerReason::GpuUnavailable,
@@ -823,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_composite_request_rejects_source_descriptor_mismatch() {
+    fn gpu_composite_request_accepts_media_extent_mismatch_with_affine_transform() {
         let frame = CpuColorFrame::working(RgbaF32Frame {
             width: 8,
             height: 8,
@@ -834,7 +902,7 @@ mod tests {
             source: GpuCompositeLayerSource::CpuFrame(&frame),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
-            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            transform: [2.0, 0.0, 0.0, 0.0, 2.0, 0.0],
             has_effect_graph: false,
         };
         let request = GpuCompositeRequest {
@@ -844,13 +912,68 @@ mod tests {
             layers: &[layer],
         };
 
-        let err = validate_request(&request).expect_err("extent mismatch should be blocked");
+        validate_request(&request).expect("GPU compositor should support affine media sampling");
+    }
+
+    #[test]
+    fn gpu_composite_request_rejects_singular_media_transform() {
+        let frame = CpuColorFrame::working(RgbaF32Frame {
+            width: 8,
+            height: 8,
+            color_space: ColorSpace::Rec709,
+            data: vec![[0.0, 0.0, 0.0, 1.0]; 64],
+        });
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            has_effect_graph: false,
+        };
+        let request = GpuCompositeRequest {
+            width: 16,
+            height: 16,
+            working_color_space: ColorSpace::Rec709,
+            layers: &[layer],
+        };
+
+        let err = validate_request(&request).expect_err("singular transform should be blocked");
 
         assert_eq!(
             err,
             GpuCompositeError::Blocked {
-                reason: GpuCompositingBlockerReason::NonIdentityTransform
+                reason: GpuCompositingBlockerReason::UnsupportedTransform
             }
         );
+    }
+
+    #[test]
+    fn gpu_composite_request_rejects_source_color_space_mismatch() {
+        let frame = CpuColorFrame::working(RgbaF32Frame {
+            width: 8,
+            height: 8,
+            color_space: ColorSpace::DciP3,
+            data: vec![[0.0, 0.0, 0.0, 1.0]; 64],
+        });
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            has_effect_graph: false,
+        };
+        let request = GpuCompositeRequest {
+            width: 8,
+            height: 8,
+            working_color_space: ColorSpace::Rec709,
+            layers: &[layer],
+        };
+
+        let err = validate_request(&request).expect_err("color space mismatch should be blocked");
+
+        assert!(matches!(
+            err,
+            GpuCompositeError::SourceDescriptorMismatch { .. }
+        ));
     }
 }

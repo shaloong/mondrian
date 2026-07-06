@@ -2983,13 +2983,15 @@ fn preview_gpu_composite_layers(
     layers
         .iter()
         .map(|layer| match layer {
-            AppUiGpuPreviewCompositeLayer::Media { frame, opacity } => GpuCompositeLayer {
-                source: GpuCompositeLayerSource::CpuFrame(frame),
-                opacity: *opacity,
-                blend_mode: mondrian_core::types::BlendMode::Normal,
-                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                has_effect_graph: false,
-            },
+            AppUiGpuPreviewCompositeLayer::Media { frame, opacity, transform } => {
+                GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::CpuFrame(frame),
+                    opacity: *opacity,
+                    blend_mode: mondrian_core::types::BlendMode::Normal,
+                    transform: *transform,
+                    has_effect_graph: false,
+                }
+            }
             AppUiGpuPreviewCompositeLayer::SolidColor { layer } => GpuCompositeLayer {
                 source: GpuCompositeLayerSource::SolidColor(layer.color),
                 opacity: layer.opacity,

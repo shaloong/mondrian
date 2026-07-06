@@ -651,16 +651,19 @@ and `document_unsupported_feature` action code.
 - **Real OS HDR/EDR detection** — `ViewerDisplayMode::HdrPq` /
   `ViewerDisplayMode::HdrHlg` are explicit user selections, not OS-queried
   capabilities. The surface contract validates wgpu `SurfaceColorSpace`
-  compatibility but does not verify actual monitor HDR support. Diagnostics
-  do not record a blocker for this — it is a design choice, not a bug.
+  compatibility but does not yet prove actual monitor HDR support across every
+  OS. Display Output Contract v2 records `MonitorHdrCapabilityUnknown` /
+  `MonitorHdrCapabilityUnsupported` blockers when HDR correctness cannot be
+  confirmed.
 - **GPU compositing** — The `gpu_compositor.rs` module is wired into the
-  preview/viewer GPU path for the safe production subset: identity transforms,
-  Normal blend mode, no effect graphs, and at most five media/solid layers.
+  preview/viewer GPU path for the safe production subset: media-layer affine
+  transforms, identity solid transforms, Normal blend mode, no effect graphs,
+  and at most five media/solid layers.
   It composites into an `Rgba32Float` working-space GPU texture, then feeds the
   same renderer-owned OCIO GPU output boundary used by the rest of preview.
   Unsupported layer stacks fail back to the CPU reference compositor with
   structured `GpuCompositingDiagnostics` blocker reasons (`EffectRequiresCpu`,
-  `UnsupportedBlendMode`, `NonIdentityTransform`, `TooManyLayers`,
+  `UnsupportedBlendMode`, `UnsupportedTransform`, `TooManyLayers`,
   `GpuUnavailable`).
 - **`FrameNotGpuResident` blocker** — The current preview GPU compositing path
   supports CPU-layer upload into GPU compositing (`GpuWithUpload`) and then keeps

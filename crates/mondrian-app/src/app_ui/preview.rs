@@ -1793,6 +1793,8 @@ pub(crate) enum AppUiGpuPreviewCompositeLayer {
         frame: CpuColorFrame,
         /// Layer opacity.
         opacity: f32,
+        /// Timeline affine transform.
+        transform: [f32; 6],
     },
     /// Full-frame solid color.
     SolidColor {
@@ -2992,8 +2994,8 @@ fn output_boundary_from_color_context(color_context: &ColorContext) -> RenderOut
 }
 
 fn gpu_composite_layers_for_resolved(
-    width: u32,
-    height: u32,
+    _width: u32,
+    _height: u32,
     resolved: &[ResolvedPreviewElement],
     working_color_space: ColorSpace,
 ) -> Result<Vec<AppUiGpuPreviewCompositeLayer>, GpuCompositingBlockerReason> {
@@ -3017,19 +3019,17 @@ fn gpu_composite_layers_for_resolved(
                 if *blend_mode != BlendMode::Normal {
                     return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
                 }
-                if !is_preview_identity_transform(*transform) {
-                    return Err(GpuCompositingBlockerReason::NonIdentityTransform);
-                }
                 let descriptor = frame.frame.descriptor();
-                if descriptor.width != width
-                    || descriptor.height != height
-                    || descriptor.color_space != working_color_space
-                {
-                    return Err(GpuCompositingBlockerReason::NonIdentityTransform);
+                if descriptor.color_space != working_color_space {
+                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
+                }
+                if !is_preview_gpu_media_transform_supported(*transform) {
+                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
                 layers.push(AppUiGpuPreviewCompositeLayer::Media {
                     frame: frame.frame.clone(),
                     opacity: *opacity,
+                    transform: *transform,
                 });
             }
             ResolvedPreviewElement::SolidColor(layer) => {
@@ -3040,7 +3040,7 @@ fn gpu_composite_layers_for_resolved(
                     return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
                 }
                 if !is_preview_identity_transform(layer.transform) {
-                    return Err(GpuCompositingBlockerReason::NonIdentityTransform);
+                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
                 layers.push(AppUiGpuPreviewCompositeLayer::SolidColor { layer: layer.clone() });
             }
@@ -3060,6 +3060,11 @@ fn is_preview_identity_transform(transform: [f32; 6]) -> bool {
         && transform[3].abs() <= EPSILON
         && (transform[4] - 1.0).abs() <= EPSILON
         && transform[5].abs() <= EPSILON
+}
+
+fn is_preview_gpu_media_transform_supported(transform: [f32; 6]) -> bool {
+    let det = transform[0] * transform[4] - transform[3] * transform[1];
+    det.abs() > 1.0e-8
 }
 
 fn composite_resolved_preview(
@@ -3362,6 +3367,64 @@ mod tests {
         assert_eq!(diagnostics.gpu_preview_candidate_loading, 0);
         assert_eq!(diagnostics.gpu_preview_candidate_unavailable, 0);
         assert_eq!(diagnostics.gpu_preview_candidate_pixels, 960_u64 * 540);
+    }
+
+    #[test]
+    fn gpu_composite_layers_accept_transformed_media_frame() {
+        let media = test_media_frame_with_size(180, 320, 180, 42);
+        let transform = [3.0, 0.0, 12.0, 0.0, 3.0, 18.0];
+        let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+            &mondrian_effects::EffectRenderPlan::default(),
+        )
+        .expect("compile identity graph");
+        let elements = vec![ResolvedPreviewElement::Media {
+            frame: media,
+            opacity: 0.85,
+            blend_mode: BlendMode::Normal,
+            transform,
+            effect_graph,
+            frame_seed: 7,
+        }];
+
+        let layers = gpu_composite_layers_for_resolved(960, 540, &elements, ColorSpace::Rec709)
+            .expect("affine transformed media should stay on GPU composite path");
+
+        assert_eq!(layers.len(), 1);
+        match &layers[0] {
+            AppUiGpuPreviewCompositeLayer::Media {
+                opacity, transform: actual_transform, ..
+            } => {
+                assert_eq!(*opacity, 0.85);
+                assert_eq!(*actual_transform, transform);
+            }
+            AppUiGpuPreviewCompositeLayer::SolidColor { .. } => {
+                panic!("expected media layer")
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_composite_layers_reject_singular_media_transform() {
+        let media = test_media_frame_with_size(180, 320, 180, 43);
+        let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+            &mondrian_effects::EffectRenderPlan::default(),
+        )
+        .expect("compile identity graph");
+        let elements = vec![ResolvedPreviewElement::Media {
+            frame: media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            effect_graph,
+            frame_seed: 7,
+        }];
+
+        let err = match gpu_composite_layers_for_resolved(960, 540, &elements, ColorSpace::Rec709) {
+            Ok(_) => panic!("singular transform cannot stay on GPU composite path"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, GpuCompositingBlockerReason::UnsupportedTransform);
     }
 
     #[test]

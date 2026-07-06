@@ -552,7 +552,7 @@ covered by `from_gpu_working_frame()`.
 - **`CpuFallback`** — GPU compositing not possible. Reason is classified as:
   - `EffectRequiresCpu` — Effect graph needs CPU execution
   - `UnsupportedBlendMode` — Only Normal is GPU-supported
-  - `NonIdentityTransform` — Transform needs CPU bilinear sampling
+  - `UnsupportedTransform` — Transform cannot be represented by the GPU compositor
   - `FrameNotGpuResident` — Frame must be uploaded
   - `TooManyLayers` — Exceeds 5-layer fused shader limit
   - `GpuUnavailable` — No GPU device/queue
@@ -567,10 +567,12 @@ formats with size-class-based LRU reuse (8 per key, 64 total default).
 The production preview path uses GPU compositing when `ResolvedPreviewElement`
 contains only supported media/solid layers:
 
-- media frames must already be in the sequence working color space and match
-  the preview extent;
+- media frames must already be in the sequence working color space; differing
+  source/preview extents are supported through inverse-affine GPU sampling;
 - solid layers must have identity effect graphs;
-- all layers must use identity transforms and `BlendMode::Normal`;
+- media layers may use invertible affine transforms; solid layers currently
+  require identity transforms to match the float reference compositor;
+- all layers must use `BlendMode::Normal`;
 - layer count must be ≤5.
 
 If any condition is not met, the preview service records
