@@ -426,6 +426,18 @@ impl AppState {
         self.project_settings.proxy_enabled
     }
 
+    /// Resolve project proxy settings into the media-layer proxy generator config.
+    pub fn proxy_config(&self) -> mondrian_media::ProxyConfig {
+        let mut config = mondrian_media::ProxyConfig {
+            resolution: proxy_resolution_from_project(self.project_settings.proxy_resolution),
+            ..mondrian_media::ProxyConfig::default()
+        };
+        if let Some(cache_dir) = self.project_settings.cache_dir.as_ref() {
+            config.cache_dir = cache_dir.join("proxy");
+        }
+        config
+    }
+
     pub fn is_asset_proxy_mode(&self, asset_id: AssetId) -> bool {
         self.proxy_mode_assets.contains(&asset_id)
     }
@@ -436,6 +448,15 @@ impl AppState {
         } else {
             self.proxy_mode_assets.remove(&asset_id);
         }
+    }
+}
+
+fn proxy_resolution_from_project(resolution: Resolution) -> mondrian_media::ProxyResolution {
+    match resolution.height {
+        0..=360 => mondrian_media::ProxyResolution::P360,
+        361..=480 => mondrian_media::ProxyResolution::P480,
+        481..=720 => mondrian_media::ProxyResolution::P720,
+        _ => mondrian_media::ProxyResolution::P1080,
     }
 }
 

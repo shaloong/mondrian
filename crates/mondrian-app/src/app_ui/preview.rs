@@ -3231,10 +3231,11 @@ impl AppUiPreviewService {
             return None;
         }
 
+        let proxy_config = state.proxy_config();
         let resolved_path = resolve_preview_media_decode_path(
             state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id),
             &asset.path,
-            &mondrian_media::ProxyConfig::default(),
+            &proxy_config,
         );
         match resolved_path.resolution {
             PreviewMediaDecodePathResolution::Proxy => bump(&self.metrics.media_proxy_path_hits),

@@ -377,7 +377,7 @@ impl AppState {
                         if let Ok(Some(asset)) = library.get_asset(asset_id) {
                             if matches!(asset.kind, AssetKind::Video) {
                                 self.set_asset_proxy_mode(asset_id, true);
-                                spawn_proxy_generation(asset_id, asset.path);
+                                spawn_proxy_generation(asset_id, asset.path, self.proxy_config());
                                 proxy_started = true;
                             } else {
                                 self.set_asset_proxy_mode(asset_id, false);
@@ -561,6 +561,14 @@ impl AppState {
                 reason,
             });
         }
+        if payload.enabled && !self.project_settings.proxy_enabled {
+            let reason = "项目已禁用代理工作流，请先在项目设置中启用代理".to_string();
+            self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "set_asset_proxy_mode".to_string(),
+                reason,
+            });
+        }
 
         self.set_asset_proxy_mode(payload.asset_id, payload.enabled);
         let mut status = if payload.enabled {
@@ -569,10 +577,10 @@ impl AppState {
             format!("已关闭代理模式：{}", asset.name)
         };
         if payload.enabled {
-            let proxy_generator =
-                mondrian_media::ProxyGenerator::new(mondrian_media::ProxyConfig::default());
+            let proxy_config = self.proxy_config();
+            let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
             if !proxy_generator.proxy_exists(&asset.path) {
-                spawn_proxy_generation(payload.asset_id, asset.path);
+                spawn_proxy_generation(payload.asset_id, asset.path, proxy_config);
                 status.push_str("（后台生成中）");
             }
         }
@@ -2291,12 +2299,15 @@ fn source_trim_target_frame(clip: &Clip, edge: TrimEdge, source_time: TimeCode) 
     Ok(clip.position.frame.saturating_add(timeline_delta).max(0))
 }
 
-fn spawn_proxy_generation(asset_id: mondrian_core::types::AssetId, source_path: PathBuf) {
+fn spawn_proxy_generation(
+    asset_id: mondrian_core::types::AssetId,
+    source_path: PathBuf,
+    proxy_config: mondrian_media::ProxyConfig,
+) {
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
         if let Ok(rt) = runtime {
-            let generator =
-                mondrian_media::ProxyGenerator::new(mondrian_media::ProxyConfig::default());
+            let generator = mondrian_media::ProxyGenerator::new(proxy_config);
             let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(8);
             let _ = rt.block_on(generator.generate(asset_id, source_path, progress_tx));
         }
@@ -3599,6 +3610,24 @@ mod tests {
         state.auto_proxy_enabled = false;
         state.project_settings.proxy_enabled = true;
         assert!(state.should_auto_generate_proxy_for_import());
+    }
+
+    #[test]
+    fn project_proxy_config_controls_media_proxy_generation_contract() {
+        let mut state = AppState::new();
+        let cache_root = unique_temp_path("project-proxy-cache");
+        state.project_settings.proxy_resolution = Resolution::FHD;
+        state.project_settings.cache_dir = Some(cache_root.clone());
+
+        let proxy_config = state.proxy_config();
+
+        assert_eq!(
+            proxy_config.resolution,
+            mondrian_media::ProxyResolution::P1080
+        );
+        assert_eq!(proxy_config.cache_dir, cache_root.join("proxy"));
+
+        remove_temp_path(&cache_root);
     }
 
     #[test]

@@ -44,6 +44,12 @@ generation only when the project `ProjectSettings.proxy_enabled` policy is on.
 The project policy is the scheduling source of truth; app/UI preferences must
 not independently enable proxy generation against a project that has disabled
 proxy workflows.
+Proxy generation and preview proxy-path resolution must use the same
+project-derived `ProxyConfig`: `ProjectSettings.proxy_resolution` selects the
+proxy height preset, and `ProjectSettings.cache_dir` places proxy media under
+that cache root's `proxy/` directory when configured. Callers must not use
+`ProxyConfig::default()` for project media scheduling because that would split
+generation and playback lookup across different cache roots or resolutions.
 
 `DecodedGpuFrameHandleKind` belongs to media because it describes the decoder
 surface family that FFmpeg/hardware decode produced, such as D3D11 texture,
