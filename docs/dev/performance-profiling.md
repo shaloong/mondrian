@@ -69,9 +69,18 @@ file. It bypasses app UI scheduling and reports one
 `MONDRIAN_PREVIEW_DECODE_PERF_JSON` record with the in-process FFmpeg preview
 decode path, output dimensions, RGBA byte count, elapsed time, cache-hit flag,
 CPU-residency flag, whether the request performed a decoder seek, and how many
-frames FFmpeg decoded before selecting the output frame. Use it when a real
-4K/HDR file feels slow to distinguish long-GOP seek/decode/scaling cost from
-later app UI, OCIO, compositor, or viewer-output cost.
+frames FFmpeg decoded before selecting the output frame. It also reports the
+in-process FFmpeg decoder threading mode/count. Use it when a real 4K/HDR file
+feels slow to distinguish long-GOP seek/decode/scaling cost from later app UI,
+OCIO, compositor, or viewer-output cost.
+
+Preview software decode defaults to bounded slice threading. Override it only
+for profiling or platform-specific investigation:
+
+```powershell
+$env:MONDRIAN_PREVIEW_DECODE_THREADING='slice' # none | frame | slice
+$env:MONDRIAN_PREVIEW_DECODE_THREADS='8'      # 0 lets FFmpeg choose
+```
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

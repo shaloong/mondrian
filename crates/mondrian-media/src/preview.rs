@@ -49,6 +49,60 @@ pub enum PreviewDecodePath {
     PreviewCacheHit,
 }
 
+/// FFmpeg decoder threading mode requested for preview software decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewDecodeThreadingKind {
+    /// Decoder threading disabled.
+    None,
+    /// Frame-level decoder threading.
+    Frame,
+    /// Slice-level decoder threading.
+    #[default]
+    Slice,
+}
+
+impl PreviewDecodeThreadingKind {
+    /// Stable threading kind name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Frame => "Frame",
+            Self::Slice => "Slice",
+        }
+    }
+
+    fn from_env(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "none" | "off" | "false" | "0" => Some(Self::None),
+            "frame" | "frames" => Some(Self::Frame),
+            "slice" | "slices" => Some(Self::Slice),
+            _ => None,
+        }
+    }
+
+    fn to_ffmpeg(self) -> ffmpeg::codec::threading::Type {
+        match self {
+            Self::None => ffmpeg::codec::threading::Type::None,
+            Self::Frame => ffmpeg::codec::threading::Type::Frame,
+            Self::Slice => ffmpeg::codec::threading::Type::Slice,
+        }
+    }
+
+    fn from_ffmpeg(value: ffmpeg::codec::threading::Type) -> Self {
+        match value {
+            ffmpeg::codec::threading::Type::None => Self::None,
+            ffmpeg::codec::threading::Type::Frame => Self::Frame,
+            ffmpeg::codec::threading::Type::Slice => Self::Slice,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewDecodeThreadingConfig {
+    kind: PreviewDecodeThreadingKind,
+    count: usize,
+}
+
 impl PreviewDecodePath {
     /// Stable path name for telemetry.
     pub fn as_str(self) -> &'static str {
@@ -79,6 +133,12 @@ pub struct PreviewDecodeDiagnostics {
     /// Decoded frames consumed by this request before selecting the output frame.
     #[serde(default)]
     pub decoded_frame_count: u32,
+    /// FFmpeg decoder threading mode active for the decode session.
+    #[serde(default)]
+    pub threading_kind: PreviewDecodeThreadingKind,
+    /// FFmpeg decoder thread count active for the decode session.
+    #[serde(default)]
+    pub threading_count: u32,
 }
 
 impl PreviewDecodeDiagnostics {
@@ -91,6 +151,8 @@ impl PreviewDecodeDiagnostics {
             cpu_resident: true,
             seek_performed: false,
             decoded_frame_count: 0,
+            threading_kind: PreviewDecodeThreadingKind::None,
+            threading_count: 0,
         }
     }
 
@@ -165,6 +227,12 @@ impl RgbaFrame {
         self
     }
 
+    fn with_threading(mut self, kind: PreviewDecodeThreadingKind, count: usize) -> Self {
+        self.diagnostics.threading_kind = kind;
+        self.diagnostics.threading_count = count.min(u32::MAX as usize) as u32;
+        self
+    }
+
     fn into_cache_hit(mut self, elapsed: Duration) -> Self {
         self.diagnostics = PreviewDecodeDiagnostics::cache_hit(elapsed);
         self
@@ -192,6 +260,18 @@ thread_local! {
     static PREVIEW_DECODE_SESSION: RefCell<Option<PreviewDecodeSession>> = const { RefCell::new(None) };
 }
 
+/// Drop the current thread's cached preview decode session.
+///
+/// Preview playback keeps a thread-local FFmpeg session so nearby frames can be
+/// decoded forward without reopening codecs or seeking. Call this at explicit
+/// lifecycle boundaries, such as perf probes, project/media shutdown, or tests
+/// that intentionally open threaded software decoders.
+pub fn clear_thread_local_preview_decode_session() {
+    PREVIEW_DECODE_SESSION.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
 struct PreviewDecodeSession {
     path: PathBuf,
     max_width: Option<u32>,
@@ -207,6 +287,8 @@ struct PreviewDecodeSession {
     cache_tolerance_pts: i64,
     target_width: u32,
     target_height: u32,
+    threading_kind: PreviewDecodeThreadingKind,
+    threading_count: usize,
     last_pts: Option<i64>,
     reached_eof: bool,
 }
@@ -249,17 +331,26 @@ impl PreviewDecodeSession {
             )
         };
 
-        let context =
+        let mut context =
             ffmpeg::codec::context::Context::from_parameters(parameters).map_err(|e| {
                 MondrianError::DecodeFailed {
                     asset_id: path.display().to_string(),
                     reason: e.to_string(),
                 }
             })?;
+        let requested_threading = preview_decode_threading_config();
+        let ffmpeg_threading = ffmpeg::codec::threading::Config {
+            kind: requested_threading.kind.to_ffmpeg(),
+            count: requested_threading.count,
+        };
+        context.set_threading(ffmpeg_threading);
         let decoder = context.decoder().video().map_err(|e| MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
             reason: e.to_string(),
         })?;
+        let active_threading = decoder.threading();
+        let threading_kind = PreviewDecodeThreadingKind::from_ffmpeg(active_threading.kind);
+        let threading_count = active_threading.count;
 
         let (target_width, target_height) =
             fit_target_size(decoder.width(), decoder.height(), max_width, max_height);
@@ -300,6 +391,8 @@ impl PreviewDecodeSession {
             cache_tolerance_pts,
             target_width,
             target_height,
+            threading_kind,
+            threading_count,
             last_pts: None,
             reached_eof: false,
         })
@@ -347,7 +440,9 @@ impl PreviewDecodeSession {
 
         let result = self.decode_forward_until(target_pts)?;
         if let Some(frame) = result.frame {
-            return Ok(frame.with_decode_work(seek_performed, result.decoded_frame_count));
+            return Ok(frame
+                .with_decode_work(seek_performed, result.decoded_frame_count)
+                .with_threading(self.threading_kind, self.threading_count));
         }
 
         Err(MondrianError::DecodeFailed {
@@ -688,6 +783,26 @@ fn preview_fast_any_seek_enabled() -> bool {
     })
 }
 
+fn preview_decode_threading_config() -> PreviewDecodeThreadingConfig {
+    let kind = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADING")
+        .ok()
+        .and_then(|value| PreviewDecodeThreadingKind::from_env(&value))
+        .unwrap_or_default();
+    let count = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(default_preview_decode_thread_count);
+    PreviewDecodeThreadingConfig { kind, count }
+}
+
+fn default_preview_decode_thread_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1)
+        .saturating_sub(2)
+        .clamp(1, 8)
+}
+
 #[derive(Clone)]
 struct PreviewCacheHit {
     frame: RgbaFrame,
@@ -1008,7 +1123,8 @@ fn convert_decoded_to_rgba(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_video_frame_at_time_rgba_scaled, PreviewDecodeBackend, PreviewDecodePath, RgbaFrame,
+        clear_thread_local_preview_decode_session, decode_video_frame_at_time_rgba_scaled,
+        PreviewDecodeBackend, PreviewDecodePath, PreviewDecodeThreadingKind, RgbaFrame,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1035,6 +1151,26 @@ mod tests {
     }
 
     #[test]
+    fn preview_decode_threading_kind_names_and_env_values_are_stable() {
+        assert_eq!(PreviewDecodeThreadingKind::None.as_str(), "None");
+        assert_eq!(PreviewDecodeThreadingKind::Frame.as_str(), "Frame");
+        assert_eq!(PreviewDecodeThreadingKind::Slice.as_str(), "Slice");
+        assert_eq!(
+            PreviewDecodeThreadingKind::from_env("off"),
+            Some(PreviewDecodeThreadingKind::None)
+        );
+        assert_eq!(
+            PreviewDecodeThreadingKind::from_env("frame"),
+            Some(PreviewDecodeThreadingKind::Frame)
+        );
+        assert_eq!(
+            PreviewDecodeThreadingKind::from_env("slice"),
+            Some(PreviewDecodeThreadingKind::Slice)
+        );
+        assert_eq!(PreviewDecodeThreadingKind::from_env("surprise"), None);
+    }
+
+    #[test]
     fn rgba_frame_diagnostics_record_cpu_residency_and_cache_hits() {
         let frame = RgbaFrame::new(2, 1, vec![0; 8], PreviewDecodePath::InProcessFfmpegCpuRgba)
             .with_elapsed(std::time::Duration::from_micros(42));
@@ -1047,6 +1183,11 @@ mod tests {
         assert!(!frame.diagnostics.cache_hit);
         assert!(!frame.diagnostics.external_process);
         assert!(frame.diagnostics.cpu_resident);
+        assert_eq!(
+            frame.diagnostics.threading_kind,
+            PreviewDecodeThreadingKind::None
+        );
+        assert_eq!(frame.diagnostics.threading_count, 0);
 
         let cached = frame.into_cache_hit(std::time::Duration::from_micros(3));
         assert_eq!(cached.diagnostics.path, PreviewDecodePath::PreviewCacheHit);
@@ -1096,9 +1237,12 @@ mod tests {
             cpu_resident: frame.diagnostics.cpu_resident,
             seek_performed: frame.diagnostics.seek_performed,
             decoded_frame_count: frame.diagnostics.decoded_frame_count,
+            threading_kind: frame.diagnostics.threading_kind.as_str(),
+            threading_count: frame.diagnostics.threading_count,
         };
         let json = serde_json::to_string(&report).expect("serialize decode perf report");
         eprintln!("MONDRIAN_PREVIEW_DECODE_PERF_JSON={json}");
+        clear_thread_local_preview_decode_session();
     }
 
     #[derive(Debug, Serialize)]
@@ -1117,5 +1261,7 @@ mod tests {
         cpu_resident: bool,
         seek_performed: bool,
         decoded_frame_count: u32,
+        threading_kind: &'static str,
+        threading_count: u32,
     }
 }

@@ -17,7 +17,7 @@ use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
-    PreviewDecodeDiagnostics, PreviewDecodePath, VideoColorDiagnostic,
+    PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeThreadingKind, VideoColorDiagnostic,
     VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
@@ -180,6 +180,11 @@ impl AppUiPreviewService {
             decode_seeked_frames: self.metrics.decode_seeked_frames.get(),
             decode_decoded_frame_count: self.metrics.decode_decoded_frame_count.get(),
             decode_max_decoded_frame_count: self.metrics.decode_max_decoded_frame_count.get(),
+            decode_threading_none_frames: self.metrics.decode_threading_none_frames.get(),
+            decode_threading_frame_frames: self.metrics.decode_threading_frame_frames.get(),
+            decode_threading_slice_frames: self.metrics.decode_threading_slice_frames.get(),
+            decode_last_threading_count: self.metrics.decode_last_threading_count.get(),
+            decode_max_threading_count: self.metrics.decode_max_threading_count.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
@@ -798,6 +803,16 @@ impl AppUiPreviewService {
                 .get()
                 .max(u64::from(diagnostics.decoded_frame_count)),
         );
+        match diagnostics.threading_kind {
+            PreviewDecodeThreadingKind::None => bump(&self.metrics.decode_threading_none_frames),
+            PreviewDecodeThreadingKind::Frame => bump(&self.metrics.decode_threading_frame_frames),
+            PreviewDecodeThreadingKind::Slice => bump(&self.metrics.decode_threading_slice_frames),
+        }
+        let threading_count = u64::from(diagnostics.threading_count);
+        self.metrics.decode_last_threading_count.set(threading_count);
+        self.metrics
+            .decode_max_threading_count
+            .set(self.metrics.decode_max_threading_count.get().max(threading_count));
     }
 
     fn record_composite(&self, diagnostics: TimelineCompositeDiagnostics) {
@@ -1135,6 +1150,16 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_decoded_frame_count: u64,
     /// Largest decoded-frame count consumed by one preview decode request.
     pub decode_max_decoded_frame_count: u64,
+    /// Decode results that reported no FFmpeg decoder threading.
+    pub decode_threading_none_frames: u64,
+    /// Decode results that reported frame-level FFmpeg decoder threading.
+    pub decode_threading_frame_frames: u64,
+    /// Decode results that reported slice-level FFmpeg decoder threading.
+    pub decode_threading_slice_frames: u64,
+    /// Most recent FFmpeg decoder thread count reported by preview decode.
+    pub decode_last_threading_count: u64,
+    /// Largest FFmpeg decoder thread count reported by preview decode.
+    pub decode_max_threading_count: u64,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
@@ -2892,6 +2917,11 @@ struct AppUiPreviewMetrics {
     decode_seeked_frames: Cell<u64>,
     decode_decoded_frame_count: Cell<u64>,
     decode_max_decoded_frame_count: Cell<u64>,
+    decode_threading_none_frames: Cell<u64>,
+    decode_threading_frame_frames: Cell<u64>,
+    decode_threading_slice_frames: Cell<u64>,
+    decode_last_threading_count: Cell<u64>,
+    decode_max_threading_count: Cell<u64>,
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
@@ -3970,6 +4000,8 @@ mod tests {
             cpu_resident: true,
             seek_performed: true,
             decoded_frame_count: 48,
+            threading_kind: PreviewDecodeThreadingKind::Frame,
+            threading_count: 6,
         });
         service.record_preview_decode(PreviewDecodeDiagnostics {
             path: PreviewDecodePath::ExternalFfmpegCpuRgba,
@@ -3979,6 +4011,8 @@ mod tests {
             cpu_resident: true,
             seek_performed: false,
             decoded_frame_count: 0,
+            threading_kind: PreviewDecodeThreadingKind::None,
+            threading_count: 0,
         });
         service.record_preview_decode(PreviewDecodeDiagnostics {
             path: PreviewDecodePath::PreviewCacheHit,
@@ -3988,6 +4022,8 @@ mod tests {
             cpu_resident: true,
             seek_performed: false,
             decoded_frame_count: 0,
+            threading_kind: PreviewDecodeThreadingKind::None,
+            threading_count: 0,
         });
 
         let diagnostics = service.diagnostics();
@@ -4001,6 +4037,11 @@ mod tests {
         assert_eq!(diagnostics.decode_seeked_frames, 1);
         assert_eq!(diagnostics.decode_decoded_frame_count, 48);
         assert_eq!(diagnostics.decode_max_decoded_frame_count, 48);
+        assert_eq!(diagnostics.decode_threading_none_frames, 2);
+        assert_eq!(diagnostics.decode_threading_frame_frames, 1);
+        assert_eq!(diagnostics.decode_threading_slice_frames, 0);
+        assert_eq!(diagnostics.decode_last_threading_count, 0);
+        assert_eq!(diagnostics.decode_max_threading_count, 6);
     }
 
     #[test]
