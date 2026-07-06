@@ -8,7 +8,8 @@ use std::process::Command;
 
 use mondrian_core::Color;
 pub use mondrian_platform_core::{
-    ClipboardError, FileFilter, NoopPlatformService, PlatformService,
+    ClipboardError, DisplayIccProfileProbeResult, DisplayProfileProbe, DisplayProfileProbeTarget,
+    FileFilter, NoopPlatformService, PlatformService,
 };
 
 /// Default desktop platform implementation.
@@ -59,6 +60,27 @@ impl PlatformService for SystemPlatformService {
     fn send_notification(&self, _title: &str, _body: &str) {}
 }
 
+impl DisplayProfileProbe for SystemPlatformService {
+    fn display_icc_profile(
+        &self,
+        target: DisplayProfileProbeTarget,
+    ) -> DisplayIccProfileProbeResult {
+        system_display_icc_profile(target)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn system_display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
+    windows_display_profile::display_icc_profile(target)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_display_icc_profile(_target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
+    DisplayIccProfileProbeResult::unsupported(
+        "OS ICC profile discovery is not implemented for this platform",
+    )
+}
+
 fn reveal_path_in_file_manager(path: &Path) {
     #[cfg(target_os = "windows")]
     {
@@ -101,6 +123,203 @@ fn configured_file_dialog(title: &str, filters: &[FileFilter]) -> rfd::FileDialo
         dialog = dialog.add_filter(&filter.name, &extensions);
     }
     dialog
+}
+
+#[cfg(target_os = "windows")]
+mod windows_display_profile {
+    use std::path::PathBuf;
+    use std::ptr;
+
+    use mondrian_platform_core::{DisplayIccProfileProbeResult, DisplayProfileProbeTarget};
+    use windows_sys::Win32::Foundation::{LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    };
+    use windows_sys::Win32::UI::ColorSystem::{
+        WcsGetDefaultColorProfile, WcsGetDefaultColorProfileSize, CPST_NONE,
+        CPST_RGB_WORKING_SPACE, CPST_STANDARD_DISPLAY_COLOR_MODE, CPT_ICC,
+        WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER, WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE,
+    };
+
+    pub fn display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
+        let display_device_name = match display_device_name_for_target(target) {
+            Ok(Some(name)) => name,
+            Ok(None) => {
+                return DisplayIccProfileProbeResult::missing(
+                    None,
+                    "no Windows monitor matched the winit display rectangle",
+                );
+            }
+            Err(reason) => return DisplayIccProfileProbeResult::failed(None, reason),
+        };
+
+        match default_icc_profile_for_device(&display_device_name) {
+            Ok(path) => DisplayIccProfileProbeResult::found(Some(display_device_name), path),
+            Err(reason) => DisplayIccProfileProbeResult::missing(Some(display_device_name), reason),
+        }
+    }
+
+    fn display_device_name_for_target(
+        target: DisplayProfileProbeTarget,
+    ) -> Result<Option<String>, String> {
+        let mut search = MonitorSearch { target, matched_name: None };
+        let ok = unsafe {
+            EnumDisplayMonitors(
+                ptr::null_mut(),
+                ptr::null(),
+                Some(enum_monitor_proc),
+                &mut search as *mut MonitorSearch as LPARAM,
+            )
+        };
+        if ok == 0 {
+            return Err("EnumDisplayMonitors failed".to_owned());
+        }
+        Ok(search.matched_name)
+    }
+
+    struct MonitorSearch {
+        target: DisplayProfileProbeTarget,
+        matched_name: Option<String>,
+    }
+
+    unsafe extern "system" fn enum_monitor_proc(
+        monitor: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> windows_sys::core::BOOL {
+        let search = &mut *(lparam as *mut MonitorSearch);
+        if search.matched_name.is_some() {
+            return 0;
+        }
+
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        let ok = GetMonitorInfoW(
+            monitor,
+            &mut info as *mut MONITORINFOEXW as *mut windows_sys::Win32::Graphics::Gdi::MONITORINFO,
+        );
+        if ok == 0 {
+            return 1;
+        }
+
+        if monitor_matches_target(&info.monitorInfo.rcMonitor, search.target) {
+            search.matched_name = utf16z_to_string(&info.szDevice);
+            return 0;
+        }
+
+        1
+    }
+
+    fn monitor_matches_target(rect: &RECT, target: DisplayProfileProbeTarget) -> bool {
+        let width = rect.right.saturating_sub(rect.left) as u32;
+        let height = rect.bottom.saturating_sub(rect.top) as u32;
+        let exact = rect.left == target.x
+            && rect.top == target.y
+            && width == target.width
+            && height == target.height;
+        if exact {
+            return true;
+        }
+
+        let center_x = target.x.saturating_add((target.width / 2) as i32);
+        let center_y = target.y.saturating_add((target.height / 2) as i32);
+        center_x >= rect.left
+            && center_x < rect.right
+            && center_y >= rect.top
+            && center_y < rect.bottom
+    }
+
+    fn default_icc_profile_for_device(device_name: &str) -> Result<PathBuf, String> {
+        let device_name = wide_null(device_name);
+        let scopes = [
+            WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
+            WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE,
+        ];
+        let subtypes = [
+            CPST_RGB_WORKING_SPACE,
+            CPST_STANDARD_DISPLAY_COLOR_MODE,
+            CPST_NONE,
+        ];
+
+        let mut failures = Vec::new();
+        for scope in scopes {
+            for subtype in subtypes {
+                match default_icc_profile_for_scope(device_name.as_ptr(), scope, subtype) {
+                    Ok(path) => return Ok(resolve_color_profile_path(path)),
+                    Err(reason) => failures.push(reason),
+                }
+            }
+        }
+
+        Err(format!(
+            "WcsGetDefaultColorProfile did not return a profile ({})",
+            failures.join("; ")
+        ))
+    }
+
+    fn default_icc_profile_for_scope(
+        device_name: *const u16,
+        scope: i32,
+        subtype: i32,
+    ) -> Result<PathBuf, String> {
+        let mut size = 0u32;
+        let size_ok = unsafe {
+            WcsGetDefaultColorProfileSize(scope, device_name, CPT_ICC, subtype, 0, &mut size)
+        };
+        if size_ok == 0 || size == 0 {
+            return Err(format!(
+                "size query failed for scope={scope} subtype={subtype}"
+            ));
+        }
+
+        let mut buffer = vec![0u16; size as usize];
+        let profile_ok = unsafe {
+            WcsGetDefaultColorProfile(
+                scope,
+                device_name,
+                CPT_ICC,
+                subtype,
+                0,
+                size,
+                buffer.as_mut_ptr(),
+            )
+        };
+        if profile_ok == 0 {
+            return Err(format!(
+                "profile query failed for scope={scope} subtype={subtype}"
+            ));
+        }
+
+        let profile = utf16z_to_string(&buffer)
+            .ok_or_else(|| format!("empty profile path for scope={scope} subtype={subtype}"))?;
+        Ok(PathBuf::from(profile))
+    }
+
+    fn resolve_color_profile_path(path: PathBuf) -> PathBuf {
+        if path.is_absolute() {
+            return path;
+        }
+
+        std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .map(|root| {
+                root.join("System32").join("spool").join("drivers").join("color").join(&path)
+            })
+            .unwrap_or(path)
+    }
+
+    fn utf16z_to_string(slice: &[u16]) -> Option<String> {
+        let len = slice.iter().position(|ch| *ch == 0).unwrap_or(slice.len());
+        if len == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&slice[..len]))
+    }
+
+    fn wide_null(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
 }
 
 /// Desktop-space pixel coordinate.

@@ -419,7 +419,7 @@ impl DisplayOutputBlocker {
             Self::SurfaceContractMismatch { .. }
             | Self::UnsupportedDisplayColorSpace { .. }
             | Self::UnsupportedHdrSwapchainOrEdr { .. } => "configure_display_contract",
-            Self::MonitorIccProfileUnsupported { .. } => "implement_os_icc_profile_probe",
+            Self::MonitorIccProfileUnsupported { .. } => "configure_monitor_icc_profile",
             Self::MonitorIccProfileInvalid { .. } => "map_icc_profile_to_ocio_display",
             Self::MonitorIccProfileUnmapped { .. } => "map_icc_profile_to_ocio_display",
             Self::MonitorHdrCapabilityUnknown { .. } => "inspect_monitor_hdr_capability",

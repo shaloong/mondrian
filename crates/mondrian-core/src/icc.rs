@@ -430,11 +430,12 @@ mod tests {
     }
 }
 
-/// OS-level display profile access status.
+/// Core-level display profile access status.
 ///
-/// This reports whether the current platform can provide ICC profile access,
-/// EDR information, or HDR display metadata. For alpha, this is a diagnostic
-/// only — full OS integration is deferred to a later phase.
+/// This reports whether `mondrian-core` itself can provide ICC profile access,
+/// EDR information, or HDR display metadata. Real OS adapters live outside
+/// core in `mondrian-platform`, so core never performs platform discovery
+/// directly.
 ///
 /// The structured status integrates with the Display Output Contract v2:
 /// when `os_icc_discovery_available` is false and the user requests an
@@ -443,10 +444,11 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OsDisplayProfileStatus {
     /// Whether ICC profile parsing is available (always true — the parser is
-    /// built-in, but OS-level profile discovery is not implemented).
+    /// built in).
     pub icc_parser_available: bool,
-    /// Whether OS-level ICC profile discovery is available (currently false
-    /// on all platforms).
+    /// Whether OS-level ICC profile discovery is available from core.
+    ///
+    /// This is always false; use `mondrian-platform` for OS-backed discovery.
     pub os_icc_discovery_available: bool,
     /// Whether EDR (Extended Dynamic Range) information is available from the OS.
     pub os_edr_available: bool,
@@ -457,19 +459,19 @@ pub struct OsDisplayProfileStatus {
 }
 
 impl OsDisplayProfileStatus {
-    /// Check the current platform's display profile access capabilities.
+    /// Check core display profile access capabilities.
     ///
-    /// For alpha, this always reports OS-level access as unavailable. Full
-    /// integration with Windows ICC, macOS ColorSync, and Linux colord is
-    /// deferred to a later phase.
+    /// This always reports OS-level access as unavailable because core must not
+    /// call platform APIs. Desktop integrations should use the platform display
+    /// profile probe instead.
     pub fn check() -> Self {
         Self {
             icc_parser_available: true,
             os_icc_discovery_available: false,
             os_edr_available: false,
             os_hdr_metadata_available: false,
-            status_message: "OS display profile discovery not implemented; \
-             ICC profiles must be provided explicitly via project settings."
+            status_message: "Core does not perform OS display profile discovery; \
+             use the platform display profile probe."
                 .to_string(),
         }
     }

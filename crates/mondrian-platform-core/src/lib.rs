@@ -22,6 +22,100 @@ impl FileFilter {
     }
 }
 
+/// Display target used for OS display-profile probing.
+///
+/// Coordinates and size are in the operating system's virtual desktop physical
+/// pixel space. Multi-monitor setups may report negative coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayProfileProbeTarget {
+    /// Left edge in virtual desktop physical pixels.
+    pub x: i32,
+    /// Top edge in virtual desktop physical pixels.
+    pub y: i32,
+    /// Physical monitor width in pixels.
+    pub width: u32,
+    /// Physical monitor height in pixels.
+    pub height: u32,
+}
+
+impl DisplayProfileProbeTarget {
+    /// Create a display-profile probe target from a monitor rectangle.
+    pub fn new(position: (i32, i32), physical_size: (u32, u32)) -> Self {
+        Self {
+            x: position.0,
+            y: position.1,
+            width: physical_size.0,
+            height: physical_size.1,
+        }
+    }
+}
+
+/// OS ICC profile discovery result for a display target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayIccProfileProbeResult {
+    /// Whether the current platform adapter has an OS ICC discovery mechanism.
+    pub discovery_available: bool,
+    /// OS display-device identifier used by the platform API, if known.
+    pub display_device_name: Option<String>,
+    /// Resolved ICC/ICM profile path, if the OS reported one.
+    pub profile_path: Option<PathBuf>,
+    /// Structured human-readable failure reason when discovery did not produce
+    /// a usable profile path.
+    pub error: Option<String>,
+}
+
+impl DisplayIccProfileProbeResult {
+    /// Build a successful ICC profile probe result.
+    pub fn found(display_device_name: Option<String>, profile_path: PathBuf) -> Self {
+        Self {
+            discovery_available: true,
+            display_device_name,
+            profile_path: Some(profile_path),
+            error: None,
+        }
+    }
+
+    /// Build a result for a supported probe that found no default profile.
+    pub fn missing(display_device_name: Option<String>, reason: impl Into<String>) -> Self {
+        Self {
+            discovery_available: true,
+            display_device_name,
+            profile_path: None,
+            error: Some(reason.into()),
+        }
+    }
+
+    /// Build a result for a supported probe that failed.
+    pub fn failed(display_device_name: Option<String>, reason: impl Into<String>) -> Self {
+        Self {
+            discovery_available: true,
+            display_device_name,
+            profile_path: None,
+            error: Some(reason.into()),
+        }
+    }
+
+    /// Build a result for a platform with no ICC profile discovery adapter.
+    pub fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            discovery_available: false,
+            display_device_name: None,
+            profile_path: None,
+            error: Some(reason.into()),
+        }
+    }
+}
+
+/// Interface for OS-backed display profile probing.
+pub trait DisplayProfileProbe: Send + Sync {
+    /// Resolve the current display's default ICC profile, when the platform can
+    /// provide one.
+    fn display_icc_profile(
+        &self,
+        target: DisplayProfileProbeTarget,
+    ) -> DisplayIccProfileProbeResult;
+}
+
 /// Clipboard operation failure reported by the platform boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardError {
@@ -108,6 +202,17 @@ impl PlatformService for NoopPlatformService {
     fn send_notification(&self, _title: &str, _body: &str) {}
 }
 
+impl DisplayProfileProbe for NoopPlatformService {
+    fn display_icc_profile(
+        &self,
+        _target: DisplayProfileProbeTarget,
+    ) -> DisplayIccProfileProbeResult {
+        DisplayIccProfileProbeResult::unsupported(
+            "OS ICC profile discovery unavailable in noop platform adapter",
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +270,14 @@ mod tests {
     fn noop_open_folder_dialog_returns_none() {
         let svc = NoopPlatformService;
         assert_eq!(svc.open_folder_dialog("Select Folder"), None);
+    }
+
+    #[test]
+    fn noop_display_profile_probe_reports_unsupported() {
+        let svc = NoopPlatformService;
+        let result = svc.display_icc_profile(DisplayProfileProbeTarget::new((0, 0), (1920, 1080)));
+        assert!(!result.discovery_available);
+        assert!(result.profile_path.is_none());
     }
 
     #[test]

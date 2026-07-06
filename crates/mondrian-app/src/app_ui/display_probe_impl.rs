@@ -4,13 +4,17 @@
 //! winit/wgpu display capabilities. It generates a `DisplayOutputSnapshot`
 //! from the live window, surface, adapter, and display management policy.
 
+use std::path::{Path, PathBuf};
+
 use mondrian_core::color_models::{DisplayManagementPolicy, MonitorProfileReference};
 use mondrian_core::display_contract::*;
-use mondrian_core::display_probe::{
-    compute_display_blockers, resolve_hdr_status, resolve_monitor_profile_status,
-};
-use mondrian_core::icc::OsDisplayProfileStatus;
+use mondrian_core::display_probe::{compute_display_blockers, resolve_hdr_status};
 use mondrian_core::types::ColorSpace;
+use mondrian_core::DisplayColorProfile;
+use mondrian_platform::{
+    DisplayIccProfileProbeResult, DisplayProfileProbe, DisplayProfileProbeTarget,
+    SystemPlatformService,
+};
 
 /// Generate a real `DisplayOutputSnapshot` from the current winit/wgpu state.
 ///
@@ -18,7 +22,7 @@ use mondrian_core::types::ColorSpace;
 /// - winit window's current monitor for display identity
 /// - wgpu surface capabilities for format/color-space support
 /// - wgpu display_hdr_info for HDR metadata
-/// - OS ICC profile status (currently always unsupported)
+/// - OS ICC profile status via the platform display-profile probe
 /// - The user's display management policy
 ///
 /// The snapshot is regenerated on every display contract refresh event.
@@ -36,10 +40,16 @@ pub fn generate_display_snapshot(
     output_color_space: ColorSpace,
     refresh_reason: &str,
 ) -> DisplayOutputSnapshot {
-    let os_status = OsDisplayProfileStatus::check();
+    let profile_probe = if should_probe_os_icc_profile(policy) {
+        SystemPlatformService.display_icc_profile(DisplayProfileProbeTarget::new(
+            display_position,
+            display_physical_size,
+        ))
+    } else {
+        DisplayIccProfileProbeResult::unsupported("ICC profile not requested")
+    };
 
-    let monitor_profile_status =
-        resolve_monitor_profile_status(policy, os_status.can_discover_os_icc_profile());
+    let monitor_profile_status = resolve_monitor_profile_status(policy, &profile_probe);
 
     let hdr_mode_str = match surface_hdr_mode_str {
         "HdrPq" => "HdrPq",
@@ -115,6 +125,130 @@ pub fn generate_display_snapshot(
         blockers,
         refresh_reason: refresh_reason.to_owned(),
     }
+}
+
+fn should_probe_os_icc_profile(policy: &DisplayManagementPolicy) -> bool {
+    matches!(
+        &policy.monitor_profile,
+        MonitorProfileReference::IccProfile { profile_id }
+            if profile_id.trim().is_empty() || profile_id.trim().eq_ignore_ascii_case("os-default")
+    )
+}
+
+/// Resolve the monitor profile status from policy and the platform ICC probe.
+fn resolve_monitor_profile_status(
+    policy: &DisplayManagementPolicy,
+    profile_probe: &DisplayIccProfileProbeResult,
+) -> MonitorProfileStatus {
+    match &policy.monitor_profile {
+        MonitorProfileReference::MatchOutputColorSpace => MonitorProfileStatus::NotRequested,
+        MonitorProfileReference::ColorSpace(cs) => MonitorProfileStatus::ManagedColorSpace {
+            color_space: *cs,
+            source: MonitorProfileSource::UserConfigured,
+        },
+        MonitorProfileReference::OcioDisplay { display: _ } => {
+            MonitorProfileStatus::ManagedColorSpace {
+                color_space: ColorSpace::Rec709,
+                source: MonitorProfileSource::OcioConfig,
+            }
+        }
+        MonitorProfileReference::IccProfile { profile_id } => {
+            let profile_path = match explicit_profile_path(profile_id) {
+                ExplicitProfilePath::Path(path) => Some(path),
+                ExplicitProfilePath::UseOsDefault => profile_probe.profile_path.clone(),
+                ExplicitProfilePath::UnresolvedId => {
+                    return MonitorProfileStatus::IccProfileUnsupported {
+                        feature_code: "icc_profile_registry".to_owned(),
+                        profile_path: Some(profile_id.clone()),
+                        reason: "ICC profile id registry is not implemented; use an absolute profile path or profile_id='os-default'".to_owned(),
+                    };
+                }
+            };
+
+            let Some(profile_path) = profile_path else {
+                return MonitorProfileStatus::IccProfileUnsupported {
+                    feature_code: "os_icc_profile".to_owned(),
+                    profile_path: Some(profile_id.clone()),
+                    reason: profile_probe.error.clone().unwrap_or_else(|| {
+                        if profile_probe.discovery_available {
+                            "OS ICC profile discovery did not return a profile".to_owned()
+                        } else {
+                            "OS ICC profile discovery is not available".to_owned()
+                        }
+                    }),
+                };
+            };
+
+            let profile = match DisplayColorProfile::from_icc_file(&profile_path) {
+                Ok(profile) => profile,
+                Err(reason) => {
+                    return MonitorProfileStatus::IccProfileReadError {
+                        profile_path: Some(profile_path.display().to_string()),
+                        reason,
+                    };
+                }
+            };
+
+            match managed_color_space_from_icc_profile(&profile) {
+                Some(color_space) => MonitorProfileStatus::ManagedColorSpace {
+                    color_space,
+                    source: MonitorProfileSource::OsIccProfile,
+                },
+                None => MonitorProfileStatus::IccProfileUnmapped {
+                    profile_path: Some(profile_path.display().to_string()),
+                    parsed_color_space: Some(profile.color_space),
+                    reason: format!(
+                        "ICC profile '{}' parsed, but no explicit OCIO display/view mapping exists",
+                        profile.name
+                    ),
+                },
+            }
+        }
+    }
+}
+
+enum ExplicitProfilePath {
+    Path(PathBuf),
+    UseOsDefault,
+    UnresolvedId,
+}
+
+fn explicit_profile_path(profile_id: &str) -> ExplicitProfilePath {
+    let trimmed = profile_id.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("os-default") {
+        return ExplicitProfilePath::UseOsDefault;
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        ExplicitProfilePath::Path(path.to_path_buf())
+    } else {
+        ExplicitProfilePath::UnresolvedId
+    }
+}
+
+fn managed_color_space_from_icc_profile(profile: &DisplayColorProfile) -> Option<ColorSpace> {
+    let name = profile.name.to_ascii_lowercase();
+    let explicitly_named = [
+        "srgb",
+        "rec.709",
+        "rec709",
+        "bt.709",
+        "bt709",
+        "display p3",
+        "dci-p3",
+        "rec.2020",
+        "rec2020",
+        "bt.2020",
+        "bt2020",
+        "pq",
+        "smpte2084",
+        "hlg",
+    ]
+    .iter()
+    .any(|hint| name.contains(hint));
+
+    explicitly_named.then_some(profile.color_space)
 }
 
 /// Resolve the output color space from the display management policy.
@@ -373,6 +507,54 @@ mod tests {
             MonitorProfileStatus::IccProfileUnsupported { .. }
         ));
         assert!(snapshot.blockers.iter().any(|b| b.code() == "monitor_icc_profile_unsupported"));
+    }
+
+    #[test]
+    fn unresolved_icc_profile_id_does_not_fall_back_to_os_default() {
+        let status = resolve_monitor_profile_status(
+            &DisplayManagementPolicy {
+                monitor_profile: MonitorProfileReference::IccProfile {
+                    profile_id: "display-profile".to_owned(),
+                },
+                ..default_policy()
+            },
+            &DisplayIccProfileProbeResult::found(
+                Some(r"\\.\DISPLAY1".to_owned()),
+                PathBuf::from(
+                    r"C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm",
+                ),
+            ),
+        );
+
+        assert!(matches!(
+            status,
+            MonitorProfileStatus::IccProfileUnsupported {
+                ref feature_code,
+                ..
+            } if feature_code == "icc_profile_registry"
+        ));
+    }
+
+    #[test]
+    fn os_default_icc_profile_without_platform_probe_fails_closed() {
+        let status = resolve_monitor_profile_status(
+            &DisplayManagementPolicy {
+                monitor_profile: MonitorProfileReference::IccProfile {
+                    profile_id: "os-default".to_owned(),
+                },
+                ..default_policy()
+            },
+            &DisplayIccProfileProbeResult::unsupported("test probe unavailable"),
+        );
+
+        assert!(matches!(
+            status,
+            MonitorProfileStatus::IccProfileUnsupported {
+                ref feature_code,
+                ref reason,
+                ..
+            } if feature_code == "os_icc_profile" && reason.contains("test probe unavailable")
+        ));
     }
 
     #[test]

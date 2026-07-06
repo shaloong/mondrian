@@ -89,7 +89,7 @@ Structured failure categories:
 | `SurfaceContractMismatch` | DisplayContract | `configure_display_contract` |
 | `UnsupportedDisplayColorSpace` | DisplayContract | `configure_display_contract` |
 | `UnsupportedHdrSwapchainOrEdr` | DisplayContract | `configure_display_contract` |
-| `MonitorIccProfileUnsupported` | MonitorProfile | `implement_os_icc_profile_probe` |
+| `MonitorIccProfileUnsupported` | MonitorProfile | `configure_monitor_icc_profile` |
 | `MonitorIccProfileInvalid` | MonitorProfile | `map_icc_profile_to_ocio_display` |
 | `MonitorIccProfileUnmapped` | MonitorProfile | `map_icc_profile_to_ocio_display` |
 | `MonitorHdrCapabilityUnknown` | MonitorHdr | `inspect_monitor_hdr_capability` |
@@ -169,7 +169,7 @@ The display contract produces structured diagnostics for:
 | Code | Meaning |
 |---|---|
 | `configure_display_contract` | Reconfigure display output contract |
-| `implement_os_icc_profile_probe` | Implement OS ICC profile discovery |
+| `configure_monitor_icc_profile` | Configure a resolvable monitor ICC profile source |
 | `map_icc_profile_to_ocio_display` | Map ICC profile to OCIO display/view |
 | `enable_hdr_surface` | Enable HDR surface format and swapchain |
 | `move_window_display_contract_refresh` | Refresh contract after window move |
@@ -183,16 +183,23 @@ The display contract produces structured diagnostics for:
 - Surface format selection with color space capability matching
 - Structured blocker taxonomy with health report integration
 - Fake display probe for testable display contract logic
+- Windows OS default ICC profile discovery via `mondrian-platform`
+  (`EnumDisplayMonitors` + WCS default profile lookup)
 - Cache invalidation on contract change
 
 ### Not Implemented (Fail-Closed)
-- **OS ICC profile discovery** — All platforms report `IccProfileUnsupported`.
-  ICC profiles must be provided explicitly via project settings.
+- **macOS/Linux OS ICC profile discovery** — these platform adapters still
+  report `IccProfileUnsupported`.
+- **ICC profile id registry** — `IccProfile { profile_id }` accepts absolute
+  paths or `os-default`; arbitrary stable ids fail closed until a registry is
+  implemented.
 - **OS HDR display metadata** — `display_hdr_info` from wgpu is available but
   real monitor HDR capability cannot be confirmed on most platforms.
 - **OS EDR information** — Not available on any platform.
-- **ICC-to-OCIO mapping** — Even if ICC bytes are provided, mapping to OCIO
-  display/view pairs is not implemented.
+- **General ICC-to-OCIO mapping** — common explicitly named monitor profiles
+  can resolve to managed Mondrian color spaces, but arbitrary calibrated ICC
+  profiles still emit `IccProfileUnmapped` until OCIO display/view mapping is
+  implemented.
 
 ### Explicitly Unsupported
 - `DataTexture` / `NonColorData` in display colorspace selection

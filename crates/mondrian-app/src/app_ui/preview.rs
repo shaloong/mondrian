@@ -2891,8 +2891,8 @@ fn preview_display_color_space(
         mondrian_core::MonitorProfileReference::IccProfile { .. } => {
             return Err(
                 crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
-                    feature: "os_icc_profile".to_owned(),
-                    reason: "MonitorProfileReference::IccProfile is configured but OS ICC profile reading is not implemented".to_owned(),
+                    feature: "icc_preview_color_space_resolution".to_owned(),
+                    reason: "MonitorProfileReference::IccProfile requires the display output contract to provide a resolved monitor color space before preview scheduling".to_owned(),
                 },
             );
         }
@@ -3279,7 +3279,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_display_color_space_rejects_unimplemented_icc_profile() {
+    fn preview_display_color_space_rejects_icc_before_display_contract_resolution() {
         let mut sequence = Sequence::new("icc-preview");
         sequence.settings.color_management.inherit = false;
         sequence.settings.color_management.display_management =
@@ -3293,14 +3293,14 @@ mod tests {
             };
 
         let err = preview_display_color_space(&sequence, &ProjectColorManagement::default())
-            .expect_err("ICC profile reading is not implemented and must fail closed");
+            .expect_err("ICC profile requires display contract resolution and must fail closed");
 
         assert!(matches!(
             err,
             crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
                 ref feature,
                 ..
-            } if feature == "os_icc_profile"
+            } if feature == "icc_preview_color_space_resolution"
         ));
     }
 

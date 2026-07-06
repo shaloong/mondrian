@@ -130,8 +130,8 @@ pub mod action {
     pub const CONFIGURE_DISPLAY_CONTRACT: &str = "configure_display_contract";
     /// Inspect preview GPU output blocker breakdown.
     pub const INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS: &str = "inspect_preview_gpu_output_blockers";
-    /// Implement OS ICC profile probe (platform-specific).
-    pub const IMPLEMENT_OS_ICC_PROFILE_PROBE: &str = "implement_os_icc_profile_probe";
+    /// Configure a resolvable monitor ICC profile source.
+    pub const CONFIGURE_MONITOR_ICC_PROFILE: &str = "configure_monitor_icc_profile";
     /// Map ICC profile to OCIO display/view.
     pub const MAP_ICC_PROFILE_TO_OCIO_DISPLAY: &str = "map_icc_profile_to_ocio_display";
     /// Enable HDR surface format and swapchain configuration.
@@ -191,7 +191,7 @@ pub fn normalize_action_code(code: &str) -> &str {
         "prepare_ocio_gpu_resources" => action::PREPARE_OCIO_GPU_RESOURCES,
         "configure_display_contract" => action::CONFIGURE_DISPLAY_CONTRACT,
         "inspect_preview_gpu_output_blockers" => action::INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS,
-        "implement_os_icc_profile_probe" => action::IMPLEMENT_OS_ICC_PROFILE_PROBE,
+        "configure_monitor_icc_profile" => action::CONFIGURE_MONITOR_ICC_PROFILE,
         "map_icc_profile_to_ocio_display" => action::MAP_ICC_PROFILE_TO_OCIO_DISPLAY,
         "enable_hdr_surface" => action::ENABLE_HDR_SURFACE,
         "move_window_display_contract_refresh" => action::MOVE_WINDOW_DISPLAY_CONTRACT_REFRESH,
@@ -287,8 +287,8 @@ mod tests {
             action::INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS
         );
         assert_eq!(
-            normalize_action_code("implement_os_icc_profile_probe"),
-            action::IMPLEMENT_OS_ICC_PROFILE_PROBE
+            normalize_action_code("configure_monitor_icc_profile"),
+            action::CONFIGURE_MONITOR_ICC_PROFILE
         );
         assert_eq!(
             normalize_action_code("map_icc_profile_to_ocio_display"),
@@ -329,8 +329,8 @@ mod tests {
             "prepare_ocio_gpu_resources"
         );
         assert_eq!(
-            normalize_action_code("implement_os_icc_profile_probe"),
-            "implement_os_icc_profile_probe"
+            normalize_action_code("configure_monitor_icc_profile"),
+            "configure_monitor_icc_profile"
         );
         assert_eq!(
             normalize_action_code("some_future_unknown_code"),

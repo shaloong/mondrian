@@ -288,7 +288,7 @@ impl PreviewGpuOutputBlocker {
             Self::LegacyRgba8CompositeBoundary { .. } => "avoid_legacy_rgba8_boundary",
             Self::CpuFallbackRequested { .. } => "investigate_cpu_fallback",
             Self::UnsupportedFeature { .. } => "document_unsupported_feature",
-            Self::MonitorIccProfileUnsupported { .. } => "implement_os_icc_profile_probe",
+            Self::MonitorIccProfileUnsupported { .. } => "configure_monitor_icc_profile",
             Self::MonitorIccProfileInvalid { .. } => "map_icc_profile_to_ocio_display",
             Self::MonitorIccProfileUnmapped { .. } => "map_icc_profile_to_ocio_display",
             Self::MonitorHdrCapabilityUnknown { .. } => "inspect_monitor_hdr_capability",
