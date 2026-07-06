@@ -16,7 +16,10 @@ use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatu
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
-use mondrian_media::{VideoColorDiagnostic, VideoColorDiagnosticIssueSummary};
+use mondrian_media::{
+    PreviewDecodeDiagnostics, PreviewDecodePath, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueSummary,
+};
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
 use mondrian_renderer::{
@@ -165,6 +168,15 @@ impl AppUiPreviewService {
             media_failure_hits: self.metrics.media_failure_hits.get(),
             decode_successes: self.metrics.decode_successes.get(),
             decode_failures: self.metrics.decode_failures.get(),
+            decode_in_process_cpu_rgba_frames: self.metrics.decode_in_process_cpu_rgba_frames.get(),
+            decode_external_ffmpeg_cpu_rgba_frames: self
+                .metrics
+                .decode_external_ffmpeg_cpu_rgba_frames
+                .get(),
+            decode_cache_hit_frames: self.metrics.decode_cache_hit_frames.get(),
+            decode_total_duration_us: self.metrics.decode_total_duration_us.get(),
+            decode_max_duration_us: self.metrics.decode_max_duration_us.get(),
+            decode_last_duration_us: self.metrics.decode_last_duration_us.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
@@ -270,6 +282,9 @@ impl AppUiPreviewService {
         let mut changed = false;
         while let Ok(result) = self.results.borrow().try_recv() {
             let is_current = self.scheduler.complete(&result.key, result.generation);
+            if let Some(diagnostics) = result.decode_diagnostics {
+                self.record_preview_decode(diagnostics);
+            }
             match result.frame {
                 Some(frame) => {
                     bump(&self.metrics.decode_successes);
@@ -741,6 +756,28 @@ impl AppUiPreviewService {
         add_cell(&self.metrics.color_stage_pixels, diagnostics.stage_pixels);
     }
 
+    fn record_preview_decode(&self, diagnostics: PreviewDecodeDiagnostics) {
+        match diagnostics.path {
+            PreviewDecodePath::InProcessFfmpegCpuRgba => {
+                bump(&self.metrics.decode_in_process_cpu_rgba_frames);
+            }
+            PreviewDecodePath::ExternalFfmpegCpuRgba => {
+                bump(&self.metrics.decode_external_ffmpeg_cpu_rgba_frames);
+            }
+            PreviewDecodePath::PreviewCacheHit => {
+                bump(&self.metrics.decode_cache_hit_frames);
+            }
+        }
+        add_cell(
+            &self.metrics.decode_total_duration_us,
+            diagnostics.elapsed_us,
+        );
+        self.metrics
+            .decode_max_duration_us
+            .set(self.metrics.decode_max_duration_us.get().max(diagnostics.elapsed_us));
+        self.metrics.decode_last_duration_us.set(diagnostics.elapsed_us);
+    }
+
     fn record_composite(&self, diagnostics: TimelineCompositeDiagnostics) {
         bump(&self.metrics.color_composite_plans);
         add_cell(&self.metrics.color_composite_elements, diagnostics.elements);
@@ -1056,6 +1093,18 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_successes: u64,
     /// Failed background media decodes received by the UI service.
     pub decode_failures: u64,
+    /// Successful decodes produced by the in-process FFmpeg CPU RGBA path.
+    pub decode_in_process_cpu_rgba_frames: u64,
+    /// Successful decodes produced by the external ffmpeg CPU RGBA path.
+    pub decode_external_ffmpeg_cpu_rgba_frames: u64,
+    /// Successful decodes served from the preview frame cache.
+    pub decode_cache_hit_frames: u64,
+    /// Total preview decode duration in microseconds.
+    pub decode_total_duration_us: u64,
+    /// Slowest preview decode duration in microseconds.
+    pub decode_max_duration_us: u64,
+    /// Most recent successful preview decode duration in microseconds.
+    pub decode_last_duration_us: u64,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
@@ -2339,6 +2388,7 @@ struct MediaPreviewResult {
     frame: Option<MediaPreviewFrame>,
     error: Option<String>,
     generation: u64,
+    decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
 }
@@ -2775,6 +2825,12 @@ struct AppUiPreviewMetrics {
     media_failure_hits: Cell<u64>,
     decode_successes: Cell<u64>,
     decode_failures: Cell<u64>,
+    decode_in_process_cpu_rgba_frames: Cell<u64>,
+    decode_external_ffmpeg_cpu_rgba_frames: Cell<u64>,
+    decode_cache_hit_frames: Cell<u64>,
+    decode_total_duration_us: Cell<u64>,
+    decode_max_duration_us: Cell<u64>,
+    decode_last_duration_us: Cell<u64>,
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
@@ -3252,6 +3308,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
         Some(job.key.target_height.max(1)),
     ) {
         Ok(frame) => {
+            let decode_diagnostics = frame.diagnostics;
             let source = CpuEncodedColorFrame::source_rgba8(
                 frame.width,
                 frame.height,
@@ -3273,6 +3330,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                             "viewer preview input color transform failed: {err}"
                         )),
                         generation: job.generation,
+                        decode_diagnostics: Some(decode_diagnostics),
                         color_diagnostics: None,
                         color_stage_diagnostics: None,
                     };
@@ -3290,6 +3348,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                 }),
                 error: None,
                 generation: job.generation,
+                decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics,
                 color_stage_diagnostics,
             }
@@ -3299,6 +3358,7 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
             frame: None,
             error: Some(err.to_string()),
             generation: job.generation,
+            decode_diagnostics: None,
             color_diagnostics: None,
             color_stage_diagnostics: None,
         },
@@ -3735,6 +3795,42 @@ mod tests {
         assert_eq!(diagnostics.color_stage_gpu_ocio_resource_blockers, 1);
         assert_eq!(diagnostics.color_stage_gpu_wrapper_blockers, 1);
         assert_eq!(diagnostics.color_stage_gpu_render_pipeline_blockers, 1);
+    }
+
+    #[test]
+    fn preview_diagnostics_count_decode_paths_and_duration() {
+        let service = AppUiPreviewService::new();
+
+        service.record_preview_decode(PreviewDecodeDiagnostics {
+            path: PreviewDecodePath::InProcessFfmpegCpuRgba,
+            elapsed_us: 1_000,
+            cache_hit: false,
+            external_process: false,
+            cpu_resident: true,
+        });
+        service.record_preview_decode(PreviewDecodeDiagnostics {
+            path: PreviewDecodePath::ExternalFfmpegCpuRgba,
+            elapsed_us: 2_500,
+            cache_hit: false,
+            external_process: true,
+            cpu_resident: true,
+        });
+        service.record_preview_decode(PreviewDecodeDiagnostics {
+            path: PreviewDecodePath::PreviewCacheHit,
+            elapsed_us: 25,
+            cache_hit: true,
+            external_process: false,
+            cpu_resident: true,
+        });
+
+        let diagnostics = service.diagnostics();
+
+        assert_eq!(diagnostics.decode_in_process_cpu_rgba_frames, 1);
+        assert_eq!(diagnostics.decode_external_ffmpeg_cpu_rgba_frames, 1);
+        assert_eq!(diagnostics.decode_cache_hit_frames, 1);
+        assert_eq!(diagnostics.decode_total_duration_us, 3_525);
+        assert_eq!(diagnostics.decode_max_duration_us, 2_500);
+        assert_eq!(diagnostics.decode_last_duration_us, 25);
     }
 
     #[test]

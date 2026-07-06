@@ -35,6 +35,12 @@ It may ask the `ffmpeg` CLI for platform hwaccel, but its contract is still
 `rawvideo` RGBA over stdout, so it is CPU-resident and cannot be reported as
 Mondrian hardware decode, zero-copy, low-copy texture residency, or GPU frame
 delivery. The previous "GPU assist" terminology is intentionally not used.
+Every `RgbaFrame` returned by the preview decode boundary carries
+`PreviewDecodeDiagnostics`: concrete path (`InProcessFfmpegCpuRgba`,
+`ExternalFfmpegCpuRgba`, or `PreviewCacheHit`), elapsed microseconds, cache-hit
+status, external-process status, and CPU-residency evidence. App-level preview
+diagnostics aggregate those fields so playback/perf JSON can show whether a
+4K/HDR test is decode-bound, cache-bound, or GPU-output-bound.
 
 The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
 source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and

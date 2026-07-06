@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// 从关键帧向前解码的最大帧数安全限制
 /// 提高到 1800（足以覆盖常见 2 分钟超长 GOP 文件，例如广播流）
@@ -35,6 +36,64 @@ pub enum PreviewDecodeBackend {
     /// This is not Mondrian hardware decode residency and must never be
     /// reported as zero-copy or GPU-resident decode.
     ExternalFfmpegCpuRgba,
+}
+
+/// Concrete path that produced a preview RGBA frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreviewDecodePath {
+    /// In-process FFmpeg decoder and software scaler returned CPU RGBA bytes.
+    InProcessFfmpegCpuRgba,
+    /// Experimental external `ffmpeg` process returned CPU RGBA bytes.
+    ExternalFfmpegCpuRgba,
+    /// The frame was served from the process-global preview frame cache.
+    PreviewCacheHit,
+}
+
+impl PreviewDecodePath {
+    /// Stable path name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
+            Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
+            Self::PreviewCacheHit => "PreviewCacheHit",
+        }
+    }
+}
+
+/// Diagnostics attached to a decoded preview RGBA frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDecodeDiagnostics {
+    /// Concrete decode/cache path that produced the frame.
+    pub path: PreviewDecodePath,
+    /// End-to-end decode call duration in microseconds.
+    pub elapsed_us: u64,
+    /// Whether this result came from the preview frame cache.
+    pub cache_hit: bool,
+    /// Whether this result came from an external process.
+    pub external_process: bool,
+    /// Whether the returned payload is CPU-resident memory.
+    pub cpu_resident: bool,
+}
+
+impl PreviewDecodeDiagnostics {
+    fn new(path: PreviewDecodePath) -> Self {
+        Self {
+            path,
+            elapsed_us: 0,
+            cache_hit: path == PreviewDecodePath::PreviewCacheHit,
+            external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
+            cpu_resident: true,
+        }
+    }
+
+    fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.elapsed_us = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        self
+    }
+
+    fn cache_hit(elapsed: Duration) -> Self {
+        Self::new(PreviewDecodePath::PreviewCacheHit).with_elapsed(elapsed)
+    }
 }
 
 impl PreviewDecodeBackend {
@@ -67,9 +126,35 @@ pub fn preview_decode_backend() -> PreviewDecodeBackend {
 
 #[derive(Debug, Clone)]
 pub struct RgbaFrame {
+    /// Frame width in pixels.
     pub width: u32,
+    /// Frame height in pixels.
     pub height: u32,
+    /// CPU-resident RGBA8 pixels.
     pub data: Vec<u8>,
+    /// Decode/cache diagnostics for this frame.
+    pub diagnostics: PreviewDecodeDiagnostics,
+}
+
+impl RgbaFrame {
+    fn new(width: u32, height: u32, data: Vec<u8>, path: PreviewDecodePath) -> Self {
+        Self {
+            width,
+            height,
+            data,
+            diagnostics: PreviewDecodeDiagnostics::new(path),
+        }
+    }
+
+    fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.diagnostics = self.diagnostics.with_elapsed(elapsed);
+        self
+    }
+
+    fn into_cache_hit(mut self, elapsed: Duration) -> Self {
+        self.diagnostics = PreviewDecodeDiagnostics::cache_hit(elapsed);
+        self
+    }
 }
 
 pub fn decode_first_video_frame_rgba(path: &Path) -> Result<RgbaFrame> {
@@ -224,7 +309,7 @@ impl PreviewDecodeSession {
             target_pts,
             self.cache_tolerance_pts,
         ) {
-            return Ok(hit.frame);
+            return Ok(hit.frame.into_cache_hit(Duration::ZERO));
         }
 
         let should_continue_forward = self
@@ -473,6 +558,7 @@ fn decode_video_frame_at_time_impl(
     max_width: Option<u32>,
     max_height: Option<u32>,
 ) -> Result<RgbaFrame> {
+    let started_at = Instant::now();
     ensure_ffmpeg_initialized(path)?;
     PREVIEW_DECODE_SESSION.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -497,9 +583,9 @@ fn decode_video_frame_at_time_impl(
                 timestamp_secs,
                 session.target_width,
                 session.target_height,
-            ) {
+                ) {
                 match result {
-                    Ok(frame) => return Ok(frame),
+                    Ok(frame) => return Ok(frame.with_elapsed(started_at.elapsed())),
                     Err(err) => {
                         preview_trace(format!(
                             "[preview] external ffmpeg CPU RGBA decode failed, fallback software: {err}"
@@ -509,7 +595,7 @@ fn decode_video_frame_at_time_impl(
             }
         }
 
-        session.decode_at(timestamp_secs)
+        session.decode_at(timestamp_secs).map(|frame| frame.with_elapsed(started_at.elapsed()))
     })
 }
 
@@ -768,11 +854,12 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         }));
     }
 
-    Some(Ok(RgbaFrame {
+    Some(Ok(RgbaFrame::new(
         width,
         height,
-        data: output.stdout.into_iter().take(expected).collect(),
-    }))
+        output.stdout.into_iter().take(expected).collect(),
+        PreviewDecodePath::ExternalFfmpegCpuRgba,
+    )))
 }
 
 fn fit_target_size(
@@ -877,12 +964,17 @@ fn convert_decoded_to_rgba(
         out
     };
 
-    Ok(RgbaFrame { width, height, data: out })
+    Ok(RgbaFrame::new(
+        width,
+        height,
+        out,
+        PreviewDecodePath::InProcessFfmpegCpuRgba,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::PreviewDecodeBackend;
+    use super::{PreviewDecodeBackend, PreviewDecodePath, RgbaFrame};
 
     #[test]
     fn preview_decode_backend_codes_are_explicit_and_cpu_resident() {
@@ -902,5 +994,26 @@ mod tests {
             PreviewDecodeBackend::from_u8(255),
             PreviewDecodeBackend::Auto
         );
+    }
+
+    #[test]
+    fn rgba_frame_diagnostics_record_cpu_residency_and_cache_hits() {
+        let frame = RgbaFrame::new(2, 1, vec![0; 8], PreviewDecodePath::InProcessFfmpegCpuRgba)
+            .with_elapsed(std::time::Duration::from_micros(42));
+
+        assert_eq!(
+            frame.diagnostics.path,
+            PreviewDecodePath::InProcessFfmpegCpuRgba
+        );
+        assert_eq!(frame.diagnostics.elapsed_us, 42);
+        assert!(!frame.diagnostics.cache_hit);
+        assert!(!frame.diagnostics.external_process);
+        assert!(frame.diagnostics.cpu_resident);
+
+        let cached = frame.into_cache_hit(std::time::Duration::from_micros(3));
+        assert_eq!(cached.diagnostics.path, PreviewDecodePath::PreviewCacheHit);
+        assert_eq!(cached.diagnostics.elapsed_us, 3);
+        assert!(cached.diagnostics.cache_hit);
+        assert!(cached.diagnostics.cpu_resident);
     }
 }
