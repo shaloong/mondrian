@@ -101,6 +101,14 @@ with checks, root causes, and actions. The default slow-frame budget is 50 ms;
 over-budget frames should be diagnosed from `preview_decode_report.root_causes`
 before changing renderer/color code.
 
+Viewer preview scheduling treats current-frame media requests as higher
+priority than forward prefetch. When the pending decode window is full, a
+current-frame request may evict a pending prefetch request; prefetch requests
+must not evict current-frame work. Track this with
+`scheduler.evicted_prefetch_requests`, `scheduler.dropped_backpressure_requests`,
+and `scheduler.skipped_decode_jobs` before tuning queue sizes or decode worker
+counts.
+
 Viewer GPU-output sessions can persist live health records from the app window:
 
 ```powershell

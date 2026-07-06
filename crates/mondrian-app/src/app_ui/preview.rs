@@ -2874,8 +2874,29 @@ struct MediaPreviewScheduler {
 #[derive(Default)]
 struct MediaPreviewSchedulerState {
     latest_generation: u64,
-    pending: HashMap<MediaPreviewKey, u64>,
+    pending: HashMap<MediaPreviewKey, MediaPreviewPendingRequest>,
     metrics: MediaPreviewSchedulerMetrics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MediaPreviewPendingRequest {
+    generation: u64,
+    priority: MediaPreviewRequestPriority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPreviewRequestPriority {
+    Prefetch,
+    Current,
+}
+
+impl MediaPreviewRequestPriority {
+    fn promote_with(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Current, _) | (_, Self::Current) => Self::Current,
+            (Self::Prefetch, Self::Prefetch) => Self::Prefetch,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2895,6 +2916,7 @@ struct MediaPreviewSchedulerMetrics {
     completed_stale_results: u64,
     canceled_requests: u64,
     pruned_obsolete_requests: u64,
+    evicted_prefetch_requests: u64,
 }
 
 /// Scheduler-side preview media request counters.
@@ -2920,6 +2942,8 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub canceled_requests: u64,
     /// Obsolete pending requests removed during generation pruning.
     pub pruned_obsolete_requests: u64,
+    /// Pending prefetch requests removed so a current-frame request can run.
+    pub evicted_prefetch_requests: u64,
 }
 
 impl Default for MediaPreviewScheduler {
@@ -2942,35 +2966,56 @@ impl MediaPreviewScheduler {
         state.latest_generation
     }
 
-    fn request(&self, key: MediaPreviewKey, generation: u64) -> MediaPreviewRequestStatus {
+    fn request(
+        &self,
+        key: MediaPreviewKey,
+        generation: u64,
+        priority: MediaPreviewRequestPriority,
+    ) -> MediaPreviewRequestStatus {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         if generation < state.latest_generation {
             bump_value(&mut state.metrics.dropped_backpressure_requests);
             return MediaPreviewRequestStatus::DroppedBackpressure;
         }
-        if let Some(pending_generation) = state.pending.get_mut(&key) {
-            *pending_generation = generation;
+        if let Some(pending) = state.pending.get_mut(&key) {
+            pending.generation = generation;
+            pending.priority = pending.priority.promote_with(priority);
             Self::prune_obsolete_locked(&mut state);
             bump_value(&mut state.metrics.already_pending_requests);
             return MediaPreviewRequestStatus::AlreadyPending;
         }
         Self::prune_obsolete_locked(&mut state);
         if state.pending.len() >= self.max_pending {
-            bump_value(&mut state.metrics.dropped_backpressure_requests);
-            return MediaPreviewRequestStatus::DroppedBackpressure;
+            if priority == MediaPreviewRequestPriority::Current {
+                if let Some(evicted) = state
+                    .pending
+                    .iter()
+                    .find(|(_, pending)| pending.priority == MediaPreviewRequestPriority::Prefetch)
+                    .map(|(key, _)| key.clone())
+                {
+                    state.pending.remove(&evicted);
+                    bump_value(&mut state.metrics.evicted_prefetch_requests);
+                } else {
+                    bump_value(&mut state.metrics.dropped_backpressure_requests);
+                    return MediaPreviewRequestStatus::DroppedBackpressure;
+                }
+            } else {
+                bump_value(&mut state.metrics.dropped_backpressure_requests);
+                return MediaPreviewRequestStatus::DroppedBackpressure;
+            }
         }
-        state.pending.insert(key, generation);
+        state.pending.insert(key, MediaPreviewPendingRequest { generation, priority });
         bump_value(&mut state.metrics.scheduled_requests);
         MediaPreviewRequestStatus::Scheduled
     }
 
     fn should_decode(&self, key: &MediaPreviewKey) -> bool {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        let Some(generation) = state.pending.get(key).copied() else {
+        let Some(pending) = state.pending.get(key).copied() else {
             bump_value(&mut state.metrics.skipped_decode_jobs);
             return false;
         };
-        if generation >= state.latest_generation {
+        if pending.generation >= state.latest_generation {
             return true;
         }
         state.pending.remove(key);
@@ -2980,7 +3025,11 @@ impl MediaPreviewScheduler {
 
     fn complete(&self, key: &MediaPreviewKey, result_generation: u64) -> bool {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        let pending_generation = state.pending.remove(key).unwrap_or(result_generation);
+        let pending_generation = state
+            .pending
+            .remove(key)
+            .map(|pending| pending.generation)
+            .unwrap_or(result_generation);
         let is_current = pending_generation >= state.latest_generation
             || result_generation >= state.latest_generation;
         if is_current {
@@ -3006,7 +3055,7 @@ impl MediaPreviewScheduler {
     fn prune_obsolete_locked(state: &mut MediaPreviewSchedulerState) {
         let latest_generation = state.latest_generation;
         let before = state.pending.len();
-        state.pending.retain(|_, generation| *generation >= latest_generation);
+        state.pending.retain(|_, pending| pending.generation >= latest_generation);
         let pruned = before.saturating_sub(state.pending.len()) as u64;
         state.metrics.pruned_obsolete_requests =
             state.metrics.pruned_obsolete_requests.saturating_add(pruned);
@@ -3025,6 +3074,7 @@ impl MediaPreviewScheduler {
             completed_stale_results: state.metrics.completed_stale_results,
             canceled_requests: state.metrics.canceled_requests,
             pruned_obsolete_requests: state.metrics.pruned_obsolete_requests,
+            evicted_prefetch_requests: state.metrics.evicted_prefetch_requests,
         }
     }
 
@@ -3127,7 +3177,11 @@ impl AppUiPreviewService {
                         continue;
                     };
                     if self.cached_media_frame(&key).is_none() && !self.failed_media_key(&key) {
-                        self.request_media_preview(key, source_secs);
+                        self.request_media_preview(
+                            key,
+                            source_secs,
+                            MediaPreviewRequestPriority::Prefetch,
+                        );
                     }
                 }
                 TimelineRenderPlanElement::NestedSequence(nested) => {
@@ -3184,7 +3238,7 @@ impl AppUiPreviewService {
             return None;
         }
         self.current_frame_pending.set(true);
-        self.request_media_preview(key, source_secs);
+        self.request_media_preview(key, source_secs, MediaPreviewRequestPriority::Current);
         None
     }
 
@@ -3331,9 +3385,14 @@ impl AppUiPreviewService {
         ))
     }
 
-    fn request_media_preview(&self, key: MediaPreviewKey, source_secs: f64) {
+    fn request_media_preview(
+        &self,
+        key: MediaPreviewKey,
+        source_secs: f64,
+        priority: MediaPreviewRequestPriority,
+    ) {
         let generation = self.current_generation.get();
-        match self.scheduler.request(key.clone(), generation) {
+        match self.scheduler.request(key.clone(), generation, priority) {
             MediaPreviewRequestStatus::Scheduled => {}
             MediaPreviewRequestStatus::AlreadyPending => return,
             MediaPreviewRequestStatus::DroppedBackpressure => {
@@ -6712,7 +6771,11 @@ mod tests {
             engine: ColorEngine::MondrianSmart,
         };
         assert_eq!(
-            scheduler.request(key.clone(), first_generation),
+            scheduler.request(
+                key.clone(),
+                first_generation,
+                MediaPreviewRequestPriority::Current,
+            ),
             MediaPreviewRequestStatus::Scheduled
         );
 
@@ -6740,13 +6803,21 @@ mod tests {
             engine: ColorEngine::MondrianSmart,
         };
         assert_eq!(
-            scheduler.request(key.clone(), first_generation),
+            scheduler.request(
+                key.clone(),
+                first_generation,
+                MediaPreviewRequestPriority::Prefetch,
+            ),
             MediaPreviewRequestStatus::Scheduled
         );
 
         let second_generation = scheduler.begin_generation();
         assert_eq!(
-            scheduler.request(key.clone(), second_generation),
+            scheduler.request(
+                key.clone(),
+                second_generation,
+                MediaPreviewRequestPriority::Current,
+            ),
             MediaPreviewRequestStatus::AlreadyPending
         );
 
@@ -6762,11 +6833,19 @@ mod tests {
         let first = test_media_key(1);
         let second = test_media_key(2);
         assert_eq!(
-            scheduler.request(first.clone(), first_generation),
+            scheduler.request(
+                first.clone(),
+                first_generation,
+                MediaPreviewRequestPriority::Current,
+            ),
             MediaPreviewRequestStatus::Scheduled
         );
         assert_eq!(
-            scheduler.request(second.clone(), first_generation),
+            scheduler.request(
+                second.clone(),
+                first_generation,
+                MediaPreviewRequestPriority::Current,
+            ),
             MediaPreviewRequestStatus::Scheduled
         );
 
@@ -6787,15 +6866,15 @@ mod tests {
         let third = test_media_key(3);
 
         assert_eq!(
-            scheduler.request(first, generation),
+            scheduler.request(first, generation, MediaPreviewRequestPriority::Current),
             MediaPreviewRequestStatus::Scheduled
         );
         assert_eq!(
-            scheduler.request(second, generation),
+            scheduler.request(second, generation, MediaPreviewRequestPriority::Current),
             MediaPreviewRequestStatus::Scheduled
         );
         assert_eq!(
-            scheduler.request(third, generation),
+            scheduler.request(third, generation, MediaPreviewRequestPriority::Current),
             MediaPreviewRequestStatus::DroppedBackpressure
         );
 
@@ -6809,7 +6888,11 @@ mod tests {
         scheduler.begin_generation();
 
         assert_eq!(
-            scheduler.request(test_media_key(1), first_generation),
+            scheduler.request(
+                test_media_key(1),
+                first_generation,
+                MediaPreviewRequestPriority::Current,
+            ),
             MediaPreviewRequestStatus::DroppedBackpressure
         );
         assert_eq!(scheduler.pending_len(), 0);
@@ -6823,15 +6906,27 @@ mod tests {
         let second = test_media_key(2);
 
         assert_eq!(
-            scheduler.request(first.clone(), generation),
+            scheduler.request(
+                first.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
             MediaPreviewRequestStatus::Scheduled
         );
         assert_eq!(
-            scheduler.request(first.clone(), generation),
+            scheduler.request(
+                first.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
             MediaPreviewRequestStatus::AlreadyPending
         );
         assert_eq!(
-            scheduler.request(second.clone(), generation),
+            scheduler.request(
+                second.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
             MediaPreviewRequestStatus::DroppedBackpressure
         );
 
@@ -6850,5 +6945,64 @@ mod tests {
         assert_eq!(diagnostics.skipped_decode_jobs, 1);
         assert_eq!(diagnostics.completed_current_results, 0);
         assert_eq!(diagnostics.completed_stale_results, 1);
+    }
+
+    #[test]
+    fn media_preview_scheduler_current_request_evicts_prefetch_when_window_is_full() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(1);
+        let generation = scheduler.begin_generation();
+        let prefetch = test_media_key(1);
+        let current = test_media_key(2);
+
+        assert_eq!(
+            scheduler.request(
+                prefetch.clone(),
+                generation,
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            scheduler.request(
+                current.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+
+        assert_eq!(scheduler.pending_len(), 1);
+        assert!(!scheduler.should_decode(&prefetch));
+        assert!(scheduler.should_decode(&current));
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.evicted_prefetch_requests, 1);
+        assert_eq!(diagnostics.dropped_backpressure_requests, 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_prefetch_does_not_evict_current_request() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(1);
+        let generation = scheduler.begin_generation();
+        let current = test_media_key(1);
+        let prefetch = test_media_key(2);
+
+        assert_eq!(
+            scheduler.request(
+                current.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            scheduler.request(prefetch, generation, MediaPreviewRequestPriority::Prefetch),
+            MediaPreviewRequestStatus::DroppedBackpressure
+        );
+
+        assert_eq!(scheduler.pending_len(), 1);
+        assert!(scheduler.should_decode(&current));
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.evicted_prefetch_requests, 0);
+        assert_eq!(diagnostics.dropped_backpressure_requests, 1);
     }
 }
