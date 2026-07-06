@@ -114,6 +114,49 @@ impl PreviewDecodePath {
     }
 }
 
+/// Stage-level wall-clock timings for preview decode.
+///
+/// These timings are diagnostic evidence for playback tuning. They are not a
+/// real-time scheduling contract because FFmpeg may overlap work internally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PreviewDecodeStageDurations {
+    /// Time spent opening or reconfiguring the in-process decode session.
+    #[serde(default)]
+    pub session_open_us: u64,
+    /// Time spent checking the process-global preview frame cache.
+    #[serde(default)]
+    pub cache_lookup_us: u64,
+    /// Time spent seeking and flushing the decoder before forward decode.
+    #[serde(default)]
+    pub seek_us: u64,
+    /// Time spent demuxing packets and receiving decoded frames.
+    #[serde(default)]
+    pub packet_decode_us: u64,
+    /// Time spent in FFmpeg software scaling / pixel-format conversion.
+    #[serde(default)]
+    pub swscale_us: u64,
+    /// Time spent copying packed RGBA rows into Mondrian-owned CPU memory.
+    #[serde(default)]
+    pub rgba_copy_us: u64,
+    /// Time spent waiting for the experimental external ffmpeg process path.
+    #[serde(default)]
+    pub external_process_us: u64,
+}
+
+impl PreviewDecodeStageDurations {
+    /// Saturating-add another stage duration set into this one.
+    pub fn accumulate(&mut self, other: Self) {
+        self.session_open_us = self.session_open_us.saturating_add(other.session_open_us);
+        self.cache_lookup_us = self.cache_lookup_us.saturating_add(other.cache_lookup_us);
+        self.seek_us = self.seek_us.saturating_add(other.seek_us);
+        self.packet_decode_us = self.packet_decode_us.saturating_add(other.packet_decode_us);
+        self.swscale_us = self.swscale_us.saturating_add(other.swscale_us);
+        self.rgba_copy_us = self.rgba_copy_us.saturating_add(other.rgba_copy_us);
+        self.external_process_us =
+            self.external_process_us.saturating_add(other.external_process_us);
+    }
+}
+
 /// Diagnostics attached to a decoded preview RGBA frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewDecodeDiagnostics {
@@ -139,6 +182,9 @@ pub struct PreviewDecodeDiagnostics {
     /// FFmpeg decoder thread count active for the decode session.
     #[serde(default)]
     pub threading_count: u32,
+    /// Stage-level decode timings in microseconds.
+    #[serde(default)]
+    pub stage_durations: PreviewDecodeStageDurations,
 }
 
 impl PreviewDecodeDiagnostics {
@@ -153,6 +199,7 @@ impl PreviewDecodeDiagnostics {
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
+            stage_durations: PreviewDecodeStageDurations::default(),
         }
     }
 
@@ -230,6 +277,11 @@ impl RgbaFrame {
     fn with_threading(mut self, kind: PreviewDecodeThreadingKind, count: usize) -> Self {
         self.diagnostics.threading_kind = kind;
         self.diagnostics.threading_count = count.min(u32::MAX as usize) as u32;
+        self
+    }
+
+    fn with_stage_durations(mut self, durations: PreviewDecodeStageDurations) -> Self {
+        self.diagnostics.stage_durations.accumulate(durations);
         self
     }
 
@@ -414,6 +466,7 @@ impl PreviewDecodeSession {
     fn decode_at(&mut self, timestamp_secs: f64) -> Result<RgbaFrame> {
         let target_pts = timestamp_to_stream_pts(timestamp_secs, self.stream_tb);
 
+        let cache_lookup_started_at = Instant::now();
         if let Some(hit) = preview_cache_get(
             &self.path,
             self.target_width,
@@ -421,8 +474,15 @@ impl PreviewDecodeSession {
             target_pts,
             self.cache_tolerance_pts,
         ) {
-            return Ok(hit.frame.into_cache_hit(Duration::ZERO));
+            return Ok(hit
+                .frame
+                .into_cache_hit(cache_lookup_started_at.elapsed())
+                .with_stage_durations(PreviewDecodeStageDurations {
+                    cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
+                    ..PreviewDecodeStageDurations::default()
+                }));
         }
+        let cache_lookup_us = duration_us(cache_lookup_started_at.elapsed());
 
         let should_continue_forward = self
             .last_pts
@@ -434,13 +494,30 @@ impl PreviewDecodeSession {
             .unwrap_or(false);
 
         let seek_performed = !should_continue_forward;
+        let mut seek_us = 0;
         if seek_performed {
+            let seek_started_at = Instant::now();
             self.seek_to_target(target_pts)?;
+            seek_us = duration_us(seek_started_at.elapsed());
         }
 
+        let decode_started_at = Instant::now();
         let result = self.decode_forward_until(target_pts)?;
         if let Some(frame) = result.frame {
+            let conversion_us = frame
+                .diagnostics
+                .stage_durations
+                .swscale_us
+                .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
+            let packet_decode_us =
+                duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
             return Ok(frame
+                .with_stage_durations(PreviewDecodeStageDurations {
+                    cache_lookup_us,
+                    seek_us,
+                    packet_decode_us,
+                    ..PreviewDecodeStageDurations::default()
+                })
                 .with_decode_work(seek_performed, result.decoded_frame_count)
                 .with_threading(self.threading_kind, self.threading_count));
         }
@@ -691,6 +768,7 @@ fn decode_video_frame_at_time_impl(
     PREVIEW_DECODE_SESSION.with(|slot| {
         let mut slot = slot.borrow_mut();
         let backend = preview_decode_backend();
+        let mut session_open_us = 0;
 
         let current_match = slot
             .as_ref()
@@ -698,22 +776,35 @@ fn decode_video_frame_at_time_impl(
             .unwrap_or(false);
 
         if !current_match {
+            let open_started_at = Instant::now();
             *slot = Some(PreviewDecodeSession::open(
                 path, max_width, max_height, backend,
             )?);
+            session_open_us = duration_us(open_started_at.elapsed());
         }
 
         let session = slot.as_mut().expect("preview decode session must exist");
+        let mut external_process_us = 0;
 
         if preview_external_ffmpeg_cpu_rgba_enabled() {
+            let external_started_at = Instant::now();
             if let Some(result) = try_decode_with_external_ffmpeg_cpu_rgba(
                 path,
                 timestamp_secs,
                 session.target_width,
                 session.target_height,
-                ) {
+            ) {
+                external_process_us = duration_us(external_started_at.elapsed());
                 match result {
-                    Ok(frame) => return Ok(frame.with_elapsed(started_at.elapsed())),
+                    Ok(frame) => {
+                        return Ok(frame
+                            .with_stage_durations(PreviewDecodeStageDurations {
+                                session_open_us,
+                                external_process_us,
+                                ..PreviewDecodeStageDurations::default()
+                            })
+                            .with_elapsed(started_at.elapsed()));
+                    }
                     Err(err) => {
                         preview_trace(format!(
                             "[preview] external ffmpeg CPU RGBA decode failed, fallback software: {err}"
@@ -723,8 +814,20 @@ fn decode_video_frame_at_time_impl(
             }
         }
 
-        session.decode_at(timestamp_secs).map(|frame| frame.with_elapsed(started_at.elapsed()))
+        session.decode_at(timestamp_secs).map(|frame| {
+            frame
+                .with_stage_durations(PreviewDecodeStageDurations {
+                    session_open_us,
+                    external_process_us,
+                    ..PreviewDecodeStageDurations::default()
+                })
+                .with_elapsed(started_at.elapsed())
+        })
     })
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn estimate_frame_duration_pts(stream_tb: ffmpeg::Rational, stream_rate: ffmpeg::Rational) -> i64 {
@@ -1088,16 +1191,19 @@ fn convert_decoded_to_rgba(
     path: &Path,
 ) -> Result<RgbaFrame> {
     let mut rgba = ffmpeg::util::frame::video::Video::empty();
+    let swscale_started_at = Instant::now();
     scaler.run(decoded, &mut rgba).map_err(|e| MondrianError::DecodeFailed {
         asset_id: path.display().to_string(),
         reason: e.to_string(),
     })?;
+    let swscale_us = duration_us(swscale_started_at.elapsed());
 
     let width = rgba.width();
     let height = rgba.height();
     let stride = rgba.stride(0);
     let row_bytes = width as usize * 4;
     let src = rgba.data(0);
+    let copy_started_at = Instant::now();
     let out = if stride == row_bytes {
         src[..row_bytes * height as usize].to_vec()
     } else {
@@ -1111,20 +1217,27 @@ fn convert_decoded_to_rgba(
         }
         out
     };
+    let rgba_copy_us = duration_us(copy_started_at.elapsed());
 
     Ok(RgbaFrame::new(
         width,
         height,
         out,
         PreviewDecodePath::InProcessFfmpegCpuRgba,
-    ))
+    )
+    .with_stage_durations(PreviewDecodeStageDurations {
+        swscale_us,
+        rgba_copy_us,
+        ..PreviewDecodeStageDurations::default()
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         clear_thread_local_preview_decode_session, decode_video_frame_at_time_rgba_scaled,
-        PreviewDecodeBackend, PreviewDecodePath, PreviewDecodeThreadingKind, RgbaFrame,
+        PreviewDecodeBackend, PreviewDecodePath, PreviewDecodeStageDurations,
+        PreviewDecodeThreadingKind, RgbaFrame,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1168,6 +1281,37 @@ mod tests {
             Some(PreviewDecodeThreadingKind::Slice)
         );
         assert_eq!(PreviewDecodeThreadingKind::from_env("surprise"), None);
+    }
+
+    #[test]
+    fn preview_decode_stage_durations_accumulate_saturating() {
+        let mut durations = PreviewDecodeStageDurations {
+            session_open_us: u64::MAX,
+            cache_lookup_us: 2,
+            seek_us: 3,
+            packet_decode_us: 4,
+            swscale_us: 5,
+            rgba_copy_us: 6,
+            external_process_us: 7,
+        };
+
+        durations.accumulate(PreviewDecodeStageDurations {
+            session_open_us: 1,
+            cache_lookup_us: 20,
+            seek_us: 30,
+            packet_decode_us: 40,
+            swscale_us: 50,
+            rgba_copy_us: 60,
+            external_process_us: 70,
+        });
+
+        assert_eq!(durations.session_open_us, u64::MAX);
+        assert_eq!(durations.cache_lookup_us, 22);
+        assert_eq!(durations.seek_us, 33);
+        assert_eq!(durations.packet_decode_us, 44);
+        assert_eq!(durations.swscale_us, 55);
+        assert_eq!(durations.rgba_copy_us, 66);
+        assert_eq!(durations.external_process_us, 77);
     }
 
     #[test]

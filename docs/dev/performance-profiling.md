@@ -90,6 +90,13 @@ fresh proxy path or a real hardware-decoded GPU residency path; repeated source
 decode with `seek_performed=true` and high `decoded_frame_count` is expected to
 remain CPU-bound.
 
+`decode_stage_durations` breaks software preview decode time into session open,
+cache lookup, seek, packet/decode, FFmpeg software scale, RGBA copy, and
+external-process wait time. Use these counters to classify slow frames before
+changing color/render code: high `packet_decode_us` usually points at codec/GOP
+or hardware-decode work, high `seek_us` points at random-access/indexing/proxy
+work, and high `swscale_us`/`rgba_copy_us` points at the CPU RGBA boundary.
+
 Viewer GPU-output sessions can persist live health records from the app window:
 
 ```powershell

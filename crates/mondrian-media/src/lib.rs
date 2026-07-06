@@ -38,8 +38,8 @@ pub use preview::{
     clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
     decode_first_video_frame_rgba, decode_video_frame_at_time_rgba,
     decode_video_frame_at_time_rgba_scaled, preview_decode_backend, set_preview_decode_backend,
-    PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeThreadingKind,
-    RgbaFrame,
+    PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingKind, RgbaFrame,
 };
 pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

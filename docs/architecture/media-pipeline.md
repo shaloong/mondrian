@@ -60,14 +60,16 @@ Every `RgbaFrame` returned by the preview decode boundary carries
 `PreviewDecodeDiagnostics`: concrete path (`InProcessFfmpegCpuRgba`,
 `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`), elapsed microseconds, cache-hit
 status, external-process status, CPU-residency evidence, seek status, decoded
-frame count, and in-process FFmpeg decoder threading mode/count. App-level
-preview diagnostics aggregate those fields so playback/perf JSON can show
-whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
-single-thread decode-bound, or GPU-output-bound. The in-process preview decoder
-uses bounded slice threading by default; `MONDRIAN_PREVIEW_DECODE_THREADING`
-and `MONDRIAN_PREVIEW_DECODE_THREADS` are diagnostic overrides, not separate
-decode semantics. Thread-local preview decode sessions are intentionally kept
-alive for playback locality and must be released through
+frame count, in-process FFmpeg decoder threading mode/count, and stage-level
+wall-clock timings for session open, cache lookup, seek, packet/decode,
+software scaling, RGBA copy, and the experimental external-process path.
+App-level preview diagnostics aggregate those fields so playback/perf JSON can
+show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
+single-thread decode-bound, software-scale/copy-bound, or GPU-output-bound. The
+in-process preview decoder uses bounded slice threading by default;
+`MONDRIAN_PREVIEW_DECODE_THREADING` and `MONDRIAN_PREVIEW_DECODE_THREADS` are
+diagnostic overrides, not separate decode semantics. Thread-local preview decode
+sessions are intentionally kept alive for playback locality and must be released through
 `clear_thread_local_preview_decode_session()` at explicit lifecycle boundaries
 such as perf probes, media/project shutdown, or tests that open threaded
 software decoders.

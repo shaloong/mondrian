@@ -17,8 +17,8 @@ use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
-    PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeThreadingKind, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueSummary,
+    PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingKind, VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -189,6 +189,7 @@ impl AppUiPreviewService {
             decode_threading_slice_frames: self.metrics.decode_threading_slice_frames.get(),
             decode_last_threading_count: self.metrics.decode_last_threading_count.get(),
             decode_max_threading_count: self.metrics.decode_max_threading_count.get(),
+            decode_stage_durations: self.metrics.decode_stage_durations.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
@@ -817,6 +818,9 @@ impl AppUiPreviewService {
         self.metrics
             .decode_max_threading_count
             .set(self.metrics.decode_max_threading_count.get().max(threading_count));
+        let mut stage_durations = self.metrics.decode_stage_durations.get();
+        stage_durations.accumulate(diagnostics.stage_durations);
+        self.metrics.decode_stage_durations.set(stage_durations);
     }
 
     fn record_composite(&self, diagnostics: TimelineCompositeDiagnostics) {
@@ -1172,6 +1176,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_last_threading_count: u64,
     /// Largest FFmpeg decoder thread count reported by preview decode.
     pub decode_max_threading_count: u64,
+    /// Aggregated stage-level timings reported by preview decode.
+    pub decode_stage_durations: PreviewDecodeStageDurations,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
@@ -2956,6 +2962,7 @@ struct AppUiPreviewMetrics {
     decode_threading_slice_frames: Cell<u64>,
     decode_last_threading_count: Cell<u64>,
     decode_max_threading_count: Cell<u64>,
+    decode_stage_durations: Cell<PreviewDecodeStageDurations>,
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
@@ -4091,6 +4098,15 @@ mod tests {
             decoded_frame_count: 48,
             threading_kind: PreviewDecodeThreadingKind::Frame,
             threading_count: 6,
+            stage_durations: PreviewDecodeStageDurations {
+                session_open_us: 100,
+                cache_lookup_us: 2,
+                seek_us: 300,
+                packet_decode_us: 500,
+                swscale_us: 70,
+                rgba_copy_us: 30,
+                external_process_us: 0,
+            },
         });
         service.record_preview_decode(PreviewDecodeDiagnostics {
             path: PreviewDecodePath::ExternalFfmpegCpuRgba,
@@ -4102,6 +4118,15 @@ mod tests {
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
+            stage_durations: PreviewDecodeStageDurations {
+                session_open_us: 0,
+                cache_lookup_us: 0,
+                seek_us: 0,
+                packet_decode_us: 0,
+                swscale_us: 0,
+                rgba_copy_us: 0,
+                external_process_us: 2_450,
+            },
         });
         service.record_preview_decode(PreviewDecodeDiagnostics {
             path: PreviewDecodePath::PreviewCacheHit,
@@ -4113,6 +4138,15 @@ mod tests {
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
+            stage_durations: PreviewDecodeStageDurations {
+                session_open_us: 0,
+                cache_lookup_us: 20,
+                seek_us: 0,
+                packet_decode_us: 0,
+                swscale_us: 0,
+                rgba_copy_us: 0,
+                external_process_us: 0,
+            },
         });
 
         let diagnostics = service.diagnostics();
@@ -4131,6 +4165,16 @@ mod tests {
         assert_eq!(diagnostics.decode_threading_slice_frames, 0);
         assert_eq!(diagnostics.decode_last_threading_count, 0);
         assert_eq!(diagnostics.decode_max_threading_count, 6);
+        assert_eq!(diagnostics.decode_stage_durations.session_open_us, 100);
+        assert_eq!(diagnostics.decode_stage_durations.cache_lookup_us, 22);
+        assert_eq!(diagnostics.decode_stage_durations.seek_us, 300);
+        assert_eq!(diagnostics.decode_stage_durations.packet_decode_us, 500);
+        assert_eq!(diagnostics.decode_stage_durations.swscale_us, 70);
+        assert_eq!(diagnostics.decode_stage_durations.rgba_copy_us, 30);
+        assert_eq!(
+            diagnostics.decode_stage_durations.external_process_us,
+            2_450
+        );
     }
 
     #[test]
