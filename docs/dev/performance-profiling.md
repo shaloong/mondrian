@@ -106,10 +106,12 @@ priority than forward prefetch. When the pending decode window is full, a
 current-frame request may evict a pending prefetch request; prefetch requests
 must not evict current-frame work. The worker transport queue follows the same
 rule and pops current-frame jobs before prefetch jobs so FIFO prefetch backlog
-cannot hide a newly requested viewer frame. Track this with
+cannot hide a newly requested viewer frame; an already-queued prefetch job for
+the same media key is promoted when it becomes current-frame work. Track this with
 `scheduler.evicted_prefetch_requests`, `scheduler.dropped_backpressure_requests`,
-`queue_evicted_prefetch_jobs`, and `scheduler.skipped_decode_jobs` before
-tuning queue sizes or decode worker counts.
+`queue_evicted_prefetch_jobs`, `queue_promoted_current_jobs`, and
+`scheduler.skipped_decode_jobs` before tuning queue sizes or decode worker
+counts.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

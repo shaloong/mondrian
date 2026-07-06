@@ -192,6 +192,7 @@ impl AppUiPreviewService {
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
+            queue_promoted_current_jobs: self.metrics.queue_promoted_current_jobs.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
             scheduler,
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
@@ -1184,6 +1185,8 @@ pub struct AppUiPreviewDiagnostics {
     pub queue_full_drops: u64,
     /// Queued prefetch jobs evicted so current-frame decode work can run.
     pub queue_evicted_prefetch_jobs: u64,
+    /// Queued prefetch jobs promoted after the same key became current-frame work.
+    pub queue_promoted_current_jobs: u64,
     /// Media preview jobs dropped because the worker channel was disconnected.
     pub worker_disconnected_drops: u64,
     /// Scheduler-side request, drop, completion, and pruning counters.
@@ -3184,6 +3187,23 @@ impl MediaPreviewJobQueueSender {
         self.shared.changed.notify_one();
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch }
     }
+
+    fn promote(&self, key: &MediaPreviewKey, priority: MediaPreviewRequestPriority) -> bool {
+        if priority != MediaPreviewRequestPriority::Current {
+            return false;
+        }
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        let Some(queued) = state.queue.iter_mut().find(|queued| &queued.job.key == key) else {
+            return false;
+        };
+        let previous = queued.priority;
+        queued.priority = queued.priority.promote_with(priority);
+        let promoted = previous != queued.priority;
+        if promoted {
+            self.shared.changed.notify_one();
+        }
+        promoted
+    }
 }
 
 impl Drop for MediaPreviewJobQueueSender {
@@ -3518,7 +3538,12 @@ impl AppUiPreviewService {
         let generation = self.current_generation.get();
         match self.scheduler.request(key.clone(), generation, priority) {
             MediaPreviewRequestStatus::Scheduled => {}
-            MediaPreviewRequestStatus::AlreadyPending => return,
+            MediaPreviewRequestStatus::AlreadyPending => {
+                if self.jobs.promote(&key, priority) {
+                    bump(&self.metrics.queue_promoted_current_jobs);
+                }
+                return;
+            }
             MediaPreviewRequestStatus::DroppedBackpressure => {
                 tracing::trace!(
                     asset_id = %key.asset_id,
@@ -3714,6 +3739,7 @@ struct AppUiPreviewMetrics {
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
+    queue_promoted_current_jobs: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
     color_input_transform_calls: Cell<u64>,
     color_input_transform_pixels: Cell<u64>,
@@ -7213,5 +7239,51 @@ mod tests {
             receiver.recv().expect("second prefetch").key,
             second_prefetch
         );
+    }
+
+    #[test]
+    fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
+        let (sender, receiver) = media_preview_job_queue(2);
+        let promoted = test_media_key(1);
+        let other_prefetch = test_media_key(2);
+
+        assert_eq!(
+            sender.enqueue(
+                MediaPreviewJob {
+                    key: promoted.clone(),
+                    source_secs: 1.0,
+                    generation: 1,
+                },
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        assert_eq!(
+            sender.enqueue(
+                MediaPreviewJob {
+                    key: other_prefetch.clone(),
+                    source_secs: 2.0,
+                    generation: 1,
+                },
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+
+        assert!(sender.promote(&promoted, MediaPreviewRequestPriority::Current));
+        assert_eq!(receiver.recv().expect("promoted current").key, promoted);
+        assert_eq!(
+            receiver.recv().expect("remaining prefetch").key,
+            other_prefetch
+        );
+    }
+
+    #[test]
+    fn media_preview_job_queue_promote_returns_false_for_missing_or_prefetch() {
+        let (sender, _receiver) = media_preview_job_queue(1);
+        let key = test_media_key(1);
+
+        assert!(!sender.promote(&key, MediaPreviewRequestPriority::Current));
+        assert!(!sender.promote(&key, MediaPreviewRequestPriority::Prefetch));
     }
 }
