@@ -110,6 +110,10 @@ decode work, while render-bound frames should drive GPU composite, output
 boundary, or raster-packaging work. In particular,
 `preview_render_cpu_output_boundary_bound` means the viewer is spending budget
 after decode in the CPU display/output transform, not in FFmpeg.
+`preview_render_frame_packaging_bound` should never be caused by hashing the full
+RGBA payload for an atlas key; viewer raster keys are expected to come from the
+resolved render-plan identity so large frames do not add another full-frame CPU
+scan after rendering.
 
 Viewer preview scheduling treats current-frame media requests as higher
 priority than forward prefetch. When the pending decode window is full, a

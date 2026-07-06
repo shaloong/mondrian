@@ -431,7 +431,10 @@ impl AppUiPreviewService {
                     self.record_color_stage(output.color_stage_diagnostics);
                     let rgba = output.rgba;
                     let frame_packaging_started_at = Instant::now();
-                    let key = preview_cache_key(frame, width, height, &rgba);
+                    let key =
+                        resolved.cache_key.as_ref().map(viewer_raster_frame_key).unwrap_or_else(
+                            || uncached_viewer_raster_frame_key(sequence.id, frame, width, height),
+                        );
                     match ViewerFrameImage::new(key, width, height, rgba) {
                         Some(frame) => {
                             if let Some(cache_key) = resolved.cache_key {
@@ -4802,12 +4805,22 @@ fn composite_resolved_preview(
         .map_err(|err| format!("viewer preview final color transform failed: {err}"))
 }
 
-fn preview_cache_key(frame: i64, width: u32, height: u32, rgba: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    rgba.hash(&mut hasher);
+fn viewer_raster_frame_key(cache_key: &ViewerPreviewCacheKey) -> String {
     format!(
-        "app UI-viewer:{width}x{height}:f{frame}:p{:016x}",
-        hasher.finish()
+        "app-ui.viewer.raster:{}:{}x{}:{:016x}",
+        cache_key.sequence_id, cache_key.width, cache_key.height, cache_key.plan_signature
+    )
+}
+
+fn uncached_viewer_raster_frame_key(
+    sequence_id: SequenceId,
+    frame: i64,
+    width: u32,
+    height: u32,
+) -> String {
+    format!(
+        "app-ui.viewer.raster-uncached:{sequence_id}:{width}x{height}:f{}",
+        frame.max(0)
     )
 }
 
@@ -6074,7 +6087,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_cache_key_changes_when_pixels_change() {
+    fn preview_raster_key_changes_when_render_plan_changes() {
         let service = AppUiPreviewService::new();
         let first = service.viewer_preview_for_state(&state_with_solid_color_clip(
             Color::from_rgba8(255, 0, 0, 255),
@@ -6089,7 +6102,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_solid_preview_is_stable_across_frames() {
+    fn deterministic_solid_preview_reuses_raster_key_across_frames() {
         let service = AppUiPreviewService::new();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(255, 128, 0, 255));
 
@@ -6098,6 +6111,7 @@ mod tests {
         let second = ready_frame(service.viewer_preview_for_state(&state));
 
         assert_eq!(first.rgba, second.rgba);
+        assert_eq!(first.key, second.key);
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.render_requests, 2);
         assert_eq!(diagnostics.ready_frames, 2);
