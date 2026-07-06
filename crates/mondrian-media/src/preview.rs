@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// 从关键帧向前解码的最大帧数安全限制
 /// 提高到 1800（足以覆盖常见 2 分钟超长 GOP 文件，例如广播流）
@@ -326,6 +326,7 @@ pub fn clear_thread_local_preview_decode_session() {
 
 struct PreviewDecodeSession {
     path: PathBuf,
+    fingerprint: PreviewFileFingerprint,
     max_width: Option<u32>,
     max_height: Option<u32>,
     backend: PreviewDecodeBackend,
@@ -350,9 +351,36 @@ struct PreviewDecodeForwardResult {
     decoded_frame_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewFileFingerprint {
+    len: Option<u64>,
+    modified_secs: Option<u64>,
+    modified_nanos: Option<u32>,
+}
+
+impl PreviewFileFingerprint {
+    fn capture(path: &Path) -> Self {
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return Self {
+                len: None,
+                modified_secs: None,
+                modified_nanos: None,
+            };
+        };
+        let modified =
+            metadata.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+        Self {
+            len: Some(metadata.len()),
+            modified_secs: modified.map(|duration| duration.as_secs()),
+            modified_nanos: modified.map(|duration| duration.subsec_nanos()),
+        }
+    }
+}
+
 impl PreviewDecodeSession {
     fn open(
         path: &Path,
+        fingerprint: PreviewFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
         backend: PreviewDecodeBackend,
@@ -361,12 +389,13 @@ impl PreviewDecodeSession {
             path: path.display().to_string(),
             reason: e.to_string(),
         })?;
-        Self::from_input(input, path, max_width, max_height, backend)
+        Self::from_input(input, path, fingerprint, max_width, max_height, backend)
     }
 
     fn from_input(
         input: ffmpeg::format::context::Input,
         path: &Path,
+        fingerprint: PreviewFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
         backend: PreviewDecodeBackend,
@@ -430,6 +459,7 @@ impl PreviewDecodeSession {
 
         Ok(Self {
             path: path.to_path_buf(),
+            fingerprint,
             max_width,
             max_height,
             backend,
@@ -453,11 +483,13 @@ impl PreviewDecodeSession {
     fn matches(
         &self,
         path: &Path,
+        fingerprint: PreviewFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
         backend: PreviewDecodeBackend,
     ) -> bool {
         self.path == path
+            && self.fingerprint == fingerprint
             && self.max_width == max_width
             && self.max_height == max_height
             && self.backend == backend
@@ -469,6 +501,7 @@ impl PreviewDecodeSession {
         let cache_lookup_started_at = Instant::now();
         if let Some(hit) = preview_cache_get(
             &self.path,
+            self.fingerprint,
             self.target_width,
             self.target_height,
             target_pts,
@@ -653,8 +686,9 @@ impl PreviewDecodeSession {
                                 &mut self.scaler,
                                 &self.path,
                             )?;
-                            preview_cache_put(
+                            preview_cache_put_with_fingerprint(
                                 &self.path,
+                                self.fingerprint,
                                 self.target_width,
                                 self.target_height,
                                 frame_pts,
@@ -670,8 +704,9 @@ impl PreviewDecodeSession {
                         if let Some((selected_pts, rgba)) =
                             choose_and_convert(best_before.as_ref(), best_after.as_ref())?
                         {
-                            preview_cache_put(
+                            preview_cache_put_with_fingerprint(
                                 &self.path,
+                                self.fingerprint,
                                 self.target_width,
                                 self.target_height,
                                 selected_pts,
@@ -713,8 +748,9 @@ impl PreviewDecodeSession {
                         if let Some((selected_pts, rgba)) =
                             choose_and_convert(best_before.as_ref(), best_after.as_ref())?
                         {
-                            preview_cache_put(
+                            preview_cache_put_with_fingerprint(
                                 &self.path,
+                                self.fingerprint,
                                 self.target_width,
                                 self.target_height,
                                 selected_pts,
@@ -740,8 +776,9 @@ impl PreviewDecodeSession {
         if let Some((selected_pts, rgba)) =
             choose_and_convert(best_before.as_ref(), best_after.as_ref())?
         {
-            preview_cache_put(
+            preview_cache_put_with_fingerprint(
                 &self.path,
+                self.fingerprint,
                 self.target_width,
                 self.target_height,
                 selected_pts,
@@ -765,6 +802,7 @@ fn decode_video_frame_at_time_impl(
 ) -> Result<RgbaFrame> {
     let started_at = Instant::now();
     ensure_ffmpeg_initialized(path)?;
+    let fingerprint = PreviewFileFingerprint::capture(path);
     PREVIEW_DECODE_SESSION.with(|slot| {
         let mut slot = slot.borrow_mut();
         let backend = preview_decode_backend();
@@ -772,13 +810,17 @@ fn decode_video_frame_at_time_impl(
 
         let current_match = slot
             .as_ref()
-            .map(|session| session.matches(path, max_width, max_height, backend))
+            .map(|session| session.matches(path, fingerprint, max_width, max_height, backend))
             .unwrap_or(false);
 
         if !current_match {
             let open_started_at = Instant::now();
             *slot = Some(PreviewDecodeSession::open(
-                path, max_width, max_height, backend,
+                path,
+                fingerprint,
+                max_width,
+                max_height,
+                backend,
             )?);
             session_open_us = duration_us(open_started_at.elapsed());
         }
@@ -914,6 +956,7 @@ struct PreviewCacheHit {
 #[derive(Clone)]
 struct PreviewFrameCacheEntry {
     path: PathBuf,
+    fingerprint: PreviewFileFingerprint,
     width: u32,
     height: u32,
     pts: i64,
@@ -922,6 +965,7 @@ struct PreviewFrameCacheEntry {
 
 fn preview_cache_get(
     path: &Path,
+    fingerprint: PreviewFileFingerprint,
     width: u32,
     height: u32,
     target_pts: i64,
@@ -934,7 +978,11 @@ fn preview_cache_get(
     let mut best_distance = i64::MAX;
 
     for (index, entry) in guard.iter().enumerate() {
-        if entry.path != path || entry.width != width || entry.height != height {
+        if entry.path != path
+            || entry.fingerprint != fingerprint
+            || entry.width != width
+            || entry.height != height
+        {
             continue;
         }
         let distance = (entry.pts - target_pts).abs();
@@ -955,7 +1003,14 @@ fn preview_cache_get(
     Some(hit)
 }
 
-fn preview_cache_put(path: &Path, width: u32, height: u32, pts: i64, frame: RgbaFrame) {
+fn preview_cache_put_with_fingerprint(
+    path: &Path,
+    fingerprint: PreviewFileFingerprint,
+    width: u32,
+    height: u32,
+    pts: i64,
+    frame: RgbaFrame,
+) {
     let cache = preview_frame_cache();
     let mut guard = match cache.lock() {
         Ok(g) => g,
@@ -963,13 +1018,18 @@ fn preview_cache_put(path: &Path, width: u32, height: u32, pts: i64, frame: Rgba
     };
 
     if let Some(index) = guard.iter().position(|entry| {
-        entry.path == path && entry.width == width && entry.height == height && entry.pts == pts
+        entry.path == path
+            && entry.fingerprint == fingerprint
+            && entry.width == width
+            && entry.height == height
+            && entry.pts == pts
     }) {
         guard.remove(index);
     }
 
     guard.push_front(PreviewFrameCacheEntry {
         path: path.to_path_buf(),
+        fingerprint,
         width,
         height,
         pts,
@@ -1235,13 +1295,14 @@ fn convert_decoded_to_rgba(
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_thread_local_preview_decode_session, decode_video_frame_at_time_rgba_scaled,
-        PreviewDecodeBackend, PreviewDecodePath, PreviewDecodeStageDurations,
-        PreviewDecodeThreadingKind, RgbaFrame,
+        clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
+        decode_video_frame_at_time_rgba_scaled, preview_cache_get,
+        preview_cache_put_with_fingerprint, PreviewDecodeBackend, PreviewDecodePath,
+        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
     };
     use serde::Serialize;
     use std::path::PathBuf;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn preview_decode_backend_codes_are_explicit_and_cpu_resident() {
@@ -1338,6 +1399,47 @@ mod tests {
         assert_eq!(cached.diagnostics.elapsed_us, 3);
         assert!(cached.diagnostics.cache_hit);
         assert!(cached.diagnostics.cpu_resident);
+    }
+
+    #[test]
+    fn preview_file_fingerprint_changes_when_file_is_replaced() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("proxy.mp4");
+        std::fs::write(&path, b"old").expect("old");
+        let first = PreviewFileFingerprint::capture(&path);
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&path, b"new proxy bytes").expect("new");
+        let second = PreviewFileFingerprint::capture(&path);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn preview_frame_cache_is_keyed_by_file_fingerprint() {
+        clear_global_preview_frame_cache();
+        let path = PathBuf::from("same-proxy-path.mp4");
+        let old_fingerprint = PreviewFileFingerprint {
+            len: Some(3),
+            modified_secs: Some(1),
+            modified_nanos: Some(0),
+        };
+        let new_fingerprint = PreviewFileFingerprint {
+            len: Some(15),
+            modified_secs: Some(2),
+            modified_nanos: Some(0),
+        };
+        let frame = RgbaFrame::new(
+            2,
+            1,
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
+
+        preview_cache_put_with_fingerprint(&path, old_fingerprint, 2, 1, 100, frame);
+
+        assert!(preview_cache_get(&path, new_fingerprint, 2, 1, 100, 1).is_none());
+        assert!(preview_cache_get(&path, old_fingerprint, 2, 1, 100, 1).is_some());
+        clear_global_preview_frame_cache();
     }
 
     #[test]

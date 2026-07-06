@@ -92,13 +92,18 @@ software scaling, RGBA copy, and the experimental external-process path.
 App-level preview diagnostics aggregate those fields so playback/perf JSON can
 show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
 single-thread decode-bound, software-scale/copy-bound, or GPU-output-bound. The
-in-process preview decoder uses bounded slice threading by default;
+in-process preview decoder uses bounded slice threading by default.
+Preview decode session reuse and the process-global preview frame cache must be
+keyed by a media file fingerprint, not by path alone. Proxy regeneration
+finalizes fresh media at the same proxy path, so same-path cache hits or reused
+FFmpeg sessions are valid only while file length and modification timestamp
+still match the fingerprint captured when the session/cache entry was created.
 `MONDRIAN_PREVIEW_DECODE_THREADING` and `MONDRIAN_PREVIEW_DECODE_THREADS` are
 diagnostic overrides, not separate decode semantics. Thread-local preview decode
-sessions are intentionally kept alive for playback locality and must be released through
-`clear_thread_local_preview_decode_session()` at explicit lifecycle boundaries
-such as perf probes, media/project shutdown, or tests that open threaded
-software decoders.
+sessions are intentionally kept alive for playback locality and must be
+released through `clear_thread_local_preview_decode_session()` at explicit
+lifecycle boundaries such as perf probes, media/project shutdown, or tests that
+open threaded software decoders.
 
 The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
 source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and
