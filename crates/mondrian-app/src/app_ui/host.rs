@@ -188,6 +188,26 @@ impl AppUiHost {
         self.app_state.borrow()
     }
 
+    /// Get the resolved display management policy for the current sequence/project.
+    ///
+    /// Applies the inheritance model: if the sequence inherits from project,
+    /// returns the project-level policy; otherwise returns the sequence-level policy.
+    pub(crate) fn resolved_display_management_policy(
+        &self,
+    ) -> mondrian_core::color_models::DisplayManagementPolicy {
+        let state = self.app_state.borrow();
+        let project_cm = &state.project_settings.color_management;
+        if let Some(sequence) = &state.sequence {
+            if sequence.settings.color_management.inherit {
+                project_cm.display_management.clone()
+            } else {
+                sequence.settings.color_management.display_management.clone()
+            }
+        } else {
+            project_cm.display_management.clone()
+        }
+    }
+
     /// Build a GPU-output preview candidate for the current app state.
     pub(crate) fn gpu_preview_frame_for_current_state(&self) -> AppUiGpuPreviewFrameState {
         let state = self.app_state.borrow();

@@ -175,6 +175,53 @@ struct AppUiViewerGpuOutputDiagnostics {
     last_display_contract_refresh: Option<AppUiDisplayContractRefreshEvent>,
     display_issue_summary: Option<AppUiDisplayIssueSummary>,
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_snapshot: Option<DisplaySnapshotDiagnostics>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct DisplaySnapshotDiagnostics {
+    display_name: Option<String>,
+    platform: String,
+    scale_factor_ppm: u32,
+    surface_format: String,
+    surface_color_space: String,
+    surface_hdr_mode: String,
+    requested_viewer_mode: String,
+    resolved_output_color_space: String,
+    ocio_display: Option<String>,
+    ocio_view: Option<String>,
+    monitor_profile_status: String,
+    hdr_status: String,
+    validation_status: String,
+    blocker_count: u64,
+    blocker_codes: Vec<String>,
+    warning_count: u64,
+    contract_generation: u64,
+}
+
+impl DisplaySnapshotDiagnostics {
+    fn from_snapshot(snapshot: &mondrian_core::display_contract::DisplayOutputSnapshot) -> Self {
+        Self {
+            display_name: snapshot.display_id.name.clone(),
+            platform: snapshot.platform.to_string(),
+            scale_factor_ppm: snapshot.scale_factor.0,
+            surface_format: snapshot.surface_format.clone(),
+            surface_color_space: snapshot.surface_color_space.clone(),
+            surface_hdr_mode: snapshot.surface_hdr_mode.clone(),
+            requested_viewer_mode: snapshot.requested_viewer_mode.clone(),
+            resolved_output_color_space: snapshot.resolved_output_color_space.clone(),
+            ocio_display: snapshot.ocio_display.clone(),
+            ocio_view: snapshot.ocio_view.clone(),
+            monitor_profile_status: snapshot.monitor_profile_status.to_string(),
+            hdr_status: snapshot.hdr_status.to_string(),
+            validation_status: snapshot.validation_status.to_string(),
+            blocker_count: snapshot.blockers.len() as u64,
+            blocker_codes: snapshot.blockers.iter().map(|b| b.code().to_owned()).collect(),
+            warning_count: snapshot.warnings.len() as u64,
+            contract_generation: snapshot.contract_generation(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -442,6 +489,7 @@ impl AppUiViewerGpuOutputTelemetry {
             last_display_contract_refresh: self.last_display_contract_refresh.clone(),
             display_issue_summary,
             last_outcome: self.last_outcome,
+            display_snapshot: None,
         }
     }
 
@@ -972,6 +1020,7 @@ struct AppUiWindowSession {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     display_output_contract: AppUiDisplayOutputContract,
+    display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
     frame_renderer: AppUiFrameRenderer,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
     working_compositor: GpuFrameCompositor,
@@ -1236,6 +1285,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &session.viewer_gpu_output_telemetry,
                             &session.display_output_contract.display_target,
                             session.color_output_runtime.diagnostics().into(),
+                            session.display_snapshot.as_ref(),
                         );
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
@@ -2335,6 +2385,16 @@ fn app_ui_surface_hdr_mode(color_space: wgpu::SurfaceColorSpace) -> AppUiSurface
     }
 }
 
+fn surface_color_space_to_color_space(cs: wgpu::SurfaceColorSpace) -> ColorSpace {
+    match cs {
+        wgpu::SurfaceColorSpace::Srgb => ColorSpace::Srgb,
+        wgpu::SurfaceColorSpace::DisplayP3 => ColorSpace::DciP3,
+        wgpu::SurfaceColorSpace::Bt2100Pq => ColorSpace::Rec2100Pq,
+        wgpu::SurfaceColorSpace::Bt2100Hlg => ColorSpace::Rec2100Hlg,
+        _ => ColorSpace::Rec709,
+    }
+}
+
 fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
     matches!(
         format,
@@ -2508,12 +2568,14 @@ fn viewer_gpu_output_diagnostics(
     telemetry: &AppUiViewerGpuOutputTelemetry,
     display_target: &AppUiDisplayTarget,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
+    display_snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
 ) -> AppUiViewerGpuOutputDiagnostics {
     let mut diagnostics = telemetry.diagnostics(runtime_report);
     diagnostics.last_color_rejection = host.current_viewer_color_rejection();
     if let Some(issue) = diagnostics.display_issue_summary.as_mut() {
         issue.display_target = Some(display_target.clone());
     }
+    diagnostics.display_snapshot = display_snapshot.map(DisplaySnapshotDiagnostics::from_snapshot);
     diagnostics
 }
 
@@ -2522,9 +2584,15 @@ fn trace_viewer_gpu_output_telemetry(
     telemetry: &AppUiViewerGpuOutputTelemetry,
     display_target: &AppUiDisplayTarget,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
+    display_snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
 ) {
-    let diagnostics =
-        viewer_gpu_output_diagnostics(host, telemetry, display_target, runtime_report);
+    let diagnostics = viewer_gpu_output_diagnostics(
+        host,
+        telemetry,
+        display_target,
+        runtime_report,
+        display_snapshot,
+    );
     tracing::trace!(
         invocations = diagnostics.invocations,
         non_workspace_skips = diagnostics.non_workspace_skips,
@@ -2684,6 +2752,37 @@ fn prepare_viewer_gpu_preview(
             "viewer GPU preview display presentation is not ready for the requested boundary"
         );
     }
+
+    if let Some(ref snapshot) = session.display_snapshot {
+        if !snapshot.is_valid() {
+            tracing::warn!(
+                sequence_id = %frame.sequence_id,
+                frame = frame.frame,
+                validation_status = ?snapshot.validation_status,
+                blockers = ?snapshot.blockers,
+                monitor_profile = ?snapshot.monitor_profile_status,
+                hdr_status = ?snapshot.hdr_status,
+                "v2 display output contract invalid — blocking preview"
+            );
+            let preview_blockers =
+                super::display_probe_impl::preview_blockers_from_snapshot(snapshot);
+            for blocker in &snapshot.blockers {
+                host.record_preview_gpu_output_blocker(
+                    &preview_blockers
+                        .iter()
+                        .find(|b| b.code() == blocker.code())
+                        .cloned()
+                        .unwrap_or_else(|| PreviewGpuOutputBlocker::UnsupportedFeature {
+                            feature: blocker.code().to_owned(),
+                            reason: format!("{blocker:?}"),
+                        }),
+                );
+            }
+            host.clear_external_viewer_frame();
+            return;
+        }
+    }
+
     if let Some(blocker) = session.display_output_contract.boundary_blocker(&frame.boundary) {
         session.viewer_gpu_output_telemetry.record_display_contract_blocker(&blocker);
         match &blocker {
@@ -3069,6 +3168,46 @@ fn refresh_display_output_contract(
     }
 
     let renderer_rebuilt = display_output_contract_requires_renderer_rebuild(&previous, &next);
+
+    let reason_str = format!("{reason:?}");
+    let previous_display_name = previous.display_target.name.clone();
+    let new_display_name = next.display_target.name.clone();
+
+    let snapshot = super::display_probe_impl::generate_display_snapshot(
+        next.display_target.name.clone(),
+        next.display_target.position,
+        next.display_target.physical_size,
+        next.display_target.scale_factor_ppm as f64 / 1_000_000.0,
+        next.surface_color.format,
+        next.surface_color.color_space,
+        &format!("{:?}", next.surface_color.hdr_mode),
+        &next.supported_surface_color_spaces_for_selected_format(),
+        next.display_hdr_info.clone(),
+        &host.resolved_display_management_policy(),
+        surface_color_space_to_color_space(next.surface_color.color_space),
+        &reason_str,
+    );
+
+    if let Some(ref prev_snapshot) = session.display_snapshot {
+        if prev_snapshot.display_id != snapshot.display_id {
+            tracing::warn!(
+                previous_display = ?previous_display_name,
+                new_display = ?new_display_name,
+                "display changed — previous contract may be stale"
+            );
+        }
+    }
+
+    let snapshot_blockers = super::display_probe_impl::preview_blockers_from_snapshot(&snapshot);
+    for blocker in &snapshot_blockers {
+        host.record_preview_gpu_output_blocker(blocker);
+    }
+
+    let previous_generation = session.display_snapshot.as_ref().map(|s| s.contract_generation());
+    let new_generation = snapshot.contract_generation();
+
+    session.display_snapshot = Some(snapshot);
+
     session.viewer_gpu_output_telemetry.record_display_contract_refresh(
         reason,
         &previous,
@@ -3082,10 +3221,18 @@ fn refresh_display_output_contract(
         session.surface.configure(device, &session.config);
         session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
     }
-    invalidate_display_dependent_gpu_preview(session, host);
+
+    let generation_changed = previous_generation != Some(new_generation);
+    if generation_changed {
+        invalidate_display_dependent_gpu_preview(session, host);
+    }
+
     tracing::info!(
         ?reason,
         renderer_rebuilt,
+        generation_changed,
+        previous_generation = ?previous_generation,
+        new_generation,
         display_target = ?session.display_output_contract.display_target,
         surface_format = ?session.display_output_contract.surface_color.format,
         surface_color_space = ?session.display_output_contract.surface_color.color_space,
@@ -3142,12 +3289,29 @@ impl AppUiWindowSession {
 
         let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
         TreeWalker::layout(host.active_root_mut(), bounds);
+
+        let initial_snapshot = super::display_probe_impl::generate_display_snapshot(
+            display_output_contract.display_target.name.clone(),
+            display_output_contract.display_target.position,
+            display_output_contract.display_target.physical_size,
+            display_output_contract.display_target.scale_factor_ppm as f64 / 1_000_000.0,
+            display_output_contract.surface_color.format,
+            display_output_contract.surface_color.color_space,
+            &format!("{:?}", display_output_contract.surface_color.hdr_mode),
+            &display_output_contract.supported_surface_color_spaces_for_selected_format(),
+            display_output_contract.display_hdr_info.clone(),
+            &host.resolved_display_management_policy(),
+            surface_color_space_to_color_space(display_output_contract.surface_color.color_space),
+            "Startup",
+        );
+
         Ok(Self {
             role,
             window,
             surface,
             config: config.clone(),
             display_output_contract,
+            display_snapshot: Some(initial_snapshot),
             frame_renderer: AppUiFrameRenderer::new(device, config.format),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
@@ -4420,6 +4584,7 @@ mod tests {
             &telemetry,
             &display_target,
             RenderGpuOutputRuntimeDiagnosticsReport::default(),
+            None,
         );
 
         assert_eq!(

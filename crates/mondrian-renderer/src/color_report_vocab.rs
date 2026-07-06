@@ -66,7 +66,49 @@ pub mod root_cause {
     pub const GPU_OUTPUT_BLOCKED: &str = "gpu_output_blocked";
 }
 
-// ── Shared action codes ───────────────────────────────────────────────────────
+// ── Display management check codes ───────────────────────────────────────────
+
+/// Check codes for display management health reports.
+pub mod display_check {
+    /// Display contract is current and has no blockers.
+    pub const DISPLAY_CONTRACT_CURRENT: &str = "display_contract_current";
+    /// Display contract has no blockers.
+    pub const DISPLAY_CONTRACT_NO_BLOCKERS: &str = "display_contract_no_blockers";
+    /// GPU output is ready with the current display contract.
+    pub const GPU_OUTPUT_READY: &str = "gpu_output_ready";
+    /// OS ICC profile discovery is unavailable.
+    pub const OS_ICC_PROFILE_UNAVAILABLE: &str = "os_icc_profile_unavailable";
+    /// OS HDR display metadata is unavailable.
+    pub const OS_HDR_METADATA_UNAVAILABLE: &str = "os_hdr_metadata_unavailable";
+    /// Monitor HDR capability is unknown.
+    pub const MONITOR_HDR_CAPABILITY_UNKNOWN: &str = "monitor_hdr_capability_unknown";
+    /// Display contract has been refreshed (window move, resize, etc.).
+    pub const DISPLAY_CONTRACT_REFRESHED: &str = "display_contract_refreshed";
+}
+
+// ── Display management root cause codes ──────────────────────────────────────
+
+/// Root cause codes for display management health reports.
+pub mod display_root_cause {
+    /// ICC profile requested but OS discovery is unsupported.
+    pub const ICC_PROFILE_UNSUPPORTED: &str = "icc_profile_unsupported";
+    /// ICC profile was found but is invalid or unreadable.
+    pub const ICC_PROFILE_INVALID: &str = "icc_profile_invalid";
+    /// ICC profile was read but cannot be mapped to OCIO display/view.
+    pub const ICC_PROFILE_UNMAPPED: &str = "icc_profile_unmapped";
+    /// HDR requested but surface does not support it.
+    pub const HDR_SURFACE_UNSUPPORTED: &str = "hdr_surface_unsupported";
+    /// HDR requested but monitor capability is unknown.
+    pub const HDR_MONITOR_UNKNOWN: &str = "hdr_monitor_unknown";
+    /// HDR requested but monitor explicitly does not support it.
+    pub const HDR_MONITOR_UNSUPPORTED: &str = "hdr_monitor_unsupported";
+    /// Display contract is stale after window move.
+    pub const DISPLAY_CONTRACT_STALE: &str = "display_contract_stale";
+    /// OCIO display/view pair not found.
+    pub const OCIO_DISPLAY_VIEW_MISSING: &str = "ocio_display_view_missing";
+}
+
+// ── Display management action codes ──────────────────────────────────────────
 
 /// Canonical action codes.
 pub mod action {
@@ -88,6 +130,16 @@ pub mod action {
     pub const CONFIGURE_DISPLAY_CONTRACT: &str = "configure_display_contract";
     /// Inspect preview GPU output blocker breakdown.
     pub const INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS: &str = "inspect_preview_gpu_output_blockers";
+    /// Implement OS ICC profile probe (platform-specific).
+    pub const IMPLEMENT_OS_ICC_PROFILE_PROBE: &str = "implement_os_icc_profile_probe";
+    /// Map ICC profile to OCIO display/view.
+    pub const MAP_ICC_PROFILE_TO_OCIO_DISPLAY: &str = "map_icc_profile_to_ocio_display";
+    /// Enable HDR surface format and swapchain configuration.
+    pub const ENABLE_HDR_SURFACE: &str = "enable_hdr_surface";
+    /// Refresh display contract after window move.
+    pub const MOVE_WINDOW_DISPLAY_CONTRACT_REFRESH: &str = "move_window_display_contract_refresh";
+    /// Inspect monitor HDR capability (requires OS-level query).
+    pub const INSPECT_MONITOR_HDR_CAPABILITY: &str = "inspect_monitor_hdr_capability";
 }
 
 // ── Normalization functions ───────────────────────────────────────────────────
@@ -139,6 +191,11 @@ pub fn normalize_action_code(code: &str) -> &str {
         "prepare_ocio_gpu_resources" => action::PREPARE_OCIO_GPU_RESOURCES,
         "configure_display_contract" => action::CONFIGURE_DISPLAY_CONTRACT,
         "inspect_preview_gpu_output_blockers" => action::INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS,
+        "implement_os_icc_profile_probe" => action::IMPLEMENT_OS_ICC_PROFILE_PROBE,
+        "map_icc_profile_to_ocio_display" => action::MAP_ICC_PROFILE_TO_OCIO_DISPLAY,
+        "enable_hdr_surface" => action::ENABLE_HDR_SURFACE,
+        "move_window_display_contract_refresh" => action::MOVE_WINDOW_DISPLAY_CONTRACT_REFRESH,
+        "inspect_monitor_hdr_capability" => action::INSPECT_MONITOR_HDR_CAPABILITY,
         other => other,
     }
 }
@@ -229,6 +286,26 @@ mod tests {
             normalize_action_code("inspect_preview_gpu_output_blockers"),
             action::INSPECT_PREVIEW_GPU_OUTPUT_BLOCKERS
         );
+        assert_eq!(
+            normalize_action_code("implement_os_icc_profile_probe"),
+            action::IMPLEMENT_OS_ICC_PROFILE_PROBE
+        );
+        assert_eq!(
+            normalize_action_code("map_icc_profile_to_ocio_display"),
+            action::MAP_ICC_PROFILE_TO_OCIO_DISPLAY
+        );
+        assert_eq!(
+            normalize_action_code("enable_hdr_surface"),
+            action::ENABLE_HDR_SURFACE
+        );
+        assert_eq!(
+            normalize_action_code("move_window_display_contract_refresh"),
+            action::MOVE_WINDOW_DISPLAY_CONTRACT_REFRESH
+        );
+        assert_eq!(
+            normalize_action_code("inspect_monitor_hdr_capability"),
+            action::INSPECT_MONITOR_HDR_CAPABILITY
+        );
     }
 
     #[test]
@@ -239,5 +316,25 @@ mod tests {
         assert!(is_shared_check_code("gpu_output_blockers"));
         assert!(!is_shared_check_code("diagnosed_frames_present"));
         assert!(!is_shared_check_code("media_warnings"));
+    }
+
+    #[test]
+    fn normalize_action_code_passes_through_canonical_codes() {
+        assert_eq!(
+            normalize_action_code("configure_display_contract"),
+            "configure_display_contract"
+        );
+        assert_eq!(
+            normalize_action_code("prepare_ocio_gpu_resources"),
+            "prepare_ocio_gpu_resources"
+        );
+        assert_eq!(
+            normalize_action_code("implement_os_icc_profile_probe"),
+            "implement_os_icc_profile_probe"
+        );
+        assert_eq!(
+            normalize_action_code("some_future_unknown_code"),
+            "some_future_unknown_code"
+        );
     }
 }

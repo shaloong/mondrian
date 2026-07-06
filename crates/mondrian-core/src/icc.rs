@@ -435,6 +435,11 @@ mod tests {
 /// This reports whether the current platform can provide ICC profile access,
 /// EDR information, or HDR display metadata. For alpha, this is a diagnostic
 /// only — full OS integration is deferred to a later phase.
+///
+/// The structured status integrates with the Display Output Contract v2:
+/// when `os_icc_discovery_available` is false and the user requests an
+/// ICC profile, the contract must emit `MonitorProfileStatus::IccProfileUnsupported`
+/// rather than silently falling back to Rec.709.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OsDisplayProfileStatus {
     /// Whether ICC profile parsing is available (always true — the parser is
@@ -467,5 +472,29 @@ impl OsDisplayProfileStatus {
              ICC profiles must be provided explicitly via project settings."
                 .to_string(),
         }
+    }
+
+    /// Whether the OS can provide ICC profile data for the current monitor.
+    ///
+    /// When this returns `false` and the user configures
+    /// `MonitorProfileReference::IccProfile`, the display output contract
+    /// **must** emit `MonitorProfileStatus::IccProfileUnsupported` — never
+    /// silently fall back to Rec.709.
+    pub fn can_discover_os_icc_profile(&self) -> bool {
+        self.os_icc_discovery_available
+    }
+
+    /// Whether the OS can provide reliable HDR display metadata.
+    ///
+    /// When this returns `false` and the user requests HDR viewer mode,
+    /// the display output contract **must** emit
+    /// `HdrStatus::RequestedMonitorUnknown` — never claim HDR correctness.
+    pub fn can_query_os_hdr_metadata(&self) -> bool {
+        self.os_hdr_metadata_available
+    }
+
+    /// Whether the OS can provide EDR (Extended Dynamic Range) information.
+    pub fn can_query_os_edr(&self) -> bool {
+        self.os_edr_available
     }
 }

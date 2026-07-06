@@ -6,7 +6,9 @@
 pub mod automation;
 pub mod color;
 pub mod color_models;
+pub mod display_contract;
 pub mod display_labels;
+pub mod display_probe;
 pub mod effect_data;
 pub mod error;
 pub mod events;

@@ -9,6 +9,7 @@ pub mod action_availability;
 pub mod action_queue;
 pub mod asset_thumbnails;
 pub mod commands;
+pub(crate) mod display_probe_impl;
 pub mod host;
 pub mod icons;
 pub mod interpret_asset_dialog;

@@ -21,6 +21,21 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every reason is a typed enum variant — no opaque counters or string-scattered
 /// diagnostics.  Health reports carry per-variant codes, areas, and actions.
+///
+/// ## Display management blocker categories
+///
+/// The following variants cover industrial-grade display management failures:
+///
+/// - **ICC profile blockers**: `MonitorIccProfileUnsupported`,
+///   `MonitorIccProfileInvalid` — fail-closed when OS ICC discovery is
+///   unavailable or the profile cannot be read/mapped.
+///
+/// - **HDR blockers**: `MonitorHdrCapabilityUnknown`,
+///   `MonitorHdrCapabilityUnsupported` — fail-closed when monitor HDR
+///   capability cannot be confirmed.
+///
+/// - **Lifecycle blockers**: `DisplayContractStale` — contract invalidation
+///   after window move, monitor change, or surface reconfiguration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PreviewGpuOutputBlocker {
     /// OCIO config is not loaded or unavailable for GPU shader extraction.
@@ -82,6 +97,60 @@ pub enum PreviewGpuOutputBlocker {
         /// Human-readable explanation.
         reason: String,
     },
+    /// OS ICC profile discovery is not implemented on this platform.
+    ///
+    /// When the user configures `MonitorProfileReference::IccProfile` and
+    /// the OS cannot provide ICC data, this blocker is emitted. The contract
+    /// **must not** fall back to Rec.709 / sRGB.
+    MonitorIccProfileUnsupported {
+        /// Stable feature code (e.g. `os_icc_profile`).
+        feature_code: String,
+        /// Profile path or identifier, if known.
+        profile_path: Option<String>,
+        /// Human-readable reason.
+        reason: String,
+    },
+    /// An ICC profile was found but is invalid or unreadable.
+    MonitorIccProfileInvalid {
+        /// Profile path or identifier.
+        profile_path: Option<String>,
+        /// Human-readable error.
+        reason: String,
+    },
+    /// An ICC profile was parsed but could not be mapped to an OCIO display/view.
+    MonitorIccProfileUnmapped {
+        /// Profile path or identifier.
+        profile_path: Option<String>,
+        /// Parsed color space, if available.
+        parsed_color_space: Option<String>,
+        /// Human-readable reason.
+        reason: String,
+    },
+    /// Monitor HDR capability is unknown — cannot claim HDR correctness.
+    ///
+    /// When the user requests HDR viewer mode and the monitor's HDR
+    /// capability cannot be confirmed, this blocker is emitted. The contract
+    /// **must not** silently assume HDR support.
+    MonitorHdrCapabilityUnknown {
+        /// Why the capability is unknown.
+        reason: String,
+    },
+    /// Monitor explicitly does not support the requested HDR mode.
+    MonitorHdrCapabilityUnsupported {
+        /// The requested HDR mode.
+        hdr_mode: String,
+        /// Evidence (e.g. display_hdr_info.max_luminance == 0).
+        evidence: String,
+    },
+    /// Display contract is stale because the window moved to another monitor
+    /// or the surface was reconfigured. The previous contract cannot be used
+    /// for the new display.
+    DisplayContractStale {
+        /// Previous display name.
+        previous_display: Option<String>,
+        /// New display name.
+        new_display: Option<String>,
+    },
 }
 
 impl PreviewGpuOutputBlocker {
@@ -102,6 +171,12 @@ impl PreviewGpuOutputBlocker {
             Self::LegacyRgba8CompositeBoundary { .. } => "legacy_rgba8_composite_boundary",
             Self::CpuFallbackRequested { .. } => "cpu_fallback_requested",
             Self::UnsupportedFeature { .. } => "unsupported_feature",
+            Self::MonitorIccProfileUnsupported { .. } => "monitor_icc_profile_unsupported",
+            Self::MonitorIccProfileInvalid { .. } => "monitor_icc_profile_invalid",
+            Self::MonitorIccProfileUnmapped { .. } => "monitor_icc_profile_unmapped",
+            Self::MonitorHdrCapabilityUnknown { .. } => "monitor_hdr_capability_unknown",
+            Self::MonitorHdrCapabilityUnsupported { .. } => "monitor_hdr_capability_unsupported",
+            Self::DisplayContractStale { .. } => "display_contract_stale",
         }
     }
 
@@ -144,6 +219,28 @@ impl PreviewGpuOutputBlocker {
             Self::UnsupportedFeature { feature, reason } => {
                 format!("Unsupported feature {feature}: {reason}")
             }
+            Self::MonitorIccProfileUnsupported { feature_code, reason, .. } => {
+                format!("OS ICC profile unsupported ({feature_code}): {reason}")
+            }
+            Self::MonitorIccProfileInvalid { reason, .. } => {
+                format!("Monitor ICC profile invalid: {reason}")
+            }
+            Self::MonitorIccProfileUnmapped { parsed_color_space, reason, .. } => {
+                format!("Monitor ICC profile unmapped ({parsed_color_space:?}): {reason}")
+            }
+            Self::MonitorHdrCapabilityUnknown { reason } => {
+                format!("Monitor HDR capability unknown: {reason}")
+            }
+            Self::MonitorHdrCapabilityUnsupported { hdr_mode, evidence } => {
+                format!("Monitor HDR capability unsupported for {hdr_mode}: {evidence}")
+            }
+            Self::DisplayContractStale { previous_display, new_display } => {
+                format!(
+                    "Display contract stale: moved from {} to {}",
+                    previous_display.as_deref().unwrap_or("unknown"),
+                    new_display.as_deref().unwrap_or("unknown"),
+                )
+            }
         }
     }
 
@@ -164,6 +261,12 @@ impl PreviewGpuOutputBlocker {
             Self::LegacyRgba8CompositeBoundary { .. } => "CompositePath",
             Self::CpuFallbackRequested { .. } => "CpuFallback",
             Self::UnsupportedFeature { .. } => "UnsupportedFeature",
+            Self::MonitorIccProfileUnsupported { .. }
+            | Self::MonitorIccProfileInvalid { .. }
+            | Self::MonitorIccProfileUnmapped { .. } => "MonitorProfile",
+            Self::MonitorHdrCapabilityUnknown { .. }
+            | Self::MonitorHdrCapabilityUnsupported { .. } => "MonitorHdr",
+            Self::DisplayContractStale { .. } => "DisplayLifecycle",
         }
     }
 
@@ -185,6 +288,12 @@ impl PreviewGpuOutputBlocker {
             Self::LegacyRgba8CompositeBoundary { .. } => "avoid_legacy_rgba8_boundary",
             Self::CpuFallbackRequested { .. } => "investigate_cpu_fallback",
             Self::UnsupportedFeature { .. } => "document_unsupported_feature",
+            Self::MonitorIccProfileUnsupported { .. } => "implement_os_icc_profile_probe",
+            Self::MonitorIccProfileInvalid { .. } => "map_icc_profile_to_ocio_display",
+            Self::MonitorIccProfileUnmapped { .. } => "map_icc_profile_to_ocio_display",
+            Self::MonitorHdrCapabilityUnknown { .. } => "inspect_monitor_hdr_capability",
+            Self::MonitorHdrCapabilityUnsupported { .. } => "configure_display_contract",
+            Self::DisplayContractStale { .. } => "move_window_display_contract_refresh",
         }
     }
 
@@ -217,6 +326,29 @@ impl PreviewGpuOutputBlocker {
             }
             Self::UnsupportedFeature { .. } => {
                 "Document the unsupported feature limitation and track for future implementation."
+            }
+            Self::MonitorIccProfileUnsupported { .. } => {
+                "OS ICC profile discovery is not implemented. Display management cannot guarantee \
+                 correct color presentation with ICC profiles on this platform."
+            }
+            Self::MonitorIccProfileInvalid { .. } => {
+                "The ICC profile is invalid or unreadable. Provide a valid ICC profile or switch \
+                 to a managed color space."
+            }
+            Self::MonitorIccProfileUnmapped { .. } => {
+                "The ICC profile could not be mapped to an OCIO display/view. Configure an \
+                 explicit managed display profile or add a matching OCIO display/view mapping."
+            }
+            Self::MonitorHdrCapabilityUnknown { .. } => {
+                "Monitor HDR capability cannot be confirmed. Do not claim HDR correctness until \
+                 the OS provides reliable HDR display metadata."
+            }
+            Self::MonitorHdrCapabilityUnsupported { .. } => {
+                "The monitor does not support the requested HDR mode. Switch to SDR or select \
+                 a different display."
+            }
+            Self::DisplayContractStale { .. } => {
+                "Refresh the display output contract after window move or surface reconfiguration."
             }
         }
     }
@@ -253,6 +385,18 @@ pub struct PreviewGpuOutputBlockerBreakdown {
     pub cpu_fallback_requested: u64,
     /// Explicitly unsupported features.
     pub unsupported_features: u64,
+    /// Monitor ICC profile unsupported.
+    pub monitor_icc_profile_unsupported: u64,
+    /// Monitor ICC profile invalid.
+    pub monitor_icc_profile_invalid: u64,
+    /// Monitor ICC profile parsed but unmapped to OCIO display/view.
+    pub monitor_icc_profile_unmapped: u64,
+    /// Monitor HDR capability unknown.
+    pub monitor_hdr_capability_unknown: u64,
+    /// Monitor HDR capability unsupported.
+    pub monitor_hdr_capability_unsupported: u64,
+    /// Display contract stale (window moved / monitor change).
+    pub display_contract_stale: u64,
 }
 
 impl PreviewGpuOutputBlockerBreakdown {
@@ -272,6 +416,12 @@ impl PreviewGpuOutputBlockerBreakdown {
             .saturating_add(self.legacy_rgba8_composite_boundary)
             .saturating_add(self.cpu_fallback_requested)
             .saturating_add(self.unsupported_features)
+            .saturating_add(self.monitor_icc_profile_unsupported)
+            .saturating_add(self.monitor_icc_profile_invalid)
+            .saturating_add(self.monitor_icc_profile_unmapped)
+            .saturating_add(self.monitor_hdr_capability_unknown)
+            .saturating_add(self.monitor_hdr_capability_unsupported)
+            .saturating_add(self.display_contract_stale)
     }
 
     /// Whether all counts are zero.
@@ -331,6 +481,29 @@ impl PreviewGpuOutputBlockerBreakdown {
             PreviewGpuOutputBlocker::UnsupportedFeature { .. } => {
                 self.unsupported_features = self.unsupported_features.saturating_add(1);
             }
+            PreviewGpuOutputBlocker::MonitorIccProfileUnsupported { .. } => {
+                self.monitor_icc_profile_unsupported =
+                    self.monitor_icc_profile_unsupported.saturating_add(1);
+            }
+            PreviewGpuOutputBlocker::MonitorIccProfileInvalid { .. } => {
+                self.monitor_icc_profile_invalid =
+                    self.monitor_icc_profile_invalid.saturating_add(1);
+            }
+            PreviewGpuOutputBlocker::MonitorIccProfileUnmapped { .. } => {
+                self.monitor_icc_profile_unmapped =
+                    self.monitor_icc_profile_unmapped.saturating_add(1);
+            }
+            PreviewGpuOutputBlocker::MonitorHdrCapabilityUnknown { .. } => {
+                self.monitor_hdr_capability_unknown =
+                    self.monitor_hdr_capability_unknown.saturating_add(1);
+            }
+            PreviewGpuOutputBlocker::MonitorHdrCapabilityUnsupported { .. } => {
+                self.monitor_hdr_capability_unsupported =
+                    self.monitor_hdr_capability_unsupported.saturating_add(1);
+            }
+            PreviewGpuOutputBlocker::DisplayContractStale { .. } => {
+                self.display_contract_stale = self.display_contract_stale.saturating_add(1);
+            }
         }
     }
 
@@ -371,6 +544,23 @@ impl PreviewGpuOutputBlockerBreakdown {
             self.cpu_fallback_requested.saturating_add(other.cpu_fallback_requested);
         self.unsupported_features =
             self.unsupported_features.saturating_add(other.unsupported_features);
+        self.monitor_icc_profile_unsupported = self
+            .monitor_icc_profile_unsupported
+            .saturating_add(other.monitor_icc_profile_unsupported);
+        self.monitor_icc_profile_invalid = self
+            .monitor_icc_profile_invalid
+            .saturating_add(other.monitor_icc_profile_invalid);
+        self.monitor_icc_profile_unmapped = self
+            .monitor_icc_profile_unmapped
+            .saturating_add(other.monitor_icc_profile_unmapped);
+        self.monitor_hdr_capability_unknown = self
+            .monitor_hdr_capability_unknown
+            .saturating_add(other.monitor_hdr_capability_unknown);
+        self.monitor_hdr_capability_unsupported = self
+            .monitor_hdr_capability_unsupported
+            .saturating_add(other.monitor_hdr_capability_unsupported);
+        self.display_contract_stale =
+            self.display_contract_stale.saturating_add(other.display_contract_stale);
     }
 
     /// Build from a renderer-level `RenderColorStageGpuBlockerBreakdown`.
@@ -419,6 +609,31 @@ mod tests {
                 feature: "os_icc_profile".to_owned(),
                 reason: "not implemented".to_owned(),
             },
+            PreviewGpuOutputBlocker::MonitorIccProfileUnsupported {
+                feature_code: "os_icc_profile".to_owned(),
+                profile_path: None,
+                reason: "OS ICC discovery not implemented".to_owned(),
+            },
+            PreviewGpuOutputBlocker::MonitorIccProfileInvalid {
+                profile_path: Some("bad.icc".to_owned()),
+                reason: "parse error".to_owned(),
+            },
+            PreviewGpuOutputBlocker::MonitorIccProfileUnmapped {
+                profile_path: Some("display.icc".to_owned()),
+                parsed_color_space: Some("DciP3".to_owned()),
+                reason: "no OCIO display/view match".to_owned(),
+            },
+            PreviewGpuOutputBlocker::MonitorHdrCapabilityUnknown {
+                reason: "display_hdr_info unavailable".to_owned(),
+            },
+            PreviewGpuOutputBlocker::MonitorHdrCapabilityUnsupported {
+                hdr_mode: "HdrPq".to_owned(),
+                evidence: "max_luminance=0".to_owned(),
+            },
+            PreviewGpuOutputBlocker::DisplayContractStale {
+                previous_display: Some("Monitor A".to_owned()),
+                new_display: Some("Monitor B".to_owned()),
+            },
         ];
 
         for blocker in &blockers {
@@ -458,8 +673,25 @@ mod tests {
             feature: "os_icc_profile".to_owned(),
             reason: "not implemented".to_owned(),
         });
+        breakdown.record(&PreviewGpuOutputBlocker::MonitorIccProfileUnsupported {
+            feature_code: "os_icc_profile".to_owned(),
+            profile_path: None,
+            reason: "not implemented".to_owned(),
+        });
+        breakdown.record(&PreviewGpuOutputBlocker::MonitorIccProfileUnmapped {
+            profile_path: Some("display.icc".to_owned()),
+            parsed_color_space: Some("DciP3".to_owned()),
+            reason: "no OCIO display/view match".to_owned(),
+        });
+        breakdown.record(&PreviewGpuOutputBlocker::MonitorHdrCapabilityUnknown {
+            reason: "unknown".to_owned(),
+        });
+        breakdown.record(&PreviewGpuOutputBlocker::DisplayContractStale {
+            previous_display: None,
+            new_display: None,
+        });
 
-        assert_eq!(breakdown.total(), 6);
+        assert_eq!(breakdown.total(), 10);
         assert!(!breakdown.is_empty());
         assert_eq!(breakdown.ocio_config_not_loaded, 1);
         assert_eq!(breakdown.shader_module_not_prepared, 1);
@@ -467,6 +699,10 @@ mod tests {
         assert_eq!(breakdown.frame_not_gpu_resident, 1);
         assert_eq!(breakdown.cpu_fallback_requested, 1);
         assert_eq!(breakdown.unsupported_features, 1);
+        assert_eq!(breakdown.monitor_icc_profile_unsupported, 1);
+        assert_eq!(breakdown.monitor_icc_profile_unmapped, 1);
+        assert_eq!(breakdown.monitor_hdr_capability_unknown, 1);
+        assert_eq!(breakdown.display_contract_stale, 1);
     }
 
     #[test]
@@ -478,11 +714,32 @@ mod tests {
         let mut b = PreviewGpuOutputBlockerBreakdown::default();
         b.record(&PreviewGpuOutputBlocker::OcioConfigNotLoaded);
         b.record(&PreviewGpuOutputBlocker::FrameNotGpuResident);
+        b.record(&PreviewGpuOutputBlocker::MonitorIccProfileUnsupported {
+            feature_code: "os_icc_profile".to_owned(),
+            profile_path: None,
+            reason: "test".to_owned(),
+        });
+        b.record(&PreviewGpuOutputBlocker::MonitorIccProfileUnmapped {
+            profile_path: None,
+            parsed_color_space: None,
+            reason: "test".to_owned(),
+        });
+        b.record(&PreviewGpuOutputBlocker::MonitorHdrCapabilityUnknown {
+            reason: "test".to_owned(),
+        });
+        b.record(&PreviewGpuOutputBlocker::DisplayContractStale {
+            previous_display: None,
+            new_display: None,
+        });
 
         a.accumulate(b);
         assert_eq!(a.ocio_config_not_loaded, 3);
         assert_eq!(a.frame_not_gpu_resident, 1);
-        assert_eq!(a.total(), 4);
+        assert_eq!(a.monitor_icc_profile_unsupported, 1);
+        assert_eq!(a.monitor_icc_profile_unmapped, 1);
+        assert_eq!(a.monitor_hdr_capability_unknown, 1);
+        assert_eq!(a.display_contract_stale, 1);
+        assert_eq!(a.total(), 8);
     }
 
     #[test]
@@ -536,10 +793,89 @@ mod tests {
                 reason: String::new(),
             }
             .code(),
+            PreviewGpuOutputBlocker::MonitorIccProfileUnsupported {
+                feature_code: String::new(),
+                profile_path: None,
+                reason: String::new(),
+            }
+            .code(),
+            PreviewGpuOutputBlocker::MonitorIccProfileInvalid {
+                profile_path: None,
+                reason: String::new(),
+            }
+            .code(),
+            PreviewGpuOutputBlocker::MonitorIccProfileUnmapped {
+                profile_path: None,
+                parsed_color_space: None,
+                reason: String::new(),
+            }
+            .code(),
+            PreviewGpuOutputBlocker::MonitorHdrCapabilityUnknown { reason: String::new() }.code(),
+            PreviewGpuOutputBlocker::MonitorHdrCapabilityUnsupported {
+                hdr_mode: String::new(),
+                evidence: String::new(),
+            }
+            .code(),
+            PreviewGpuOutputBlocker::DisplayContractStale {
+                previous_display: None,
+                new_display: None,
+            }
+            .code(),
         ];
         let mut unique = codes.to_vec();
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), codes.len(), "blocker codes must be unique");
+    }
+
+    #[test]
+    fn icc_and_hdr_blocker_area_codes_are_display_management() {
+        assert_eq!(
+            PreviewGpuOutputBlocker::MonitorIccProfileUnsupported {
+                feature_code: String::new(),
+                profile_path: None,
+                reason: String::new(),
+            }
+            .area_code(),
+            "MonitorProfile"
+        );
+        assert_eq!(
+            PreviewGpuOutputBlocker::MonitorIccProfileInvalid {
+                profile_path: None,
+                reason: String::new(),
+            }
+            .area_code(),
+            "MonitorProfile"
+        );
+        assert_eq!(
+            PreviewGpuOutputBlocker::MonitorIccProfileUnmapped {
+                profile_path: None,
+                parsed_color_space: None,
+                reason: String::new(),
+            }
+            .area_code(),
+            "MonitorProfile"
+        );
+        assert_eq!(
+            PreviewGpuOutputBlocker::MonitorHdrCapabilityUnknown { reason: String::new() }
+                .area_code(),
+            "MonitorHdr"
+        );
+        assert_eq!(
+            PreviewGpuOutputBlocker::MonitorHdrCapabilityUnsupported {
+                hdr_mode: String::new(),
+                evidence: String::new(),
+            }
+            .area_code(),
+            "MonitorHdr"
+        );
+        assert_eq!(
+            PreviewGpuOutputBlocker::DisplayContractStale {
+                previous_display: None,
+                new_display: None,
+            }
+            .area_code(),
+            "DisplayLifecycle"
+        );
     }
 }

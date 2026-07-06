@@ -1444,6 +1444,12 @@ pub fn ocio_view_names(display: &str) -> Vec<String> {
     (0..n).filter_map(|i| config.view(display, i)).collect()
 }
 
+/// Return the default view for a display from the current OCIO config.
+pub fn ocio_default_view_for_display(display: &str) -> Option<String> {
+    let config = ocio_rs::current_config()?;
+    config.default_view(display)
+}
+
 /// Return the default display / view pair from the current OCIO config.
 pub fn ocio_default_display_view() -> Option<(String, String)> {
     let config = ocio_rs::current_config()?;
