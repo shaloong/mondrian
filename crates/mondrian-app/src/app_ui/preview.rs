@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use mondrian_assets::AssetKind;
 use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
@@ -189,6 +189,11 @@ impl AppUiPreviewService {
             decode_last_threading_count: self.metrics.decode_last_threading_count.get(),
             decode_max_threading_count: self.metrics.decode_max_threading_count.get(),
             decode_stage_durations: self.metrics.decode_stage_durations.get(),
+            render_timed_frames: self.metrics.render_timed_frames.get(),
+            render_total_duration_us: self.metrics.render_total_duration_us.get(),
+            render_max_duration_us: self.metrics.render_max_duration_us.get(),
+            render_last_duration_us: self.metrics.render_last_duration_us.get(),
+            render_stage_durations: self.metrics.render_stage_durations.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
@@ -362,27 +367,40 @@ impl AppUiPreviewService {
             &state.project_settings.color_management,
             display_color_space,
         );
-        let preview_state = match self.resolve_sequence_elements(
-            state,
-            sequence,
-            frame,
-            width,
-            height,
-            0,
-            color_context,
-        ) {
+        let render_started_at = Instant::now();
+        let resolve_started_at = Instant::now();
+        let resolved =
+            self.resolve_sequence_elements(state, sequence, frame, width, height, 0, color_context);
+        let mut render_stage_durations = AppUiPreviewRenderStageDurations {
+            resolve_us: app_duration_us(resolve_started_at.elapsed()),
+            ..AppUiPreviewRenderStageDurations::default()
+        };
+        let preview_state = match resolved {
             Some(resolved) => {
+                let final_cache_lookup_started_at = Instant::now();
                 if let Some(frame) = resolved
                     .cache_key
                     .as_ref()
                     .and_then(|cache_key| self.external_viewer_frame_for_key(cache_key))
                 {
+                    render_stage_durations.final_cache_lookup_us =
+                        app_duration_us(final_cache_lookup_started_at.elapsed());
+                    self.record_render_stage_durations(
+                        app_duration_us(render_started_at.elapsed()),
+                        render_stage_durations,
+                    );
                     ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
                 } else if let Some(frame) = resolved
                     .cache_key
                     .as_ref()
                     .and_then(|cache_key| self.cached_viewer_frame(cache_key))
                 {
+                    render_stage_durations.final_cache_lookup_us =
+                        app_duration_us(final_cache_lookup_started_at.elapsed());
+                    self.record_render_stage_durations(
+                        app_duration_us(render_started_at.elapsed()),
+                        render_stage_durations,
+                    );
                     self.last_ready_frame.replace(Some(ScopedViewerFrame {
                         sequence_id: sequence.id,
                         width,
@@ -391,6 +409,8 @@ impl AppUiPreviewService {
                     }));
                     ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
                 } else {
+                    render_stage_durations.final_cache_lookup_us =
+                        app_duration_us(final_cache_lookup_started_at.elapsed());
                     let output = match composite_resolved_preview(
                         self,
                         width,
@@ -405,10 +425,12 @@ impl AppUiPreviewService {
                             return ViewerPreviewState::Unavailable;
                         }
                     };
+                    render_stage_durations.accumulate(output.render_stage_durations);
                     self.record_composite(output.composite_diagnostics);
                     self.record_color_transform(output.color_diagnostics);
                     self.record_color_stage(output.color_stage_diagnostics);
                     let rgba = output.rgba;
+                    let frame_packaging_started_at = Instant::now();
                     let key = preview_cache_key(frame, width, height, &rgba);
                     match ViewerFrameImage::new(key, width, height, rgba) {
                         Some(frame) => {
@@ -417,6 +439,12 @@ impl AppUiPreviewService {
                                     .borrow_mut()
                                     .insert(cache_key, frame.clone());
                             }
+                            render_stage_durations.frame_packaging_us =
+                                app_duration_us(frame_packaging_started_at.elapsed());
+                            self.record_render_stage_durations(
+                                app_duration_us(render_started_at.elapsed()),
+                                render_stage_durations,
+                            );
                             self.last_ready_frame.replace(Some(ScopedViewerFrame {
                                 sequence_id: sequence.id,
                                 width,
@@ -824,6 +852,22 @@ impl AppUiPreviewService {
         self.metrics.decode_stage_durations.set(stage_durations);
     }
 
+    fn record_render_stage_durations(
+        &self,
+        total_duration_us: u64,
+        durations: AppUiPreviewRenderStageDurations,
+    ) {
+        bump(&self.metrics.render_timed_frames);
+        add_cell(&self.metrics.render_total_duration_us, total_duration_us);
+        self.metrics
+            .render_max_duration_us
+            .set(self.metrics.render_max_duration_us.get().max(total_duration_us));
+        self.metrics.render_last_duration_us.set(total_duration_us);
+        let mut stage_durations = self.metrics.render_stage_durations.get();
+        stage_durations.accumulate(durations);
+        self.metrics.render_stage_durations.set(stage_durations);
+    }
+
     fn record_composite(&self, diagnostics: TimelineCompositeDiagnostics) {
         bump(&self.metrics.color_composite_plans);
         add_cell(&self.metrics.color_composite_elements, diagnostics.elements);
@@ -952,9 +996,15 @@ impl AppUiPreviewService {
             &mut scratch,
         )
         .ok()?;
+        let render_stage_durations = output.render_stage_durations;
+        let render_total_us = render_stage_durations
+            .working_prepare_us
+            .saturating_add(render_stage_durations.cpu_composite_us)
+            .saturating_add(render_stage_durations.cpu_output_boundary_us);
         self.record_composite(output.composite_diagnostics);
         self.record_color_transform(output.color_diagnostics);
         self.record_color_stage(output.color_stage_diagnostics);
+        self.record_render_stage_durations(render_total_us, render_stage_durations);
         let rgba = output.rgba;
         let signature =
             nested_preview_frame_signature(sequence.id, frame.max(0), width, height, &rgba);
@@ -1088,6 +1138,36 @@ struct ResolvedPreviewPlan {
     color_context: ColorContext,
 }
 
+/// Aggregated CPU-side viewer render stage timings after media decode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewRenderStageDurations {
+    /// Time spent resolving sequence elements, media cache keys, and current-frame readiness.
+    pub resolve_us: u64,
+    /// Time spent checking external/final viewer frame caches.
+    pub final_cache_lookup_us: u64,
+    /// Time spent preparing working-space inputs for CPU composition.
+    pub working_prepare_us: u64,
+    /// Time spent in CPU timeline compositing and basic property/effect application.
+    pub cpu_composite_us: u64,
+    /// Time spent applying the final CPU output/color boundary.
+    pub cpu_output_boundary_us: u64,
+    /// Time spent hashing, packaging, and storing the final raster viewer frame.
+    pub frame_packaging_us: u64,
+}
+
+impl AppUiPreviewRenderStageDurations {
+    fn accumulate(&mut self, other: Self) {
+        self.resolve_us = self.resolve_us.saturating_add(other.resolve_us);
+        self.final_cache_lookup_us =
+            self.final_cache_lookup_us.saturating_add(other.final_cache_lookup_us);
+        self.working_prepare_us = self.working_prepare_us.saturating_add(other.working_prepare_us);
+        self.cpu_composite_us = self.cpu_composite_us.saturating_add(other.cpu_composite_us);
+        self.cpu_output_boundary_us =
+            self.cpu_output_boundary_us.saturating_add(other.cpu_output_boundary_us);
+        self.frame_packaging_us = self.frame_packaging_us.saturating_add(other.frame_packaging_us);
+    }
+}
+
 /// Point-in-time preview service counters for local performance diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AppUiPreviewDiagnostics {
@@ -1179,6 +1259,16 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_max_threading_count: u64,
     /// Aggregated stage-level timings reported by preview decode.
     pub decode_stage_durations: PreviewDecodeStageDurations,
+    /// Viewer render requests with post-decode stage timing evidence.
+    pub render_timed_frames: u64,
+    /// Total post-decode viewer render duration in microseconds.
+    pub render_total_duration_us: u64,
+    /// Slowest post-decode viewer render duration in microseconds.
+    pub render_max_duration_us: u64,
+    /// Most recent post-decode viewer render duration in microseconds.
+    pub render_last_duration_us: u64,
+    /// Aggregated CPU-side viewer render stage timings after media decode.
+    pub render_stage_durations: AppUiPreviewRenderStageDurations,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
@@ -1435,6 +1525,148 @@ pub struct AppUiPreviewDecodePerformanceReport {
     pub actions: Vec<AppUiPreviewDecodePerformanceAction>,
 }
 
+/// Stable preview render performance summary for post-decode viewer work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewRenderPerformanceSummary {
+    /// Viewer render requests with timing evidence.
+    pub timed_frames: u64,
+    /// Maximum post-decode render duration.
+    pub max_duration_us: u64,
+    /// Most recent post-decode render duration.
+    pub last_duration_us: u64,
+    /// Total post-decode render duration.
+    pub total_duration_us: u64,
+    /// Slow-frame budget applied by the report.
+    pub slow_frame_budget_us: u64,
+    /// Aggregated post-decode render stage timings.
+    pub stage_durations: AppUiPreviewRenderStageDurations,
+    /// Dominant post-decode render bottleneck inferred from aggregated timings.
+    pub primary_bottleneck: AppUiPreviewRenderBottleneck,
+}
+
+/// Dominant post-decode preview render bottleneck.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewRenderBottleneck {
+    /// No post-decode render evidence was captured.
+    #[default]
+    None,
+    /// Sequence/plan/media readiness resolution dominated.
+    Resolve,
+    /// Final viewer/external frame cache lookup dominated.
+    FinalCacheLookup,
+    /// Working-frame preparation dominated.
+    WorkingPreparation,
+    /// CPU timeline compositing and property/effect work dominated.
+    CpuComposite,
+    /// CPU output/color boundary dominated.
+    CpuOutputBoundary,
+    /// Final raster frame packaging dominated.
+    FramePackaging,
+}
+
+/// Schema version for preview render performance reports.
+pub const APP_UI_PREVIEW_RENDER_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 1;
+
+/// Default post-decode viewer render budget: one frame should complete in tens of ms.
+pub const APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
+
+/// Versioned preview render performance report for UI, telemetry, and perf artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewRenderPerformanceReport {
+    /// Report schema version.
+    pub schema_version: u32,
+    /// Applied report profile.
+    pub profile: String,
+    /// Overall post-decode render performance verdict.
+    pub verdict: AppUiPreviewRenderPerformanceVerdict,
+    /// Structured render performance summary used as report evidence.
+    pub summary: Option<AppUiPreviewRenderPerformanceSummary>,
+    /// Structured checks by preview render area.
+    pub checks: Vec<AppUiPreviewRenderPerformanceCheck>,
+    /// Prioritized machine-readable root causes.
+    pub root_causes: Vec<AppUiPreviewRenderPerformanceRootCause>,
+    /// Suggested engineering or operator actions.
+    pub actions: Vec<AppUiPreviewRenderPerformanceAction>,
+}
+
+/// Overall post-decode preview render performance verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewRenderPerformanceVerdict {
+    /// Preview render met the applied performance budget.
+    Pass,
+    /// Preview render violated the budget or had no evidence.
+    Fail,
+}
+
+/// Preview render performance diagnostic area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewRenderPerformanceArea {
+    /// Evidence capture and summary availability.
+    CaptureIntegrity,
+    /// End-to-end post-decode render latency budget.
+    LatencyBudget,
+    /// Sequence/plan/media readiness resolution.
+    Resolve,
+    /// Final viewer/external frame cache lookup.
+    FinalCacheLookup,
+    /// Working-frame preparation before CPU composition.
+    WorkingPreparation,
+    /// CPU timeline compositing and property/effect work.
+    CpuComposite,
+    /// CPU output/color boundary.
+    CpuOutputBoundary,
+    /// Final raster frame packaging.
+    FramePackaging,
+}
+
+/// Preview render performance check severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewRenderPerformanceSeverity {
+    /// Check passed.
+    Pass,
+    /// Check failed.
+    Fail,
+}
+
+/// One preview render performance check.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewRenderPerformanceCheck {
+    /// Diagnostic area for this check.
+    pub area: AppUiPreviewRenderPerformanceArea,
+    /// Stable check code.
+    pub code: &'static str,
+    /// Check severity.
+    pub severity: AppUiPreviewRenderPerformanceSeverity,
+    /// Observed value.
+    pub observed: u64,
+    /// Optional target or threshold.
+    pub limit: Option<u64>,
+}
+
+/// One preview render performance root cause.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewRenderPerformanceRootCause {
+    /// Diagnostic area for this root cause.
+    pub area: AppUiPreviewRenderPerformanceArea,
+    /// Stable root-cause code.
+    pub code: &'static str,
+    /// Root-cause severity.
+    pub severity: AppUiPreviewRenderPerformanceSeverity,
+    /// Compact evidence string.
+    pub evidence: String,
+}
+
+/// One preview render performance action.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewRenderPerformanceAction {
+    /// Diagnostic area for this action.
+    pub area: AppUiPreviewRenderPerformanceArea,
+    /// Stable action code.
+    pub code: &'static str,
+    /// Human-readable action.
+    pub description: &'static str,
+}
+
 /// Overall preview decode performance verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum AppUiPreviewDecodePerformanceVerdict {
@@ -1526,6 +1758,83 @@ impl AppUiPreviewDecodePerformanceSummary {
             profile,
             APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
         )
+    }
+}
+
+impl AppUiPreviewRenderPerformanceSummary {
+    /// Build the versioned preview render performance report for this summary.
+    pub fn performance_report(
+        self,
+        profile: impl Into<String>,
+    ) -> AppUiPreviewRenderPerformanceReport {
+        build_preview_render_performance_report(
+            Some(self),
+            profile,
+            APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+        )
+    }
+}
+
+/// Build a versioned preview render performance report from an optional summary.
+pub fn build_preview_render_performance_report(
+    summary: Option<AppUiPreviewRenderPerformanceSummary>,
+    profile: impl Into<String>,
+    slow_frame_budget_us: u64,
+) -> AppUiPreviewRenderPerformanceReport {
+    let mut checks = Vec::new();
+    let mut root_causes = Vec::new();
+    let mut actions = Vec::new();
+
+    push_render_bool_check(
+        &mut checks,
+        AppUiPreviewRenderPerformanceArea::CaptureIntegrity,
+        "preview_render_evidence_present",
+        summary.map(|summary| summary.timed_frames > 0).unwrap_or(false),
+    );
+
+    if let Some(mut summary) = summary {
+        summary.slow_frame_budget_us = slow_frame_budget_us;
+        summary.primary_bottleneck = classify_preview_render_bottleneck(summary.stage_durations);
+        push_render_max_check(
+            &mut checks,
+            AppUiPreviewRenderPerformanceArea::LatencyBudget,
+            "preview_render_max_frame_us",
+            summary.max_duration_us,
+            slow_frame_budget_us,
+        );
+        push_preview_render_root_causes_and_actions(summary, &mut root_causes, &mut actions);
+
+        let verdict = preview_render_verdict(&checks);
+        return AppUiPreviewRenderPerformanceReport {
+            schema_version: APP_UI_PREVIEW_RENDER_PERFORMANCE_REPORT_SCHEMA_VERSION,
+            profile: profile.into(),
+            verdict,
+            summary: Some(summary),
+            checks,
+            root_causes,
+            actions,
+        };
+    }
+
+    push_render_root_cause_with_action(
+        &mut root_causes,
+        &mut actions,
+        AppUiPreviewRenderPerformanceArea::CaptureIntegrity,
+        "missing_preview_render_evidence",
+        "preview_render_evidence_present=false".to_owned(),
+        "capture_preview_render_stage_durations",
+        "Ensure viewer preview records post-decode render stage timings from the real playback path.",
+    );
+
+    let verdict = preview_render_verdict(&checks);
+    AppUiPreviewRenderPerformanceReport {
+        schema_version: APP_UI_PREVIEW_RENDER_PERFORMANCE_REPORT_SCHEMA_VERSION,
+        profile: profile.into(),
+        verdict,
+        summary: None,
+        checks,
+        root_causes,
+        actions,
     }
 }
 
@@ -1631,6 +1940,58 @@ fn preview_decode_verdict(
     } else {
         AppUiPreviewDecodePerformanceVerdict::Pass
     }
+}
+
+fn preview_render_verdict(
+    checks: &[AppUiPreviewRenderPerformanceCheck],
+) -> AppUiPreviewRenderPerformanceVerdict {
+    if checks
+        .iter()
+        .any(|check| check.severity == AppUiPreviewRenderPerformanceSeverity::Fail)
+    {
+        AppUiPreviewRenderPerformanceVerdict::Fail
+    } else {
+        AppUiPreviewRenderPerformanceVerdict::Pass
+    }
+}
+
+fn push_render_max_check(
+    checks: &mut Vec<AppUiPreviewRenderPerformanceCheck>,
+    area: AppUiPreviewRenderPerformanceArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(AppUiPreviewRenderPerformanceCheck {
+        area,
+        code,
+        severity: if observed > limit {
+            AppUiPreviewRenderPerformanceSeverity::Fail
+        } else {
+            AppUiPreviewRenderPerformanceSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_render_bool_check(
+    checks: &mut Vec<AppUiPreviewRenderPerformanceCheck>,
+    area: AppUiPreviewRenderPerformanceArea,
+    code: &'static str,
+    passed: bool,
+) {
+    checks.push(AppUiPreviewRenderPerformanceCheck {
+        area,
+        code,
+        severity: if passed {
+            AppUiPreviewRenderPerformanceSeverity::Pass
+        } else {
+            AppUiPreviewRenderPerformanceSeverity::Fail
+        },
+        observed: if passed { 1 } else { 0 },
+        limit: Some(1),
+    });
 }
 
 fn push_decode_max_check(
@@ -1825,6 +2186,125 @@ fn push_preview_decode_root_causes_and_actions(
     }
 }
 
+fn push_preview_render_root_causes_and_actions(
+    summary: AppUiPreviewRenderPerformanceSummary,
+    root_causes: &mut Vec<AppUiPreviewRenderPerformanceRootCause>,
+    actions: &mut Vec<AppUiPreviewRenderPerformanceAction>,
+) {
+    if summary.max_duration_us <= summary.slow_frame_budget_us {
+        return;
+    }
+
+    push_render_root_cause_with_action(
+        root_causes,
+        actions,
+        AppUiPreviewRenderPerformanceArea::LatencyBudget,
+        "preview_render_frame_over_budget",
+        format!(
+            "max_duration_us={} slow_frame_budget_us={} primary_bottleneck={:?}",
+            summary.max_duration_us, summary.slow_frame_budget_us, summary.primary_bottleneck
+        ),
+        "inspect_preview_render_stage_durations",
+        "Inspect post-decode viewer render stage timings before changing decode code.",
+    );
+
+    match summary.primary_bottleneck {
+        AppUiPreviewRenderBottleneck::Resolve => push_render_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewRenderPerformanceArea::Resolve,
+            "preview_render_resolve_bound",
+            format!("resolve_us={}", summary.stage_durations.resolve_us),
+            "profile_preview_plan_resolution",
+            "Profile sequence resolution, media-key construction, and readiness checks.",
+        ),
+        AppUiPreviewRenderBottleneck::FinalCacheLookup => push_render_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewRenderPerformanceArea::FinalCacheLookup,
+            "preview_render_final_cache_lookup_bound",
+            format!(
+                "final_cache_lookup_us={}",
+                summary.stage_durations.final_cache_lookup_us
+            ),
+            "profile_viewer_frame_cache",
+            "Profile final viewer frame cache lookup and external texture identity checks.",
+        ),
+        AppUiPreviewRenderBottleneck::WorkingPreparation => push_render_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewRenderPerformanceArea::WorkingPreparation,
+            "preview_render_working_prepare_bound",
+            format!(
+                "working_prepare_us={}",
+                summary.stage_durations.working_prepare_us
+            ),
+            "reduce_working_frame_preparation",
+            "Reduce working-frame extraction/copy work before timeline compositing.",
+        ),
+        AppUiPreviewRenderBottleneck::CpuComposite => push_render_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewRenderPerformanceArea::CpuComposite,
+            "preview_render_cpu_composite_bound",
+            format!("cpu_composite_us={}", summary.stage_durations.cpu_composite_us),
+            "move_preview_composite_to_gpu",
+            "Keep common blend, transform, and effect paths on GPU or improve CPU composite tiling.",
+        ),
+        AppUiPreviewRenderBottleneck::CpuOutputBoundary => push_render_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewRenderPerformanceArea::CpuOutputBoundary,
+            "preview_render_cpu_output_boundary_bound",
+            format!(
+                "cpu_output_boundary_us={}",
+                summary.stage_durations.cpu_output_boundary_us
+            ),
+            "move_preview_output_boundary_to_gpu",
+            "Route viewer output color/display transforms through the GPU output boundary.",
+        ),
+        AppUiPreviewRenderBottleneck::FramePackaging => push_render_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewRenderPerformanceArea::FramePackaging,
+            "preview_render_frame_packaging_bound",
+            format!(
+                "frame_packaging_us={}",
+                summary.stage_durations.frame_packaging_us
+            ),
+            "avoid_raster_frame_packaging",
+            "Prefer GPU-resident viewer frames or reduce final raster hashing/copying.",
+        ),
+        AppUiPreviewRenderBottleneck::None => {}
+    }
+}
+
+fn push_render_root_cause_with_action(
+    root_causes: &mut Vec<AppUiPreviewRenderPerformanceRootCause>,
+    actions: &mut Vec<AppUiPreviewRenderPerformanceAction>,
+    area: AppUiPreviewRenderPerformanceArea,
+    root_code: &'static str,
+    evidence: String,
+    action_code: &'static str,
+    action_description: &'static str,
+) {
+    if !root_causes.iter().any(|root| root.code == root_code) {
+        root_causes.push(AppUiPreviewRenderPerformanceRootCause {
+            area,
+            code: root_code,
+            severity: AppUiPreviewRenderPerformanceSeverity::Fail,
+            evidence,
+        });
+    }
+    if !actions.iter().any(|action| action.code == action_code) {
+        actions.push(AppUiPreviewRenderPerformanceAction {
+            area,
+            code: action_code,
+            description: action_description,
+        });
+    }
+}
+
 fn push_decode_root_cause_with_action(
     root_causes: &mut Vec<AppUiPreviewDecodePerformanceRootCause>,
     actions: &mut Vec<AppUiPreviewDecodePerformanceAction>,
@@ -1885,6 +2365,41 @@ fn classify_preview_decode_bottleneck(
         .filter(|(_, duration)| *duration > 0)
         .map(|(bottleneck, _)| bottleneck)
         .unwrap_or(AppUiPreviewDecodeBottleneck::None)
+}
+
+fn classify_preview_render_bottleneck(
+    durations: AppUiPreviewRenderStageDurations,
+) -> AppUiPreviewRenderBottleneck {
+    let candidates = [
+        (AppUiPreviewRenderBottleneck::Resolve, durations.resolve_us),
+        (
+            AppUiPreviewRenderBottleneck::FinalCacheLookup,
+            durations.final_cache_lookup_us,
+        ),
+        (
+            AppUiPreviewRenderBottleneck::WorkingPreparation,
+            durations.working_prepare_us,
+        ),
+        (
+            AppUiPreviewRenderBottleneck::CpuComposite,
+            durations.cpu_composite_us,
+        ),
+        (
+            AppUiPreviewRenderBottleneck::CpuOutputBoundary,
+            durations.cpu_output_boundary_us,
+        ),
+        (
+            AppUiPreviewRenderBottleneck::FramePackaging,
+            durations.frame_packaging_us,
+        ),
+    ];
+
+    candidates
+        .into_iter()
+        .max_by_key(|(_, duration)| *duration)
+        .filter(|(_, duration)| *duration > 0)
+        .map(|(bottleneck, _)| bottleneck)
+        .unwrap_or(AppUiPreviewRenderBottleneck::None)
 }
 
 /// Schema version for preview color health reports.
@@ -2359,6 +2874,26 @@ impl AppUiPreviewDiagnostics {
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
             stage_durations,
             primary_bottleneck: classify_preview_decode_bottleneck(stage_durations),
+        })
+    }
+
+    /// Return structured post-decode viewer render performance evidence.
+    pub fn render_performance_summary(
+        self,
+        slow_frame_budget_us: u64,
+    ) -> Option<AppUiPreviewRenderPerformanceSummary> {
+        if self.render_timed_frames == 0 {
+            return None;
+        }
+        let stage_durations = self.render_stage_durations;
+        Some(AppUiPreviewRenderPerformanceSummary {
+            timed_frames: self.render_timed_frames,
+            max_duration_us: self.render_max_duration_us,
+            last_duration_us: self.render_last_duration_us,
+            total_duration_us: self.render_total_duration_us,
+            slow_frame_budget_us,
+            stage_durations,
+            primary_bottleneck: classify_preview_render_bottleneck(stage_durations),
         })
     }
 
@@ -3737,6 +4272,11 @@ struct AppUiPreviewMetrics {
     decode_last_threading_count: Cell<u64>,
     decode_max_threading_count: Cell<u64>,
     decode_stage_durations: Cell<PreviewDecodeStageDurations>,
+    render_timed_frames: Cell<u64>,
+    render_total_duration_us: Cell<u64>,
+    render_max_duration_us: Cell<u64>,
+    render_last_duration_us: Cell<u64>,
+    render_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
@@ -3789,6 +4329,10 @@ fn bump(counter: &Cell<u64>) {
 
 fn add_cell(counter: &Cell<u64>, delta: u64) {
     counter.set(counter.get().saturating_add(delta));
+}
+
+fn app_duration_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn bump_value(counter: &mut u64) {
@@ -3990,6 +4534,7 @@ struct PreviewCompositeOutput {
     composite_diagnostics: TimelineCompositeDiagnostics,
     color_diagnostics: RenderColorTransformDiagnostics,
     color_stage_diagnostics: RenderColorStageDiagnostics,
+    render_stage_durations: AppUiPreviewRenderStageDurations,
 }
 
 struct PreviewWorkingCompositeOutput {
@@ -3998,6 +4543,7 @@ struct PreviewWorkingCompositeOutput {
     composite_diagnostics: TimelineCompositeDiagnostics,
     input_color_diagnostics: Vec<RenderColorTransformDiagnostics>,
     input_color_stage_diagnostics: RenderColorStageDiagnostics,
+    render_stage_durations: AppUiPreviewRenderStageDurations,
 }
 
 enum PreviewWorkingElement {
@@ -4020,6 +4566,7 @@ fn composite_resolved_preview_working(
     color_context: &ColorContext,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<PreviewWorkingCompositeOutput, String> {
+    let working_prepare_started_at = Instant::now();
     let mut working_frames = Vec::new();
     let mut working_elements = Vec::with_capacity(resolved.len());
     let mut input_color_diagnostics = Vec::new();
@@ -4086,6 +4633,8 @@ fn composite_resolved_preview_working(
             }),
         })
         .collect();
+    let working_prepare_us = app_duration_us(working_prepare_started_at.elapsed());
+    let cpu_composite_started_at = Instant::now();
     let composite = composite_timeline_elements_color_frame_with_diagnostics(
         width,
         height,
@@ -4094,6 +4643,7 @@ fn composite_resolved_preview_working(
         color_context.working_color_space,
         scratch,
     );
+    let cpu_composite_us = app_duration_us(cpu_composite_started_at.elapsed());
     let boundary = output_boundary_from_color_context(color_context);
     Ok(PreviewWorkingCompositeOutput {
         frame: composite.frame,
@@ -4101,6 +4651,11 @@ fn composite_resolved_preview_working(
         composite_diagnostics: composite.diagnostics,
         input_color_diagnostics,
         input_color_stage_diagnostics,
+        render_stage_durations: AppUiPreviewRenderStageDurations {
+            working_prepare_us,
+            cpu_composite_us,
+            ..AppUiPreviewRenderStageDurations::default()
+        },
     })
 }
 
@@ -4230,12 +4785,19 @@ fn composite_resolved_preview(
             },
         );
     }
+    let output_boundary_started_at = Instant::now();
+    let mut render_stage_durations = composite.render_stage_durations;
     execute_cpu_output_boundary_rgba8(&composite.frame, &composite.boundary)
-        .map(|output| PreviewCompositeOutput {
-            rgba: output.rgba,
-            composite_diagnostics: composite.composite_diagnostics,
-            color_diagnostics: output.color_diagnostics,
-            color_stage_diagnostics: output.stage_diagnostics,
+        .map(|output| {
+            render_stage_durations.cpu_output_boundary_us =
+                app_duration_us(output_boundary_started_at.elapsed());
+            PreviewCompositeOutput {
+                rgba: output.rgba,
+                composite_diagnostics: composite.composite_diagnostics,
+                color_diagnostics: output.color_diagnostics,
+                color_stage_diagnostics: output.stage_diagnostics,
+                render_stage_durations,
+            }
         })
         .map_err(|err| format!("viewer preview final color transform failed: {err}"))
 }
@@ -4985,6 +5547,50 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "enable_proxy_or_hardware_decode"));
+    }
+
+    #[test]
+    fn preview_render_performance_report_classifies_output_boundary_bound_slow_frame() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            render_timed_frames: 1,
+            render_total_duration_us: 120_000,
+            render_max_duration_us: 120_000,
+            render_last_duration_us: 120_000,
+            render_stage_durations: AppUiPreviewRenderStageDurations {
+                resolve_us: 2_000,
+                final_cache_lookup_us: 100,
+                working_prepare_us: 7_000,
+                cpu_composite_us: 20_000,
+                cpu_output_boundary_us: 90_000,
+                frame_packaging_us: 900,
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_render_performance_report(
+            diagnostics.render_performance_summary(50_000),
+            "preview-render-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewRenderPerformanceVerdict::Fail);
+        let summary = report.summary.expect("render summary");
+        assert_eq!(
+            summary.primary_bottleneck,
+            AppUiPreviewRenderBottleneck::CpuOutputBoundary
+        );
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_render_frame_over_budget"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_render_cpu_output_boundary_bound"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "move_preview_output_boundary_to_gpu"));
     }
 
     #[test]

@@ -2,9 +2,12 @@ use super::*;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::{
     build_preview_color_health_report, build_preview_decode_performance_report,
-    AppUiPreviewColorHealthReport, AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
-    AppUiPreviewDecodePerformanceReport, AppUiPreviewDiagnostics, AppUiPreviewService,
+    build_preview_render_performance_report, AppUiPreviewColorHealthReport,
+    AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
+    AppUiPreviewDecodePerformanceReport, AppUiPreviewDiagnostics,
+    AppUiPreviewRenderPerformanceReport, AppUiPreviewService,
     APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app_ui::shell::AppUiAppRoot;
 use crate::app_ui::viewer_gpu_output_budget::{
@@ -69,6 +72,7 @@ struct PreviewMediaPerfReport {
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_report: AppUiPreviewColorHealthReport,
     preview_decode_report: AppUiPreviewDecodePerformanceReport,
+    preview_render_report: AppUiPreviewRenderPerformanceReport,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -90,6 +94,7 @@ struct PreviewMediaPlaybackPerfReport {
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_report: AppUiPreviewColorHealthReport,
     preview_decode_report: AppUiPreviewDecodePerformanceReport,
+    preview_render_report: AppUiPreviewRenderPerformanceReport,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -685,6 +690,12 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             "preview_media_decode_cache",
             APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
         );
+        let preview_render_report = build_preview_render_performance_report(
+            preview_diagnostics
+                .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
+            "preview_media_decode_cache",
+            APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+        );
         Ok(PreviewMediaPerfReport {
             scenario: "preview_media_decode_cache",
             frames: frame_count,
@@ -693,6 +704,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             preview_diagnostics,
             preview_color_report,
             preview_decode_report,
+            preview_render_report,
             cases: vec![
                 first_frame_case,
                 cached_frame_case,
@@ -817,6 +829,12 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             "preview_media_continuous_playback",
             APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
         );
+        let preview_render_report = build_preview_render_performance_report(
+            preview_diagnostics
+                .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
+            "preview_media_continuous_playback",
+            APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+        );
         Ok(PreviewMediaPlaybackPerfReport {
             scenario: "preview_media_continuous_playback",
             frames: frame_count,
@@ -826,6 +844,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             preview_diagnostics,
             preview_color_report,
             preview_decode_report,
+            preview_render_report,
             cases: vec![playback_case, gpu_candidate_case],
         })
     })();
@@ -1178,6 +1197,18 @@ fn preview_perf_report_serializes_color_report() {
             rgba_copy_us: 1_000,
             ..PreviewDecodeStageDurations::default()
         },
+        render_timed_frames: 1,
+        render_total_duration_us: 90_000,
+        render_max_duration_us: 90_000,
+        render_last_duration_us: 90_000,
+        render_stage_durations: crate::app_ui::preview::AppUiPreviewRenderStageDurations {
+            resolve_us: 2_000,
+            final_cache_lookup_us: 100,
+            working_prepare_us: 5_000,
+            cpu_composite_us: 20_000,
+            cpu_output_boundary_us: 60_000,
+            frame_packaging_us: 2_900,
+        },
         color_composite_plans: 1,
         color_composite_elements: 1,
         color_composite_float_linear: 1,
@@ -1207,6 +1238,12 @@ fn preview_perf_report_serializes_color_report() {
                 .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
             "preview-color-health-test",
             APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+        ),
+        preview_render_report: build_preview_render_performance_report(
+            diagnostics
+                .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
+            "preview-color-health-test",
+            APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
         ),
         cases: Vec::new(),
     };
@@ -1247,6 +1284,20 @@ fn preview_perf_report_serializes_color_report() {
         .expect("root causes")
         .iter()
         .any(|root| root["code"] == "preview_decode_codec_or_gop_bound"));
+    assert_eq!(json["preview_render_report"]["verdict"], "Fail");
+    assert_eq!(
+        json["preview_render_report"]["summary"]["primary_bottleneck"],
+        "CpuOutputBoundary"
+    );
+    assert_eq!(
+        json["preview_render_report"]["summary"]["stage_durations"]["cpu_output_boundary_us"],
+        60_000
+    );
+    assert!(json["preview_render_report"]["root_causes"]
+        .as_array()
+        .expect("render root causes")
+        .iter()
+        .any(|root| root["code"] == "preview_render_cpu_output_boundary_bound"));
     assert!(json.get("preview_color_health").is_none());
     assert!(json.get("preview_color_health_budget").is_none());
     assert!(json.get("preview_color_health_passed").is_none());

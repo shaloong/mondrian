@@ -195,6 +195,14 @@ candidate readiness without changing timeline evaluation. Each service call prod
 when the frame is ready. Window-level telemetry records this candidate id and state
 alongside structured runtime/stage evidence so a JSONL record can be linked
 against the exact working-space attempt that fed it.
+Preview diagnostics keep decode-stage timings separate from post-decode viewer
+render timings. Decode reports classify session open, cache lookup, seek,
+packet/decode, software scale, RGBA copy, and external-process wait cost;
+render reports classify sequence resolution, final-frame cache lookup,
+working-frame preparation, CPU timeline composition, CPU output/color boundary,
+and final raster packaging. Perf tooling should use both reports before
+assigning a slow frame to codec, cache, color, composite, or viewer packaging
+work.
 
 GPU preview candidate counters are intentionally scoped to the headless service
 boundary: they prove that a working-space frame was produced for the app-window

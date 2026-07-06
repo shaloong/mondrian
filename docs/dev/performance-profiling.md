@@ -101,6 +101,16 @@ with checks, root causes, and actions. The default slow-frame budget is 50 ms;
 over-budget frames should be diagnosed from `preview_decode_report.root_causes`
 before changing renderer/color code.
 
+Preview media perf artifacts also include `preview_render_report`, which covers
+post-decode viewer work: sequence/media resolution, final-frame cache lookup,
+working-frame preparation, CPU timeline composition, CPU output/color boundary,
+and final raster packaging. Use it with `preview_decode_report` as a two-part
+slow-frame diagnosis: decode-bound frames should drive codec/proxy/hardware
+decode work, while render-bound frames should drive GPU composite, output
+boundary, or raster-packaging work. In particular,
+`preview_render_cpu_output_boundary_bound` means the viewer is spending budget
+after decode in the CPU display/output transform, not in FFmpeg.
+
 Viewer preview scheduling treats current-frame media requests as higher
 priority than forward prefetch. When the pending decode window is full, a
 current-frame request may evict a pending prefetch request; prefetch requests
