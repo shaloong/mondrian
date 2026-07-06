@@ -31,6 +31,15 @@ contract, `HwAccelBackend::probe()` must return `None`,
 `renderer_import_ready=false`. Platform preference alone is not a valid
 hardware decode signal.
 
+Preview path resolution is proxy-aware but does not synchronously generate
+proxy media. If project proxy playback is enabled for an asset and the expected
+proxy file already exists and is at least as fresh as the source file, app
+preview decodes that proxy path. If the proxy is missing or stale, preview
+falls back to the source path and records proxy hit/miss/stale counters in
+`AppUiPreviewDiagnostics`. Export continues to use the source/export contract;
+proxy selection is a preview playback scheduling decision, not media color
+interpretation.
+
 `DecodedGpuFrameHandleKind` belongs to media because it describes the decoder
 surface family that FFmpeg/hardware decode produced, such as D3D11 texture,
 CVPixelBuffer, VA-API surface, or CUDA device memory. It does not imply that

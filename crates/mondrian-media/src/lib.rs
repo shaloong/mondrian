@@ -41,5 +41,5 @@ pub use preview::{
     PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeThreadingKind,
     RgbaFrame,
 };
-pub use proxy::{ProxyConfig, ProxyGenerator};
+pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

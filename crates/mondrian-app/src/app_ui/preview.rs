@@ -163,6 +163,10 @@ impl AppUiPreviewService {
                 .metrics
                 .input_color_resolution_data_texture
                 .get(),
+            media_proxy_path_hits: self.metrics.media_proxy_path_hits.get(),
+            media_proxy_path_misses: self.metrics.media_proxy_path_misses.get(),
+            media_proxy_path_stale: self.metrics.media_proxy_path_stale.get(),
+            media_proxy_path_bypasses: self.metrics.media_proxy_path_bypasses.get(),
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
             media_failure_hits: self.metrics.media_failure_hits.get(),
@@ -1122,6 +1126,14 @@ pub struct AppUiPreviewDiagnostics {
     pub input_color_resolution_missing_rejected: u64,
     /// Media input color resolutions that treated the asset as non-color data.
     pub input_color_resolution_data_texture: u64,
+    /// Media preview path resolutions that used an existing proxy file.
+    pub media_proxy_path_hits: u64,
+    /// Media preview path resolutions that wanted a proxy but fell back to source.
+    pub media_proxy_path_misses: u64,
+    /// Media preview path resolutions that rejected a stale proxy file.
+    pub media_proxy_path_stale: u64,
+    /// Media preview path resolutions that intentionally used source media.
+    pub media_proxy_path_bypasses: u64,
     /// Media preview cache hits.
     pub media_cache_hits: u64,
     /// Media preview cache misses.
@@ -2655,7 +2667,25 @@ impl AppUiPreviewService {
             return None;
         }
 
-        let modified = modified_stamp(&asset.path);
+        let resolved_path = resolve_preview_media_decode_path(
+            state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id),
+            &asset.path,
+            &mondrian_media::ProxyConfig::default(),
+        );
+        match resolved_path.resolution {
+            PreviewMediaDecodePathResolution::Proxy => bump(&self.metrics.media_proxy_path_hits),
+            PreviewMediaDecodePathResolution::ProxyMissing => {
+                bump(&self.metrics.media_proxy_path_misses);
+            }
+            PreviewMediaDecodePathResolution::ProxyStale => {
+                bump(&self.metrics.media_proxy_path_stale);
+            }
+            PreviewMediaDecodePathResolution::Source => {
+                bump(&self.metrics.media_proxy_path_bypasses);
+            }
+        }
+
+        let modified = modified_stamp(&resolved_path.path);
         let detected_color_space = asset
             .media_info
             .video_streams
@@ -2721,7 +2751,7 @@ impl AppUiPreviewService {
         Some((
             MediaPreviewKey {
                 asset_id: *asset_id,
-                path: asset.path.clone(),
+                path: resolved_path.path,
                 modified,
                 source_frame: source_frame.max(0),
                 source_micros: source_micros(source_secs),
@@ -2901,6 +2931,10 @@ struct AppUiPreviewMetrics {
     input_color_resolution_missing_assume_working: Cell<u64>,
     input_color_resolution_missing_rejected: Cell<u64>,
     input_color_resolution_data_texture: Cell<u64>,
+    media_proxy_path_hits: Cell<u64>,
+    media_proxy_path_misses: Cell<u64>,
+    media_proxy_path_stale: Cell<u64>,
+    media_proxy_path_bypasses: Cell<u64>,
     viewer_frame_cache_hits: Cell<u64>,
     viewer_frame_cache_misses: Cell<u64>,
     media_cache_hits: Cell<u64>,
@@ -3430,6 +3464,61 @@ fn preview_cache_key(frame: i64, width: u32, height: u32, rgba: &[u8]) -> String
         "app UI-viewer:{width}x{height}:f{frame}:p{:016x}",
         hasher.finish()
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewMediaDecodePath {
+    path: PathBuf,
+    resolution: PreviewMediaDecodePathResolution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewMediaDecodePathResolution {
+    Source,
+    Proxy,
+    ProxyMissing,
+    ProxyStale,
+}
+
+fn resolve_preview_media_decode_path(
+    prefer_proxy: bool,
+    source_path: &std::path::Path,
+    proxy_config: &mondrian_media::ProxyConfig,
+) -> PreviewMediaDecodePath {
+    if !prefer_proxy {
+        return PreviewMediaDecodePath {
+            path: source_path.to_path_buf(),
+            resolution: PreviewMediaDecodePathResolution::Source,
+        };
+    }
+    let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
+    let proxy_path = proxy_generator.proxy_path(source_path);
+    if proxy_path.exists() {
+        if !proxy_is_fresh(source_path, &proxy_path) {
+            return PreviewMediaDecodePath {
+                path: source_path.to_path_buf(),
+                resolution: PreviewMediaDecodePathResolution::ProxyStale,
+            };
+        }
+        return PreviewMediaDecodePath {
+            path: proxy_path,
+            resolution: PreviewMediaDecodePathResolution::Proxy,
+        };
+    }
+    PreviewMediaDecodePath {
+        path: source_path.to_path_buf(),
+        resolution: PreviewMediaDecodePathResolution::ProxyMissing,
+    }
+}
+
+fn proxy_is_fresh(source_path: &std::path::Path, proxy_path: &std::path::Path) -> bool {
+    let source_modified = std::fs::metadata(source_path).and_then(|metadata| metadata.modified());
+    let proxy_modified = std::fs::metadata(proxy_path).and_then(|metadata| metadata.modified());
+    match (source_modified, proxy_modified) {
+        (Ok(source), Ok(proxy)) => proxy >= source,
+        (Err(_), Ok(_)) => true,
+        _ => false,
+    }
 }
 
 fn modified_stamp(path: &std::path::Path) -> Option<ModifiedStamp> {
@@ -5817,6 +5906,91 @@ mod tests {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         hash
+    }
+
+    fn test_proxy_config(cache_dir: PathBuf) -> mondrian_media::ProxyConfig {
+        mondrian_media::ProxyConfig {
+            cache_dir,
+            ..mondrian_media::ProxyConfig::default()
+        }
+    }
+
+    #[test]
+    fn preview_media_decode_path_uses_existing_fresh_proxy() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-preview-proxy-hit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let source = root.join("source.mp4");
+        std::fs::create_dir_all(&root).expect("test root");
+        std::fs::write(&source, b"source").expect("source");
+        let proxy_config = test_proxy_config(root.join("proxy"));
+        let proxy_path =
+            mondrian_media::ProxyGenerator::new(proxy_config.clone()).proxy_path(&source);
+        std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
+        std::fs::write(&proxy_path, b"proxy").expect("proxy");
+
+        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config);
+
+        assert_eq!(resolved.path, proxy_path);
+        assert_eq!(resolved.resolution, PreviewMediaDecodePathResolution::Proxy);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preview_media_decode_path_falls_back_when_proxy_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-preview-proxy-missing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let source = root.join("source.mp4");
+        std::fs::create_dir_all(&root).expect("test root");
+        std::fs::write(&source, b"source").expect("source");
+        let proxy_config = test_proxy_config(root.join("proxy"));
+
+        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config);
+
+        assert_eq!(resolved.path, source);
+        assert_eq!(
+            resolved.resolution,
+            PreviewMediaDecodePathResolution::ProxyMissing
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preview_media_decode_path_rejects_stale_proxy() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-preview-proxy-stale-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let source = root.join("source.mp4");
+        std::fs::create_dir_all(&root).expect("test root");
+        let proxy_config = test_proxy_config(root.join("proxy"));
+        let proxy_path =
+            mondrian_media::ProxyGenerator::new(proxy_config.clone()).proxy_path(&source);
+        std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
+        std::fs::write(&proxy_path, b"proxy").expect("proxy");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&source, b"newer source").expect("source");
+
+        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config);
+
+        assert_eq!(resolved.path, source);
+        assert_eq!(
+            resolved.resolution,
+            PreviewMediaDecodePathResolution::ProxyStale
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

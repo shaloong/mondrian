@@ -82,6 +82,14 @@ $env:MONDRIAN_PREVIEW_DECODE_THREADING='slice' # none | frame | slice
 $env:MONDRIAN_PREVIEW_DECODE_THREADS='8'      # 0 lets FFmpeg choose
 ```
 
+App preview diagnostics also report proxy path resolution:
+`media_proxy_path_hits`, `media_proxy_path_misses`,
+`media_proxy_path_stale`, and `media_proxy_path_bypasses`. A 4K/HDR clip that
+must produce single-frame preview in tens of milliseconds should either hit a
+fresh proxy path or a real hardware-decoded GPU residency path; repeated source
+decode with `seek_performed=true` and high `decoded_frame_count` is expected to
+remain CPU-bound.
+
 Viewer GPU-output sessions can persist live health records from the app window:
 
 ```powershell
