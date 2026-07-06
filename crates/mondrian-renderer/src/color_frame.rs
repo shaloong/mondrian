@@ -1,6 +1,7 @@
 use mondrian_core::{types::ColorSpace, RgbaF32Frame};
 use mondrian_media::DecodedGpuFrameHandleKind;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Semantic role of a frame in the color-managed render graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1094,7 +1095,7 @@ impl CpuColorFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpuEncodedColorFrame {
     descriptor: ColorFrameDescriptor,
-    rgba: Vec<u8>,
+    rgba: Arc<Vec<u8>>,
 }
 
 impl CpuEncodedColorFrame {
@@ -1114,7 +1115,7 @@ impl CpuEncodedColorFrame {
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Cpu,
         };
-        Self { descriptor, rgba }
+        Self { descriptor, rgba: Arc::new(rgba) }
     }
 
     /// Create a source/import RGBA8 boundary frame.
@@ -1139,12 +1140,12 @@ impl CpuEncodedColorFrame {
 
     /// Borrow RGBA8 pixels.
     pub fn rgba(&self) -> &[u8] {
-        &self.rgba
+        self.rgba.as_slice()
     }
 
     /// Consume this wrapper and return RGBA8 pixels.
     pub fn into_rgba(self) -> Vec<u8> {
-        self.rgba
+        Arc::try_unwrap(self.rgba).unwrap_or_else(|rgba| rgba.as_ref().clone())
     }
 }
 
@@ -1755,6 +1756,22 @@ mod tests {
         assert_eq!(plan.bytes_per_row, 2 * 4);
         assert_eq!(plan.rows_per_image, 1);
         assert_eq!(plan.bytes, frame.rgba());
+    }
+
+    #[test]
+    fn cpu_encoded_color_frame_clone_shares_rgba_payload() {
+        let frame = CpuEncodedColorFrame::source_rgba8(
+            2,
+            1,
+            ColorSpace::Srgb,
+            vec![0, 64, 128, 255, 255, 128, 64, 32],
+        );
+
+        let cloned = frame.clone();
+
+        assert!(Arc::ptr_eq(&frame.rgba, &cloned.rgba));
+        assert_eq!(cloned.rgba(), frame.rgba());
+        assert_eq!(cloned.descriptor(), frame.descriptor());
     }
 
     #[test]
