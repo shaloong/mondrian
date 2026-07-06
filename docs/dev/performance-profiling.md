@@ -28,6 +28,7 @@ $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo te
 $env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-1080p2997.jsonl'; cargo test -p mondrian-export export_1080p2997_simulated_perf -- --ignored --nocapture
 $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-media.jsonl'; cargo test -p mondrian-app preview_media_decode_cache_smoke -- --ignored --nocapture
 $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-playback.jsonl'; cargo test -p mondrian-app preview_media_continuous_playback_smoke -- --ignored --nocapture
+$env:MONDRIAN_PREVIEW_DECODE_FIXTURE='E:\media\sample-4k-hdr.mov'; $env:MONDRIAN_PREVIEW_DECODE_TIMESTAMP='1.0'; $env:MONDRIAN_PREVIEW_DECODE_MAX_WIDTH='1920'; $env:MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT='1080'; cargo test -p mondrian-media preview_decode_fixture_perf_smoke -- --ignored --nocapture
 $env:MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT='target/perf/renderer-gpu-output.jsonl'; cargo test -p mondrian-renderer gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture
 ```
 
@@ -62,6 +63,14 @@ structured legacy RGBA8 reasons, and has no missing-metadata policy rejections.
 diagnostics, including missing metadata, decoder-unavailable assets, hint
 conflicts, and HDR side-data presence. The old preview `*_budget`, `*_passed`,
 and `*_failures` perf fields are not part of the report contract.
+
+`preview_decode_fixture_perf_smoke` is a focused media-layer probe for a real
+file. It bypasses app UI scheduling and reports one
+`MONDRIAN_PREVIEW_DECODE_PERF_JSON` record with the in-process FFmpeg preview
+decode path, output dimensions, RGBA byte count, elapsed time, cache-hit flag,
+and CPU-residency flag. Use it when a real 4K/HDR file feels slow to distinguish
+decoder/seek/scaling cost from later app UI, OCIO, compositor, or viewer-output
+cost.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

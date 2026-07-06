@@ -974,7 +974,12 @@ fn convert_decoded_to_rgba(
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewDecodeBackend, PreviewDecodePath, RgbaFrame};
+    use super::{
+        decode_video_frame_at_time_rgba_scaled, PreviewDecodeBackend, PreviewDecodePath, RgbaFrame,
+    };
+    use serde::Serialize;
+    use std::path::PathBuf;
+    use std::time::Instant;
 
     #[test]
     fn preview_decode_backend_codes_are_explicit_and_cpu_resident() {
@@ -1015,5 +1020,65 @@ mod tests {
         assert_eq!(cached.diagnostics.elapsed_us, 3);
         assert!(cached.diagnostics.cache_hit);
         assert!(cached.diagnostics.cpu_resident);
+    }
+
+    #[test]
+    #[ignore = "manual decode performance diagnostic; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
+    fn preview_decode_fixture_perf_smoke() {
+        let Some(path) = std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE").map(PathBuf::from)
+        else {
+            eprintln!(
+                "MONDRIAN_PREVIEW_DECODE_PERF_JSON={{\"skipped\":\"MONDRIAN_PREVIEW_DECODE_FIXTURE not set\"}}"
+            );
+            return;
+        };
+        let timestamp_secs = std::env::var("MONDRIAN_PREVIEW_DECODE_TIMESTAMP")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(1.0);
+        let max_width = std::env::var("MONDRIAN_PREVIEW_DECODE_MAX_WIDTH")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        let max_height = std::env::var("MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+
+        let started = Instant::now();
+        let frame =
+            decode_video_frame_at_time_rgba_scaled(&path, timestamp_secs, max_width, max_height)
+                .expect("decode preview fixture");
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let report = PreviewDecodePerfReport {
+            path: path.display().to_string(),
+            timestamp_secs,
+            max_width,
+            max_height,
+            decoded_width: frame.width,
+            decoded_height: frame.height,
+            rgba_bytes: frame.data.len(),
+            elapsed_ms,
+            diagnostics_elapsed_us: frame.diagnostics.elapsed_us,
+            path_kind: frame.diagnostics.path.as_str(),
+            cache_hit: frame.diagnostics.cache_hit,
+            cpu_resident: frame.diagnostics.cpu_resident,
+        };
+        let json = serde_json::to_string(&report).expect("serialize decode perf report");
+        eprintln!("MONDRIAN_PREVIEW_DECODE_PERF_JSON={json}");
+    }
+
+    #[derive(Debug, Serialize)]
+    struct PreviewDecodePerfReport {
+        path: String,
+        timestamp_secs: f64,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+        decoded_width: u32,
+        decoded_height: u32,
+        rgba_bytes: usize,
+        elapsed_ms: u64,
+        diagnostics_elapsed_us: u64,
+        path_kind: &'static str,
+        cache_hit: bool,
+        cpu_resident: bool,
     }
 }
