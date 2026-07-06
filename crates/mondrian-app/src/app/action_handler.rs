@@ -579,9 +579,16 @@ impl AppState {
         if payload.enabled {
             let proxy_config = self.proxy_config();
             let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
-            if !proxy_generator.proxy_exists(&asset.path) {
-                spawn_proxy_generation(payload.asset_id, asset.path, proxy_config);
-                status.push_str("（后台生成中）");
+            match proxy_generator.proxy_status(&asset.path) {
+                mondrian_media::ProxyStatus::Fresh => {}
+                mondrian_media::ProxyStatus::Missing => {
+                    spawn_proxy_generation(payload.asset_id, asset.path, proxy_config);
+                    status.push_str("（后台生成中）");
+                }
+                mondrian_media::ProxyStatus::Stale => {
+                    spawn_proxy_generation(payload.asset_id, asset.path, proxy_config);
+                    status.push_str("（代理过期，后台重新生成中）");
+                }
             }
         }
         let _ = self.save_project_file();

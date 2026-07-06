@@ -79,6 +79,24 @@ pub struct ProxyProgress {
     pub error: Option<String>,
 }
 
+/// Freshness state for a project's expected proxy media file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProxyStatus {
+    /// No proxy file exists at the configured proxy path.
+    Missing,
+    /// The proxy file exists and is at least as new as the source media.
+    Fresh,
+    /// The proxy file exists but should not be used for playback.
+    Stale,
+}
+
+impl ProxyStatus {
+    /// Returns true when preview playback may decode the proxy file.
+    pub fn is_fresh(self) -> bool {
+        self == Self::Fresh
+    }
+}
+
 /// 代理文件生成器
 pub struct ProxyGenerator {
     config: ProxyConfig,
@@ -113,9 +131,36 @@ impl ProxyGenerator {
         ))
     }
 
-    /// 检查代理文件是否已存在且有效
+    /// 检查代理文件是否存在。
+    ///
+    /// This intentionally reports existence only. Use [`Self::proxy_status`]
+    /// or [`Self::proxy_is_fresh`] for preview/playback scheduling.
     pub fn proxy_exists(&self, source_path: &Path) -> bool {
         self.proxy_path(source_path).exists()
+    }
+
+    /// Returns the freshness state for the configured proxy of `source_path`.
+    pub fn proxy_status(&self, source_path: &Path) -> ProxyStatus {
+        let proxy_path = self.proxy_path(source_path);
+        if !proxy_path.exists() {
+            return ProxyStatus::Missing;
+        }
+
+        let source_modified =
+            std::fs::metadata(source_path).and_then(|metadata| metadata.modified());
+        let proxy_modified =
+            std::fs::metadata(&proxy_path).and_then(|metadata| metadata.modified());
+        match (source_modified, proxy_modified) {
+            (Ok(source), Ok(proxy)) if proxy >= source => ProxyStatus::Fresh,
+            (Ok(_), Ok(_)) => ProxyStatus::Stale,
+            (Err(_), Ok(_)) => ProxyStatus::Fresh,
+            _ => ProxyStatus::Stale,
+        }
+    }
+
+    /// Returns true when the configured proxy exists and is safe to decode.
+    pub fn proxy_is_fresh(&self, source_path: &Path) -> bool {
+        self.proxy_status(source_path).is_fresh()
     }
 
     /// 异步生成代理文件（后台 FFmpeg 转码）
@@ -143,7 +188,7 @@ impl ProxyGenerator {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        if output_path.exists() {
+        if self.proxy_status(&source_path) == ProxyStatus::Fresh {
             let _ = progress_tx
                 .send(ProxyProgress {
                     asset_id,
@@ -189,7 +234,6 @@ impl ProxyGenerator {
         })?;
 
         if let Err(err) = transcode_result {
-            let _ = std::fs::remove_file(&output_path);
             let _ = std::fs::remove_file(&tmp_output_path);
             let _ = progress_tx
                 .send(ProxyProgress {
@@ -202,16 +246,7 @@ impl ProxyGenerator {
             return Err(err);
         }
 
-        std::fs::rename(&tmp_output_path, &output_path).map_err(|e| {
-            mondrian_core::MondrianError::ProxyGenerationFailed {
-                reason: format!(
-                    "proxy finalize rename failed ({} -> {}): {}",
-                    tmp_output_path.display(),
-                    output_path.display(),
-                    e
-                ),
-            }
-        })?;
+        finalize_proxy_output(&tmp_output_path, &output_path)?;
 
         let _ = progress_tx
             .send(ProxyProgress {
@@ -286,4 +321,153 @@ fn run_ffmpeg_proxy_transcode(
     }
 
     Ok(())
+}
+
+fn finalize_proxy_output(tmp_output_path: &Path, output_path: &Path) -> Result<()> {
+    if !output_path.exists() {
+        return std::fs::rename(tmp_output_path, output_path).map_err(|e| {
+            mondrian_core::MondrianError::ProxyGenerationFailed {
+                reason: format!(
+                    "proxy finalize rename failed ({} -> {}): {}",
+                    tmp_output_path.display(),
+                    output_path.display(),
+                    e
+                ),
+            }
+        });
+    }
+
+    let backup_path = output_path.with_extension(format!(
+        "{}.replace-backup",
+        output_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("proxy")
+    ));
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path).map_err(|e| {
+            mondrian_core::MondrianError::ProxyGenerationFailed {
+                reason: format!(
+                    "proxy finalize remove old backup failed ({}): {}",
+                    backup_path.display(),
+                    e
+                ),
+            }
+        })?;
+    }
+
+    std::fs::rename(output_path, &backup_path).map_err(|e| {
+        mondrian_core::MondrianError::ProxyGenerationFailed {
+            reason: format!(
+                "proxy finalize backup existing output failed ({} -> {}): {}",
+                output_path.display(),
+                backup_path.display(),
+                e
+            ),
+        }
+    })?;
+
+    match std::fs::rename(tmp_output_path, output_path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&backup_path);
+            Ok(())
+        }
+        Err(rename_err) => {
+            let restore_result = std::fs::rename(&backup_path, output_path);
+            let restore_message = match restore_result {
+                Ok(()) => "previous proxy restored".to_string(),
+                Err(restore_err) => format!("previous proxy restore failed: {restore_err}"),
+            };
+            Err(mondrian_core::MondrianError::ProxyGenerationFailed {
+                reason: format!(
+                    "proxy finalize rename failed ({} -> {}): {}; {}",
+                    tmp_output_path.display(),
+                    output_path.display(),
+                    rename_err,
+                    restore_message
+                ),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{finalize_proxy_output, ProxyConfig, ProxyGenerator, ProxyStatus};
+    use std::time::Duration;
+
+    fn test_proxy_config(cache_dir: std::path::PathBuf) -> ProxyConfig {
+        ProxyConfig { cache_dir, ..ProxyConfig::default() }
+    }
+
+    #[test]
+    fn proxy_status_reports_missing_when_proxy_file_does_not_exist() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source.mp4");
+        std::fs::write(&source, b"source").expect("source");
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
+
+        assert_eq!(generator.proxy_status(&source), ProxyStatus::Missing);
+        assert!(!generator.proxy_is_fresh(&source));
+    }
+
+    #[test]
+    fn proxy_status_reports_fresh_when_proxy_is_newer_than_source() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source.mp4");
+        std::fs::write(&source, b"source").expect("source");
+        std::thread::sleep(Duration::from_millis(20));
+
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
+        let proxy = generator.proxy_path(&source);
+        std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
+        std::fs::write(&proxy, b"proxy").expect("proxy");
+
+        assert_eq!(generator.proxy_status(&source), ProxyStatus::Fresh);
+        assert!(generator.proxy_is_fresh(&source));
+    }
+
+    #[test]
+    fn proxy_status_reports_stale_when_source_is_newer_than_proxy() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source.mp4");
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
+        let proxy = generator.proxy_path(&source);
+        std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
+        std::fs::write(&proxy, b"proxy").expect("proxy");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&source, b"source").expect("source");
+
+        assert_eq!(generator.proxy_status(&source), ProxyStatus::Stale);
+        assert!(!generator.proxy_is_fresh(&source));
+    }
+
+    #[test]
+    fn finalize_proxy_output_replaces_existing_proxy_after_tmp_is_ready() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let output = root.path().join("proxy.mp4");
+        let tmp = root.path().join("proxy.mp4.part");
+        std::fs::write(&output, b"old proxy").expect("old proxy");
+        std::fs::write(&tmp, b"new proxy").expect("new proxy");
+
+        finalize_proxy_output(&tmp, &output).expect("finalize");
+
+        assert_eq!(std::fs::read(&output).expect("output"), b"new proxy");
+        assert!(!tmp.exists());
+        assert!(!root.path().join("proxy.mp4.replace-backup").exists());
+    }
+
+    #[test]
+    fn finalize_proxy_output_restores_existing_proxy_when_new_file_is_missing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let output = root.path().join("proxy.mp4");
+        let tmp = root.path().join("missing-proxy.mp4.part");
+        std::fs::write(&output, b"old proxy").expect("old proxy");
+
+        let err = finalize_proxy_output(&tmp, &output).expect_err("finalize should fail");
+
+        assert!(err.to_string().contains("previous proxy restored"));
+        assert_eq!(std::fs::read(&output).expect("output"), b"old proxy");
+        assert!(!root.path().join("proxy.mp4.replace-backup").exists());
+    }
 }

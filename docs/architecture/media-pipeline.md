@@ -32,9 +32,10 @@ contract, `HwAccelBackend::probe()` must return `None`,
 hardware decode signal.
 
 Preview path resolution is proxy-aware but does not synchronously generate
-proxy media. If project proxy playback is enabled for an asset and the expected
-proxy file already exists and is at least as fresh as the source file, app
-preview decodes that proxy path. If the proxy is missing or stale, preview
+proxy media. `mondrian-media::ProxyGenerator` owns the shared proxy freshness
+contract through `ProxyStatus` (`Missing`, `Fresh`, `Stale`). If project proxy
+playback is enabled for an asset and the expected proxy file is `Fresh`, app
+preview decodes that proxy path. If the proxy is `Missing` or `Stale`, preview
 falls back to the source path and records proxy hit/miss/stale counters in
 `AppUiPreviewDiagnostics`. Export continues to use the source/export contract;
 proxy selection is a preview playback scheduling decision, not media color
@@ -50,6 +51,10 @@ proxy height preset, and `ProjectSettings.cache_dir` places proxy media under
 that cache root's `proxy/` directory when configured. Callers must not use
 `ProxyConfig::default()` for project media scheduling because that would split
 generation and playback lookup across different cache roots or resolutions.
+Generation must also use `ProxyStatus`: a `Fresh` proxy is reused, while a
+`Stale` proxy is regenerated in the background. Failed regeneration must not
+delete the previous proxy file, because preview can keep falling back to source
+until a fresh proxy is finalized.
 
 `DecodedGpuFrameHandleKind` belongs to media because it describes the decoder
 surface family that FFmpeg/hardware decode produced, such as D3D11 texture,

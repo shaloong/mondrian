@@ -4059,31 +4059,19 @@ fn resolve_preview_media_decode_path(
     }
     let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
     let proxy_path = proxy_generator.proxy_path(source_path);
-    if proxy_path.exists() {
-        if !proxy_is_fresh(source_path, &proxy_path) {
-            return PreviewMediaDecodePath {
-                path: source_path.to_path_buf(),
-                resolution: PreviewMediaDecodePathResolution::ProxyStale,
-            };
-        }
-        return PreviewMediaDecodePath {
+    match proxy_generator.proxy_status(source_path) {
+        mondrian_media::ProxyStatus::Fresh => PreviewMediaDecodePath {
             path: proxy_path,
             resolution: PreviewMediaDecodePathResolution::Proxy,
-        };
-    }
-    PreviewMediaDecodePath {
-        path: source_path.to_path_buf(),
-        resolution: PreviewMediaDecodePathResolution::ProxyMissing,
-    }
-}
-
-fn proxy_is_fresh(source_path: &std::path::Path, proxy_path: &std::path::Path) -> bool {
-    let source_modified = std::fs::metadata(source_path).and_then(|metadata| metadata.modified());
-    let proxy_modified = std::fs::metadata(proxy_path).and_then(|metadata| metadata.modified());
-    match (source_modified, proxy_modified) {
-        (Ok(source), Ok(proxy)) => proxy >= source,
-        (Err(_), Ok(_)) => true,
-        _ => false,
+        },
+        mondrian_media::ProxyStatus::Missing => PreviewMediaDecodePath {
+            path: source_path.to_path_buf(),
+            resolution: PreviewMediaDecodePathResolution::ProxyMissing,
+        },
+        mondrian_media::ProxyStatus::Stale => PreviewMediaDecodePath {
+            path: source_path.to_path_buf(),
+            resolution: PreviewMediaDecodePathResolution::ProxyStale,
+        },
     }
 }
 
