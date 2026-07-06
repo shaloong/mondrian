@@ -1341,7 +1341,6 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::RedrawRequested => {
-                        host.refresh_if_dirty(session.current_bounds.get());
                         sync_window_session_role(
                             &mut host,
                             elwt,

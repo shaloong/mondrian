@@ -388,6 +388,13 @@ path. `DrawCommand::ExternalTexture` carries only a stable renderer-owned key,
 bounds, UVs, and tint; widgets and panel models do not own wgpu objects.
 `ViewerFrameContent` is the widget/app-model boundary and can carry either a
 CPU `RasterImage` reference or a GPU `ViewerExternalTextureFrame` key.
+Workspace redraw treats GPU preview preparation as a pre-refresh scheduling
+step: `prepare_viewer_gpu_preview()` runs before the dirty UI tree is refreshed
+for painting. This prevents a new playback frame from first generating a CPU
+raster preview merely because the external GPU texture for that frame has not
+yet been registered. If GPU preparation fails or is unavailable, the following
+UI refresh still reaches the normal raster/stale/loading fallback in the same
+redraw.
 `AppUiFrameRenderer::register_external_texture_view` exposes the renderer
 registry to the app window/runtime layer, while `UiRenderer` owns the concrete
 bind group for the current backend lifetime. The window unregisters the
