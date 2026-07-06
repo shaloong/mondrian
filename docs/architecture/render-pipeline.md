@@ -92,7 +92,11 @@ Preview and export must use `RenderInputTransform` plus
 `execute_cpu_input_stage(...)` or `execute_cpu_input_stage_float(...)` to
 produce a result carrying both `CpuColorFrame` and stage diagnostics before
 building `TimelineMediaLayer`. Timeline media layers therefore carry typed
-working frames, not naked RGBA slices.
+working frames, not naked RGBA slices. `CpuColorFrame` stores its linear
+`RgbaF32Frame` payload in shared immutable storage so preview caches, lazy CPU
+fallbacks, and export scheduling can clone the typed frame contract without
+deep-copying a full 16-byte-per-pixel working frame. Copies that need owned
+mutable float data must happen explicitly at execution boundaries.
 
 The float transform path (`CpuColorTransformExecutor::input_to_working_float`
 and `transform_float`) operates directly on f32 data without u8 quantization,

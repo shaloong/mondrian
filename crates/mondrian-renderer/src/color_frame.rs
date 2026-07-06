@@ -1048,7 +1048,7 @@ pub enum GpuColorFrameResourceTableError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpuColorFrame {
     descriptor: ColorFrameDescriptor,
-    frame: RgbaF32Frame,
+    frame: Arc<RgbaF32Frame>,
 }
 
 impl CpuColorFrame {
@@ -1067,7 +1067,7 @@ impl CpuColorFrame {
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
         };
-        Self { descriptor, frame }
+        Self { descriptor, frame: Arc::new(frame) }
     }
 
     /// Return the frame metadata contract.
@@ -1077,12 +1077,12 @@ impl CpuColorFrame {
 
     /// Borrow the underlying linear-light frame.
     pub fn rgba_f32(&self) -> &RgbaF32Frame {
-        &self.frame
+        self.frame.as_ref()
     }
 
     /// Consume this wrapper and return the underlying linear-light frame.
     pub fn into_rgba_f32(self) -> RgbaF32Frame {
-        self.frame
+        Arc::try_unwrap(self.frame).unwrap_or_else(|frame| frame.as_ref().clone())
     }
 
     /// Encode this frame to RGBA8 for a specific output color space.
@@ -1777,6 +1777,22 @@ mod tests {
         assert_eq!(plan.bytes_per_row, 2 * 4);
         assert_eq!(plan.rows_per_image, 1);
         assert_eq!(plan.bytes, frame.rgba());
+    }
+
+    #[test]
+    fn cpu_color_frame_clone_shares_linear_payload() {
+        let frame = CpuColorFrame::working(RgbaF32Frame {
+            width: 2,
+            height: 1,
+            color_space: ColorSpace::Rec709,
+            data: vec![[0.25, 0.5, 0.75, 1.0], [1.25, 1.5, 1.75, 0.5]],
+        });
+
+        let cloned = frame.clone();
+
+        assert!(Arc::ptr_eq(&frame.frame, &cloned.frame));
+        assert_eq!(cloned.rgba_f32().data, frame.rgba_f32().data);
+        assert_eq!(cloned.descriptor(), frame.descriptor());
     }
 
     #[test]
