@@ -100,7 +100,10 @@ frame/time, target preview dimensions, input color interpretation, target
 working color space, tone-map policy, and color engine. A media frame decoded
 for one working-space contract must never be reused for another viewer/export
 color contract, and same-path media/proxy replacements must not reuse stale app
-cache entries when the file fingerprint changes.
+cache entries when the file fingerprint changes. Preview path resolution should
+capture source/proxy freshness and the resolved file fingerprint in one
+metadata probe path, so playback does not repeatedly stat the same source and
+proxy only to build a cache key.
 Decode failures are also held in a bounded LRU key cache so repeated bad media
 does not grow memory unbounded during playback.
 Resolved preview plans may reuse a bounded final-frame cache keyed by sequence,

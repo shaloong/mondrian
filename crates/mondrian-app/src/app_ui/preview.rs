@@ -7,9 +7,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mondrian_assets::AssetKind;
 use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
@@ -3964,16 +3964,12 @@ impl AppUiPreviewService {
                 return None;
             }
         };
-        if !asset.path.exists() {
-            return None;
-        }
-
         let proxy_config = state.proxy_config();
         let resolved_path = resolve_preview_media_decode_path(
             state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id),
             &asset.path,
             &proxy_config,
-        );
+        )?;
         match resolved_path.resolution {
             PreviewMediaDecodePathResolution::Proxy => bump(&self.metrics.media_proxy_path_hits),
             PreviewMediaDecodePathResolution::ProxyMissing => {
@@ -3987,7 +3983,6 @@ impl AppUiPreviewService {
             }
         }
 
-        let fingerprint = media_file_fingerprint(&resolved_path.path);
         let detected_color_space = asset
             .media_info
             .video_streams
@@ -4054,7 +4049,7 @@ impl AppUiPreviewService {
             MediaPreviewKey {
                 asset_id: *asset_id,
                 path: resolved_path.path,
-                fingerprint,
+                fingerprint: Some(resolved_path.fingerprint),
                 source_frame: source_frame.max(0),
                 source_micros: source_micros(source_secs),
                 target_width,
@@ -4828,6 +4823,7 @@ fn uncached_viewer_raster_frame_key(
 struct PreviewMediaDecodePath {
     path: PathBuf,
     resolution: PreviewMediaDecodePathResolution,
+    fingerprint: MediaFileFingerprint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4840,40 +4836,57 @@ enum PreviewMediaDecodePathResolution {
 
 fn resolve_preview_media_decode_path(
     prefer_proxy: bool,
-    source_path: &std::path::Path,
+    source_path: &Path,
     proxy_config: &mondrian_media::ProxyConfig,
-) -> PreviewMediaDecodePath {
+) -> Option<PreviewMediaDecodePath> {
+    let source_metadata = media_path_metadata(source_path)?;
     if !prefer_proxy {
-        return PreviewMediaDecodePath {
+        return Some(PreviewMediaDecodePath {
             path: source_path.to_path_buf(),
             resolution: PreviewMediaDecodePathResolution::Source,
-        };
+            fingerprint: source_metadata.fingerprint,
+        });
     }
     let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
     let proxy_path = proxy_generator.proxy_path(source_path);
-    match proxy_generator.proxy_status(source_path) {
-        mondrian_media::ProxyStatus::Fresh => PreviewMediaDecodePath {
-            path: proxy_path,
-            resolution: PreviewMediaDecodePathResolution::Proxy,
-        },
-        mondrian_media::ProxyStatus::Missing => PreviewMediaDecodePath {
+    match media_path_metadata(&proxy_path) {
+        Some(proxy_metadata) if proxy_metadata.modified >= source_metadata.modified => {
+            Some(PreviewMediaDecodePath {
+                path: proxy_path,
+                resolution: PreviewMediaDecodePathResolution::Proxy,
+                fingerprint: proxy_metadata.fingerprint,
+            })
+        }
+        None => Some(PreviewMediaDecodePath {
             path: source_path.to_path_buf(),
             resolution: PreviewMediaDecodePathResolution::ProxyMissing,
-        },
-        mondrian_media::ProxyStatus::Stale => PreviewMediaDecodePath {
+            fingerprint: source_metadata.fingerprint,
+        }),
+        Some(_) => Some(PreviewMediaDecodePath {
             path: source_path.to_path_buf(),
             resolution: PreviewMediaDecodePathResolution::ProxyStale,
-        },
+            fingerprint: source_metadata.fingerprint,
+        }),
     }
 }
 
-fn media_file_fingerprint(path: &std::path::Path) -> Option<MediaFileFingerprint> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MediaPathMetadata {
+    fingerprint: MediaFileFingerprint,
+    modified: SystemTime,
+}
+
+fn media_path_metadata(path: &Path) -> Option<MediaPathMetadata> {
     let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-    Some(MediaFileFingerprint {
-        len: metadata.len(),
-        modified_secs: modified.as_secs(),
-        modified_nanos: modified.subsec_nanos(),
+    let modified = metadata.modified().ok()?;
+    let modified_since_epoch = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(MediaPathMetadata {
+        fingerprint: MediaFileFingerprint {
+            len: metadata.len(),
+            modified_secs: modified_since_epoch.as_secs(),
+            modified_nanos: modified_since_epoch.subsec_nanos(),
+        },
+        modified,
     })
 }
 
@@ -7407,10 +7420,12 @@ mod tests {
         std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
         std::fs::write(&proxy_path, b"proxy").expect("proxy");
 
-        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config);
+        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config)
+            .expect("fresh proxy path");
 
         assert_eq!(resolved.path, proxy_path);
         assert_eq!(resolved.resolution, PreviewMediaDecodePathResolution::Proxy);
+        assert_eq!(resolved.fingerprint.len, 5);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7428,13 +7443,15 @@ mod tests {
         std::fs::write(&source, b"source").expect("source");
         let proxy_config = test_proxy_config(root.join("proxy"));
 
-        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config);
+        let resolved =
+            resolve_preview_media_decode_path(true, &source, &proxy_config).expect("source path");
 
         assert_eq!(resolved.path, source);
         assert_eq!(
             resolved.resolution,
             PreviewMediaDecodePathResolution::ProxyMissing
         );
+        assert_eq!(resolved.fingerprint.len, 6);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7457,14 +7474,32 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&source, b"newer source").expect("source");
 
-        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config);
+        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config)
+            .expect("stale proxy falls back to source");
 
         assert_eq!(resolved.path, source);
         assert_eq!(
             resolved.resolution,
             PreviewMediaDecodePathResolution::ProxyStale
         );
+        assert_eq!(resolved.fingerprint.len, 12);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preview_media_decode_path_returns_none_when_source_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-preview-source-missing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let source = root.join("source.mp4");
+        let proxy_config = test_proxy_config(root.join("proxy"));
+
+        assert!(resolve_preview_media_decode_path(false, &source, &proxy_config).is_none());
+        assert!(resolve_preview_media_decode_path(true, &source, &proxy_config).is_none());
     }
 
     #[test]

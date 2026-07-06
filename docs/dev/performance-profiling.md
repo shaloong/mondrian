@@ -114,6 +114,10 @@ after decode in the CPU display/output transform, not in FFmpeg.
 RGBA payload for an atlas key; viewer raster keys are expected to come from the
 resolved render-plan identity so large frames do not add another full-frame CPU
 scan after rendering.
+Preview media path resolution also captures the resolved file fingerprint while
+checking source/proxy freshness; repeated source/proxy metadata probes in the
+viewer hot path should show up as resolve cost and should be collapsed instead
+of hidden behind cache-key construction.
 
 Viewer preview scheduling treats current-frame media requests as higher
 priority than forward prefetch. When the pending decode window is full, a
