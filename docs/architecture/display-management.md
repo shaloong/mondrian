@@ -185,6 +185,9 @@ The display contract produces structured diagnostics for:
 - Fake display probe for testable display contract logic
 - Windows OS default ICC profile discovery via `mondrian-platform`
   (`EnumDisplayMonitors` + WCS default profile lookup)
+- Preview scheduling consumes the resolved Display Output Contract for
+  ICC-backed monitor color-space resolution and invalidates cached preview
+  frames when the contract changes
 - Cache invalidation on contract change
 
 ### Not Implemented (Fail-Closed)

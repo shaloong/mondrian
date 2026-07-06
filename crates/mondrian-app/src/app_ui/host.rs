@@ -214,6 +214,14 @@ impl AppUiHost {
         self.preview_service.gpu_preview_frame_for_state(&state)
     }
 
+    /// Synchronize the current display output snapshot into preview scheduling.
+    pub(crate) fn set_display_output_snapshot(
+        &self,
+        snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
+    ) {
+        self.preview_service.set_display_output_snapshot(snapshot);
+    }
+
     /// Advertise a registered GPU preview texture as the viewer frame for its resolved plan.
     pub(crate) fn set_external_viewer_frame(
         &self,

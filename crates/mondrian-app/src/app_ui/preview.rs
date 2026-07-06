@@ -12,6 +12,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use mondrian_assets::AssetKind;
+use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
@@ -69,6 +70,7 @@ pub struct AppUiPreviewService {
     current_frame_pending: Cell<bool>,
     last_ready_frame: RefCell<Option<ScopedViewerFrame>>,
     last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
+    display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
     metrics: AppUiPreviewMetrics,
 }
 
@@ -105,6 +107,7 @@ impl AppUiPreviewService {
             current_frame_pending: Cell::new(false),
             last_ready_frame: RefCell::new(None),
             last_color_rejection: RefCell::new(None),
+            display_snapshot: RefCell::new(None),
             metrics: AppUiPreviewMetrics::default(),
         }
     }
@@ -311,17 +314,21 @@ impl AppUiPreviewService {
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
-        let display_color_space =
-            match preview_display_color_space(sequence, &state.project_settings.color_management) {
-                Ok(color_space) => color_space,
-                Err(blocker) => {
-                    self.record_preview_gpu_output_blocker(&blocker);
-                    self.scheduler.prune_obsolete();
-                    self.last_ready_frame.replace(None);
-                    bump(&self.metrics.unavailable_frames);
-                    return ViewerPreviewState::Unavailable;
-                }
-            };
+        let display_snapshot = self.display_snapshot.borrow();
+        let display_color_space = match preview_display_color_space(
+            sequence,
+            &state.project_settings.color_management,
+            display_snapshot.as_ref(),
+        ) {
+            Ok(color_space) => color_space,
+            Err(blocker) => {
+                self.record_preview_gpu_output_blocker(&blocker);
+                self.scheduler.prune_obsolete();
+                self.last_ready_frame.replace(None);
+                bump(&self.metrics.unavailable_frames);
+                return ViewerPreviewState::Unavailable;
+            }
+        };
         let color_context = sequence.settings.root_preview_color_context(
             &state.project_settings.color_management,
             display_color_space,
@@ -426,17 +433,21 @@ impl AppUiPreviewService {
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_sequence(sequence);
-        let display_color_space =
-            match preview_display_color_space(sequence, &state.project_settings.color_management) {
-                Ok(color_space) => color_space,
-                Err(blocker) => {
-                    self.record_preview_gpu_output_blocker(&blocker);
-                    self.scheduler.prune_obsolete();
-                    self.external_viewer_frame.replace(None);
-                    bump(&self.metrics.gpu_preview_candidate_unavailable);
-                    return AppUiGpuPreviewFrameState::Unavailable;
-                }
-            };
+        let display_snapshot = self.display_snapshot.borrow();
+        let display_color_space = match preview_display_color_space(
+            sequence,
+            &state.project_settings.color_management,
+            display_snapshot.as_ref(),
+        ) {
+            Ok(color_space) => color_space,
+            Err(blocker) => {
+                self.record_preview_gpu_output_blocker(&blocker);
+                self.scheduler.prune_obsolete();
+                self.external_viewer_frame.replace(None);
+                bump(&self.metrics.gpu_preview_candidate_unavailable);
+                return AppUiGpuPreviewFrameState::Unavailable;
+            }
+        };
         let color_context = sequence.settings.root_preview_color_context(
             &state.project_settings.color_management,
             display_color_space,
@@ -570,6 +581,30 @@ impl AppUiPreviewService {
     pub(crate) fn clear_external_viewer_frame(&self) {
         self.external_viewer_frame.replace(None);
         bump(&self.metrics.gpu_preview_external_frames_cleared);
+    }
+
+    /// Synchronize the display output contract snapshot used by preview scheduling.
+    pub(crate) fn set_display_output_snapshot(&self, snapshot: Option<&DisplayOutputSnapshot>) {
+        let previous_generation = self
+            .display_snapshot
+            .borrow()
+            .as_ref()
+            .map(DisplayOutputSnapshot::contract_generation);
+        let next_generation = snapshot.map(DisplayOutputSnapshot::contract_generation);
+
+        if previous_generation != next_generation {
+            self.clear_cached_frames_for_display_change();
+        }
+
+        self.display_snapshot.replace(snapshot.cloned());
+    }
+
+    fn clear_cached_frames_for_display_change(&self) {
+        self.viewer_frame_cache.borrow_mut().clear();
+        self.external_viewer_frame.replace(None);
+        self.last_ready_frame.replace(None);
+        self.current_generation.set(self.current_generation.get().saturating_add(1));
+        self.scheduler.prune_obsolete();
     }
 
     fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
@@ -1986,6 +2021,11 @@ impl ViewerPreviewFrameCache {
         self.entries.len()
     }
 
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
+
     fn touch(&mut self, key: &ViewerPreviewCacheKey) {
         self.lru.retain(|candidate| candidate != key);
         self.lru.push_back(key.clone());
@@ -2285,9 +2325,12 @@ impl AppUiPreviewService {
         if !state.is_playing() {
             return;
         }
-        let Ok(display_color_space) =
-            preview_display_color_space(sequence, &state.project_settings.color_management)
-        else {
+        let display_snapshot = self.display_snapshot.borrow();
+        let Ok(display_color_space) = preview_display_color_space(
+            sequence,
+            &state.project_settings.color_management,
+            display_snapshot.as_ref(),
+        ) else {
             return;
         };
         let color_context = sequence.settings.root_preview_color_context(
@@ -2880,6 +2923,7 @@ fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
 fn preview_display_color_space(
     sequence: &Sequence,
     project_cm: &mondrian_core::ProjectColorManagement,
+    display_snapshot: Option<&DisplayOutputSnapshot>,
 ) -> Result<ColorSpace, crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
     let sequence_output = sequence.settings.color_management.output_color_space;
     let display_management = if sequence.settings.color_management.inherit {
@@ -2889,12 +2933,7 @@ fn preview_display_color_space(
     };
     let profile_space = match display_management.monitor_profile {
         mondrian_core::MonitorProfileReference::IccProfile { .. } => {
-            return Err(
-                crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
-                    feature: "icc_preview_color_space_resolution".to_owned(),
-                    reason: "MonitorProfileReference::IccProfile requires the display output contract to provide a resolved monitor color space before preview scheduling".to_owned(),
-                },
-            );
+            preview_icc_display_color_space(display_snapshot)?
         }
         ref monitor => monitor.managed_color_space(sequence_output).unwrap_or(sequence_output),
     };
@@ -2912,6 +2951,44 @@ fn preview_display_color_space(
             mondrian_core::ResolvedViewerDisplayMode::HdrHlg => ColorSpace::Rec2100Hlg,
         },
     )
+}
+
+fn preview_icc_display_color_space(
+    display_snapshot: Option<&DisplayOutputSnapshot>,
+) -> Result<ColorSpace, crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
+    let Some(snapshot) = display_snapshot else {
+        return Err(
+            crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "icc_preview_color_space_resolution".to_owned(),
+                reason: "MonitorProfileReference::IccProfile requires the display output contract to provide a resolved monitor color space before preview scheduling".to_owned(),
+            },
+        );
+    };
+
+    if !snapshot.is_valid() {
+        return Err(super::display_probe_impl::preview_blockers_from_snapshot(snapshot)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                    feature: "display_output_contract_invalid".to_owned(),
+                    reason: "display output contract is invalid for ICC preview scheduling"
+                        .to_owned(),
+                }
+            }));
+    }
+
+    match snapshot.monitor_profile_status {
+        MonitorProfileStatus::ManagedColorSpace { color_space, .. } => Ok(color_space),
+        ref status => Err(
+            crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "icc_preview_color_space_resolution".to_owned(),
+                reason: format!(
+                    "display output contract did not resolve ICC profile to a managed color space: {status}"
+                ),
+            },
+        ),
+    }
 }
 
 struct PreviewCompositeOutput {
@@ -3229,6 +3306,32 @@ mod tests {
         state
     }
 
+    fn state_with_icc_display_policy(color: Color) -> AppState {
+        let mut state = state_with_solid_color_clip(color);
+        let sequence = state.sequence.as_mut().expect("test state has sequence");
+        sequence.settings.color_management.inherit = false;
+        sequence.settings.color_management.display_management =
+            mondrian_core::DisplayManagementPolicy {
+                monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
+                    profile_id: "os-default".to_owned(),
+                },
+                viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+                tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+                ..Default::default()
+            };
+        state
+    }
+
+    fn managed_icc_display_snapshot(color_space: ColorSpace) -> DisplayOutputSnapshot {
+        let mut snapshot = mondrian_core::display_probe::FakeDisplayProbe::sdr_pass().snapshot;
+        snapshot.monitor_profile_status = MonitorProfileStatus::ManagedColorSpace {
+            color_space,
+            source: mondrian_core::display_contract::MonitorProfileSource::OsIccProfile,
+        };
+        snapshot.resolved_output_color_space = format!("{color_space:?}");
+        snapshot
+    }
+
     fn test_color_context(output_color_space: ColorSpace) -> ColorContext {
         ensure_test_ocio_loaded();
         Sequence::new("color-context")
@@ -3251,7 +3354,7 @@ mod tests {
             };
 
         assert_eq!(
-            preview_display_color_space(&sequence, &ProjectColorManagement::default())
+            preview_display_color_space(&sequence, &ProjectColorManagement::default(), None)
                 .expect("display color space"),
             ColorSpace::DciP3
         );
@@ -3272,7 +3375,7 @@ mod tests {
             };
 
         assert_eq!(
-            preview_display_color_space(&sequence, &ProjectColorManagement::default())
+            preview_display_color_space(&sequence, &ProjectColorManagement::default(), None)
                 .expect("display color space"),
             ColorSpace::Rec2100Pq
         );
@@ -3292,7 +3395,7 @@ mod tests {
                 ..Default::default()
             };
 
-        let err = preview_display_color_space(&sequence, &ProjectColorManagement::default())
+        let err = preview_display_color_space(&sequence, &ProjectColorManagement::default(), None)
             .expect_err("ICC profile requires display contract resolution and must fail closed");
 
         assert!(matches!(
@@ -3302,6 +3405,52 @@ mod tests {
                 ..
             } if feature == "icc_preview_color_space_resolution"
         ));
+    }
+
+    #[test]
+    fn preview_display_color_space_resolves_icc_from_display_contract() {
+        let mut sequence = Sequence::new("icc-preview");
+        sequence.settings.color_management.inherit = false;
+        sequence.settings.color_management.display_management =
+            mondrian_core::DisplayManagementPolicy {
+                monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
+                    profile_id: "os-default".to_owned(),
+                },
+                viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+                tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+                ..Default::default()
+            };
+        let snapshot = managed_icc_display_snapshot(ColorSpace::DciP3);
+
+        assert_eq!(
+            preview_display_color_space(
+                &sequence,
+                &ProjectColorManagement::default(),
+                Some(&snapshot)
+            )
+            .expect("ICC display color space should resolve from display contract"),
+            ColorSpace::DciP3
+        );
+    }
+
+    #[test]
+    fn gpu_preview_frame_for_icc_policy_uses_display_contract_color_space() {
+        let service = AppUiPreviewService::new();
+        let state = state_with_icc_display_policy(Color::from_rgba8(24, 80, 160, 255));
+        let snapshot = managed_icc_display_snapshot(ColorSpace::DciP3);
+        service.set_display_output_snapshot(Some(&snapshot));
+
+        let frame = match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Ready(frame) => frame,
+            AppUiGpuPreviewFrameState::Current => panic!("expected new GPU preview candidate"),
+            AppUiGpuPreviewFrameState::Loading => panic!("expected ready GPU preview candidate"),
+            AppUiGpuPreviewFrameState::Unavailable => {
+                panic!("ICC policy should resolve through display contract")
+            }
+        };
+
+        assert_eq!(frame.boundary.output_color_space, ColorSpace::DciP3);
+        assert_eq!(frame.working_color_space, ColorSpace::Rec709);
     }
 
     fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {

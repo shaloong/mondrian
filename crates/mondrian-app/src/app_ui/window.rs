@@ -306,6 +306,7 @@ enum AppUiDisplayContractRefreshReasonDiagnostic {
     Resize,
     ScaleFactorChanged,
     WindowMoved,
+    DisplayPolicyChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -990,6 +991,7 @@ impl AppUiDisplayBoundaryBlockerDiagnostics {
 enum DisplayOutputContractRefreshReason {
     SurfaceLifecycle(SurfaceLifecycleReason),
     WindowMoved,
+    DisplayPolicyChanged,
 }
 
 impl AppUiDisplayContractRefreshReasonDiagnostic {
@@ -1002,6 +1004,7 @@ impl AppUiDisplayContractRefreshReasonDiagnostic {
                 SurfaceLifecycleReason::ScaleFactorChanged,
             ) => Self::ScaleFactorChanged,
             DisplayOutputContractRefreshReason::WindowMoved => Self::WindowMoved,
+            DisplayOutputContractRefreshReason::DisplayPolicyChanged => Self::DisplayPolicyChanged,
         }
     }
 }
@@ -1021,6 +1024,7 @@ struct AppUiWindowSession {
     config: wgpu::SurfaceConfiguration,
     display_output_contract: AppUiDisplayOutputContract,
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
+    display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
     frame_renderer: AppUiFrameRenderer,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
     working_compositor: GpuFrameCompositor,
@@ -3165,11 +3169,19 @@ fn refresh_display_output_contract(
         }
     };
 
-    if !display_output_contract_requires_gpu_preview_invalidation(&previous, &next) {
+    let contract_requires_invalidation =
+        display_output_contract_requires_gpu_preview_invalidation(&previous, &next);
+    let policy_requires_snapshot_refresh = matches!(
+        reason,
+        DisplayOutputContractRefreshReason::DisplayPolicyChanged
+    );
+    if !contract_requires_invalidation && !policy_requires_snapshot_refresh {
         return;
     }
 
-    let renderer_rebuilt = display_output_contract_requires_renderer_rebuild(&previous, &next);
+    let renderer_rebuilt = contract_requires_invalidation
+        && display_output_contract_requires_renderer_rebuild(&previous, &next);
+    let display_management_policy = host.resolved_display_management_policy();
 
     let reason_str = format!("{reason:?}");
     let previous_display_name = previous.display_target.name.clone();
@@ -3185,7 +3197,7 @@ fn refresh_display_output_contract(
         &format!("{:?}", next.surface_color.hdr_mode),
         &next.supported_surface_color_spaces_for_selected_format(),
         next.display_hdr_info.clone(),
-        &host.resolved_display_management_policy(),
+        &display_management_policy,
         surface_color_space_to_color_space(next.surface_color.color_space),
         &reason_str,
     );
@@ -3209,6 +3221,8 @@ fn refresh_display_output_contract(
     let new_generation = snapshot.contract_generation();
 
     session.display_snapshot = Some(snapshot);
+    host.set_display_output_snapshot(session.display_snapshot.as_ref());
+    session.display_management_policy = display_management_policy;
 
     session.viewer_gpu_output_telemetry.record_display_contract_refresh(
         reason,
@@ -3292,6 +3306,7 @@ impl AppUiWindowSession {
         let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
         TreeWalker::layout(host.active_root_mut(), bounds);
 
+        let display_management_policy = host.resolved_display_management_policy();
         let initial_snapshot = super::display_probe_impl::generate_display_snapshot(
             display_output_contract.display_target.name.clone(),
             display_output_contract.display_target.position,
@@ -3302,10 +3317,11 @@ impl AppUiWindowSession {
             &format!("{:?}", display_output_contract.surface_color.hdr_mode),
             &display_output_contract.supported_surface_color_spaces_for_selected_format(),
             display_output_contract.display_hdr_info.clone(),
-            &host.resolved_display_management_policy(),
+            &display_management_policy,
             surface_color_space_to_color_space(display_output_contract.surface_color.color_space),
             "Startup",
         );
+        host.set_display_output_snapshot(Some(&initial_snapshot));
 
         Ok(Self {
             role,
@@ -3314,6 +3330,7 @@ impl AppUiWindowSession {
             config: config.clone(),
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
+            display_management_policy,
             frame_renderer: AppUiFrameRenderer::new(device, config.format),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
@@ -3358,11 +3375,24 @@ fn drain_actions_and_sync_window_session(
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
 ) {
+    let previous_display_policy = session.display_management_policy.clone();
     let commands =
         host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
     rebuild_global_shortcuts(&mut session.router, &host.preferences().shortcut_overrides);
     apply_shell_commands(commands, &session.window, elwt);
     sync_window_session_role(host, elwt, instance, adapter, device, session);
+    if session.role == AppUiWindowRole::Workspace {
+        let next_display_policy = host.resolved_display_management_policy();
+        if previous_display_policy != next_display_policy {
+            refresh_display_output_contract(
+                DisplayOutputContractRefreshReason::DisplayPolicyChanged,
+                adapter,
+                device,
+                session,
+                host,
+            );
+        }
+    }
 }
 
 fn rebuild_global_shortcuts(
@@ -4648,6 +4678,16 @@ mod tests {
                 present_modes_changed: true,
                 alpha_modes_changed: true,
             })
+        );
+    }
+
+    #[test]
+    fn display_policy_changed_refresh_reason_has_diagnostic_code() {
+        assert_eq!(
+            AppUiDisplayContractRefreshReasonDiagnostic::from_reason(
+                DisplayOutputContractRefreshReason::DisplayPolicyChanged
+            ),
+            AppUiDisplayContractRefreshReasonDiagnostic::DisplayPolicyChanged
         );
     }
 

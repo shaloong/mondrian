@@ -643,14 +643,14 @@ These features are defined in the type system but not implemented. Diagnostics
 use `PreviewGpuOutputBlocker::UnsupportedFeature` with stable `feature` codes
 and `document_unsupported_feature` action code.
 
-- **`MonitorProfileReference::IccProfile` in early preview scheduling** —
-  Windows OS default ICC profile discovery is available through
-  `mondrian-platform`, but the early preview color-space resolver still needs a
-  resolved Display Output Contract before it can schedule an ICC-backed viewer
-  transform. Until that contract is threaded through, preview scheduling fails
-  closed with the stable `icc_preview_color_space_resolution` feature code. It
-  must not silently fall back to Rec.709, sRGB, or the sequence output color
-  space.
+- **`MonitorProfileReference::IccProfile` outside a resolved Display Output
+  Contract** — Windows OS default ICC profile discovery is available through
+  `mondrian-platform`, and preview scheduling consumes the resolved Display
+  Output Contract when it maps the ICC profile to a managed monitor color
+  space. If the contract is missing, invalid, unreadable, or unmapped, preview
+  fails closed with `icc_preview_color_space_resolution` or the structured
+  display-contract blocker. It must not silently fall back to Rec.709, sRGB, or
+  the sequence output color space.
 - **Real OS HDR/EDR detection** — `ViewerDisplayMode::HdrPq` /
   `ViewerDisplayMode::HdrHlg` are explicit user selections, not OS-queried
   capabilities. The surface contract validates wgpu `SurfaceColorSpace`
