@@ -196,8 +196,11 @@ The display contract produces structured diagnostics for:
 - **ICC profile id registry** — `IccProfile { profile_id }` accepts absolute
   paths or `os-default`; arbitrary stable ids fail closed until a registry is
   implemented.
-- **OS HDR display metadata** — `display_hdr_info` from wgpu is available but
-  real monitor HDR capability cannot be confirmed on most platforms.
+- **macOS/Linux OS HDR display metadata** — Windows probes DisplayConfig
+  Advanced Color state and SDR white level through `mondrian-platform` before
+  falling back to wgpu headroom. macOS/Linux still cannot confirm real monitor
+  HDR capability and must report `MonitorHdrCapabilityUnknown` or
+  `MonitorHdrCapabilityUnsupported` instead of silently treating HDR as ready.
 - **OS EDR information** — Not available on any platform.
 - **General ICC-to-OCIO mapping** — common explicitly named monitor profiles
   can resolve to managed Mondrian color spaces, but arbitrary calibrated ICC

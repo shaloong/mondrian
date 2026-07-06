@@ -64,6 +64,97 @@ pub struct DisplayIccProfileProbeResult {
     pub error: Option<String>,
 }
 
+/// OS HDR / Advanced Color discovery result for a display target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayHdrProbeResult {
+    /// Whether the current platform adapter has an OS HDR discovery mechanism.
+    pub discovery_available: bool,
+    /// OS display-device identifier used by the platform API, if known.
+    pub display_device_name: Option<String>,
+    /// Whether the OS reports HDR / Advanced Color support for this display.
+    pub advanced_color_supported: Option<bool>,
+    /// Whether the OS currently has HDR / Advanced Color enabled for this display.
+    pub advanced_color_enabled: Option<bool>,
+    /// Whether wide color is enforced by the OS.
+    pub wide_color_enforced: Option<bool>,
+    /// Whether Advanced Color is force-disabled by the OS or driver policy.
+    pub advanced_color_force_disabled: Option<bool>,
+    /// Reported output bits per color channel, if available.
+    pub bits_per_color_channel: Option<u32>,
+    /// OS display color encoding label, if available.
+    pub color_encoding: Option<String>,
+    /// Windows SDR white level raw value reported by DisplayConfig, if available.
+    pub sdr_white_level: Option<u32>,
+    /// Structured human-readable failure reason when discovery did not produce
+    /// a usable Advanced Color result.
+    pub error: Option<String>,
+}
+
+impl DisplayHdrProbeResult {
+    /// Build a successful HDR / Advanced Color probe result.
+    #[allow(clippy::too_many_arguments)]
+    pub fn found(
+        display_device_name: Option<String>,
+        advanced_color_supported: bool,
+        advanced_color_enabled: bool,
+        wide_color_enforced: bool,
+        advanced_color_force_disabled: bool,
+        bits_per_color_channel: u32,
+        color_encoding: Option<String>,
+        sdr_white_level: Option<u32>,
+    ) -> Self {
+        Self {
+            discovery_available: true,
+            display_device_name,
+            advanced_color_supported: Some(advanced_color_supported),
+            advanced_color_enabled: Some(advanced_color_enabled),
+            wide_color_enforced: Some(wide_color_enforced),
+            advanced_color_force_disabled: Some(advanced_color_force_disabled),
+            bits_per_color_channel: Some(bits_per_color_channel),
+            color_encoding,
+            sdr_white_level,
+            error: None,
+        }
+    }
+
+    /// Build a result for a supported probe that could not resolve this display.
+    pub fn missing(display_device_name: Option<String>, reason: impl Into<String>) -> Self {
+        Self {
+            discovery_available: true,
+            display_device_name,
+            advanced_color_supported: None,
+            advanced_color_enabled: None,
+            wide_color_enforced: None,
+            advanced_color_force_disabled: None,
+            bits_per_color_channel: None,
+            color_encoding: None,
+            sdr_white_level: None,
+            error: Some(reason.into()),
+        }
+    }
+
+    /// Build a result for a supported probe that failed.
+    pub fn failed(display_device_name: Option<String>, reason: impl Into<String>) -> Self {
+        Self::missing(display_device_name, reason)
+    }
+
+    /// Build a result for a platform with no HDR / Advanced Color discovery adapter.
+    pub fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            discovery_available: false,
+            display_device_name: None,
+            advanced_color_supported: None,
+            advanced_color_enabled: None,
+            wide_color_enforced: None,
+            advanced_color_force_disabled: None,
+            bits_per_color_channel: None,
+            color_encoding: None,
+            sdr_white_level: None,
+            error: Some(reason.into()),
+        }
+    }
+}
+
 impl DisplayIccProfileProbeResult {
     /// Build a successful ICC profile probe result.
     pub fn found(display_device_name: Option<String>, profile_path: PathBuf) -> Self {
@@ -114,6 +205,13 @@ pub trait DisplayProfileProbe: Send + Sync {
         &self,
         target: DisplayProfileProbeTarget,
     ) -> DisplayIccProfileProbeResult;
+}
+
+/// Interface for OS-backed display HDR / Advanced Color probing.
+pub trait DisplayHdrProbe: Send + Sync {
+    /// Resolve the current display's HDR / Advanced Color state, when the
+    /// platform can provide it.
+    fn display_hdr_state(&self, target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult;
 }
 
 /// Clipboard operation failure reported by the platform boundary.
@@ -209,6 +307,14 @@ impl DisplayProfileProbe for NoopPlatformService {
     ) -> DisplayIccProfileProbeResult {
         DisplayIccProfileProbeResult::unsupported(
             "OS ICC profile discovery unavailable in noop platform adapter",
+        )
+    }
+}
+
+impl DisplayHdrProbe for NoopPlatformService {
+    fn display_hdr_state(&self, _target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+        DisplayHdrProbeResult::unsupported(
+            "OS HDR / Advanced Color discovery unavailable in noop platform adapter",
         )
     }
 }

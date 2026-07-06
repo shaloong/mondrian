@@ -104,6 +104,7 @@ unicode-segmentation = "1"
 arboard              = "3"
 xcap                 = "0.3"
 windows-sys = { version = "0.61", features = [
+    "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",

@@ -8,8 +8,9 @@ use std::process::Command;
 
 use mondrian_core::Color;
 pub use mondrian_platform_core::{
-    ClipboardError, DisplayIccProfileProbeResult, DisplayProfileProbe, DisplayProfileProbeTarget,
-    FileFilter, NoopPlatformService, PlatformService,
+    ClipboardError, DisplayHdrProbe, DisplayHdrProbeResult, DisplayIccProfileProbeResult,
+    DisplayProfileProbe, DisplayProfileProbeTarget, FileFilter, NoopPlatformService,
+    PlatformService,
 };
 
 /// Default desktop platform implementation.
@@ -69,6 +70,12 @@ impl DisplayProfileProbe for SystemPlatformService {
     }
 }
 
+impl DisplayHdrProbe for SystemPlatformService {
+    fn display_hdr_state(&self, target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+        system_display_hdr_state(target)
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn system_display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
     windows_display_profile::display_icc_profile(target)
@@ -78,6 +85,18 @@ fn system_display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccPr
 fn system_display_icc_profile(_target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
     DisplayIccProfileProbeResult::unsupported(
         "OS ICC profile discovery is not implemented for this platform",
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn system_display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    windows_display_profile::display_hdr_state(target)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_display_hdr_state(_target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    DisplayHdrProbeResult::unsupported(
+        "OS HDR / Advanced Color discovery is not implemented for this platform",
     )
 }
 
@@ -127,13 +146,29 @@ fn configured_file_dialog(title: &str, filters: &[FileFilter]) -> rfd::FileDialo
 
 #[cfg(target_os = "windows")]
 mod windows_display_profile {
+    use std::mem;
     use std::path::PathBuf;
     use std::ptr;
 
-    use mondrian_platform_core::{DisplayIccProfileProbeResult, DisplayProfileProbeTarget};
-    use windows_sys::Win32::Foundation::{LPARAM, RECT};
+    use mondrian_platform_core::{
+        DisplayHdrProbeResult, DisplayIccProfileProbeResult, DisplayProfileProbeTarget,
+    };
+    use windows_sys::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+        DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO,
+        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SDR_WHITE_LEVEL,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+    };
+    use windows_sys::Win32::Foundation::{LPARAM, LUID, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    };
+    use windows_sys::Win32::Graphics::Gdi::{
+        DISPLAYCONFIG_COLOR_ENCODING_INTENSITY, DISPLAYCONFIG_COLOR_ENCODING_RGB,
+        DISPLAYCONFIG_COLOR_ENCODING_YCBCR420, DISPLAYCONFIG_COLOR_ENCODING_YCBCR422,
+        DISPLAYCONFIG_COLOR_ENCODING_YCBCR444,
     };
     use windows_sys::Win32::UI::ColorSystem::{
         WcsGetDefaultColorProfile, WcsGetDefaultColorProfileSize, CPST_NONE,
@@ -156,6 +191,33 @@ mod windows_display_profile {
         match default_icc_profile_for_device(&display_device_name) {
             Ok(path) => DisplayIccProfileProbeResult::found(Some(display_device_name), path),
             Err(reason) => DisplayIccProfileProbeResult::missing(Some(display_device_name), reason),
+        }
+    }
+
+    pub fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+        let display_device_name = match display_device_name_for_target(target) {
+            Ok(Some(name)) => name,
+            Ok(None) => {
+                return DisplayHdrProbeResult::missing(
+                    None,
+                    "no Windows monitor matched the winit display rectangle",
+                );
+            }
+            Err(reason) => return DisplayHdrProbeResult::failed(None, reason),
+        };
+
+        match advanced_color_for_device(&display_device_name) {
+            Ok(state) => DisplayHdrProbeResult::found(
+                Some(display_device_name),
+                state.advanced_color_supported,
+                state.advanced_color_enabled,
+                state.wide_color_enforced,
+                state.advanced_color_force_disabled,
+                state.bits_per_color_channel,
+                state.color_encoding,
+                state.sdr_white_level,
+            ),
+            Err(reason) => DisplayHdrProbeResult::failed(Some(display_device_name), reason),
         }
     }
 
@@ -256,6 +318,183 @@ mod windows_display_profile {
             "WcsGetDefaultColorProfile did not return a profile ({})",
             failures.join("; ")
         ))
+    }
+
+    struct WindowsAdvancedColorState {
+        advanced_color_supported: bool,
+        advanced_color_enabled: bool,
+        wide_color_enforced: bool,
+        advanced_color_force_disabled: bool,
+        bits_per_color_channel: u32,
+        color_encoding: Option<String>,
+        sdr_white_level: Option<u32>,
+    }
+
+    fn advanced_color_for_device(device_name: &str) -> Result<WindowsAdvancedColorState, String> {
+        let paths = active_display_paths()?;
+        for path in paths {
+            let source_name = source_gdi_device_name(&path)?;
+            if !source_name.eq_ignore_ascii_case(device_name) {
+                continue;
+            }
+
+            let advanced = advanced_color_info(&path)?;
+            let advanced_flags = unsafe { advanced.Anonymous.value };
+            let sdr_white_level = sdr_white_level(&path).ok();
+            return Ok(WindowsAdvancedColorState {
+                advanced_color_supported: bit(advanced_flags, 0),
+                advanced_color_enabled: bit(advanced_flags, 1),
+                wide_color_enforced: bit(advanced_flags, 2),
+                advanced_color_force_disabled: bit(advanced_flags, 3),
+                bits_per_color_channel: advanced.bitsPerColorChannel,
+                color_encoding: Some(color_encoding_name(advanced.colorEncoding).to_owned()),
+                sdr_white_level,
+            });
+        }
+
+        Err(format!(
+            "DisplayConfig active paths did not include source device '{device_name}'"
+        ))
+    }
+
+    fn active_display_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, String> {
+        let mut path_count = 0u32;
+        let mut mode_count = 0u32;
+        let size_result = unsafe {
+            GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+        };
+        if size_result != 0 {
+            return Err(format!(
+                "GetDisplayConfigBufferSizes failed with code {size_result}"
+            ));
+        }
+        if path_count == 0 {
+            return Err("QueryDisplayConfig reported no active display paths".to_owned());
+        }
+
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+        let query_result = unsafe {
+            QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut path_count,
+                paths.as_mut_ptr(),
+                &mut mode_count,
+                modes.as_mut_ptr(),
+                ptr::null_mut(),
+            )
+        };
+        if query_result != 0 {
+            return Err(format!(
+                "QueryDisplayConfig failed with code {query_result}"
+            ));
+        }
+        paths.truncate(path_count as usize);
+        Ok(paths)
+    }
+
+    fn source_gdi_device_name(path: &DISPLAYCONFIG_PATH_INFO) -> Result<String, String> {
+        let mut packet = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: display_config_header(
+                DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>(),
+                path.sourceInfo.adapterId,
+                path.sourceInfo.id,
+            ),
+            ..DISPLAYCONFIG_SOURCE_DEVICE_NAME::default()
+        };
+        let result = unsafe {
+            DisplayConfigGetDeviceInfo(
+                &mut packet as *mut DISPLAYCONFIG_SOURCE_DEVICE_NAME
+                    as *mut DISPLAYCONFIG_DEVICE_INFO_HEADER,
+            )
+        };
+        if result != 0 {
+            return Err(format!(
+                "DisplayConfigGetDeviceInfo(GET_SOURCE_NAME) failed with code {result}"
+            ));
+        }
+        utf16z_to_string(&packet.viewGdiDeviceName)
+            .ok_or_else(|| "DisplayConfig source returned an empty GDI device name".to_owned())
+    }
+
+    fn advanced_color_info(
+        path: &DISPLAYCONFIG_PATH_INFO,
+    ) -> Result<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, String> {
+        let mut packet = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+            header: display_config_header(
+                DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+                mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>(),
+                path.targetInfo.adapterId,
+                path.targetInfo.id,
+            ),
+            ..DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default()
+        };
+        let result = unsafe {
+            DisplayConfigGetDeviceInfo(
+                &mut packet as *mut DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO
+                    as *mut DISPLAYCONFIG_DEVICE_INFO_HEADER,
+            )
+        };
+        if result != 0 {
+            return Err(format!(
+                "DisplayConfigGetDeviceInfo(GET_ADVANCED_COLOR_INFO) failed with code {result}"
+            ));
+        }
+        Ok(packet)
+    }
+
+    fn sdr_white_level(path: &DISPLAYCONFIG_PATH_INFO) -> Result<u32, String> {
+        let mut packet = DISPLAYCONFIG_SDR_WHITE_LEVEL {
+            header: display_config_header(
+                DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+                mem::size_of::<DISPLAYCONFIG_SDR_WHITE_LEVEL>(),
+                path.targetInfo.adapterId,
+                path.targetInfo.id,
+            ),
+            ..DISPLAYCONFIG_SDR_WHITE_LEVEL::default()
+        };
+        let result = unsafe {
+            DisplayConfigGetDeviceInfo(
+                &mut packet as *mut DISPLAYCONFIG_SDR_WHITE_LEVEL
+                    as *mut DISPLAYCONFIG_DEVICE_INFO_HEADER,
+            )
+        };
+        if result != 0 {
+            return Err(format!(
+                "DisplayConfigGetDeviceInfo(GET_SDR_WHITE_LEVEL) failed with code {result}"
+            ));
+        }
+        Ok(packet.SDRWhiteLevel)
+    }
+
+    fn display_config_header(
+        packet_type: i32,
+        packet_size: usize,
+        adapter_id: LUID,
+        id: u32,
+    ) -> DISPLAYCONFIG_DEVICE_INFO_HEADER {
+        DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: packet_type,
+            size: packet_size as u32,
+            adapterId: adapter_id,
+            id,
+        }
+    }
+
+    fn bit(value: u32, bit_index: u32) -> bool {
+        value & (1 << bit_index) != 0
+    }
+
+    fn color_encoding_name(encoding: i32) -> &'static str {
+        match encoding {
+            DISPLAYCONFIG_COLOR_ENCODING_RGB => "Rgb",
+            DISPLAYCONFIG_COLOR_ENCODING_YCBCR444 => "YCbCr444",
+            DISPLAYCONFIG_COLOR_ENCODING_YCBCR422 => "YCbCr422",
+            DISPLAYCONFIG_COLOR_ENCODING_YCBCR420 => "YCbCr420",
+            DISPLAYCONFIG_COLOR_ENCODING_INTENSITY => "Intensity",
+            _ => "Unknown",
+        }
     }
 
     fn default_icc_profile_for_scope(

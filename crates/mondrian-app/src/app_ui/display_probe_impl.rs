@@ -11,9 +11,10 @@ use mondrian_core::display_contract::*;
 use mondrian_core::display_probe::{compute_display_blockers, resolve_hdr_status};
 use mondrian_core::types::ColorSpace;
 use mondrian_core::DisplayColorProfile;
+#[cfg(not(test))]
+use mondrian_platform::{DisplayHdrProbe, DisplayProfileProbe, SystemPlatformService};
 use mondrian_platform::{
-    DisplayIccProfileProbeResult, DisplayProfileProbe, DisplayProfileProbeTarget,
-    SystemPlatformService,
+    DisplayHdrProbeResult, DisplayIccProfileProbeResult, DisplayProfileProbeTarget,
 };
 
 /// Generate a real `DisplayOutputSnapshot` from the current winit/wgpu state.
@@ -41,7 +42,7 @@ pub fn generate_display_snapshot(
     refresh_reason: &str,
 ) -> DisplayOutputSnapshot {
     let profile_probe = if should_probe_os_icc_profile(policy) {
-        SystemPlatformService.display_icc_profile(DisplayProfileProbeTarget::new(
+        display_icc_profile_probe(DisplayProfileProbeTarget::new(
             display_position,
             display_physical_size,
         ))
@@ -50,6 +51,10 @@ pub fn generate_display_snapshot(
     };
 
     let monitor_profile_status = resolve_monitor_profile_status(policy, &profile_probe);
+    let hdr_probe = display_hdr_state_probe(DisplayProfileProbeTarget::new(
+        display_position,
+        display_physical_size,
+    ));
 
     let hdr_mode_str = match surface_hdr_mode_str {
         "HdrPq" => "HdrPq",
@@ -59,9 +64,8 @@ pub fn generate_display_snapshot(
 
     let surface_supports_hdr = matches!(surface_hdr_mode_str, "HdrPq" | "HdrHlg");
 
-    let monitor_hdr_known = display_hdr_info.tone_map_headroom().is_some();
-
-    let monitor_hdr_supported = display_hdr_info.tone_map_headroom().is_some_and(|h| h > 1.0);
+    let (monitor_hdr_known, monitor_hdr_supported) =
+        resolve_monitor_hdr_capability(&hdr_probe, display_hdr_info);
 
     let hdr_status = resolve_hdr_status(
         policy.viewer_mode,
@@ -125,6 +129,47 @@ pub fn generate_display_snapshot(
         blockers,
         refresh_reason: refresh_reason.to_owned(),
     }
+}
+
+#[cfg(not(test))]
+fn display_icc_profile_probe(target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
+    SystemPlatformService.display_icc_profile(target)
+}
+
+#[cfg(test)]
+fn display_icc_profile_probe(_target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
+    DisplayIccProfileProbeResult::unsupported("test ICC profile probe unavailable")
+}
+
+#[cfg(not(test))]
+fn display_hdr_state_probe(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    SystemPlatformService.display_hdr_state(target)
+}
+
+#[cfg(test)]
+fn display_hdr_state_probe(_target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    DisplayHdrProbeResult::unsupported("test HDR / Advanced Color probe unavailable")
+}
+
+fn resolve_monitor_hdr_capability(
+    hdr_probe: &DisplayHdrProbeResult,
+    display_hdr_info: wgpu::DisplayHdrInfo,
+) -> (bool, bool) {
+    let os_hdr_known = hdr_probe.discovery_available
+        && (hdr_probe.advanced_color_supported.is_some()
+            || hdr_probe.advanced_color_enabled.is_some()
+            || hdr_probe.advanced_color_force_disabled.is_some());
+    if os_hdr_known {
+        let supported = hdr_probe.advanced_color_supported == Some(true);
+        let enabled = hdr_probe.advanced_color_enabled == Some(true);
+        let force_disabled = hdr_probe.advanced_color_force_disabled == Some(true);
+        return (true, supported && enabled && !force_disabled);
+    }
+
+    (
+        display_hdr_info.tone_map_headroom().is_some(),
+        display_hdr_info.tone_map_headroom().is_some_and(|h| h > 1.0),
+    )
 }
 
 fn should_probe_os_icc_profile(policy: &DisplayManagementPolicy) -> bool {
@@ -559,10 +604,10 @@ mod tests {
 
     #[test]
     fn generate_snapshot_with_known_hdr_monitor_passes() {
-        // With default DisplayHdrInfo (no headroom reported), the monitor HDR
-        // capability is unknown, so this produces RequestedMonitorUnknown.
-        // Real wgpu surfaces that support HDR will report headroom, making
-        // this a RequestedSupported case at runtime.
+        // Tests use a fixed unsupported OS probe, so default DisplayHdrInfo
+        // still produces RequestedMonitorUnknown. Production Windows builds use
+        // DisplayConfig Advanced Color state before falling back to wgpu
+        // headroom.
         let snapshot = generate_display_snapshot(
             Some("HDR Monitor".to_owned()),
             (0, 0),
@@ -589,6 +634,44 @@ mod tests {
             snapshot.hdr_status,
             HdrStatus::RequestedMonitorUnknown { .. }
         ));
+    }
+
+    #[test]
+    fn monitor_hdr_capability_uses_os_advanced_color_when_known() {
+        let probe = DisplayHdrProbeResult::found(
+            Some(r"\\.\DISPLAY1".to_owned()),
+            true,
+            true,
+            false,
+            false,
+            10,
+            Some("Rgb".to_owned()),
+            Some(203),
+        );
+
+        assert_eq!(
+            resolve_monitor_hdr_capability(&probe, no_hdr_info()),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn monitor_hdr_capability_does_not_override_os_disabled_state() {
+        let probe = DisplayHdrProbeResult::found(
+            Some(r"\\.\DISPLAY1".to_owned()),
+            true,
+            false,
+            false,
+            false,
+            10,
+            Some("Rgb".to_owned()),
+            Some(203),
+        );
+
+        assert_eq!(
+            resolve_monitor_hdr_capability(&probe, no_hdr_info()),
+            (true, false)
+        );
     }
 
     #[test]

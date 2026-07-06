@@ -287,6 +287,7 @@ struct AppUiViewerGpuOutputFrameContext {
     preview_candidate_id: Option<u64>,
     preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState,
     display_view: Option<AppUiViewerGpuOutputDisplayView>,
+    frame_residency: AppUiViewerGpuOutputFrameResidency,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -299,6 +300,38 @@ enum AppUiViewerGpuOutputTarget {
 struct AppUiViewerGpuOutputDisplayView {
     display: String,
     view: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiViewerGpuOutputFrameResidency {
+    decode_residency: AppUiViewerGpuOutputDecodeResidency,
+    working_residency: AppUiViewerGpuOutputWorkingResidency,
+    input_transform_path: AppUiViewerGpuOutputInputTransformPath,
+    zero_copy: bool,
+    low_copy: bool,
+    upload_count: u32,
+    readback_count: u32,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum AppUiViewerGpuOutputDecodeResidency {
+    CpuDecodedRgba,
+    ProceduralGpuNative,
+    MixedCpuAndProcedural,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum AppUiViewerGpuOutputWorkingResidency {
+    CpuWorkingFrame,
+    GpuWorkingComposite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum AppUiViewerGpuOutputInputTransformPath {
+    CpuOcio,
+    GpuNativeProcedural,
+    MixedCpuOcioAndGpuNative,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -698,6 +731,57 @@ impl AppUiViewerGpuOutputFrameContext {
                     view: display_view.view.clone(),
                 }
             }),
+            frame_residency: AppUiViewerGpuOutputFrameResidency::from_frame(frame),
+        }
+    }
+}
+
+impl AppUiViewerGpuOutputFrameResidency {
+    fn from_frame(frame: &AppUiGpuPreviewFrame) -> Self {
+        match &frame.working_input {
+            AppUiGpuPreviewWorkingInput::CpuFrame(_) => Self {
+                decode_residency: AppUiViewerGpuOutputDecodeResidency::CpuDecodedRgba,
+                working_residency: AppUiViewerGpuOutputWorkingResidency::CpuWorkingFrame,
+                input_transform_path: AppUiViewerGpuOutputInputTransformPath::CpuOcio,
+                zero_copy: false,
+                low_copy: false,
+                upload_count: 1,
+                readback_count: 0,
+                reason: "CPU working frame is uploaded before the GPU output boundary".to_owned(),
+            },
+            AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
+                let media_layers = layers
+                    .iter()
+                    .filter(|layer| matches!(layer, AppUiGpuPreviewCompositeLayer::Media { .. }))
+                    .count() as u32;
+                let procedural_layers = layers.len() as u32 - media_layers;
+                let has_media = media_layers > 0;
+                let has_procedural = procedural_layers > 0;
+                Self {
+                    decode_residency: match (has_media, has_procedural) {
+                        (true, true) => AppUiViewerGpuOutputDecodeResidency::MixedCpuAndProcedural,
+                        (true, false) => AppUiViewerGpuOutputDecodeResidency::CpuDecodedRgba,
+                        (false, _) => AppUiViewerGpuOutputDecodeResidency::ProceduralGpuNative,
+                    },
+                    working_residency: AppUiViewerGpuOutputWorkingResidency::GpuWorkingComposite,
+                    input_transform_path: match (has_media, has_procedural) {
+                        (true, true) => {
+                            AppUiViewerGpuOutputInputTransformPath::MixedCpuOcioAndGpuNative
+                        }
+                        (true, false) => AppUiViewerGpuOutputInputTransformPath::CpuOcio,
+                        (false, _) => AppUiViewerGpuOutputInputTransformPath::GpuNativeProcedural,
+                    },
+                    zero_copy: !has_media,
+                    low_copy: has_media,
+                    upload_count: media_layers,
+                    readback_count: 0,
+                    reason: if has_media {
+                        "GPU working composite uses uploaded CPU media layers; hardware decode texture residency is not active".to_owned()
+                    } else {
+                        "Procedural layers are generated and composited on the GPU without media uploads".to_owned()
+                    },
+                }
+            }
         }
     }
 }
@@ -5010,6 +5094,16 @@ mod tests {
                 display: "sRGB Display".to_owned(),
                 view: "Standard".to_owned(),
             }),
+            frame_residency: AppUiViewerGpuOutputFrameResidency {
+                decode_residency: AppUiViewerGpuOutputDecodeResidency::CpuDecodedRgba,
+                working_residency: AppUiViewerGpuOutputWorkingResidency::GpuWorkingComposite,
+                input_transform_path: AppUiViewerGpuOutputInputTransformPath::CpuOcio,
+                zero_copy: false,
+                low_copy: true,
+                upload_count: 1,
+                readback_count: 0,
+                reason: "test residency".to_owned(),
+            },
         });
         let mut diagnostics =
             telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
@@ -5106,6 +5200,26 @@ mod tests {
         assert_eq!(
             json["last_frame_context"]["display_view"]["view"],
             "Standard"
+        );
+        assert_eq!(
+            json["last_frame_context"]["frame_residency"]["decode_residency"],
+            "CpuDecodedRgba"
+        );
+        assert_eq!(
+            json["last_frame_context"]["frame_residency"]["working_residency"],
+            "GpuWorkingComposite"
+        );
+        assert_eq!(
+            json["last_frame_context"]["frame_residency"]["input_transform_path"],
+            "CpuOcio"
+        );
+        assert_eq!(
+            json["last_frame_context"]["frame_residency"]["zero_copy"],
+            false
+        );
+        assert_eq!(
+            json["last_frame_context"]["frame_residency"]["upload_count"],
+            1
         );
         assert_eq!(
             json["last_color_rejection"]["diagnostic_issue_summary"]

@@ -301,8 +301,13 @@ texture registration rejection without making dashboards reconstruct the state
 machine from counters. Setting `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT` appends those
 viewer diagnostics as JSONL from the live app window, including sequence id,
 timeline frame, preview dimensions, external texture key, output target, output
-color space, tone-map flag, optional OCIO display/view, and cumulative health
-counts for ready/degraded/blocked/failed/rejected/waiting outcomes. The same
+color space, tone-map flag, optional OCIO display/view, frame residency
+diagnostics, and cumulative health counts for
+ready/degraded/blocked/failed/rejected/waiting outcomes. Frame residency reports
+whether the candidate was CPU-decoded media, procedural GPU-native content, or a
+mixed stack; whether working composition was CPU or GPU resident; whether input
+transform was CPU OCIO or GPU-native; upload/readback counts; and whether the
+frame is truly zero-copy/low-copy. The same
 records also carry the latest structured viewer color rejection and its machine
 issue summary when missing-metadata policy rejects preview media. This gives
 playback/scrubbing sessions a persistent health stream that can be budgeted and

@@ -652,12 +652,14 @@ and `document_unsupported_feature` action code.
   display-contract blocker. It must not silently fall back to Rec.709, sRGB, or
   the sequence output color space.
 - **Real OS HDR/EDR detection** — `ViewerDisplayMode::HdrPq` /
-  `ViewerDisplayMode::HdrHlg` are explicit user selections, not OS-queried
-  capabilities. The surface contract validates wgpu `SurfaceColorSpace`
-  compatibility but does not yet prove actual monitor HDR support across every
-  OS. Display Output Contract v2 records `MonitorHdrCapabilityUnknown` /
-  `MonitorHdrCapabilityUnsupported` blockers when HDR correctness cannot be
-  confirmed.
+  `ViewerDisplayMode::HdrHlg` are explicit user selections. On Windows the app
+  probes DisplayConfig Advanced Color support/enabled/force-disabled state, bits
+  per channel, color encoding, and SDR white level through `mondrian-platform`;
+  known disabled or unsupported state blocks HDR preview. wgpu
+  `SurfaceColorSpace` compatibility is still only the swapchain side of the
+  contract. macOS/Linux and unavailable probes record
+  `MonitorHdrCapabilityUnknown` / `MonitorHdrCapabilityUnsupported` blockers
+  when HDR correctness cannot be confirmed.
 - **GPU compositing** — The `gpu_compositor.rs` module is wired into the
   preview/viewer GPU path for the safe production subset: media-layer affine
   transforms, identity solid transforms, Normal blend mode, no effect graphs,
