@@ -126,6 +126,15 @@ struct EffectOutputCacheKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EffectFloatOutputCacheKey {
+    graph_signature: u64,
+    input_signature: u64,
+    width: u32,
+    height: u32,
+    frame_seed: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EffectNodeOutputCacheKey {
     subtree_signature: u64,
     input_signature: u64,
@@ -152,6 +161,15 @@ struct EffectNodeOutputFrameCache {
     order: VecDeque<EffectNodeOutputCacheKey>,
 }
 
+#[derive(Debug)]
+struct EffectFloatOutputFrameCache {
+    max_entries: usize,
+    max_bytes: usize,
+    total_bytes: usize,
+    entries: HashMap<EffectFloatOutputCacheKey, Vec<[f32; 4]>>,
+    order: VecDeque<EffectFloatOutputCacheKey>,
+}
+
 impl Default for EffectOutputFrameCache {
     fn default() -> Self {
         Self {
@@ -173,6 +191,9 @@ impl EffectOutputFrameCache {
 
     fn insert(&mut self, key: EffectOutputCacheKey, value: Vec<u8>) {
         let size = value.len();
+        if size > self.max_bytes {
+            return;
+        }
         if let Some(previous) = self.entries.insert(key.clone(), value) {
             self.total_bytes = self.total_bytes.saturating_sub(previous.len());
             self.remove_from_order(&key);
@@ -226,6 +247,9 @@ impl EffectNodeOutputFrameCache {
 
     fn insert(&mut self, key: EffectNodeOutputCacheKey, value: Vec<u8>) {
         let size = value.len();
+        if size > self.max_bytes {
+            return;
+        }
         if let Some(previous) = self.entries.insert(key.clone(), value) {
             self.total_bytes = self.total_bytes.saturating_sub(previous.len());
             self.remove_from_order(&key);
@@ -258,6 +282,66 @@ impl EffectNodeOutputFrameCache {
     }
 }
 
+impl Default for EffectFloatOutputFrameCache {
+    fn default() -> Self {
+        Self {
+            max_entries: 8,
+            max_bytes: 256 * 1024 * 1024,
+            total_bytes: 0,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+}
+
+impl EffectFloatOutputFrameCache {
+    fn get(&mut self, key: &EffectFloatOutputCacheKey) -> Option<Vec<[f32; 4]>> {
+        let value = self.entries.get(key).cloned()?;
+        self.touch(key);
+        Some(value)
+    }
+
+    fn insert(&mut self, key: EffectFloatOutputCacheKey, value: Vec<[f32; 4]>) {
+        let size = value.len().saturating_mul(std::mem::size_of::<[f32; 4]>());
+        if size > self.max_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.insert(key.clone(), value) {
+            self.total_bytes = self
+                .total_bytes
+                .saturating_sub(previous.len().saturating_mul(std::mem::size_of::<[f32; 4]>()));
+            self.remove_from_order(&key);
+        }
+        self.total_bytes = self.total_bytes.saturating_add(size);
+        self.order.push_back(key);
+        self.trim();
+    }
+
+    fn touch(&mut self, key: &EffectFloatOutputCacheKey) {
+        self.remove_from_order(key);
+        self.order.push_back(key.clone());
+    }
+
+    fn remove_from_order(&mut self, key: &EffectFloatOutputCacheKey) {
+        if let Some(index) = self.order.iter().position(|existing| existing == key) {
+            self.order.remove(index);
+        }
+    }
+
+    fn trim(&mut self) {
+        while self.entries.len() > self.max_entries || self.total_bytes > self.max_bytes {
+            let Some(evicted_key) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&evicted_key) {
+                self.total_bytes = self
+                    .total_bytes
+                    .saturating_sub(evicted.len().saturating_mul(std::mem::size_of::<[f32; 4]>()));
+            }
+        }
+    }
+}
+
 pub(crate) fn custom_render_processor_registry(
 ) -> &'static RwLock<HashMap<String, CustomEffectRenderProcessor>> {
     static REGISTRY: OnceLock<RwLock<HashMap<String, CustomEffectRenderProcessor>>> =
@@ -273,6 +357,11 @@ fn effect_output_frame_cache() -> &'static Mutex<EffectOutputFrameCache> {
 fn effect_node_output_frame_cache() -> &'static Mutex<EffectNodeOutputFrameCache> {
     static CACHE: OnceLock<Mutex<EffectNodeOutputFrameCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(EffectNodeOutputFrameCache::default()))
+}
+
+fn effect_float_output_frame_cache() -> &'static Mutex<EffectFloatOutputFrameCache> {
+    static CACHE: OnceLock<Mutex<EffectFloatOutputFrameCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(EffectFloatOutputFrameCache::default()))
 }
 
 pub fn register_custom_render_processor(
@@ -808,7 +897,7 @@ pub fn apply_compiled_effect_graph_rgba_f32(
     width: u32,
     height: u32,
     compiled: &CompiledEffectGraph,
-    _frame_seed: i64,
+    frame_seed: i64,
 ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
     let required_len = width as usize * height as usize;
     if input.len() != required_len {
@@ -821,6 +910,9 @@ pub fn apply_compiled_effect_graph_rgba_f32(
         return Ok(input.to_vec());
     }
     validate_float_effect_graph(compiled)?;
+    if let Some(cached) = get_cached_effect_output_f32(input, width, height, compiled, frame_seed) {
+        return Ok(cached);
+    }
 
     let mut outputs = HashMap::<EffectGraphNodeId, Vec<[f32; 4]>>::new();
     for node_id in &compiled.schedule.ordered_nodes {
@@ -866,9 +958,11 @@ pub fn apply_compiled_effect_graph_rgba_f32(
     let Some(output_id) = compiled.graph.output else {
         return Ok(input.to_vec());
     };
-    outputs
+    let output = outputs
         .remove(&output_id)
-        .ok_or(EffectFloatExecutionError::MissingOutput { node_id: output_id })
+        .ok_or(EffectFloatExecutionError::MissingOutput { node_id: output_id })?;
+    put_cached_effect_output_f32(input, width, height, compiled, frame_seed, &output);
+    Ok(output)
 }
 
 /// Execute a compiled adjustment graph and blend the result over a float base frame.
@@ -1008,6 +1102,61 @@ fn effect_output_cache_key(
     })
 }
 
+fn get_cached_effect_output_f32(
+    input: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    frame_seed: i64,
+) -> Option<Vec<[f32; 4]>> {
+    let key = effect_output_cache_key_f32(input, width, height, compiled, frame_seed)?;
+    let mut cache = effect_float_output_frame_cache().lock().ok()?;
+    cache.get(&key)
+}
+
+fn put_cached_effect_output_f32(
+    input: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    frame_seed: i64,
+    output: &[[f32; 4]],
+) {
+    let Some(key) = effect_output_cache_key_f32(input, width, height, compiled, frame_seed) else {
+        return;
+    };
+    let Ok(mut cache) = effect_float_output_frame_cache().lock() else {
+        return;
+    };
+    cache.insert(key, output.to_vec());
+}
+
+fn effect_output_cache_key_f32(
+    input: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    frame_seed: i64,
+) -> Option<EffectFloatOutputCacheKey> {
+    if !effect_output_cache_enabled_f32(compiled) || input.is_empty() || width == 0 || height == 0 {
+        return None;
+    }
+
+    Some(EffectFloatOutputCacheKey {
+        graph_signature: compiled.signature_hash,
+        input_signature: frame_buffer_signature_f32(input),
+        width,
+        height,
+        frame_seed: (compiled.output_cache_policy
+            == crate::effect::EffectCachePolicy::FrameDependent)
+            .then_some(frame_seed),
+    })
+}
+
+fn effect_output_cache_enabled_f32(compiled: &CompiledEffectGraph) -> bool {
+    compiled.output_cache_enabled && validate_float_effect_graph(compiled).is_ok()
+}
+
 fn validate_float_effect_graph(
     compiled: &CompiledEffectGraph,
 ) -> Result<(), EffectFloatExecutionError> {
@@ -1078,6 +1227,18 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
 fn frame_buffer_signature(buffer: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     buffer.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn frame_buffer_signature_f32(buffer: &[[f32; 4]]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for pixel in buffer {
+        for channel in pixel {
+            channel.to_bits().hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -1344,6 +1505,48 @@ mod tests {
         assert!((output[0][1] - 0.25).abs() <= 1.0e-6);
         assert!((output[0][2] - 0.5625).abs() <= 1.0e-6);
         assert_eq!(output[0][3], 1.0);
+    }
+
+    #[test]
+    fn float_effect_graph_caches_deterministic_multi_op_output() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![
+                EffectRenderOp::ColorAdjust { exposure: 1.0, contrast: 1.0, saturation: 1.0 },
+                EffectRenderOp::WhiteBalance { temperature: 0.1, tint: -0.1 },
+                EffectRenderOp::ColorAdjust { exposure: 0.0, contrast: 1.1, saturation: 0.9 },
+                EffectRenderOp::WhiteBalance { temperature: -0.05, tint: 0.05 },
+            ],
+        })
+        .expect("compile float adjustment chain");
+        let input = [[0.25, 0.5, 0.75, 1.0]];
+
+        assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7).is_some());
+        assert!(get_cached_effect_output_f32(&input, 1, 1, &compiled, 7).is_none());
+        let output =
+            apply_compiled_effect_graph_rgba_f32(&input, 1, 1, &compiled, 7).expect("float chain");
+
+        assert_eq!(
+            get_cached_effect_output_f32(&input, 1, 1, &compiled, 7),
+            Some(output)
+        );
+    }
+
+    #[test]
+    fn float_effect_graph_avoids_output_cache_for_low_cost_adjustments() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![
+                EffectRenderOp::ColorAdjust { exposure: 1.0, contrast: 1.0, saturation: 1.0 },
+                EffectRenderOp::WhiteBalance { temperature: 0.1, tint: -0.1 },
+            ],
+        })
+        .expect("compile low-cost float adjustment chain");
+        let input = [[0.25, 0.5, 0.75, 1.0]];
+
+        assert!(!compiled.output_cache_enabled);
+        assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7).is_none());
+        apply_compiled_effect_graph_rgba_f32(&input, 1, 1, &compiled, 7)
+            .expect("low-cost float chain");
+        assert!(get_cached_effect_output_f32(&input, 1, 1, &compiled, 7).is_none());
     }
 
     #[test]

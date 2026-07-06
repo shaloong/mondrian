@@ -75,6 +75,12 @@ the float/linear compositor. Dissolve uses the same stable frame/pixel seed
 contract as the legacy RGBA8 path so preview and export make identical dither
 decisions.
 
+Float/linear graph execution has its own bounded output cache keyed by compiled
+graph signature, typed float input signature, dimensions, and frame seed when a
+graph is frame-dependent. Deterministic multi-op color-correction chains should
+reuse this cache rather than forcing repeated full-frame float adjustment work
+during preview scrubbing or export retries.
+
 Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
 callers can make an explicit legacy fallback decision. Blur, sharpen, vignette,
