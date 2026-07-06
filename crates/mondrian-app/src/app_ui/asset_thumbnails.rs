@@ -186,8 +186,10 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
         Some(THUMBNAIL_MAX_HEIGHT),
     ) {
         Ok(frame) => {
-            let key = thumbnail_key(job.asset_id, frame.width, frame.height, job.modified);
-            let image = RasterImage::new(key, frame.width, frame.height, frame.data);
+            let width = frame.width;
+            let height = frame.height;
+            let key = thumbnail_key(job.asset_id, width, height, job.modified);
+            let image = RasterImage::new(key, width, height, frame.into_data());
             ThumbnailResult {
                 asset_id: job.asset_id,
                 path: job.path,

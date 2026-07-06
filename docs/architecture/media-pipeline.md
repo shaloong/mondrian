@@ -98,6 +98,10 @@ App-level preview diagnostics aggregate those fields so playback/perf JSON can
 show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
 single-thread decode-bound, software-scale/copy-bound, or GPU-output-bound. The
 in-process preview decoder uses bounded slice threading by default.
+`RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
+adjust per-request diagnostics without deep-copying a 4K frame. Callers that
+need ownership must request it explicitly through the frame consumption API;
+renderer color-frame boundaries should prefer the shared payload constructor.
 Preview decode session reuse and the process-global preview frame cache must be
 keyed by a media file fingerprint, not by path alone. Proxy regeneration
 finalizes fresh media at the same proxy path, so same-path cache hits or reused

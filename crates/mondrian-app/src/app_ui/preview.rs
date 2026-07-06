@@ -4956,11 +4956,13 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
     ) {
         Ok(frame) => {
             let decode_diagnostics = frame.diagnostics;
-            let source = CpuEncodedColorFrame::source_rgba8(
-                frame.width,
-                frame.height,
+            let width = frame.width;
+            let height = frame.height;
+            let source = CpuEncodedColorFrame::source_rgba8_shared(
+                width,
+                height,
                 job.key.input_color_space,
-                frame.data,
+                frame.into_shared_data(),
             );
             let input_transform = RenderInputTransform::to_working(
                 job.key.working_color_space,
@@ -4970,8 +4972,8 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
             MediaPreviewResult {
                 key: job.key,
                 frame: Some(MediaPreviewFrame {
-                    width: frame.width,
-                    height: frame.height,
+                    width,
+                    height,
                     frame: None,
                     gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
                     signature,

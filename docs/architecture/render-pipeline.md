@@ -242,7 +242,9 @@ CPU-working-upload fallback only for layers whose GPU input stage fails.
 storage so preview media-cache hits, GPU source contracts, and queued preview
 frame clones do not deep-copy a full source frame. Upload/CPU-transform
 boundaries may still request owned mutable bytes, but that copy must be visible
-at the boundary rather than hidden in ordinary frame cloning.
+at the boundary rather than hidden in ordinary frame cloning. Media decode
+callers should use the shared `CpuEncodedColorFrame` constructors when handing a
+decoded `RgbaFrame` to the renderer.
 Telemetry must report the actual path as `GpuOcio`, `CpuOcio`, or a mixed
 variant; it must not infer GPU residency from preview-plan eligibility alone.
 When a preview frame contains media layers, the viewer frame-residency payload

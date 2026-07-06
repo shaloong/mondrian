@@ -1107,6 +1107,17 @@ impl CpuEncodedColorFrame {
         domain: ColorFrameDomain,
         rgba: Vec<u8>,
     ) -> Self {
+        Self::rgba8_shared(width, height, color_space, domain, Arc::new(rgba))
+    }
+
+    /// Create a CPU RGBA8 boundary frame from shared immutable pixels.
+    pub fn rgba8_shared(
+        width: u32,
+        height: u32,
+        color_space: ColorSpace,
+        domain: ColorFrameDomain,
+        rgba: Arc<Vec<u8>>,
+    ) -> Self {
         let descriptor = ColorFrameDescriptor {
             width,
             height,
@@ -1115,12 +1126,22 @@ impl CpuEncodedColorFrame {
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Cpu,
         };
-        Self { descriptor, rgba: Arc::new(rgba) }
+        Self { descriptor, rgba }
     }
 
     /// Create a source/import RGBA8 boundary frame.
     pub fn source_rgba8(width: u32, height: u32, color_space: ColorSpace, rgba: Vec<u8>) -> Self {
         Self::rgba8(width, height, color_space, ColorFrameDomain::Source, rgba)
+    }
+
+    /// Create a source/import RGBA8 boundary frame from shared immutable pixels.
+    pub fn source_rgba8_shared(
+        width: u32,
+        height: u32,
+        color_space: ColorSpace,
+        rgba: Arc<Vec<u8>>,
+    ) -> Self {
+        Self::rgba8_shared(width, height, color_space, ColorFrameDomain::Source, rgba)
     }
 
     /// Return frame width.
@@ -1772,6 +1793,16 @@ mod tests {
         assert!(Arc::ptr_eq(&frame.rgba, &cloned.rgba));
         assert_eq!(cloned.rgba(), frame.rgba());
         assert_eq!(cloned.descriptor(), frame.descriptor());
+    }
+
+    #[test]
+    fn cpu_encoded_color_frame_shared_constructor_preserves_payload() {
+        let payload = Arc::new(vec![0, 64, 128, 255, 255, 128, 64, 32]);
+        let frame =
+            CpuEncodedColorFrame::source_rgba8_shared(2, 1, ColorSpace::Srgb, Arc::clone(&payload));
+
+        assert!(Arc::ptr_eq(&payload, &frame.rgba));
+        assert_eq!(frame.rgba(), payload.as_slice());
     }
 
     #[test]

@@ -2721,11 +2721,13 @@ fn decode_video_layer_scaled(
     let decoded =
         decode_video_frame_at_time_rgba_scaled(path, source_secs, Some(width), Some(height))
             .map_err(|err| format!("asset={} path={} err={}", asset_id, path.display(), err))?;
-    let source = CpuEncodedColorFrame::source_rgba8(
-        decoded.width,
-        decoded.height,
+    let decoded_width = decoded.width;
+    let decoded_height = decoded.height;
+    let source = CpuEncodedColorFrame::source_rgba8_shared(
+        decoded_width,
+        decoded_height,
         input_color_space,
-        decoded.data,
+        decoded.into_shared_data(),
     );
     let execution = execute_cpu_input_stage(
         &source,

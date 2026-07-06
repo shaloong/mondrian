@@ -12,7 +12,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// 从关键帧向前解码的最大帧数安全限制
@@ -247,8 +247,8 @@ pub struct RgbaFrame {
     pub width: u32,
     /// Frame height in pixels.
     pub height: u32,
-    /// CPU-resident RGBA8 pixels.
-    pub data: Vec<u8>,
+    /// Shared CPU-resident RGBA8 pixels.
+    pub data: Arc<Vec<u8>>,
     /// Decode/cache diagnostics for this frame.
     pub diagnostics: PreviewDecodeDiagnostics,
 }
@@ -258,9 +258,24 @@ impl RgbaFrame {
         Self {
             width,
             height,
-            data,
+            data: Arc::new(data),
             diagnostics: PreviewDecodeDiagnostics::new(path),
         }
+    }
+
+    /// Borrow decoded RGBA8 pixels.
+    pub fn rgba(&self) -> &[u8] {
+        self.data.as_slice()
+    }
+
+    /// Consume this frame and return shared decoded RGBA8 pixels.
+    pub fn into_shared_data(self) -> Arc<Vec<u8>> {
+        self.data
+    }
+
+    /// Consume this frame and return owned decoded RGBA8 pixels.
+    pub fn into_data(self) -> Vec<u8> {
+        Arc::try_unwrap(self.data).unwrap_or_else(|data| data.as_ref().clone())
     }
 
     fn with_elapsed(mut self, elapsed: Duration) -> Self {
@@ -1399,6 +1414,21 @@ mod tests {
         assert_eq!(cached.diagnostics.elapsed_us, 3);
         assert!(cached.diagnostics.cache_hit);
         assert!(cached.diagnostics.cpu_resident);
+    }
+
+    #[test]
+    fn rgba_frame_clone_shares_pixel_payload() {
+        let frame = RgbaFrame::new(
+            2,
+            1,
+            vec![0, 64, 128, 255, 255, 128, 64, 32],
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
+        let cloned = frame.clone();
+
+        assert!(std::sync::Arc::ptr_eq(&frame.data, &cloned.data));
+        assert_eq!(cloned.rgba(), frame.rgba());
+        assert_eq!(frame.into_data(), vec![0, 64, 128, 255, 255, 128, 64, 32]);
     }
 
     #[test]
