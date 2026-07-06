@@ -892,7 +892,11 @@ impl AppUiPreviewService {
         .ok()?;
         self.record_color_transform(frame.result.diagnostics);
         self.record_color_stage(frame.stage_diagnostics);
-        Some(MediaPreviewFrame { frame: frame.result.frame, signature })
+        Some(MediaPreviewFrame {
+            frame: frame.result.frame,
+            gpu_source: None,
+            signature,
+        })
     }
 
     fn resolve_sequence_elements(
@@ -1824,8 +1828,11 @@ pub(crate) enum AppUiGpuPreviewWorkingInput {
 pub(crate) enum AppUiGpuPreviewCompositeLayer {
     /// Working-space media frame.
     Media {
-        /// Working frame to upload and composite.
+        /// CPU working frame used as a correctness fallback when GPU input
+        /// transform cannot be scheduled for this layer.
         frame: CpuColorFrame,
+        /// Source/input contract for the preferred GPU color path.
+        gpu_source: Option<AppUiGpuPreviewMediaSource>,
         /// Layer opacity.
         opacity: f32,
         /// Timeline affine transform.
@@ -1836,6 +1843,15 @@ pub(crate) enum AppUiGpuPreviewCompositeLayer {
         /// Solid layer.
         layer: TimelineSolidColorLayer,
     },
+}
+
+/// App-window media source contract for GPU input color transforms.
+#[derive(Debug, Clone)]
+pub(crate) struct AppUiGpuPreviewMediaSource {
+    /// CPU decoded encoded RGBA8 source frame.
+    pub source: CpuEncodedColorFrame,
+    /// Source/import -> timeline working-space transform.
+    pub input_transform: RenderInputTransform,
 }
 
 impl AppUiGpuPreviewFrame {
@@ -1948,6 +1964,7 @@ struct ModifiedStamp {
 #[derive(Debug, Clone)]
 struct MediaPreviewFrame {
     frame: CpuColorFrame,
+    gpu_source: Option<MediaPreviewGpuSourceFrame>,
     signature: u64,
 }
 
@@ -1959,6 +1976,19 @@ impl MediaPreviewFrame {
     fn height(&self) -> u32 {
         self.frame.descriptor().height
     }
+
+    fn gpu_source(&self) -> Option<AppUiGpuPreviewMediaSource> {
+        self.gpu_source.as_ref().map(|source| AppUiGpuPreviewMediaSource {
+            source: source.source.clone(),
+            input_transform: source.input_transform.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MediaPreviewGpuSourceFrame {
+    source: CpuEncodedColorFrame,
+    input_transform: RenderInputTransform,
 }
 
 #[derive(Debug, Clone)]
@@ -3105,6 +3135,7 @@ fn gpu_composite_layers_for_resolved(
                 }
                 layers.push(AppUiGpuPreviewCompositeLayer::Media {
                     frame: frame.frame.clone(),
+                    gpu_source: frame.gpu_source(),
                     opacity: *opacity,
                     transform: *transform,
                 });
@@ -3227,14 +3258,12 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                 job.key.input_color_space,
                 frame.data,
             );
-            let working = match execute_cpu_input_stage(
-                &source,
-                &RenderInputTransform::to_working(
-                    job.key.working_color_space,
-                    job.key.tone_map,
-                    job.key.engine.clone(),
-                ),
-            ) {
+            let input_transform = RenderInputTransform::to_working(
+                job.key.working_color_space,
+                job.key.tone_map,
+                job.key.engine.clone(),
+            );
+            let working = match execute_cpu_input_stage(&source, &input_transform) {
                 Ok(frame) => frame,
                 Err(err) => {
                     return MediaPreviewResult {
@@ -3254,7 +3283,11 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
 
             MediaPreviewResult {
                 key: job.key,
-                frame: Some(MediaPreviewFrame { frame: working.result.frame, signature }),
+                frame: Some(MediaPreviewFrame {
+                    frame: working.result.frame,
+                    gpu_source: Some(MediaPreviewGpuSourceFrame { source, input_transform }),
+                    signature,
+                }),
                 error: None,
                 generation: job.generation,
                 color_diagnostics,
@@ -5176,7 +5209,7 @@ mod tests {
         .expect("media input transform")
         .result
         .frame;
-        let media = MediaPreviewFrame { frame, signature: 2_020 };
+        let media = MediaPreviewFrame { frame, gpu_source: None, signature: 2_020 };
         let solid = TimelineSolidColorLayer {
             color: Color::from_rgba8(32, 180, 220, 255),
             opacity: 0.35,
@@ -5432,17 +5465,16 @@ mod tests {
         signature: u64,
     ) -> MediaPreviewFrame {
         let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, rgba);
-        let frame = execute_cpu_input_stage(
-            &source,
-            &RenderInputTransform::to_working(
-                ColorSpace::Rec709,
-                false,
-                ColorEngine::MondrianSmart,
-            ),
-        )
-        .expect("test media input transform");
+        let input_transform =
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let frame =
+            execute_cpu_input_stage(&source, &input_transform).expect("test media input transform");
         let frame = frame.result.frame;
-        MediaPreviewFrame { frame, signature }
+        MediaPreviewFrame {
+            frame,
+            gpu_source: Some(MediaPreviewGpuSourceFrame { source, input_transform }),
+            signature,
+        }
     }
 
     fn test_media_frame_rgba8(frame: &MediaPreviewFrame) -> Vec<u8> {

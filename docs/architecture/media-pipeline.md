@@ -31,9 +31,12 @@ hardware decode signal.
 The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
 source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and
 produce a GPU-resident linear working frame in a float texture. This is the
-bridge for guarded rollout of GPU input transforms. It is not yet a hardware
-decode or zero-copy media path because the decoder boundary still hands CPU
-memory to the renderer.
+bridge for guarded rollout of GPU input transforms. The app viewer uses this
+contract for supported media preview layers before GPU working-space
+compositing, falling back per-layer to CPU working-frame upload only when the
+GPU input stage cannot be recorded. It is not yet a hardware decode or
+zero-copy media path because the decoder boundary still hands CPU memory to the
+renderer.
 
 ## Asset Classification
 

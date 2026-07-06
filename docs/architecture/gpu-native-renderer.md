@@ -371,9 +371,12 @@ texture was already current, media was loading, the preview was unavailable, the
 display contract blocked presentation, wgpu recording failed, the output
 texture was missing, or the external texture was registered. Successful and
 rejected registrations accumulate the actual `RenderColorStageDiagnostics`
-returned by `RenderGpuOutputStageRecord`, so logs and smoke tests can prove the
-main preview path used upload + native GPU color + optional readback rather than
-inferring it from model state.
+returned by input and output color-stage records, so logs and smoke tests can
+prove the main preview path used CPU source upload + GPU OCIO input + GPU
+working composite + GPU output transform rather than inferring it from model
+state. The frame-residency payload distinguishes `GpuOcio`, `CpuOcio`, and
+mixed input-transform paths; `GpuOcio` still means low-copy until media decode
+exports real GPU hardware frames.
 Headless smoke tests cannot create this window/session boundary, so
 `AppUiPreviewService::diagnostics()` separately reports GPU preview candidate
 requests, ready/current/loading/unavailable outcomes, candidate pixels, and

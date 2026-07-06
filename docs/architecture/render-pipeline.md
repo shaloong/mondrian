@@ -225,6 +225,14 @@ preview path can become GPU input transform -> GPU working composite -> GPU
 output boundary without re-uploading that media layer. It is not a hardware
 decode or zero-copy path until `mondrian-media` supplies an actual GPU
 texture/hardware frame instead of CPU RGBA bytes.
+The app viewer path now carries each decoded media layer's `CpuEncodedColorFrame`
+plus `RenderInputTransform` alongside its CPU working-frame fallback. During
+window recording it first tries `record_wgpu_input_stage_owned_backend(...)`
+for each eligible media layer, feeds successful outputs to
+`GpuFrameCompositor` as GPU-resident working frames, and records a structured
+CPU-working-upload fallback only for layers whose GPU input stage fails.
+Telemetry must report the actual path as `GpuOcio`, `CpuOcio`, or a mixed
+variant; it must not infer GPU residency from preview-plan eligibility alone.
 
 Stage helpers return `RenderColorStageExecution<T>`, not the raw transform
 result. App, export, tests, and benches must read frames from `.result` and
@@ -496,6 +504,8 @@ User scrub/play
             - GpuComposite { layers } for supported simple layer stacks
             - CpuFrame(frame) after explicit CPU composite fallback
     → if GpuComposite:
+        RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend()
+          for media layers with source/input contracts
         RenderGpuOutputBoundaryRuntime::record_wgpu_working_composite()
         RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
       else CpuFrame:
@@ -545,8 +555,13 @@ through `gpu_compositor.rs`. For supported layer stacks, the app window records:
 
 ```
 Resolved preview layers
+  -> for each media layer with a source/input contract:
+       RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend()
+       -> upload CPU decoded source RGBA8 once as Rgba8Unorm
+       -> run OCIO GPU input transform into Rgba16Float working texture
   -> GpuFrameCompositor::record()
-     -> upload CPU media layers as Rgba32Float textures
+     -> sample GPU-resident media layers directly
+     -> upload only media layers whose GPU input transform failed or is absent
      -> composite media/solid layers into an Rgba32Float working texture
      -> insert the working texture into RenderGpuOutputBoundaryRuntime frame table
   -> RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
@@ -555,18 +570,22 @@ Resolved preview layers
 ```
 
 This keeps preview playback GPU-resident from working composite through output
-transform for the supported subset. It also removes the extra `UploadToGpu`
-stage between working composite and output transform; the renderer contract is
-covered by `from_gpu_working_frame()`.
+transform for the supported subset. For ordinary decoded media it is a low-copy
+path, not zero-copy: FFmpeg currently produces CPU RGBA8, so the source upload
+still exists, but the input OCIO transform, working composite, and output
+boundary stay on GPU. It also removes the extra `UploadToGpu` stage between
+working composite and output transform; the renderer contract is covered by
+`from_gpu_working_frame()`.
 
 ### Capability Classification
 
 - **`GpuNative`** — All layers are GPU-resident, use Normal blend mode,
   have no effect graphs, and ≤5 layers. No CPU round-trip needed.
-- **`GpuWithUpload`** — Layer structure supports GPU compositing, but layers
-  must be uploaded from CPU first. This is the current preview production path
-  for media/solid layers decoded into CPU working frames; the composited result
-  stays on GPU for OCIO output.
+- **`GpuWithUpload`** — Layer structure supports GPU compositing, but at least
+  one layer enters from CPU memory. The preferred media path uploads decoded
+  source RGBA8 once and runs GPU OCIO input before compositing. If that input
+  stage is unavailable, the app records a structured fallback and uploads the
+  CPU working frame for that layer instead.
 - **`CpuFallback`** — GPU compositing not possible. Reason is classified as:
   - `EffectRequiresCpu` — Effect graph needs CPU execution
   - `UnsupportedBlendMode` — Only Normal is GPU-supported
