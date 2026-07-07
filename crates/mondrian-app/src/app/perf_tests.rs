@@ -4,8 +4,9 @@ use crate::app_ui::preview::{
     build_preview_color_health_report, build_preview_decode_performance_report,
     build_preview_render_performance_report, AppUiPreviewColorHealthReport,
     AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
-    AppUiPreviewDecodePerformanceReport, AppUiPreviewDiagnostics,
-    AppUiPreviewRenderPerformanceReport, AppUiPreviewService,
+    AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeAccessModeProfiles,
+    AppUiPreviewDecodePerformanceReport, AppUiPreviewDecodePerformanceVerdict,
+    AppUiPreviewDiagnostics, AppUiPreviewRenderPerformanceReport, AppUiPreviewService,
     APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
     APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
@@ -153,6 +154,25 @@ fn write_report_if_needed(report_json: &str) {
             let _ = writeln!(file, "{report_json}");
         }
     }
+}
+
+fn preview_playback_decode_failures(
+    report: &AppUiPreviewDecodePerformanceReport,
+) -> Vec<&'static str> {
+    let mut failures = Vec::new();
+    if report.verdict == AppUiPreviewDecodePerformanceVerdict::Fail {
+        failures.push("preview_decode_report_failed");
+    }
+    for root in &report.root_causes {
+        match root.code {
+            "preview_decode_playback_session_not_reused"
+            | "preview_decode_playback_without_locality" => failures.push(root.code),
+            _ => {}
+        }
+    }
+    failures.sort_unstable();
+    failures.dedup();
+    failures
 }
 
 fn viewer_gpu_output_budget_from_env() -> ViewerGpuOutputBudget {
@@ -868,6 +888,14 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
     if report.preview_color_report.verdict == AppUiPreviewColorHealthVerdict::Fail {
         anyhow::bail!("preview media playback color report failed: {report_json}");
     }
+    let decode_failures = preview_playback_decode_failures(&report.preview_decode_report);
+    if !decode_failures.is_empty() {
+        anyhow::bail!(
+            "preview media continuous playback decode report failed: {:?}; report: {}",
+            decode_failures,
+            report_json
+        );
+    }
 
     Ok(())
 }
@@ -1177,6 +1205,86 @@ fn preview_color_report_marks_clean_float_linear_path() {
     assert_eq!(summary.legacy_reason_total, 0);
     assert!(summary.fully_float_linear);
     assert!(summary.gpu_path_ready);
+}
+
+#[test]
+fn preview_playback_decode_failures_include_locality_regressions() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 2,
+        decode_in_process_cpu_rgba_frames: 2,
+        decode_total_duration_us: 80_000,
+        decode_max_duration_us: 45_000,
+        decode_last_duration_us: 35_000,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 2,
+                in_process_cpu_rgba_frames: 2,
+                total_duration_us: 80_000,
+                max_duration_us: 45_000,
+                last_duration_us: 35_000,
+                seeked_frames: 2,
+                session_opened_frames: 2,
+                decoded_frame_count: 96,
+                max_decoded_frame_count: 48,
+                stage_durations: PreviewDecodeStageDurations {
+                    seek_us: 20_000,
+                    packet_decode_us: 55_000,
+                    ..PreviewDecodeStageDurations::default()
+                },
+                max_frame_stage_durations: PreviewDecodeStageDurations {
+                    seek_us: 10_000,
+                    packet_decode_us: 30_000,
+                    ..PreviewDecodeStageDurations::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-playback-locality-test",
+        50_000,
+    );
+
+    let failures = preview_playback_decode_failures(&report);
+
+    assert!(failures.contains(&"preview_decode_playback_session_not_reused"));
+    assert!(failures.contains(&"preview_decode_playback_without_locality"));
+    assert!(!failures.contains(&"preview_decode_report_failed"));
+}
+
+#[test]
+fn preview_playback_decode_failures_allow_non_playback_warnings() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 1,
+        decode_in_process_cpu_rgba_frames: 1,
+        decode_total_duration_us: 12_000,
+        decode_max_duration_us: 12_000,
+        decode_last_duration_us: 12_000,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                total_duration_us: 12_000,
+                max_duration_us: 12_000,
+                last_duration_us: 12_000,
+                session_opened_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-non-playback-warn-test",
+        50_000,
+    );
+
+    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert!(preview_playback_decode_failures(&report).is_empty());
 }
 
 #[test]

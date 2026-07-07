@@ -100,6 +100,11 @@ Preview media perf artifacts also include a versioned `preview_decode_report`
 with checks, root causes, and actions. The default slow-frame budget is 50 ms;
 over-budget frames should be diagnosed from `preview_decode_report.root_causes`
 before changing renderer/color code.
+Continuous playback smoke also fails on playback-locality root causes such as
+`preview_decode_playback_session_not_reused` and
+`preview_decode_playback_without_locality`, even when the wall-clock window
+still passes. Those indicate `PlaybackCursor` is behaving like repeated random
+access instead of a warm mostly-forward decode stream.
 
 Preview media perf artifacts also include `preview_render_report`, which covers
 post-decode viewer work: sequence/media resolution, final-frame cache lookup,
