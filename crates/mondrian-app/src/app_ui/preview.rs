@@ -389,10 +389,10 @@ impl AppUiPreviewService {
     /// cooperatively stop instead of continuing to consume CPU for invisible
     /// media.
     pub fn cancel_interactive_work(&self) {
-        self.scheduler.cancel_all();
+        let generation = self.scheduler.cancel_all();
         self.last_generation_key.replace(None);
         self.jobs.clear();
-        self.current_generation.set(self.current_generation.get().saturating_add(1));
+        self.current_generation.set(generation);
         self.current_frame_pending.set(false);
         self.last_ready_frame.replace(None);
         self.external_viewer_frame.replace(None);

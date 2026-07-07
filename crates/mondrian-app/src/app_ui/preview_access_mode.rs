@@ -639,12 +639,13 @@ impl MediaPreviewScheduler {
         }
     }
 
-    pub(crate) fn cancel_all(&self) {
+    pub(crate) fn cancel_all(&self) -> u64 {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         let canceled = state.pending.len() as u64;
         state.pending.clear();
         state.latest_generation = state.latest_generation.saturating_add(1);
         state.metrics.canceled_requests = state.metrics.canceled_requests.saturating_add(canceled);
+        state.latest_generation
     }
 
     pub(crate) fn prune_obsolete(&self) {
@@ -1169,7 +1170,7 @@ mod tests {
             MediaPreviewRequestPriority::Current
         ));
 
-        scheduler.cancel_all();
+        let canceled_generation = scheduler.cancel_all();
 
         assert!(!test_scheduler_is_decode_current(
             &scheduler,
@@ -1177,6 +1178,11 @@ mod tests {
             generation,
             MediaPreviewRequestPriority::Current
         ));
+        assert_eq!(
+            canceled_generation,
+            scheduler.diagnostics().latest_generation
+        );
+        assert!(canceled_generation > generation);
         assert_eq!(scheduler.pending_len(), 0);
         assert_eq!(scheduler.diagnostics().canceled_requests, 1);
     }
