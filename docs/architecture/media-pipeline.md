@@ -82,6 +82,11 @@ The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older
 job complete and remove the pending scrub work.
+In the app layer this contract lives in the `preview_access_mode` module:
+request admission, latest-generation tracking, access-mode promotion, and
+completion classification are localized there. The module must not own render
+plan evaluation, decode execution, color interpretation, or GPU/CPU frame
+conversion; those remain in the preview orchestrator and media/renderer layers.
 Preview completion has separate display and cache semantics. A decode result is
 `Current` only when it still matches pending visible work; same-generation
 results whose pending request was canceled or whose access mode has been

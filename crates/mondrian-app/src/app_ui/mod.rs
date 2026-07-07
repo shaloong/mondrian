@@ -22,6 +22,7 @@ pub mod pending_close_dialog;
 pub mod preferences_dialog;
 pub mod preferences_store;
 pub mod preview;
+pub(crate) mod preview_access_mode;
 pub(crate) mod preview_gpu_output_blocker;
 pub(crate) mod preview_scale;
 pub mod rendering;
