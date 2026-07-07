@@ -408,7 +408,11 @@ impl AppUiPreviewService {
             drained += 1;
             let completion =
                 self.scheduler.complete(&result.key, result.generation, result.access_mode);
-            self.record_preview_decode_queue_wait(result.priority, result.queue_wait_us);
+            self.record_preview_decode_queue_wait(
+                result.priority,
+                result.access_mode,
+                result.queue_wait_us,
+            );
             if result.canceled {
                 self.record_preview_decode_cancel(result.access_mode, result.cancel_reason);
                 changed |= completion.is_current();
@@ -1023,6 +1027,7 @@ impl AppUiPreviewService {
     fn record_preview_decode_queue_wait(
         &self,
         priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
         queue_wait_us: u64,
     ) {
         add_cell(&self.metrics.decode_queue_wait_total_us, queue_wait_us);
@@ -1042,6 +1047,9 @@ impl AppUiPreviewService {
                     .set(self.metrics.decode_prefetch_queue_wait_max_us.get().max(queue_wait_us));
             }
         }
+        let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
+        access_mode_profiles.record_queue_wait(access_mode, queue_wait_us);
+        self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
     fn record_render_stage_durations(
@@ -1703,6 +1711,12 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub max_duration_us: u64,
     /// Most recent end-to-end decode duration for this access mode.
     pub last_duration_us: u64,
+    /// Total worker-queue wait before decode started for this access mode.
+    pub queue_wait_total_us: u64,
+    /// Slowest worker-queue wait before decode started for this access mode.
+    pub queue_wait_max_us: u64,
+    /// Most recent worker-queue wait before decode started for this access mode.
+    pub queue_wait_last_us: u64,
     /// Decode requests for this access mode that required a seek.
     pub seeked_frames: u64,
     /// Decode results that reused an existing access-mode-local session.
@@ -1762,6 +1776,12 @@ impl AppUiPreviewDecodeAccessModeProfile {
         self.max_decoded_frame_count = self.max_decoded_frame_count.max(decoded_frame_count);
         self.stage_durations.accumulate(diagnostics.stage_durations);
     }
+
+    fn record_queue_wait(&mut self, queue_wait_us: u64) {
+        self.queue_wait_total_us = self.queue_wait_total_us.saturating_add(queue_wait_us);
+        self.queue_wait_max_us = self.queue_wait_max_us.max(queue_wait_us);
+        self.queue_wait_last_us = queue_wait_us;
+    }
 }
 
 /// Preview decode profiles split by access mode.
@@ -1786,6 +1806,20 @@ impl AppUiPreviewDecodeAccessModeProfiles {
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
                 self.random_access_still.record(diagnostics);
+            }
+        }
+    }
+
+    fn record_queue_wait(&mut self, access_mode: PreviewDecodeAccessMode, queue_wait_us: u64) {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.playback_cursor.record_queue_wait(queue_wait_us);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.scrub_cursor.record_queue_wait(queue_wait_us);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.random_access_still.record_queue_wait(queue_wait_us);
             }
         }
     }
@@ -2524,18 +2558,31 @@ fn push_preview_decode_access_mode_checks(
     slow_frame_budget_us: u64,
 ) {
     for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
-        if profile.frames == 0 {
+        if profile.frames == 0 && profile.queue_wait_max_us == 0 {
             continue;
+        }
+        if profile.frames > 0 {
+            checks.push(AppUiPreviewDecodePerformanceCheck {
+                area: AppUiPreviewDecodePerformanceArea::AccessMode,
+                code: preview_decode_access_mode_budget_code(access_mode),
+                severity: if profile.max_duration_us > slow_frame_budget_us {
+                    AppUiPreviewDecodePerformanceSeverity::Fail
+                } else {
+                    AppUiPreviewDecodePerformanceSeverity::Pass
+                },
+                observed: profile.max_duration_us,
+                limit: Some(slow_frame_budget_us),
+            });
         }
         checks.push(AppUiPreviewDecodePerformanceCheck {
             area: AppUiPreviewDecodePerformanceArea::AccessMode,
-            code: preview_decode_access_mode_budget_code(access_mode),
-            severity: if profile.max_duration_us > slow_frame_budget_us {
-                AppUiPreviewDecodePerformanceSeverity::Fail
+            code: preview_decode_access_mode_queue_wait_budget_code(access_mode),
+            severity: if profile.queue_wait_max_us > slow_frame_budget_us {
+                AppUiPreviewDecodePerformanceSeverity::Warn
             } else {
                 AppUiPreviewDecodePerformanceSeverity::Pass
             },
-            observed: profile.max_duration_us,
+            observed: profile.queue_wait_max_us,
             limit: Some(slow_frame_budget_us),
         });
     }
@@ -2547,6 +2594,20 @@ fn preview_decode_access_mode_budget_code(access_mode: PreviewDecodeAccessMode) 
         PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_max_frame_us",
         PreviewDecodeAccessMode::RandomAccessStillFrame => {
             "preview_decode_random_access_still_max_frame_us"
+        }
+    }
+}
+
+fn preview_decode_access_mode_queue_wait_budget_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_queue_wait_max_us"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_queue_wait_max_us",
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_queue_wait_max_us"
         }
     }
 }
@@ -2588,11 +2649,13 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} total_duration_us={} seeked_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} decoded_frame_count={} max_decoded_frame_count={} packet_decode_us={} seek_us={} swscale_us={} rgba_copy_us={} cache_hit_frames={} playback_session_ring_hit_frames={}",
+                "access_mode={} frames={} max_duration_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} seeked_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} decoded_frame_count={} max_decoded_frame_count={} packet_decode_us={} seek_us={} swscale_us={} rgba_copy_us={} cache_hit_frames={} playback_session_ring_hit_frames={}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
                 profile.total_duration_us,
+                profile.queue_wait_max_us,
+                profile.queue_wait_total_us,
                 profile.seeked_frames,
                 profile.session_reused_frames,
                 profile.session_opened_frames,
@@ -2609,6 +2672,30 @@ fn push_preview_decode_root_causes_and_actions(
             "inspect_preview_decode_access_mode_profile",
             "Inspect the per-access-mode decode profile before changing global decode concurrency or color/render code.",
             AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+
+    for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
+        if profile.queue_wait_max_us <= summary.slow_frame_budget_us {
+            continue;
+        }
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::AccessMode,
+            "preview_decode_access_mode_queue_wait_bound",
+            format!(
+                "access_mode={} queue_wait_max_us={} queue_wait_total_us={} queue_wait_last_us={} frames={} slow_frame_budget_us={}",
+                access_mode.as_str(),
+                profile.queue_wait_max_us,
+                profile.queue_wait_total_us,
+                profile.queue_wait_last_us,
+                profile.frames,
+                summary.slow_frame_budget_us
+            ),
+            "inspect_preview_access_mode_queue",
+            "Inspect per-access-mode worker lane pressure so playback, scrub, and still-frame requests cannot hide each other's queue latency.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
 
@@ -6130,9 +6217,21 @@ mod tests {
                 external_process_us: 0,
             },
         });
-        service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Prefetch, 400);
-        service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Current, 1_200);
-        service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Current, 20);
+        service.record_preview_decode_queue_wait(
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            400,
+        );
+        service.record_preview_decode_queue_wait(
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+            1_200,
+        );
+        service.record_preview_decode_queue_wait(
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            20,
+        );
         service.record_preview_decode_cancel(
             PreviewDecodeAccessMode::PlaybackCursor,
             Some(MediaPreviewCancelReason::PrefetchDeadline),
@@ -6200,6 +6299,9 @@ mod tests {
         assert_eq!(playback_profile.total_duration_us, 2_540);
         assert_eq!(playback_profile.max_duration_us, 2_500);
         assert_eq!(playback_profile.last_duration_us, 40);
+        assert_eq!(playback_profile.queue_wait_total_us, 400);
+        assert_eq!(playback_profile.queue_wait_max_us, 400);
+        assert_eq!(playback_profile.queue_wait_last_us, 400);
         assert_eq!(playback_profile.session_reused_frames, 2);
         assert_eq!(playback_profile.session_opened_frames, 0);
         assert_eq!(playback_profile.forward_reused_frames, 0);
@@ -6215,12 +6317,18 @@ mod tests {
         assert_eq!(scrub_profile.session_reused_frames, 0);
         assert_eq!(scrub_profile.session_opened_frames, 1);
         assert_eq!(scrub_profile.forward_reused_frames, 0);
+        assert_eq!(scrub_profile.queue_wait_total_us, 1_200);
+        assert_eq!(scrub_profile.queue_wait_max_us, 1_200);
+        assert_eq!(scrub_profile.queue_wait_last_us, 1_200);
         assert_eq!(scrub_profile.decoded_frame_count, 48);
         assert_eq!(scrub_profile.max_decoded_frame_count, 48);
         assert_eq!(scrub_profile.stage_durations.packet_decode_us, 500);
         let still_profile = diagnostics.decode_access_mode_profiles.random_access_still;
         assert_eq!(still_profile.frames, 1);
         assert_eq!(still_profile.cache_hit_frames, 1);
+        assert_eq!(still_profile.queue_wait_total_us, 20);
+        assert_eq!(still_profile.queue_wait_max_us, 20);
+        assert_eq!(still_profile.queue_wait_last_us, 20);
         assert_eq!(still_profile.session_reused_frames, 0);
         assert_eq!(still_profile.session_opened_frames, 1);
         assert_eq!(still_profile.stage_durations.cache_lookup_us, 20);
@@ -6349,6 +6457,32 @@ mod tests {
             decode_queue_wait_last_us: 95_000,
             decode_current_queue_wait_max_us: 95_000,
             decode_prefetch_queue_wait_max_us: 15_000,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_rgba_frames: 1,
+                    total_duration_us: 12_000,
+                    max_duration_us: 12_000,
+                    last_duration_us: 12_000,
+                    queue_wait_total_us: 95_000,
+                    queue_wait_max_us: 95_000,
+                    queue_wait_last_us: 95_000,
+                    stage_durations: PreviewDecodeStageDurations {
+                        packet_decode_us: 10_000,
+                        swscale_us: 1_000,
+                        rgba_copy_us: 500,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    max_frame_stage_durations: PreviewDecodeStageDurations {
+                        packet_decode_us: 10_000,
+                        swscale_us: 1_000,
+                        rgba_copy_us: 500,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
             decode_stage_durations: PreviewDecodeStageDurations {
                 packet_decode_us: 10_000,
                 swscale_us: 1_000,
@@ -6387,6 +6521,18 @@ mod tests {
             .root_causes
             .iter()
             .any(|root| root.code == "preview_decode_queue_wait_bound"));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_scrub_cursor_queue_wait_max_us"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 95_000
+                && check.limit == Some(50_000)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_access_mode_queue_wait_bound"
+                && root.area == AppUiPreviewDecodePerformanceArea::AccessMode
+                && root.evidence.contains("access_mode=ScrubCursor")
+                && root.evidence.contains("queue_wait_max_us=95000")
+        }));
         assert!(report
             .root_causes
             .iter()
@@ -6403,6 +6549,52 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_preview_access_mode_transitions"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_keeps_queue_wait_evidence_without_successful_frame() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_canceled_jobs: 1,
+            decode_canceled_obsolete_jobs: 1,
+            decode_canceled_scrub_cursor_jobs: 1,
+            decode_queue_wait_total_us: 75_000,
+            decode_queue_wait_max_us: 75_000,
+            decode_queue_wait_last_us: 75_000,
+            decode_current_queue_wait_max_us: 75_000,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    queue_wait_total_us: 75_000,
+                    queue_wait_max_us: 75_000,
+                    queue_wait_last_us: 75_000,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-canceled-queue-wait-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_scrub_cursor_queue_wait_max_us"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 75_000
+                && check.limit == Some(50_000)
+        }));
+        assert!(!report
+            .checks
+            .iter()
+            .any(|check| check.code == "preview_decode_scrub_cursor_max_frame_us"));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_access_mode_queue_wait_bound"
+                && root.evidence.contains("access_mode=ScrubCursor")
+                && root.evidence.contains("frames=0")
+        }));
     }
 
     #[test]

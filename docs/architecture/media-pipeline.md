@@ -131,10 +131,11 @@ emits stable Scheduling root causes for access-mode mismatch, obsolete
 generation churn, and pending-window backpressure.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
-end-to-end duration totals/maxima, seek counts, decoded-frame pressure, and
-stage-level timings. A slow preview report must identify the slowest access
-mode so engineers can distinguish playback locality failures from scrub seek
-latency or exact still-frame random access costs.
+end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,
+decoded-frame pressure, and stage-level timings. A slow preview report must
+identify the slowest access mode so engineers can distinguish playback locality
+failures from scrub seek latency, queue-lane contention, or exact still-frame
+random access costs.
 The versioned report must emit access-mode-specific latency checks and root
 causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` regressions without reverse-engineering raw counters.

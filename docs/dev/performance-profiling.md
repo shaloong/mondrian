@@ -100,7 +100,9 @@ Preview media perf artifacts also include a versioned `preview_decode_report`
 with checks, root causes, and actions. The default slow-frame budget is 50 ms;
 over-budget hard failures make the preview media smoke fail and should be
 diagnosed from `preview_decode_report.root_causes` before changing
-renderer/color code.
+renderer/color code. Access-mode profiles include `queue_wait_max_us` and
+`queue_wait_total_us`; high values there point at worker-lane contention or
+stale prefetch/current admission before codec, color, or render work.
 `preview_media_decode_cache_smoke` intentionally exercises both settled
 non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 (`ScrubCursor`). The active scrub window is controlled by
