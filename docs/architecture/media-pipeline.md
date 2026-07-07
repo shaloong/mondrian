@@ -138,6 +138,9 @@ latency or exact still-frame random access costs.
 The versioned report must emit access-mode-specific latency checks and root
 causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` regressions without reverse-engineering raw counters.
+App media preview smokes must generate real samples for both active
+`ScrubCursor` playhead dragging and settled `RandomAccessStillFrame` requests;
+coverage is incomplete if the report merely defines both profiles.
 Playback diagnostics must also expose session reuse and forward reuse evidence.
 If playback source decodes repeatedly open sessions or never hit forward reuse,
 ring reuse, or cache reuse, the report should flag playback locality separately

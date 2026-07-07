@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::ui_actions::TimelineSeekSource;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::{
     build_preview_color_health_report, build_preview_decode_performance_report,
@@ -638,6 +639,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
     let cache_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_CACHE_REFRESH_MS", 1_000);
     let gpu_candidate_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_GPU_CANDIDATE_MS", 1_000);
     let sequential_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_SEQUENCE_READY_MS", 8_000);
+    let scrub_threshold_ms = env_u128("MONDRIAN_PREVIEW_MEDIA_SCRUB_READY_MS", 8_000);
     let ready_timeout =
         Duration::from_millis(env_u128("MONDRIAN_PREVIEW_MEDIA_READY_TIMEOUT_MS", 10_000) as u64);
 
@@ -693,6 +695,20 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             },
         )?;
 
+        let scrub_case = run_case(
+            "preview_media.active_scrub_ready_window",
+            1,
+            scrub_threshold_ms,
+            || {
+                for frame in 0..frame_count {
+                    state.seek_with_source(frame as i64, TimelineSeekSource::PointerDrag);
+                    wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+                }
+                state.seek(frame_count.saturating_sub(1) as i64);
+                Ok(())
+            },
+        )?;
+
         let gpu_candidate_case = run_case(
             "preview_media.gpu_candidate_ready",
             1,
@@ -734,6 +750,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
                 first_frame_case,
                 cached_frame_case,
                 sequential_case,
+                scrub_case,
                 gpu_candidate_case,
             ],
         })

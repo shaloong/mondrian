@@ -101,6 +101,12 @@ with checks, root causes, and actions. The default slow-frame budget is 50 ms;
 over-budget hard failures make the preview media smoke fail and should be
 diagnosed from `preview_decode_report.root_causes` before changing
 renderer/color code.
+`preview_media_decode_cache_smoke` intentionally exercises both settled
+non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
+(`ScrubCursor`). The active scrub window is controlled by
+`MONDRIAN_PREVIEW_MEDIA_SCRUB_READY_MS`; do not replace it with plain
+`state.seek(...)`, because that would silently stop profiling the latest-wins
+scrub path.
 Continuous playback smoke also fails on playback-locality root causes such as
 `preview_decode_playback_session_not_reused` and
 `preview_decode_playback_without_locality`, even when the wall-clock window
