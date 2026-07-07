@@ -44,6 +44,9 @@ or treating playback as repeated random-access still decode. The generic
 access-mode router is intentionally media-internal so public APIs describe the
 workload rather than exposing a strategy enum as a long-lived compatibility
 surface.
+`PreviewDecodeAccessMode` intentionally has no default value, and serialized
+decode diagnostics must include it. Missing access-mode evidence is a diagnostic
+coverage bug, not a reason to assume still-frame semantics.
 App preview scheduling preserves playback cursor locality: worker 0 is the
 playback-capable lane and non-playback workers skip `PlaybackCursor` work
 instead of stealing it from the playback session. Scrub/still requests may still

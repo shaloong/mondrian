@@ -55,7 +55,7 @@ pub enum PreviewDecodePath {
 /// layer contract for that split. The current CPU RGBA adapter may still share
 /// implementation code, but callers must choose one mode so future hardware,
 /// streaming, and proxy paths can specialize behind this seam.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PreviewDecodeAccessMode {
     /// Mostly-forward decode for sustained timeline playback and forward prefetch.
     PlaybackCursor,
@@ -63,7 +63,6 @@ pub enum PreviewDecodeAccessMode {
     ScrubCursor,
     /// Deterministic random-access still-frame decode for thumbnails, export
     /// fallback, diagnostics, and exact frame requests.
-    #[default]
     RandomAccessStillFrame,
 }
 
@@ -200,7 +199,6 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether this result came from the preview frame cache.
     pub cache_hit: bool,
     /// Caller intent that selected this decode path.
-    #[serde(default)]
     pub access_mode: PreviewDecodeAccessMode,
     /// Whether this result came from an external process.
     pub external_process: bool,
@@ -1756,10 +1754,6 @@ mod tests {
         assert_eq!(
             PreviewDecodeAccessMode::RandomAccessStillFrame.as_str(),
             "RandomAccessStillFrame"
-        );
-        assert_eq!(
-            PreviewDecodeAccessMode::default(),
-            PreviewDecodeAccessMode::RandomAccessStillFrame
         );
         assert!(PreviewDecodeAccessMode::PlaybackCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
