@@ -4,7 +4,8 @@
 
 use crate::cache::{FrameCache, RawVideoFrame};
 use crate::preview::{
-    decode_video_frame_at_time_rgba, decode_video_frame_at_time_rgba_scaled, RgbaFrame,
+    decode_video_frame_at_time_rgba, decode_video_frame_for_access_mode_rgba_scaled_cancellable,
+    PreviewDecodeAccessMode, RgbaFrame,
 };
 use dashmap::DashMap;
 use lru::LruCache;
@@ -179,6 +180,7 @@ struct RgbaFrameKey {
     frame_num: u64,
     width: u32,
     height: u32,
+    access_mode: PreviewDecodeAccessMode,
 }
 
 #[derive(Default)]
@@ -330,6 +332,32 @@ impl DecoderPool {
         target_width: u32,
         target_height: u32,
     ) -> Result<Arc<RgbaFrame>> {
+        self.get_video_frame_rgba_for_access_mode(
+            asset_id,
+            path,
+            timecode,
+            target_width,
+            target_height,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        )
+        .await
+    }
+
+    /// Get an RGBA preview frame for a specific decode access mode.
+    ///
+    /// This is the access-mode-aware RGBA seam for app playback/scrub adapters.
+    /// The current implementation still returns CPU RGBA memory, but callers no
+    /// longer have to pretend playback, scrubbing, and still-frame extraction
+    /// are the same workload.
+    pub async fn get_video_frame_rgba_for_access_mode(
+        &self,
+        asset_id: AssetId,
+        path: PathBuf,
+        timecode: TimeCode,
+        target_width: u32,
+        target_height: u32,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> Result<Arc<RgbaFrame>> {
         self.metrics.rgba_requests.fetch_add(1, Ordering::Relaxed);
         let frame_num = timecode.frame.max(0) as u64;
         let key = RgbaFrameKey {
@@ -337,6 +365,7 @@ impl DecoderPool {
             frame_num,
             width: target_width,
             height: target_height,
+            access_mode,
         };
 
         if let Some(hit) = self.rgba_cache.lock().get(&key).cloned() {
@@ -387,12 +416,20 @@ impl DecoderPool {
 
         let started = Instant::now();
         let mut decode_task = self.preview_decode_runtime.spawn(async move {
-            decode_video_frame_at_time_rgba_scaled(
+            decode_video_frame_for_access_mode_rgba_scaled_cancellable(
                 path.as_path(),
                 secs,
                 Some(target_width.max(1)),
                 Some(target_height.max(1)),
+                access_mode,
+                || false,
             )
+            .and_then(|outcome| match outcome {
+                crate::preview::PreviewDecodeOutcome::Frame(frame) => Ok(frame),
+                crate::preview::PreviewDecodeOutcome::Canceled => {
+                    Err(mondrian_core::MondrianError::Cancelled)
+                }
+            })
             .map(Arc::new)
         });
 
@@ -657,12 +694,13 @@ impl DecoderPool {
 
                 let tc = TimeCode::new(start_timecode.frame + offset as i64, tb);
                 if let Err(err) = pool
-                    .get_video_frame_rgba(
+                    .get_video_frame_rgba_for_access_mode(
                         asset_id,
                         path.clone(),
                         tc,
                         target_width.max(1),
                         target_height.max(1),
+                        PreviewDecodeAccessMode::PlaybackCursor,
                     )
                     .await
                 {

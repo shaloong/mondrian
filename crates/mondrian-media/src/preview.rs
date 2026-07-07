@@ -49,6 +49,36 @@ pub enum PreviewDecodePath {
     PreviewCacheHit,
 }
 
+/// Caller intent for a preview decode request.
+///
+/// Mature NLEs treat sustained playback, interactive scrubbing, and precise
+/// still-frame extraction as different access patterns. This enum is the media
+/// layer contract for that split. The current CPU RGBA adapter may still share
+/// implementation code, but callers must choose one mode so future hardware,
+/// streaming, and proxy paths can specialize behind this seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum PreviewDecodeAccessMode {
+    /// Mostly-forward decode for sustained timeline playback and forward prefetch.
+    PlaybackCursor,
+    /// Latest-wins interactive decode for playhead dragging, jog, and shuttle.
+    ScrubCursor,
+    /// Deterministic random-access still-frame decode for thumbnails, export
+    /// fallback, diagnostics, and exact frame requests.
+    #[default]
+    RandomAccessStillFrame,
+}
+
+impl PreviewDecodeAccessMode {
+    /// Stable access-mode name for telemetry and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PlaybackCursor => "PlaybackCursor",
+            Self::ScrubCursor => "ScrubCursor",
+            Self::RandomAccessStillFrame => "RandomAccessStillFrame",
+        }
+    }
+}
+
 /// FFmpeg decoder threading mode requested for preview software decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewDecodeThreadingKind {
@@ -166,6 +196,9 @@ pub struct PreviewDecodeDiagnostics {
     pub elapsed_us: u64,
     /// Whether this result came from the preview frame cache.
     pub cache_hit: bool,
+    /// Caller intent that selected this decode path.
+    #[serde(default)]
+    pub access_mode: PreviewDecodeAccessMode,
     /// Whether this result came from an external process.
     pub external_process: bool,
     /// Whether the returned payload is CPU-resident memory.
@@ -193,6 +226,7 @@ impl PreviewDecodeDiagnostics {
             path,
             elapsed_us: 0,
             cache_hit: path == PreviewDecodePath::PreviewCacheHit,
+            access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
             cpu_resident: true,
             seek_performed: false,
@@ -208,8 +242,15 @@ impl PreviewDecodeDiagnostics {
         self
     }
 
-    fn cache_hit(elapsed: Duration) -> Self {
-        Self::new(PreviewDecodePath::PreviewCacheHit).with_elapsed(elapsed)
+    fn cache_hit_for_mode(elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
+        Self::new(PreviewDecodePath::PreviewCacheHit)
+            .with_access_mode(access_mode)
+            .with_elapsed(elapsed)
+    }
+
+    fn with_access_mode(mut self, access_mode: PreviewDecodeAccessMode) -> Self {
+        self.access_mode = access_mode;
+        self
     }
 }
 
@@ -295,13 +336,18 @@ impl RgbaFrame {
         self
     }
 
+    fn with_access_mode(mut self, access_mode: PreviewDecodeAccessMode) -> Self {
+        self.diagnostics.access_mode = access_mode;
+        self
+    }
+
     fn with_stage_durations(mut self, durations: PreviewDecodeStageDurations) -> Self {
         self.diagnostics.stage_durations.accumulate(durations);
         self
     }
 
-    fn into_cache_hit(mut self, elapsed: Duration) -> Self {
-        self.diagnostics = PreviewDecodeDiagnostics::cache_hit(elapsed);
+    fn into_cache_hit(mut self, elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
+        self.diagnostics = PreviewDecodeDiagnostics::cache_hit_for_mode(elapsed, access_mode);
         self
     }
 }
@@ -325,6 +371,7 @@ pub fn decode_video_frame_at_time_rgba_scaled(
         timestamp_secs,
         max_width,
         max_height,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
         None,
         || false,
     )? {
@@ -354,6 +401,7 @@ pub fn decode_video_frame_at_time_rgba_scaled_cancellable(
         timestamp_secs,
         max_width,
         max_height,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
         None,
         should_cancel,
     )
@@ -379,7 +427,59 @@ pub fn decode_video_frame_at_time_rgba_scaled_cancellable_with_fingerprint(
         timestamp_secs,
         max_width,
         max_height,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
         Some(fingerprint),
+        should_cancel,
+    )
+}
+
+/// Decode a preview frame for a specific access mode using a caller-supplied
+/// file fingerprint.
+///
+/// This is the preferred preview entry point for app scheduling code because it
+/// preserves the distinction between playback, scrubbing, and random still
+/// access. The returned diagnostics echo the requested mode even when the frame
+/// is served from cache.
+pub fn decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint(
+    path: &Path,
+    timestamp_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    access_mode: PreviewDecodeAccessMode,
+    fingerprint: PreviewFileFingerprint,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
+    decode_video_frame_at_time_outcome(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        access_mode,
+        Some(fingerprint),
+        should_cancel,
+    )
+}
+
+/// Decode a preview frame for a specific access mode.
+///
+/// Prefer
+/// [`decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint`]
+/// when the caller already resolved source/proxy file metadata.
+pub fn decode_video_frame_for_access_mode_rgba_scaled_cancellable(
+    path: &Path,
+    timestamp_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    access_mode: PreviewDecodeAccessMode,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
+    decode_video_frame_at_time_outcome(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        access_mode,
+        None,
         should_cancel,
     )
 }
@@ -616,6 +716,7 @@ impl PreviewDecodeSession {
     fn decode_at(
         &mut self,
         timestamp_secs: f64,
+        access_mode: PreviewDecodeAccessMode,
         should_cancel: &impl Fn() -> bool,
     ) -> Result<PreviewDecodeOutcome> {
         if should_cancel() {
@@ -637,7 +738,7 @@ impl PreviewDecodeSession {
             }
             return Ok(PreviewDecodeOutcome::Frame(
                 hit.frame
-                    .into_cache_hit(cache_lookup_started_at.elapsed())
+                    .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
                     .with_stage_durations(PreviewDecodeStageDurations {
                         cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                         ..PreviewDecodeStageDurations::default()
@@ -684,6 +785,7 @@ impl PreviewDecodeSession {
                 duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
             return Ok(PreviewDecodeOutcome::Frame(
                 frame
+                    .with_access_mode(access_mode)
                     .with_stage_durations(PreviewDecodeStageDurations {
                         cache_lookup_us,
                         seek_us,
@@ -952,6 +1054,7 @@ fn decode_video_frame_at_time_outcome(
     timestamp_secs: f64,
     max_width: Option<u32>,
     max_height: Option<u32>,
+    access_mode: PreviewDecodeAccessMode,
     fingerprint: Option<PreviewFileFingerprint>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
@@ -1008,6 +1111,7 @@ fn decode_video_frame_at_time_outcome(
                             return Ok(PreviewDecodeOutcome::Canceled);
                         }
                         return Ok(PreviewDecodeOutcome::Frame(frame
+                            .with_access_mode(access_mode)
                             .with_stage_durations(PreviewDecodeStageDurations {
                                 session_open_us,
                                 external_process_us,
@@ -1024,10 +1128,11 @@ fn decode_video_frame_at_time_outcome(
             }
         }
 
-        let outcome = session.decode_at(timestamp_secs, &should_cancel)?;
+        let outcome = session.decode_at(timestamp_secs, access_mode, &should_cancel)?;
         match outcome {
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame
+                    .with_access_mode(access_mode)
                     .with_stage_durations(PreviewDecodeStageDurations {
                         session_open_us,
                         external_process_us,
@@ -1472,9 +1577,9 @@ mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
         decode_video_frame_at_time_rgba_scaled, decode_video_frame_at_time_rgba_scaled_cancellable,
-        duration_us, preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeBackend,
-        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
-        PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
+        duration_us, preview_cache_get, preview_cache_put_with_fingerprint,
+        PreviewDecodeAccessMode, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
+        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1522,6 +1627,23 @@ mod tests {
             Some(PreviewDecodeThreadingKind::Slice)
         );
         assert_eq!(PreviewDecodeThreadingKind::from_env("surprise"), None);
+    }
+
+    #[test]
+    fn preview_decode_access_mode_names_and_defaults_are_stable() {
+        assert_eq!(
+            PreviewDecodeAccessMode::PlaybackCursor.as_str(),
+            "PlaybackCursor"
+        );
+        assert_eq!(PreviewDecodeAccessMode::ScrubCursor.as_str(), "ScrubCursor");
+        assert_eq!(
+            PreviewDecodeAccessMode::RandomAccessStillFrame.as_str(),
+            "RandomAccessStillFrame"
+        );
+        assert_eq!(
+            PreviewDecodeAccessMode::default(),
+            PreviewDecodeAccessMode::RandomAccessStillFrame
+        );
     }
 
     #[test]
@@ -1573,12 +1695,23 @@ mod tests {
             PreviewDecodeThreadingKind::None
         );
         assert_eq!(frame.diagnostics.threading_count, 0);
+        assert_eq!(
+            frame.diagnostics.access_mode,
+            PreviewDecodeAccessMode::RandomAccessStillFrame
+        );
 
-        let cached = frame.into_cache_hit(std::time::Duration::from_micros(3));
+        let cached = frame.into_cache_hit(
+            std::time::Duration::from_micros(3),
+            PreviewDecodeAccessMode::PlaybackCursor,
+        );
         assert_eq!(cached.diagnostics.path, PreviewDecodePath::PreviewCacheHit);
         assert_eq!(cached.diagnostics.elapsed_us, 3);
         assert!(cached.diagnostics.cache_hit);
         assert!(cached.diagnostics.cpu_resident);
+        assert_eq!(
+            cached.diagnostics.access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
     }
 
     #[test]

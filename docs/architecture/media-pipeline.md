@@ -17,6 +17,27 @@ The probe runs off the UI thread.
 
 Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state.
 
+The media decode layer exposes three access contracts, matching the way mature
+NLEs separate playback, interactive navigation, and precise still extraction:
+
+- `PreviewDecodeAccessMode::PlaybackCursor` is for sustained timeline playback
+  and forward prefetch. It is mostly-forward, should keep decoder/session
+  locality, and is the seam where hardware decode, low-copy P010/NV12
+  residency, deadline/drop policy, and GPU input transforms belong.
+- `PreviewDecodeAccessMode::ScrubCursor` is for latest-wins playhead dragging,
+  jog, and shuttle. It prioritizes cancellation and seek latency over warming a
+  long forward queue.
+- `PreviewDecodeAccessMode::RandomAccessStillFrame` is for deterministic still
+  extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
+  one-off requests. Existing timestamp-based public helpers are explicitly this
+  mode, not the playback path.
+
+These contracts are media-layer interfaces. The current in-process adapter can
+share the same CPU RGBA FFmpeg implementation while diagnostics and app
+scheduling distinguish the requested access mode. Future hardware-resident
+decode must specialize behind these contracts instead of adding app-layer flags
+or treating playback as repeated random-access still decode.
+
 Current decode residency is intentionally explicit and fail-closed. The active
 preview/media decode path produces CPU RGBA frames and, for legacy YUV callers,
 CPU YUV420p frames derived from that CPU RGBA decode. `DecoderMetricsSnapshot`
@@ -90,10 +111,11 @@ delivery. The previous "GPU assist" terminology is intentionally not used.
 Every `RgbaFrame` returned by the preview decode boundary carries
 `PreviewDecodeDiagnostics`: concrete path (`InProcessFfmpegCpuRgba`,
 `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`), elapsed microseconds, cache-hit
-status, external-process status, CPU-residency evidence, seek status, decoded
-frame count, in-process FFmpeg decoder threading mode/count, and stage-level
-wall-clock timings for session open, cache lookup, seek, packet/decode,
-software scaling, RGBA copy, and the experimental external-process path.
+status, requested access mode, external-process status, CPU-residency evidence,
+seek status, decoded frame count, in-process FFmpeg decoder threading
+mode/count, and stage-level wall-clock timings for session open, cache lookup,
+seek, packet/decode, software scaling, RGBA copy, and the experimental
+external-process path.
 App-level preview diagnostics aggregate those fields so playback/perf JSON can
 show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
 single-thread decode-bound, software-scale/copy-bound, worker-queue-bound, or

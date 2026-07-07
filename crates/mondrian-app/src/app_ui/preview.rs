@@ -18,9 +18,9 @@ use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
-    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueSummary,
+    PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
+    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -209,6 +209,9 @@ impl AppUiPreviewService {
                 .decode_external_ffmpeg_cpu_rgba_frames
                 .get(),
             decode_cache_hit_frames: self.metrics.decode_cache_hit_frames.get(),
+            decode_playback_cursor_frames: self.metrics.decode_playback_cursor_frames.get(),
+            decode_scrub_cursor_frames: self.metrics.decode_scrub_cursor_frames.get(),
+            decode_random_access_still_frames: self.metrics.decode_random_access_still_frames.get(),
             decode_total_duration_us: self.metrics.decode_total_duration_us.get(),
             decode_max_duration_us: self.metrics.decode_max_duration_us.get(),
             decode_last_duration_us: self.metrics.decode_last_duration_us.get(),
@@ -903,6 +906,17 @@ impl AppUiPreviewService {
                 bump(&self.metrics.decode_cache_hit_frames);
             }
         }
+        match diagnostics.access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                bump(&self.metrics.decode_playback_cursor_frames);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                bump(&self.metrics.decode_scrub_cursor_frames);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                bump(&self.metrics.decode_random_access_still_frames);
+            }
+        }
         add_cell(
             &self.metrics.decode_total_duration_us,
             diagnostics.elapsed_us,
@@ -1352,6 +1366,12 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_external_ffmpeg_cpu_rgba_frames: u64,
     /// Successful decodes served from the preview frame cache.
     pub decode_cache_hit_frames: u64,
+    /// Decode results requested through the playback cursor access contract.
+    pub decode_playback_cursor_frames: u64,
+    /// Decode results requested through the scrub cursor access contract.
+    pub decode_scrub_cursor_frames: u64,
+    /// Decode results requested through the random-access still-frame contract.
+    pub decode_random_access_still_frames: u64,
     /// Total preview decode duration in microseconds.
     pub decode_total_duration_us: u64,
     /// Slowest preview decode duration in microseconds.
@@ -1593,6 +1613,12 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub external_ffmpeg_cpu_rgba_frames: u64,
     /// Successful decodes served from preview cache.
     pub cache_hit_frames: u64,
+    /// Decode results requested through the playback cursor access contract.
+    pub playback_cursor_frames: u64,
+    /// Decode results requested through the scrub cursor access contract.
+    pub scrub_cursor_frames: u64,
+    /// Decode results requested through the random-access still-frame contract.
+    pub random_access_still_frames: u64,
     /// Maximum end-to-end decode duration.
     pub max_duration_us: u64,
     /// Most recent end-to-end decode duration.
@@ -3052,6 +3078,9 @@ impl AppUiPreviewDiagnostics {
             in_process_cpu_rgba_frames: self.decode_in_process_cpu_rgba_frames,
             external_ffmpeg_cpu_rgba_frames: self.decode_external_ffmpeg_cpu_rgba_frames,
             cache_hit_frames: self.decode_cache_hit_frames,
+            playback_cursor_frames: self.decode_playback_cursor_frames,
+            scrub_cursor_frames: self.decode_scrub_cursor_frames,
+            random_access_still_frames: self.decode_random_access_still_frames,
             max_duration_us: self.decode_max_duration_us,
             last_duration_us: self.decode_last_duration_us,
             total_duration_us: self.decode_total_duration_us,
@@ -3893,6 +3922,7 @@ struct MediaPreviewJob {
     source_secs: f64,
     generation: u64,
     priority: MediaPreviewRequestPriority,
+    access_mode: PreviewDecodeAccessMode,
     enqueued_at: Instant,
 }
 
@@ -4072,6 +4102,14 @@ fn lock_media_preview_job_queue_state(
     }
 }
 
+fn media_preview_current_access_mode(is_playing: bool) -> PreviewDecodeAccessMode {
+    if is_playing {
+        PreviewDecodeAccessMode::PlaybackCursor
+    } else {
+        PreviewDecodeAccessMode::ScrubCursor
+    }
+}
+
 fn media_preview_worker_count() -> usize {
     std::thread::available_parallelism()
         .map(|parallelism| media_preview_worker_count_for(parallelism.get()))
@@ -4165,6 +4203,7 @@ impl AppUiPreviewService {
                             key,
                             source_secs,
                             MediaPreviewRequestPriority::Prefetch,
+                            PreviewDecodeAccessMode::PlaybackCursor,
                         );
                     }
                 }
@@ -4222,7 +4261,13 @@ impl AppUiPreviewService {
             return None;
         }
         self.current_frame_pending.set(true);
-        self.request_media_preview(key, source_secs, MediaPreviewRequestPriority::Current);
+        let access_mode = media_preview_current_access_mode(state.is_playing());
+        self.request_media_preview(
+            key,
+            source_secs,
+            MediaPreviewRequestPriority::Current,
+            access_mode,
+        );
         None
     }
 
@@ -4369,6 +4414,7 @@ impl AppUiPreviewService {
         key: MediaPreviewKey,
         source_secs: f64,
         priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
     ) {
         let generation = self.current_generation.get();
         match self.scheduler.request(key.clone(), generation, priority) {
@@ -4393,6 +4439,7 @@ impl AppUiPreviewService {
             source_secs,
             generation,
             priority,
+            access_mode,
             enqueued_at: Instant::now(),
         };
         if priority == MediaPreviewRequestPriority::Current {
@@ -4570,6 +4617,9 @@ struct AppUiPreviewMetrics {
     decode_in_process_cpu_rgba_frames: Cell<u64>,
     decode_external_ffmpeg_cpu_rgba_frames: Cell<u64>,
     decode_cache_hit_frames: Cell<u64>,
+    decode_playback_cursor_frames: Cell<u64>,
+    decode_scrub_cursor_frames: Cell<u64>,
+    decode_random_access_still_frames: Cell<u64>,
     decode_total_duration_us: Cell<u64>,
     decode_max_duration_us: Cell<u64>,
     decode_last_duration_us: Cell<u64>,
@@ -5263,22 +5313,25 @@ fn decode_media_preview(
 ) -> MediaPreviewResult {
     let signature = media_preview_frame_signature(&job.key);
     let priority = job.priority;
+    let access_mode = job.access_mode;
     let decode_outcome = match job.key.fingerprint {
         Some(fingerprint) => {
-            mondrian_media::decode_video_frame_at_time_rgba_scaled_cancellable_with_fingerprint(
+            mondrian_media::decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint(
                 job.key.path.as_path(),
                 job.source_secs,
                 Some(job.key.target_width.max(1)),
                 Some(job.key.target_height.max(1)),
+                access_mode,
                 fingerprint,
                 should_cancel,
             )
         }
-        None => mondrian_media::decode_video_frame_at_time_rgba_scaled_cancellable(
+        None => mondrian_media::decode_video_frame_for_access_mode_rgba_scaled_cancellable(
             job.key.path.as_path(),
             job.source_secs,
             Some(job.key.target_width.max(1)),
             Some(job.key.target_height.max(1)),
+            access_mode,
             should_cancel,
         ),
     };
@@ -5828,6 +5881,7 @@ mod tests {
             path: PreviewDecodePath::InProcessFfmpegCpuRgba,
             elapsed_us: 1_000,
             cache_hit: false,
+            access_mode: PreviewDecodeAccessMode::ScrubCursor,
             external_process: false,
             cpu_resident: true,
             seek_performed: true,
@@ -5848,6 +5902,7 @@ mod tests {
             path: PreviewDecodePath::ExternalFfmpegCpuRgba,
             elapsed_us: 2_500,
             cache_hit: false,
+            access_mode: PreviewDecodeAccessMode::PlaybackCursor,
             external_process: true,
             cpu_resident: true,
             seek_performed: false,
@@ -5868,6 +5923,7 @@ mod tests {
             path: PreviewDecodePath::PreviewCacheHit,
             elapsed_us: 25,
             cache_hit: true,
+            access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
             external_process: false,
             cpu_resident: true,
             seek_performed: false,
@@ -5893,6 +5949,9 @@ mod tests {
         assert_eq!(diagnostics.decode_in_process_cpu_rgba_frames, 1);
         assert_eq!(diagnostics.decode_external_ffmpeg_cpu_rgba_frames, 1);
         assert_eq!(diagnostics.decode_cache_hit_frames, 1);
+        assert_eq!(diagnostics.decode_playback_cursor_frames, 1);
+        assert_eq!(diagnostics.decode_scrub_cursor_frames, 1);
+        assert_eq!(diagnostics.decode_random_access_still_frames, 1);
         assert_eq!(diagnostics.decode_total_duration_us, 3_525);
         assert_eq!(diagnostics.decode_max_duration_us, 2_500);
         assert_eq!(diagnostics.decode_last_duration_us, 25);
@@ -7838,6 +7897,7 @@ mod tests {
                 source_secs: 0.5,
                 generation: 7,
                 priority: MediaPreviewRequestPriority::Current,
+                access_mode: PreviewDecodeAccessMode::ScrubCursor,
                 enqueued_at: Instant::now(),
             },
             123,
@@ -7877,6 +7937,7 @@ mod tests {
                 source_secs: 0.5,
                 generation: 7,
                 priority: MediaPreviewRequestPriority::Prefetch,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 enqueued_at: Instant::now(),
             },
             456,
@@ -7928,7 +7989,17 @@ mod tests {
             source_secs,
             generation,
             priority,
+            access_mode: test_access_mode_for_priority(priority),
             enqueued_at: Instant::now(),
+        }
+    }
+
+    fn test_access_mode_for_priority(
+        priority: MediaPreviewRequestPriority,
+    ) -> PreviewDecodeAccessMode {
+        match priority {
+            MediaPreviewRequestPriority::Current => PreviewDecodeAccessMode::ScrubCursor,
+            MediaPreviewRequestPriority::Prefetch => PreviewDecodeAccessMode::PlaybackCursor,
         }
     }
 
@@ -8805,6 +8876,18 @@ mod tests {
         assert_eq!(media_preview_worker_count_for(5), 1);
         assert_eq!(media_preview_worker_count_for(6), 2);
         assert_eq!(media_preview_worker_count_for(32), 2);
+    }
+
+    #[test]
+    fn media_preview_current_access_mode_tracks_playback_state() {
+        assert_eq!(
+            media_preview_current_access_mode(true),
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
+        assert_eq!(
+            media_preview_current_access_mode(false),
+            PreviewDecodeAccessMode::ScrubCursor
+        );
     }
 
     #[test]
