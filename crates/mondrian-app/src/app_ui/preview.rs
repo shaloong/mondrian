@@ -1776,24 +1776,25 @@ impl AppUiPreviewDecodeAccessModeProfiles {
     }
 
     fn slowest_access_mode(self) -> Option<PreviewDecodeAccessMode> {
+        self.named_profiles()
+            .into_iter()
+            .filter(|(_, profile)| profile.max_duration_us > 0)
+            .max_by_key(|(_, profile)| profile.max_duration_us)
+            .map(|(access_mode, _)| access_mode)
+    }
+
+    fn named_profiles(self) -> [(PreviewDecodeAccessMode, AppUiPreviewDecodeAccessModeProfile); 3] {
         [
             (
                 PreviewDecodeAccessMode::PlaybackCursor,
-                self.playback_cursor.max_duration_us,
+                self.playback_cursor,
             ),
-            (
-                PreviewDecodeAccessMode::ScrubCursor,
-                self.scrub_cursor.max_duration_us,
-            ),
+            (PreviewDecodeAccessMode::ScrubCursor, self.scrub_cursor),
             (
                 PreviewDecodeAccessMode::RandomAccessStillFrame,
-                self.random_access_still.max_duration_us,
+                self.random_access_still,
             ),
         ]
-        .into_iter()
-        .filter(|(_, max_duration_us)| *max_duration_us > 0)
-        .max_by_key(|(_, max_duration_us)| *max_duration_us)
-        .map(|(access_mode, _)| access_mode)
     }
 }
 
@@ -2081,6 +2082,8 @@ pub enum AppUiPreviewDecodePerformanceArea {
     CaptureIntegrity,
     /// End-to-end decode latency budget.
     LatencyBudget,
+    /// Playback, scrub, and still-frame access-mode-specific decode budgets.
+    AccessMode,
     /// Random access, seeking, and GOP pressure.
     RandomAccess,
     /// Codec packet/decode work.
@@ -2275,6 +2278,7 @@ pub fn build_preview_decode_performance_report(
             summary.max_duration_us,
             slow_frame_budget_us,
         );
+        push_preview_decode_access_mode_checks(&mut checks, summary, slow_frame_budget_us);
         push_decode_warn_max_check(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::RandomAccess,
@@ -2499,6 +2503,39 @@ fn push_decode_bool_check(
     });
 }
 
+fn push_preview_decode_access_mode_checks(
+    checks: &mut Vec<AppUiPreviewDecodePerformanceCheck>,
+    summary: AppUiPreviewDecodePerformanceSummary,
+    slow_frame_budget_us: u64,
+) {
+    for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
+        if profile.frames == 0 {
+            continue;
+        }
+        checks.push(AppUiPreviewDecodePerformanceCheck {
+            area: AppUiPreviewDecodePerformanceArea::AccessMode,
+            code: preview_decode_access_mode_budget_code(access_mode),
+            severity: if profile.max_duration_us > slow_frame_budget_us {
+                AppUiPreviewDecodePerformanceSeverity::Fail
+            } else {
+                AppUiPreviewDecodePerformanceSeverity::Pass
+            },
+            observed: profile.max_duration_us,
+            limit: Some(slow_frame_budget_us),
+        });
+    }
+}
+
+fn preview_decode_access_mode_budget_code(access_mode: PreviewDecodeAccessMode) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => "preview_decode_playback_cursor_max_frame_us",
+        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_max_frame_us",
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_max_frame_us"
+        }
+    }
+}
+
 fn push_preview_decode_root_causes_and_actions(
     summary: AppUiPreviewDecodePerformanceSummary,
     root_causes: &mut Vec<AppUiPreviewDecodePerformanceRootCause>,
@@ -2522,6 +2559,37 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "inspect_preview_decode_stage_durations",
             "Inspect preview decode stage timings before changing color or render code.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+
+    for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
+        if profile.frames == 0 || profile.max_duration_us <= summary.slow_frame_budget_us {
+            continue;
+        }
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::AccessMode,
+            "preview_decode_access_mode_over_budget",
+            format!(
+                "access_mode={} frames={} max_duration_us={} total_duration_us={} seeked_frames={} decoded_frame_count={} max_decoded_frame_count={} packet_decode_us={} seek_us={} swscale_us={} rgba_copy_us={} cache_hit_frames={} playback_session_ring_hit_frames={}",
+                access_mode.as_str(),
+                profile.frames,
+                profile.max_duration_us,
+                profile.total_duration_us,
+                profile.seeked_frames,
+                profile.decoded_frame_count,
+                profile.max_decoded_frame_count,
+                profile.max_frame_stage_durations.packet_decode_us,
+                profile.max_frame_stage_durations.seek_us,
+                profile.max_frame_stage_durations.swscale_us,
+                profile.max_frame_stage_durations.rgba_copy_us,
+                profile.cache_hit_frames,
+                profile.playback_session_ring_hit_frames
+            ),
+            "inspect_preview_decode_access_mode_profile",
+            "Inspect the per-access-mode decode profile before changing global decode concurrency or color/render code.",
             AppUiPreviewDecodePerformanceSeverity::Fail,
         );
     }
@@ -6160,6 +6228,18 @@ mod tests {
             root.code == "preview_decode_frame_over_budget"
                 && root.evidence.contains("slowest_access_mode=ScrubCursor")
         }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_scrub_cursor_max_frame_us"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 120_000
+                && check.limit == Some(50_000)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_access_mode_over_budget"
+                && root.area == AppUiPreviewDecodePerformanceArea::AccessMode
+                && root.evidence.contains("access_mode=ScrubCursor")
+                && root.evidence.contains("packet_decode_us=95000")
+        }));
         assert!(report
             .root_causes
             .iter()
@@ -6168,6 +6248,10 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "enable_proxy_or_hardware_decode"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_preview_decode_access_mode_profile"));
     }
 
     #[test]

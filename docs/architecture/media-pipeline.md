@@ -120,6 +120,9 @@ end-to-end duration totals/maxima, seek counts, decoded-frame pressure, and
 stage-level timings. A slow preview report must identify the slowest access
 mode so engineers can distinguish playback locality failures from scrub seek
 latency or exact still-frame random access costs.
+The versioned report must emit access-mode-specific latency checks and root
+causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
+`RandomAccessStillFrame` regressions without reverse-engineering raw counters.
 App-level decode cancellation is also structured before it reaches diagnostics:
 workers classify cancellations as shutdown, obsolete pending work, prefetch
 deadline, or unknown, and aggregate them by requested access mode. The media
