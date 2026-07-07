@@ -47,14 +47,13 @@ surface.
 `PreviewDecodeAccessMode` intentionally has no default value, and serialized
 decode diagnostics must include it. Missing access-mode evidence is a diagnostic
 coverage bug, not a reason to assume still-frame semantics.
-App preview scheduling preserves playback cursor locality: worker 0 is the
-playback-capable lane and non-playback workers skip `PlaybackCursor` work
-instead of stealing it from the playback session. Scrub/still requests may still
-run on the remaining workers so interactive navigation can make progress while
-playback prefetch is decoding. Because workers filter by lane, enqueue and
-priority promotion wake all preview workers, not just one; otherwise a
-playback-only queue could wake a non-playback worker and leave the playback
-worker asleep until another request arrives.
+App preview scheduling preserves playback cursor locality. When more than one
+preview decode worker exists, worker 0 is a dedicated playback lane and the
+remaining workers are interactive lanes for scrub/still work. With only one
+worker, the lane is `Any` so all modes still make progress. Because workers
+filter by lane, enqueue and priority promotion wake all preview workers, not
+just one; otherwise a playback-only queue could wake an interactive worker and
+leave the playback worker asleep until another request arrives.
 Playback cursor cancellation is cooperative but non-destructive to the playback
 decode session: a prefetch budget miss should not throw away the warmed
 mostly-forward decoder stream. Scrub and still-frame cancellation remain

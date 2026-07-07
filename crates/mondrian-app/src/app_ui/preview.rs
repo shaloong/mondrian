@@ -92,16 +92,18 @@ impl AppUiPreviewService {
         let scheduler = MediaPreviewScheduler::default();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut decode_worker_count = 0;
-        for worker_index in 0..media_preview_worker_count() {
+        let worker_count = media_preview_worker_count();
+        for worker_index in 0..worker_count {
             let worker_jobs = job_rx.clone();
             let worker_results = result_tx.clone();
             let worker_scheduler = scheduler.clone();
             let worker_shutdown = Arc::clone(&shutdown);
+            let worker_lane = media_preview_worker_lane(worker_index, worker_count);
             match std::thread::Builder::new()
                 .name(format!("mondrian-ui-viewer-preview-{worker_index}"))
                 .spawn(move || {
                     media_preview_worker(
-                        worker_index,
+                        worker_lane,
                         worker_jobs,
                         worker_results,
                         worker_scheduler,
@@ -4134,13 +4136,13 @@ impl Drop for MediaPreviewJobQueueSender {
 impl MediaPreviewJobQueueReceiver {
     #[cfg(test)]
     fn recv(&self) -> Option<MediaPreviewJob> {
-        self.recv_for_worker(true)
+        self.recv_for_worker(MediaPreviewWorkerLane::Any)
     }
 
-    fn recv_for_worker(&self, allow_playback_cursor: bool) -> Option<MediaPreviewJob> {
+    fn recv_for_worker(&self, lane: MediaPreviewWorkerLane) -> Option<MediaPreviewJob> {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         loop {
-            if let Some(index) = next_media_preview_job_index(&state.queue, allow_playback_cursor) {
+            if let Some(index) = next_media_preview_job_index(&state.queue, lane) {
                 return state.queue.remove(index).map(|queued| queued.job);
             }
             if state.closed {
@@ -4156,11 +4158,9 @@ impl MediaPreviewJobQueueReceiver {
 
 fn next_media_preview_job_index(
     queue: &VecDeque<QueuedMediaPreviewJob>,
-    allow_playback_cursor: bool,
+    lane: MediaPreviewWorkerLane,
 ) -> Option<usize> {
-    let eligible = |queued: &QueuedMediaPreviewJob| {
-        allow_playback_cursor || queued.job.access_mode != PreviewDecodeAccessMode::PlaybackCursor
-    };
+    let eligible = |queued: &QueuedMediaPreviewJob| lane.accepts(queued.job.access_mode);
     queue
         .iter()
         .position(|queued| {
@@ -4197,6 +4197,33 @@ fn media_preview_worker_count_for(parallelism: usize) -> usize {
         MEDIA_PREVIEW_MAX_DECODE_WORKERS
     } else {
         1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPreviewWorkerLane {
+    Any,
+    Playback,
+    Interactive,
+}
+
+impl MediaPreviewWorkerLane {
+    fn accepts(self, access_mode: PreviewDecodeAccessMode) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Playback => access_mode == PreviewDecodeAccessMode::PlaybackCursor,
+            Self::Interactive => access_mode != PreviewDecodeAccessMode::PlaybackCursor,
+        }
+    }
+}
+
+fn media_preview_worker_lane(worker_index: usize, worker_count: usize) -> MediaPreviewWorkerLane {
+    if worker_count <= 1 {
+        MediaPreviewWorkerLane::Any
+    } else if worker_index == 0 {
+        MediaPreviewWorkerLane::Playback
+    } else {
+        MediaPreviewWorkerLane::Interactive
     }
 }
 
@@ -5341,14 +5368,13 @@ fn source_micros(source_secs: f64) -> i64 {
 }
 
 fn media_preview_worker(
-    worker_index: usize,
+    lane: MediaPreviewWorkerLane,
     jobs: MediaPreviewJobQueueReceiver,
     results: mpsc::Sender<MediaPreviewResult>,
     scheduler: MediaPreviewScheduler,
     shutdown: Arc<AtomicBool>,
 ) {
-    let allow_playback_cursor = worker_index == 0;
-    while let Some(job) = jobs.recv_for_worker(allow_playback_cursor) {
+    while let Some(job) = jobs.recv_for_worker(lane) {
         if shutdown.load(Ordering::Acquire) {
             break;
         }
@@ -9025,15 +9051,44 @@ mod tests {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
-        let non_playback_job = receiver
-            .recv_for_worker(false)
+        let interactive_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Interactive)
             .expect("non-playback worker should skip playback cursor work");
-        assert_eq!(non_playback_job.key, still);
+        assert_eq!(interactive_job.key, still);
 
         let playback_job = receiver
-            .recv_for_worker(true)
+            .recv_for_worker(MediaPreviewWorkerLane::Playback)
             .expect("playback worker should retain playback cursor work");
         assert_eq!(playback_job.key, playback);
+    }
+
+    #[test]
+    fn media_preview_job_queue_keeps_interactive_work_off_playback_lane() {
+        let (sender, receiver) = media_preview_job_queue(2);
+        let scrub = test_media_key(1);
+        let playback = test_media_key(2);
+        let scrub_job = test_media_job(scrub, 1.0, MediaPreviewRequestPriority::Current);
+        let mut playback_job =
+            test_media_job(playback.clone(), 2.0, MediaPreviewRequestPriority::Prefetch);
+        playback_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+
+        assert_eq!(
+            sender.enqueue(scrub_job, MediaPreviewRequestPriority::Current),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        assert_eq!(
+            sender.enqueue(playback_job, MediaPreviewRequestPriority::Prefetch),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+
+        let playback_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Playback)
+            .expect("playback lane should skip scrub work");
+        assert_eq!(playback_job.key, playback);
+        assert_eq!(
+            playback_job.access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
     }
 
     #[test]
@@ -9243,6 +9298,19 @@ mod tests {
         assert_eq!(media_preview_worker_count_for(5), 1);
         assert_eq!(media_preview_worker_count_for(6), 2);
         assert_eq!(media_preview_worker_count_for(32), 2);
+    }
+
+    #[test]
+    fn media_preview_worker_lane_reserves_playback_only_when_parallel() {
+        assert_eq!(media_preview_worker_lane(0, 1), MediaPreviewWorkerLane::Any);
+        assert_eq!(
+            media_preview_worker_lane(0, 2),
+            MediaPreviewWorkerLane::Playback
+        );
+        assert_eq!(
+            media_preview_worker_lane(1, 2),
+            MediaPreviewWorkerLane::Interactive
+        );
     }
 
     #[test]
