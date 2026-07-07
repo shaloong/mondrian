@@ -3813,7 +3813,7 @@ impl MediaPreviewScheduler {
             .pending
             .get(key)
             .map(|pending| {
-                pending.generation == generation && generation >= state.latest_generation
+                pending.generation >= generation && pending.generation >= state.latest_generation
             })
             .unwrap_or(false)
     }
@@ -8329,6 +8329,39 @@ mod tests {
         assert!(scheduler.should_decode(&key));
         assert!(scheduler.complete(&key, first_generation));
         assert_eq!(scheduler.pending_len(), 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_keeps_same_key_in_flight_decode_current_after_rerequest() {
+        let scheduler = MediaPreviewScheduler::default();
+        let first_generation = scheduler.begin_generation();
+        let key = test_media_key(1);
+
+        assert_eq!(
+            scheduler.request(
+                key.clone(),
+                first_generation,
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert!(scheduler.is_decode_current(&key, first_generation));
+
+        let second_generation = scheduler.begin_generation();
+        assert_eq!(
+            scheduler.request(
+                key.clone(),
+                second_generation,
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewRequestStatus::AlreadyPending
+        );
+
+        assert!(
+            scheduler.is_decode_current(&key, first_generation),
+            "same frame/key decode must survive UI generation refreshes"
+        );
+        assert!(scheduler.complete(&key, first_generation));
     }
 
     #[test]

@@ -93,6 +93,10 @@ starts a monotonic generation, and background media jobs check that their key is
 still requested by the latest generation before decoding. Completed stale jobs
 may warm the cache, but they do not force a UI refresh for an older playback
 frame.
+If a later generation requests the same media-preview key while a worker is
+already decoding it, that in-flight decode remains current: generation changes
+alone must not cancel identical frame/key work, or the viewer can livelock in a
+permanent "preparing" state under repeated UI refreshes.
 
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
 media file fingerprint (file length plus modification timestamp), source
