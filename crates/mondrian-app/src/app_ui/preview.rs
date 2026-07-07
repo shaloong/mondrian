@@ -4813,11 +4813,18 @@ impl AppUiPreviewService {
             match self.scheduler.request(key.clone(), generation, priority, access_mode) {
                 MediaPreviewRequestStatus::Scheduled => true,
                 MediaPreviewRequestStatus::AlreadyPending { access_mode_changed } => {
-                    let queued_updated = self.jobs.promote(&key, priority, access_mode);
-                    if queued_updated {
+                    let queued_update = self.jobs.promote(
+                        &key,
+                        priority,
+                        access_mode,
+                        generation,
+                        source_secs,
+                        Instant::now(),
+                    );
+                    if queued_update.priority_promoted {
                         bump(&self.metrics.queue_promoted_current_jobs);
                     }
-                    access_mode_changed && !queued_updated
+                    access_mode_changed && !queued_update.updated
                 }
                 MediaPreviewRequestStatus::DroppedBackpressure => {
                     tracing::trace!(

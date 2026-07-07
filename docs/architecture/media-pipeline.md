@@ -151,6 +151,11 @@ Queued current-frame work is latest-wins for playback and scrubbing. Before a
 new current frame is enqueued, obsolete queued jobs from older generations are
 removed regardless of priority so old current jobs cannot fill the bounded queue
 and cause the visible current frame to be dropped.
+If an existing queued prefetch for the same media key becomes current-frame
+work, queue promotion must refresh the queued job's access mode, generation,
+source timing, and enqueue timestamp. The promoted job should be measured as
+current-frame queue wait from the promotion point, not from the earlier
+speculative prefetch enqueue.
 Scheduler diagnostics keep aggregate skip/drop/stale counters plus reason
 breakdowns for missing pending work, access-mode mismatch, obsolete generation,
 obsolete request generation, and pending-window backpressure. Access-mode

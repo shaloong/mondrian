@@ -232,6 +232,14 @@ pub(crate) enum MediaPreviewJobEnqueueStatus {
     Closed,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MediaPreviewJobPromoteStatus {
+    pub(crate) updated: bool,
+    pub(crate) priority_promoted: bool,
+    pub(crate) access_mode_changed: bool,
+    pub(crate) generation_changed: bool,
+}
+
 pub(crate) fn media_preview_job_queue(
     capacity: usize,
 ) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
@@ -309,26 +317,40 @@ impl MediaPreviewJobQueueSender {
         key: &MediaPreviewKey,
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
-    ) -> bool {
+        generation: u64,
+        source_secs: f64,
+        enqueued_at: Instant,
+    ) -> MediaPreviewJobPromoteStatus {
         if priority != MediaPreviewRequestPriority::Current {
-            return false;
+            return MediaPreviewJobPromoteStatus::default();
         }
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         let Some(queued) = state.queue.iter_mut().find(|queued| &queued.job.key == key) else {
-            return false;
+            return MediaPreviewJobPromoteStatus::default();
         };
         let previous = queued.priority;
         let previous_access_mode = queued.job.access_mode;
+        let previous_generation = queued.job.generation;
         queued.job.access_mode =
             promoted_access_mode(previous, previous_access_mode, priority, access_mode);
         queued.priority = queued.priority.promote_with(priority);
         queued.job.priority = queued.priority;
-        let promoted = previous != queued.priority;
+        queued.job.generation = generation;
+        queued.job.source_secs = source_secs;
+        queued.job.enqueued_at = enqueued_at;
+        let priority_promoted = previous != queued.priority;
         let access_mode_changed = previous_access_mode != queued.job.access_mode;
-        if promoted || access_mode_changed {
+        let generation_changed = previous_generation != queued.job.generation;
+        let updated = priority_promoted || access_mode_changed || generation_changed;
+        if updated {
             self.shared.changed.notify_all();
         }
-        promoted || access_mode_changed
+        MediaPreviewJobPromoteStatus {
+            updated,
+            priority_promoted,
+            access_mode_changed,
+            generation_changed,
+        }
     }
 }
 
@@ -1534,14 +1556,30 @@ mod tests {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
-        assert!(sender.promote(
+        let promoted_at = Instant::now();
+        let status = sender.promote(
             &promoted,
             MediaPreviewRequestPriority::Current,
-            PreviewDecodeAccessMode::ScrubCursor
-        ));
+            PreviewDecodeAccessMode::ScrubCursor,
+            7,
+            1.25,
+            promoted_at,
+        );
+        assert_eq!(
+            status,
+            MediaPreviewJobPromoteStatus {
+                updated: true,
+                priority_promoted: true,
+                access_mode_changed: true,
+                generation_changed: true,
+            }
+        );
         let promoted_job = receiver.recv().expect("promoted current");
         assert_eq!(promoted_job.key, promoted);
         assert_eq!(promoted_job.priority, MediaPreviewRequestPriority::Current);
+        assert_eq!(promoted_job.generation, 7);
+        assert_eq!(promoted_job.source_secs, 1.25);
+        assert_eq!(promoted_job.enqueued_at, promoted_at);
         assert_eq!(
             promoted_job.access_mode,
             PreviewDecodeAccessMode::ScrubCursor
@@ -1550,6 +1588,51 @@ mod tests {
             receiver.recv().expect("remaining prefetch").key,
             other_prefetch
         );
+    }
+
+    #[test]
+    fn media_preview_job_queue_promote_refreshes_current_generation_without_priority_metric() {
+        let (sender, receiver) = media_preview_job_queue(1);
+        let key = test_media_key(1);
+
+        assert_eq!(
+            sender.enqueue(
+                test_media_job_with_generation(
+                    key.clone(),
+                    1.0,
+                    2,
+                    MediaPreviewRequestPriority::Current,
+                ),
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+
+        let refreshed_at = Instant::now();
+        let status = sender.promote(
+            &key,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+            5,
+            1.0,
+            refreshed_at,
+        );
+
+        assert_eq!(
+            status,
+            MediaPreviewJobPromoteStatus {
+                updated: true,
+                priority_promoted: false,
+                access_mode_changed: false,
+                generation_changed: true,
+            }
+        );
+        let job = receiver.recv().expect("refreshed current job");
+        assert_eq!(job.key, key);
+        assert_eq!(job.priority, MediaPreviewRequestPriority::Current);
+        assert_eq!(job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
+        assert_eq!(job.generation, 5);
+        assert_eq!(job.enqueued_at, refreshed_at);
     }
 
     #[test]
@@ -1620,16 +1703,28 @@ mod tests {
         let (sender, _receiver) = media_preview_job_queue(1);
         let key = test_media_key(1);
 
-        assert!(!sender.promote(
-            &key,
-            MediaPreviewRequestPriority::Current,
-            PreviewDecodeAccessMode::ScrubCursor
-        ));
-        assert!(!sender.promote(
-            &key,
-            MediaPreviewRequestPriority::Prefetch,
-            PreviewDecodeAccessMode::PlaybackCursor
-        ));
+        assert_eq!(
+            sender.promote(
+                &key,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+                1,
+                1.0,
+                Instant::now(),
+            ),
+            MediaPreviewJobPromoteStatus::default()
+        );
+        assert_eq!(
+            sender.promote(
+                &key,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                1,
+                1.0,
+                Instant::now(),
+            ),
+            MediaPreviewJobPromoteStatus::default()
+        );
     }
 
     #[test]
