@@ -727,105 +727,19 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let result = (|| -> anyhow::Result<PreviewMediaPerfReport> {
-        let mut state = build_preview_media_perf_state(&root_dir, &video_path, frame_count)?;
-        let preview_service = AppUiPreviewService::new();
-
-        let first_frame_case = run_case(
-            "preview_media.first_frame_ready",
-            1,
-            first_frame_threshold_ms,
-            || {
-                state.seek(0);
-                wait_for_preview_ready(&preview_service, &state, ready_timeout)
-            },
-        )?;
-
-        let cached_frame_case = run_case(
-            "preview_media.cached_frame_refresh",
-            1,
-            cache_threshold_ms,
-            || {
-                for _ in 0..cache_iterations {
-                    assert_preview_ready(&preview_service, &state)?;
-                }
-                Ok(())
-            },
-        )?;
-
-        let scrub_case = run_case(
-            "preview_media.active_scrub_ready_window",
-            1,
-            scrub_threshold_ms,
-            || {
-                for frame in 0..frame_count {
-                    state.seek_with_source(frame as i64, TimelineSeekSource::PointerDrag);
-                    wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
-                }
-                state.seek(frame_count.saturating_sub(1) as i64);
-                Ok(())
-            },
-        )?;
-
-        let sequential_case = run_case(
-            "preview_media.sequential_frame_ready_window",
-            1,
-            sequential_threshold_ms,
-            || {
-                for frame in 0..frame_count {
-                    state.seek(frame as i64);
-                    wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
-                }
-                Ok(())
-            },
-        )?;
-
-        let gpu_candidate_case = run_case(
-            "preview_media.gpu_candidate_ready",
-            1,
-            gpu_candidate_threshold_ms,
-            || {
-                let _ = preview_service.gpu_preview_frame_for_state(&state);
-                Ok(())
-            },
-        )?;
-
-        let preview_diagnostics = preview_service.diagnostics();
-        let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
-        let preview_color_report = build_preview_color_health_report(
-            preview_diagnostics.color_health_summary(),
-            "preview_media_decode_cache",
-        );
-        let preview_decode_report = build_preview_decode_performance_report(
-            preview_diagnostics
-                .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
-            "preview_media_decode_cache",
-            APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
-        );
-        let preview_render_report = build_preview_render_performance_report(
-            preview_diagnostics
-                .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
-            "preview_media_decode_cache",
-            APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
-        );
-        Ok(PreviewMediaPerfReport {
-            scenario: "preview_media_decode_cache",
-            frames: frame_count,
-            cache_iterations,
-            media_color_issues,
-            preview_diagnostics,
-            preview_color_report,
-            preview_decode_report,
-            preview_render_report,
-            cases: vec![
-                first_frame_case,
-                cached_frame_case,
-                scrub_case,
-                sequential_case,
-                gpu_candidate_case,
-            ],
-        })
-    })();
+    let result = run_preview_media_access_mode_probe(
+        &root_dir,
+        &video_path,
+        "preview_media_decode_cache",
+        frame_count,
+        cache_iterations,
+        first_frame_threshold_ms,
+        cache_threshold_ms,
+        gpu_candidate_threshold_ms,
+        sequential_threshold_ms,
+        scrub_threshold_ms,
+        ready_timeout,
+    );
 
     let _ = fs::remove_dir_all(&root_dir);
 
@@ -834,6 +748,125 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
     write_report_if_needed(&report_json);
 
+    validate_preview_media_access_mode_report(&report, &report_json)?;
+
+    Ok(())
+}
+
+fn run_preview_media_access_mode_probe(
+    root_dir: &Path,
+    video_path: &Path,
+    scenario: &'static str,
+    frame_count: usize,
+    cache_iterations: usize,
+    first_frame_threshold_ms: u128,
+    cache_threshold_ms: u128,
+    gpu_candidate_threshold_ms: u128,
+    sequential_threshold_ms: u128,
+    scrub_threshold_ms: u128,
+    ready_timeout: Duration,
+) -> anyhow::Result<PreviewMediaPerfReport> {
+    let mut state = build_preview_media_perf_state(root_dir, video_path, frame_count)?;
+    let preview_service = AppUiPreviewService::new();
+
+    let first_frame_case = run_case(
+        "preview_media.first_frame_ready",
+        1,
+        first_frame_threshold_ms,
+        || {
+            state.seek(0);
+            wait_for_preview_ready(&preview_service, &state, ready_timeout)
+        },
+    )?;
+
+    let cached_frame_case = run_case(
+        "preview_media.cached_frame_refresh",
+        1,
+        cache_threshold_ms,
+        || {
+            for _ in 0..cache_iterations {
+                assert_preview_ready(&preview_service, &state)?;
+            }
+            Ok(())
+        },
+    )?;
+
+    let scrub_case = run_case(
+        "preview_media.active_scrub_ready_window",
+        1,
+        scrub_threshold_ms,
+        || {
+            for frame in 0..frame_count {
+                state.seek_with_source(frame as i64, TimelineSeekSource::PointerDrag);
+                wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+            }
+            state.seek(frame_count.saturating_sub(1) as i64);
+            Ok(())
+        },
+    )?;
+
+    let sequential_case = run_case(
+        "preview_media.sequential_frame_ready_window",
+        1,
+        sequential_threshold_ms,
+        || {
+            for frame in 0..frame_count {
+                state.seek(frame as i64);
+                wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+            }
+            Ok(())
+        },
+    )?;
+
+    let gpu_candidate_case = run_case(
+        "preview_media.gpu_candidate_ready",
+        1,
+        gpu_candidate_threshold_ms,
+        || {
+            let _ = preview_service.gpu_preview_frame_for_state(&state);
+            Ok(())
+        },
+    )?;
+
+    let preview_diagnostics = preview_service.diagnostics();
+    let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
+    let preview_color_report =
+        build_preview_color_health_report(preview_diagnostics.color_health_summary(), scenario);
+    let preview_decode_report = build_preview_decode_performance_report(
+        preview_diagnostics
+            .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+        scenario,
+        APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    );
+    let preview_render_report = build_preview_render_performance_report(
+        preview_diagnostics
+            .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
+        scenario,
+        APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+    );
+    Ok(PreviewMediaPerfReport {
+        scenario,
+        frames: frame_count,
+        cache_iterations,
+        media_color_issues,
+        preview_diagnostics,
+        preview_color_report,
+        preview_decode_report,
+        preview_render_report,
+        cases: vec![
+            first_frame_case,
+            cached_frame_case,
+            scrub_case,
+            sequential_case,
+            gpu_candidate_case,
+        ],
+    })
+}
+
+fn validate_preview_media_access_mode_report(
+    report: &PreviewMediaPerfReport,
+    report_json: &str,
+) -> anyhow::Result<()> {
     let failed_cases: Vec<_> =
         report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();
     if !failed_cases.is_empty() {
@@ -877,6 +910,69 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             report_json
         );
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "development preview media access-mode smoke for a real external media file; run manually"]
+fn preview_media_external_access_mode_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+
+    let Some(video_path) =
+        std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH").map(std::path::PathBuf::from)
+    else {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_external_access_mode\",\"skipped\":\"MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH not set\"}}"
+        );
+        return Ok(());
+    };
+    anyhow::ensure!(
+        video_path.exists(),
+        "MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH does not exist: {}",
+        video_path.display()
+    );
+
+    let frame_count = env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_FRAMES", 24, 2, 300);
+    let cache_iterations =
+        env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_CACHE_ITERS", 6, 1, 120);
+    let first_frame_threshold_ms =
+        env_u128("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_FIRST_READY_MS", 30_000);
+    let cache_threshold_ms = env_u128("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_CACHE_REFRESH_MS", 2_000);
+    let gpu_candidate_threshold_ms =
+        env_u128("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_GPU_CANDIDATE_MS", 2_000);
+    let sequential_threshold_ms =
+        env_u128("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_SEQUENCE_READY_MS", 30_000);
+    let scrub_threshold_ms = env_u128("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_SCRUB_READY_MS", 30_000);
+    let ready_timeout = Duration::from_millis(env_u128(
+        "MONDRIAN_PREVIEW_EXTERNAL_MEDIA_READY_TIMEOUT_MS",
+        30_000,
+    ) as u64);
+
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_preview_external_media_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+
+    let result = run_preview_media_access_mode_probe(
+        &root_dir,
+        &video_path,
+        "preview_media_external_access_mode",
+        frame_count,
+        cache_iterations,
+        first_frame_threshold_ms,
+        cache_threshold_ms,
+        gpu_candidate_threshold_ms,
+        sequential_threshold_ms,
+        scrub_threshold_ms,
+        ready_timeout,
+    );
+
+    let _ = fs::remove_dir_all(&root_dir);
+
+    let report = result?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    write_report_if_needed(&report_json);
+    validate_preview_media_access_mode_report(&report, &report_json)?;
 
     Ok(())
 }

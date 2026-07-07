@@ -27,6 +27,7 @@ $env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p m
 $env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo test -p mondrian-app preview_1080p2997_simulated_perf -- --ignored --nocapture
 $env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-1080p2997.jsonl'; cargo test -p mondrian-export export_1080p2997_simulated_perf -- --ignored --nocapture
 $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-media.jsonl'; cargo test -p mondrian-app preview_media_decode_cache_smoke -- --ignored --nocapture
+$env:MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH='E:\Video Projects\Mondrian Test\HEVC Samples\hevc_4k25P_main10_1.mp4'; $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-external-media.jsonl'; cargo test -p mondrian-app preview_media_external_access_mode_smoke -- --ignored --nocapture
 $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-playback.jsonl'; cargo test -p mondrian-app preview_media_continuous_playback_smoke -- --ignored --nocapture
 $env:MONDRIAN_PREVIEW_DECODE_FIXTURE='E:\media\sample-4k-hdr.mov'; $env:MONDRIAN_PREVIEW_DECODE_TIMESTAMP='1.0'; $env:MONDRIAN_PREVIEW_DECODE_MAX_WIDTH='1920'; $env:MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT='1080'; cargo test -p mondrian-media preview_decode_fixture_perf_smoke -- --ignored --nocapture
 $env:MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT='target/perf/renderer-gpu-output.jsonl'; cargo test -p mondrian-renderer gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture
@@ -116,6 +117,11 @@ non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 scrub path. The smoke fails closed when either `ScrubCursor` or
 `RandomAccessStillFrame` has no successful profile samples; a profile schema
 without exercised samples is not acceptable coverage.
+`preview_media_external_access_mode_smoke` runs the same access-mode probe and
+gates against a caller-supplied real media file via
+`MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH`. Use it for 4K HEVC/HDR, camera originals,
+and other slow-path samples; tune only its `MONDRIAN_PREVIEW_EXTERNAL_MEDIA_*`
+thresholds so the generated fixture smoke remains a stable fast regression gate.
 Continuous playback smoke also fails on playback-locality root causes such as
 `preview_decode_playback_session_not_reused` and
 `preview_decode_playback_without_locality`, even when the wall-clock window

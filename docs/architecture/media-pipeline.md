@@ -154,6 +154,10 @@ coverage is incomplete if the report merely defines both profiles. A common
 preview media smoke must fail when either access mode has zero successful
 profile samples, because cached-only coverage cannot prove the requested
 decode contract reached the media layer.
+Generated-fixture and external-real-media smokes must share the same
+access-mode probe and validation helpers. The external path exists to run 4K
+HEVC/HDR and camera-original samples through the exact same `ScrubCursor` and
+`RandomAccessStillFrame` gates, not to create a looser ad hoc benchmark.
 Playback diagnostics must also expose session reuse and forward reuse evidence.
 If playback source decodes repeatedly open sessions or never hit forward reuse,
 ring reuse, or cache reuse, the report should flag playback locality separately
