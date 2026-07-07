@@ -98,8 +98,9 @@ or hardware-decode work, high `seek_us` points at random-access/indexing/proxy
 work, and high `swscale_us`/`rgba_copy_us` points at the CPU RGBA boundary.
 Preview media perf artifacts also include a versioned `preview_decode_report`
 with checks, root causes, and actions. The default slow-frame budget is 50 ms;
-over-budget frames should be diagnosed from `preview_decode_report.root_causes`
-before changing renderer/color code.
+over-budget hard failures make the preview media smoke fail and should be
+diagnosed from `preview_decode_report.root_causes` before changing
+renderer/color code.
 Continuous playback smoke also fails on playback-locality root causes such as
 `preview_decode_playback_session_not_reused` and
 `preview_decode_playback_without_locality`, even when the wall-clock window

@@ -156,13 +156,18 @@ fn write_report_if_needed(report_json: &str) {
     }
 }
 
+fn preview_decode_hard_failures(report: &AppUiPreviewDecodePerformanceReport) -> Vec<&'static str> {
+    if report.verdict == AppUiPreviewDecodePerformanceVerdict::Fail {
+        vec!["preview_decode_report_failed"]
+    } else {
+        Vec::new()
+    }
+}
+
 fn preview_playback_decode_failures(
     report: &AppUiPreviewDecodePerformanceReport,
 ) -> Vec<&'static str> {
-    let mut failures = Vec::new();
-    if report.verdict == AppUiPreviewDecodePerformanceVerdict::Fail {
-        failures.push("preview_decode_report_failed");
-    }
+    let mut failures = preview_decode_hard_failures(report);
     for root in &report.root_causes {
         match root.code {
             "preview_decode_playback_session_not_reused"
@@ -753,6 +758,14 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
     if report.preview_color_report.verdict == AppUiPreviewColorHealthVerdict::Fail {
         anyhow::bail!("preview media color report failed: {report_json}");
     }
+    let decode_failures = preview_decode_hard_failures(&report.preview_decode_report);
+    if !decode_failures.is_empty() {
+        anyhow::bail!(
+            "preview media decode report failed: {:?}; report: {}",
+            decode_failures,
+            report_json
+        );
+    }
 
     Ok(())
 }
@@ -1205,6 +1218,49 @@ fn preview_color_report_marks_clean_float_linear_path() {
     assert_eq!(summary.legacy_reason_total, 0);
     assert!(summary.fully_float_linear);
     assert!(summary.gpu_path_ready);
+}
+
+#[test]
+fn preview_decode_hard_failures_include_failed_report() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 1,
+        decode_in_process_cpu_rgba_frames: 1,
+        decode_total_duration_us: 80_000,
+        decode_max_duration_us: 80_000,
+        decode_last_duration_us: 80_000,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                total_duration_us: 80_000,
+                max_duration_us: 80_000,
+                last_duration_us: 80_000,
+                session_opened_frames: 1,
+                stage_durations: PreviewDecodeStageDurations {
+                    packet_decode_us: 75_000,
+                    ..PreviewDecodeStageDurations::default()
+                },
+                max_frame_stage_durations: PreviewDecodeStageDurations {
+                    packet_decode_us: 75_000,
+                    ..PreviewDecodeStageDurations::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-random-access-hard-failure-test",
+        50_000,
+    );
+
+    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(
+        preview_decode_hard_failures(&report),
+        vec!["preview_decode_report_failed"]
+    );
 }
 
 #[test]
