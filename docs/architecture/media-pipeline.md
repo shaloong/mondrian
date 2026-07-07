@@ -47,6 +47,11 @@ surface.
 `PreviewDecodeAccessMode` intentionally has no default value, and serialized
 decode diagnostics must include it. Missing access-mode evidence is a diagnostic
 coverage bug, not a reason to assume still-frame semantics.
+`DecoderPool` cache and in-flight coalescing keys must include the requested
+access mode, source media path, file fingerprint, output dimensions, and source
+time in microseconds. A bare timeline frame number is not a media identity:
+the same frame index can represent different source times under different time
+bases, and relink/proxy/source path changes must not reuse stale RGBA frames.
 App preview scheduling preserves playback cursor locality. When more than one
 preview decode worker exists, worker 0 is a dedicated playback lane and the
 remaining workers are interactive lanes for scrub/still work. With only one

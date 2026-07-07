@@ -4,8 +4,8 @@
 
 use crate::cache::{FrameCache, RawVideoFrame};
 use crate::preview::{
-    decode_access_mode_rgba_scaled_cancellable, decode_still_frame_rgba, PreviewDecodeAccessMode,
-    RgbaFrame,
+    decode_access_mode_rgba_scaled_cancellable_with_fingerprint, decode_still_frame_rgba,
+    PreviewDecodeAccessMode, PreviewFileFingerprint, RgbaFrame,
 };
 use dashmap::DashMap;
 use lru::LruCache;
@@ -177,7 +177,9 @@ struct PrefetchTask {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RgbaFrameKey {
     asset_id: AssetId,
-    frame_num: u64,
+    path: PathBuf,
+    fingerprint: PreviewFileFingerprint,
+    source_micros: i64,
     width: u32,
     height: u32,
     access_mode: PreviewDecodeAccessMode,
@@ -402,9 +404,14 @@ impl DecoderPool {
     ) -> Result<Arc<RgbaFrame>> {
         self.metrics.rgba_requests.fetch_add(1, Ordering::Relaxed);
         let frame_num = timecode.frame.max(0) as u64;
+        let secs = timecode.to_secs().max(0.0);
+        let source_micros = source_time_micros(secs);
+        let fingerprint = PreviewFileFingerprint::capture(path.as_path());
         let key = RgbaFrameKey {
             asset_id,
-            frame_num,
+            path: path.clone(),
+            fingerprint,
+            source_micros,
             width: target_width,
             height: target_height,
             access_mode,
@@ -454,16 +461,15 @@ impl DecoderPool {
             frame_num
         );
 
-        let secs = timecode.to_secs().max(0.0);
-
         let started = Instant::now();
         let mut decode_task = self.preview_decode_runtime.spawn(async move {
-            decode_access_mode_rgba_scaled_cancellable(
+            decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
                 path.as_path(),
                 secs,
                 Some(target_width.max(1)),
                 Some(target_height.max(1)),
                 access_mode,
+                fingerprint,
                 || false,
             )
             .and_then(|outcome| match outcome {
@@ -495,9 +501,11 @@ impl DecoderPool {
                 _ = &mut timeout => {
                     decode_task.abort();
                     tracing::warn!(
-                        "MONDRIAN_DECODE_TIMEOUT_JSON={{\"asset_id\":\"{}\",\"frame\":{},\"secs\":{:.3},\"budget_ms\":{},\"target_width\":{},\"target_height\":{},\"reason\":\"decode timeout\"}}",
+                        "MONDRIAN_DECODE_TIMEOUT_JSON={{\"asset_id\":\"{}\",\"frame\":{},\"source_micros\":{},\"access_mode\":\"{}\",\"secs\":{:.3},\"budget_ms\":{},\"target_width\":{},\"target_height\":{},\"reason\":\"decode timeout\"}}",
                         asset_id,
                         frame_num,
+                        source_micros,
+                        access_mode.as_str(),
                         secs,
                         decode_timeout_ms,
                         target_width,
@@ -867,6 +875,10 @@ fn decode_timeout_budget_ms() -> u64 {
     })
 }
 
+fn source_time_micros(secs: f64) -> i64 {
+    (secs.max(0.0) * 1_000_000.0).round() as i64
+}
+
 fn rgba_to_yuv420p(frame: &RgbaFrame) -> Result<([Vec<u8>; 3], [u32; 3])> {
     let width = frame.width as usize;
     let height = frame.height as usize;
@@ -998,5 +1010,73 @@ mod tests {
         assert!(!snapshot.hardware_decode_active);
         assert!(!snapshot.zero_copy_active);
         assert!(snapshot.hw_accel_reason.contains("CPU RGBA decode"));
+    }
+
+    #[test]
+    fn rgba_frame_key_uses_source_time_not_bare_frame_number() {
+        let asset_id = AssetId::new();
+        let fingerprint = PreviewFileFingerprint {
+            len: Some(10),
+            modified_secs: Some(20),
+            modified_nanos: Some(30),
+        };
+        let at_one_second = TimeCode::new(24, Rational::new(1, 24));
+        let before_one_second = TimeCode::new(24, Rational::new(1, 30));
+
+        let first = RgbaFrameKey {
+            asset_id,
+            path: PathBuf::from("E:/media/source.mov"),
+            fingerprint,
+            source_micros: source_time_micros(at_one_second.to_secs()),
+            width: 1920,
+            height: 1080,
+            access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+        };
+        let second = RgbaFrameKey {
+            source_micros: source_time_micros(before_one_second.to_secs()),
+            ..first.clone()
+        };
+
+        assert_ne!(first.source_micros, second.source_micros);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn rgba_frame_key_isolates_path_fingerprint_and_access_mode() {
+        let base = RgbaFrameKey {
+            asset_id: AssetId::new(),
+            path: PathBuf::from("E:/media/source.mov"),
+            fingerprint: PreviewFileFingerprint {
+                len: Some(10),
+                modified_secs: Some(20),
+                modified_nanos: Some(30),
+            },
+            source_micros: 1_000_000,
+            width: 1920,
+            height: 1080,
+            access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+        };
+
+        assert_ne!(
+            base,
+            RgbaFrameKey {
+                path: PathBuf::from("E:/media/proxy.mov"),
+                ..base.clone()
+            }
+        );
+        assert_ne!(
+            base,
+            RgbaFrameKey {
+                fingerprint: PreviewFileFingerprint { len: Some(11), ..base.fingerprint },
+                ..base.clone()
+            }
+        );
+        assert_ne!(
+            base,
+            RgbaFrameKey {
+                access_mode: PreviewDecodeAccessMode::ScrubCursor,
+                ..base.clone()
+            }
+        );
     }
 }
