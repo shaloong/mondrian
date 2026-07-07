@@ -14,7 +14,7 @@ use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_media::{PreviewDecodeAccessMode, PreviewFileFingerprint};
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
-const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
+const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
 /// Stable identity for one decoded media preview request.
@@ -297,10 +297,9 @@ impl MediaPreviewJobQueueSender {
         }
 
         state.queue.push_back(QueuedMediaPreviewJob { job, priority });
-        // Workers have lane-specific eligibility: only worker 0 may take
-        // PlaybackCursor work. Wake all workers so a playback-only queue cannot
-        // be observed only by non-playback workers and remain stuck until the
-        // next enqueue.
+        // Workers have lane-specific eligibility. Wake all workers so a queued
+        // item for one lane cannot remain asleep behind workers that are
+        // waiting on a different lane.
         self.shared.changed.notify_all();
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch }
     }
@@ -432,8 +431,10 @@ pub(crate) fn media_preview_worker_count() -> usize {
 }
 
 pub(crate) fn media_preview_worker_count_for(parallelism: usize) -> usize {
-    if parallelism >= 6 {
+    if parallelism >= 8 {
         MEDIA_PREVIEW_MAX_DECODE_WORKERS
+    } else if parallelism >= 6 {
+        2
     } else {
         1
     }
@@ -443,6 +444,8 @@ pub(crate) fn media_preview_worker_count_for(parallelism: usize) -> usize {
 pub(crate) enum MediaPreviewWorkerLane {
     Any,
     Playback,
+    Scrub,
+    Still,
     Interactive,
 }
 
@@ -451,6 +454,8 @@ impl MediaPreviewWorkerLane {
         match self {
             Self::Any => true,
             Self::Playback => access_mode == PreviewDecodeAccessMode::PlaybackCursor,
+            Self::Scrub => access_mode == PreviewDecodeAccessMode::ScrubCursor,
+            Self::Still => access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame,
             Self::Interactive => access_mode != PreviewDecodeAccessMode::PlaybackCursor,
         }
     }
@@ -462,10 +467,13 @@ pub(crate) fn media_preview_worker_lane(
 ) -> MediaPreviewWorkerLane {
     if worker_count <= 1 {
         MediaPreviewWorkerLane::Any
-    } else if worker_index == 0 {
-        MediaPreviewWorkerLane::Playback
     } else {
-        MediaPreviewWorkerLane::Interactive
+        match worker_index {
+            0 => MediaPreviewWorkerLane::Playback,
+            1 if worker_count >= 3 => MediaPreviewWorkerLane::Scrub,
+            2 if worker_count >= 3 => MediaPreviewWorkerLane::Still,
+            _ => MediaPreviewWorkerLane::Interactive,
+        }
     }
 }
 
@@ -1465,6 +1473,43 @@ mod tests {
     }
 
     #[test]
+    fn media_preview_job_queue_splits_scrub_and_still_on_dedicated_lanes() {
+        let (sender, receiver) = media_preview_job_queue(2);
+        let still = test_media_key(1);
+        let scrub = test_media_key(2);
+        let mut still_job =
+            test_media_job(still.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
+        let mut scrub_job =
+            test_media_job(scrub.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
+
+        assert_eq!(
+            sender.enqueue(still_job, MediaPreviewRequestPriority::Current),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        assert_eq!(
+            sender.enqueue(scrub_job, MediaPreviewRequestPriority::Current),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+
+        let scrub_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Scrub)
+            .expect("scrub lane should skip still work");
+        assert_eq!(scrub_job.key, scrub);
+        assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
+
+        let still_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Still)
+            .expect("still lane should retain still work");
+        assert_eq!(still_job.key, still);
+        assert_eq!(
+            still_job.access_mode,
+            PreviewDecodeAccessMode::RandomAccessStillFrame
+        );
+    }
+
+    #[test]
     fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
         let (sender, receiver) = media_preview_job_queue(2);
         let promoted = test_media_key(1);
@@ -1627,7 +1672,9 @@ mod tests {
         assert_eq!(media_preview_worker_count_for(1), 1);
         assert_eq!(media_preview_worker_count_for(5), 1);
         assert_eq!(media_preview_worker_count_for(6), 2);
-        assert_eq!(media_preview_worker_count_for(32), 2);
+        assert_eq!(media_preview_worker_count_for(7), 2);
+        assert_eq!(media_preview_worker_count_for(8), 3);
+        assert_eq!(media_preview_worker_count_for(32), 3);
     }
 
     #[test]
@@ -1640,6 +1687,18 @@ mod tests {
         assert_eq!(
             media_preview_worker_lane(1, 2),
             MediaPreviewWorkerLane::Interactive
+        );
+        assert_eq!(
+            media_preview_worker_lane(0, 3),
+            MediaPreviewWorkerLane::Playback
+        );
+        assert_eq!(
+            media_preview_worker_lane(1, 3),
+            MediaPreviewWorkerLane::Scrub
+        );
+        assert_eq!(
+            media_preview_worker_lane(2, 3),
+            MediaPreviewWorkerLane::Still
         );
     }
 

@@ -112,6 +112,12 @@ preview decode job queue and worker-lane selection, because those policies are
 defined by access mode. The module must not own render plan evaluation, decode
 execution, color interpretation, or GPU/CPU frame conversion; those remain in
 the preview orchestrator and media/renderer layers.
+Worker-lane selection reserves CPU capacity instead of maximizing raw decode
+throughput. Single-worker systems use one `Any` lane; mid-range systems use
+separate `Playback` and non-playback `Interactive` lanes; systems with enough
+parallelism split `Playback`, `Scrub`, and `Still` lanes so exact still-frame
+requests cannot sit ahead of active playhead dragging, and playback prefetch
+cannot consume the only interactive decode lane.
 Preview completion has separate display and cache semantics. A decode result is
 `Current` only when it still matches pending visible work; same-generation
 results whose pending request was canceled or whose access mode has been
