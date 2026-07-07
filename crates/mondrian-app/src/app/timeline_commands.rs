@@ -65,6 +65,7 @@ impl AppState {
         self.sequence = Some(next);
         self.active_sequence_id = Some(sequence_id);
         self.playback = PlaybackState::Stopped;
+        self.settle_preview_access_source();
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         Ok(())
     }
@@ -185,6 +186,7 @@ impl AppState {
             self.active_sequence_id = Some(fallback_id);
             self.sequence = self.sequences.first().cloned();
             self.playback = PlaybackState::Stopped;
+            self.settle_preview_access_source();
             self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         }
         self.sequence_navigation_stack.retain(|id| *id != sequence_id);
@@ -263,6 +265,7 @@ impl AppState {
         if self.active_sequence_id == Some(sequence_id) {
             self.sequence = Some(after.clone());
             self.playback = PlaybackState::Stopped;
+            self.settle_preview_access_source();
         }
         self.record_sequence_snapshot_command("修改序列设置", before, after);
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
@@ -346,6 +349,7 @@ impl AppState {
         self.project_runtime_dir = None;
         self.asset_library = None;
         self.playback = PlaybackState::Stopped;
+        self.settle_preview_access_source();
         self.playback_buffering = false;
         self.dragging_asset = None;
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);

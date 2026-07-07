@@ -295,6 +295,7 @@ impl AppState {
         self.proxy_mode_assets = saved.proxy_mode_assets.into_iter().collect();
         self.project_settings = saved.settings;
         self.playback = PlaybackState::Stopped;
+        self.settle_preview_access_source();
         self.dragging_asset = None;
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         self.ensure_minimum_tracks();
@@ -404,6 +405,7 @@ impl AppState {
         self.project_runtime_dir = Some(runtime_root.clone());
         self.project_settings = project_settings;
         self.playback = PlaybackState::Stopped;
+        self.settle_preview_access_source();
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         self.proxy_mode_assets.clear();
 

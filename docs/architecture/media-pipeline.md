@@ -69,8 +69,10 @@ dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
 deterministic one-off work such as thumbnail stills lower to
 `RandomAccessStillFrame`. The timeline widget emits explicit seek source
 events, including a settled event on drag release, so preview scheduling does
-not infer stillness from wall-clock timeouts. New UI states must extend that
-intent layer instead of passing booleans or strategy flags into
+not infer stillness from wall-clock timeouts. Playback pause, stop, project
+switch, and natural end-of-playback transitions also settle the preview access
+source before the next non-playing viewer request. New UI states must extend
+that intent layer instead of passing booleans or strategy flags into
 `mondrian-media`.
 Playback cursor cancellation is cooperative but non-destructive to the playback
 decode session: a prefetch budget miss should not throw away the warmed

@@ -71,6 +71,7 @@ impl AppState {
 
     pub fn pause(&mut self) {
         let frames = self.current_frame();
+        self.settle_preview_access_source();
         self.playback_buffering = false;
         self.playback_frame_accumulator = 0.0;
         self.playback = PlaybackState::Paused { timecode_frames: frames };
@@ -83,6 +84,7 @@ impl AppState {
     }
 
     pub fn stop(&mut self) {
+        self.settle_preview_access_source();
         self.playback = PlaybackState::Stopped;
         self.playback_reached_end = false;
         self.playback_buffering = false;
@@ -97,6 +99,10 @@ impl AppState {
 
     pub fn seek(&mut self, frame: i64) {
         self.seek_with_source(frame, TimelineSeekSource::Settled);
+    }
+
+    pub(crate) fn settle_preview_access_source(&mut self) {
+        self.last_timeline_seek_source = TimelineSeekSource::Settled;
     }
 
     pub fn seek_with_source(&mut self, frame: i64, source: TimelineSeekSource) {
@@ -336,6 +342,7 @@ impl AppState {
 
         let end_frame = self.last_content_frame().max(0);
         if target_frame >= end_frame {
+            self.settle_preview_access_source();
             self.playback = PlaybackState::Paused { timecode_frames: end_frame };
             self.playback_reached_end = true;
             self.playback_buffering = false;
@@ -509,6 +516,26 @@ mod tests {
 
         state.seek(18);
         assert_eq!(state.current_frame(), 18);
+        assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
+    }
+
+    #[test]
+    fn pause_stop_and_reached_end_settle_preview_access_source() {
+        let mut state = state_with_sequence(5);
+
+        state.seek_with_source(2, TimelineSeekSource::PointerDrag);
+        state.play();
+        state.pause();
+        assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
+
+        state.seek_with_source(3, TimelineSeekSource::PointerDrag);
+        state.stop();
+        assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
+
+        state.seek_with_source(4, TimelineSeekSource::PointerDrag);
+        state.play();
+        let outcome = state.advance_playback_clock(Duration::from_secs(1));
+        assert_eq!(outcome.status, PlaybackAdvanceStatus::ReachedEnd);
         assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
     }
 
