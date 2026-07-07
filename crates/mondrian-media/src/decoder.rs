@@ -4,8 +4,8 @@
 
 use crate::cache::{FrameCache, RawVideoFrame};
 use crate::preview::{
-    decode_still_frame_rgba, decode_video_frame_for_access_mode_rgba_scaled_cancellable,
-    PreviewDecodeAccessMode, RgbaFrame,
+    decode_access_mode_rgba_scaled_cancellable, decode_still_frame_rgba, PreviewDecodeAccessMode,
+    RgbaFrame,
 };
 use dashmap::DashMap;
 use lru::LruCache;
@@ -333,7 +333,7 @@ impl DecoderPool {
         target_width: u32,
         target_height: u32,
     ) -> Result<Arc<RgbaFrame>> {
-        self.get_video_frame_rgba_for_access_mode(
+        self.get_rgba_for_access_mode(
             asset_id,
             path,
             timecode,
@@ -344,13 +344,54 @@ impl DecoderPool {
         .await
     }
 
-    /// Get an RGBA preview frame for a specific decode access mode.
+    /// Get one playback-cursor preview frame as CPU RGBA memory.
     ///
-    /// This is the access-mode-aware RGBA seam for app playback/scrub adapters.
-    /// The current implementation still returns CPU RGBA memory, but callers no
-    /// longer have to pretend playback, scrubbing, and still-frame extraction
-    /// are the same workload.
-    pub async fn get_video_frame_rgba_for_access_mode(
+    /// Playback cursor requests are sustained timeline playback/prefetch work.
+    /// They are kept as a distinct public contract so future hardware-resident
+    /// decode can specialize without changing callers.
+    pub async fn get_playback_cursor_frame_rgba(
+        &self,
+        asset_id: AssetId,
+        path: PathBuf,
+        timecode: TimeCode,
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<Arc<RgbaFrame>> {
+        self.get_rgba_for_access_mode(
+            asset_id,
+            path,
+            timecode,
+            target_width,
+            target_height,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        )
+        .await
+    }
+
+    /// Get one scrub-cursor preview frame as CPU RGBA memory.
+    ///
+    /// Scrub cursor requests are latest-wins interactive navigation work and
+    /// should prioritize cancellation and seek latency over forward locality.
+    pub async fn get_scrub_cursor_frame_rgba(
+        &self,
+        asset_id: AssetId,
+        path: PathBuf,
+        timecode: TimeCode,
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<Arc<RgbaFrame>> {
+        self.get_rgba_for_access_mode(
+            asset_id,
+            path,
+            timecode,
+            target_width,
+            target_height,
+            PreviewDecodeAccessMode::ScrubCursor,
+        )
+        .await
+    }
+
+    async fn get_rgba_for_access_mode(
         &self,
         asset_id: AssetId,
         path: PathBuf,
@@ -417,7 +458,7 @@ impl DecoderPool {
 
         let started = Instant::now();
         let mut decode_task = self.preview_decode_runtime.spawn(async move {
-            decode_video_frame_for_access_mode_rgba_scaled_cancellable(
+            decode_access_mode_rgba_scaled_cancellable(
                 path.as_path(),
                 secs,
                 Some(target_width.max(1)),
@@ -698,13 +739,12 @@ impl DecoderPool {
 
                 let tc = TimeCode::new(start_timecode.frame + offset as i64, tb);
                 if let Err(err) = pool
-                    .get_video_frame_rgba_for_access_mode(
+                    .get_playback_cursor_frame_rgba(
                         asset_id,
                         path.clone(),
                         tc,
                         target_width.max(1),
                         target_height.max(1),
-                        PreviewDecodeAccessMode::PlaybackCursor,
                     )
                     .await
                 {

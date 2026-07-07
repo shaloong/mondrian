@@ -5314,27 +5314,15 @@ fn decode_media_preview(
     let signature = media_preview_frame_signature(&job.key);
     let priority = job.priority;
     let access_mode = job.access_mode;
-    let decode_outcome = match job.key.fingerprint {
-        Some(fingerprint) => {
-            mondrian_media::decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint(
-                job.key.path.as_path(),
-                job.source_secs,
-                Some(job.key.target_width.max(1)),
-                Some(job.key.target_height.max(1)),
-                access_mode,
-                fingerprint,
-                should_cancel,
-            )
-        }
-        None => mondrian_media::decode_video_frame_for_access_mode_rgba_scaled_cancellable(
-            job.key.path.as_path(),
-            job.source_secs,
-            Some(job.key.target_width.max(1)),
-            Some(job.key.target_height.max(1)),
-            access_mode,
-            should_cancel,
-        ),
-    };
+    let decode_outcome = decode_media_preview_for_access_mode(
+        job.key.path.as_path(),
+        job.source_secs,
+        Some(job.key.target_width.max(1)),
+        Some(job.key.target_height.max(1)),
+        access_mode,
+        job.key.fingerprint,
+        should_cancel,
+    );
     match decode_outcome {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
@@ -5394,6 +5382,76 @@ fn decode_media_preview(
             color_diagnostics: None,
             color_stage_diagnostics: None,
         },
+    }
+}
+
+fn decode_media_preview_for_access_mode(
+    path: &Path,
+    source_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    access_mode: PreviewDecodeAccessMode,
+    fingerprint: Option<PreviewFileFingerprint>,
+    should_cancel: impl Fn() -> bool,
+) -> mondrian_core::Result<PreviewDecodeOutcome> {
+    match (access_mode, fingerprint) {
+        (PreviewDecodeAccessMode::PlaybackCursor, Some(fingerprint)) => {
+            mondrian_media::decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
+                path,
+                source_secs,
+                max_width,
+                max_height,
+                fingerprint,
+                should_cancel,
+            )
+        }
+        (PreviewDecodeAccessMode::PlaybackCursor, None) => {
+            mondrian_media::decode_playback_cursor_frame_rgba_scaled_cancellable(
+                path,
+                source_secs,
+                max_width,
+                max_height,
+                should_cancel,
+            )
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, Some(fingerprint)) => {
+            mondrian_media::decode_scrub_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
+                path,
+                source_secs,
+                max_width,
+                max_height,
+                fingerprint,
+                should_cancel,
+            )
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, None) => {
+            mondrian_media::decode_scrub_cursor_frame_rgba_scaled_cancellable(
+                path,
+                source_secs,
+                max_width,
+                max_height,
+                should_cancel,
+            )
+        }
+        (PreviewDecodeAccessMode::RandomAccessStillFrame, Some(fingerprint)) => {
+            mondrian_media::decode_still_frame_rgba_scaled_cancellable_with_fingerprint(
+                path,
+                source_secs,
+                max_width,
+                max_height,
+                fingerprint,
+                should_cancel,
+            )
+        }
+        (PreviewDecodeAccessMode::RandomAccessStillFrame, None) => {
+            mondrian_media::decode_still_frame_rgba_scaled_cancellable(
+                path,
+                source_secs,
+                max_width,
+                max_height,
+                should_cancel,
+            )
+        }
     }
 }
 

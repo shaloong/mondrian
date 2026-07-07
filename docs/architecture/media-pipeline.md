@@ -23,10 +23,14 @@ NLEs separate playback, interactive navigation, and precise still extraction:
 - `PreviewDecodeAccessMode::PlaybackCursor` is for sustained timeline playback
   and forward prefetch. It is mostly-forward, should keep decoder/session
   locality, and is the seam where hardware decode, low-copy P010/NV12
-  residency, deadline/drop policy, and GPU input transforms belong.
+  residency, deadline/drop policy, and GPU input transforms belong. Public
+  callers must enter through `decode_playback_cursor_frame_*` helpers or
+  `DecoderPool::get_playback_cursor_frame_rgba`.
 - `PreviewDecodeAccessMode::ScrubCursor` is for latest-wins playhead dragging,
   jog, and shuttle. It prioritizes cancellation and seek latency over warming a
-  long forward queue.
+  long forward queue. Public callers must enter through
+  `decode_scrub_cursor_frame_*` helpers or
+  `DecoderPool::get_scrub_cursor_frame_rgba`.
 - `PreviewDecodeAccessMode::RandomAccessStillFrame` is for deterministic still
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
   one-off requests. Public `decode_still_frame_*` helpers are explicitly this
@@ -36,7 +40,10 @@ These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app
 scheduling distinguish the requested access mode. Future hardware-resident
 decode must specialize behind these contracts instead of adding app-layer flags
-or treating playback as repeated random-access still decode.
+or treating playback as repeated random-access still decode. The generic
+access-mode router is intentionally media-internal so public APIs describe the
+workload rather than exposing a strategy enum as a long-lived compatibility
+surface.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and

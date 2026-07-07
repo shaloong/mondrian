@@ -435,14 +435,99 @@ pub fn decode_still_frame_rgba_scaled_cancellable_with_fingerprint(
     )
 }
 
-/// Decode a preview frame for a specific access mode using a caller-supplied
-/// file fingerprint.
+/// Decode one playback-cursor preview frame using a caller-supplied file fingerprint.
 ///
-/// This is the preferred preview entry point for app scheduling code because it
-/// preserves the distinction between playback, scrubbing, and random still
-/// access. The returned diagnostics echo the requested mode even when the frame
-/// is served from cache.
-pub fn decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint(
+/// Playback cursor requests represent sustained timeline playback and forward
+/// prefetch. Callers should use this entry point instead of passing a generic
+/// access-mode flag so hardware decode, low-copy residency, deadline/drop
+/// policy, and GPU input transforms can specialize behind a stable contract.
+pub fn decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
+    path: &Path,
+    timestamp_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    fingerprint: PreviewFileFingerprint,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
+    decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        fingerprint,
+        should_cancel,
+    )
+}
+
+/// Decode one playback-cursor preview frame.
+///
+/// Prefer
+/// [`decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint`]
+/// when the caller already resolved source/proxy file metadata.
+pub fn decode_playback_cursor_frame_rgba_scaled_cancellable(
+    path: &Path,
+    timestamp_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
+    decode_access_mode_rgba_scaled_cancellable(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        should_cancel,
+    )
+}
+
+/// Decode one scrub-cursor preview frame using a caller-supplied file fingerprint.
+///
+/// Scrub cursor requests are latest-wins playhead navigation work. They must
+/// favor cancellation and seek latency over forward queue warmth.
+pub fn decode_scrub_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
+    path: &Path,
+    timestamp_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    fingerprint: PreviewFileFingerprint,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
+    decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        PreviewDecodeAccessMode::ScrubCursor,
+        fingerprint,
+        should_cancel,
+    )
+}
+
+/// Decode one scrub-cursor preview frame.
+///
+/// Prefer
+/// [`decode_scrub_cursor_frame_rgba_scaled_cancellable_with_fingerprint`]
+/// when the caller already resolved source/proxy file metadata.
+pub fn decode_scrub_cursor_frame_rgba_scaled_cancellable(
+    path: &Path,
+    timestamp_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
+    decode_access_mode_rgba_scaled_cancellable(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        PreviewDecodeAccessMode::ScrubCursor,
+        should_cancel,
+    )
+}
+
+pub(crate) fn decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
     path: &Path,
     timestamp_secs: f64,
     max_width: Option<u32>,
@@ -462,12 +547,7 @@ pub fn decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerpri
     )
 }
 
-/// Decode a preview frame for a specific access mode.
-///
-/// Prefer
-/// [`decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint`]
-/// when the caller already resolved source/proxy file metadata.
-pub fn decode_video_frame_for_access_mode_rgba_scaled_cancellable(
+pub(crate) fn decode_access_mode_rgba_scaled_cancellable(
     path: &Path,
     timestamp_secs: f64,
     max_width: Option<u32>,
@@ -1606,8 +1686,8 @@ fn convert_decoded_to_rgba(
 mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        decode_still_frame_rgba_scaled, decode_still_frame_rgba_scaled_cancellable,
-        decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint, duration_us,
+        decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint,
+        decode_still_frame_rgba_scaled, decode_still_frame_rgba_scaled_cancellable, duration_us,
         preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeAccessMode,
         PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
         PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
@@ -1933,23 +2013,21 @@ mod tests {
         for index in 0..frame_count {
             let timestamp_secs = start_secs + index as f64 / frame_rate;
             let frame_started = Instant::now();
-            let frame =
-                match decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint(
-                    &path,
-                    timestamp_secs,
-                    max_width,
-                    max_height,
-                    access_mode,
-                    fingerprint,
-                    || false,
-                )
-                .expect("decode preview fixture frame")
-                {
-                    PreviewDecodeOutcome::Frame(frame) => frame,
-                    PreviewDecodeOutcome::Canceled => {
-                        panic!("playback sequence perf decode canceled")
-                    }
-                };
+            let frame = match decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
+                &path,
+                timestamp_secs,
+                max_width,
+                max_height,
+                fingerprint,
+                || false,
+            )
+            .expect("decode preview fixture frame")
+            {
+                PreviewDecodeOutcome::Frame(frame) => frame,
+                PreviewDecodeOutcome::Canceled => {
+                    panic!("playback sequence perf decode canceled")
+                }
+            };
             let elapsed_us = duration_us(frame_started.elapsed());
             total_us = total_us.saturating_add(elapsed_us);
             max_us = max_us.max(elapsed_us);
