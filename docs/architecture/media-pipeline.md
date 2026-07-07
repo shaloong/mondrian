@@ -74,7 +74,10 @@ turns random access or latest-wins interaction into hidden background playback
 decode and can keep project shutdown waiting on invisible media. In the app
 preview scheduler, `MediaPreviewRequestPriority::Prefetch` is therefore valid
 only with `PreviewDecodeAccessMode::PlaybackCursor`; non-playback prefetch
-requests are rejected at admission and surfaced as structured diagnostics.
+requests are rejected at admission and surfaced as structured diagnostics. The
+worker transport queue repeats this invariant and derives priority only from
+`MediaPreviewJob::priority`; queue callers must not pass a second priority value
+that can drift from the job payload.
 The app preview service owns worker thread lifetimes. Workers are joined during
 service shutdown after the job queue is closed, and each worker explicitly drops
 its thread-local media decode sessions before exit. Thread-local FFmpeg decoder

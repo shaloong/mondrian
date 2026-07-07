@@ -281,6 +281,7 @@ impl AppUiPreviewService {
             render_max_frame_stage_durations: self.metrics.render_max_frame_stage_durations.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
+            queue_invalid_access_mode_drops: self.metrics.queue_invalid_access_mode_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
             queue_canceled_jobs: self.metrics.queue_canceled_jobs.get(),
             queue_pruned_obsolete_jobs: self.metrics.queue_pruned_obsolete_jobs.get(),
@@ -1612,6 +1613,8 @@ pub struct AppUiPreviewDiagnostics {
     pub enqueued_jobs: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
     pub queue_full_drops: u64,
+    /// Media preview jobs rejected by the worker queue for invalid priority/access-mode pairs.
+    pub queue_invalid_access_mode_drops: u64,
     /// Queued prefetch jobs evicted so current-frame decode work can run.
     pub queue_evicted_prefetch_jobs: u64,
     /// Queued jobs removed because their scheduler-side pending request was canceled.
@@ -2053,6 +2056,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub enqueued_jobs: u64,
     /// Jobs dropped because the bounded worker queue was full.
     pub queue_full_drops: u64,
+    /// Jobs rejected by the worker queue for invalid priority/access-mode pairs.
+    pub queue_invalid_access_mode_drops: u64,
     /// Queued prefetch jobs evicted so current-frame decode can run.
     pub queue_evicted_prefetch_jobs: u64,
     /// Queued jobs removed because their scheduler-side pending request was canceled.
@@ -2531,6 +2536,13 @@ pub fn build_preview_decode_performance_report(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             summary.queue_full_drops,
+            0,
+        );
+        push_decode_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_queue_invalid_access_mode_drops",
+            summary.queue_invalid_access_mode_drops,
             0,
         );
         push_decode_max_check(
@@ -3129,6 +3141,23 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "reduce_preview_worker_transport_backpressure",
             "Fix preview worker transport backpressure so scheduler-accepted current-frame work cannot be dropped after admission.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+    if summary.queue_invalid_access_mode_drops > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_queue_invalid_access_mode_drop",
+            format!(
+                "queue_invalid_access_mode_drops={} enqueued_jobs={} scheduler_dropped_invalid_access_mode_requests={}",
+                summary.queue_invalid_access_mode_drops,
+                summary.enqueued_jobs,
+                summary.scheduler.dropped_invalid_access_mode_requests
+            ),
+            "fix_preview_access_mode_admission",
+            "Ensure invalid priority/access-mode pairs are rejected before worker-queue transport.",
             AppUiPreviewDecodePerformanceSeverity::Fail,
         );
     }
@@ -3940,6 +3969,7 @@ impl AppUiPreviewDiagnostics {
             prefetch_queue_wait_max_us: self.decode_prefetch_queue_wait_max_us,
             enqueued_jobs: self.enqueued_jobs,
             queue_full_drops: self.queue_full_drops,
+            queue_invalid_access_mode_drops: self.queue_invalid_access_mode_drops,
             queue_evicted_prefetch_jobs: self.queue_evicted_prefetch_jobs,
             queue_canceled_jobs: self.queue_canceled_jobs,
             queue_pruned_obsolete_jobs: self.queue_pruned_obsolete_jobs,
@@ -4896,7 +4926,7 @@ impl AppUiPreviewService {
             let pruned = self.jobs.prune_obsolete_jobs(generation) as u64;
             add_cell(&self.metrics.queue_pruned_obsolete_jobs, pruned);
         }
-        match self.jobs.enqueue(job, priority) {
+        match self.jobs.enqueue(job) {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch } => {
                 bump(&self.metrics.enqueued_jobs);
                 if let Some(evicted_key) = evicted_prefetch {
@@ -4915,6 +4945,17 @@ impl AppUiPreviewService {
                     asset_id = %key.asset_id,
                     source_frame = key.source_frame,
                     "viewer preview queue full; dropping media preview request"
+                );
+            }
+            MediaPreviewJobEnqueueStatus::DroppedInvalidAccessMode => {
+                bump(&self.metrics.queue_invalid_access_mode_drops);
+                self.scheduler.cancel(&key);
+                tracing::warn!(
+                    asset_id = %key.asset_id,
+                    source_frame = key.source_frame,
+                    priority = ?priority,
+                    access_mode = access_mode.as_str(),
+                    "viewer preview queue rejected invalid priority/access-mode pair"
                 );
             }
             MediaPreviewJobEnqueueStatus::Closed => {
@@ -5111,6 +5152,7 @@ struct AppUiPreviewMetrics {
     render_max_frame_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
+    queue_invalid_access_mode_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
     queue_canceled_jobs: Cell<u64>,
     queue_pruned_obsolete_jobs: Cell<u64>,
@@ -6837,6 +6879,7 @@ mod tests {
             decode_total_duration_us: 12_000,
             decode_max_duration_us: 12_000,
             decode_last_duration_us: 12_000,
+            queue_invalid_access_mode_drops: 1,
             scheduler: MediaPreviewSchedulerDiagnostics {
                 dropped_invalid_access_mode_requests: 2,
                 ..MediaPreviewSchedulerDiagnostics::default()
@@ -6857,10 +6900,21 @@ mod tests {
                 && check.observed == 2
                 && check.limit == Some(0)
         }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_queue_invalid_access_mode_drops"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 1
+                && check.limit == Some(0)
+        }));
         assert!(report.root_causes.iter().any(|root| {
             root.code == "preview_decode_invalid_access_mode_request"
                 && root.area == AppUiPreviewDecodePerformanceArea::Scheduling
                 && root.evidence.contains("dropped_invalid_access_mode_requests=2")
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_queue_invalid_access_mode_drop"
+                && root.area == AppUiPreviewDecodePerformanceArea::Scheduling
+                && root.evidence.contains("queue_invalid_access_mode_drops=1")
         }));
         assert!(report
             .actions
@@ -9418,17 +9472,14 @@ mod tests {
             MediaPreviewRequestStatus::Scheduled
         );
         assert_eq!(
-            service.jobs.enqueue(
-                MediaPreviewJob {
-                    key: key.clone(),
-                    source_secs: 1.0,
-                    generation,
-                    priority: MediaPreviewRequestPriority::Current,
-                    access_mode: PreviewDecodeAccessMode::ScrubCursor,
-                    enqueued_at: Instant::now(),
-                },
-                MediaPreviewRequestPriority::Current,
-            ),
+            service.jobs.enqueue(MediaPreviewJob {
+                key: key.clone(),
+                source_secs: 1.0,
+                generation,
+                priority: MediaPreviewRequestPriority::Current,
+                access_mode: PreviewDecodeAccessMode::ScrubCursor,
+                enqueued_at: Instant::now(),
+            }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         service.media_cache.borrow_mut().insert(key.clone(), test_media_frame(1));

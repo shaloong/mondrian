@@ -241,6 +241,7 @@ pub(crate) enum MediaPreviewJobEnqueueStatus {
         evicted_prefetch: Option<MediaPreviewKey>,
     },
     DroppedFull,
+    DroppedInvalidAccessMode,
     Closed,
 }
 
@@ -295,14 +296,14 @@ impl MediaPreviewJobQueueSender {
         before.saturating_sub(state.queue.len())
     }
 
-    pub(crate) fn enqueue(
-        &self,
-        job: MediaPreviewJob,
-        priority: MediaPreviewRequestPriority,
-    ) -> MediaPreviewJobEnqueueStatus {
+    pub(crate) fn enqueue(&self, job: MediaPreviewJob) -> MediaPreviewJobEnqueueStatus {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         if state.closed {
             return MediaPreviewJobEnqueueStatus::Closed;
+        }
+        let priority = job.priority;
+        if !priority.accepts_access_mode(job.access_mode) {
+            return MediaPreviewJobEnqueueStatus::DroppedInvalidAccessMode;
         }
 
         let mut evicted_prefetch = None;
@@ -1435,16 +1436,32 @@ mod tests {
             test_media_job(current.clone(), 2.0, MediaPreviewRequestPriority::Current);
 
         assert_eq!(
-            sender.enqueue(prefetch_job, MediaPreviewRequestPriority::Prefetch),
+            sender.enqueue(prefetch_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(current_job, MediaPreviewRequestPriority::Current),
+            sender.enqueue(current_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: Some(prefetch) }
         );
 
         let next = receiver.recv().expect("queued current job");
         assert_eq!(next.key, current);
+    }
+
+    #[test]
+    fn media_preview_job_queue_rejects_non_playback_prefetch_jobs() {
+        let (sender, receiver) = media_preview_job_queue(2);
+        let key = test_media_key(1);
+        let mut job = test_media_job(key, 1.0, MediaPreviewRequestPriority::Prefetch);
+        job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
+
+        assert_eq!(
+            sender.enqueue(job),
+            MediaPreviewJobEnqueueStatus::DroppedInvalidAccessMode
+        );
+
+        sender.close();
+        assert!(receiver.recv().is_none());
     }
 
     #[test]
@@ -1455,32 +1472,27 @@ mod tests {
         let second_prefetch = test_media_key(3);
 
         assert_eq!(
-            sender.enqueue(
-                test_media_job(
-                    first_prefetch.clone(),
-                    1.0,
-                    MediaPreviewRequestPriority::Prefetch,
-                ),
+            sender.enqueue(test_media_job(
+                first_prefetch.clone(),
+                1.0,
                 MediaPreviewRequestPriority::Prefetch,
-            ),
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(
-                test_media_job(current.clone(), 2.0, MediaPreviewRequestPriority::Current),
-                MediaPreviewRequestPriority::Current,
-            ),
+            sender.enqueue(test_media_job(
+                current.clone(),
+                2.0,
+                MediaPreviewRequestPriority::Current
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(
-                test_media_job(
-                    second_prefetch.clone(),
-                    3.0,
-                    MediaPreviewRequestPriority::Prefetch,
-                ),
+            sender.enqueue(test_media_job(
+                second_prefetch.clone(),
+                3.0,
                 MediaPreviewRequestPriority::Prefetch,
-            ),
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1505,11 +1517,11 @@ mod tests {
         still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
 
         assert_eq!(
-            sender.enqueue(playback_job, MediaPreviewRequestPriority::Current),
+            sender.enqueue(playback_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(still_job, MediaPreviewRequestPriority::Current),
+            sender.enqueue(still_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1535,11 +1547,11 @@ mod tests {
         playback_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
 
         assert_eq!(
-            sender.enqueue(scrub_job, MediaPreviewRequestPriority::Current),
+            sender.enqueue(scrub_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(playback_job, MediaPreviewRequestPriority::Prefetch),
+            sender.enqueue(playback_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1566,11 +1578,11 @@ mod tests {
         scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
 
         assert_eq!(
-            sender.enqueue(still_job, MediaPreviewRequestPriority::Current),
+            sender.enqueue(still_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(scrub_job, MediaPreviewRequestPriority::Current),
+            sender.enqueue(scrub_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1597,21 +1609,19 @@ mod tests {
         let other_prefetch = test_media_key(2);
 
         assert_eq!(
-            sender.enqueue(
-                test_media_job(promoted.clone(), 1.0, MediaPreviewRequestPriority::Prefetch),
-                MediaPreviewRequestPriority::Prefetch,
-            ),
+            sender.enqueue(test_media_job(
+                promoted.clone(),
+                1.0,
+                MediaPreviewRequestPriority::Prefetch
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(
-                test_media_job(
-                    other_prefetch.clone(),
-                    2.0,
-                    MediaPreviewRequestPriority::Prefetch,
-                ),
+            sender.enqueue(test_media_job(
+                other_prefetch.clone(),
+                2.0,
                 MediaPreviewRequestPriority::Prefetch,
-            ),
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1655,15 +1665,12 @@ mod tests {
         let key = test_media_key(1);
 
         assert_eq!(
-            sender.enqueue(
-                test_media_job_with_generation(
-                    key.clone(),
-                    1.0,
-                    2,
-                    MediaPreviewRequestPriority::Current,
-                ),
+            sender.enqueue(test_media_job_with_generation(
+                key.clone(),
+                1.0,
+                2,
                 MediaPreviewRequestPriority::Current,
-            ),
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1703,53 +1710,41 @@ mod tests {
         let current = test_media_key(4);
 
         assert_eq!(
-            sender.enqueue(
-                test_media_job_with_generation(
-                    old_current.clone(),
-                    1.0,
-                    1,
-                    MediaPreviewRequestPriority::Current,
-                ),
+            sender.enqueue(test_media_job_with_generation(
+                old_current.clone(),
+                1.0,
+                1,
                 MediaPreviewRequestPriority::Current,
-            ),
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(
-                test_media_job_with_generation(
-                    old_prefetch.clone(),
-                    2.0,
-                    1,
-                    MediaPreviewRequestPriority::Prefetch,
-                ),
+            sender.enqueue(test_media_job_with_generation(
+                old_prefetch.clone(),
+                2.0,
+                1,
                 MediaPreviewRequestPriority::Prefetch,
-            ),
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(
-                test_media_job_with_generation(
-                    fresh_prefetch.clone(),
-                    3.0,
-                    3,
-                    MediaPreviewRequestPriority::Prefetch,
-                ),
+            sender.enqueue(test_media_job_with_generation(
+                fresh_prefetch.clone(),
+                3.0,
+                3,
                 MediaPreviewRequestPriority::Prefetch,
-            ),
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
         assert_eq!(sender.prune_obsolete_jobs(3), 2);
         assert_eq!(
-            sender.enqueue(
-                test_media_job_with_generation(
-                    current.clone(),
-                    4.0,
-                    3,
-                    MediaPreviewRequestPriority::Current,
-                ),
+            sender.enqueue(test_media_job_with_generation(
+                current.clone(),
+                4.0,
+                3,
                 MediaPreviewRequestPriority::Current,
-            ),
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1764,24 +1759,27 @@ mod tests {
         let retained = test_media_key(2);
 
         assert_eq!(
-            sender.enqueue(
-                test_media_job(canceled.clone(), 1.0, MediaPreviewRequestPriority::Prefetch),
-                MediaPreviewRequestPriority::Prefetch,
-            ),
+            sender.enqueue(test_media_job(
+                canceled.clone(),
+                1.0,
+                MediaPreviewRequestPriority::Prefetch
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(
-                test_media_job(retained.clone(), 2.0, MediaPreviewRequestPriority::Prefetch),
-                MediaPreviewRequestPriority::Prefetch,
-            ),
+            sender.enqueue(test_media_job(
+                retained.clone(),
+                2.0,
+                MediaPreviewRequestPriority::Prefetch
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(
-                test_media_job(canceled.clone(), 3.0, MediaPreviewRequestPriority::Current),
-                MediaPreviewRequestPriority::Current,
-            ),
+            sender.enqueue(test_media_job(
+                canceled.clone(),
+                3.0,
+                MediaPreviewRequestPriority::Current
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1827,17 +1825,19 @@ mod tests {
         let second = test_media_key(2);
 
         assert_eq!(
-            sender.enqueue(
-                test_media_job(first, 1.0, MediaPreviewRequestPriority::Prefetch),
-                MediaPreviewRequestPriority::Prefetch,
-            ),
+            sender.enqueue(test_media_job(
+                first,
+                1.0,
+                MediaPreviewRequestPriority::Prefetch
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
-            sender.enqueue(
-                test_media_job(second, 2.0, MediaPreviewRequestPriority::Prefetch),
-                MediaPreviewRequestPriority::Prefetch,
-            ),
+            sender.enqueue(test_media_job(
+                second,
+                2.0,
+                MediaPreviewRequestPriority::Prefetch
+            )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
@@ -1846,10 +1846,11 @@ mod tests {
 
         assert!(receiver.recv().is_none());
         assert_eq!(
-            sender.enqueue(
-                test_media_job(test_media_key(3), 3.0, MediaPreviewRequestPriority::Current),
-                MediaPreviewRequestPriority::Current,
-            ),
+            sender.enqueue(test_media_job(
+                test_media_key(3),
+                3.0,
+                MediaPreviewRequestPriority::Current
+            )),
             MediaPreviewJobEnqueueStatus::Closed
         );
     }
