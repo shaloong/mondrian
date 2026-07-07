@@ -13,7 +13,7 @@ use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, JobId, Rational, Ti
 use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
-use mondrian_media::decode_video_frame_at_time_rgba_scaled;
+use mondrian_media::decode_still_frame_rgba_scaled;
 use mondrian_media::VideoColorDiagnosticIssueAggregate;
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
@@ -2718,9 +2718,8 @@ fn decode_video_layer_scaled(
     width: u32,
     height: u32,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
-    let decoded =
-        decode_video_frame_at_time_rgba_scaled(path, source_secs, Some(width), Some(height))
-            .map_err(|err| format!("asset={} path={} err={}", asset_id, path.display(), err))?;
+    let decoded = decode_still_frame_rgba_scaled(path, source_secs, Some(width), Some(height))
+        .map_err(|err| format!("asset={} path={} err={}", asset_id, path.display(), err))?;
     let decoded_width = decoded.width;
     let decoded_height = decoded.height;
     let source = CpuEncodedColorFrame::source_rgba8_shared(

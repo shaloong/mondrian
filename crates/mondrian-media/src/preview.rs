@@ -351,21 +351,24 @@ impl RgbaFrame {
     }
 }
 
-pub fn decode_first_video_frame_rgba(path: &Path) -> Result<RgbaFrame> {
-    decode_video_frame_at_time_rgba_scaled(path, 0.0, None, None)
+/// Decode the first video frame through the random-access still-frame path.
+pub fn decode_first_still_frame_rgba(path: &Path) -> Result<RgbaFrame> {
+    decode_still_frame_rgba_scaled(path, 0.0, None, None)
 }
 
-pub fn decode_video_frame_at_time_rgba(path: &Path, timestamp_secs: f64) -> Result<RgbaFrame> {
-    decode_video_frame_at_time_rgba_scaled(path, timestamp_secs, None, None)
+/// Decode one deterministic still frame as CPU RGBA8.
+pub fn decode_still_frame_rgba(path: &Path, timestamp_secs: f64) -> Result<RgbaFrame> {
+    decode_still_frame_rgba_scaled(path, timestamp_secs, None, None)
 }
 
-pub fn decode_video_frame_at_time_rgba_scaled(
+/// Decode one deterministic still frame as scaled CPU RGBA8.
+pub fn decode_still_frame_rgba_scaled(
     path: &Path,
     timestamp_secs: f64,
     max_width: Option<u32>,
     max_height: Option<u32>,
 ) -> Result<RgbaFrame> {
-    match decode_video_frame_at_time_outcome(
+    match decode_preview_rgba_frame_outcome(
         path,
         timestamp_secs,
         max_width,
@@ -388,14 +391,14 @@ pub fn decode_video_frame_at_time_rgba_scaled(
 /// between packets, between received frames, and before software conversion.
 /// External-process decode cannot be interrupted while the child process is
 /// running, but a stale result is discarded before it is returned.
-pub fn decode_video_frame_at_time_rgba_scaled_cancellable(
+pub fn decode_still_frame_rgba_scaled_cancellable(
     path: &Path,
     timestamp_secs: f64,
     max_width: Option<u32>,
     max_height: Option<u32>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_video_frame_at_time_outcome(
+    decode_preview_rgba_frame_outcome(
         path,
         timestamp_secs,
         max_width,
@@ -412,8 +415,8 @@ pub fn decode_video_frame_at_time_rgba_scaled_cancellable(
 /// decide which media path to decode. Passing that fingerprint through avoids a
 /// duplicate filesystem metadata lookup on the decode worker hot path while
 /// preserving the same cache invalidation semantics as
-/// [`decode_video_frame_at_time_rgba_scaled_cancellable`].
-pub fn decode_video_frame_at_time_rgba_scaled_cancellable_with_fingerprint(
+/// [`decode_still_frame_rgba_scaled_cancellable`].
+pub fn decode_still_frame_rgba_scaled_cancellable_with_fingerprint(
     path: &Path,
     timestamp_secs: f64,
     max_width: Option<u32>,
@@ -421,7 +424,7 @@ pub fn decode_video_frame_at_time_rgba_scaled_cancellable_with_fingerprint(
     fingerprint: PreviewFileFingerprint,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_video_frame_at_time_outcome(
+    decode_preview_rgba_frame_outcome(
         path,
         timestamp_secs,
         max_width,
@@ -448,7 +451,7 @@ pub fn decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerpri
     fingerprint: PreviewFileFingerprint,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_video_frame_at_time_outcome(
+    decode_preview_rgba_frame_outcome(
         path,
         timestamp_secs,
         max_width,
@@ -472,7 +475,7 @@ pub fn decode_video_frame_for_access_mode_rgba_scaled_cancellable(
     access_mode: PreviewDecodeAccessMode,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_video_frame_at_time_outcome(
+    decode_preview_rgba_frame_outcome(
         path,
         timestamp_secs,
         max_width,
@@ -1075,7 +1078,7 @@ impl PreviewDecodeSession {
     }
 }
 
-fn decode_video_frame_at_time_outcome(
+fn decode_preview_rgba_frame_outcome(
     path: &Path,
     timestamp_secs: f64,
     max_width: Option<u32>,
@@ -1353,7 +1356,7 @@ fn preview_frame_cache() -> &'static std::sync::Mutex<VecDeque<PreviewFrameCache
     CACHE.get_or_init(|| std::sync::Mutex::new(VecDeque::new()))
 }
 
-/// 清除进程全局的预览帧缓存（decode_video_frame_at_time 使用的全局 VecDeque）。
+/// 清除进程全局的预览帧缓存。
 /// 在大幅 seek 后调用，避免旧帧被误用。
 pub fn clear_global_preview_frame_cache() {
     if let Ok(mut guard) = preview_frame_cache().lock() {
@@ -1603,7 +1606,7 @@ fn convert_decoded_to_rgba(
 mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        decode_video_frame_at_time_rgba_scaled, decode_video_frame_at_time_rgba_scaled_cancellable,
+        decode_still_frame_rgba_scaled, decode_still_frame_rgba_scaled_cancellable,
         decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint, duration_us,
         preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeAccessMode,
         PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
@@ -1759,7 +1762,7 @@ mod tests {
 
     #[test]
     fn cancellable_preview_decode_returns_canceled_before_opening_missing_file() {
-        let outcome = decode_video_frame_at_time_rgba_scaled_cancellable(
+        let outcome = decode_still_frame_rgba_scaled_cancellable(
             &PathBuf::from("E:/definitely-missing/canceled-preview.mov"),
             0.0,
             Some(320),
@@ -1857,9 +1860,8 @@ mod tests {
             .and_then(|value| value.parse::<u32>().ok());
 
         let started = Instant::now();
-        let frame =
-            decode_video_frame_at_time_rgba_scaled(&path, timestamp_secs, max_width, max_height)
-                .expect("decode preview fixture");
+        let frame = decode_still_frame_rgba_scaled(&path, timestamp_secs, max_width, max_height)
+            .expect("decode preview fixture");
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let report = PreviewDecodePerfReport {
             path: path.display().to_string(),

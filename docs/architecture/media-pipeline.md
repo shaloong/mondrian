@@ -29,7 +29,7 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   long forward queue.
 - `PreviewDecodeAccessMode::RandomAccessStillFrame` is for deterministic still
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
-  one-off requests. Existing timestamp-based public helpers are explicitly this
+  one-off requests. Public `decode_still_frame_*` helpers are explicitly this
   mode, not the playback path.
 
 These contracts are media-layer interfaces. The current in-process adapter can

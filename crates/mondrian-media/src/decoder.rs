@@ -4,7 +4,7 @@
 
 use crate::cache::{FrameCache, RawVideoFrame};
 use crate::preview::{
-    decode_video_frame_at_time_rgba, decode_video_frame_for_access_mode_rgba_scaled_cancellable,
+    decode_still_frame_rgba, decode_video_frame_for_access_mode_rgba_scaled_cancellable,
     PreviewDecodeAccessMode, RgbaFrame,
 };
 use dashmap::DashMap;
@@ -324,7 +324,8 @@ impl DecoderPool {
         })
     }
 
-    pub async fn get_video_frame_rgba(
+    /// Get one random-access still frame as CPU RGBA memory.
+    pub async fn get_still_frame_rgba(
         &self,
         asset_id: AssetId,
         path: PathBuf,
@@ -532,8 +533,11 @@ impl DecoderPool {
         Ok(ctx)
     }
 
-    /// 获取指定时间码处的视频帧（优先从缓存读取）
-    pub async fn get_video_frame(
+    /// 获取指定时间码处的随机访问静帧（优先从缓存读取）。
+    ///
+    /// This legacy YUV-facing path derives YUV420p from a still-frame CPU RGBA
+    /// decode. It is not the playback cursor path.
+    pub async fn get_still_video_frame(
         &self,
         asset_id: AssetId,
         path: PathBuf,
@@ -567,7 +571,7 @@ impl DecoderPool {
             tracing::debug!("Decoding frame {frame_num} for asset {asset_id}");
 
             let timestamp_secs = timecode.to_secs().max(0.0);
-            let rgba = decode_video_frame_at_time_rgba(path.as_path(), timestamp_secs)?;
+            let rgba = decode_still_frame_rgba(path.as_path(), timestamp_secs)?;
             let (planes, strides) = rgba_to_yuv420p(&rgba)?;
 
             Ok::<Arc<RawVideoFrame>, mondrian_core::MondrianError>(Arc::new(RawVideoFrame {
@@ -637,7 +641,7 @@ impl DecoderPool {
                 }
 
                 let tc = TimeCode::new(start_timecode.frame + offset as i64, fps);
-                if let Err(err) = pool.get_video_frame(asset_id, path.clone(), tc).await {
+                if let Err(err) = pool.get_still_video_frame(asset_id, path.clone(), tc).await {
                     if matches!(err, mondrian_core::MondrianError::Cancelled) {
                         was_cancelled = true;
                         break;
@@ -778,7 +782,7 @@ impl DecoderPool {
     /// 清除全部 RGBA 图层帧缓存（大幅 seek 后调用，淘汰远离新位置的旧缓存帧）。
     pub fn evict_rgba_cache(&self) {
         self.rgba_cache.lock().clear();
-        // 同步清除进程全局预览帧缓存（decode_video_frame_at_time 使用的缓存）
+        // 同步清除进程全局预览帧缓存。
         crate::preview::clear_global_preview_frame_cache();
     }
 

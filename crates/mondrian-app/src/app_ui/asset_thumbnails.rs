@@ -179,7 +179,7 @@ fn thumbnail_worker(jobs: mpsc::Receiver<ThumbnailJob>, results: mpsc::Sender<Th
 }
 
 fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
-    match mondrian_media::decode_video_frame_at_time_rgba_scaled(
+    match mondrian_media::decode_still_frame_rgba_scaled(
         job.path.as_path(),
         0.0,
         Some(THUMBNAIL_MAX_WIDTH),

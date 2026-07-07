@@ -36,9 +36,9 @@ pub use info::{
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
     clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-    decode_first_video_frame_rgba, decode_video_frame_at_time_rgba,
-    decode_video_frame_at_time_rgba_scaled, decode_video_frame_at_time_rgba_scaled_cancellable,
-    decode_video_frame_at_time_rgba_scaled_cancellable_with_fingerprint,
+    decode_first_still_frame_rgba, decode_still_frame_rgba, decode_still_frame_rgba_scaled,
+    decode_still_frame_rgba_scaled_cancellable,
+    decode_still_frame_rgba_scaled_cancellable_with_fingerprint,
     decode_video_frame_for_access_mode_rgba_scaled_cancellable,
     decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint,
     preview_decode_backend, set_preview_decode_backend, PreviewDecodeAccessMode,
