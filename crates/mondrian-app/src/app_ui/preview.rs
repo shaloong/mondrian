@@ -180,6 +180,11 @@ impl AppUiPreviewService {
             decode_total_duration_us: self.metrics.decode_total_duration_us.get(),
             decode_max_duration_us: self.metrics.decode_max_duration_us.get(),
             decode_last_duration_us: self.metrics.decode_last_duration_us.get(),
+            decode_queue_wait_total_us: self.metrics.decode_queue_wait_total_us.get(),
+            decode_queue_wait_max_us: self.metrics.decode_queue_wait_max_us.get(),
+            decode_queue_wait_last_us: self.metrics.decode_queue_wait_last_us.get(),
+            decode_current_queue_wait_max_us: self.metrics.decode_current_queue_wait_max_us.get(),
+            decode_prefetch_queue_wait_max_us: self.metrics.decode_prefetch_queue_wait_max_us.get(),
             decode_seeked_frames: self.metrics.decode_seeked_frames.get(),
             decode_decoded_frame_count: self.metrics.decode_decoded_frame_count.get(),
             decode_max_decoded_frame_count: self.metrics.decode_max_decoded_frame_count.get(),
@@ -303,6 +308,7 @@ impl AppUiPreviewService {
         let mut changed = false;
         while let Ok(result) = self.results.borrow().try_recv() {
             let is_current = self.scheduler.complete(&result.key, result.generation);
+            self.record_preview_decode_queue_wait(result.priority, result.queue_wait_us);
             if let Some(diagnostics) = result.decode_diagnostics {
                 self.record_preview_decode(diagnostics);
             }
@@ -858,6 +864,30 @@ impl AppUiPreviewService {
         self.metrics.decode_stage_durations.set(stage_durations);
     }
 
+    fn record_preview_decode_queue_wait(
+        &self,
+        priority: MediaPreviewRequestPriority,
+        queue_wait_us: u64,
+    ) {
+        add_cell(&self.metrics.decode_queue_wait_total_us, queue_wait_us);
+        self.metrics
+            .decode_queue_wait_max_us
+            .set(self.metrics.decode_queue_wait_max_us.get().max(queue_wait_us));
+        self.metrics.decode_queue_wait_last_us.set(queue_wait_us);
+        match priority {
+            MediaPreviewRequestPriority::Current => {
+                self.metrics
+                    .decode_current_queue_wait_max_us
+                    .set(self.metrics.decode_current_queue_wait_max_us.get().max(queue_wait_us));
+            }
+            MediaPreviewRequestPriority::Prefetch => {
+                self.metrics
+                    .decode_prefetch_queue_wait_max_us
+                    .set(self.metrics.decode_prefetch_queue_wait_max_us.get().max(queue_wait_us));
+            }
+        }
+    }
+
     fn record_render_stage_durations(
         &self,
         total_duration_us: u64,
@@ -1248,6 +1278,16 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_max_duration_us: u64,
     /// Most recent successful preview decode duration in microseconds.
     pub decode_last_duration_us: u64,
+    /// Total time decoded jobs spent waiting in the preview worker queue.
+    pub decode_queue_wait_total_us: u64,
+    /// Slowest decoded job queue wait.
+    pub decode_queue_wait_max_us: u64,
+    /// Most recent decoded job queue wait.
+    pub decode_queue_wait_last_us: u64,
+    /// Slowest current-frame decode queue wait.
+    pub decode_current_queue_wait_max_us: u64,
+    /// Slowest prefetch decode queue wait.
+    pub decode_prefetch_queue_wait_max_us: u64,
     /// Decode requests that required a decoder seek before frame selection.
     pub decode_seeked_frames: u64,
     /// Total decoded frames consumed by preview decode requests.
@@ -1479,6 +1519,16 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub total_duration_us: u64,
     /// Slow-frame budget applied by the report.
     pub slow_frame_budget_us: u64,
+    /// Total time decoded jobs spent waiting in the preview worker queue.
+    pub queue_wait_total_us: u64,
+    /// Slowest decoded job queue wait.
+    pub queue_wait_max_us: u64,
+    /// Most recent decoded job queue wait.
+    pub queue_wait_last_us: u64,
+    /// Slowest current-frame decode queue wait.
+    pub current_queue_wait_max_us: u64,
+    /// Slowest prefetch decode queue wait.
+    pub prefetch_queue_wait_max_us: u64,
     /// Decode requests that required a seek.
     pub seeked_frames: u64,
     /// Total decoded frames consumed before frame selection.
@@ -1501,6 +1551,8 @@ pub enum AppUiPreviewDecodeBottleneck {
     None,
     /// Opening or reconfiguring the decode session dominated.
     SessionOpen,
+    /// Waiting in the preview decode worker queue dominated.
+    QueueWait,
     /// Cache lookup dominated.
     CacheLookup,
     /// Seek and decoder flush dominated.
@@ -1708,6 +1760,8 @@ pub enum AppUiPreviewDecodePerformanceArea {
     CpuRgbaBoundary,
     /// Proxy/cache readiness.
     ProxyCache,
+    /// Preview decode worker queue scheduling.
+    Scheduling,
     /// External process decode path.
     ExternalProcess,
 }
@@ -1873,8 +1927,10 @@ pub fn build_preview_decode_performance_report(
 
     if let Some(mut summary) = summary {
         summary.slow_frame_budget_us = slow_frame_budget_us;
-        summary.primary_bottleneck =
-            classify_preview_decode_bottleneck(summary.max_frame_stage_durations);
+        summary.primary_bottleneck = classify_preview_decode_bottleneck(
+            summary.max_frame_stage_durations,
+            summary.queue_wait_max_us,
+        );
         push_decode_max_check(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::LatencyBudget,
@@ -1902,6 +1958,13 @@ pub fn build_preview_decode_performance_report(
             "preview_decode_cache_hit_frames",
             summary.cache_hit_frames,
             1,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_queue_wait_max_us",
+            summary.queue_wait_max_us,
+            slow_frame_budget_us,
         );
 
         push_preview_decode_root_causes_and_actions(summary, &mut root_causes, &mut actions);
@@ -2112,6 +2175,21 @@ fn push_preview_decode_root_causes_and_actions(
     }
 
     match summary.primary_bottleneck {
+        AppUiPreviewDecodeBottleneck::QueueWait => push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_queue_wait_bound",
+            format!(
+                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={}",
+                summary.queue_wait_max_us,
+                summary.current_queue_wait_max_us,
+                summary.prefetch_queue_wait_max_us
+            ),
+            "prioritize_current_preview_decode",
+            "Reduce worker queue wait by canceling stale prefetch work or adding a cancellable decode session.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        ),
         AppUiPreviewDecodeBottleneck::PacketDecode => push_decode_root_cause_with_action(
             root_causes,
             actions,
@@ -2358,8 +2436,10 @@ fn push_decode_root_cause_with_action(
 
 fn classify_preview_decode_bottleneck(
     durations: PreviewDecodeStageDurations,
+    queue_wait_us: u64,
 ) -> AppUiPreviewDecodeBottleneck {
     let candidates = [
+        (AppUiPreviewDecodeBottleneck::QueueWait, queue_wait_us),
         (
             AppUiPreviewDecodeBottleneck::SessionOpen,
             durations.session_open_us,
@@ -2894,12 +2974,20 @@ impl AppUiPreviewDiagnostics {
             last_duration_us: self.decode_last_duration_us,
             total_duration_us: self.decode_total_duration_us,
             slow_frame_budget_us,
+            queue_wait_total_us: self.decode_queue_wait_total_us,
+            queue_wait_max_us: self.decode_queue_wait_max_us,
+            queue_wait_last_us: self.decode_queue_wait_last_us,
+            current_queue_wait_max_us: self.decode_current_queue_wait_max_us,
+            prefetch_queue_wait_max_us: self.decode_prefetch_queue_wait_max_us,
             seeked_frames: self.decode_seeked_frames,
             decoded_frame_count: self.decode_decoded_frame_count,
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
             stage_durations,
             max_frame_stage_durations,
-            primary_bottleneck: classify_preview_decode_bottleneck(max_frame_stage_durations),
+            primary_bottleneck: classify_preview_decode_bottleneck(
+                max_frame_stage_durations,
+                self.decode_queue_wait_max_us,
+            ),
         })
     }
 
@@ -3694,6 +3782,8 @@ struct MediaPreviewJob {
     key: MediaPreviewKey,
     source_secs: f64,
     generation: u64,
+    priority: MediaPreviewRequestPriority,
+    enqueued_at: Instant,
 }
 
 #[derive(Debug)]
@@ -3702,6 +3792,8 @@ struct MediaPreviewResult {
     frame: Option<MediaPreviewFrame>,
     error: Option<String>,
     generation: u64,
+    priority: MediaPreviewRequestPriority,
+    queue_wait_us: u64,
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
@@ -4148,7 +4240,13 @@ impl AppUiPreviewService {
                 return;
             }
         }
-        let job = MediaPreviewJob { key: key.clone(), source_secs, generation };
+        let job = MediaPreviewJob {
+            key: key.clone(),
+            source_secs,
+            generation,
+            priority,
+            enqueued_at: Instant::now(),
+        };
         match self.jobs.enqueue(job, priority) {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch } => {
                 bump(&self.metrics.enqueued_jobs);
@@ -4322,6 +4420,11 @@ struct AppUiPreviewMetrics {
     decode_total_duration_us: Cell<u64>,
     decode_max_duration_us: Cell<u64>,
     decode_last_duration_us: Cell<u64>,
+    decode_queue_wait_total_us: Cell<u64>,
+    decode_queue_wait_max_us: Cell<u64>,
+    decode_queue_wait_last_us: Cell<u64>,
+    decode_current_queue_wait_max_us: Cell<u64>,
+    decode_prefetch_queue_wait_max_us: Cell<u64>,
     decode_seeked_frames: Cell<u64>,
     decode_decoded_frame_count: Cell<u64>,
     decode_max_decoded_frame_count: Cell<u64>,
@@ -4963,18 +5066,20 @@ fn media_preview_worker(
     scheduler: MediaPreviewScheduler,
 ) {
     while let Some(job) = jobs.recv() {
+        let queue_wait_us = app_duration_us(job.enqueued_at.elapsed());
         if !scheduler.should_decode(&job.key) {
             continue;
         }
-        let result = decode_media_preview(job);
+        let result = decode_media_preview(job, queue_wait_us);
         if results.send(result).is_err() {
             break;
         }
     }
 }
 
-fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
+fn decode_media_preview(job: MediaPreviewJob, queue_wait_us: u64) -> MediaPreviewResult {
     let signature = media_preview_frame_signature(&job.key);
+    let priority = job.priority;
     match mondrian_media::decode_video_frame_at_time_rgba_scaled(
         job.key.path.as_path(),
         job.source_secs,
@@ -5007,6 +5112,8 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
                 }),
                 error: None,
                 generation: job.generation,
+                priority,
+                queue_wait_us,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
@@ -5017,6 +5124,8 @@ fn decode_media_preview(job: MediaPreviewJob) -> MediaPreviewResult {
             frame: None,
             error: Some(err.to_string()),
             generation: job.generation,
+            priority,
+            queue_wait_us,
             decode_diagnostics: None,
             color_diagnostics: None,
             color_stage_diagnostics: None,
@@ -5564,6 +5673,9 @@ mod tests {
                 external_process_us: 0,
             },
         });
+        service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Prefetch, 400);
+        service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Current, 1_200);
+        service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Current, 20);
 
         let diagnostics = service.diagnostics();
 
@@ -5573,6 +5685,11 @@ mod tests {
         assert_eq!(diagnostics.decode_total_duration_us, 3_525);
         assert_eq!(diagnostics.decode_max_duration_us, 2_500);
         assert_eq!(diagnostics.decode_last_duration_us, 25);
+        assert_eq!(diagnostics.decode_queue_wait_total_us, 1_620);
+        assert_eq!(diagnostics.decode_queue_wait_max_us, 1_200);
+        assert_eq!(diagnostics.decode_queue_wait_last_us, 20);
+        assert_eq!(diagnostics.decode_current_queue_wait_max_us, 1_200);
+        assert_eq!(diagnostics.decode_prefetch_queue_wait_max_us, 400);
         assert_eq!(diagnostics.decode_seeked_frames, 1);
         assert_eq!(diagnostics.decode_decoded_frame_count, 48);
         assert_eq!(diagnostics.decode_max_decoded_frame_count, 48);
@@ -5649,6 +5766,56 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "enable_proxy_or_hardware_decode"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_total_duration_us: 12_000,
+            decode_max_duration_us: 12_000,
+            decode_last_duration_us: 12_000,
+            decode_queue_wait_total_us: 95_000,
+            decode_queue_wait_max_us: 95_000,
+            decode_queue_wait_last_us: 95_000,
+            decode_current_queue_wait_max_us: 95_000,
+            decode_prefetch_queue_wait_max_us: 15_000,
+            decode_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 10_000,
+                swscale_us: 1_000,
+                rgba_copy_us: 500,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_max_frame_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 10_000,
+                swscale_us: 1_000,
+                rgba_copy_us: 500,
+                ..PreviewDecodeStageDurations::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-queue-wait-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        let summary = report.summary.expect("decode summary");
+        assert_eq!(
+            summary.primary_bottleneck,
+            AppUiPreviewDecodeBottleneck::QueueWait
+        );
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_queue_wait_bound"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "prioritize_current_preview_decode"));
     }
 
     #[test]
@@ -7454,16 +7621,23 @@ mod tests {
             engine: ColorEngine::MondrianSmart,
         };
 
-        let result = decode_media_preview(MediaPreviewJob {
-            key: key.clone(),
-            source_secs: 0.5,
-            generation: 7,
-        });
+        let result = decode_media_preview(
+            MediaPreviewJob {
+                key: key.clone(),
+                source_secs: 0.5,
+                generation: 7,
+                priority: MediaPreviewRequestPriority::Current,
+                enqueued_at: Instant::now(),
+            },
+            123,
+        );
 
         assert_eq!(result.key, key);
         assert!(result.frame.is_none());
         assert!(result.error.is_some());
         assert_eq!(result.generation, 7);
+        assert_eq!(result.priority, MediaPreviewRequestPriority::Current);
+        assert_eq!(result.queue_wait_us, 123);
         assert!(result.color_diagnostics.is_none());
         assert!(result.color_stage_diagnostics.is_none());
     }
@@ -7481,6 +7655,20 @@ mod tests {
             working_color_space: ColorSpace::Rec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
+        }
+    }
+
+    fn test_media_job(
+        key: MediaPreviewKey,
+        source_secs: f64,
+        priority: MediaPreviewRequestPriority,
+    ) -> MediaPreviewJob {
+        MediaPreviewJob {
+            key,
+            source_secs,
+            generation: 1,
+            priority,
+            enqueued_at: Instant::now(),
         }
     }
 
@@ -8039,16 +8227,10 @@ mod tests {
         let (sender, receiver) = media_preview_job_queue(1);
         let prefetch = test_media_key(1);
         let current = test_media_key(2);
-        let prefetch_job = MediaPreviewJob {
-            key: prefetch.clone(),
-            source_secs: 1.0,
-            generation: 1,
-        };
-        let current_job = MediaPreviewJob {
-            key: current.clone(),
-            source_secs: 2.0,
-            generation: 1,
-        };
+        let prefetch_job =
+            test_media_job(prefetch.clone(), 1.0, MediaPreviewRequestPriority::Prefetch);
+        let current_job =
+            test_media_job(current.clone(), 2.0, MediaPreviewRequestPriority::Current);
 
         assert_eq!(
             sender.enqueue(prefetch_job, MediaPreviewRequestPriority::Prefetch),
@@ -8072,33 +8254,29 @@ mod tests {
 
         assert_eq!(
             sender.enqueue(
-                MediaPreviewJob {
-                    key: first_prefetch.clone(),
-                    source_secs: 1.0,
-                    generation: 1,
-                },
+                test_media_job(
+                    first_prefetch.clone(),
+                    1.0,
+                    MediaPreviewRequestPriority::Prefetch,
+                ),
                 MediaPreviewRequestPriority::Prefetch,
             ),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
             sender.enqueue(
-                MediaPreviewJob {
-                    key: current.clone(),
-                    source_secs: 2.0,
-                    generation: 1,
-                },
+                test_media_job(current.clone(), 2.0, MediaPreviewRequestPriority::Current),
                 MediaPreviewRequestPriority::Current,
             ),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
             sender.enqueue(
-                MediaPreviewJob {
-                    key: second_prefetch.clone(),
-                    source_secs: 3.0,
-                    generation: 1,
-                },
+                test_media_job(
+                    second_prefetch.clone(),
+                    3.0,
+                    MediaPreviewRequestPriority::Prefetch,
+                ),
                 MediaPreviewRequestPriority::Prefetch,
             ),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
@@ -8120,22 +8298,18 @@ mod tests {
 
         assert_eq!(
             sender.enqueue(
-                MediaPreviewJob {
-                    key: promoted.clone(),
-                    source_secs: 1.0,
-                    generation: 1,
-                },
+                test_media_job(promoted.clone(), 1.0, MediaPreviewRequestPriority::Prefetch),
                 MediaPreviewRequestPriority::Prefetch,
             ),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
         assert_eq!(
             sender.enqueue(
-                MediaPreviewJob {
-                    key: other_prefetch.clone(),
-                    source_secs: 2.0,
-                    generation: 1,
-                },
+                test_media_job(
+                    other_prefetch.clone(),
+                    2.0,
+                    MediaPreviewRequestPriority::Prefetch,
+                ),
                 MediaPreviewRequestPriority::Prefetch,
             ),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }

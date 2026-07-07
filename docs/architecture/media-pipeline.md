@@ -96,14 +96,16 @@ wall-clock timings for session open, cache lookup, seek, packet/decode,
 software scaling, RGBA copy, and the experimental external-process path.
 App-level preview diagnostics aggregate those fields so playback/perf JSON can
 show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
-single-thread decode-bound, software-scale/copy-bound, or GPU-output-bound. The
-same diagnostics must also preserve the stage timings from the slowest single
-decode frame and slowest single post-decode render frame. Performance reports
-classify their primary bottleneck from those max-frame stage timings, while the
-aggregate stage totals remain trend evidence. This avoids blaming a cumulative
-stage total when an interactive stall came from one pathological seek, decode,
-software-scale/copy, composite, or output-boundary frame. The in-process preview
-decoder uses bounded slice threading by default.
+single-thread decode-bound, software-scale/copy-bound, worker-queue-bound, or
+GPU-output-bound. The same diagnostics must also preserve the stage timings from
+the slowest single decode frame and slowest single post-decode render frame, and
+track how long decoded jobs waited in the preview worker queue before decode
+started. Performance reports classify their primary bottleneck from max-frame
+stage timings plus max queue wait, while aggregate stage totals remain trend
+evidence. This avoids blaming a cumulative stage total when an interactive stall
+came from one pathological seek, decode, software-scale/copy, composite,
+output-boundary frame, or current-frame job waiting behind other decode work.
+The in-process preview decoder uses bounded slice threading by default.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
