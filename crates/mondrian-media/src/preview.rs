@@ -320,8 +320,14 @@ pub fn decode_video_frame_at_time_rgba_scaled(
     max_width: Option<u32>,
     max_height: Option<u32>,
 ) -> Result<RgbaFrame> {
-    match decode_video_frame_at_time_outcome(path, timestamp_secs, max_width, max_height, || false)?
-    {
+    match decode_video_frame_at_time_outcome(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        None,
+        || false,
+    )? {
         PreviewDecodeOutcome::Frame(frame) => Ok(frame),
         PreviewDecodeOutcome::Canceled => Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
@@ -343,7 +349,39 @@ pub fn decode_video_frame_at_time_rgba_scaled_cancellable(
     max_height: Option<u32>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_video_frame_at_time_outcome(path, timestamp_secs, max_width, max_height, should_cancel)
+    decode_video_frame_at_time_outcome(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        None,
+        should_cancel,
+    )
+}
+
+/// Decode a preview frame using a caller-supplied file fingerprint.
+///
+/// App-level preview planning often already probes source/proxy metadata to
+/// decide which media path to decode. Passing that fingerprint through avoids a
+/// duplicate filesystem metadata lookup on the decode worker hot path while
+/// preserving the same cache invalidation semantics as
+/// [`decode_video_frame_at_time_rgba_scaled_cancellable`].
+pub fn decode_video_frame_at_time_rgba_scaled_cancellable_with_fingerprint(
+    path: &Path,
+    timestamp_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    fingerprint: PreviewFileFingerprint,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
+    decode_video_frame_at_time_outcome(
+        path,
+        timestamp_secs,
+        max_width,
+        max_height,
+        Some(fingerprint),
+        should_cancel,
+    )
 }
 
 /// Result of a cancellable preview decode request.
@@ -417,15 +455,24 @@ impl PreviewDecodeForwardResult {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PreviewFileFingerprint {
-    len: Option<u64>,
-    modified_secs: Option<u64>,
-    modified_nanos: Option<u32>,
+/// Stable file identity used to invalidate preview decode sessions and frames.
+///
+/// The optional fields let callers represent missing/unreadable metadata
+/// without falling back to a false stable identity. A successful app/media path
+/// probe should prefer [`PreviewFileFingerprint::from_metadata`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PreviewFileFingerprint {
+    /// File length in bytes when available.
+    pub len: Option<u64>,
+    /// File modification time seconds since Unix epoch when available.
+    pub modified_secs: Option<u64>,
+    /// File modification time subsecond nanoseconds when available.
+    pub modified_nanos: Option<u32>,
 }
 
 impl PreviewFileFingerprint {
-    fn capture(path: &Path) -> Self {
+    /// Capture a fingerprint from the filesystem, preserving missing metadata.
+    pub fn capture(path: &Path) -> Self {
         let Ok(metadata) = std::fs::metadata(path) else {
             return Self {
                 len: None,
@@ -433,6 +480,11 @@ impl PreviewFileFingerprint {
                 modified_nanos: None,
             };
         };
+        Self::from_metadata(&metadata)
+    }
+
+    /// Build a fingerprint from a metadata record the caller already fetched.
+    pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         let modified =
             metadata.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok());
         Self {
@@ -900,6 +952,7 @@ fn decode_video_frame_at_time_outcome(
     timestamp_secs: f64,
     max_width: Option<u32>,
     max_height: Option<u32>,
+    fingerprint: Option<PreviewFileFingerprint>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
@@ -907,7 +960,7 @@ fn decode_video_frame_at_time_outcome(
         return Ok(PreviewDecodeOutcome::Canceled);
     }
     ensure_ffmpeg_initialized(path)?;
-    let fingerprint = PreviewFileFingerprint::capture(path);
+    let fingerprint = fingerprint.unwrap_or_else(|| PreviewFileFingerprint::capture(path));
     PREVIEW_DECODE_SESSION.with(|slot| {
         let mut slot = slot.borrow_mut();
         let backend = preview_decode_backend();

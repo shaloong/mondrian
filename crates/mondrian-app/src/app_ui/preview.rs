@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use mondrian_assets::AssetKind;
 use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
@@ -18,7 +18,8 @@ use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, Sequence
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
     PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
+    PreviewDecodeThreadingKind, PreviewFileFingerprint, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -3313,7 +3314,7 @@ impl Default for AppUiPreviewService {
 struct MediaPreviewKey {
     asset_id: AssetId,
     path: PathBuf,
-    fingerprint: Option<MediaFileFingerprint>,
+    fingerprint: Option<PreviewFileFingerprint>,
     source_frame: i64,
     source_micros: i64,
     target_width: u32,
@@ -3322,13 +3323,6 @@ struct MediaPreviewKey {
     working_color_space: ColorSpace,
     tone_map: bool,
     engine: ColorEngine,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct MediaFileFingerprint {
-    len: u64,
-    modified_secs: u64,
-    modified_nanos: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -5065,7 +5059,7 @@ fn uncached_viewer_raster_frame_key(
 struct PreviewMediaDecodePath {
     path: PathBuf,
     resolution: PreviewMediaDecodePathResolution,
-    fingerprint: MediaFileFingerprint,
+    fingerprint: PreviewFileFingerprint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5114,20 +5108,15 @@ fn resolve_preview_media_decode_path(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MediaPathMetadata {
-    fingerprint: MediaFileFingerprint,
+    fingerprint: PreviewFileFingerprint,
     modified: SystemTime,
 }
 
 fn media_path_metadata(path: &Path) -> Option<MediaPathMetadata> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
-    let modified_since_epoch = modified.duration_since(UNIX_EPOCH).ok()?;
     Some(MediaPathMetadata {
-        fingerprint: MediaFileFingerprint {
-            len: metadata.len(),
-            modified_secs: modified_since_epoch.as_secs(),
-            modified_nanos: modified_since_epoch.subsec_nanos(),
-        },
+        fingerprint: PreviewFileFingerprint::from_metadata(&metadata),
         modified,
     })
 }
@@ -5165,13 +5154,26 @@ fn decode_media_preview(
 ) -> MediaPreviewResult {
     let signature = media_preview_frame_signature(&job.key);
     let priority = job.priority;
-    match mondrian_media::decode_video_frame_at_time_rgba_scaled_cancellable(
-        job.key.path.as_path(),
-        job.source_secs,
-        Some(job.key.target_width.max(1)),
-        Some(job.key.target_height.max(1)),
-        should_cancel,
-    ) {
+    let decode_outcome = match job.key.fingerprint {
+        Some(fingerprint) => {
+            mondrian_media::decode_video_frame_at_time_rgba_scaled_cancellable_with_fingerprint(
+                job.key.path.as_path(),
+                job.source_secs,
+                Some(job.key.target_width.max(1)),
+                Some(job.key.target_height.max(1)),
+                fingerprint,
+                should_cancel,
+            )
+        }
+        None => mondrian_media::decode_video_frame_at_time_rgba_scaled_cancellable(
+            job.key.path.as_path(),
+            job.source_secs,
+            Some(job.key.target_width.max(1)),
+            Some(job.key.target_height.max(1)),
+            should_cancel,
+        ),
+    };
+    match decode_outcome {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
             let width = frame.width;
@@ -7948,7 +7950,7 @@ mod tests {
 
         assert_eq!(resolved.path, proxy_path);
         assert_eq!(resolved.resolution, PreviewMediaDecodePathResolution::Proxy);
-        assert_eq!(resolved.fingerprint.len, 5);
+        assert_eq!(resolved.fingerprint.len, Some(5));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7974,7 +7976,7 @@ mod tests {
             resolved.resolution,
             PreviewMediaDecodePathResolution::ProxyMissing
         );
-        assert_eq!(resolved.fingerprint.len, 6);
+        assert_eq!(resolved.fingerprint.len, Some(6));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -8005,7 +8007,7 @@ mod tests {
             resolved.resolution,
             PreviewMediaDecodePathResolution::ProxyStale
         );
-        assert_eq!(resolved.fingerprint.len, 12);
+        assert_eq!(resolved.fingerprint.len, Some(12));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -8061,11 +8063,17 @@ mod tests {
     fn media_preview_key_includes_file_length_in_identity() {
         let mut first = test_media_key(1);
         first.path = PathBuf::from("E:/media/replaced.mov");
-        first.fingerprint =
-            Some(MediaFileFingerprint { len: 1_024, modified_secs: 10, modified_nanos: 20 });
+        first.fingerprint = Some(PreviewFileFingerprint {
+            len: Some(1_024),
+            modified_secs: Some(10),
+            modified_nanos: Some(20),
+        });
         let mut second = first.clone();
-        second.fingerprint =
-            Some(MediaFileFingerprint { len: 2_048, modified_secs: 10, modified_nanos: 20 });
+        second.fingerprint = Some(PreviewFileFingerprint {
+            len: Some(2_048),
+            modified_secs: Some(10),
+            modified_nanos: Some(20),
+        });
 
         assert_ne!(first, second);
     }
@@ -8074,11 +8082,17 @@ mod tests {
     fn media_preview_cache_does_not_reuse_same_path_with_different_file_length() {
         let mut old_key = test_media_key(1);
         old_key.path = PathBuf::from("E:/media/replaced.mov");
-        old_key.fingerprint =
-            Some(MediaFileFingerprint { len: 1_024, modified_secs: 10, modified_nanos: 20 });
+        old_key.fingerprint = Some(PreviewFileFingerprint {
+            len: Some(1_024),
+            modified_secs: Some(10),
+            modified_nanos: Some(20),
+        });
         let mut new_key = old_key.clone();
-        new_key.fingerprint =
-            Some(MediaFileFingerprint { len: 2_048, modified_secs: 10, modified_nanos: 20 });
+        new_key.fingerprint = Some(PreviewFileFingerprint {
+            len: Some(2_048),
+            modified_secs: Some(10),
+            modified_nanos: Some(20),
+        });
         let mut cache = MediaPreviewCache::new(2);
 
         cache.insert(old_key.clone(), test_media_frame(1));

@@ -133,6 +133,11 @@ keyed by a media file fingerprint, not by path alone. Proxy regeneration
 finalizes fresh media at the same proxy path, so same-path cache hits or reused
 FFmpeg sessions are valid only while file length and modification timestamp
 still match the fingerprint captured when the session/cache entry was created.
+Preview path resolution already probes the source/proxy file identity; app
+workers must forward that `PreviewFileFingerprint` into the media decode
+boundary instead of making the decode worker repeat the filesystem metadata
+lookup. `mondrian-media` may capture the fingerprint itself only for lower-level
+callers that do not already have one.
 `MONDRIAN_PREVIEW_DECODE_THREADING` and `MONDRIAN_PREVIEW_DECODE_THREADS` are
 diagnostic overrides, not separate decode semantics. Thread-local preview decode
 sessions are intentionally kept alive for playback locality and must be
