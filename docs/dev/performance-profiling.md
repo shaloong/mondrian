@@ -171,6 +171,13 @@ the same media key is promoted when it becomes current-frame work. Track this wi
 `queue_evicted_prefetch_jobs`, `queue_promoted_current_jobs`, and
 `scheduler.skipped_decode_jobs` before tuning queue sizes or decode worker
 counts.
+The decode performance report also carries worker-transport counters. Treat
+`queue_full_drops` and `worker_disconnected_drops` as hard failures: they mean
+work accepted by scheduler policy did not reach a live preview worker. Treat
+`queue_pruned_obsolete_jobs`, `queue_evicted_prefetch_jobs`, and
+`queue_promoted_current_jobs` as scheduling evidence that explains whether the
+queue protected visible current-frame work before any codec or color/render
+optimization is attempted.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

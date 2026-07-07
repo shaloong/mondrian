@@ -2046,6 +2046,18 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub current_queue_wait_max_us: u64,
     /// Slowest prefetch decode queue wait.
     pub prefetch_queue_wait_max_us: u64,
+    /// Media preview jobs accepted by the worker queue.
+    pub enqueued_jobs: u64,
+    /// Jobs dropped because the bounded worker queue was full.
+    pub queue_full_drops: u64,
+    /// Queued prefetch jobs evicted so current-frame decode can run.
+    pub queue_evicted_prefetch_jobs: u64,
+    /// Obsolete queued jobs removed before scheduling current-frame decode.
+    pub queue_pruned_obsolete_jobs: u64,
+    /// Queued prefetch jobs promoted after the same key became current-frame work.
+    pub queue_promoted_current_jobs: u64,
+    /// Jobs dropped because preview workers were unavailable.
+    pub worker_disconnected_drops: u64,
     /// Decode requests that required a seek.
     pub seeked_frames: u64,
     /// Total decoded frames consumed before frame selection.
@@ -2089,7 +2101,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2509,6 +2521,20 @@ pub fn build_preview_decode_performance_report(
             summary.canceled_prefetch_deadline_jobs,
             0,
         );
+        push_decode_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_worker_queue_full_drops",
+            summary.queue_full_drops,
+            0,
+        );
+        push_decode_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_worker_disconnected_drops",
+            summary.worker_disconnected_drops,
+            0,
+        );
 
         push_preview_decode_root_causes_and_actions(summary, &mut root_causes, &mut actions);
 
@@ -2895,10 +2921,15 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={}",
+                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
-                summary.prefetch_queue_wait_max_us
+                summary.prefetch_queue_wait_max_us,
+                summary.enqueued_jobs,
+                summary.queue_full_drops,
+                summary.queue_evicted_prefetch_jobs,
+                summary.queue_pruned_obsolete_jobs,
+                summary.queue_promoted_current_jobs
             ),
             "prioritize_current_preview_decode",
             "Reduce worker queue wait by canceling stale prefetch work or adding a cancellable decode session.",
@@ -3064,6 +3095,42 @@ fn push_preview_decode_root_causes_and_actions(
             "preserve_preview_cancel_reason",
             "Ensure app-level cancellation predicates record a structured reason before returning canceled decode outcomes.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+
+    if summary.queue_full_drops > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_worker_queue_full_drops",
+            format!(
+                "queue_full_drops={} enqueued_jobs={} queue_evicted_prefetch_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={}",
+                summary.queue_full_drops,
+                summary.enqueued_jobs,
+                summary.queue_evicted_prefetch_jobs,
+                summary.queue_pruned_obsolete_jobs,
+                summary.queue_promoted_current_jobs,
+                summary.scheduler.dropped_pending_window_requests
+            ),
+            "reduce_preview_worker_transport_backpressure",
+            "Fix preview worker transport backpressure so scheduler-accepted current-frame work cannot be dropped after admission.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+    if summary.worker_disconnected_drops > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_worker_disconnected_drops",
+            format!(
+                "worker_disconnected_drops={} enqueued_jobs={} queue_full_drops={}",
+                summary.worker_disconnected_drops, summary.enqueued_jobs, summary.queue_full_drops
+            ),
+            "restore_preview_worker_lifecycle",
+            "Ensure preview workers are running before accepting media preview jobs and close the queue only during service shutdown.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
         );
     }
 
@@ -3840,6 +3907,12 @@ impl AppUiPreviewDiagnostics {
             queue_wait_last_us: self.decode_queue_wait_last_us,
             current_queue_wait_max_us: self.decode_current_queue_wait_max_us,
             prefetch_queue_wait_max_us: self.decode_prefetch_queue_wait_max_us,
+            enqueued_jobs: self.enqueued_jobs,
+            queue_full_drops: self.queue_full_drops,
+            queue_evicted_prefetch_jobs: self.queue_evicted_prefetch_jobs,
+            queue_pruned_obsolete_jobs: self.queue_pruned_obsolete_jobs,
+            queue_promoted_current_jobs: self.queue_promoted_current_jobs,
+            worker_disconnected_drops: self.worker_disconnected_drops,
             seeked_frames: self.decode_seeked_frames,
             decoded_frame_count: self.decode_decoded_frame_count,
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
@@ -6640,6 +6713,10 @@ mod tests {
             decode_queue_wait_last_us: 95_000,
             decode_current_queue_wait_max_us: 95_000,
             decode_prefetch_queue_wait_max_us: 15_000,
+            enqueued_jobs: 4,
+            queue_evicted_prefetch_jobs: 1,
+            queue_pruned_obsolete_jobs: 2,
+            queue_promoted_current_jobs: 1,
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
@@ -6699,11 +6776,16 @@ mod tests {
             summary.primary_bottleneck,
             AppUiPreviewDecodeBottleneck::QueueWait
         );
+        assert_eq!(summary.enqueued_jobs, 4);
+        assert_eq!(summary.queue_evicted_prefetch_jobs, 1);
+        assert_eq!(summary.queue_pruned_obsolete_jobs, 2);
+        assert_eq!(summary.queue_promoted_current_jobs, 1);
         assert_eq!(summary.scheduler.dropped_pending_window_requests, 2);
-        assert!(report
-            .root_causes
-            .iter()
-            .any(|root| root.code == "preview_decode_queue_wait_bound"));
+        assert!(report.root_causes.iter().any(|root| root.code
+            == "preview_decode_queue_wait_bound"
+            && root.evidence.contains("queue_evicted_prefetch_jobs=1")
+            && root.evidence.contains("queue_pruned_obsolete_jobs=2")
+            && root.evidence.contains("queue_promoted_current_jobs=1")));
         assert!(report.checks.iter().any(|check| {
             check.code == "preview_decode_scrub_cursor_queue_wait_max_us"
                 && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
@@ -6732,6 +6814,83 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_preview_access_mode_transitions"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_fails_worker_transport_drops() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_total_duration_us: 12_000,
+            decode_max_duration_us: 12_000,
+            decode_last_duration_us: 12_000,
+            enqueued_jobs: 3,
+            queue_full_drops: 1,
+            queue_evicted_prefetch_jobs: 1,
+            queue_pruned_obsolete_jobs: 2,
+            queue_promoted_current_jobs: 1,
+            worker_disconnected_drops: 1,
+            decode_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 10_000,
+                swscale_us: 1_000,
+                rgba_copy_us: 500,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_max_frame_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 10_000,
+                swscale_us: 1_000,
+                rgba_copy_us: 500,
+                ..PreviewDecodeStageDurations::default()
+            },
+            scheduler: MediaPreviewSchedulerDiagnostics {
+                dropped_pending_window_requests: 2,
+                ..MediaPreviewSchedulerDiagnostics::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-worker-queue-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        let summary = report.summary.expect("decode summary");
+        assert_eq!(summary.enqueued_jobs, 3);
+        assert_eq!(summary.queue_full_drops, 1);
+        assert_eq!(summary.worker_disconnected_drops, 1);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_worker_queue_full_drops"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 1
+                && check.limit == Some(0)
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_worker_disconnected_drops"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 1
+                && check.limit == Some(0)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_worker_queue_full_drops"
+                && root.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && root.evidence.contains("queue_full_drops=1")
+                && root.evidence.contains("scheduler_dropped_pending_window_requests=2")
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_worker_disconnected_drops"
+                && root.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && root.evidence.contains("worker_disconnected_drops=1")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "reduce_preview_worker_transport_backpressure"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "restore_preview_worker_lifecycle"));
     }
 
     #[test]
