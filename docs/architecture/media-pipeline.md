@@ -35,6 +35,10 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
   one-off requests. Public `decode_still_frame_*` helpers are explicitly this
   mode, not the playback path.
+  App thumbnail workers must pass the already-probed `PreviewFileFingerprint`
+  into the still helper and use the same fingerprint for thumbnail cache and
+  failure invalidation, so replaced files cannot reuse stale still-frame UI
+  rasters.
 
 These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app

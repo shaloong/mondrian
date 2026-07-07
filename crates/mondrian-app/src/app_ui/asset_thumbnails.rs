@@ -8,12 +8,12 @@
 use crate::app_ui::panels::{AssetThumbnailSource, AssetThumbnailState};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::AssetId;
+use mondrian_media::{PreviewDecodeOutcome, PreviewFileFingerprint};
 use mondrian_ui_widgets::RasterImage;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const THUMBNAIL_MAX_WIDTH: u32 = 320;
 const THUMBNAIL_MAX_HEIGHT: u32 = 180;
@@ -21,28 +21,28 @@ const THUMBNAIL_MAX_HEIGHT: u32 = 180;
 #[derive(Debug, Clone)]
 struct ThumbnailCacheEntry {
     path: PathBuf,
-    modified: Option<SystemTime>,
+    fingerprint: PreviewFileFingerprint,
     image: RasterImage,
 }
 
 #[derive(Debug, Clone)]
 struct ThumbnailFailureEntry {
     path: PathBuf,
-    modified: Option<SystemTime>,
+    fingerprint: PreviewFileFingerprint,
 }
 
 #[derive(Debug)]
 struct ThumbnailJob {
     asset_id: AssetId,
     path: PathBuf,
-    modified: Option<SystemTime>,
+    fingerprint: PreviewFileFingerprint,
 }
 
 #[derive(Debug)]
 struct ThumbnailResult {
     asset_id: AssetId,
     path: PathBuf,
-    modified: Option<SystemTime>,
+    fingerprint: PreviewFileFingerprint,
     image: Option<RasterImage>,
     error: Option<String>,
 }
@@ -88,7 +88,7 @@ impl AssetThumbnailCache {
                     result.asset_id,
                     ThumbnailCacheEntry {
                         path: result.path,
-                        modified: result.modified,
+                        fingerprint: result.fingerprint,
                         image,
                     },
                 );
@@ -104,21 +104,21 @@ impl AssetThumbnailCache {
                 }
                 self.failures.borrow_mut().insert(
                     result.asset_id,
-                    ThumbnailFailureEntry { path: result.path, modified: result.modified },
+                    ThumbnailFailureEntry { path: result.path, fingerprint: result.fingerprint },
                 );
             }
         }
         changed
     }
 
-    fn request_thumbnail(&self, asset: &AssetRecord, modified: Option<SystemTime>) {
+    fn request_thumbnail(&self, asset: &AssetRecord, fingerprint: PreviewFileFingerprint) {
         if self.pending.borrow().contains(&asset.id) {
             return;
         }
         let job = ThumbnailJob {
             asset_id: asset.id,
             path: asset.path.clone(),
-            modified,
+            fingerprint,
         };
         match self.jobs.send(job) {
             Ok(()) => {
@@ -147,25 +147,25 @@ impl AssetThumbnailSource for AssetThumbnailCache {
         if asset.kind != AssetKind::Video {
             return AssetThumbnailState::Unavailable;
         }
-        let modified = std::fs::metadata(&asset.path).ok().and_then(|m| m.modified().ok());
+        let Ok(metadata) = std::fs::metadata(&asset.path) else {
+            return AssetThumbnailState::Failed;
+        };
+        let fingerprint = PreviewFileFingerprint::from_metadata(&metadata);
         if let Some(entry) = self.cache.borrow().get(&asset.id) {
-            if entry.path == asset.path && entry.modified == modified {
+            if entry.path == asset.path && entry.fingerprint == fingerprint {
                 return AssetThumbnailState::Ready(entry.image.clone());
             }
         }
         if let Some(failure) = self.failures.borrow().get(&asset.id) {
-            if failure.path == asset.path && failure.modified == modified {
+            if failure.path == asset.path && failure.fingerprint == fingerprint {
                 return AssetThumbnailState::Failed;
             }
         }
         if self.pending.borrow().contains(&asset.id) {
             return AssetThumbnailState::Loading;
         }
-        if asset.path.exists() {
-            self.request_thumbnail(asset, modified);
-            return AssetThumbnailState::Loading;
-        }
-        AssetThumbnailState::Failed
+        self.request_thumbnail(asset, fingerprint);
+        AssetThumbnailState::Loading
     }
 }
 
@@ -179,29 +179,38 @@ fn thumbnail_worker(jobs: mpsc::Receiver<ThumbnailJob>, results: mpsc::Sender<Th
 }
 
 fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
-    match mondrian_media::decode_still_frame_rgba_scaled(
+    match mondrian_media::decode_still_frame_rgba_scaled_cancellable_with_fingerprint(
         job.path.as_path(),
         0.0,
         Some(THUMBNAIL_MAX_WIDTH),
         Some(THUMBNAIL_MAX_HEIGHT),
+        job.fingerprint,
+        || false,
     ) {
-        Ok(frame) => {
+        Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let width = frame.width;
             let height = frame.height;
-            let key = thumbnail_key(job.asset_id, width, height, job.modified);
+            let key = thumbnail_key(job.asset_id, width, height, job.fingerprint);
             let image = RasterImage::new(key, width, height, frame.into_data());
             ThumbnailResult {
                 asset_id: job.asset_id,
                 path: job.path,
-                modified: job.modified,
+                fingerprint: job.fingerprint,
                 image,
                 error: None,
             }
         }
+        Ok(PreviewDecodeOutcome::Canceled) => ThumbnailResult {
+            asset_id: job.asset_id,
+            path: job.path,
+            fingerprint: job.fingerprint,
+            image: None,
+            error: Some("thumbnail still-frame decode canceled unexpectedly".to_owned()),
+        },
         Err(err) => ThumbnailResult {
             asset_id: job.asset_id,
             path: job.path,
-            modified: job.modified,
+            fingerprint: job.fingerprint,
             image: None,
             error: Some(err.to_string()),
         },
@@ -212,13 +221,14 @@ fn thumbnail_key(
     asset_id: AssetId,
     width: u32,
     height: u32,
-    modified: Option<SystemTime>,
+    fingerprint: PreviewFileFingerprint,
 ) -> String {
-    let modified = modified
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| format!("{}-{}", duration.as_secs(), duration.subsec_nanos()))
-        .unwrap_or_else(|| "unknown".to_owned());
-    format!("asset-thumb:{asset_id}:{width}x{height}:{modified}")
+    let len = fingerprint.len.map_or_else(|| "unknown".to_owned(), |len| len.to_string());
+    let modified = match (fingerprint.modified_secs, fingerprint.modified_nanos) {
+        (Some(secs), Some(nanos)) => format!("{secs}-{nanos}"),
+        _ => "unknown".to_owned(),
+    };
+    format!("asset-thumb:{asset_id}:{width}x{height}:len{len}:mtime{modified}")
 }
 
 #[cfg(test)]
@@ -288,10 +298,17 @@ mod tests {
     #[test]
     fn thumbnail_keys_include_asset_dimensions_and_modification_stamp() {
         let asset_id = AssetId::new();
-        let modified = UNIX_EPOCH + std::time::Duration::from_millis(42);
+        let fingerprint = PreviewFileFingerprint {
+            len: Some(1234),
+            modified_secs: Some(0),
+            modified_nanos: Some(42_000_000),
+        };
 
-        let key = thumbnail_key(asset_id, 320, 180, Some(modified));
+        let key = thumbnail_key(asset_id, 320, 180, fingerprint);
 
-        assert_eq!(key, format!("asset-thumb:{asset_id}:320x180:0-42000000"));
+        assert_eq!(
+            key,
+            format!("asset-thumb:{asset_id}:320x180:len1234:mtime0-42000000")
+        );
     }
 }
