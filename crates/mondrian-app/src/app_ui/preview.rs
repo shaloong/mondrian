@@ -1704,6 +1704,12 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub last_duration_us: u64,
     /// Decode requests for this access mode that required a seek.
     pub seeked_frames: u64,
+    /// Decode results that reused an existing access-mode-local session.
+    pub session_reused_frames: u64,
+    /// Decode results that opened or replaced the access-mode-local session.
+    pub session_opened_frames: u64,
+    /// Decode results produced by continuing forward in an existing session without seeking.
+    pub forward_reused_frames: u64,
     /// Total decoded frames consumed by this access mode.
     pub decoded_frame_count: u64,
     /// Largest decoded-frame count consumed by one request in this access mode.
@@ -1741,6 +1747,14 @@ impl AppUiPreviewDecodeAccessModeProfile {
         self.last_duration_us = diagnostics.elapsed_us;
         if diagnostics.seek_performed {
             self.seeked_frames = self.seeked_frames.saturating_add(1);
+        }
+        if diagnostics.session_reused {
+            self.session_reused_frames = self.session_reused_frames.saturating_add(1);
+        } else {
+            self.session_opened_frames = self.session_opened_frames.saturating_add(1);
+        }
+        if diagnostics.forward_reused {
+            self.forward_reused_frames = self.forward_reused_frames.saturating_add(1);
         }
         let decoded_frame_count = u64::from(diagnostics.decoded_frame_count);
         self.decoded_frame_count = self.decoded_frame_count.saturating_add(decoded_frame_count);
@@ -2573,12 +2587,15 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} total_duration_us={} seeked_frames={} decoded_frame_count={} max_decoded_frame_count={} packet_decode_us={} seek_us={} swscale_us={} rgba_copy_us={} cache_hit_frames={} playback_session_ring_hit_frames={}",
+                "access_mode={} frames={} max_duration_us={} total_duration_us={} seeked_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} decoded_frame_count={} max_decoded_frame_count={} packet_decode_us={} seek_us={} swscale_us={} rgba_copy_us={} cache_hit_frames={} playback_session_ring_hit_frames={}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
                 profile.total_duration_us,
                 profile.seeked_frames,
+                profile.session_reused_frames,
+                profile.session_opened_frames,
+                profile.forward_reused_frames,
                 profile.decoded_frame_count,
                 profile.max_decoded_frame_count,
                 profile.max_frame_stage_durations.packet_decode_us,
@@ -2591,6 +2608,51 @@ fn push_preview_decode_root_causes_and_actions(
             "inspect_preview_decode_access_mode_profile",
             "Inspect the per-access-mode decode profile before changing global decode concurrency or color/render code.",
             AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+
+    let playback_profile = summary.access_mode_profiles.playback_cursor;
+    if playback_profile.frames > 1 && playback_profile.session_reused_frames == 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::AccessMode,
+            "preview_decode_playback_session_not_reused",
+            format!(
+                "access_mode=PlaybackCursor frames={} session_opened_frames={} session_reused_frames=0 max_duration_us={} session_open_us={}",
+                playback_profile.frames,
+                playback_profile.session_opened_frames,
+                playback_profile.max_duration_us,
+                playback_profile.max_frame_stage_durations.session_open_us
+            ),
+            "preserve_playback_decode_session",
+            "Keep the playback cursor decode session stable across adjacent playback frames before increasing worker count.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    let playback_source_decode_frames = playback_profile
+        .in_process_cpu_rgba_frames
+        .saturating_add(playback_profile.external_ffmpeg_cpu_rgba_frames);
+    if playback_source_decode_frames > 0
+        && playback_profile.forward_reused_frames == 0
+        && playback_profile.playback_session_ring_hit_frames == 0
+        && playback_profile.cache_hit_frames == 0
+    {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::AccessMode,
+            "preview_decode_playback_without_locality",
+            format!(
+                "access_mode=PlaybackCursor source_decode_frames={} forward_reused_frames=0 playback_session_ring_hit_frames=0 cache_hit_frames=0 seeked_frames={} decoded_frame_count={} max_decoded_frame_count={}",
+                playback_source_decode_frames,
+                playback_profile.seeked_frames,
+                playback_profile.decoded_frame_count,
+                playback_profile.max_decoded_frame_count
+            ),
+            "improve_playback_decoder_residency",
+            "Inspect playback cursor sequencing, proxy readiness, and decoder residency because playback is behaving like repeated random access.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
 
@@ -5980,6 +6042,8 @@ mod tests {
             external_process: false,
             cpu_resident: true,
             seek_performed: true,
+            session_reused: false,
+            forward_reused: false,
             decoded_frame_count: 48,
             threading_kind: PreviewDecodeThreadingKind::Frame,
             threading_count: 6,
@@ -6001,6 +6065,8 @@ mod tests {
             external_process: true,
             cpu_resident: true,
             seek_performed: false,
+            session_reused: true,
+            forward_reused: false,
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
@@ -6022,6 +6088,8 @@ mod tests {
             external_process: false,
             cpu_resident: true,
             seek_performed: false,
+            session_reused: false,
+            forward_reused: false,
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
@@ -6043,6 +6111,8 @@ mod tests {
             external_process: false,
             cpu_resident: true,
             seek_performed: false,
+            session_reused: true,
+            forward_reused: false,
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
@@ -6126,6 +6196,9 @@ mod tests {
         assert_eq!(playback_profile.total_duration_us, 2_540);
         assert_eq!(playback_profile.max_duration_us, 2_500);
         assert_eq!(playback_profile.last_duration_us, 40);
+        assert_eq!(playback_profile.session_reused_frames, 2);
+        assert_eq!(playback_profile.session_opened_frames, 0);
+        assert_eq!(playback_profile.forward_reused_frames, 0);
         assert_eq!(playback_profile.stage_durations.cache_lookup_us, 12);
         assert_eq!(
             playback_profile.max_frame_stage_durations.external_process_us,
@@ -6135,12 +6208,17 @@ mod tests {
         assert_eq!(scrub_profile.frames, 1);
         assert_eq!(scrub_profile.in_process_cpu_rgba_frames, 1);
         assert_eq!(scrub_profile.seeked_frames, 1);
+        assert_eq!(scrub_profile.session_reused_frames, 0);
+        assert_eq!(scrub_profile.session_opened_frames, 1);
+        assert_eq!(scrub_profile.forward_reused_frames, 0);
         assert_eq!(scrub_profile.decoded_frame_count, 48);
         assert_eq!(scrub_profile.max_decoded_frame_count, 48);
         assert_eq!(scrub_profile.stage_durations.packet_decode_us, 500);
         let still_profile = diagnostics.decode_access_mode_profiles.random_access_still;
         assert_eq!(still_profile.frames, 1);
         assert_eq!(still_profile.cache_hit_frames, 1);
+        assert_eq!(still_profile.session_reused_frames, 0);
+        assert_eq!(still_profile.session_opened_frames, 1);
         assert_eq!(still_profile.stage_durations.cache_lookup_us, 20);
         assert_eq!(
             diagnostics.decode_access_mode_profiles.slowest_access_mode(),
@@ -6368,6 +6446,78 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "tune_preview_prefetch_deadline_or_proxy"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_flags_playback_without_locality() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 2,
+            decode_in_process_cpu_rgba_frames: 2,
+            decode_total_duration_us: 80_000,
+            decode_max_duration_us: 45_000,
+            decode_last_duration_us: 35_000,
+            decode_seeked_frames: 2,
+            decode_decoded_frame_count: 96,
+            decode_max_decoded_frame_count: 48,
+            decode_stage_durations: PreviewDecodeStageDurations {
+                seek_us: 20_000,
+                packet_decode_us: 55_000,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_max_frame_stage_durations: PreviewDecodeStageDurations {
+                seek_us: 10_000,
+                packet_decode_us: 30_000,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 2,
+                    in_process_cpu_rgba_frames: 2,
+                    total_duration_us: 80_000,
+                    max_duration_us: 45_000,
+                    last_duration_us: 35_000,
+                    seeked_frames: 2,
+                    session_opened_frames: 2,
+                    session_reused_frames: 0,
+                    forward_reused_frames: 0,
+                    decoded_frame_count: 96,
+                    max_decoded_frame_count: 48,
+                    stage_durations: PreviewDecodeStageDurations {
+                        seek_us: 20_000,
+                        packet_decode_us: 55_000,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    max_frame_stage_durations: PreviewDecodeStageDurations {
+                        seek_us: 10_000,
+                        packet_decode_us: 30_000,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-playback-locality-test",
+            50_000,
+        );
+
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_playback_session_not_reused"
+                && root.evidence.contains("session_opened_frames=2")
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_playback_without_locality"
+                && root.evidence.contains("source_decode_frames=2")
+                && root.evidence.contains("forward_reused_frames=0")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "improve_playback_decoder_residency"));
     }
 
     #[test]

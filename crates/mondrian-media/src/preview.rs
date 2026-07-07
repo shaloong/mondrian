@@ -261,6 +261,12 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether the decoder had to seek before producing this frame.
     #[serde(default)]
     pub seek_performed: bool,
+    /// Whether an existing access-mode-local decode session was reused.
+    #[serde(default)]
+    pub session_reused: bool,
+    /// Whether this frame was produced by continuing forward in an existing session without seeking.
+    #[serde(default)]
+    pub forward_reused: bool,
     /// Decoded frames consumed by this request before selecting the output frame.
     #[serde(default)]
     pub decoded_frame_count: u32,
@@ -288,6 +294,8 @@ impl PreviewDecodeDiagnostics {
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
             cpu_resident: true,
             seek_performed: false,
+            session_reused: false,
+            forward_reused: false,
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
@@ -391,6 +399,16 @@ impl RgbaFrame {
     fn with_decode_work(mut self, seek_performed: bool, decoded_frame_count: usize) -> Self {
         self.diagnostics.seek_performed = seek_performed;
         self.diagnostics.decoded_frame_count = decoded_frame_count.min(u32::MAX as usize) as u32;
+        self
+    }
+
+    fn with_session_reused(mut self, session_reused: bool) -> Self {
+        self.diagnostics.session_reused = session_reused;
+        self
+    }
+
+    fn with_forward_reused(mut self, forward_reused: bool) -> Self {
+        self.diagnostics.forward_reused = forward_reused;
         self
     }
 
@@ -1062,6 +1080,7 @@ impl PreviewDecodeSession {
                         ..PreviewDecodeStageDurations::default()
                     })
                     .with_decode_work(seek_performed, result.decoded_frame_count)
+                    .with_forward_reused(should_continue_forward)
                     .with_threading(self.threading_kind, self.threading_count),
             ));
         }
@@ -1399,6 +1418,7 @@ fn decode_preview_rgba_frame_outcome(
                         }
                         return Ok(PreviewDecodeOutcome::Frame(frame
                             .with_access_mode(access_mode)
+                            .with_session_reused(current_match)
                             .with_stage_durations(PreviewDecodeStageDurations {
                                 session_open_us,
                                 external_process_us,
@@ -1420,6 +1440,7 @@ fn decode_preview_rgba_frame_outcome(
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame
                     .with_access_mode(access_mode)
+                    .with_session_reused(current_match)
                     .with_stage_durations(PreviewDecodeStageDurations {
                         session_open_us,
                         external_process_us,
@@ -2065,6 +2086,8 @@ mod tests {
         assert!(!frame.diagnostics.cache_hit);
         assert!(!frame.diagnostics.external_process);
         assert!(frame.diagnostics.cpu_resident);
+        assert!(!frame.diagnostics.session_reused);
+        assert!(!frame.diagnostics.forward_reused);
         assert_eq!(
             frame.diagnostics.threading_kind,
             PreviewDecodeThreadingKind::None
@@ -2074,6 +2097,9 @@ mod tests {
             frame.diagnostics.access_mode,
             PreviewDecodeAccessMode::RandomAccessStillFrame
         );
+        let reused = frame.clone().with_session_reused(true).with_forward_reused(true);
+        assert!(reused.diagnostics.session_reused);
+        assert!(reused.diagnostics.forward_reused);
 
         let cached = frame.into_cache_hit(
             std::time::Duration::from_micros(3),

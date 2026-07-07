@@ -123,6 +123,10 @@ latency or exact still-frame random access costs.
 The versioned report must emit access-mode-specific latency checks and root
 causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` regressions without reverse-engineering raw counters.
+Playback diagnostics must also expose session reuse and forward reuse evidence.
+If playback source decodes repeatedly open sessions or never hit forward reuse,
+ring reuse, or cache reuse, the report should flag playback locality separately
+from generic codec/GOP pressure.
 App-level decode cancellation is also structured before it reaches diagnostics:
 workers classify cancellations as shutdown, obsolete pending work, prefetch
 deadline, or unknown, and aggregate them by requested access mode. The media
