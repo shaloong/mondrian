@@ -166,9 +166,11 @@ generation churn, and pending-window backpressure.
 The app worker transport queue is diagnosed separately from scheduler
 admission. `queue_full_drops` and `worker_disconnected_drops` are hard failures
 because they mean scheduler-accepted work did not reach a preview worker.
-`queue_evicted_prefetch_jobs`, `queue_pruned_obsolete_jobs`, and
-`queue_promoted_current_jobs` are evidence fields: they should explain how the
-system protected current-frame work, not be folded into opaque backpressure.
+`queue_evicted_prefetch_jobs`, `queue_canceled_jobs`,
+`queue_pruned_obsolete_jobs`, and `queue_promoted_current_jobs` are evidence
+fields: they should explain how the system protected current-frame work and kept
+the worker transport queue aligned with scheduler cancellation, not be folded
+into opaque backpressure.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
 end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,

@@ -282,6 +282,7 @@ impl AppUiPreviewService {
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
+            queue_canceled_jobs: self.metrics.queue_canceled_jobs.get(),
             queue_pruned_obsolete_jobs: self.metrics.queue_pruned_obsolete_jobs.get(),
             queue_promoted_current_jobs: self.metrics.queue_promoted_current_jobs.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
@@ -1613,6 +1614,8 @@ pub struct AppUiPreviewDiagnostics {
     pub queue_full_drops: u64,
     /// Queued prefetch jobs evicted so current-frame decode work can run.
     pub queue_evicted_prefetch_jobs: u64,
+    /// Queued jobs removed because their scheduler-side pending request was canceled.
+    pub queue_canceled_jobs: u64,
     /// Obsolete queued jobs removed before scheduling current-frame decode.
     pub queue_pruned_obsolete_jobs: u64,
     /// Queued prefetch jobs promoted after the same key became current-frame work.
@@ -2052,6 +2055,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub queue_full_drops: u64,
     /// Queued prefetch jobs evicted so current-frame decode can run.
     pub queue_evicted_prefetch_jobs: u64,
+    /// Queued jobs removed because their scheduler-side pending request was canceled.
+    pub queue_canceled_jobs: u64,
     /// Obsolete queued jobs removed before scheduling current-frame decode.
     pub queue_pruned_obsolete_jobs: u64,
     /// Queued prefetch jobs promoted after the same key became current-frame work.
@@ -2921,13 +2926,14 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
                 summary.enqueued_jobs,
                 summary.queue_full_drops,
                 summary.queue_evicted_prefetch_jobs,
+                summary.queue_canceled_jobs,
                 summary.queue_pruned_obsolete_jobs,
                 summary.queue_promoted_current_jobs
             ),
@@ -3105,10 +3111,11 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} queue_evicted_prefetch_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={}",
+                "queue_full_drops={} enqueued_jobs={} queue_evicted_prefetch_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
                 summary.queue_evicted_prefetch_jobs,
+                summary.queue_canceled_jobs,
                 summary.queue_pruned_obsolete_jobs,
                 summary.queue_promoted_current_jobs,
                 summary.scheduler.dropped_pending_window_requests
@@ -3910,6 +3917,7 @@ impl AppUiPreviewDiagnostics {
             enqueued_jobs: self.enqueued_jobs,
             queue_full_drops: self.queue_full_drops,
             queue_evicted_prefetch_jobs: self.queue_evicted_prefetch_jobs,
+            queue_canceled_jobs: self.queue_canceled_jobs,
             queue_pruned_obsolete_jobs: self.queue_pruned_obsolete_jobs,
             queue_promoted_current_jobs: self.queue_promoted_current_jobs,
             worker_disconnected_drops: self.worker_disconnected_drops,
@@ -4855,11 +4863,15 @@ impl AppUiPreviewService {
                 bump(&self.metrics.enqueued_jobs);
                 if let Some(evicted_key) = evicted_prefetch {
                     bump(&self.metrics.queue_evicted_prefetch_jobs);
+                    let canceled = self.jobs.cancel_key(&evicted_key) as u64;
+                    add_cell(&self.metrics.queue_canceled_jobs, canceled);
                     self.scheduler.cancel(&evicted_key);
                 }
             }
             MediaPreviewJobEnqueueStatus::DroppedFull => {
                 bump(&self.metrics.queue_full_drops);
+                let canceled = self.jobs.cancel_key(&key) as u64;
+                add_cell(&self.metrics.queue_canceled_jobs, canceled);
                 self.scheduler.cancel(&key);
                 tracing::trace!(
                     asset_id = %key.asset_id,
@@ -4869,6 +4881,8 @@ impl AppUiPreviewService {
             }
             MediaPreviewJobEnqueueStatus::Closed => {
                 bump(&self.metrics.worker_disconnected_drops);
+                let canceled = self.jobs.cancel_key(&key) as u64;
+                add_cell(&self.metrics.queue_canceled_jobs, canceled);
                 self.scheduler.cancel(&key);
                 tracing::debug!("viewer preview worker unavailable");
             }
@@ -5060,6 +5074,7 @@ struct AppUiPreviewMetrics {
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
+    queue_canceled_jobs: Cell<u64>,
     queue_pruned_obsolete_jobs: Cell<u64>,
     queue_promoted_current_jobs: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
@@ -6722,6 +6737,7 @@ mod tests {
             decode_prefetch_queue_wait_max_us: 15_000,
             enqueued_jobs: 4,
             queue_evicted_prefetch_jobs: 1,
+            queue_canceled_jobs: 3,
             queue_pruned_obsolete_jobs: 2,
             queue_promoted_current_jobs: 1,
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
@@ -6785,12 +6801,14 @@ mod tests {
         );
         assert_eq!(summary.enqueued_jobs, 4);
         assert_eq!(summary.queue_evicted_prefetch_jobs, 1);
+        assert_eq!(summary.queue_canceled_jobs, 3);
         assert_eq!(summary.queue_pruned_obsolete_jobs, 2);
         assert_eq!(summary.queue_promoted_current_jobs, 1);
         assert_eq!(summary.scheduler.dropped_pending_window_requests, 2);
         assert!(report.root_causes.iter().any(|root| root.code
             == "preview_decode_queue_wait_bound"
             && root.evidence.contains("queue_evicted_prefetch_jobs=1")
+            && root.evidence.contains("queue_canceled_jobs=3")
             && root.evidence.contains("queue_pruned_obsolete_jobs=2")
             && root.evidence.contains("queue_promoted_current_jobs=1")));
         assert!(report.checks.iter().any(|check| {
@@ -6834,6 +6852,7 @@ mod tests {
             enqueued_jobs: 3,
             queue_full_drops: 1,
             queue_evicted_prefetch_jobs: 1,
+            queue_canceled_jobs: 2,
             queue_pruned_obsolete_jobs: 2,
             queue_promoted_current_jobs: 1,
             worker_disconnected_drops: 1,
@@ -6866,6 +6885,7 @@ mod tests {
         let summary = report.summary.expect("decode summary");
         assert_eq!(summary.enqueued_jobs, 3);
         assert_eq!(summary.queue_full_drops, 1);
+        assert_eq!(summary.queue_canceled_jobs, 2);
         assert_eq!(summary.worker_disconnected_drops, 1);
         assert!(report.checks.iter().any(|check| {
             check.code == "preview_decode_worker_queue_full_drops"
@@ -6883,6 +6903,7 @@ mod tests {
             root.code == "preview_decode_worker_queue_full_drops"
                 && root.severity == AppUiPreviewDecodePerformanceSeverity::Fail
                 && root.evidence.contains("queue_full_drops=1")
+                && root.evidence.contains("queue_canceled_jobs=2")
                 && root.evidence.contains("scheduler_dropped_pending_window_requests=2")
         }));
         assert!(report.root_causes.iter().any(|root| {

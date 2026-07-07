@@ -276,6 +276,13 @@ impl MediaPreviewJobQueueSender {
         before.saturating_sub(state.queue.len())
     }
 
+    pub(crate) fn cancel_key(&self, key: &MediaPreviewKey) -> usize {
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        let before = state.queue.len();
+        state.queue.retain(|queued| &queued.job.key != key);
+        before.saturating_sub(state.queue.len())
+    }
+
     pub(crate) fn enqueue(
         &self,
         job: MediaPreviewJob,
@@ -1696,6 +1703,40 @@ mod tests {
 
         assert_eq!(receiver.recv().expect("current").key, current);
         assert_eq!(receiver.recv().expect("fresh prefetch").key, fresh_prefetch);
+    }
+
+    #[test]
+    fn media_preview_job_queue_cancels_all_queued_jobs_for_key() {
+        let (sender, receiver) = media_preview_job_queue(4);
+        let canceled = test_media_key(1);
+        let retained = test_media_key(2);
+
+        assert_eq!(
+            sender.enqueue(
+                test_media_job(canceled.clone(), 1.0, MediaPreviewRequestPriority::Prefetch),
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        assert_eq!(
+            sender.enqueue(
+                test_media_job(retained.clone(), 2.0, MediaPreviewRequestPriority::Prefetch),
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        assert_eq!(
+            sender.enqueue(
+                test_media_job(canceled.clone(), 3.0, MediaPreviewRequestPriority::Current),
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+
+        assert_eq!(sender.cancel_key(&canceled), 2);
+        assert_eq!(receiver.recv().expect("retained job").key, retained);
+        sender.close();
+        assert!(receiver.recv().is_none());
     }
 
     #[test]
