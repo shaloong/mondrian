@@ -165,6 +165,23 @@ fn preview_decode_hard_failures(report: &AppUiPreviewDecodePerformanceReport) ->
     }
 }
 
+fn preview_media_decode_access_mode_coverage_failures(
+    report: &AppUiPreviewDecodePerformanceReport,
+) -> Vec<&'static str> {
+    let Some(summary) = report.summary.as_ref() else {
+        return vec!["preview_decode_report_missing_summary"];
+    };
+
+    let mut failures = Vec::new();
+    if summary.access_mode_profiles.scrub_cursor.frames == 0 {
+        failures.push("preview_decode_scrub_cursor_not_sampled");
+    }
+    if summary.access_mode_profiles.random_access_still.frames == 0 {
+        failures.push("preview_decode_random_access_still_not_sampled");
+    }
+    failures
+}
+
 fn preview_playback_decode_failures(
     report: &AppUiPreviewDecodePerformanceReport,
 ) -> Vec<&'static str> {
@@ -682,19 +699,6 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             },
         )?;
 
-        let sequential_case = run_case(
-            "preview_media.sequential_frame_ready_window",
-            1,
-            sequential_threshold_ms,
-            || {
-                for frame in 0..frame_count {
-                    state.seek(frame as i64);
-                    wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
-                }
-                Ok(())
-            },
-        )?;
-
         let scrub_case = run_case(
             "preview_media.active_scrub_ready_window",
             1,
@@ -705,6 +709,19 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
                     wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
                 }
                 state.seek(frame_count.saturating_sub(1) as i64);
+                Ok(())
+            },
+        )?;
+
+        let sequential_case = run_case(
+            "preview_media.sequential_frame_ready_window",
+            1,
+            sequential_threshold_ms,
+            || {
+                for frame in 0..frame_count {
+                    state.seek(frame as i64);
+                    wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+                }
                 Ok(())
             },
         )?;
@@ -749,8 +766,8 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             cases: vec![
                 first_frame_case,
                 cached_frame_case,
-                sequential_case,
                 scrub_case,
+                sequential_case,
                 gpu_candidate_case,
             ],
         })
@@ -780,6 +797,15 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
         anyhow::bail!(
             "preview media decode report failed: {:?}; report: {}",
             decode_failures,
+            report_json
+        );
+    }
+    let access_mode_coverage_failures =
+        preview_media_decode_access_mode_coverage_failures(&report.preview_decode_report);
+    if !access_mode_coverage_failures.is_empty() {
+        anyhow::bail!(
+            "preview media decode access-mode coverage failed: {:?}; report: {}",
+            access_mode_coverage_failures,
             report_json
         );
     }
@@ -1278,6 +1304,62 @@ fn preview_decode_hard_failures_include_failed_report() {
         preview_decode_hard_failures(&report),
         vec!["preview_decode_report_failed"]
     );
+}
+
+#[test]
+fn preview_media_decode_access_mode_coverage_requires_scrub_and_still_samples() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 1,
+        decode_in_process_cpu_rgba_frames: 1,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-access-mode-coverage-test",
+        50_000,
+    );
+
+    assert_eq!(
+        preview_media_decode_access_mode_coverage_failures(&report),
+        vec!["preview_decode_scrub_cursor_not_sampled"]
+    );
+}
+
+#[test]
+fn preview_media_decode_access_mode_coverage_passes_with_scrub_and_still_samples() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 2,
+        decode_in_process_cpu_rgba_frames: 2,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-access-mode-coverage-test",
+        50_000,
+    );
+
+    assert!(preview_media_decode_access_mode_coverage_failures(&report).is_empty());
 }
 
 #[test]

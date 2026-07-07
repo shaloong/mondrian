@@ -106,7 +106,9 @@ non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 (`ScrubCursor`). The active scrub window is controlled by
 `MONDRIAN_PREVIEW_MEDIA_SCRUB_READY_MS`; do not replace it with plain
 `state.seek(...)`, because that would silently stop profiling the latest-wins
-scrub path.
+scrub path. The smoke fails closed when either `ScrubCursor` or
+`RandomAccessStillFrame` has no successful profile samples; a profile schema
+without exercised samples is not acceptable coverage.
 Continuous playback smoke also fails on playback-locality root causes such as
 `preview_decode_playback_session_not_reused` and
 `preview_decode_playback_without_locality`, even when the wall-clock window
