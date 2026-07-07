@@ -74,6 +74,12 @@ failures must be diagnosable without inferring from one opaque skipped count.
 The decode performance summary/report carries the same scheduler diagnostics and
 emits stable Scheduling root causes for access-mode mismatch, obsolete
 generation churn, and pending-window backpressure.
+App-level decode cancellation is also structured before it reaches diagnostics:
+workers classify cancellations as shutdown, obsolete pending work, prefetch
+deadline, or unknown, and aggregate them by requested access mode. The media
+decode predicate remains a boolean so FFmpeg adapters do not learn app/UI
+scheduler semantics, but the worker result must preserve the app-level reason
+for telemetry and performance reports.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and

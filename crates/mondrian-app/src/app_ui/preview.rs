@@ -206,6 +206,13 @@ impl AppUiPreviewService {
             decode_successes: self.metrics.decode_successes.get(),
             decode_failures: self.metrics.decode_failures.get(),
             decode_canceled_jobs: self.metrics.decode_canceled_jobs.get(),
+            decode_canceled_shutdown_jobs: self.metrics.decode_canceled_shutdown_jobs.get(),
+            decode_canceled_obsolete_jobs: self.metrics.decode_canceled_obsolete_jobs.get(),
+            decode_canceled_prefetch_deadline_jobs: self
+                .metrics
+                .decode_canceled_prefetch_deadline_jobs
+                .get(),
+            decode_canceled_unknown_jobs: self.metrics.decode_canceled_unknown_jobs.get(),
             decode_in_process_cpu_rgba_frames: self.metrics.decode_in_process_cpu_rgba_frames.get(),
             decode_external_ffmpeg_cpu_rgba_frames: self
                 .metrics
@@ -215,6 +222,15 @@ impl AppUiPreviewService {
             decode_playback_cursor_frames: self.metrics.decode_playback_cursor_frames.get(),
             decode_scrub_cursor_frames: self.metrics.decode_scrub_cursor_frames.get(),
             decode_random_access_still_frames: self.metrics.decode_random_access_still_frames.get(),
+            decode_canceled_playback_cursor_jobs: self
+                .metrics
+                .decode_canceled_playback_cursor_jobs
+                .get(),
+            decode_canceled_scrub_cursor_jobs: self.metrics.decode_canceled_scrub_cursor_jobs.get(),
+            decode_canceled_random_access_still_jobs: self
+                .metrics
+                .decode_canceled_random_access_still_jobs
+                .get(),
             decode_total_duration_us: self.metrics.decode_total_duration_us.get(),
             decode_max_duration_us: self.metrics.decode_max_duration_us.get(),
             decode_last_duration_us: self.metrics.decode_last_duration_us.get(),
@@ -382,7 +398,7 @@ impl AppUiPreviewService {
                 self.scheduler.complete(&result.key, result.generation, result.access_mode);
             self.record_preview_decode_queue_wait(result.priority, result.queue_wait_us);
             if result.canceled {
-                bump(&self.metrics.decode_canceled_jobs);
+                self.record_preview_decode_cancel(result.access_mode, result.cancel_reason);
                 changed |= is_current;
                 continue;
             }
@@ -955,6 +971,33 @@ impl AppUiPreviewService {
         self.metrics.decode_stage_durations.set(stage_durations);
     }
 
+    fn record_preview_decode_cancel(
+        &self,
+        access_mode: PreviewDecodeAccessMode,
+        reason: Option<MediaPreviewCancelReason>,
+    ) {
+        bump(&self.metrics.decode_canceled_jobs);
+        match reason.unwrap_or(MediaPreviewCancelReason::Unknown) {
+            MediaPreviewCancelReason::Shutdown => bump(&self.metrics.decode_canceled_shutdown_jobs),
+            MediaPreviewCancelReason::Obsolete => bump(&self.metrics.decode_canceled_obsolete_jobs),
+            MediaPreviewCancelReason::PrefetchDeadline => {
+                bump(&self.metrics.decode_canceled_prefetch_deadline_jobs);
+            }
+            MediaPreviewCancelReason::Unknown => bump(&self.metrics.decode_canceled_unknown_jobs),
+        }
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                bump(&self.metrics.decode_canceled_playback_cursor_jobs);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                bump(&self.metrics.decode_canceled_scrub_cursor_jobs);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                bump(&self.metrics.decode_canceled_random_access_still_jobs);
+            }
+        }
+    }
+
     fn record_preview_decode_queue_wait(
         &self,
         priority: MediaPreviewRequestPriority,
@@ -1359,8 +1402,16 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_successes: u64,
     /// Failed background media decodes received by the UI service.
     pub decode_failures: u64,
-    /// Background media decodes canceled because their render generation became obsolete.
+    /// Background media decodes canceled before producing a frame.
     pub decode_canceled_jobs: u64,
+    /// Background media decodes canceled because the preview service is shutting down.
+    pub decode_canceled_shutdown_jobs: u64,
+    /// Background media decodes canceled because their pending request became obsolete.
+    pub decode_canceled_obsolete_jobs: u64,
+    /// Prefetch decodes canceled by the app-level prefetch deadline.
+    pub decode_canceled_prefetch_deadline_jobs: u64,
+    /// Background media decodes canceled without a structured app-level reason.
+    pub decode_canceled_unknown_jobs: u64,
     /// Successful decodes produced by the in-process FFmpeg CPU RGBA path.
     pub decode_in_process_cpu_rgba_frames: u64,
     /// Successful decodes produced by the external ffmpeg CPU RGBA path.
@@ -1373,6 +1424,12 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_scrub_cursor_frames: u64,
     /// Decode results requested through the random-access still-frame contract.
     pub decode_random_access_still_frames: u64,
+    /// Canceled decode jobs requested through the playback cursor access contract.
+    pub decode_canceled_playback_cursor_jobs: u64,
+    /// Canceled decode jobs requested through the scrub cursor access contract.
+    pub decode_canceled_scrub_cursor_jobs: u64,
+    /// Canceled decode jobs requested through the random-access still-frame contract.
+    pub decode_canceled_random_access_still_jobs: u64,
     /// Total preview decode duration in microseconds.
     pub decode_total_duration_us: u64,
     /// Slowest preview decode duration in microseconds.
@@ -1608,6 +1665,16 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub decode_successes: u64,
     /// Failed preview decode results.
     pub decode_failures: u64,
+    /// Canceled preview decode jobs.
+    pub canceled_jobs: u64,
+    /// Canceled preview decode jobs caused by shutdown.
+    pub canceled_shutdown_jobs: u64,
+    /// Canceled preview decode jobs caused by obsolete pending work.
+    pub canceled_obsolete_jobs: u64,
+    /// Prefetch decode jobs canceled by their deadline.
+    pub canceled_prefetch_deadline_jobs: u64,
+    /// Canceled preview decode jobs with no structured reason.
+    pub canceled_unknown_jobs: u64,
     /// Successful decodes served from the in-process FFmpeg CPU RGBA path.
     pub in_process_cpu_rgba_frames: u64,
     /// Successful decodes served from the external ffmpeg CPU RGBA path.
@@ -1620,6 +1687,12 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub scrub_cursor_frames: u64,
     /// Decode results requested through the random-access still-frame contract.
     pub random_access_still_frames: u64,
+    /// Canceled decode jobs requested through the playback cursor access contract.
+    pub canceled_playback_cursor_jobs: u64,
+    /// Canceled decode jobs requested through the scrub cursor access contract.
+    pub canceled_scrub_cursor_jobs: u64,
+    /// Canceled decode jobs requested through the random-access still-frame contract.
+    pub canceled_random_access_still_jobs: u64,
     /// Maximum end-to-end decode duration.
     pub max_duration_us: u64,
     /// Most recent end-to-end decode duration.
@@ -2033,7 +2106,15 @@ pub fn build_preview_decode_performance_report(
         &mut checks,
         AppUiPreviewDecodePerformanceArea::CaptureIntegrity,
         "preview_decode_evidence_present",
-        summary.map(|summary| summary.decode_successes > 0).unwrap_or(false),
+        summary
+            .map(|summary| {
+                summary
+                    .decode_successes
+                    .saturating_add(summary.decode_failures)
+                    .saturating_add(summary.canceled_jobs)
+                    > 0
+            })
+            .unwrap_or(false),
     );
 
     if let Some(mut summary) = summary {
@@ -2076,6 +2157,13 @@ pub fn build_preview_decode_performance_report(
             "preview_decode_queue_wait_max_us",
             summary.queue_wait_max_us,
             slow_frame_budget_us,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_prefetch_deadline_cancellations",
+            summary.canceled_prefetch_deadline_jobs,
+            0,
         );
 
         push_preview_decode_root_causes_and_actions(summary, &mut root_causes, &mut actions);
@@ -2391,6 +2479,52 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "warm_preview_cache_or_proxy",
             "Warm preview cache or generate fresh playback proxies before interactive playback.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+
+    if summary.canceled_prefetch_deadline_jobs > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_prefetch_deadline_cancellations",
+            format!(
+                "canceled_prefetch_deadline_jobs={} canceled_playback_cursor_jobs={} canceled_scrub_cursor_jobs={} canceled_random_access_still_jobs={}",
+                summary.canceled_prefetch_deadline_jobs,
+                summary.canceled_playback_cursor_jobs,
+                summary.canceled_scrub_cursor_jobs,
+                summary.canceled_random_access_still_jobs
+            ),
+            "tune_preview_prefetch_deadline_or_proxy",
+            "Inspect prefetch cancellation pressure, proxy readiness, and playback decode locality before increasing decode concurrency.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if summary.canceled_obsolete_jobs > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_obsolete_cancellations",
+            format!(
+                "canceled_obsolete_jobs={} canceled_jobs={}",
+                summary.canceled_obsolete_jobs, summary.canceled_jobs
+            ),
+            "coalesce_obsolete_preview_requests",
+            "Coalesce preview requests before decode when UI state changes faster than workers can consume jobs.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if summary.canceled_unknown_jobs > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_unknown_cancellations",
+            format!("canceled_unknown_jobs={}", summary.canceled_unknown_jobs),
+            "preserve_preview_cancel_reason",
+            "Ensure app-level cancellation predicates record a structured reason before returning canceled decode outcomes.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -3129,7 +3263,11 @@ impl AppUiPreviewDiagnostics {
         slow_frame_budget_us: u64,
     ) -> Option<AppUiPreviewDecodePerformanceSummary> {
         let decode_successes = self.decode_successes;
-        if decode_successes == 0 {
+        if decode_successes
+            .saturating_add(self.decode_failures)
+            .saturating_add(self.decode_canceled_jobs)
+            == 0
+        {
             return None;
         }
         let stage_durations = self.decode_stage_durations;
@@ -3137,12 +3275,20 @@ impl AppUiPreviewDiagnostics {
         Some(AppUiPreviewDecodePerformanceSummary {
             decode_successes,
             decode_failures: self.decode_failures,
+            canceled_jobs: self.decode_canceled_jobs,
+            canceled_shutdown_jobs: self.decode_canceled_shutdown_jobs,
+            canceled_obsolete_jobs: self.decode_canceled_obsolete_jobs,
+            canceled_prefetch_deadline_jobs: self.decode_canceled_prefetch_deadline_jobs,
+            canceled_unknown_jobs: self.decode_canceled_unknown_jobs,
             in_process_cpu_rgba_frames: self.decode_in_process_cpu_rgba_frames,
             external_ffmpeg_cpu_rgba_frames: self.decode_external_ffmpeg_cpu_rgba_frames,
             cache_hit_frames: self.decode_cache_hit_frames,
             playback_cursor_frames: self.decode_playback_cursor_frames,
             scrub_cursor_frames: self.decode_scrub_cursor_frames,
             random_access_still_frames: self.decode_random_access_still_frames,
+            canceled_playback_cursor_jobs: self.decode_canceled_playback_cursor_jobs,
+            canceled_scrub_cursor_jobs: self.decode_canceled_scrub_cursor_jobs,
+            canceled_random_access_still_jobs: self.decode_canceled_random_access_still_jobs,
             max_duration_us: self.decode_max_duration_us,
             last_duration_us: self.decode_last_duration_us,
             total_duration_us: self.decode_total_duration_us,
@@ -4091,6 +4237,14 @@ struct MediaPreviewJob {
     enqueued_at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPreviewCancelReason {
+    Shutdown,
+    Obsolete,
+    PrefetchDeadline,
+    Unknown,
+}
+
 #[derive(Debug)]
 struct MediaPreviewResult {
     key: MediaPreviewKey,
@@ -4101,6 +4255,7 @@ struct MediaPreviewResult {
     access_mode: PreviewDecodeAccessMode,
     queue_wait_us: u64,
     canceled: bool,
+    cancel_reason: Option<MediaPreviewCancelReason>,
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
@@ -4836,12 +4991,19 @@ struct AppUiPreviewMetrics {
     decode_successes: Cell<u64>,
     decode_failures: Cell<u64>,
     decode_canceled_jobs: Cell<u64>,
+    decode_canceled_shutdown_jobs: Cell<u64>,
+    decode_canceled_obsolete_jobs: Cell<u64>,
+    decode_canceled_prefetch_deadline_jobs: Cell<u64>,
+    decode_canceled_unknown_jobs: Cell<u64>,
     decode_in_process_cpu_rgba_frames: Cell<u64>,
     decode_external_ffmpeg_cpu_rgba_frames: Cell<u64>,
     decode_cache_hit_frames: Cell<u64>,
     decode_playback_cursor_frames: Cell<u64>,
     decode_scrub_cursor_frames: Cell<u64>,
     decode_random_access_still_frames: Cell<u64>,
+    decode_canceled_playback_cursor_jobs: Cell<u64>,
+    decode_canceled_scrub_cursor_jobs: Cell<u64>,
+    decode_canceled_random_access_still_jobs: Cell<u64>,
     decode_total_duration_us: Cell<u64>,
     decode_max_duration_us: Cell<u64>,
     decode_last_duration_us: Cell<u64>,
@@ -5502,11 +5664,10 @@ fn media_preview_worker(
         let cancel_access_mode = job.access_mode;
         let cancel_scheduler = scheduler.clone();
         let decode_started_at = Instant::now();
-        let result = decode_media_preview(job, queue_wait_us, || {
-            if shutdown.load(Ordering::Acquire) {
-                return true;
-            }
-            media_preview_should_cancel_decode(
+        let observed_cancel_reason = Cell::new(None);
+        let mut result = decode_media_preview(job, queue_wait_us, || {
+            let reason = media_preview_cancel_reason(
+                shutdown.load(Ordering::Acquire),
                 cancel_scheduler.is_decode_current(
                     &cancel_key,
                     cancel_generation,
@@ -5514,24 +5675,40 @@ fn media_preview_worker(
                 ),
                 cancel_priority,
                 decode_started_at.elapsed(),
-            )
+            );
+            if reason.is_some() {
+                observed_cancel_reason.set(reason);
+            }
+            reason.is_some()
         });
+        if result.canceled && result.cancel_reason.is_none() {
+            result.cancel_reason =
+                Some(observed_cancel_reason.get().unwrap_or(MediaPreviewCancelReason::Unknown));
+        }
         if results.send(result).is_err() {
             break;
         }
     }
 }
 
-fn media_preview_should_cancel_decode(
+fn media_preview_cancel_reason(
+    shutdown: bool,
     scheduler_current: bool,
     priority: MediaPreviewRequestPriority,
     elapsed: Duration,
-) -> bool {
-    if !scheduler_current {
-        return true;
+) -> Option<MediaPreviewCancelReason> {
+    if shutdown {
+        return Some(MediaPreviewCancelReason::Shutdown);
     }
-    priority == MediaPreviewRequestPriority::Prefetch
+    if !scheduler_current {
+        return Some(MediaPreviewCancelReason::Obsolete);
+    }
+    if priority == MediaPreviewRequestPriority::Prefetch
         && app_duration_us(elapsed) >= MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US
+    {
+        return Some(MediaPreviewCancelReason::PrefetchDeadline);
+    }
+    None
 }
 
 fn decode_media_preview(
@@ -5582,6 +5759,7 @@ fn decode_media_preview(
                 access_mode,
                 queue_wait_us,
                 canceled: false,
+                cancel_reason: None,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
@@ -5596,6 +5774,7 @@ fn decode_media_preview(
             access_mode,
             queue_wait_us,
             canceled: true,
+            cancel_reason: None,
             decode_diagnostics: None,
             color_diagnostics: None,
             color_stage_diagnostics: None,
@@ -5609,6 +5788,7 @@ fn decode_media_preview(
             access_mode,
             queue_wait_us,
             canceled: false,
+            cancel_reason: None,
             decode_diagnostics: None,
             color_diagnostics: None,
             color_stage_diagnostics: None,
@@ -5888,7 +6068,8 @@ mod tests {
         assert_eq!(frame.width, 960);
         assert_eq!(frame.height, 540);
         assert_eq!(frame.rgba.len(), 960 * 540 * 4);
-        assert!(frame.key.contains("app UI-viewer:960x540:f4:"));
+        assert!(frame.key.starts_with("app-ui.viewer.raster:"));
+        assert!(frame.key.contains(":960x540:"));
     }
 
     #[test]
@@ -6232,15 +6413,35 @@ mod tests {
         service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Prefetch, 400);
         service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Current, 1_200);
         service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Current, 20);
+        service.record_preview_decode_cancel(
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(MediaPreviewCancelReason::PrefetchDeadline),
+        );
+        service.record_preview_decode_cancel(
+            PreviewDecodeAccessMode::ScrubCursor,
+            Some(MediaPreviewCancelReason::Obsolete),
+        );
+        service.record_preview_decode_cancel(
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            Some(MediaPreviewCancelReason::Shutdown),
+        );
 
         let diagnostics = service.diagnostics();
 
+        assert_eq!(diagnostics.decode_canceled_jobs, 3);
+        assert_eq!(diagnostics.decode_canceled_shutdown_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_obsolete_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_prefetch_deadline_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_unknown_jobs, 0);
         assert_eq!(diagnostics.decode_in_process_cpu_rgba_frames, 1);
         assert_eq!(diagnostics.decode_external_ffmpeg_cpu_rgba_frames, 1);
         assert_eq!(diagnostics.decode_cache_hit_frames, 1);
         assert_eq!(diagnostics.decode_playback_cursor_frames, 1);
         assert_eq!(diagnostics.decode_scrub_cursor_frames, 1);
         assert_eq!(diagnostics.decode_random_access_still_frames, 1);
+        assert_eq!(diagnostics.decode_canceled_playback_cursor_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_scrub_cursor_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_random_access_still_jobs, 1);
         assert_eq!(diagnostics.decode_total_duration_us, 3_525);
         assert_eq!(diagnostics.decode_max_duration_us, 2_500);
         assert_eq!(diagnostics.decode_last_duration_us, 25);
@@ -6394,6 +6595,53 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_preview_access_mode_transitions"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_classifies_prefetch_deadline_cancellations() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_canceled_jobs: 2,
+            decode_canceled_prefetch_deadline_jobs: 2,
+            decode_canceled_playback_cursor_jobs: 2,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_total_duration_us: 12_000,
+            decode_max_duration_us: 12_000,
+            decode_last_duration_us: 12_000,
+            decode_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 10_000,
+                swscale_us: 1_000,
+                rgba_copy_us: 500,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_max_frame_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 10_000,
+                swscale_us: 1_000,
+                rgba_copy_us: 500,
+                ..PreviewDecodeStageDurations::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-cancel-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        let summary = report.summary.expect("decode summary");
+        assert_eq!(summary.canceled_jobs, 2);
+        assert_eq!(summary.canceled_prefetch_deadline_jobs, 2);
+        assert_eq!(summary.canceled_playback_cursor_jobs, 2);
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_prefetch_deadline_cancellations"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "tune_preview_prefetch_deadline_or_proxy"));
     }
 
     #[test]
@@ -8219,6 +8467,7 @@ mod tests {
         assert_eq!(result.priority, MediaPreviewRequestPriority::Current);
         assert_eq!(result.queue_wait_us, 123);
         assert!(!result.canceled);
+        assert!(result.cancel_reason.is_none());
         assert!(result.color_diagnostics.is_none());
         assert!(result.color_stage_diagnostics.is_none());
     }
@@ -8256,6 +8505,7 @@ mod tests {
         assert!(result.frame.is_none());
         assert!(result.error.is_none());
         assert!(result.canceled);
+        assert!(result.cancel_reason.is_none());
         assert_eq!(result.generation, 7);
         assert_eq!(result.priority, MediaPreviewRequestPriority::Prefetch);
         assert_eq!(result.queue_wait_us, 456);
@@ -9510,38 +9760,71 @@ mod tests {
 
     #[test]
     fn media_preview_decode_cancellation_keeps_current_frame_unbudgeted() {
-        assert!(!media_preview_should_cancel_decode(
-            true,
-            MediaPreviewRequestPriority::Current,
-            Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
-        ));
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                true,
+                MediaPreviewRequestPriority::Current,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn media_preview_decode_cancellation_reports_shutdown() {
+        assert_eq!(
+            media_preview_cancel_reason(
+                true,
+                true,
+                MediaPreviewRequestPriority::Current,
+                Duration::ZERO,
+            ),
+            Some(MediaPreviewCancelReason::Shutdown),
+        );
     }
 
     #[test]
     fn media_preview_decode_cancellation_budgets_prefetch_work() {
-        assert!(!media_preview_should_cancel_decode(
-            true,
-            MediaPreviewRequestPriority::Prefetch,
-            Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US - 1),
-        ));
-        assert!(media_preview_should_cancel_decode(
-            true,
-            MediaPreviewRequestPriority::Prefetch,
-            Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US),
-        ));
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                true,
+                MediaPreviewRequestPriority::Prefetch,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US - 1),
+            ),
+            None,
+        );
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                true,
+                MediaPreviewRequestPriority::Prefetch,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US),
+            ),
+            Some(MediaPreviewCancelReason::PrefetchDeadline),
+        );
     }
 
     #[test]
     fn media_preview_decode_cancellation_stops_stale_work() {
-        assert!(media_preview_should_cancel_decode(
-            false,
-            MediaPreviewRequestPriority::Current,
-            Duration::ZERO,
-        ));
-        assert!(media_preview_should_cancel_decode(
-            false,
-            MediaPreviewRequestPriority::Prefetch,
-            Duration::ZERO,
-        ));
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                false,
+                MediaPreviewRequestPriority::Current,
+                Duration::ZERO,
+            ),
+            Some(MediaPreviewCancelReason::Obsolete),
+        );
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                false,
+                MediaPreviewRequestPriority::Prefetch,
+                Duration::ZERO,
+            ),
+            Some(MediaPreviewCancelReason::Obsolete),
+        );
     }
 }
