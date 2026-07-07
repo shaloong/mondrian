@@ -1197,6 +1197,13 @@ fn preview_perf_report_serializes_color_report() {
             rgba_copy_us: 1_000,
             ..PreviewDecodeStageDurations::default()
         },
+        decode_max_frame_stage_durations: PreviewDecodeStageDurations {
+            packet_decode_us: 70_000,
+            seek_us: 5_000,
+            swscale_us: 4_000,
+            rgba_copy_us: 1_000,
+            ..PreviewDecodeStageDurations::default()
+        },
         render_timed_frames: 1,
         render_total_duration_us: 90_000,
         render_max_duration_us: 90_000,
@@ -1209,6 +1216,15 @@ fn preview_perf_report_serializes_color_report() {
             cpu_output_boundary_us: 60_000,
             frame_packaging_us: 2_900,
         },
+        render_max_frame_stage_durations:
+            crate::app_ui::preview::AppUiPreviewRenderStageDurations {
+                resolve_us: 2_000,
+                final_cache_lookup_us: 100,
+                working_prepare_us: 5_000,
+                cpu_composite_us: 20_000,
+                cpu_output_boundary_us: 60_000,
+                frame_packaging_us: 2_900,
+            },
         color_composite_plans: 1,
         color_composite_elements: 1,
         color_composite_float_linear: 1,

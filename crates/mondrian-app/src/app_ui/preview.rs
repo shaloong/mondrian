@@ -189,11 +189,13 @@ impl AppUiPreviewService {
             decode_last_threading_count: self.metrics.decode_last_threading_count.get(),
             decode_max_threading_count: self.metrics.decode_max_threading_count.get(),
             decode_stage_durations: self.metrics.decode_stage_durations.get(),
+            decode_max_frame_stage_durations: self.metrics.decode_max_frame_stage_durations.get(),
             render_timed_frames: self.metrics.render_timed_frames.get(),
             render_total_duration_us: self.metrics.render_total_duration_us.get(),
             render_max_duration_us: self.metrics.render_max_duration_us.get(),
             render_last_duration_us: self.metrics.render_last_duration_us.get(),
             render_stage_durations: self.metrics.render_stage_durations.get(),
+            render_max_frame_stage_durations: self.metrics.render_max_frame_stage_durations.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
@@ -823,9 +825,10 @@ impl AppUiPreviewService {
             &self.metrics.decode_total_duration_us,
             diagnostics.elapsed_us,
         );
-        self.metrics
-            .decode_max_duration_us
-            .set(self.metrics.decode_max_duration_us.get().max(diagnostics.elapsed_us));
+        if diagnostics.elapsed_us >= self.metrics.decode_max_duration_us.get() {
+            self.metrics.decode_max_duration_us.set(diagnostics.elapsed_us);
+            self.metrics.decode_max_frame_stage_durations.set(diagnostics.stage_durations);
+        }
         self.metrics.decode_last_duration_us.set(diagnostics.elapsed_us);
         if diagnostics.seek_performed {
             bump(&self.metrics.decode_seeked_frames);
@@ -862,9 +865,10 @@ impl AppUiPreviewService {
     ) {
         bump(&self.metrics.render_timed_frames);
         add_cell(&self.metrics.render_total_duration_us, total_duration_us);
-        self.metrics
-            .render_max_duration_us
-            .set(self.metrics.render_max_duration_us.get().max(total_duration_us));
+        if total_duration_us >= self.metrics.render_max_duration_us.get() {
+            self.metrics.render_max_duration_us.set(total_duration_us);
+            self.metrics.render_max_frame_stage_durations.set(durations);
+        }
         self.metrics.render_last_duration_us.set(total_duration_us);
         let mut stage_durations = self.metrics.render_stage_durations.get();
         stage_durations.accumulate(durations);
@@ -1262,6 +1266,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_max_threading_count: u64,
     /// Aggregated stage-level timings reported by preview decode.
     pub decode_stage_durations: PreviewDecodeStageDurations,
+    /// Stage-level timings from the slowest decoded preview frame.
+    pub decode_max_frame_stage_durations: PreviewDecodeStageDurations,
     /// Viewer render requests with post-decode stage timing evidence.
     pub render_timed_frames: u64,
     /// Total post-decode viewer render duration in microseconds.
@@ -1272,6 +1278,8 @@ pub struct AppUiPreviewDiagnostics {
     pub render_last_duration_us: u64,
     /// Aggregated CPU-side viewer render stage timings after media decode.
     pub render_stage_durations: AppUiPreviewRenderStageDurations,
+    /// CPU-side viewer render stage timings from the slowest post-decode frame.
+    pub render_max_frame_stage_durations: AppUiPreviewRenderStageDurations,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
@@ -1479,7 +1487,9 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub max_decoded_frame_count: u64,
     /// Aggregated media-layer decode stage timings.
     pub stage_durations: PreviewDecodeStageDurations,
-    /// Dominant stage inferred from aggregated timings.
+    /// Stage timings from the slowest decode frame.
+    pub max_frame_stage_durations: PreviewDecodeStageDurations,
+    /// Dominant stage inferred from the slowest-frame timings.
     pub primary_bottleneck: AppUiPreviewDecodeBottleneck,
 }
 
@@ -1543,7 +1553,9 @@ pub struct AppUiPreviewRenderPerformanceSummary {
     pub slow_frame_budget_us: u64,
     /// Aggregated post-decode render stage timings.
     pub stage_durations: AppUiPreviewRenderStageDurations,
-    /// Dominant post-decode render bottleneck inferred from aggregated timings.
+    /// Stage timings from the slowest post-decode render frame.
+    pub max_frame_stage_durations: AppUiPreviewRenderStageDurations,
+    /// Dominant post-decode render bottleneck inferred from the slowest-frame timings.
     pub primary_bottleneck: AppUiPreviewRenderBottleneck,
 }
 
@@ -1797,7 +1809,8 @@ pub fn build_preview_render_performance_report(
 
     if let Some(mut summary) = summary {
         summary.slow_frame_budget_us = slow_frame_budget_us;
-        summary.primary_bottleneck = classify_preview_render_bottleneck(summary.stage_durations);
+        summary.primary_bottleneck =
+            classify_preview_render_bottleneck(summary.max_frame_stage_durations);
         push_render_max_check(
             &mut checks,
             AppUiPreviewRenderPerformanceArea::LatencyBudget,
@@ -1860,7 +1873,8 @@ pub fn build_preview_decode_performance_report(
 
     if let Some(mut summary) = summary {
         summary.slow_frame_budget_us = slow_frame_budget_us;
-        summary.primary_bottleneck = classify_preview_decode_bottleneck(summary.stage_durations);
+        summary.primary_bottleneck =
+            classify_preview_decode_bottleneck(summary.max_frame_stage_durations);
         push_decode_max_check(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::LatencyBudget,
@@ -2105,7 +2119,7 @@ fn push_preview_decode_root_causes_and_actions(
             "preview_decode_codec_or_gop_bound",
             format!(
                 "packet_decode_us={} decoded_frame_count={} max_decoded_frame_count={}",
-                summary.stage_durations.packet_decode_us,
+                summary.max_frame_stage_durations.packet_decode_us,
                 summary.decoded_frame_count,
                 summary.max_decoded_frame_count
             ),
@@ -2120,7 +2134,7 @@ fn push_preview_decode_root_causes_and_actions(
             "preview_decode_seek_bound",
             format!(
                 "seek_us={} seeked_frames={}",
-                summary.stage_durations.seek_us, summary.seeked_frames
+                summary.max_frame_stage_durations.seek_us, summary.seeked_frames
             ),
             "generate_proxy_or_improve_random_access",
             "Generate playback proxies or improve random-access/indexing strategy for this media.",
@@ -2133,7 +2147,8 @@ fn push_preview_decode_root_causes_and_actions(
             "preview_decode_cpu_rgba_boundary_bound",
             format!(
                 "swscale_us={} rgba_copy_us={}",
-                summary.stage_durations.swscale_us, summary.stage_durations.rgba_copy_us
+                summary.max_frame_stage_durations.swscale_us,
+                summary.max_frame_stage_durations.rgba_copy_us
             ),
             "remove_cpu_rgba_decode_boundary",
             "Move toward high-bit-depth or GPU-resident decode frames instead of CPU RGBA8 preview payloads.",
@@ -2146,7 +2161,7 @@ fn push_preview_decode_root_causes_and_actions(
             "preview_decode_external_process_bound",
             format!(
                 "external_process_us={}",
-                summary.stage_durations.external_process_us
+                summary.max_frame_stage_durations.external_process_us
             ),
             "avoid_external_ffmpeg_preview_path",
             "Use in-process decode or a real hardware-resident adapter instead of rawvideo over stdout.",
@@ -2157,7 +2172,10 @@ fn push_preview_decode_root_causes_and_actions(
             actions,
             AppUiPreviewDecodePerformanceArea::CodecDecode,
             "preview_decode_session_open_bound",
-            format!("session_open_us={}", summary.stage_durations.session_open_us),
+            format!(
+                "session_open_us={}",
+                summary.max_frame_stage_durations.session_open_us
+            ),
             "preserve_decode_session_locality",
             "Keep decode sessions alive across adjacent playback requests and avoid path/size churn.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
@@ -2217,7 +2235,7 @@ fn push_preview_render_root_causes_and_actions(
             actions,
             AppUiPreviewRenderPerformanceArea::Resolve,
             "preview_render_resolve_bound",
-            format!("resolve_us={}", summary.stage_durations.resolve_us),
+            format!("resolve_us={}", summary.max_frame_stage_durations.resolve_us),
             "profile_preview_plan_resolution",
             "Profile sequence resolution, media-key construction, and readiness checks.",
         ),
@@ -2228,7 +2246,7 @@ fn push_preview_render_root_causes_and_actions(
             "preview_render_final_cache_lookup_bound",
             format!(
                 "final_cache_lookup_us={}",
-                summary.stage_durations.final_cache_lookup_us
+                summary.max_frame_stage_durations.final_cache_lookup_us
             ),
             "profile_viewer_frame_cache",
             "Profile final viewer frame cache lookup and external texture identity checks.",
@@ -2240,7 +2258,7 @@ fn push_preview_render_root_causes_and_actions(
             "preview_render_working_prepare_bound",
             format!(
                 "working_prepare_us={}",
-                summary.stage_durations.working_prepare_us
+                summary.max_frame_stage_durations.working_prepare_us
             ),
             "reduce_working_frame_preparation",
             "Reduce working-frame extraction/copy work before timeline compositing.",
@@ -2250,7 +2268,10 @@ fn push_preview_render_root_causes_and_actions(
             actions,
             AppUiPreviewRenderPerformanceArea::CpuComposite,
             "preview_render_cpu_composite_bound",
-            format!("cpu_composite_us={}", summary.stage_durations.cpu_composite_us),
+            format!(
+                "cpu_composite_us={}",
+                summary.max_frame_stage_durations.cpu_composite_us
+            ),
             "move_preview_composite_to_gpu",
             "Keep common blend, transform, and effect paths on GPU or improve CPU composite tiling.",
         ),
@@ -2261,7 +2282,7 @@ fn push_preview_render_root_causes_and_actions(
             "preview_render_cpu_output_boundary_bound",
             format!(
                 "cpu_output_boundary_us={}",
-                summary.stage_durations.cpu_output_boundary_us
+                summary.max_frame_stage_durations.cpu_output_boundary_us
             ),
             "move_preview_output_boundary_to_gpu",
             "Route viewer output color/display transforms through the GPU output boundary.",
@@ -2273,7 +2294,7 @@ fn push_preview_render_root_causes_and_actions(
             "preview_render_frame_packaging_bound",
             format!(
                 "frame_packaging_us={}",
-                summary.stage_durations.frame_packaging_us
+                summary.max_frame_stage_durations.frame_packaging_us
             ),
             "avoid_raster_frame_packaging",
             "Prefer GPU-resident viewer frames or reduce final raster hashing/copying.",
@@ -2862,6 +2883,7 @@ impl AppUiPreviewDiagnostics {
             return None;
         }
         let stage_durations = self.decode_stage_durations;
+        let max_frame_stage_durations = self.decode_max_frame_stage_durations;
         Some(AppUiPreviewDecodePerformanceSummary {
             decode_successes,
             decode_failures: self.decode_failures,
@@ -2876,7 +2898,8 @@ impl AppUiPreviewDiagnostics {
             decoded_frame_count: self.decode_decoded_frame_count,
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
             stage_durations,
-            primary_bottleneck: classify_preview_decode_bottleneck(stage_durations),
+            max_frame_stage_durations,
+            primary_bottleneck: classify_preview_decode_bottleneck(max_frame_stage_durations),
         })
     }
 
@@ -2889,6 +2912,7 @@ impl AppUiPreviewDiagnostics {
             return None;
         }
         let stage_durations = self.render_stage_durations;
+        let max_frame_stage_durations = self.render_max_frame_stage_durations;
         Some(AppUiPreviewRenderPerformanceSummary {
             timed_frames: self.render_timed_frames,
             max_duration_us: self.render_max_duration_us,
@@ -2896,7 +2920,8 @@ impl AppUiPreviewDiagnostics {
             total_duration_us: self.render_total_duration_us,
             slow_frame_budget_us,
             stage_durations,
-            primary_bottleneck: classify_preview_render_bottleneck(stage_durations),
+            max_frame_stage_durations,
+            primary_bottleneck: classify_preview_render_bottleneck(max_frame_stage_durations),
         })
     }
 
@@ -4306,11 +4331,13 @@ struct AppUiPreviewMetrics {
     decode_last_threading_count: Cell<u64>,
     decode_max_threading_count: Cell<u64>,
     decode_stage_durations: Cell<PreviewDecodeStageDurations>,
+    decode_max_frame_stage_durations: Cell<PreviewDecodeStageDurations>,
     render_timed_frames: Cell<u64>,
     render_total_duration_us: Cell<u64>,
     render_max_duration_us: Cell<u64>,
     render_last_duration_us: Cell<u64>,
     render_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
+    render_max_frame_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
@@ -5564,6 +5591,10 @@ mod tests {
             diagnostics.decode_stage_durations.external_process_us,
             2_450
         );
+        assert_eq!(
+            diagnostics.decode_max_frame_stage_durations.external_process_us,
+            2_450
+        );
     }
 
     #[test]
@@ -5578,6 +5609,13 @@ mod tests {
             decode_decoded_frame_count: 36,
             decode_max_decoded_frame_count: 36,
             decode_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 95_000,
+                seek_us: 10_000,
+                swscale_us: 8_000,
+                rgba_copy_us: 2_000,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_max_frame_stage_durations: PreviewDecodeStageDurations {
                 packet_decode_us: 95_000,
                 seek_us: 10_000,
                 swscale_us: 8_000,
@@ -5628,6 +5666,14 @@ mod tests {
                 cpu_output_boundary_us: 90_000,
                 frame_packaging_us: 900,
             },
+            render_max_frame_stage_durations: AppUiPreviewRenderStageDurations {
+                resolve_us: 2_000,
+                final_cache_lookup_us: 100,
+                working_prepare_us: 7_000,
+                cpu_composite_us: 20_000,
+                cpu_output_boundary_us: 90_000,
+                frame_packaging_us: 900,
+            },
             ..AppUiPreviewDiagnostics::default()
         };
 
@@ -5655,6 +5701,77 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "move_preview_output_boundary_to_gpu"));
+    }
+
+    #[test]
+    fn preview_performance_reports_classify_slowest_frame_not_aggregate_total() {
+        let decode_diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 2,
+            decode_in_process_cpu_rgba_frames: 2,
+            decode_total_duration_us: 160_000,
+            decode_max_duration_us: 120_000,
+            decode_last_duration_us: 40_000,
+            decode_decoded_frame_count: 40,
+            decode_max_decoded_frame_count: 36,
+            decode_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 30_000,
+                swscale_us: 200_000,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_max_frame_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 95_000,
+                swscale_us: 10_000,
+                rgba_copy_us: 2_000,
+                ..PreviewDecodeStageDurations::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+        let decode_report = build_preview_decode_performance_report(
+            decode_diagnostics.decode_performance_summary(50_000),
+            "preview-decode-max-frame-test",
+            50_000,
+        );
+
+        assert_eq!(
+            decode_report.summary.expect("decode summary").primary_bottleneck,
+            AppUiPreviewDecodeBottleneck::PacketDecode
+        );
+        assert!(decode_report
+            .root_causes
+            .iter()
+            .any(|root| root.evidence.contains("packet_decode_us=95000")));
+
+        let render_diagnostics = AppUiPreviewDiagnostics {
+            render_timed_frames: 2,
+            render_total_duration_us: 160_000,
+            render_max_duration_us: 120_000,
+            render_last_duration_us: 40_000,
+            render_stage_durations: AppUiPreviewRenderStageDurations {
+                cpu_composite_us: 200_000,
+                cpu_output_boundary_us: 30_000,
+                ..AppUiPreviewRenderStageDurations::default()
+            },
+            render_max_frame_stage_durations: AppUiPreviewRenderStageDurations {
+                cpu_composite_us: 20_000,
+                cpu_output_boundary_us: 90_000,
+                ..AppUiPreviewRenderStageDurations::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+        let render_report = build_preview_render_performance_report(
+            render_diagnostics.render_performance_summary(50_000),
+            "preview-render-max-frame-test",
+            50_000,
+        );
+
+        assert_eq!(
+            render_report.summary.expect("render summary").primary_bottleneck,
+            AppUiPreviewRenderBottleneck::CpuOutputBoundary
+        );
+        assert!(render_report
+            .root_causes
+            .iter()
+            .any(|root| root.evidence.contains("cpu_output_boundary_us=90000")));
     }
 
     #[test]
