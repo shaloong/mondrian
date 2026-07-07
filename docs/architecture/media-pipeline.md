@@ -322,11 +322,16 @@ Preview decode also exposes a cooperative cancellation boundary for interactive
 work: app workers pass a generation-aware predicate to the media decoder, and
 the media loop checks it before opening, seeking, packet decode, frame receive,
 EOF draining, and RGBA conversion. If cancellation fires, the decoder returns a
-typed canceled outcome rather than a media failure, and only the canceled
-access mode's thread-local FFmpeg session is discarded because its packet/frame
-state may be mid-stream. This keeps stale playback work from being cached or
-marked as a failed source while preserving independent playback, scrub, and
-still-frame session state for subsequent requests.
+typed canceled outcome rather than a media failure. `PlaybackCursor`
+cancellation preserves its thread-local FFmpeg session so sustained playback
+and forward prefetch can retain decoder residency; `ScrubCursor` and
+`RandomAccessStillFrame` cancellation discard only their own mode-specific
+session because their packet/frame state may be mid-stream and should not poison
+subsequent precise or latest-wins requests. The experimental external-process
+CPU RGBA path must follow the same session-retention policy even though the
+child process itself cannot be interrupted mid-run. This keeps stale work from
+being cached or marked as a failed source while preserving independent playback,
+scrub, and still-frame session state for subsequent requests.
 Speculative prefetch decode is also bounded by a short app-level wall-clock
 budget. Current-frame decode is not canceled by this budget; the budget only
 prevents long-GOP or 4K/HDR prefetch work from occupying decode workers that

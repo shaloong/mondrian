@@ -558,7 +558,8 @@ pub fn decode_still_frame_rgba_scaled(
 /// Cancellation is cooperative. It is checked before expensive decode phases,
 /// between packets, between received frames, and before software conversion.
 /// External-process decode cannot be interrupted while the child process is
-/// running, but a stale result is discarded before it is returned.
+/// running, but a stale result is discarded before it is returned while still
+/// honoring the access mode's session-retention policy.
 pub fn decode_still_frame_rgba_scaled_cancellable(
     path: &Path,
     timestamp_secs: f64,
@@ -1493,7 +1494,9 @@ fn decode_preview_rgba_frame_outcome(
                 match result {
                     Ok(frame) => {
                         if should_cancel() {
-                            *slot = None;
+                            if !access_mode.preserves_session_on_cancel() {
+                                *slot = None;
+                            }
                             return Ok(PreviewDecodeOutcome::Canceled);
                         }
                         return Ok(PreviewDecodeOutcome::Frame(frame
@@ -2049,6 +2052,21 @@ mod tests {
         assert!(PreviewDecodeAccessMode::PlaybackCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::RandomAccessStillFrame.preserves_session_on_cancel());
+    }
+
+    #[test]
+    fn preview_decode_cancel_session_policy_is_mode_specific() {
+        for access_mode in [
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeAccessMode::ScrubCursor,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        ] {
+            let policy = PreviewDecodeAccessPolicy::for_access_mode(access_mode);
+            assert_eq!(
+                policy.preserve_session_on_cancel,
+                access_mode.preserves_session_on_cancel()
+            );
+        }
     }
 
     #[test]
