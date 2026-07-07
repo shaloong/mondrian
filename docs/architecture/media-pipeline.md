@@ -125,12 +125,14 @@ destroying the warmed playback cursor session.
 DecoderPool RGBA decode execution must run synchronous FFmpeg preview decode on
 a bounded Tokio blocking pool, not on async runtime worker threads. The async
 runtime is only orchestration for queueing, timeout, cancellation watches, and
-join handling. Timeout/abort may release the caller and prevent queued blocking
-work from starting, but an already-running FFmpeg decode remains cooperatively
-canceled through the request predicate; do not depend on Tokio task abort to
-preempt synchronous packet decode. The decode concurrency semaphore must use an
-owned permit moved into the blocking task, so timeout/cancel does not release
-capacity while a synchronous decode is still running in the background.
+join handling. Once a request owns a decode permit, timeout/cancel may release
+the caller but must not tear down the in-flight owner; the blocking task remains
+responsible for cache insertion, in-flight removal, waiter notification, and
+cooperative cancellation through the request predicate. Do not depend on Tokio
+task abort to preempt synchronous packet decode. The decode concurrency
+semaphore must use an owned permit moved into the blocking task, so
+timeout/cancel does not release capacity while a synchronous decode is still
+running in the background.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older

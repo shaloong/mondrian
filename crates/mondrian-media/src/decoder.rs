@@ -286,8 +286,8 @@ pub struct DecoderPool {
     hw_accel_probe: HwAccelProbe,
     prefetch_tasks: DashMap<u64, PrefetchTask>,
     next_prefetch_task_id: AtomicU64,
-    rgba_cache: Mutex<LruCache<RgbaFrameKey, Arc<RgbaFrame>>>,
-    rgba_inflight: DashMap<RgbaFrameKey, Arc<Notify>>,
+    rgba_cache: Arc<Mutex<LruCache<RgbaFrameKey, Arc<RgbaFrame>>>>,
+    rgba_inflight: Arc<DashMap<RgbaFrameKey, Arc<Notify>>>,
     preview_decode_runtime: Arc<Runtime>,
     background_runtime: Arc<Runtime>,
     metrics: DecoderMetrics,
@@ -305,10 +305,10 @@ impl DecoderPool {
             hw_accel_probe,
             prefetch_tasks: DashMap::new(),
             next_prefetch_task_id: AtomicU64::new(1),
-            rgba_cache: Mutex::new(LruCache::new(
+            rgba_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(256).expect("256 is non-zero"),
-            )),
-            rgba_inflight: DashMap::new(),
+            ))),
+            rgba_inflight: Arc::new(DashMap::new()),
             preview_decode_runtime: Arc::new(
                 // FFmpeg preview decode is synchronous CPU work; keep async
                 // orchestration tiny and run actual decode on bounded blocking
@@ -489,7 +489,11 @@ impl DecoderPool {
             target_height
         );
 
-        let _ctx = self.get_or_open_context(asset_id, path.clone()).await?;
+        if let Err(err) = self.get_or_open_context(asset_id, path.clone()).await {
+            self.rgba_inflight.remove(&key);
+            notify.notify_waiters();
+            return Err(err);
+        }
         tracing::debug!(
             "[decoder] rgba context ready asset={} frame={}",
             asset_id,
@@ -498,24 +502,54 @@ impl DecoderPool {
 
         let started = Instant::now();
         let decode_cancel_flag = cancelled.clone();
+        let decode_cache = Arc::clone(&self.rgba_cache);
+        let decode_inflight = Arc::clone(&self.rgba_inflight);
+        let decode_key = key.clone();
+        let decode_notify = Arc::clone(&notify);
         let mut decode_task = self.preview_decode_runtime.spawn_blocking(move || {
             let _permit = permit;
-            let request = PreviewDecodeRgbaRequest::new(path.as_path(), secs, access_mode)
-                .with_max_size(Some(target_width.max(1)), Some(target_height.max(1)))
-                .with_fingerprint(fingerprint);
-            decode_preview_rgba_scaled_cancellable(request, || {
-                decode_cancel_flag
-                    .as_ref()
-                    .map(|flag| flag.load(Ordering::Relaxed))
-                    .unwrap_or(false)
-            })
-            .and_then(|outcome| match outcome {
-                crate::preview::PreviewDecodeOutcome::Frame(frame) => Ok(frame),
-                crate::preview::PreviewDecodeOutcome::Canceled => {
-                    Err(mondrian_core::MondrianError::Cancelled)
+            let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let request = PreviewDecodeRgbaRequest::new(path.as_path(), secs, access_mode)
+                    .with_max_size(Some(target_width.max(1)), Some(target_height.max(1)))
+                    .with_fingerprint(fingerprint);
+                decode_preview_rgba_scaled_cancellable(request, || {
+                    decode_cancel_flag
+                        .as_ref()
+                        .map(|flag| flag.load(Ordering::Relaxed))
+                        .unwrap_or(false)
+                })
+                .and_then(|outcome| match outcome {
+                    crate::preview::PreviewDecodeOutcome::Frame(frame) => Ok(frame),
+                    crate::preview::PreviewDecodeOutcome::Canceled => {
+                        Err(mondrian_core::MondrianError::Cancelled)
+                    }
+                })
+                .map(Arc::new)
+            }));
+            match decode_result {
+                Ok(result) => {
+                    finish_rgba_inflight_owner(
+                        &decode_cache,
+                        &decode_inflight,
+                        &decode_key,
+                        &decode_notify,
+                        &result,
+                    );
+                    result
                 }
-            })
-            .map(Arc::new)
+                Err(payload) => {
+                    let cleanup_result: Result<Arc<RgbaFrame>> =
+                        Err(anyhow::anyhow!("preview decode panicked").into());
+                    finish_rgba_inflight_owner(
+                        &decode_cache,
+                        &decode_inflight,
+                        &decode_key,
+                        &decode_notify,
+                        &cleanup_result,
+                    );
+                    std::panic::resume_unwind(payload);
+                }
+            }
         });
 
         let decode_timeout_ms = decode_timeout_budget_ms();
@@ -538,7 +572,6 @@ impl DecoderPool {
                     })?
                 }
                 _ = &mut timeout => {
-                    decode_task.abort();
                     tracing::warn!(
                         "MONDRIAN_DECODE_TIMEOUT_JSON={{\"asset_id\":\"{}\",\"frame\":{},\"source_micros\":{},\"access_mode\":\"{}\",\"secs\":{:.3},\"budget_ms\":{},\"target_width\":{},\"target_height\":{},\"reason\":\"decode timeout\"}}",
                         asset_id,
@@ -561,7 +594,6 @@ impl DecoderPool {
                     })
                 }
                 _ = &mut cancel_watch => {
-                    decode_task.abort();
                     Err(mondrian_core::MondrianError::Cancelled)
                 }
             }
@@ -585,19 +617,7 @@ impl DecoderPool {
             );
         }
 
-        match decode_result {
-            Ok(frame) => {
-                self.rgba_cache.lock().put(key.clone(), frame.clone());
-                self.rgba_inflight.remove(&key);
-                notify.notify_waiters();
-                Ok(frame)
-            }
-            Err(err) => {
-                self.rgba_inflight.remove(&key);
-                notify.notify_waiters();
-                Err(err)
-            }
-        }
+        decode_result
     }
 
     /// 获取或创建指定素材的解码上下文
@@ -934,6 +954,20 @@ fn source_time_micros(secs: f64) -> i64 {
     (secs.max(0.0) * 1_000_000.0).round() as i64
 }
 
+fn finish_rgba_inflight_owner(
+    cache: &Mutex<LruCache<RgbaFrameKey, Arc<RgbaFrame>>>,
+    inflight: &DashMap<RgbaFrameKey, Arc<Notify>>,
+    key: &RgbaFrameKey,
+    notify: &Notify,
+    result: &Result<Arc<RgbaFrame>>,
+) {
+    if let Ok(frame) = result {
+        cache.lock().put(key.clone(), Arc::clone(frame));
+    }
+    inflight.remove(key);
+    notify.notify_waiters();
+}
+
 fn decode_cancelled(cancelled: Option<&Arc<AtomicBool>>) -> bool {
     cancelled.map(|flag| flag.load(Ordering::Relaxed)).unwrap_or(false)
 }
@@ -1267,5 +1301,40 @@ mod tests {
         assert_eq!(semaphore.available_permits(), 0);
         drop(permit);
         assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[test]
+    fn finish_inflight_owner_caches_success_and_removes_waiter() {
+        let cache = Mutex::new(LruCache::new(NonZeroUsize::new(4).expect("non-zero")));
+        let inflight = DashMap::new();
+        let notify = Arc::new(Notify::new());
+        let key = RgbaFrameKey {
+            asset_id: AssetId::new(),
+            path: PathBuf::from("E:/media/source.mov"),
+            fingerprint: PreviewFileFingerprint {
+                len: Some(10),
+                modified_secs: Some(20),
+                modified_nanos: Some(30),
+            },
+            source_micros: 1_000_000,
+            width: 2,
+            height: 1,
+            access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+        };
+        let frame = Arc::new(RgbaFrame::new(
+            2,
+            1,
+            vec![0, 1, 2, 3, 4, 5, 6, 7],
+            crate::preview::PreviewDecodePath::InProcessFfmpegCpuRgba,
+        ));
+        inflight.insert(key.clone(), Arc::clone(&notify));
+
+        finish_rgba_inflight_owner(&cache, &inflight, &key, &notify, &Ok(Arc::clone(&frame)));
+
+        assert!(!inflight.contains_key(&key));
+        assert!(Arc::ptr_eq(
+            cache.lock().get(&key).expect("cached frame"),
+            &frame
+        ));
     }
 }

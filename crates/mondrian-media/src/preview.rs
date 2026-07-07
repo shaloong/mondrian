@@ -496,7 +496,7 @@ pub struct RgbaFrame {
 }
 
 impl RgbaFrame {
-    fn new(width: u32, height: u32, data: Vec<u8>, path: PreviewDecodePath) -> Self {
+    pub(crate) fn new(width: u32, height: u32, data: Vec<u8>, path: PreviewDecodePath) -> Self {
         Self {
             width,
             height,
