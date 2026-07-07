@@ -3740,10 +3740,19 @@ enum MediaPreviewRequestStatus {
 struct MediaPreviewSchedulerMetrics {
     scheduled_requests: u64,
     already_pending_requests: u64,
+    already_pending_access_mode_changes: u64,
     dropped_backpressure_requests: u64,
+    dropped_obsolete_generation_requests: u64,
+    dropped_pending_window_requests: u64,
     skipped_decode_jobs: u64,
+    skipped_decode_missing_pending: u64,
+    skipped_decode_access_mode_mismatch: u64,
+    skipped_decode_obsolete_generation: u64,
     completed_current_results: u64,
     completed_stale_results: u64,
+    completed_stale_missing_pending: u64,
+    completed_stale_access_mode_mismatch: u64,
+    completed_stale_obsolete_generation: u64,
     canceled_requests: u64,
     pruned_obsolete_requests: u64,
     evicted_prefetch_requests: u64,
@@ -3760,14 +3769,32 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub scheduled_requests: u64,
     /// Requests that updated an already-pending key.
     pub already_pending_requests: u64,
+    /// Already-pending requests that changed the pending access mode.
+    pub already_pending_access_mode_changes: u64,
     /// Requests rejected by generation or pending-window backpressure.
     pub dropped_backpressure_requests: u64,
+    /// Requests rejected because their render generation was obsolete.
+    pub dropped_obsolete_generation_requests: u64,
+    /// Requests rejected because the pending window had no eligible room.
+    pub dropped_pending_window_requests: u64,
     /// Worker jobs skipped because their key was no longer pending/current.
     pub skipped_decode_jobs: u64,
+    /// Worker jobs skipped because no matching pending request remained.
+    pub skipped_decode_missing_pending: u64,
+    /// Worker jobs skipped because their access mode no longer matched pending work.
+    pub skipped_decode_access_mode_mismatch: u64,
+    /// Worker jobs skipped because their generation was obsolete.
+    pub skipped_decode_obsolete_generation: u64,
     /// Completed jobs still relevant to the latest generation.
     pub completed_current_results: u64,
     /// Completed jobs that were stale by the time the UI polled them.
     pub completed_stale_results: u64,
+    /// Completed jobs treated as stale because no pending request remained.
+    pub completed_stale_missing_pending: u64,
+    /// Completed jobs treated as stale because their access mode no longer matched.
+    pub completed_stale_access_mode_mismatch: u64,
+    /// Completed jobs treated as stale because their generation was obsolete.
+    pub completed_stale_obsolete_generation: u64,
     /// Pending requests canceled before completion.
     pub canceled_requests: u64,
     /// Obsolete pending requests removed during generation pruning.
@@ -3806,6 +3833,7 @@ impl MediaPreviewScheduler {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         if generation < state.latest_generation {
             bump_value(&mut state.metrics.dropped_backpressure_requests);
+            bump_value(&mut state.metrics.dropped_obsolete_generation_requests);
             return MediaPreviewRequestStatus::DroppedBackpressure;
         }
         if let Some(pending) = state.pending.get_mut(&key) {
@@ -3817,6 +3845,9 @@ impl MediaPreviewScheduler {
             let access_mode_changed = previous_access_mode != pending.access_mode;
             Self::prune_obsolete_locked(&mut state);
             bump_value(&mut state.metrics.already_pending_requests);
+            if access_mode_changed {
+                bump_value(&mut state.metrics.already_pending_access_mode_changes);
+            }
             return MediaPreviewRequestStatus::AlreadyPending { access_mode_changed };
         }
         Self::prune_obsolete_locked(&mut state);
@@ -3832,10 +3863,12 @@ impl MediaPreviewScheduler {
                     bump_value(&mut state.metrics.evicted_prefetch_requests);
                 } else {
                     bump_value(&mut state.metrics.dropped_backpressure_requests);
+                    bump_value(&mut state.metrics.dropped_pending_window_requests);
                     return MediaPreviewRequestStatus::DroppedBackpressure;
                 }
             } else {
                 bump_value(&mut state.metrics.dropped_backpressure_requests);
+                bump_value(&mut state.metrics.dropped_pending_window_requests);
                 return MediaPreviewRequestStatus::DroppedBackpressure;
             }
         }
@@ -3851,10 +3884,12 @@ impl MediaPreviewScheduler {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         let Some(pending) = state.pending.get(key).copied() else {
             bump_value(&mut state.metrics.skipped_decode_jobs);
+            bump_value(&mut state.metrics.skipped_decode_missing_pending);
             return false;
         };
         if pending.access_mode != access_mode {
             bump_value(&mut state.metrics.skipped_decode_jobs);
+            bump_value(&mut state.metrics.skipped_decode_access_mode_mismatch);
             return false;
         }
         if pending.generation >= state.latest_generation {
@@ -3862,6 +3897,7 @@ impl MediaPreviewScheduler {
         }
         state.pending.remove(key);
         bump_value(&mut state.metrics.skipped_decode_jobs);
+        bump_value(&mut state.metrics.skipped_decode_obsolete_generation);
         false
     }
 
@@ -3896,11 +3932,13 @@ impl MediaPreviewScheduler {
                 bump_value(&mut state.metrics.completed_current_results);
             } else {
                 bump_value(&mut state.metrics.completed_stale_results);
+                bump_value(&mut state.metrics.completed_stale_missing_pending);
             }
             return is_current;
         };
         if pending.access_mode != access_mode {
             bump_value(&mut state.metrics.completed_stale_results);
+            bump_value(&mut state.metrics.completed_stale_access_mode_mismatch);
             return false;
         }
         state.pending.remove(key);
@@ -3911,6 +3949,7 @@ impl MediaPreviewScheduler {
             bump_value(&mut state.metrics.completed_current_results);
         } else {
             bump_value(&mut state.metrics.completed_stale_results);
+            bump_value(&mut state.metrics.completed_stale_obsolete_generation);
         }
         is_current
     }
@@ -3951,10 +3990,23 @@ impl MediaPreviewScheduler {
             pending_requests: state.pending.len(),
             scheduled_requests: state.metrics.scheduled_requests,
             already_pending_requests: state.metrics.already_pending_requests,
+            already_pending_access_mode_changes: state.metrics.already_pending_access_mode_changes,
             dropped_backpressure_requests: state.metrics.dropped_backpressure_requests,
+            dropped_obsolete_generation_requests: state
+                .metrics
+                .dropped_obsolete_generation_requests,
+            dropped_pending_window_requests: state.metrics.dropped_pending_window_requests,
             skipped_decode_jobs: state.metrics.skipped_decode_jobs,
+            skipped_decode_missing_pending: state.metrics.skipped_decode_missing_pending,
+            skipped_decode_access_mode_mismatch: state.metrics.skipped_decode_access_mode_mismatch,
+            skipped_decode_obsolete_generation: state.metrics.skipped_decode_obsolete_generation,
             completed_current_results: state.metrics.completed_current_results,
             completed_stale_results: state.metrics.completed_stale_results,
+            completed_stale_missing_pending: state.metrics.completed_stale_missing_pending,
+            completed_stale_access_mode_mismatch: state
+                .metrics
+                .completed_stale_access_mode_mismatch,
+            completed_stale_obsolete_generation: state.metrics.completed_stale_obsolete_generation,
             canceled_requests: state.metrics.canceled_requests,
             pruned_obsolete_requests: state.metrics.pruned_obsolete_requests,
             evicted_prefetch_requests: state.metrics.evicted_prefetch_requests,
@@ -8579,6 +8631,10 @@ mod tests {
             MediaPreviewRequestPriority::Current
         ));
         assert_eq!(scheduler.pending_len(), 0);
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.skipped_decode_obsolete_generation, 1);
+        assert_eq!(diagnostics.skipped_decode_missing_pending, 0);
+        assert_eq!(diagnostics.skipped_decode_access_mode_mismatch, 0);
     }
 
     #[test]
@@ -8630,6 +8686,9 @@ mod tests {
             first_generation,
             MediaPreviewRequestPriority::Prefetch
         ));
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.already_pending_access_mode_changes, 1);
+        assert_eq!(diagnostics.completed_stale_access_mode_mismatch, 1);
         assert_eq!(scheduler.pending_len(), 1);
         assert!(test_scheduler_complete(
             &scheduler,
@@ -8786,6 +8845,10 @@ mod tests {
             MediaPreviewRequestStatus::DroppedBackpressure
         );
         assert_eq!(scheduler.pending_len(), 0);
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.dropped_backpressure_requests, 1);
+        assert_eq!(diagnostics.dropped_obsolete_generation_requests, 1);
+        assert_eq!(diagnostics.dropped_pending_window_requests, 0);
     }
 
     #[test]
@@ -8842,11 +8905,50 @@ mod tests {
         assert_eq!(diagnostics.pending_requests, 0);
         assert_eq!(diagnostics.scheduled_requests, 1);
         assert_eq!(diagnostics.already_pending_requests, 1);
+        assert_eq!(diagnostics.already_pending_access_mode_changes, 0);
         assert_eq!(diagnostics.dropped_backpressure_requests, 1);
+        assert_eq!(diagnostics.dropped_obsolete_generation_requests, 0);
+        assert_eq!(diagnostics.dropped_pending_window_requests, 1);
         assert_eq!(diagnostics.pruned_obsolete_requests, 1);
         assert_eq!(diagnostics.skipped_decode_jobs, 1);
+        assert_eq!(diagnostics.skipped_decode_missing_pending, 1);
+        assert_eq!(diagnostics.skipped_decode_access_mode_mismatch, 0);
+        assert_eq!(diagnostics.skipped_decode_obsolete_generation, 0);
         assert_eq!(diagnostics.completed_current_results, 0);
         assert_eq!(diagnostics.completed_stale_results, 1);
+        assert_eq!(diagnostics.completed_stale_missing_pending, 1);
+        assert_eq!(diagnostics.completed_stale_access_mode_mismatch, 0);
+        assert_eq!(diagnostics.completed_stale_obsolete_generation, 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_reports_obsolete_completion_reason() {
+        let scheduler = MediaPreviewScheduler::default();
+        let generation = scheduler.begin_generation();
+        let key = test_media_key(1);
+        assert_eq!(
+            test_scheduler_request(
+                &scheduler,
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+
+        scheduler.begin_generation();
+
+        assert!(!test_scheduler_complete(
+            &scheduler,
+            &key,
+            generation,
+            MediaPreviewRequestPriority::Current
+        ));
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.completed_stale_results, 1);
+        assert_eq!(diagnostics.completed_stale_obsolete_generation, 1);
+        assert_eq!(diagnostics.completed_stale_missing_pending, 0);
+        assert_eq!(diagnostics.completed_stale_access_mode_mismatch, 0);
     }
 
     #[test]

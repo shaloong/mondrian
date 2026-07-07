@@ -67,6 +67,10 @@ Queued current-frame work is latest-wins for playback and scrubbing. Before a
 new current frame is enqueued, obsolete queued jobs from older generations are
 removed regardless of priority so old current jobs cannot fill the bounded queue
 and cause the visible current frame to be dropped.
+Scheduler diagnostics keep aggregate skip/drop/stale counters plus reason
+breakdowns for missing pending work, access-mode mismatch, obsolete generation,
+obsolete request generation, and pending-window backpressure. Access-mode
+failures must be diagnosable without inferring from one opaque skipped count.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and
