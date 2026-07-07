@@ -1650,6 +1650,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub max_frame_stage_durations: PreviewDecodeStageDurations,
     /// Dominant stage inferred from the slowest-frame timings.
     pub primary_bottleneck: AppUiPreviewDecodeBottleneck,
+    /// Scheduler-side access-mode/drop/stale diagnostics captured with decode evidence.
+    pub scheduler: MediaPreviewSchedulerDiagnostics,
 }
 
 /// Dominant preview decode bottleneck inferred from stage diagnostics.
@@ -2392,6 +2394,65 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
+
+    let scheduler = summary.scheduler;
+    if scheduler
+        .skipped_decode_access_mode_mismatch
+        .saturating_add(scheduler.completed_stale_access_mode_mismatch)
+        > 0
+    {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_access_mode_mismatch",
+            format!(
+                "skipped_decode_access_mode_mismatch={} completed_stale_access_mode_mismatch={}",
+                scheduler.skipped_decode_access_mode_mismatch,
+                scheduler.completed_stale_access_mode_mismatch
+            ),
+            "inspect_preview_access_mode_transitions",
+            "Inspect playback/scrub/still request transitions and ensure older jobs cannot complete newer access-mode work.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if scheduler
+        .skipped_decode_obsolete_generation
+        .saturating_add(scheduler.completed_stale_obsolete_generation)
+        .saturating_add(scheduler.pruned_obsolete_requests)
+        > 0
+    {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_obsolete_generation_churn",
+            format!(
+                "skipped_decode_obsolete_generation={} completed_stale_obsolete_generation={} pruned_obsolete_requests={}",
+                scheduler.skipped_decode_obsolete_generation,
+                scheduler.completed_stale_obsolete_generation,
+                scheduler.pruned_obsolete_requests
+            ),
+            "reduce_preview_generation_churn",
+            "Reduce duplicate preview requests per UI tick or coalesce obsolete generations before they reach workers.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if scheduler.dropped_pending_window_requests > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_pending_window_backpressure",
+            format!(
+                "dropped_pending_window_requests={} pending_requests={}",
+                scheduler.dropped_pending_window_requests, scheduler.pending_requests
+            ),
+            "bound_preview_pending_window_by_access_mode",
+            "Inspect current/prefetch admission policy and keep visible current-frame work latest-wins.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
 }
 
 fn push_preview_render_root_causes_and_actions(
@@ -3100,6 +3161,7 @@ impl AppUiPreviewDiagnostics {
                 max_frame_stage_durations,
                 self.decode_queue_wait_max_us,
             ),
+            scheduler: self.scheduler,
         })
     }
 
@@ -6290,6 +6352,12 @@ mod tests {
                 rgba_copy_us: 500,
                 ..PreviewDecodeStageDurations::default()
             },
+            scheduler: MediaPreviewSchedulerDiagnostics {
+                skipped_decode_access_mode_mismatch: 1,
+                completed_stale_access_mode_mismatch: 1,
+                dropped_pending_window_requests: 2,
+                ..MediaPreviewSchedulerDiagnostics::default()
+            },
             ..AppUiPreviewDiagnostics::default()
         };
 
@@ -6305,14 +6373,27 @@ mod tests {
             summary.primary_bottleneck,
             AppUiPreviewDecodeBottleneck::QueueWait
         );
+        assert_eq!(summary.scheduler.dropped_pending_window_requests, 2);
         assert!(report
             .root_causes
             .iter()
             .any(|root| root.code == "preview_decode_queue_wait_bound"));
         assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_access_mode_mismatch"));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_pending_window_backpressure"));
+        assert!(report
             .actions
             .iter()
             .any(|action| action.code == "prioritize_current_preview_decode"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_preview_access_mode_transitions"));
     }
 
     #[test]
