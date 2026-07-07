@@ -110,8 +110,12 @@ preview service runs a conservative decode worker pool: one worker on small CPU
 budgets and at most two workers on wider machines, so current-frame decode can
 make progress while another worker is occupied by prefetch or a long-GOP seek
 without letting preview decode oversubscribe the UI, renderer, or FFmpeg's own
-codec threads. This worker pool is a scheduling guardrail only; it is not a
-substitute for future cancellable decode sessions or hardware-resident decode.
+codec threads. When a current-frame request is scheduled, the job queue also
+prunes obsolete prefetch jobs from older render generations before enqueueing
+the current work; fresh same-generation prefetch remains eligible so playback
+can still warm nearby frames. This worker pool and pruning are scheduling
+guardrails only; they are not a substitute for future cancellable decode
+sessions or hardware-resident decode.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
