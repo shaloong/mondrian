@@ -82,6 +82,12 @@ The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older
 job complete and remove the pending scrub work.
+Preview completion has separate display and cache semantics. A decode result is
+`Current` only when it still matches pending visible work; same-generation
+results whose pending request was canceled or whose access mode has been
+superseded may be `CacheOnly`, but must not wake the viewer as the current
+frame or remove the newer pending request. Obsolete-generation results are
+`Stale` and must not populate success/failure caches.
 Queued current-frame work is latest-wins for playback and scrubbing. Before a
 new current frame is enqueued, obsolete queued jobs from older generations are
 removed regardless of priority so old current jobs cannot fill the bounded queue

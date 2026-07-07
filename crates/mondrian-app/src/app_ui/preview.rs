@@ -398,12 +398,12 @@ impl AppUiPreviewService {
                 Err(mpsc::TryRecvError::Disconnected) => break,
             };
             drained += 1;
-            let is_current =
+            let completion =
                 self.scheduler.complete(&result.key, result.generation, result.access_mode);
             self.record_preview_decode_queue_wait(result.priority, result.queue_wait_us);
             if result.canceled {
                 self.record_preview_decode_cancel(result.access_mode, result.cancel_reason);
-                changed |= is_current;
+                changed |= completion.is_current();
                 continue;
             }
             if let Some(diagnostics) = result.decode_diagnostics {
@@ -418,9 +418,11 @@ impl AppUiPreviewService {
                     if let Some(diagnostics) = result.color_stage_diagnostics {
                         self.record_color_stage(diagnostics);
                     }
-                    self.media_cache.borrow_mut().insert(result.key.clone(), frame);
-                    self.media_failures.borrow_mut().remove(&result.key);
-                    changed |= is_current;
+                    if completion.should_cache() {
+                        self.media_cache.borrow_mut().insert(result.key.clone(), frame);
+                        self.media_failures.borrow_mut().remove(&result.key);
+                    }
+                    changed |= completion.is_current();
                 }
                 None => {
                     bump(&self.metrics.decode_failures);
@@ -431,8 +433,10 @@ impl AppUiPreviewService {
                             "viewer preview decode failed: {error}"
                         );
                     }
-                    self.media_failures.borrow_mut().insert(result.key);
-                    changed |= is_current;
+                    if completion.should_cache() {
+                        self.media_failures.borrow_mut().insert(result.key);
+                    }
+                    changed |= completion.is_current();
                 }
             }
         }
@@ -2546,6 +2550,7 @@ fn push_preview_decode_root_causes_and_actions(
     let scheduler = summary.scheduler;
     if scheduler
         .skipped_decode_access_mode_mismatch
+        .saturating_add(scheduler.completed_cache_only_access_mode_mismatch)
         .saturating_add(scheduler.completed_stale_access_mode_mismatch)
         > 0
     {
@@ -2555,8 +2560,9 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_access_mode_mismatch",
             format!(
-                "skipped_decode_access_mode_mismatch={} completed_stale_access_mode_mismatch={}",
+                "skipped_decode_access_mode_mismatch={} completed_cache_only_access_mode_mismatch={} completed_stale_access_mode_mismatch={}",
                 scheduler.skipped_decode_access_mode_mismatch,
+                scheduler.completed_cache_only_access_mode_mismatch,
                 scheduler.completed_stale_access_mode_mismatch
             ),
             "inspect_preview_access_mode_transitions",
@@ -3959,6 +3965,23 @@ enum MediaPreviewRequestStatus {
     DroppedBackpressure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPreviewCompletionStatus {
+    Current,
+    CacheOnly,
+    Stale,
+}
+
+impl MediaPreviewCompletionStatus {
+    fn is_current(self) -> bool {
+        matches!(self, Self::Current)
+    }
+
+    fn should_cache(self) -> bool {
+        matches!(self, Self::Current | Self::CacheOnly)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct MediaPreviewSchedulerMetrics {
     scheduled_requests: u64,
@@ -3972,6 +3995,9 @@ struct MediaPreviewSchedulerMetrics {
     skipped_decode_access_mode_mismatch: u64,
     skipped_decode_obsolete_generation: u64,
     completed_current_results: u64,
+    completed_cache_only_results: u64,
+    completed_cache_only_missing_pending: u64,
+    completed_cache_only_access_mode_mismatch: u64,
     completed_stale_results: u64,
     completed_stale_missing_pending: u64,
     completed_stale_access_mode_mismatch: u64,
@@ -4010,6 +4036,12 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub skipped_decode_obsolete_generation: u64,
     /// Completed jobs still relevant to the latest generation.
     pub completed_current_results: u64,
+    /// Completed jobs that are not current but can still populate the preview cache.
+    pub completed_cache_only_results: u64,
+    /// Cache-only jobs whose pending request was already removed.
+    pub completed_cache_only_missing_pending: u64,
+    /// Cache-only jobs whose access mode no longer matched pending visible work.
+    pub completed_cache_only_access_mode_mismatch: u64,
     /// Completed jobs that were stale by the time the UI polled them.
     pub completed_stale_results: u64,
     /// Completed jobs treated as stale because no pending request remained.
@@ -4147,34 +4179,40 @@ impl MediaPreviewScheduler {
         key: &MediaPreviewKey,
         result_generation: u64,
         access_mode: PreviewDecodeAccessMode,
-    ) -> bool {
+    ) -> MediaPreviewCompletionStatus {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let result_is_latest = result_generation >= state.latest_generation;
         let Some(pending) = state.pending.get(key).copied() else {
-            let is_current = result_generation >= state.latest_generation;
-            if is_current {
-                bump_value(&mut state.metrics.completed_current_results);
-            } else {
-                bump_value(&mut state.metrics.completed_stale_results);
-                bump_value(&mut state.metrics.completed_stale_missing_pending);
+            if result_is_latest {
+                bump_value(&mut state.metrics.completed_cache_only_results);
+                bump_value(&mut state.metrics.completed_cache_only_missing_pending);
+                return MediaPreviewCompletionStatus::CacheOnly;
             }
-            return is_current;
+            bump_value(&mut state.metrics.completed_stale_results);
+            bump_value(&mut state.metrics.completed_stale_missing_pending);
+            return MediaPreviewCompletionStatus::Stale;
         };
         if pending.access_mode != access_mode {
+            if result_is_latest {
+                bump_value(&mut state.metrics.completed_cache_only_results);
+                bump_value(&mut state.metrics.completed_cache_only_access_mode_mismatch);
+                return MediaPreviewCompletionStatus::CacheOnly;
+            }
             bump_value(&mut state.metrics.completed_stale_results);
             bump_value(&mut state.metrics.completed_stale_access_mode_mismatch);
-            return false;
+            return MediaPreviewCompletionStatus::Stale;
         }
         state.pending.remove(key);
         let pending_generation = pending.generation;
-        let is_current = pending_generation >= state.latest_generation
-            || result_generation >= state.latest_generation;
+        let is_current = pending_generation >= state.latest_generation || result_is_latest;
         if is_current {
             bump_value(&mut state.metrics.completed_current_results);
+            MediaPreviewCompletionStatus::Current
         } else {
             bump_value(&mut state.metrics.completed_stale_results);
             bump_value(&mut state.metrics.completed_stale_obsolete_generation);
+            MediaPreviewCompletionStatus::Stale
         }
-        is_current
     }
 
     fn cancel(&self, key: &MediaPreviewKey) {
@@ -4224,6 +4262,13 @@ impl MediaPreviewScheduler {
             skipped_decode_access_mode_mismatch: state.metrics.skipped_decode_access_mode_mismatch,
             skipped_decode_obsolete_generation: state.metrics.skipped_decode_obsolete_generation,
             completed_current_results: state.metrics.completed_current_results,
+            completed_cache_only_results: state.metrics.completed_cache_only_results,
+            completed_cache_only_missing_pending: state
+                .metrics
+                .completed_cache_only_missing_pending,
+            completed_cache_only_access_mode_mismatch: state
+                .metrics
+                .completed_cache_only_access_mode_mismatch,
             completed_stale_results: state.metrics.completed_stale_results,
             completed_stale_missing_pending: state.metrics.completed_stale_missing_pending,
             completed_stale_access_mode_mismatch: state
@@ -8636,6 +8681,17 @@ mod tests {
         generation: u64,
         priority: MediaPreviewRequestPriority,
     ) -> bool {
+        scheduler
+            .complete(key, generation, test_access_mode_for_priority(priority))
+            .is_current()
+    }
+
+    fn test_scheduler_completion(
+        scheduler: &MediaPreviewScheduler,
+        key: &MediaPreviewKey,
+        generation: u64,
+        priority: MediaPreviewRequestPriority,
+    ) -> MediaPreviewCompletionStatus {
         scheduler.complete(key, generation, test_access_mode_for_priority(priority))
     }
 
@@ -9352,6 +9408,83 @@ mod tests {
         ));
         assert_eq!(scheduler.pending_len(), 0);
         assert_eq!(scheduler.diagnostics().canceled_requests, 1);
+    }
+
+    #[test]
+    fn media_preview_scheduler_canceled_same_generation_completion_is_cache_only() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(4);
+        let key = test_media_key(1);
+        let generation = scheduler.begin_generation();
+
+        assert_eq!(
+            test_scheduler_request(
+                &scheduler,
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+
+        scheduler.cancel(&key);
+
+        assert_eq!(
+            test_scheduler_completion(
+                &scheduler,
+                &key,
+                generation,
+                MediaPreviewRequestPriority::Prefetch
+            ),
+            MediaPreviewCompletionStatus::CacheOnly
+        );
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.completed_current_results, 0);
+        assert_eq!(diagnostics.completed_cache_only_results, 1);
+        assert_eq!(diagnostics.completed_cache_only_missing_pending, 1);
+        assert_eq!(diagnostics.completed_stale_results, 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_access_mode_mismatch_is_cache_only_when_latest() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(4);
+        let key = test_media_key(1);
+        let generation = scheduler.begin_generation();
+
+        assert_eq!(
+            test_scheduler_request(
+                &scheduler,
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            test_scheduler_request(
+                &scheduler,
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewRequestStatus::AlreadyPending { access_mode_changed: true }
+        );
+
+        assert_eq!(
+            test_scheduler_completion(
+                &scheduler,
+                &key,
+                generation,
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewCompletionStatus::CacheOnly
+        );
+
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.completed_current_results, 0);
+        assert_eq!(diagnostics.completed_cache_only_results, 1);
+        assert_eq!(diagnostics.completed_cache_only_access_mode_mismatch, 1);
+        assert_eq!(diagnostics.completed_stale_access_mode_mismatch, 0);
+        assert_eq!(scheduler.pending_len(), 1);
     }
 
     #[test]
