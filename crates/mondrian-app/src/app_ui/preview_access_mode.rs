@@ -68,6 +68,13 @@ impl MediaPreviewRequestPriority {
             (Self::Prefetch, Self::Prefetch) => Self::Prefetch,
         }
     }
+
+    fn accepts_access_mode(self, access_mode: PreviewDecodeAccessMode) -> bool {
+        match self {
+            Self::Current => true,
+            Self::Prefetch => access_mode == PreviewDecodeAccessMode::PlaybackCursor,
+        }
+    }
 }
 
 pub(crate) fn promoted_access_mode(
@@ -91,6 +98,7 @@ pub(crate) enum MediaPreviewRequestStatus {
     Scheduled,
     AlreadyPending { access_mode_changed: bool },
     DroppedBackpressure,
+    DroppedInvalidAccessMode,
 }
 
 /// Freshness classification for a completed decode result.
@@ -117,6 +125,7 @@ struct MediaPreviewSchedulerMetrics {
     already_pending_requests: u64,
     already_pending_access_mode_changes: u64,
     dropped_backpressure_requests: u64,
+    dropped_invalid_access_mode_requests: u64,
     dropped_obsolete_generation_requests: u64,
     dropped_pending_window_requests: u64,
     skipped_decode_jobs: u64,
@@ -151,6 +160,9 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub already_pending_access_mode_changes: u64,
     /// Requests rejected by generation or pending-window backpressure.
     pub dropped_backpressure_requests: u64,
+    /// Requests rejected because the priority/access-mode pair violates the
+    /// scheduler contract, such as non-playback prefetch work.
+    pub dropped_invalid_access_mode_requests: u64,
     /// Requests rejected because their render generation was obsolete.
     pub dropped_obsolete_generation_requests: u64,
     /// Requests rejected because the pending window had no eligible room.
@@ -528,6 +540,10 @@ impl MediaPreviewScheduler {
         access_mode: PreviewDecodeAccessMode,
     ) -> MediaPreviewRequestStatus {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        if !priority.accepts_access_mode(access_mode) {
+            bump_value(&mut state.metrics.dropped_invalid_access_mode_requests);
+            return MediaPreviewRequestStatus::DroppedInvalidAccessMode;
+        }
         if generation < state.latest_generation {
             bump_value(&mut state.metrics.dropped_backpressure_requests);
             bump_value(&mut state.metrics.dropped_obsolete_generation_requests);
@@ -700,6 +716,9 @@ impl MediaPreviewScheduler {
             already_pending_requests: state.metrics.already_pending_requests,
             already_pending_access_mode_changes: state.metrics.already_pending_access_mode_changes,
             dropped_backpressure_requests: state.metrics.dropped_backpressure_requests,
+            dropped_invalid_access_mode_requests: state
+                .metrics
+                .dropped_invalid_access_mode_requests,
             dropped_obsolete_generation_requests: state
                 .metrics
                 .dropped_obsolete_generation_requests,
@@ -844,6 +863,39 @@ mod tests {
         priority: MediaPreviewRequestPriority,
     ) -> MediaPreviewCompletionStatus {
         scheduler.complete(key, generation, test_access_mode_for_priority(priority))
+    }
+
+    #[test]
+    fn media_preview_scheduler_rejects_non_playback_prefetch_requests() {
+        let scheduler = MediaPreviewScheduler::default();
+        let generation = scheduler.begin_generation();
+        let scrub = test_media_key(1);
+        let still = test_media_key(2);
+
+        assert_eq!(
+            scheduler.request(
+                scrub,
+                generation,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::ScrubCursor,
+            ),
+            MediaPreviewRequestStatus::DroppedInvalidAccessMode
+        );
+        assert_eq!(
+            scheduler.request(
+                still,
+                generation,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ),
+            MediaPreviewRequestStatus::DroppedInvalidAccessMode
+        );
+
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.pending_requests, 0);
+        assert_eq!(diagnostics.scheduled_requests, 0);
+        assert_eq!(diagnostics.dropped_invalid_access_mode_requests, 2);
+        assert_eq!(diagnostics.dropped_backpressure_requests, 0);
     }
 
     #[test]

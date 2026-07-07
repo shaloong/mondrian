@@ -2540,6 +2540,13 @@ pub fn build_preview_decode_performance_report(
             summary.worker_disconnected_drops,
             0,
         );
+        push_decode_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_invalid_access_mode_requests",
+            summary.scheduler.dropped_invalid_access_mode_requests,
+            0,
+        );
 
         push_preview_decode_root_causes_and_actions(summary, &mut root_causes, &mut actions);
 
@@ -3142,6 +3149,23 @@ fn push_preview_decode_root_causes_and_actions(
     }
 
     let scheduler = summary.scheduler;
+    if scheduler.dropped_invalid_access_mode_requests > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_invalid_access_mode_request",
+            format!(
+                "dropped_invalid_access_mode_requests={} scheduled_requests={} pending_requests={}",
+                scheduler.dropped_invalid_access_mode_requests,
+                scheduler.scheduled_requests,
+                scheduler.pending_requests
+            ),
+            "fix_preview_access_mode_admission",
+            "Route speculative media work through PlaybackCursor prefetch only; scrub and still-frame requests must be current-frame work.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
     if scheduler
         .skipped_decode_access_mode_mismatch
         .saturating_add(scheduler.completed_cache_only_access_mode_mismatch)
@@ -4817,32 +4841,46 @@ impl AppUiPreviewService {
         access_mode: PreviewDecodeAccessMode,
     ) {
         let generation = self.current_generation.get();
-        let should_enqueue_job =
-            match self.scheduler.request(key.clone(), generation, priority, access_mode) {
-                MediaPreviewRequestStatus::Scheduled => true,
-                MediaPreviewRequestStatus::AlreadyPending { access_mode_changed } => {
-                    let queued_update = self.jobs.promote(
-                        &key,
-                        priority,
-                        access_mode,
-                        generation,
-                        source_secs,
-                        Instant::now(),
-                    );
-                    if queued_update.priority_promoted {
-                        bump(&self.metrics.queue_promoted_current_jobs);
-                    }
-                    access_mode_changed && !queued_update.updated
+        let should_enqueue_job = match self.scheduler.request(
+            key.clone(),
+            generation,
+            priority,
+            access_mode,
+        ) {
+            MediaPreviewRequestStatus::Scheduled => true,
+            MediaPreviewRequestStatus::AlreadyPending { access_mode_changed } => {
+                let queued_update = self.jobs.promote(
+                    &key,
+                    priority,
+                    access_mode,
+                    generation,
+                    source_secs,
+                    Instant::now(),
+                );
+                if queued_update.priority_promoted {
+                    bump(&self.metrics.queue_promoted_current_jobs);
                 }
-                MediaPreviewRequestStatus::DroppedBackpressure => {
-                    tracing::trace!(
-                        asset_id = %key.asset_id,
-                        source_frame = key.source_frame,
-                        "viewer preview request dropped by backpressure"
-                    );
-                    return;
-                }
-            };
+                access_mode_changed && !queued_update.updated
+            }
+            MediaPreviewRequestStatus::DroppedBackpressure => {
+                tracing::trace!(
+                    asset_id = %key.asset_id,
+                    source_frame = key.source_frame,
+                    "viewer preview request dropped by backpressure"
+                );
+                return;
+            }
+            MediaPreviewRequestStatus::DroppedInvalidAccessMode => {
+                tracing::warn!(
+                    asset_id = %key.asset_id,
+                    source_frame = key.source_frame,
+                    priority = ?priority,
+                    access_mode = access_mode.as_str(),
+                    "viewer preview request dropped because priority/access-mode pair is invalid"
+                );
+                return;
+            }
+        };
         if !should_enqueue_job {
             return;
         }
@@ -5714,6 +5752,7 @@ fn media_preview_worker(
                     cancel_access_mode,
                 ),
                 cancel_priority,
+                cancel_access_mode,
                 decode_started_at.elapsed(),
             );
             if reason.is_some() {
@@ -5736,6 +5775,7 @@ fn media_preview_cancel_reason(
     shutdown: bool,
     scheduler_current: bool,
     priority: MediaPreviewRequestPriority,
+    access_mode: PreviewDecodeAccessMode,
     elapsed: Duration,
 ) -> Option<MediaPreviewCancelReason> {
     if shutdown {
@@ -5745,6 +5785,7 @@ fn media_preview_cancel_reason(
         return Some(MediaPreviewCancelReason::Obsolete);
     }
     if priority == MediaPreviewRequestPriority::Prefetch
+        && access_mode == PreviewDecodeAccessMode::PlaybackCursor
         && app_duration_us(elapsed) >= MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US
     {
         return Some(MediaPreviewCancelReason::PrefetchDeadline);
@@ -6786,6 +6827,45 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_preview_access_mode_transitions"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_fails_invalid_access_mode_admission() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_total_duration_us: 12_000,
+            decode_max_duration_us: 12_000,
+            decode_last_duration_us: 12_000,
+            scheduler: MediaPreviewSchedulerDiagnostics {
+                dropped_invalid_access_mode_requests: 2,
+                ..MediaPreviewSchedulerDiagnostics::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-invalid-access-mode-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_invalid_access_mode_requests"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 2
+                && check.limit == Some(0)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_invalid_access_mode_request"
+                && root.area == AppUiPreviewDecodePerformanceArea::Scheduling
+                && root.evidence.contains("dropped_invalid_access_mode_requests=2")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "fix_preview_access_mode_admission"));
     }
 
     #[test]
@@ -9374,6 +9454,7 @@ mod tests {
                 false,
                 true,
                 MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
                 Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
             ),
             None,
@@ -9387,6 +9468,7 @@ mod tests {
                 true,
                 true,
                 MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
                 Duration::ZERO,
             ),
             Some(MediaPreviewCancelReason::Shutdown),
@@ -9400,6 +9482,7 @@ mod tests {
                 false,
                 true,
                 MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
                 Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US - 1),
             ),
             None,
@@ -9409,9 +9492,20 @@ mod tests {
                 false,
                 true,
                 MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
                 Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US),
             ),
             Some(MediaPreviewCancelReason::PrefetchDeadline),
+        );
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                true,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::ScrubCursor,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
+            ),
+            None,
         );
     }
 
@@ -9422,6 +9516,7 @@ mod tests {
                 false,
                 false,
                 MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
                 Duration::ZERO,
             ),
             Some(MediaPreviewCancelReason::Obsolete),
@@ -9431,6 +9526,7 @@ mod tests {
                 false,
                 false,
                 MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
                 Duration::ZERO,
             ),
             Some(MediaPreviewCancelReason::Obsolete),

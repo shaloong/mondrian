@@ -71,7 +71,10 @@ leave the playback worker asleep until another request arrives.
 Forward prefetch is a playback-only behavior. Settled still-frame preview and
 active scrubbing must not enqueue `PlaybackCursor` prefetch work, because that
 turns random access or latest-wins interaction into hidden background playback
-decode and can keep project shutdown waiting on invisible media.
+decode and can keep project shutdown waiting on invisible media. In the app
+preview scheduler, `MediaPreviewRequestPriority::Prefetch` is therefore valid
+only with `PreviewDecodeAccessMode::PlaybackCursor`; non-playback prefetch
+requests are rejected at admission and surfaced as structured diagnostics.
 The app preview service owns worker thread lifetimes. Workers are joined during
 service shutdown after the job queue is closed, and each worker explicitly drops
 its thread-local media decode sessions before exit. Thread-local FFmpeg decoder
@@ -348,9 +351,11 @@ child process itself cannot be interrupted mid-run. This keeps stale work from
 being cached or marked as a failed source while preserving independent playback,
 scrub, and still-frame session state for subsequent requests.
 Speculative prefetch decode is also bounded by a short app-level wall-clock
-budget. Current-frame decode is not canceled by this budget; the budget only
-prevents long-GOP or 4K/HDR prefetch work from occupying decode workers that
-interactive current-frame requests need.
+budget. Current-frame decode is not canceled by this budget, and the deadline
+applies only to playback prefetch work. Scrub and still-frame requests are
+latest-wins/current-frame work; if future callers try to submit them as
+prefetch, scheduler admission must reject them instead of letting the worker
+deadline silently reinterpret their access mode.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
