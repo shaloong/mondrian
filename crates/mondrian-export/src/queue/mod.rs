@@ -13,8 +13,10 @@ use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, JobId, Rational, Ti
 use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
-use mondrian_media::decode_still_frame_rgba_scaled;
-use mondrian_media::VideoColorDiagnosticIssueAggregate;
+use mondrian_media::{
+    decode_preview_rgba_scaled_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
+    PreviewDecodeRgbaRequest, VideoColorDiagnosticIssueAggregate,
+};
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_float,
@@ -2718,8 +2720,30 @@ fn decode_video_layer_scaled(
     width: u32,
     height: u32,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
-    let decoded = decode_still_frame_rgba_scaled(path, source_secs, Some(width), Some(height))
-        .map_err(|err| format!("asset={} path={} err={}", asset_id, path.display(), err))?;
+    let request = PreviewDecodeRgbaRequest::new(
+        path,
+        source_secs,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    )
+    .with_max_size(Some(width), Some(height));
+    let decoded = match decode_preview_rgba_scaled_cancellable(request, || false) {
+        Ok(PreviewDecodeOutcome::Frame(frame)) => frame,
+        Ok(PreviewDecodeOutcome::Canceled) => {
+            return Err(format!(
+                "asset={} path={} err=export still-frame decode canceled unexpectedly",
+                asset_id,
+                path.display()
+            ));
+        }
+        Err(err) => {
+            return Err(format!(
+                "asset={} path={} err={}",
+                asset_id,
+                path.display(),
+                err
+            ));
+        }
+    };
     let decoded_width = decoded.width;
     let decoded_height = decoded.height;
     let source = CpuEncodedColorFrame::source_rgba8_shared(

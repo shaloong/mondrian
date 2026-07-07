@@ -4,7 +4,7 @@
 
 use crate::cache::{FrameCache, RawVideoFrame};
 use crate::preview::{
-    decode_preview_rgba_scaled_cancellable, decode_still_frame_rgba, PreviewDecodeAccessMode,
+    decode_preview_rgba_scaled_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
     PreviewDecodeRgbaRequest, PreviewFileFingerprint, RgbaFrame,
 };
 use dashmap::mapref::entry::Entry;
@@ -661,7 +661,17 @@ impl DecoderPool {
             tracing::debug!("Decoding frame {frame_num} for asset {asset_id}");
 
             let timestamp_secs = timecode.to_secs().max(0.0);
-            let rgba = decode_still_frame_rgba(path.as_path(), timestamp_secs)?;
+            let request = PreviewDecodeRgbaRequest::new(
+                path.as_path(),
+                timestamp_secs,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            );
+            let rgba = match decode_preview_rgba_scaled_cancellable(request, || false)? {
+                PreviewDecodeOutcome::Frame(frame) => frame,
+                PreviewDecodeOutcome::Canceled => {
+                    return Err(mondrian_core::MondrianError::Cancelled);
+                }
+            };
             let (planes, strides) = rgba_to_yuv420p(&rgba)?;
 
             Ok::<Arc<RawVideoFrame>, mondrian_core::MondrianError>(Arc::new(RawVideoFrame {

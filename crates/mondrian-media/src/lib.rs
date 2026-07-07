@@ -36,16 +36,11 @@ pub use info::{
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
     clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-    decode_first_still_frame_rgba, decode_playback_cursor_frame_rgba_scaled_cancellable,
-    decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint,
-    decode_preview_rgba_scaled_cancellable, decode_scrub_cursor_frame_rgba_scaled_cancellable,
-    decode_scrub_cursor_frame_rgba_scaled_cancellable_with_fingerprint, decode_still_frame_rgba,
-    decode_still_frame_rgba_scaled, decode_still_frame_rgba_scaled_cancellable,
-    decode_still_frame_rgba_scaled_cancellable_with_fingerprint, preview_decode_backend,
-    preview_decode_cpu_budget, set_preview_decode_backend, PreviewDecodeAccessMode,
-    PreviewDecodeBackend, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
-    PreviewDecodePath, PreviewDecodeRgbaRequest, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
+    decode_preview_rgba_scaled_cancellable, preview_decode_backend, preview_decode_cpu_budget,
+    set_preview_decode_backend, PreviewDecodeAccessMode, PreviewDecodeBackend,
+    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
+    PreviewDecodeRgbaRequest, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+    PreviewFileFingerprint, RgbaFrame,
 };
 pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution, ProxyStatus};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};
