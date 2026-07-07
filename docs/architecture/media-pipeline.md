@@ -137,6 +137,15 @@ task abort to preempt synchronous packet decode. The decode concurrency
 semaphore must use an owned permit moved into the blocking task, so
 timeout/cancel does not release capacity while a synchronous decode is still
 running in the background.
+DecoderPool decode timeout is access-mode-specific, not a single global
+playback policy. `ScrubCursor` has the shortest caller-release budget because
+interactive latest-wins work must not leave the UI waiting behind pathological
+seeks. `RandomAccessStillFrame` may wait longer because exact still extraction
+is deterministic one-off work. `PlaybackCursor` sits between those modes and
+relies on prefetch cancellation and session locality for sustained playback.
+Diagnostic environment overrides may tune or disable these watchdogs, but they
+must preserve the per-access-mode structure rather than reintroducing one
+opaque timeout for every request.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older

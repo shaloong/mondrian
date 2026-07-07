@@ -515,7 +515,7 @@ impl DecoderPool {
             }
         });
 
-        let decode_timeout_ms = decode_timeout_budget_ms();
+        let decode_timeout_ms = decode_timeout_budget_ms(access_mode);
         let decode_result: Result<Arc<RgbaFrame>> = if decode_timeout_ms == 0 {
             decode_task.await.map_err(|e| mondrian_core::MondrianError::DecodeFailed {
                 asset_id: asset_id.to_string(),
@@ -549,7 +549,8 @@ impl DecoderPool {
                     Err(mondrian_core::MondrianError::DecodeFailed {
                         asset_id: asset_id.to_string(),
                         reason: format!(
-                            "preview decode timeout after {}ms (frame={} secs={:.3})",
+                            "preview {} decode timeout after {}ms (frame={} secs={:.3})",
+                            access_mode.as_str(),
                             decode_timeout_ms,
                             frame_num,
                             secs
@@ -900,20 +901,78 @@ fn num_cpus() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
 }
 
-fn decode_timeout_budget_ms() -> u64 {
-    static TIMEOUT_MS: OnceLock<u64> = OnceLock::new();
-    *TIMEOUT_MS.get_or_init(|| {
-        std::env::var("MONDRIAN_DECODE_TIMEOUT_BUDGET_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .or_else(|| {
-                std::env::var("MONDRIAN_PREVIEW_DECODE_TIMEOUT_MS")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok())
-            })
-            .filter(|value| *value >= 100)
-            .unwrap_or(2500)
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewDecodeTimeoutBudget {
+    playback_cursor_ms: u64,
+    scrub_cursor_ms: u64,
+    random_access_still_ms: u64,
+}
+
+impl PreviewDecodeTimeoutBudget {
+    const DEFAULT: Self = Self {
+        playback_cursor_ms: 2500,
+        scrub_cursor_ms: 1000,
+        random_access_still_ms: 5000,
+    };
+
+    fn for_access_mode(self, access_mode: PreviewDecodeAccessMode) -> u64 {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => self.playback_cursor_ms,
+            PreviewDecodeAccessMode::ScrubCursor => self.scrub_cursor_ms,
+            PreviewDecodeAccessMode::RandomAccessStillFrame => self.random_access_still_ms,
+        }
+    }
+}
+
+fn decode_timeout_budget_ms(access_mode: PreviewDecodeAccessMode) -> u64 {
+    static TIMEOUT_BUDGET: OnceLock<PreviewDecodeTimeoutBudget> = OnceLock::new();
+    TIMEOUT_BUDGET
+        .get_or_init(decode_timeout_budget_from_env)
+        .for_access_mode(access_mode)
+}
+
+fn decode_timeout_budget_from_env() -> PreviewDecodeTimeoutBudget {
+    let global = first_timeout_override([
+        "MONDRIAN_DECODE_TIMEOUT_BUDGET_MS",
+        "MONDRIAN_PREVIEW_DECODE_TIMEOUT_MS",
+    ]);
+    PreviewDecodeTimeoutBudget {
+        playback_cursor_ms: timeout_override_or_default(
+            ["MONDRIAN_PREVIEW_PLAYBACK_DECODE_TIMEOUT_MS"],
+            global,
+            PreviewDecodeTimeoutBudget::DEFAULT.playback_cursor_ms,
+        ),
+        scrub_cursor_ms: timeout_override_or_default(
+            ["MONDRIAN_PREVIEW_SCRUB_DECODE_TIMEOUT_MS"],
+            global,
+            PreviewDecodeTimeoutBudget::DEFAULT.scrub_cursor_ms,
+        ),
+        random_access_still_ms: timeout_override_or_default(
+            [
+                "MONDRIAN_PREVIEW_STILL_DECODE_TIMEOUT_MS",
+                "MONDRIAN_PREVIEW_RANDOM_ACCESS_STILL_DECODE_TIMEOUT_MS",
+            ],
+            global,
+            PreviewDecodeTimeoutBudget::DEFAULT.random_access_still_ms,
+        ),
+    }
+}
+
+fn timeout_override_or_default<const N: usize>(
+    keys: [&str; N],
+    global: Option<u64>,
+    default_ms: u64,
+) -> u64 {
+    first_timeout_override(keys).or(global).unwrap_or(default_ms)
+}
+
+fn first_timeout_override<const N: usize>(keys: [&str; N]) -> Option<u64> {
+    keys.into_iter()
+        .find_map(|key| std::env::var(key).ok().and_then(|value| parse_timeout_override_ms(&value)))
+}
+
+fn parse_timeout_override_ms(value: &str) -> Option<u64> {
+    value.parse::<u64>().ok().filter(|value| *value == 0 || *value >= 100)
 }
 
 fn source_time_micros(secs: f64) -> i64 {
@@ -1171,6 +1230,34 @@ mod tests {
             request.cancelled.as_ref().expect("cancel flag"),
             &cancel
         ));
+    }
+
+    #[test]
+    fn preview_decode_timeout_budget_is_access_mode_specific() {
+        let budget = PreviewDecodeTimeoutBudget::DEFAULT;
+
+        assert_eq!(
+            budget.for_access_mode(PreviewDecodeAccessMode::PlaybackCursor),
+            2500
+        );
+        assert_eq!(
+            budget.for_access_mode(PreviewDecodeAccessMode::ScrubCursor),
+            1000
+        );
+        assert_eq!(
+            budget.for_access_mode(PreviewDecodeAccessMode::RandomAccessStillFrame),
+            5000
+        );
+    }
+
+    #[test]
+    fn preview_decode_timeout_override_parser_allows_disable_and_rejects_tiny_values() {
+        assert_eq!(parse_timeout_override_ms("0"), Some(0));
+        assert_eq!(parse_timeout_override_ms("100"), Some(100));
+        assert_eq!(parse_timeout_override_ms("2500"), Some(2500));
+        assert_eq!(parse_timeout_override_ms("99"), None);
+        assert_eq!(parse_timeout_override_ms("-1"), None);
+        assert_eq!(parse_timeout_override_ms("abc"), None);
     }
 
     #[test]
