@@ -259,6 +259,7 @@ impl AppUiPreviewService {
             decode_max_threading_count: self.metrics.decode_max_threading_count.get(),
             decode_stage_durations: self.metrics.decode_stage_durations.get(),
             decode_max_frame_stage_durations: self.metrics.decode_max_frame_stage_durations.get(),
+            decode_access_mode_profiles: self.metrics.decode_access_mode_profiles.get(),
             render_timed_frames: self.metrics.render_timed_frames.get(),
             render_total_duration_us: self.metrics.render_total_duration_us.get(),
             render_max_duration_us: self.metrics.render_max_duration_us.get(),
@@ -986,6 +987,9 @@ impl AppUiPreviewService {
         let mut stage_durations = self.metrics.decode_stage_durations.get();
         stage_durations.accumulate(diagnostics.stage_durations);
         self.metrics.decode_stage_durations.set(stage_durations);
+        let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
+        access_mode_profiles.record(diagnostics);
+        self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
     fn record_preview_decode_cancel(
@@ -1485,6 +1489,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_stage_durations: PreviewDecodeStageDurations,
     /// Stage-level timings from the slowest decoded preview frame.
     pub decode_max_frame_stage_durations: PreviewDecodeStageDurations,
+    /// Decode profile split by playback, scrub, and random-access still modes.
+    pub decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles,
     /// Viewer render requests with post-decode stage timing evidence.
     pub render_timed_frames: u64,
     /// Total post-decode viewer render duration in microseconds.
@@ -1677,6 +1683,120 @@ pub struct AppUiPreviewColorHealthSummary {
     pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
 }
 
+/// Preview decode profile for one access mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewDecodeAccessModeProfile {
+    /// Successful decode/cache results for this access mode.
+    pub frames: u64,
+    /// Successful in-process CPU RGBA results for this access mode.
+    pub in_process_cpu_rgba_frames: u64,
+    /// Successful external ffmpeg CPU RGBA results for this access mode.
+    pub external_ffmpeg_cpu_rgba_frames: u64,
+    /// Successful playback ring hits for this access mode.
+    pub playback_session_ring_hit_frames: u64,
+    /// Successful preview cache hits for this access mode.
+    pub cache_hit_frames: u64,
+    /// Total end-to-end decode duration for this access mode.
+    pub total_duration_us: u64,
+    /// Slowest end-to-end decode duration for this access mode.
+    pub max_duration_us: u64,
+    /// Most recent end-to-end decode duration for this access mode.
+    pub last_duration_us: u64,
+    /// Decode requests for this access mode that required a seek.
+    pub seeked_frames: u64,
+    /// Total decoded frames consumed by this access mode.
+    pub decoded_frame_count: u64,
+    /// Largest decoded-frame count consumed by one request in this access mode.
+    pub max_decoded_frame_count: u64,
+    /// Aggregated media-layer stage timings for this access mode.
+    pub stage_durations: PreviewDecodeStageDurations,
+    /// Stage timings from the slowest frame in this access mode.
+    pub max_frame_stage_durations: PreviewDecodeStageDurations,
+}
+
+impl AppUiPreviewDecodeAccessModeProfile {
+    fn record(&mut self, diagnostics: PreviewDecodeDiagnostics) {
+        self.frames = self.frames.saturating_add(1);
+        match diagnostics.path {
+            PreviewDecodePath::InProcessFfmpegCpuRgba => {
+                self.in_process_cpu_rgba_frames = self.in_process_cpu_rgba_frames.saturating_add(1);
+            }
+            PreviewDecodePath::ExternalFfmpegCpuRgba => {
+                self.external_ffmpeg_cpu_rgba_frames =
+                    self.external_ffmpeg_cpu_rgba_frames.saturating_add(1);
+            }
+            PreviewDecodePath::PlaybackSessionRingHit => {
+                self.playback_session_ring_hit_frames =
+                    self.playback_session_ring_hit_frames.saturating_add(1);
+            }
+            PreviewDecodePath::PreviewCacheHit => {
+                self.cache_hit_frames = self.cache_hit_frames.saturating_add(1);
+            }
+        }
+        self.total_duration_us = self.total_duration_us.saturating_add(diagnostics.elapsed_us);
+        if diagnostics.elapsed_us >= self.max_duration_us {
+            self.max_duration_us = diagnostics.elapsed_us;
+            self.max_frame_stage_durations = diagnostics.stage_durations;
+        }
+        self.last_duration_us = diagnostics.elapsed_us;
+        if diagnostics.seek_performed {
+            self.seeked_frames = self.seeked_frames.saturating_add(1);
+        }
+        let decoded_frame_count = u64::from(diagnostics.decoded_frame_count);
+        self.decoded_frame_count = self.decoded_frame_count.saturating_add(decoded_frame_count);
+        self.max_decoded_frame_count = self.max_decoded_frame_count.max(decoded_frame_count);
+        self.stage_durations.accumulate(diagnostics.stage_durations);
+    }
+}
+
+/// Preview decode profiles split by access mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewDecodeAccessModeProfiles {
+    /// Sustained playback and forward-prefetch decode profile.
+    pub playback_cursor: AppUiPreviewDecodeAccessModeProfile,
+    /// Latest-wins interactive scrub decode profile.
+    pub scrub_cursor: AppUiPreviewDecodeAccessModeProfile,
+    /// Deterministic still-frame/random-access decode profile.
+    pub random_access_still: AppUiPreviewDecodeAccessModeProfile,
+}
+
+impl AppUiPreviewDecodeAccessModeProfiles {
+    fn record(&mut self, diagnostics: PreviewDecodeDiagnostics) {
+        match diagnostics.access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.playback_cursor.record(diagnostics);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.scrub_cursor.record(diagnostics);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.random_access_still.record(diagnostics);
+            }
+        }
+    }
+
+    fn slowest_access_mode(self) -> Option<PreviewDecodeAccessMode> {
+        [
+            (
+                PreviewDecodeAccessMode::PlaybackCursor,
+                self.playback_cursor.max_duration_us,
+            ),
+            (
+                PreviewDecodeAccessMode::ScrubCursor,
+                self.scrub_cursor.max_duration_us,
+            ),
+            (
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                self.random_access_still.max_duration_us,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, max_duration_us)| *max_duration_us > 0)
+        .max_by_key(|(_, max_duration_us)| *max_duration_us)
+        .map(|(access_mode, _)| access_mode)
+    }
+}
+
 /// Stable preview decode performance summary for perf JSONL and diagnostics tooling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AppUiPreviewDecodePerformanceSummary {
@@ -1742,6 +1862,10 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub stage_durations: PreviewDecodeStageDurations,
     /// Stage timings from the slowest decode frame.
     pub max_frame_stage_durations: PreviewDecodeStageDurations,
+    /// Decode profile split by playback, scrub, and random-access still modes.
+    pub access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles,
+    /// Access mode that produced the slowest successful decode frame.
+    pub slowest_access_mode: Option<PreviewDecodeAccessMode>,
     /// Dominant stage inferred from the slowest-frame timings.
     pub primary_bottleneck: AppUiPreviewDecodeBottleneck,
     /// Scheduler-side access-mode/drop/stale diagnostics captured with decode evidence.
@@ -2387,8 +2511,14 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::LatencyBudget,
             "preview_decode_frame_over_budget",
             format!(
-                "max_duration_us={} slow_frame_budget_us={} primary_bottleneck={:?}",
-                summary.max_duration_us, summary.slow_frame_budget_us, summary.primary_bottleneck
+                "max_duration_us={} slow_frame_budget_us={} primary_bottleneck={:?} slowest_access_mode={}",
+                summary.max_duration_us,
+                summary.slow_frame_budget_us,
+                summary.primary_bottleneck,
+                summary
+                    .slowest_access_mode
+                    .map(PreviewDecodeAccessMode::as_str)
+                    .unwrap_or("None")
             ),
             "inspect_preview_decode_stage_durations",
             "Inspect preview decode stage timings before changing color or render code.",
@@ -3330,6 +3460,8 @@ impl AppUiPreviewDiagnostics {
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
             stage_durations,
             max_frame_stage_durations,
+            access_mode_profiles: self.decode_access_mode_profiles,
+            slowest_access_mode: self.decode_access_mode_profiles.slowest_access_mode(),
             primary_bottleneck: classify_preview_decode_bottleneck(
                 max_frame_stage_durations,
                 self.decode_queue_wait_max_us,
@@ -4450,6 +4582,7 @@ struct AppUiPreviewMetrics {
     decode_max_threading_count: Cell<u64>,
     decode_stage_durations: Cell<PreviewDecodeStageDurations>,
     decode_max_frame_stage_durations: Cell<PreviewDecodeStageDurations>,
+    decode_access_mode_profiles: Cell<AppUiPreviewDecodeAccessModeProfiles>,
     render_timed_frames: Cell<u64>,
     render_total_duration_us: Cell<u64>,
     render_max_duration_us: Cell<u64>,
@@ -5918,6 +6051,33 @@ mod tests {
             diagnostics.decode_max_frame_stage_durations.external_process_us,
             2_450
         );
+        let playback_profile = diagnostics.decode_access_mode_profiles.playback_cursor;
+        assert_eq!(playback_profile.frames, 2);
+        assert_eq!(playback_profile.external_ffmpeg_cpu_rgba_frames, 1);
+        assert_eq!(playback_profile.playback_session_ring_hit_frames, 1);
+        assert_eq!(playback_profile.total_duration_us, 2_540);
+        assert_eq!(playback_profile.max_duration_us, 2_500);
+        assert_eq!(playback_profile.last_duration_us, 40);
+        assert_eq!(playback_profile.stage_durations.cache_lookup_us, 12);
+        assert_eq!(
+            playback_profile.max_frame_stage_durations.external_process_us,
+            2_450
+        );
+        let scrub_profile = diagnostics.decode_access_mode_profiles.scrub_cursor;
+        assert_eq!(scrub_profile.frames, 1);
+        assert_eq!(scrub_profile.in_process_cpu_rgba_frames, 1);
+        assert_eq!(scrub_profile.seeked_frames, 1);
+        assert_eq!(scrub_profile.decoded_frame_count, 48);
+        assert_eq!(scrub_profile.max_decoded_frame_count, 48);
+        assert_eq!(scrub_profile.stage_durations.packet_decode_us, 500);
+        let still_profile = diagnostics.decode_access_mode_profiles.random_access_still;
+        assert_eq!(still_profile.frames, 1);
+        assert_eq!(still_profile.cache_hit_frames, 1);
+        assert_eq!(still_profile.stage_durations.cache_lookup_us, 20);
+        assert_eq!(
+            diagnostics.decode_access_mode_profiles.slowest_access_mode(),
+            Some(PreviewDecodeAccessMode::PlaybackCursor)
+        );
     }
 
     #[test]
@@ -5945,6 +6105,34 @@ mod tests {
                 rgba_copy_us: 2_000,
                 ..PreviewDecodeStageDurations::default()
             },
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_rgba_frames: 1,
+                    total_duration_us: 120_000,
+                    max_duration_us: 120_000,
+                    last_duration_us: 120_000,
+                    seeked_frames: 1,
+                    decoded_frame_count: 36,
+                    max_decoded_frame_count: 36,
+                    stage_durations: PreviewDecodeStageDurations {
+                        packet_decode_us: 95_000,
+                        seek_us: 10_000,
+                        swscale_us: 8_000,
+                        rgba_copy_us: 2_000,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    max_frame_stage_durations: PreviewDecodeStageDurations {
+                        packet_decode_us: 95_000,
+                        seek_us: 10_000,
+                        swscale_us: 8_000,
+                        rgba_copy_us: 2_000,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
             ..AppUiPreviewDiagnostics::default()
         };
 
@@ -5960,10 +6148,18 @@ mod tests {
             summary.primary_bottleneck,
             AppUiPreviewDecodeBottleneck::PacketDecode
         );
+        assert_eq!(
+            summary.slowest_access_mode,
+            Some(PreviewDecodeAccessMode::ScrubCursor)
+        );
         assert!(report
             .root_causes
             .iter()
             .any(|root| root.code == "preview_decode_frame_over_budget"));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_frame_over_budget"
+                && root.evidence.contains("slowest_access_mode=ScrubCursor")
+        }));
         assert!(report
             .root_causes
             .iter()

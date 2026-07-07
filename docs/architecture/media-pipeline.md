@@ -114,6 +114,12 @@ failures must be diagnosable without inferring from one opaque skipped count.
 The decode performance summary/report carries the same scheduler diagnostics and
 emits stable Scheduling root causes for access-mode mismatch, obsolete
 generation churn, and pending-window backpressure.
+It also carries per-access-mode decode profiles for playback, scrub, and
+random-access still requests: frame counts, cache/ring/source path counts,
+end-to-end duration totals/maxima, seek counts, decoded-frame pressure, and
+stage-level timings. A slow preview report must identify the slowest access
+mode so engineers can distinguish playback locality failures from scrub seek
+latency or exact still-frame random access costs.
 App-level decode cancellation is also structured before it reaches diagnostics:
 workers classify cancellations as shutdown, obsolete pending work, prefetch
 deadline, or unknown, and aggregate them by requested access mode. The media
