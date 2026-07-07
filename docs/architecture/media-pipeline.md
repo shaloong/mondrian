@@ -29,8 +29,10 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   long forward queue.
 - `PreviewDecodeAccessMode::RandomAccessStillFrame` is for deterministic still
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
-  one-off requests. Existing timestamp-based public helpers are explicitly this
-  mode, not the playback path.
+  one-off requests. It must not use playback-style whole-frame-neighbor cache
+  hits; its cache tolerance is capped to the frame hit tolerance so adjacent
+  frames are not silently reused. Existing timestamp-based public helpers are
+  explicitly this mode, not the playback path.
 
 These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app
@@ -145,10 +147,11 @@ Preview decode also exposes a cooperative cancellation boundary for interactive
 work: app workers pass a generation-aware predicate to the media decoder, and
 the media loop checks it before opening, seeking, packet decode, frame receive,
 EOF draining, and RGBA conversion. If cancellation fires, the decoder returns a
-typed canceled outcome rather than a media failure, and the thread-local FFmpeg
-session is discarded because its packet/frame state may be mid-stream. This
-keeps stale playback work from being cached or marked as a failed source while
-preserving correctness for the next request.
+typed canceled outcome rather than a media failure, and only the canceled
+access mode's thread-local FFmpeg session is discarded because its packet/frame
+state may be mid-stream. This keeps stale playback work from being cached or
+marked as a failed source while preserving independent playback, scrub, and
+still-frame session state for subsequent requests.
 Speculative prefetch decode is also bounded by a short app-level wall-clock
 budget. Current-frame decode is not canceled by this budget; the budget only
 prevents long-GOP or 4K/HDR prefetch work from occupying decode workers that
@@ -157,11 +160,12 @@ interactive current-frame requests need.
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
 renderer color-frame boundaries should prefer the shared payload constructor.
-Preview decode session reuse and the process-global preview frame cache must be
-keyed by a media file fingerprint, not by path alone. Proxy regeneration
-finalizes fresh media at the same proxy path, so same-path cache hits or reused
-FFmpeg sessions are valid only while file length and modification timestamp
-still match the fingerprint captured when the session/cache entry was created.
+Preview decode session reuse is isolated by `PreviewDecodeAccessMode`, and each
+session slot plus the process-global preview frame cache must be keyed by a
+media file fingerprint, not by path alone. Proxy regeneration finalizes fresh
+media at the same proxy path, so same-path cache hits or reused FFmpeg sessions
+are valid only while file length and modification timestamp still match the
+fingerprint captured when the session/cache entry was created.
 Preview path resolution already probes the source/proxy file identity; app
 workers must forward that `PreviewFileFingerprint` into the media decode
 boundary instead of making the decode worker repeat the filesystem metadata

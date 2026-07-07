@@ -494,19 +494,51 @@ pub enum PreviewDecodeOutcome {
 }
 
 thread_local! {
-    static PREVIEW_DECODE_SESSION: RefCell<Option<PreviewDecodeSession>> = const { RefCell::new(None) };
+    static PREVIEW_DECODE_SESSIONS: RefCell<PreviewDecodeSessions> = const {
+        RefCell::new(PreviewDecodeSessions {
+            playback: None,
+            scrub: None,
+            still: None,
+        })
+    };
 }
 
-/// Drop the current thread's cached preview decode session.
+/// Drop the current thread's cached preview decode sessions.
 ///
-/// Preview playback keeps a thread-local FFmpeg session so nearby frames can be
-/// decoded forward without reopening codecs or seeking. Call this at explicit
-/// lifecycle boundaries, such as perf probes, project/media shutdown, or tests
-/// that intentionally open threaded software decoders.
+/// Preview playback, scrubbing, and still-frame extraction keep independent
+/// thread-local FFmpeg sessions so one access pattern cannot poison another's
+/// decoder state. Call this at explicit lifecycle boundaries, such as perf
+/// probes, project/media shutdown, or tests that intentionally open threaded
+/// software decoders.
 pub fn clear_thread_local_preview_decode_session() {
-    PREVIEW_DECODE_SESSION.with(|slot| {
-        *slot.borrow_mut() = None;
+    PREVIEW_DECODE_SESSIONS.with(|sessions| {
+        sessions.borrow_mut().clear();
     });
+}
+
+struct PreviewDecodeSessions {
+    playback: Option<PreviewDecodeSession>,
+    scrub: Option<PreviewDecodeSession>,
+    still: Option<PreviewDecodeSession>,
+}
+
+impl PreviewDecodeSessions {
+    fn slot_mut(
+        &mut self,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> &mut Option<PreviewDecodeSession> {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => &mut self.playback,
+            PreviewDecodeAccessMode::ScrubCursor => &mut self.scrub,
+            PreviewDecodeAccessMode::RandomAccessStillFrame => &mut self.still,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.playback = None;
+        self.scrub = None;
+        self.still = None;
+    }
 }
 
 struct PreviewDecodeSession {
@@ -731,7 +763,11 @@ impl PreviewDecodeSession {
             self.target_width,
             self.target_height,
             target_pts,
-            self.cache_tolerance_pts,
+            preview_cache_tolerance_pts_for_access_mode(
+                access_mode,
+                self.hit_tolerance_pts,
+                self.cache_tolerance_pts,
+            ),
         ) {
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled);
@@ -1064,8 +1100,9 @@ fn decode_video_frame_at_time_outcome(
     }
     ensure_ffmpeg_initialized(path)?;
     let fingerprint = fingerprint.unwrap_or_else(|| PreviewFileFingerprint::capture(path));
-    PREVIEW_DECODE_SESSION.with(|slot| {
-        let mut slot = slot.borrow_mut();
+    PREVIEW_DECODE_SESSIONS.with(|sessions| {
+        let mut sessions = sessions.borrow_mut();
+        let slot = sessions.slot_mut(access_mode);
         let backend = preview_decode_backend();
         let mut session_open_us = 0;
 
@@ -1196,6 +1233,19 @@ fn preview_trace(message: String) {
 
     if enabled {
         eprintln!("{message}");
+    }
+}
+
+fn preview_cache_tolerance_pts_for_access_mode(
+    access_mode: PreviewDecodeAccessMode,
+    hit_tolerance_pts: i64,
+    cache_tolerance_pts: i64,
+) -> i64 {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor | PreviewDecodeAccessMode::ScrubCursor => {
+            cache_tolerance_pts
+        }
+        PreviewDecodeAccessMode::RandomAccessStillFrame => hit_tolerance_pts,
     }
 }
 
@@ -1578,8 +1628,9 @@ mod tests {
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
         decode_video_frame_at_time_rgba_scaled, decode_video_frame_at_time_rgba_scaled_cancellable,
         duration_us, preview_cache_get, preview_cache_put_with_fingerprint,
-        PreviewDecodeAccessMode, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
-        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
+        preview_cache_tolerance_pts_for_access_mode, PreviewDecodeAccessMode, PreviewDecodeBackend,
+        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
+        PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1643,6 +1694,34 @@ mod tests {
         assert_eq!(
             PreviewDecodeAccessMode::default(),
             PreviewDecodeAccessMode::RandomAccessStillFrame
+        );
+    }
+
+    #[test]
+    fn preview_decode_access_modes_select_cache_tolerance() {
+        assert_eq!(
+            preview_cache_tolerance_pts_for_access_mode(
+                PreviewDecodeAccessMode::PlaybackCursor,
+                5,
+                10,
+            ),
+            10
+        );
+        assert_eq!(
+            preview_cache_tolerance_pts_for_access_mode(
+                PreviewDecodeAccessMode::ScrubCursor,
+                5,
+                10
+            ),
+            10
+        );
+        assert_eq!(
+            preview_cache_tolerance_pts_for_access_mode(
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                5,
+                10,
+            ),
+            5
         );
     }
 
