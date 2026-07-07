@@ -105,6 +105,9 @@ renderer/color code. Access-mode profiles include `queue_wait_max_us` and
 stale prefetch/current admission before codec, color, or render work. The
 preview media smokes fail when the access modes exercised by that scenario have
 queue waits over the decode slow-frame budget.
+Cancellation counters are also split inside each access-mode profile; use those
+fields to identify whether obsolete, prefetch-deadline, shutdown, or unknown
+cancellations came from playback, active scrub, or still-frame work.
 `preview_media_decode_cache_smoke` intentionally exercises both settled
 non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 (`ScrubCursor`). The active scrub window is controlled by

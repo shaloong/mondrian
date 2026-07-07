@@ -1003,7 +1003,8 @@ impl AppUiPreviewService {
         reason: Option<MediaPreviewCancelReason>,
     ) {
         bump(&self.metrics.decode_canceled_jobs);
-        match reason.unwrap_or(MediaPreviewCancelReason::Unknown) {
+        let reason = reason.unwrap_or(MediaPreviewCancelReason::Unknown);
+        match reason {
             MediaPreviewCancelReason::Shutdown => bump(&self.metrics.decode_canceled_shutdown_jobs),
             MediaPreviewCancelReason::Obsolete => bump(&self.metrics.decode_canceled_obsolete_jobs),
             MediaPreviewCancelReason::PrefetchDeadline => {
@@ -1022,6 +1023,9 @@ impl AppUiPreviewService {
                 bump(&self.metrics.decode_canceled_random_access_still_jobs);
             }
         }
+        let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
+        access_mode_profiles.record_cancel(access_mode, reason);
+        self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
     fn record_preview_decode_queue_wait(
@@ -1717,6 +1721,16 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub queue_wait_max_us: u64,
     /// Most recent worker-queue wait before decode started for this access mode.
     pub queue_wait_last_us: u64,
+    /// Canceled decode jobs for this access mode.
+    pub canceled_jobs: u64,
+    /// Canceled jobs caused by preview shutdown for this access mode.
+    pub canceled_shutdown_jobs: u64,
+    /// Canceled jobs caused by obsolete pending work for this access mode.
+    pub canceled_obsolete_jobs: u64,
+    /// Canceled prefetch jobs that exceeded their deadline for this access mode.
+    pub canceled_prefetch_deadline_jobs: u64,
+    /// Canceled jobs without a structured reason for this access mode.
+    pub canceled_unknown_jobs: u64,
     /// Decode requests for this access mode that required a seek.
     pub seeked_frames: u64,
     /// Decode results that reused an existing access-mode-local session.
@@ -1782,6 +1796,25 @@ impl AppUiPreviewDecodeAccessModeProfile {
         self.queue_wait_max_us = self.queue_wait_max_us.max(queue_wait_us);
         self.queue_wait_last_us = queue_wait_us;
     }
+
+    fn record_cancel(&mut self, reason: MediaPreviewCancelReason) {
+        self.canceled_jobs = self.canceled_jobs.saturating_add(1);
+        match reason {
+            MediaPreviewCancelReason::Shutdown => {
+                self.canceled_shutdown_jobs = self.canceled_shutdown_jobs.saturating_add(1);
+            }
+            MediaPreviewCancelReason::Obsolete => {
+                self.canceled_obsolete_jobs = self.canceled_obsolete_jobs.saturating_add(1);
+            }
+            MediaPreviewCancelReason::PrefetchDeadline => {
+                self.canceled_prefetch_deadline_jobs =
+                    self.canceled_prefetch_deadline_jobs.saturating_add(1);
+            }
+            MediaPreviewCancelReason::Unknown => {
+                self.canceled_unknown_jobs = self.canceled_unknown_jobs.saturating_add(1);
+            }
+        }
+    }
 }
 
 /// Preview decode profiles split by access mode.
@@ -1820,6 +1853,24 @@ impl AppUiPreviewDecodeAccessModeProfiles {
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
                 self.random_access_still.record_queue_wait(queue_wait_us);
+            }
+        }
+    }
+
+    fn record_cancel(
+        &mut self,
+        access_mode: PreviewDecodeAccessMode,
+        reason: MediaPreviewCancelReason,
+    ) {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.playback_cursor.record_cancel(reason);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.scrub_cursor.record_cancel(reason);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.random_access_still.record_cancel(reason);
             }
         }
     }
@@ -2862,11 +2913,20 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_deadline_cancellations",
             format!(
-                "canceled_prefetch_deadline_jobs={} canceled_playback_cursor_jobs={} canceled_scrub_cursor_jobs={} canceled_random_access_still_jobs={}",
+                "canceled_prefetch_deadline_jobs={} playback_prefetch_deadline_jobs={} scrub_prefetch_deadline_jobs={} random_access_still_prefetch_deadline_jobs={}",
                 summary.canceled_prefetch_deadline_jobs,
-                summary.canceled_playback_cursor_jobs,
-                summary.canceled_scrub_cursor_jobs,
-                summary.canceled_random_access_still_jobs
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .canceled_prefetch_deadline_jobs,
+                summary
+                    .access_mode_profiles
+                    .scrub_cursor
+                    .canceled_prefetch_deadline_jobs,
+                summary
+                    .access_mode_profiles
+                    .random_access_still
+                    .canceled_prefetch_deadline_jobs
             ),
             "tune_preview_prefetch_deadline_or_proxy",
             "Inspect prefetch cancellation pressure, proxy readiness, and playback decode locality before increasing decode concurrency.",
@@ -2880,8 +2940,15 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_obsolete_cancellations",
             format!(
-                "canceled_obsolete_jobs={} canceled_jobs={}",
-                summary.canceled_obsolete_jobs, summary.canceled_jobs
+                "canceled_obsolete_jobs={} canceled_jobs={} playback_obsolete_jobs={} scrub_obsolete_jobs={} random_access_still_obsolete_jobs={}",
+                summary.canceled_obsolete_jobs,
+                summary.canceled_jobs,
+                summary.access_mode_profiles.playback_cursor.canceled_obsolete_jobs,
+                summary.access_mode_profiles.scrub_cursor.canceled_obsolete_jobs,
+                summary
+                    .access_mode_profiles
+                    .random_access_still
+                    .canceled_obsolete_jobs
             ),
             "coalesce_obsolete_preview_requests",
             "Coalesce preview requests before decode when UI state changes faster than workers can consume jobs.",
@@ -2894,7 +2961,13 @@ fn push_preview_decode_root_causes_and_actions(
             actions,
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_unknown_cancellations",
-            format!("canceled_unknown_jobs={}", summary.canceled_unknown_jobs),
+            format!(
+                "canceled_unknown_jobs={} playback_unknown_jobs={} scrub_unknown_jobs={} random_access_still_unknown_jobs={}",
+                summary.canceled_unknown_jobs,
+                summary.access_mode_profiles.playback_cursor.canceled_unknown_jobs,
+                summary.access_mode_profiles.scrub_cursor.canceled_unknown_jobs,
+                summary.access_mode_profiles.random_access_still.canceled_unknown_jobs
+            ),
             "preserve_preview_cancel_reason",
             "Ensure app-level cancellation predicates record a structured reason before returning canceled decode outcomes.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
@@ -6302,6 +6375,11 @@ mod tests {
         assert_eq!(playback_profile.queue_wait_total_us, 400);
         assert_eq!(playback_profile.queue_wait_max_us, 400);
         assert_eq!(playback_profile.queue_wait_last_us, 400);
+        assert_eq!(playback_profile.canceled_jobs, 1);
+        assert_eq!(playback_profile.canceled_prefetch_deadline_jobs, 1);
+        assert_eq!(playback_profile.canceled_shutdown_jobs, 0);
+        assert_eq!(playback_profile.canceled_obsolete_jobs, 0);
+        assert_eq!(playback_profile.canceled_unknown_jobs, 0);
         assert_eq!(playback_profile.session_reused_frames, 2);
         assert_eq!(playback_profile.session_opened_frames, 0);
         assert_eq!(playback_profile.forward_reused_frames, 0);
@@ -6320,6 +6398,11 @@ mod tests {
         assert_eq!(scrub_profile.queue_wait_total_us, 1_200);
         assert_eq!(scrub_profile.queue_wait_max_us, 1_200);
         assert_eq!(scrub_profile.queue_wait_last_us, 1_200);
+        assert_eq!(scrub_profile.canceled_jobs, 1);
+        assert_eq!(scrub_profile.canceled_obsolete_jobs, 1);
+        assert_eq!(scrub_profile.canceled_shutdown_jobs, 0);
+        assert_eq!(scrub_profile.canceled_prefetch_deadline_jobs, 0);
+        assert_eq!(scrub_profile.canceled_unknown_jobs, 0);
         assert_eq!(scrub_profile.decoded_frame_count, 48);
         assert_eq!(scrub_profile.max_decoded_frame_count, 48);
         assert_eq!(scrub_profile.stage_durations.packet_decode_us, 500);
@@ -6329,6 +6412,11 @@ mod tests {
         assert_eq!(still_profile.queue_wait_total_us, 20);
         assert_eq!(still_profile.queue_wait_max_us, 20);
         assert_eq!(still_profile.queue_wait_last_us, 20);
+        assert_eq!(still_profile.canceled_jobs, 1);
+        assert_eq!(still_profile.canceled_shutdown_jobs, 1);
+        assert_eq!(still_profile.canceled_obsolete_jobs, 0);
+        assert_eq!(still_profile.canceled_prefetch_deadline_jobs, 0);
+        assert_eq!(still_profile.canceled_unknown_jobs, 0);
         assert_eq!(still_profile.session_reused_frames, 0);
         assert_eq!(still_profile.session_opened_frames, 1);
         assert_eq!(still_profile.stage_durations.cache_lookup_us, 20);
@@ -6566,6 +6654,8 @@ mod tests {
                     queue_wait_total_us: 75_000,
                     queue_wait_max_us: 75_000,
                     queue_wait_last_us: 75_000,
+                    canceled_jobs: 1,
+                    canceled_obsolete_jobs: 1,
                     ..AppUiPreviewDecodeAccessModeProfile::default()
                 },
                 ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -6595,6 +6685,11 @@ mod tests {
                 && root.evidence.contains("access_mode=ScrubCursor")
                 && root.evidence.contains("frames=0")
         }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_obsolete_cancellations"
+                && root.evidence.contains("scrub_obsolete_jobs=1")
+                && root.evidence.contains("playback_obsolete_jobs=0")
+        }));
     }
 
     #[test]
@@ -6620,6 +6715,16 @@ mod tests {
                 rgba_copy_us: 500,
                 ..PreviewDecodeStageDurations::default()
             },
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_rgba_frames: 1,
+                    canceled_jobs: 2,
+                    canceled_prefetch_deadline_jobs: 2,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
             ..AppUiPreviewDiagnostics::default()
         };
 
@@ -6634,14 +6739,47 @@ mod tests {
         assert_eq!(summary.canceled_jobs, 2);
         assert_eq!(summary.canceled_prefetch_deadline_jobs, 2);
         assert_eq!(summary.canceled_playback_cursor_jobs, 2);
-        assert!(report
-            .root_causes
-            .iter()
-            .any(|root| root.code == "preview_decode_prefetch_deadline_cancellations"));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_prefetch_deadline_cancellations"
+                && root.evidence.contains("playback_prefetch_deadline_jobs=2")
+                && root.evidence.contains("scrub_prefetch_deadline_jobs=0")
+        }));
         assert!(report
             .actions
             .iter()
             .any(|action| action.code == "tune_preview_prefetch_deadline_or_proxy"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_breaks_down_unknown_cancellations_by_access_mode() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_canceled_jobs: 1,
+            decode_canceled_unknown_jobs: 1,
+            decode_canceled_random_access_still_jobs: 1,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                    canceled_jobs: 1,
+                    canceled_unknown_jobs: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-unknown-cancel-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_unknown_cancellations"
+                && root.evidence.contains("random_access_still_unknown_jobs=1")
+                && root.evidence.contains("playback_unknown_jobs=0")
+                && root.evidence.contains("scrub_unknown_jobs=0")
+        }));
     }
 
     #[test]
