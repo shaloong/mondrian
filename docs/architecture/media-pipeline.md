@@ -122,6 +122,13 @@ waiters or make later cancellation look like decode failure. Playback prefetch
 requests pass their cancellation flag through in-flight waits, semaphore waits,
 and the FFmpeg decode predicate so obsolete speculative work can yield without
 destroying the warmed playback cursor session.
+DecoderPool RGBA decode execution must run synchronous FFmpeg preview decode on
+a bounded Tokio blocking pool, not on async runtime worker threads. The async
+runtime is only orchestration for queueing, timeout, cancellation watches, and
+join handling. Timeout/abort may release the caller and prevent queued blocking
+work from starting, but an already-running FFmpeg decode remains cooperatively
+canceled through the request predicate; do not depend on Tokio task abort to
+preempt synchronous packet decode.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older

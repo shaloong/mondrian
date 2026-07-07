@@ -310,8 +310,12 @@ impl DecoderPool {
             )),
             rgba_inflight: DashMap::new(),
             preview_decode_runtime: Arc::new(
+                // FFmpeg preview decode is synchronous CPU work; keep async
+                // orchestration tiny and run actual decode on bounded blocking
+                // threads coordinated by PreviewDecodeCpuBudget.
                 tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(preview_decode_worker_threads())
+                    .worker_threads(1)
+                    .max_blocking_threads(preview_decode_worker_threads())
                     .enable_all()
                     .build()
                     .expect("failed to create DecoderPool preview decode runtime"),
@@ -497,7 +501,7 @@ impl DecoderPool {
 
         let started = Instant::now();
         let decode_cancel_flag = cancelled.clone();
-        let mut decode_task = self.preview_decode_runtime.spawn(async move {
+        let mut decode_task = self.preview_decode_runtime.spawn_blocking(move || {
             let request = PreviewDecodeRgbaRequest::new(path.as_path(), secs, access_mode)
                 .with_max_size(Some(target_width.max(1)), Some(target_height.max(1)))
                 .with_fingerprint(fingerprint);
