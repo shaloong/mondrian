@@ -86,6 +86,55 @@ impl PreviewDecodeAccessMode {
     }
 }
 
+/// Explicit media-layer request for one scaled CPU RGBA preview decode.
+///
+/// Callers choose a [`PreviewDecodeAccessMode`] as part of the request instead
+/// of reimplementing mode-specific FFmpeg routing outside `mondrian-media`.
+/// The media layer owns how playback, scrubbing, and still-frame extraction map
+/// to session residency, seeking, caching, and future hardware-backed paths.
+#[derive(Debug, Clone, Copy)]
+pub struct PreviewDecodeRgbaRequest<'a> {
+    /// Source media path to decode.
+    pub path: &'a Path,
+    /// Source timestamp in seconds.
+    pub timestamp_secs: f64,
+    /// Optional maximum output width.
+    pub max_width: Option<u32>,
+    /// Optional maximum output height.
+    pub max_height: Option<u32>,
+    /// Access pattern that drives decoder residency and seek policy.
+    pub access_mode: PreviewDecodeAccessMode,
+    /// Optional stable file fingerprint already resolved by the caller.
+    pub fingerprint: Option<PreviewFileFingerprint>,
+}
+
+impl<'a> PreviewDecodeRgbaRequest<'a> {
+    /// Create a request for one scaled CPU RGBA preview decode.
+    pub fn new(path: &'a Path, timestamp_secs: f64, access_mode: PreviewDecodeAccessMode) -> Self {
+        Self {
+            path,
+            timestamp_secs,
+            max_width: None,
+            max_height: None,
+            access_mode,
+            fingerprint: None,
+        }
+    }
+
+    /// Set optional maximum output dimensions.
+    pub fn with_max_size(mut self, max_width: Option<u32>, max_height: Option<u32>) -> Self {
+        self.max_width = max_width;
+        self.max_height = max_height;
+        self
+    }
+
+    /// Attach a caller-resolved file fingerprint.
+    pub fn with_fingerprint(mut self, fingerprint: PreviewFileFingerprint) -> Self {
+        self.fingerprint = Some(fingerprint);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreviewDecodeAccessPolicy {
     forward_reuse_frame_window: i64,
@@ -536,15 +585,13 @@ pub fn decode_still_frame_rgba_scaled(
     max_width: Option<u32>,
     max_height: Option<u32>,
 ) -> Result<RgbaFrame> {
-    match decode_preview_rgba_frame_outcome(
+    let request = PreviewDecodeRgbaRequest::new(
         path,
         timestamp_secs,
-        max_width,
-        max_height,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
-        None,
-        || false,
-    )? {
+    )
+    .with_max_size(max_width, max_height);
+    match decode_preview_rgba_scaled_cancellable(request, || false)? {
         PreviewDecodeOutcome::Frame(frame) => Ok(frame),
         PreviewDecodeOutcome::Canceled => Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
@@ -567,15 +614,13 @@ pub fn decode_still_frame_rgba_scaled_cancellable(
     max_height: Option<u32>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_preview_rgba_frame_outcome(
+    let request = PreviewDecodeRgbaRequest::new(
         path,
         timestamp_secs,
-        max_width,
-        max_height,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
-        None,
-        should_cancel,
     )
+    .with_max_size(max_width, max_height);
+    decode_preview_rgba_scaled_cancellable(request, should_cancel)
 }
 
 /// Decode a preview frame using a caller-supplied file fingerprint.
@@ -593,15 +638,14 @@ pub fn decode_still_frame_rgba_scaled_cancellable_with_fingerprint(
     fingerprint: PreviewFileFingerprint,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_preview_rgba_frame_outcome(
+    let request = PreviewDecodeRgbaRequest::new(
         path,
         timestamp_secs,
-        max_width,
-        max_height,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
-        Some(fingerprint),
-        should_cancel,
     )
+    .with_max_size(max_width, max_height)
+    .with_fingerprint(fingerprint);
+    decode_preview_rgba_scaled_cancellable(request, should_cancel)
 }
 
 /// Decode one playback-cursor preview frame using a caller-supplied file fingerprint.
@@ -618,15 +662,14 @@ pub fn decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
     fingerprint: PreviewFileFingerprint,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
+    let request = PreviewDecodeRgbaRequest::new(
         path,
         timestamp_secs,
-        max_width,
-        max_height,
         PreviewDecodeAccessMode::PlaybackCursor,
-        fingerprint,
-        should_cancel,
     )
+    .with_max_size(max_width, max_height)
+    .with_fingerprint(fingerprint);
+    decode_preview_rgba_scaled_cancellable(request, should_cancel)
 }
 
 /// Decode one playback-cursor preview frame.
@@ -641,14 +684,13 @@ pub fn decode_playback_cursor_frame_rgba_scaled_cancellable(
     max_height: Option<u32>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_access_mode_rgba_scaled_cancellable(
+    let request = PreviewDecodeRgbaRequest::new(
         path,
         timestamp_secs,
-        max_width,
-        max_height,
         PreviewDecodeAccessMode::PlaybackCursor,
-        should_cancel,
     )
+    .with_max_size(max_width, max_height);
+    decode_preview_rgba_scaled_cancellable(request, should_cancel)
 }
 
 /// Decode one scrub-cursor preview frame using a caller-supplied file fingerprint.
@@ -663,15 +705,11 @@ pub fn decode_scrub_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
     fingerprint: PreviewFileFingerprint,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
-        path,
-        timestamp_secs,
-        max_width,
-        max_height,
-        PreviewDecodeAccessMode::ScrubCursor,
-        fingerprint,
-        should_cancel,
-    )
+    let request =
+        PreviewDecodeRgbaRequest::new(path, timestamp_secs, PreviewDecodeAccessMode::ScrubCursor)
+            .with_max_size(max_width, max_height)
+            .with_fingerprint(fingerprint);
+    decode_preview_rgba_scaled_cancellable(request, should_cancel)
 }
 
 /// Decode one scrub-cursor preview frame.
@@ -686,51 +724,29 @@ pub fn decode_scrub_cursor_frame_rgba_scaled_cancellable(
     max_height: Option<u32>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_access_mode_rgba_scaled_cancellable(
-        path,
-        timestamp_secs,
-        max_width,
-        max_height,
-        PreviewDecodeAccessMode::ScrubCursor,
-        should_cancel,
-    )
+    let request =
+        PreviewDecodeRgbaRequest::new(path, timestamp_secs, PreviewDecodeAccessMode::ScrubCursor)
+            .with_max_size(max_width, max_height);
+    decode_preview_rgba_scaled_cancellable(request, should_cancel)
 }
 
-pub(crate) fn decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
-    path: &Path,
-    timestamp_secs: f64,
-    max_width: Option<u32>,
-    max_height: Option<u32>,
-    access_mode: PreviewDecodeAccessMode,
-    fingerprint: PreviewFileFingerprint,
+/// Decode one scaled CPU RGBA preview frame from an explicit media request.
+///
+/// This is the single access-mode aware decode boundary. Convenience helpers
+/// for playback, scrub, and still-frame requests delegate here, and higher
+/// layers should prefer this request object when they already know the access
+/// mode and source fingerprint.
+pub fn decode_preview_rgba_scaled_cancellable(
+    request: PreviewDecodeRgbaRequest<'_>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
     decode_preview_rgba_frame_outcome(
-        path,
-        timestamp_secs,
-        max_width,
-        max_height,
-        access_mode,
-        Some(fingerprint),
-        should_cancel,
-    )
-}
-
-pub(crate) fn decode_access_mode_rgba_scaled_cancellable(
-    path: &Path,
-    timestamp_secs: f64,
-    max_width: Option<u32>,
-    max_height: Option<u32>,
-    access_mode: PreviewDecodeAccessMode,
-    should_cancel: impl Fn() -> bool,
-) -> Result<PreviewDecodeOutcome> {
-    decode_preview_rgba_frame_outcome(
-        path,
-        timestamp_secs,
-        max_width,
-        max_height,
-        access_mode,
-        None,
+        request.path,
+        request.timestamp_secs,
+        request.max_width,
+        request.max_height,
+        request.access_mode,
+        request.fingerprint,
         should_cancel,
     )
 }
@@ -1968,9 +1984,9 @@ mod tests {
         decode_still_frame_rgba_scaled, decode_still_frame_rgba_scaled_cancellable, duration_us,
         preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeAccessMode,
         PreviewDecodeAccessPolicy, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
-        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-        PreviewPlaybackRing, RgbaFrame, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        PreviewDecodeRgbaRequest, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+        PreviewFileFingerprint, PreviewPlaybackRing, RgbaFrame,
+        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -2052,6 +2068,30 @@ mod tests {
         assert!(PreviewDecodeAccessMode::PlaybackCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::RandomAccessStillFrame.preserves_session_on_cancel());
+    }
+
+    #[test]
+    fn preview_decode_rgba_request_preserves_explicit_contract_fields() {
+        let path = PathBuf::from("E:/media/source.mov");
+        let fingerprint = PreviewFileFingerprint {
+            len: Some(10),
+            modified_secs: Some(20),
+            modified_nanos: Some(30),
+        };
+        let request = PreviewDecodeRgbaRequest::new(
+            path.as_path(),
+            1.25,
+            PreviewDecodeAccessMode::ScrubCursor,
+        )
+        .with_max_size(Some(640), Some(360))
+        .with_fingerprint(fingerprint);
+
+        assert_eq!(request.path, path.as_path());
+        assert_eq!(request.timestamp_secs, 1.25);
+        assert_eq!(request.max_width, Some(640));
+        assert_eq!(request.max_height, Some(360));
+        assert_eq!(request.access_mode, PreviewDecodeAccessMode::ScrubCursor);
+        assert_eq!(request.fingerprint, Some(fingerprint));
     }
 
     #[test]

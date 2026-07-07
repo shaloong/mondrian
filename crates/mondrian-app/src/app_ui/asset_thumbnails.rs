@@ -11,7 +11,10 @@ use crate::app_ui::preview_access_mode::{
 };
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::AssetId;
-use mondrian_media::{PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewFileFingerprint};
+use mondrian_media::{
+    decode_preview_rgba_scaled_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
+    PreviewDecodeRgbaRequest, PreviewFileFingerprint,
+};
 use mondrian_ui_widgets::RasterImage;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -186,14 +189,14 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
         media_preview_access_mode_for_intent(MediaPreviewAccessIntent::DeterministicStill),
         PreviewDecodeAccessMode::RandomAccessStillFrame
     );
-    match mondrian_media::decode_still_frame_rgba_scaled_cancellable_with_fingerprint(
+    let request = PreviewDecodeRgbaRequest::new(
         job.path.as_path(),
         0.0,
-        Some(THUMBNAIL_MAX_WIDTH),
-        Some(THUMBNAIL_MAX_HEIGHT),
-        job.fingerprint,
-        || false,
-    ) {
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    )
+    .with_max_size(Some(THUMBNAIL_MAX_WIDTH), Some(THUMBNAIL_MAX_HEIGHT))
+    .with_fingerprint(job.fingerprint);
+    match decode_preview_rgba_scaled_cancellable(request, || false) {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let width = frame.width;
             let height = frame.height;

@@ -108,6 +108,12 @@ fast-any-seek path; random-access still extraction has no forward reuse and
 keeps keyframe-safe exact seeking. This preserves still-frame correctness while
 leaving a clear replacement point for future hardware-resident playback and
 low-latency scrub backends.
+App and decoder-pool callers submit a `PreviewDecodeRgbaRequest` to the media
+preview decode boundary instead of matching on `PreviewDecodeAccessMode` and
+calling mode-specific FFmpeg helpers themselves. Mode-specific helper functions
+may remain as thin convenience wrappers, but access-mode routing, session
+retention, cache lookup, playback-ring use, and future hardware/low-copy
+backend selection must stay behind the request boundary in `mondrian-media`.
 Process-global RGBA in-flight coalescing is also access-mode aware. For a given
 RGBA frame key, exactly one request owns the decode work; matching requests wait
 on that owner and re-check the cache after notification. Waiters must never

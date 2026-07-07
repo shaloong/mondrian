@@ -4,8 +4,8 @@
 
 use crate::cache::{FrameCache, RawVideoFrame};
 use crate::preview::{
-    decode_access_mode_rgba_scaled_cancellable_with_fingerprint, decode_still_frame_rgba,
-    PreviewDecodeAccessMode, PreviewFileFingerprint, RgbaFrame,
+    decode_preview_rgba_scaled_cancellable, decode_still_frame_rgba, PreviewDecodeAccessMode,
+    PreviewDecodeRgbaRequest, PreviewFileFingerprint, RgbaFrame,
 };
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
@@ -498,20 +498,15 @@ impl DecoderPool {
         let started = Instant::now();
         let decode_cancel_flag = cancelled.clone();
         let mut decode_task = self.preview_decode_runtime.spawn(async move {
-            decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
-                path.as_path(),
-                secs,
-                Some(target_width.max(1)),
-                Some(target_height.max(1)),
-                access_mode,
-                fingerprint,
-                || {
-                    decode_cancel_flag
-                        .as_ref()
-                        .map(|flag| flag.load(Ordering::Relaxed))
-                        .unwrap_or(false)
-                },
-            )
+            let request = PreviewDecodeRgbaRequest::new(path.as_path(), secs, access_mode)
+                .with_max_size(Some(target_width.max(1)), Some(target_height.max(1)))
+                .with_fingerprint(fingerprint);
+            decode_preview_rgba_scaled_cancellable(request, || {
+                decode_cancel_flag
+                    .as_ref()
+                    .map(|flag| flag.load(Ordering::Relaxed))
+                    .unwrap_or(false)
+            })
             .and_then(|outcome| match outcome {
                 crate::preview::PreviewDecodeOutcome::Frame(frame) => Ok(frame),
                 crate::preview::PreviewDecodeOutcome::Canceled => {

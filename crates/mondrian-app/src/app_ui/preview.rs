@@ -21,10 +21,10 @@ use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
-    preview_decode_cpu_budget, PreviewDecodeAccessMode, PreviewDecodeCpuBudget,
-    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueSummary,
+    decode_preview_rgba_scaled_cancellable, preview_decode_cpu_budget, PreviewDecodeAccessMode,
+    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
+    PreviewDecodeRgbaRequest, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+    PreviewFileFingerprint, VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -5846,65 +5846,12 @@ fn decode_media_preview_for_access_mode(
     fingerprint: Option<PreviewFileFingerprint>,
     should_cancel: impl Fn() -> bool,
 ) -> mondrian_core::Result<PreviewDecodeOutcome> {
-    match (access_mode, fingerprint) {
-        (PreviewDecodeAccessMode::PlaybackCursor, Some(fingerprint)) => {
-            mondrian_media::decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
-                path,
-                source_secs,
-                max_width,
-                max_height,
-                fingerprint,
-                should_cancel,
-            )
-        }
-        (PreviewDecodeAccessMode::PlaybackCursor, None) => {
-            mondrian_media::decode_playback_cursor_frame_rgba_scaled_cancellable(
-                path,
-                source_secs,
-                max_width,
-                max_height,
-                should_cancel,
-            )
-        }
-        (PreviewDecodeAccessMode::ScrubCursor, Some(fingerprint)) => {
-            mondrian_media::decode_scrub_cursor_frame_rgba_scaled_cancellable_with_fingerprint(
-                path,
-                source_secs,
-                max_width,
-                max_height,
-                fingerprint,
-                should_cancel,
-            )
-        }
-        (PreviewDecodeAccessMode::ScrubCursor, None) => {
-            mondrian_media::decode_scrub_cursor_frame_rgba_scaled_cancellable(
-                path,
-                source_secs,
-                max_width,
-                max_height,
-                should_cancel,
-            )
-        }
-        (PreviewDecodeAccessMode::RandomAccessStillFrame, Some(fingerprint)) => {
-            mondrian_media::decode_still_frame_rgba_scaled_cancellable_with_fingerprint(
-                path,
-                source_secs,
-                max_width,
-                max_height,
-                fingerprint,
-                should_cancel,
-            )
-        }
-        (PreviewDecodeAccessMode::RandomAccessStillFrame, None) => {
-            mondrian_media::decode_still_frame_rgba_scaled_cancellable(
-                path,
-                source_secs,
-                max_width,
-                max_height,
-                should_cancel,
-            )
-        }
+    let mut request = PreviewDecodeRgbaRequest::new(path, source_secs, access_mode)
+        .with_max_size(max_width, max_height);
+    if let Some(fingerprint) = fingerprint {
+        request = request.with_fingerprint(fingerprint);
     }
+    decode_preview_rgba_scaled_cancellable(request, should_cancel)
 }
 
 #[cfg(test)]
