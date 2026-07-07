@@ -4,18 +4,20 @@
 //! random-access preview work. It deliberately does not decode media, evaluate
 //! render plans, interpret color, or convert frames.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_media::{PreviewDecodeAccessMode, PreviewFileFingerprint};
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
+const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 /// Stable identity for one decoded media preview request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MediaPreviewKey {
     pub(crate) asset_id: AssetId,
     pub(crate) path: PathBuf,
@@ -30,8 +32,8 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) engine: ColorEngine,
 }
 
-#[derive(Clone)]
 /// Latest-wins scheduler for access-mode-aware preview decode work.
+#[derive(Clone)]
 pub(crate) struct MediaPreviewScheduler {
     state: Arc<Mutex<MediaPreviewSchedulerState>>,
     max_pending: usize,
@@ -51,8 +53,8 @@ struct MediaPreviewPendingRequest {
     access_mode: PreviewDecodeAccessMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Preview decode request priority used by scheduler admission and job queues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaPreviewRequestPriority {
     Prefetch,
     Current,
@@ -82,16 +84,16 @@ pub(crate) fn promoted_access_mode(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Result of admitting a preview decode request into the scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaPreviewRequestStatus {
     Scheduled,
     AlreadyPending { access_mode_changed: bool },
     DroppedBackpressure,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Freshness classification for a completed decode result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaPreviewCompletionStatus {
     Current,
     CacheOnly,
@@ -182,6 +184,255 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub pruned_obsolete_requests: u64,
     /// Pending prefetch requests removed so a current-frame request can run.
     pub evicted_prefetch_requests: u64,
+}
+
+#[derive(Debug)]
+/// Queued media preview decode job with access-mode scheduling evidence.
+pub(crate) struct MediaPreviewJob {
+    pub(crate) key: MediaPreviewKey,
+    pub(crate) source_secs: f64,
+    pub(crate) generation: u64,
+    pub(crate) priority: MediaPreviewRequestPriority,
+    pub(crate) access_mode: PreviewDecodeAccessMode,
+    pub(crate) enqueued_at: Instant,
+}
+
+pub(crate) struct MediaPreviewJobQueueSender {
+    shared: Arc<MediaPreviewJobQueueShared>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MediaPreviewJobQueueReceiver {
+    shared: Arc<MediaPreviewJobQueueShared>,
+}
+
+struct MediaPreviewJobQueueShared {
+    state: Mutex<MediaPreviewJobQueueState>,
+    changed: Condvar,
+    capacity: usize,
+}
+
+struct MediaPreviewJobQueueState {
+    queue: VecDeque<QueuedMediaPreviewJob>,
+    closed: bool,
+}
+
+struct QueuedMediaPreviewJob {
+    job: MediaPreviewJob,
+    priority: MediaPreviewRequestPriority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MediaPreviewJobEnqueueStatus {
+    Enqueued {
+        evicted_prefetch: Option<MediaPreviewKey>,
+    },
+    DroppedFull,
+    Closed,
+}
+
+pub(crate) fn media_preview_job_queue(
+    capacity: usize,
+) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
+    let shared = Arc::new(MediaPreviewJobQueueShared {
+        state: Mutex::new(MediaPreviewJobQueueState { queue: VecDeque::new(), closed: false }),
+        changed: Condvar::new(),
+        capacity: capacity.max(1),
+    });
+    (
+        MediaPreviewJobQueueSender { shared: Arc::clone(&shared) },
+        MediaPreviewJobQueueReceiver { shared },
+    )
+}
+
+impl MediaPreviewJobQueueSender {
+    pub(crate) fn clear(&self) -> usize {
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        let cleared = state.queue.len();
+        state.queue.clear();
+        cleared
+    }
+
+    pub(crate) fn close(&self) {
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        state.queue.clear();
+        state.closed = true;
+        self.shared.changed.notify_all();
+    }
+
+    pub(crate) fn prune_obsolete_jobs(&self, generation: u64) -> usize {
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        let before = state.queue.len();
+        state.queue.retain(|queued| queued.job.generation >= generation);
+        before.saturating_sub(state.queue.len())
+    }
+
+    pub(crate) fn enqueue(
+        &self,
+        job: MediaPreviewJob,
+        priority: MediaPreviewRequestPriority,
+    ) -> MediaPreviewJobEnqueueStatus {
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        if state.closed {
+            return MediaPreviewJobEnqueueStatus::Closed;
+        }
+
+        let mut evicted_prefetch = None;
+        if state.queue.len() >= self.shared.capacity {
+            if priority == MediaPreviewRequestPriority::Current {
+                if let Some(index) = state
+                    .queue
+                    .iter()
+                    .position(|queued| queued.priority == MediaPreviewRequestPriority::Prefetch)
+                {
+                    let evicted = state.queue.remove(index);
+                    evicted_prefetch = evicted.map(|queued| queued.job.key);
+                } else {
+                    return MediaPreviewJobEnqueueStatus::DroppedFull;
+                }
+            } else {
+                return MediaPreviewJobEnqueueStatus::DroppedFull;
+            }
+        }
+
+        state.queue.push_back(QueuedMediaPreviewJob { job, priority });
+        // Workers have lane-specific eligibility: only worker 0 may take
+        // PlaybackCursor work. Wake all workers so a playback-only queue cannot
+        // be observed only by non-playback workers and remain stuck until the
+        // next enqueue.
+        self.shared.changed.notify_all();
+        MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch }
+    }
+
+    pub(crate) fn promote(
+        &self,
+        key: &MediaPreviewKey,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> bool {
+        if priority != MediaPreviewRequestPriority::Current {
+            return false;
+        }
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        let Some(queued) = state.queue.iter_mut().find(|queued| &queued.job.key == key) else {
+            return false;
+        };
+        let previous = queued.priority;
+        let previous_access_mode = queued.job.access_mode;
+        queued.job.access_mode =
+            promoted_access_mode(previous, previous_access_mode, priority, access_mode);
+        queued.priority = queued.priority.promote_with(priority);
+        queued.job.priority = queued.priority;
+        let promoted = previous != queued.priority;
+        let access_mode_changed = previous_access_mode != queued.job.access_mode;
+        if promoted || access_mode_changed {
+            self.shared.changed.notify_all();
+        }
+        promoted || access_mode_changed
+    }
+}
+
+impl Drop for MediaPreviewJobQueueSender {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+impl MediaPreviewJobQueueReceiver {
+    #[cfg(test)]
+    pub(crate) fn recv(&self) -> Option<MediaPreviewJob> {
+        self.recv_for_worker(MediaPreviewWorkerLane::Any)
+    }
+
+    pub(crate) fn recv_for_worker(&self, lane: MediaPreviewWorkerLane) -> Option<MediaPreviewJob> {
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        loop {
+            if let Some(index) = next_media_preview_job_index(&state.queue, lane) {
+                return state.queue.remove(index).map(|queued| queued.job);
+            }
+            if state.closed {
+                return None;
+            }
+            state = match self.shared.changed.wait(state) {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        }
+    }
+}
+
+fn next_media_preview_job_index(
+    queue: &VecDeque<QueuedMediaPreviewJob>,
+    lane: MediaPreviewWorkerLane,
+) -> Option<usize> {
+    let eligible = |queued: &QueuedMediaPreviewJob| lane.accepts(queued.job.access_mode);
+    queue
+        .iter()
+        .position(|queued| {
+            queued.priority == MediaPreviewRequestPriority::Current && eligible(queued)
+        })
+        .or_else(|| queue.iter().position(eligible))
+}
+
+fn lock_media_preview_job_queue_state(
+    state: &Mutex<MediaPreviewJobQueueState>,
+) -> std::sync::MutexGuard<'_, MediaPreviewJobQueueState> {
+    match state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+pub(crate) fn media_preview_current_access_mode(is_playing: bool) -> PreviewDecodeAccessMode {
+    if is_playing {
+        PreviewDecodeAccessMode::PlaybackCursor
+    } else {
+        PreviewDecodeAccessMode::ScrubCursor
+    }
+}
+
+pub(crate) fn media_preview_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| media_preview_worker_count_for(parallelism.get()))
+        .unwrap_or(1)
+}
+
+pub(crate) fn media_preview_worker_count_for(parallelism: usize) -> usize {
+    if parallelism >= 6 {
+        MEDIA_PREVIEW_MAX_DECODE_WORKERS
+    } else {
+        1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaPreviewWorkerLane {
+    Any,
+    Playback,
+    Interactive,
+}
+
+impl MediaPreviewWorkerLane {
+    fn accepts(self, access_mode: PreviewDecodeAccessMode) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Playback => access_mode == PreviewDecodeAccessMode::PlaybackCursor,
+            Self::Interactive => access_mode != PreviewDecodeAccessMode::PlaybackCursor,
+        }
+    }
+}
+
+pub(crate) fn media_preview_worker_lane(
+    worker_index: usize,
+    worker_count: usize,
+) -> MediaPreviewWorkerLane {
+    if worker_count <= 1 {
+        MediaPreviewWorkerLane::Any
+    } else if worker_index == 0 {
+        MediaPreviewWorkerLane::Playback
+    } else {
+        MediaPreviewWorkerLane::Interactive
+    }
 }
 
 impl Default for MediaPreviewScheduler {

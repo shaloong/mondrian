@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use mondrian_assets::AssetKind;
@@ -50,10 +50,15 @@ use crate::app_ui::panels::{
     ViewerPreviewState,
 };
 #[cfg(test)]
+use crate::app_ui::preview_access_mode::media_preview_worker_count_for;
+#[cfg(test)]
 use crate::app_ui::preview_access_mode::MediaPreviewCompletionStatus;
 use crate::app_ui::preview_access_mode::{
-    promoted_access_mode, MediaPreviewKey, MediaPreviewRequestPriority, MediaPreviewRequestStatus,
-    MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
+    media_preview_current_access_mode, media_preview_job_queue, media_preview_worker_count,
+    media_preview_worker_lane, MediaPreviewJob, MediaPreviewJobEnqueueStatus,
+    MediaPreviewJobQueueReceiver, MediaPreviewJobQueueSender, MediaPreviewKey,
+    MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
+    MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
@@ -61,7 +66,6 @@ const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
 const MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY: usize = MEDIA_PREVIEW_CACHE_CAPACITY * 2;
 const VIEWER_PREVIEW_FRAME_CACHE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
-const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
 const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 
@@ -3899,16 +3903,6 @@ impl MediaPreviewCache {
     }
 }
 
-#[derive(Debug)]
-struct MediaPreviewJob {
-    key: MediaPreviewKey,
-    source_secs: f64,
-    generation: u64,
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-    enqueued_at: Instant,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MediaPreviewCancelReason {
     Shutdown,
@@ -3931,241 +3925,6 @@ struct MediaPreviewResult {
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
-}
-
-struct MediaPreviewJobQueueSender {
-    shared: Arc<MediaPreviewJobQueueShared>,
-}
-
-#[derive(Clone)]
-struct MediaPreviewJobQueueReceiver {
-    shared: Arc<MediaPreviewJobQueueShared>,
-}
-
-struct MediaPreviewJobQueueShared {
-    state: Mutex<MediaPreviewJobQueueState>,
-    changed: Condvar,
-    capacity: usize,
-}
-
-struct MediaPreviewJobQueueState {
-    queue: VecDeque<QueuedMediaPreviewJob>,
-    closed: bool,
-}
-
-struct QueuedMediaPreviewJob {
-    job: MediaPreviewJob,
-    priority: MediaPreviewRequestPriority,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum MediaPreviewJobEnqueueStatus {
-    Enqueued {
-        evicted_prefetch: Option<MediaPreviewKey>,
-    },
-    DroppedFull,
-    Closed,
-}
-
-fn media_preview_job_queue(
-    capacity: usize,
-) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
-    let shared = Arc::new(MediaPreviewJobQueueShared {
-        state: Mutex::new(MediaPreviewJobQueueState { queue: VecDeque::new(), closed: false }),
-        changed: Condvar::new(),
-        capacity: capacity.max(1),
-    });
-    (
-        MediaPreviewJobQueueSender { shared: Arc::clone(&shared) },
-        MediaPreviewJobQueueReceiver { shared },
-    )
-}
-
-impl MediaPreviewJobQueueSender {
-    fn clear(&self) -> usize {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        let cleared = state.queue.len();
-        state.queue.clear();
-        cleared
-    }
-
-    fn close(&self) {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        state.queue.clear();
-        state.closed = true;
-        self.shared.changed.notify_all();
-    }
-
-    fn prune_obsolete_jobs(&self, generation: u64) -> usize {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        let before = state.queue.len();
-        state.queue.retain(|queued| queued.job.generation >= generation);
-        before.saturating_sub(state.queue.len())
-    }
-
-    fn enqueue(
-        &self,
-        job: MediaPreviewJob,
-        priority: MediaPreviewRequestPriority,
-    ) -> MediaPreviewJobEnqueueStatus {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        if state.closed {
-            return MediaPreviewJobEnqueueStatus::Closed;
-        }
-
-        let mut evicted_prefetch = None;
-        if state.queue.len() >= self.shared.capacity {
-            if priority == MediaPreviewRequestPriority::Current {
-                if let Some(index) = state
-                    .queue
-                    .iter()
-                    .position(|queued| queued.priority == MediaPreviewRequestPriority::Prefetch)
-                {
-                    let evicted = state.queue.remove(index);
-                    evicted_prefetch = evicted.map(|queued| queued.job.key);
-                } else {
-                    return MediaPreviewJobEnqueueStatus::DroppedFull;
-                }
-            } else {
-                return MediaPreviewJobEnqueueStatus::DroppedFull;
-            }
-        }
-
-        state.queue.push_back(QueuedMediaPreviewJob { job, priority });
-        // Workers have lane-specific eligibility: only worker 0 may take
-        // PlaybackCursor work. Wake all workers so a playback-only queue cannot
-        // be observed only by non-playback workers and remain stuck until the
-        // next enqueue.
-        self.shared.changed.notify_all();
-        MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch }
-    }
-
-    fn promote(
-        &self,
-        key: &MediaPreviewKey,
-        priority: MediaPreviewRequestPriority,
-        access_mode: PreviewDecodeAccessMode,
-    ) -> bool {
-        if priority != MediaPreviewRequestPriority::Current {
-            return false;
-        }
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        let Some(queued) = state.queue.iter_mut().find(|queued| &queued.job.key == key) else {
-            return false;
-        };
-        let previous = queued.priority;
-        let previous_access_mode = queued.job.access_mode;
-        queued.job.access_mode =
-            promoted_access_mode(previous, previous_access_mode, priority, access_mode);
-        queued.priority = queued.priority.promote_with(priority);
-        queued.job.priority = queued.priority;
-        let promoted = previous != queued.priority;
-        let access_mode_changed = previous_access_mode != queued.job.access_mode;
-        if promoted || access_mode_changed {
-            self.shared.changed.notify_all();
-        }
-        promoted || access_mode_changed
-    }
-}
-
-impl Drop for MediaPreviewJobQueueSender {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
-
-impl MediaPreviewJobQueueReceiver {
-    #[cfg(test)]
-    fn recv(&self) -> Option<MediaPreviewJob> {
-        self.recv_for_worker(MediaPreviewWorkerLane::Any)
-    }
-
-    fn recv_for_worker(&self, lane: MediaPreviewWorkerLane) -> Option<MediaPreviewJob> {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        loop {
-            if let Some(index) = next_media_preview_job_index(&state.queue, lane) {
-                return state.queue.remove(index).map(|queued| queued.job);
-            }
-            if state.closed {
-                return None;
-            }
-            state = match self.shared.changed.wait(state) {
-                Ok(state) => state,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-        }
-    }
-}
-
-fn next_media_preview_job_index(
-    queue: &VecDeque<QueuedMediaPreviewJob>,
-    lane: MediaPreviewWorkerLane,
-) -> Option<usize> {
-    let eligible = |queued: &QueuedMediaPreviewJob| lane.accepts(queued.job.access_mode);
-    queue
-        .iter()
-        .position(|queued| {
-            queued.priority == MediaPreviewRequestPriority::Current && eligible(queued)
-        })
-        .or_else(|| queue.iter().position(eligible))
-}
-
-fn lock_media_preview_job_queue_state(
-    state: &Mutex<MediaPreviewJobQueueState>,
-) -> std::sync::MutexGuard<'_, MediaPreviewJobQueueState> {
-    match state.lock() {
-        Ok(state) => state,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn media_preview_current_access_mode(is_playing: bool) -> PreviewDecodeAccessMode {
-    if is_playing {
-        PreviewDecodeAccessMode::PlaybackCursor
-    } else {
-        PreviewDecodeAccessMode::ScrubCursor
-    }
-}
-
-fn media_preview_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| media_preview_worker_count_for(parallelism.get()))
-        .unwrap_or(1)
-}
-
-fn media_preview_worker_count_for(parallelism: usize) -> usize {
-    if parallelism >= 6 {
-        MEDIA_PREVIEW_MAX_DECODE_WORKERS
-    } else {
-        1
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MediaPreviewWorkerLane {
-    Any,
-    Playback,
-    Interactive,
-}
-
-impl MediaPreviewWorkerLane {
-    fn accepts(self, access_mode: PreviewDecodeAccessMode) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Playback => access_mode == PreviewDecodeAccessMode::PlaybackCursor,
-            Self::Interactive => access_mode != PreviewDecodeAccessMode::PlaybackCursor,
-        }
-    }
-}
-
-fn media_preview_worker_lane(worker_index: usize, worker_count: usize) -> MediaPreviewWorkerLane {
-    if worker_count <= 1 {
-        MediaPreviewWorkerLane::Any
-    } else if worker_index == 0 {
-        MediaPreviewWorkerLane::Playback
-    } else {
-        MediaPreviewWorkerLane::Interactive
-    }
 }
 
 impl AppUiPreviewService {
