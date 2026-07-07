@@ -22,6 +22,8 @@ const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
 const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
+const PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES: i64 = 48;
+const PREVIEW_SCRUB_FORWARD_REUSE_FRAMES: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewDecodeBackend {
@@ -80,7 +82,55 @@ impl PreviewDecodeAccessMode {
     }
 
     fn preserves_session_on_cancel(self) -> bool {
-        matches!(self, Self::PlaybackCursor)
+        PreviewDecodeAccessPolicy::for_access_mode(self).preserve_session_on_cancel
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewDecodeAccessPolicy {
+    forward_reuse_frame_window: i64,
+    use_playback_ring: bool,
+    preserve_session_on_cancel: bool,
+    allow_fast_any_seek: bool,
+}
+
+impl PreviewDecodeAccessPolicy {
+    fn for_access_mode(access_mode: PreviewDecodeAccessMode) -> Self {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => Self {
+                forward_reuse_frame_window: PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+                use_playback_ring: true,
+                preserve_session_on_cancel: true,
+                allow_fast_any_seek: false,
+            },
+            PreviewDecodeAccessMode::ScrubCursor => Self {
+                forward_reuse_frame_window: PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+                use_playback_ring: false,
+                preserve_session_on_cancel: false,
+                allow_fast_any_seek: true,
+            },
+            PreviewDecodeAccessMode::RandomAccessStillFrame => Self {
+                forward_reuse_frame_window: 0,
+                use_playback_ring: false,
+                preserve_session_on_cancel: false,
+                allow_fast_any_seek: false,
+            },
+        }
+    }
+
+    fn can_continue_forward(
+        self,
+        last_pts: i64,
+        target_pts: i64,
+        frame_duration_pts: i64,
+        reached_eof: bool,
+    ) -> bool {
+        if reached_eof || self.forward_reuse_frame_window <= 0 || target_pts < last_pts {
+            return false;
+        }
+        let max_distance =
+            frame_duration_pts.max(1).saturating_mul(self.forward_reuse_frame_window);
+        target_pts.saturating_sub(last_pts) <= max_distance
     }
 }
 
@@ -915,10 +965,11 @@ impl PreviewDecodeSession {
         if should_cancel() {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
+        let policy = PreviewDecodeAccessPolicy::for_access_mode(access_mode);
         let target_pts = timestamp_to_stream_pts(timestamp_secs, self.stream_tb);
 
         let cache_lookup_started_at = Instant::now();
-        if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+        if policy.use_playback_ring {
             if let Some(hit) = self.playback_ring.get(target_pts, self.hit_tolerance_pts) {
                 if should_cancel() {
                     return Ok(PreviewDecodeOutcome::Canceled);
@@ -943,7 +994,7 @@ impl PreviewDecodeSession {
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled);
             }
-            if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+            if policy.use_playback_ring {
                 self.playback_ring.put(hit.pts, hit.frame.clone());
             }
             return Ok(PreviewDecodeOutcome::Frame(
@@ -960,9 +1011,12 @@ impl PreviewDecodeSession {
         let should_continue_forward = self
             .last_pts
             .map(|last| {
-                target_pts >= last
-                    && target_pts.saturating_sub(last) <= self.frame_duration_pts.saturating_mul(24)
-                    && !self.reached_eof
+                policy.can_continue_forward(
+                    last,
+                    target_pts,
+                    self.frame_duration_pts,
+                    self.reached_eof,
+                )
             })
             .unwrap_or(false);
 
@@ -973,7 +1027,7 @@ impl PreviewDecodeSession {
                 return Ok(PreviewDecodeOutcome::Canceled);
             }
             let seek_started_at = Instant::now();
-            self.seek_to_target(target_pts)?;
+            self.seek_to_target(target_pts, policy)?;
             seek_us = duration_us(seek_started_at.elapsed());
         }
 
@@ -986,7 +1040,7 @@ impl PreviewDecodeSession {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
         if let Some(frame) = result.frame {
-            if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+            if policy.use_playback_ring {
                 if let Some(selected_pts) = result.selected_pts {
                     self.playback_ring.put(selected_pts, frame.clone());
                 }
@@ -1018,7 +1072,7 @@ impl PreviewDecodeSession {
         })
     }
 
-    fn seek_to_target(&mut self, target_pts: i64) -> Result<()> {
+    fn seek_to_target(&mut self, target_pts: i64, policy: PreviewDecodeAccessPolicy) -> Result<()> {
         let tb_num = self.stream_tb.numerator() as f64;
         let tb_den = self.stream_tb.denominator() as f64;
 
@@ -1038,17 +1092,18 @@ impl PreviewDecodeSession {
 
         let tb_secs = tb_num / tb_den;
 
-        let (min_ts, max_ts, seek_flags) = if preview_fast_any_seek_enabled() {
-            let seek_window_pts = (2.0 / tb_secs).round().max(1.0) as i64;
-            (
-                target_pts.saturating_sub(seek_window_pts),
-                target_pts.saturating_add(seek_window_pts),
-                ffmpeg::ffi::AVSEEK_FLAG_ANY,
-            )
-        } else {
-            // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
-            (i64::MIN, target_pts, ffmpeg::ffi::AVSEEK_FLAG_BACKWARD)
-        };
+        let (min_ts, max_ts, seek_flags) =
+            if policy.allow_fast_any_seek && preview_fast_any_seek_enabled() {
+                let seek_window_pts = (2.0 / tb_secs).round().max(1.0) as i64;
+                (
+                    target_pts.saturating_sub(seek_window_pts),
+                    target_pts.saturating_add(seek_window_pts),
+                    ffmpeg::ffi::AVSEEK_FLAG_ANY,
+                )
+            } else {
+                // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
+                (i64::MIN, target_pts, ffmpeg::ffi::AVSEEK_FLAG_BACKWARD)
+            };
 
         let ret = unsafe {
             ffmpeg::ffi::avformat_seek_file(
@@ -1814,8 +1869,10 @@ mod tests {
         decode_playback_cursor_frame_rgba_scaled_cancellable_with_fingerprint,
         decode_still_frame_rgba_scaled, decode_still_frame_rgba_scaled_cancellable, duration_us,
         preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeAccessMode,
-        PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
-        PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewPlaybackRing, RgbaFrame,
+        PreviewDecodeAccessPolicy, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
+        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
+        PreviewPlaybackRing, RgbaFrame, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1879,6 +1936,89 @@ mod tests {
         assert!(PreviewDecodeAccessMode::PlaybackCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::RandomAccessStillFrame.preserves_session_on_cancel());
+    }
+
+    #[test]
+    fn preview_decode_access_mode_policies_are_distinct() {
+        let playback =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
+        let scrub =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+        let still = PreviewDecodeAccessPolicy::for_access_mode(
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        );
+
+        assert_eq!(
+            playback.forward_reuse_frame_window,
+            PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES
+        );
+        assert!(playback.use_playback_ring);
+        assert!(playback.preserve_session_on_cancel);
+        assert!(!playback.allow_fast_any_seek);
+
+        assert_eq!(
+            scrub.forward_reuse_frame_window,
+            PREVIEW_SCRUB_FORWARD_REUSE_FRAMES
+        );
+        assert!(!scrub.use_playback_ring);
+        assert!(!scrub.preserve_session_on_cancel);
+        assert!(scrub.allow_fast_any_seek);
+
+        assert_eq!(still.forward_reuse_frame_window, 0);
+        assert!(!still.use_playback_ring);
+        assert!(!still.preserve_session_on_cancel);
+        assert!(!still.allow_fast_any_seek);
+    }
+
+    #[test]
+    fn preview_decode_access_policy_forward_reuse_is_mode_specific() {
+        let playback =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
+        let scrub =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+        let still = PreviewDecodeAccessPolicy::for_access_mode(
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        );
+        let frame_duration = 100;
+        let last_pts = 1_000;
+
+        assert!(playback.can_continue_forward(
+            last_pts,
+            last_pts + frame_duration * PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+            frame_duration,
+            false
+        ));
+        assert!(!playback.can_continue_forward(
+            last_pts,
+            last_pts + frame_duration * (PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES + 1),
+            frame_duration,
+            false
+        ));
+        assert!(scrub.can_continue_forward(
+            last_pts,
+            last_pts + frame_duration * PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+            frame_duration,
+            false
+        ));
+        assert!(!scrub.can_continue_forward(
+            last_pts,
+            last_pts + frame_duration * (PREVIEW_SCRUB_FORWARD_REUSE_FRAMES + 1),
+            frame_duration,
+            false
+        ));
+        assert!(!still.can_continue_forward(last_pts, last_pts, frame_duration, false));
+        assert!(!playback.can_continue_forward(
+            last_pts,
+            last_pts - frame_duration,
+            frame_duration,
+            false
+        ));
+        assert!(!playback.can_continue_forward(
+            last_pts,
+            last_pts + frame_duration,
+            frame_duration,
+            true
+        ));
     }
 
     #[test]

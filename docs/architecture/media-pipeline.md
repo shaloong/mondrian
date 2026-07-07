@@ -70,6 +70,14 @@ cache and are reported as `PlaybackSessionRingHit`; they are not available to
 scrub or still-frame requests. This keeps continuous playback locality inside
 the media access-mode implementation rather than scattering playback caches
 through app UI code.
+Access-mode decode behavior is centralized in a media-layer policy, not in app
+conditionals or FFmpeg call sites. Playback has the widest mostly-forward
+session reuse window and the playback ring; scrub has only a very short forward
+reuse window and is the only mode allowed to opt into the experimental
+fast-any-seek path; random-access still extraction has no forward reuse and
+keeps keyframe-safe exact seeking. This preserves still-frame correctness while
+leaving a clear replacement point for future hardware-resident playback and
+low-latency scrub backends.
 Process-global RGBA in-flight coalescing is also access-mode aware. For a given
 RGBA frame key, exactly one request owns the decode work; matching requests wait
 on that owner and re-check the cache after notification. Waiters must never
