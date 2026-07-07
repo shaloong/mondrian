@@ -50,11 +50,12 @@ use crate::app_ui::panels::{
     ViewerPreviewState,
 };
 use crate::app_ui::preview_access_mode::{
-    media_preview_current_access_mode, media_preview_job_queue, media_preview_worker_count,
-    media_preview_worker_lane, MediaPreviewJob, MediaPreviewJobEnqueueStatus,
-    MediaPreviewJobQueueReceiver, MediaPreviewJobQueueSender, MediaPreviewKey,
-    MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
-    MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
+    media_preview_access_mode_for_intent, media_preview_job_queue,
+    media_preview_viewer_access_intent, media_preview_worker_count, media_preview_worker_lane,
+    MediaPreviewJob, MediaPreviewJobEnqueueStatus, MediaPreviewJobQueueReceiver,
+    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewRequestPriority,
+    MediaPreviewRequestStatus, MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics,
+    MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
@@ -4322,7 +4323,9 @@ impl AppUiPreviewService {
             return None;
         }
         self.current_frame_pending.set(true);
-        let access_mode = media_preview_current_access_mode(state.is_playing());
+        let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
+            state.is_playing(),
+        ));
         self.request_media_preview(
             key,
             source_secs,

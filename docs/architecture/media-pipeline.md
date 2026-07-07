@@ -63,6 +63,12 @@ worker, the lane is `Any` so all modes still make progress. Because workers
 filter by lane, enqueue and priority promotion wake all preview workers, not
 just one; otherwise a playback-only queue could wake an interactive worker and
 leave the playback worker asleep until another request arrives.
+The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
+access modes. Viewer playback lowers to `PlaybackCursor`, non-playing viewer
+seek/scrub lowers to `ScrubCursor`, and deterministic one-off work such as
+thumbnail stills lowers to `RandomAccessStillFrame`. New UI states must extend
+that intent layer instead of passing booleans or strategy flags into
+`mondrian-media`.
 Playback cursor cancellation is cooperative but non-destructive to the playback
 decode session: a prefetch budget miss should not throw away the warmed
 mostly-forward decoder stream. Scrub and still-frame cancellation remain

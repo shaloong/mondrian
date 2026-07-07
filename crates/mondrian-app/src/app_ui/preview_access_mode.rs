@@ -383,11 +383,38 @@ fn lock_media_preview_job_queue_state(
     }
 }
 
-pub(crate) fn media_preview_current_access_mode(is_playing: bool) -> PreviewDecodeAccessMode {
+/// App-layer preview workload intent before it is lowered to a media access mode.
+///
+/// This keeps UI state interpretation out of the media crate. Callers should
+/// choose an intent that describes the user interaction, then lower it through
+/// [`media_preview_access_mode_for_intent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaPreviewAccessIntent {
+    /// Sustained timeline playback or forward prefetch.
+    Playback,
+    /// Latest-wins playhead movement, jog/shuttle, and non-playing viewer seeks.
+    InteractiveScrub,
+    /// Deterministic one-off still extraction such as thumbnails or poster frames.
+    DeterministicStill,
+}
+
+pub(crate) fn media_preview_viewer_access_intent(is_playing: bool) -> MediaPreviewAccessIntent {
     if is_playing {
-        PreviewDecodeAccessMode::PlaybackCursor
+        MediaPreviewAccessIntent::Playback
     } else {
-        PreviewDecodeAccessMode::ScrubCursor
+        MediaPreviewAccessIntent::InteractiveScrub
+    }
+}
+
+pub(crate) fn media_preview_access_mode_for_intent(
+    intent: MediaPreviewAccessIntent,
+) -> PreviewDecodeAccessMode {
+    match intent {
+        MediaPreviewAccessIntent::Playback => PreviewDecodeAccessMode::PlaybackCursor,
+        MediaPreviewAccessIntent::InteractiveScrub => PreviewDecodeAccessMode::ScrubCursor,
+        MediaPreviewAccessIntent::DeterministicStill => {
+            PreviewDecodeAccessMode::RandomAccessStillFrame
+        }
     }
 }
 
@@ -1610,14 +1637,30 @@ mod tests {
     }
 
     #[test]
-    fn media_preview_current_access_mode_tracks_playback_state() {
+    fn media_preview_viewer_access_intent_tracks_playback_state() {
         assert_eq!(
-            media_preview_current_access_mode(true),
+            media_preview_viewer_access_intent(true),
+            MediaPreviewAccessIntent::Playback
+        );
+        assert_eq!(
+            media_preview_viewer_access_intent(false),
+            MediaPreviewAccessIntent::InteractiveScrub
+        );
+    }
+
+    #[test]
+    fn media_preview_access_intent_lowers_to_explicit_access_modes() {
+        assert_eq!(
+            media_preview_access_mode_for_intent(MediaPreviewAccessIntent::Playback),
             PreviewDecodeAccessMode::PlaybackCursor
         );
         assert_eq!(
-            media_preview_current_access_mode(false),
+            media_preview_access_mode_for_intent(MediaPreviewAccessIntent::InteractiveScrub),
             PreviewDecodeAccessMode::ScrubCursor
+        );
+        assert_eq!(
+            media_preview_access_mode_for_intent(MediaPreviewAccessIntent::DeterministicStill),
+            PreviewDecodeAccessMode::RandomAccessStillFrame
         );
     }
 }

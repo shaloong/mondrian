@@ -6,9 +6,12 @@
 //! worker and picked up by the host on the next event-loop wake.
 
 use crate::app_ui::panels::{AssetThumbnailSource, AssetThumbnailState};
+use crate::app_ui::preview_access_mode::{
+    media_preview_access_mode_for_intent, MediaPreviewAccessIntent,
+};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::AssetId;
-use mondrian_media::{PreviewDecodeOutcome, PreviewFileFingerprint};
+use mondrian_media::{PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewFileFingerprint};
 use mondrian_ui_widgets::RasterImage;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -179,6 +182,10 @@ fn thumbnail_worker(jobs: mpsc::Receiver<ThumbnailJob>, results: mpsc::Sender<Th
 }
 
 fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
+    debug_assert_eq!(
+        media_preview_access_mode_for_intent(MediaPreviewAccessIntent::DeterministicStill),
+        PreviewDecodeAccessMode::RandomAccessStillFrame
+    );
     match mondrian_media::decode_still_frame_rgba_scaled_cancellable_with_fingerprint(
         job.path.as_path(),
         0.0,
