@@ -75,12 +75,15 @@ in-process FFmpeg decoder threading mode/count. Use it when a real 4K/HDR file
 feels slow to distinguish long-GOP seek/decode/scaling cost from later app UI,
 OCIO, compositor, or viewer-output cost.
 
-Preview software decode defaults to bounded slice threading. Override it only
-for profiling or platform-specific investigation:
+Preview software decode defaults to the coordinated `PreviewDecodeCpuBudget`:
+the app preview worker count and FFmpeg decoder threads per worker are sized
+together so software decode does not multiply independent thread pools. Override
+these only for profiling or platform-specific investigation:
 
 ```powershell
 $env:MONDRIAN_PREVIEW_DECODE_THREADING='slice' # none | frame | slice
-$env:MONDRIAN_PREVIEW_DECODE_THREADS='8'      # 0 lets FFmpeg choose
+$env:MONDRIAN_PREVIEW_DECODE_THREADS='4'      # FFmpeg decoder threads per worker
+$env:MONDRIAN_PREVIEW_DECODE_WORKERS='2'      # DecoderPool runtime workers
 ```
 
 App preview diagnostics also report proxy path resolution:

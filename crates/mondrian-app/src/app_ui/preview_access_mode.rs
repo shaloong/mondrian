@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
-use mondrian_media::{PreviewDecodeAccessMode, PreviewFileFingerprint};
+use mondrian_media::{preview_decode_cpu_budget, PreviewDecodeAccessMode, PreviewFileFingerprint};
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
@@ -425,19 +425,13 @@ pub(crate) fn media_preview_access_mode_for_intent(
 }
 
 pub(crate) fn media_preview_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| media_preview_worker_count_for(parallelism.get()))
-        .unwrap_or(1)
+    media_preview_worker_count_for(preview_decode_cpu_budget().available_parallelism)
 }
 
 pub(crate) fn media_preview_worker_count_for(parallelism: usize) -> usize {
-    if parallelism >= 8 {
-        MEDIA_PREVIEW_MAX_DECODE_WORKERS
-    } else if parallelism >= 6 {
-        2
-    } else {
-        1
-    }
+    mondrian_media::PreviewDecodeCpuBudget::for_available_parallelism(parallelism)
+        .preview_worker_count
+        .clamp(1, MEDIA_PREVIEW_MAX_DECODE_WORKERS)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1673,7 +1667,9 @@ mod tests {
         assert_eq!(media_preview_worker_count_for(5), 1);
         assert_eq!(media_preview_worker_count_for(6), 2);
         assert_eq!(media_preview_worker_count_for(7), 2);
-        assert_eq!(media_preview_worker_count_for(8), 3);
+        assert_eq!(media_preview_worker_count_for(8), 2);
+        assert_eq!(media_preview_worker_count_for(11), 2);
+        assert_eq!(media_preview_worker_count_for(12), 3);
         assert_eq!(media_preview_worker_count_for(32), 3);
     }
 

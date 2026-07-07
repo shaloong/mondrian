@@ -42,9 +42,10 @@ pub use preview::{
     decode_scrub_cursor_frame_rgba_scaled_cancellable_with_fingerprint, decode_still_frame_rgba,
     decode_still_frame_rgba_scaled, decode_still_frame_rgba_scaled_cancellable,
     decode_still_frame_rgba_scaled_cancellable_with_fingerprint, preview_decode_backend,
-    set_preview_decode_backend, PreviewDecodeAccessMode, PreviewDecodeBackend,
-    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
+    preview_decode_cpu_budget, set_preview_decode_backend, PreviewDecodeAccessMode,
+    PreviewDecodeBackend, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
+    PreviewDecodePath, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+    PreviewFileFingerprint, RgbaFrame,
 };
 pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution, ProxyStatus};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

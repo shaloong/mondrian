@@ -894,12 +894,13 @@ impl DecoderPool {
 }
 
 fn preview_decode_worker_threads() -> usize {
-    let max_threads = (num_cpus() - 1).clamp(1, 8);
-    std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
+    let budget = crate::preview::preview_decode_cpu_budget();
+    let max_threads = budget.preview_worker_count.max(1);
+    std::env::var("MONDRIAN_PREVIEW_DECODE_WORKERS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .map(|value| value.clamp(1, max_threads))
-        .unwrap_or(2.min(max_threads))
+        .unwrap_or(max_threads)
 }
 
 fn num_cpus() -> usize {

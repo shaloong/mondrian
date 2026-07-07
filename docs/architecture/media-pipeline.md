@@ -128,11 +128,19 @@ defined by access mode. The module must not own render plan evaluation, decode
 execution, color interpretation, or GPU/CPU frame conversion; those remain in
 the preview orchestrator and media/renderer layers.
 Worker-lane selection reserves CPU capacity instead of maximizing raw decode
-throughput. Single-worker systems use one `Any` lane; mid-range systems use
-separate `Playback` and non-playback `Interactive` lanes; systems with enough
+throughput. The media layer exposes a single `PreviewDecodeCpuBudget` that
+coordinates app preview worker count with FFmpeg decoder threads per worker.
+The app scheduler uses that budget for lane count, while the media decoder uses
+the same budget for its default FFmpeg threading request. This avoids the
+dangerous `preview workers * FFmpeg decoder threads` over-subscription pattern
+that can make software decode starve UI input, audio, and render submission.
+Single-worker systems use one `Any` lane; mid-range systems use separate
+`Playback` and non-playback `Interactive` lanes; systems with enough
 parallelism split `Playback`, `Scrub`, and `Still` lanes so exact still-frame
 requests cannot sit ahead of active playhead dragging, and playback prefetch
-cannot consume the only interactive decode lane.
+cannot consume the only interactive decode lane. Preview diagnostics expose the
+resolved CPU budget and the actually started worker count so perf reports can
+distinguish codec cost from scheduling over-subscription.
 Preview completion has separate display and cache semantics. A decode result is
 `Current` only when it still matches pending visible work; same-generation
 results whose pending request was canceled or whose access mode has been
@@ -285,16 +293,18 @@ The in-process preview decoder uses bounded frame threading by default. This is
 the product default because 4K HEVC Main10/Long-GOP preview seeks are commonly
 packet-decode bound, and frame threading is the safer general FFmpeg software
 decode default than slice threading for this class of media. The app
-preview service runs a conservative decode worker pool: one worker on small CPU
-budgets and at most two workers on wider machines, so current-frame decode can
-make progress while another worker is occupied by prefetch or a long-GOP seek
-without letting preview decode oversubscribe the UI, renderer, or FFmpeg's own
-codec threads. When a current-frame request is scheduled, the job queue also
-prunes obsolete prefetch jobs from older render generations before enqueueing
-the current work; fresh same-generation prefetch remains eligible so playback
-can still warm nearby frames. This worker pool and pruning are scheduling
-guardrails only; they are not a substitute for future cancellable decode
-sessions or hardware-resident decode.
+preview service runs a conservative decode worker pool from
+`PreviewDecodeCpuBudget`: one worker on small CPU budgets, two on common
+mid-range machines, and three only on larger workstations. FFmpeg decoder
+threads per worker are computed from the same budget, leaving explicit
+interactive headroom so current-frame decode can make progress while another
+worker is occupied by prefetch or a long-GOP seek without oversubscribing the
+UI, renderer, audio, or FFmpeg's own codec threads. When a current-frame request
+is scheduled, the job queue also prunes obsolete prefetch jobs from older render
+generations before enqueueing the current work; fresh same-generation prefetch
+remains eligible so playback can still warm nearby frames. This worker pool and
+pruning are scheduling guardrails only; they are not a substitute for future
+cancellable decode sessions or hardware-resident decode.
 Preview decode also exposes a cooperative cancellation boundary for interactive
 work: app workers pass a generation-aware predicate to the media decoder, and
 the media loop checks it before opening, seeking, packet decode, frame receive,
@@ -323,8 +333,11 @@ workers must forward that `PreviewFileFingerprint` into the media decode
 boundary instead of making the decode worker repeat the filesystem metadata
 lookup. `mondrian-media` may capture the fingerprint itself only for lower-level
 callers that do not already have one.
-`MONDRIAN_PREVIEW_DECODE_THREADING` and `MONDRIAN_PREVIEW_DECODE_THREADS` are
-diagnostic overrides, not separate decode semantics. Thread-local preview decode
+`MONDRIAN_PREVIEW_DECODE_THREADING`, `MONDRIAN_PREVIEW_DECODE_THREADS`, and
+`MONDRIAN_PREVIEW_DECODE_WORKERS` are diagnostic overrides, not separate decode
+semantics. `THREADS` means FFmpeg decoder threads per worker; `WORKERS` means
+DecoderPool runtime workers. The app viewer preview service uses the resolved
+budget directly for access-mode lane workers. Thread-local preview decode
 sessions are intentionally kept alive for playback locality and must be
 released through `clear_thread_local_preview_decode_session()` at explicit
 lifecycle boundaries such as perf probes, media/project shutdown, or tests that

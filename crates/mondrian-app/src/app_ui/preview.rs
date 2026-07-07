@@ -21,9 +21,10 @@ use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
-    PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
-    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
+    preview_decode_cpu_budget, PreviewDecodeAccessMode, PreviewDecodeCpuBudget,
+    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingKind, PreviewFileFingerprint, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -90,6 +91,7 @@ pub struct AppUiPreviewService {
     last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
     last_generation_key: RefCell<Option<ViewerPreviewGenerationKey>>,
+    decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
     metrics: AppUiPreviewMetrics,
 }
@@ -101,9 +103,10 @@ impl AppUiPreviewService {
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let scheduler = MediaPreviewScheduler::default();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let decode_cpu_budget = preview_decode_cpu_budget();
         let mut decode_worker_count = 0;
         let mut workers = Vec::new();
-        let worker_count = media_preview_worker_count();
+        let worker_count = media_preview_worker_count().min(decode_cpu_budget.preview_worker_count);
         for worker_index in 0..worker_count {
             let worker_jobs = job_rx.clone();
             let worker_results = result_tx.clone();
@@ -156,6 +159,7 @@ impl AppUiPreviewService {
             last_color_rejection: RefCell::new(None),
             display_snapshot: RefCell::new(None),
             last_generation_key: RefCell::new(None),
+            decode_cpu_budget,
             decode_worker_count,
             metrics: AppUiPreviewMetrics::default(),
         }
@@ -216,6 +220,7 @@ impl AppUiPreviewService {
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
             media_failure_hits: self.metrics.media_failure_hits.get(),
+            decode_cpu_budget: self.decode_cpu_budget,
             decode_worker_count: self.decode_worker_count,
             decode_successes: self.metrics.decode_successes.get(),
             decode_failures: self.metrics.decode_failures.get(),
@@ -1514,6 +1519,8 @@ pub struct AppUiPreviewDiagnostics {
     pub media_cache_misses: u64,
     /// Requests skipped because a media preview key is known to have failed.
     pub media_failure_hits: u64,
+    /// Coordinated CPU budget used for preview workers and FFmpeg decoder threads.
+    pub decode_cpu_budget: PreviewDecodeCpuBudget,
     /// Preview decode workers successfully started for this service.
     pub decode_worker_count: usize,
     /// Successful background media decodes received by the UI service.
@@ -1985,6 +1992,8 @@ impl AppUiPreviewDecodeAccessModeProfiles {
 /// Stable preview decode performance summary for perf JSONL and diagnostics tooling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AppUiPreviewDecodePerformanceSummary {
+    /// Coordinated CPU budget used for preview workers and FFmpeg decoder threads.
+    pub cpu_budget: PreviewDecodeCpuBudget,
     /// Successful preview decode/cache results.
     pub decode_successes: u64,
     /// Failed preview decode results.
@@ -3804,6 +3813,7 @@ impl AppUiPreviewDiagnostics {
         let stage_durations = self.decode_stage_durations;
         let max_frame_stage_durations = self.decode_max_frame_stage_durations;
         Some(AppUiPreviewDecodePerformanceSummary {
+            cpu_budget: self.decode_cpu_budget,
             decode_successes,
             decode_failures: self.decode_failures,
             canceled_jobs: self.decode_canceled_jobs,

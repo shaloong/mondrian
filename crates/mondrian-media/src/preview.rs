@@ -188,6 +188,86 @@ struct PreviewDecodeThreadingConfig {
     count: usize,
 }
 
+/// CPU budget used by preview decode access modes.
+///
+/// The budget coordinates app-level preview worker count with FFmpeg decoder
+/// threads per worker. Keeping these values together prevents the default
+/// preview path from multiplying worker threads by decoder threads and
+/// starving the UI while software decode is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDecodeCpuBudget {
+    /// Hardware threads visible to the process.
+    pub available_parallelism: usize,
+    /// Threads intentionally left for UI, render submission, OS, and audio work.
+    pub reserved_interactive_threads: usize,
+    /// App-level preview decode workers to spawn for playback/scrub/still lanes.
+    pub preview_worker_count: usize,
+    /// Default FFmpeg decoder threads to request per preview worker.
+    pub decoder_threads_per_worker: usize,
+    /// Highest decoder thread override accepted for one preview worker.
+    pub max_decoder_threads_per_worker: usize,
+}
+
+impl PreviewDecodeCpuBudget {
+    /// Build the default preview decode CPU budget for a given machine size.
+    pub fn for_available_parallelism(available_parallelism: usize) -> Self {
+        let available_parallelism = available_parallelism.max(1);
+        let reserved_interactive_threads = if available_parallelism >= 8 {
+            2
+        } else if available_parallelism >= 3 {
+            1
+        } else {
+            0
+        };
+        let usable_threads =
+            available_parallelism.saturating_sub(reserved_interactive_threads).max(1);
+        let preview_worker_count = if available_parallelism >= 12 {
+            3
+        } else if available_parallelism >= 6 {
+            2
+        } else {
+            1
+        }
+        .min(usable_threads)
+        .max(1);
+        let max_decoder_threads_per_worker = if available_parallelism >= 16 {
+            6
+        } else if available_parallelism >= 8 {
+            4
+        } else {
+            3
+        }
+        .min(usable_threads)
+        .max(1);
+        let decoder_threads_per_worker = (usable_threads / preview_worker_count)
+            .max(1)
+            .min(max_decoder_threads_per_worker);
+
+        Self {
+            available_parallelism,
+            reserved_interactive_threads,
+            preview_worker_count,
+            decoder_threads_per_worker,
+            max_decoder_threads_per_worker,
+        }
+    }
+}
+
+impl Default for PreviewDecodeCpuBudget {
+    fn default() -> Self {
+        preview_decode_cpu_budget()
+    }
+}
+
+/// Return the current default preview decode CPU budget.
+pub fn preview_decode_cpu_budget() -> PreviewDecodeCpuBudget {
+    PreviewDecodeCpuBudget::for_available_parallelism(
+        std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(1),
+    )
+}
+
 impl PreviewDecodePath {
     /// Stable path name for telemetry.
     pub fn as_str(self) -> &'static str {
@@ -1523,19 +1603,13 @@ fn preview_decode_threading_config() -> PreviewDecodeThreadingConfig {
         .ok()
         .and_then(|value| PreviewDecodeThreadingKind::from_env(&value))
         .unwrap_or_default();
+    let budget = preview_decode_cpu_budget();
     let count = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or_else(default_preview_decode_thread_count);
+        .map(|value| value.clamp(1, budget.max_decoder_threads_per_worker))
+        .unwrap_or(budget.decoder_threads_per_worker);
     PreviewDecodeThreadingConfig { kind, count }
-}
-
-fn default_preview_decode_thread_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get())
-        .unwrap_or(1)
-        .saturating_sub(2)
-        .clamp(1, 8)
 }
 
 #[derive(Clone)]
@@ -1941,6 +2015,24 @@ mod tests {
             Some(PreviewDecodeThreadingKind::Slice)
         );
         assert_eq!(PreviewDecodeThreadingKind::from_env("surprise"), None);
+    }
+
+    #[test]
+    fn preview_decode_cpu_budget_coordinates_workers_and_decoder_threads() {
+        let small = super::PreviewDecodeCpuBudget::for_available_parallelism(4);
+        assert_eq!(small.preview_worker_count, 1);
+        assert_eq!(small.decoder_threads_per_worker, 3);
+        assert_eq!(small.reserved_interactive_threads, 1);
+
+        let common = super::PreviewDecodeCpuBudget::for_available_parallelism(8);
+        assert_eq!(common.preview_worker_count, 2);
+        assert_eq!(common.decoder_threads_per_worker, 3);
+        assert_eq!(common.reserved_interactive_threads, 2);
+
+        let workstation = super::PreviewDecodeCpuBudget::for_available_parallelism(32);
+        assert_eq!(workstation.preview_worker_count, 3);
+        assert_eq!(workstation.decoder_threads_per_worker, 6);
+        assert_eq!(workstation.max_decoder_threads_per_worker, 6);
     }
 
     #[test]
