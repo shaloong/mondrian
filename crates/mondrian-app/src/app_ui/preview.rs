@@ -53,6 +53,7 @@ const VIEWER_PREVIEW_FRAME_CACHE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
 const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
+const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
 
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
@@ -74,6 +75,7 @@ pub struct AppUiPreviewService {
     last_ready_frame: RefCell<Option<ScopedViewerFrame>>,
     last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
+    decode_worker_count: usize,
     metrics: AppUiPreviewMetrics,
 }
 
@@ -83,12 +85,25 @@ impl AppUiPreviewService {
         let (job_tx, job_rx) = media_preview_job_queue(MEDIA_PREVIEW_JOB_QUEUE_CAPACITY);
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let scheduler = MediaPreviewScheduler::default();
-        let worker_scheduler = scheduler.clone();
-        if let Err(err) = std::thread::Builder::new()
-            .name("mondrian-ui-viewer-preview".to_owned())
-            .spawn(move || media_preview_worker(job_rx, result_tx, worker_scheduler))
-        {
-            tracing::warn!("failed to start app UI viewer preview worker: {err}");
+        let mut decode_worker_count = 0;
+        for worker_index in 0..media_preview_worker_count() {
+            let worker_jobs = job_rx.clone();
+            let worker_results = result_tx.clone();
+            let worker_scheduler = scheduler.clone();
+            match std::thread::Builder::new()
+                .name(format!("mondrian-ui-viewer-preview-{worker_index}"))
+                .spawn(move || media_preview_worker(worker_jobs, worker_results, worker_scheduler))
+            {
+                Ok(_) => {
+                    decode_worker_count += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        worker_index,
+                        "failed to start app UI viewer preview worker: {err}"
+                    );
+                }
+            }
         }
 
         Self {
@@ -110,6 +125,7 @@ impl AppUiPreviewService {
             last_ready_frame: RefCell::new(None),
             last_color_rejection: RefCell::new(None),
             display_snapshot: RefCell::new(None),
+            decode_worker_count,
             metrics: AppUiPreviewMetrics::default(),
         }
     }
@@ -169,6 +185,7 @@ impl AppUiPreviewService {
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
             media_failure_hits: self.metrics.media_failure_hits.get(),
+            decode_worker_count: self.decode_worker_count,
             decode_successes: self.metrics.decode_successes.get(),
             decode_failures: self.metrics.decode_failures.get(),
             decode_in_process_cpu_rgba_frames: self.metrics.decode_in_process_cpu_rgba_frames.get(),
@@ -1262,6 +1279,8 @@ pub struct AppUiPreviewDiagnostics {
     pub media_cache_misses: u64,
     /// Requests skipped because a media preview key is known to have failed.
     pub media_failure_hits: u64,
+    /// Preview decode workers successfully started for this service.
+    pub decode_worker_count: usize,
     /// Successful background media decodes received by the UI service.
     pub decode_successes: u64,
     /// Failed background media decodes received by the UI service.
@@ -3803,6 +3822,7 @@ struct MediaPreviewJobQueueSender {
     shared: Arc<MediaPreviewJobQueueShared>,
 }
 
+#[derive(Clone)]
 struct MediaPreviewJobQueueReceiver {
     shared: Arc<MediaPreviewJobQueueShared>,
 }
@@ -3935,6 +3955,20 @@ fn lock_media_preview_job_queue_state(
     match state.lock() {
         Ok(state) => state,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn media_preview_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| media_preview_worker_count_for(parallelism.get()))
+        .unwrap_or(1)
+}
+
+fn media_preview_worker_count_for(parallelism: usize) -> usize {
+    if parallelism >= 6 {
+        MEDIA_PREVIEW_MAX_DECODE_WORKERS
+    } else {
+        1
     }
 }
 
@@ -8330,5 +8364,14 @@ mod tests {
 
         assert!(!sender.promote(&key, MediaPreviewRequestPriority::Current));
         assert!(!sender.promote(&key, MediaPreviewRequestPriority::Prefetch));
+    }
+
+    #[test]
+    fn media_preview_worker_count_reserves_cpu_capacity() {
+        assert_eq!(media_preview_worker_count_for(0), 1);
+        assert_eq!(media_preview_worker_count_for(1), 1);
+        assert_eq!(media_preview_worker_count_for(5), 1);
+        assert_eq!(media_preview_worker_count_for(6), 2);
+        assert_eq!(media_preview_worker_count_for(32), 2);
     }
 }

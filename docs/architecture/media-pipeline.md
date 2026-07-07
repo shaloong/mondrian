@@ -105,7 +105,13 @@ stage timings plus max queue wait, while aggregate stage totals remain trend
 evidence. This avoids blaming a cumulative stage total when an interactive stall
 came from one pathological seek, decode, software-scale/copy, composite,
 output-boundary frame, or current-frame job waiting behind other decode work.
-The in-process preview decoder uses bounded slice threading by default.
+The in-process preview decoder uses bounded slice threading by default. The app
+preview service runs a conservative decode worker pool: one worker on small CPU
+budgets and at most two workers on wider machines, so current-frame decode can
+make progress while another worker is occupied by prefetch or a long-GOP seek
+without letting preview decode oversubscribe the UI, renderer, or FFmpeg's own
+codec threads. This worker pool is a scheduling guardrail only; it is not a
+substitute for future cancellable decode sessions or hardware-resident decode.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
