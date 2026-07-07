@@ -1151,7 +1151,7 @@ impl AppState {
             TIMELINE_SEEK => {
                 let payload =
                     parse_ui_payload::<TimelineSeekPayload>("timeline_ui_action", name, payload)?;
-                self.seek(payload.frame.max(0));
+                self.seek_with_source(payload.frame.max(0), payload.source);
                 Ok(())
             }
             TIMELINE_SET_TRACK_CONTROL => {
@@ -2569,30 +2569,30 @@ mod tests {
         timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
         timeline_move_track_action, timeline_open_nested_sequence_action,
         timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
-        timeline_select_clip_action, timeline_set_in_out_point_action,
-        timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
-        timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-        viewer_set_clip_transform_action, viewer_set_preview_resolution_scale_action,
-        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
-        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-        AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
-        AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-        ExportJobTargetPayload, InspectorClipRefPayload, InspectorClipTransformField,
-        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-        ProjectRecoverFromAutosavePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-        TimelineInOutPointPayloadKind, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-        ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
-        ViewerTransformPositionPayload,
+        timeline_seek_with_source_action, timeline_select_clip_action,
+        timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
+        timeline_set_track_control_action, timeline_trim_clips_action,
+        timeline_trim_selected_clips_to_playhead_action, viewer_set_clip_transform_action,
+        viewer_set_preview_resolution_scale_action, AssetsCreateAssetPayload,
+        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsPrepareDragPayload,
+        AssetsRelinkAssetPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+        AssetsSetInterpretationPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
+        ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
+        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, SequenceTargetPayload,
+        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveTrackPayload,
+        TimelineOpenNestedSequencePayload, TimelineSeekSource, TimelineSetInOutPointPayload,
+        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+        TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
+        ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
@@ -2888,9 +2888,23 @@ mod tests {
     fn dispatch_timeline_ui_seek_updates_playback_frame() {
         let (mut state, _, _) = state_with_two_video_tracks();
 
-        state.dispatch_action(timeline_seek_action(33)).expect("dispatch seek");
+        state
+            .dispatch_action(timeline_seek_with_source_action(
+                33,
+                TimelineSeekSource::PointerDrag,
+            ))
+            .expect("dispatch seek");
 
         assert_eq!(state.current_frame(), 33);
+        assert_eq!(
+            state.last_timeline_seek_source,
+            TimelineSeekSource::PointerDrag
+        );
+
+        state.dispatch_action(timeline_seek_action(44)).expect("dispatch seek");
+
+        assert_eq!(state.current_frame(), 44);
+        assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
     }
 
     #[test]

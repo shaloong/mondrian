@@ -1196,7 +1196,7 @@ fn demo_timeline_panel() -> TimelineView {
             clip.label
         ))
     })
-    .on_seek(|frame| demo_action(&format!("timeline.seek.{frame}")))
+    .on_seek(|seek| demo_action(&format!("timeline.seek.{}", seek.frame)))
 }
 
 fn demo_timeline_clip_action(clip_ref: TimelineClipRef, label: &str) -> Action {

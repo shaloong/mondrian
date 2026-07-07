@@ -115,7 +115,25 @@ pub type TimelineEditCommandAvailability = dyn Fn(TimelineEditCommand) -> bool;
 pub type TimelineEditCommandShortcut = dyn Fn(TimelineEditCommand) -> Option<String>;
 
 /// Action factory for playhead seeking.
-pub type TimelineSeekAction = dyn Fn(i64) -> Action;
+pub type TimelineSeekAction = dyn Fn(TimelineSeek) -> Action;
+
+/// User interaction source for a timeline seek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineSeekSource {
+    /// Continuous pointer drag on the ruler or playhead.
+    PointerDrag,
+    /// Stable pointer click, keyboard command, or drag release.
+    Settled,
+}
+
+/// Timeline seek event emitted by [`TimelineView`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineSeek {
+    /// Target timeline frame.
+    pub frame: i64,
+    /// Interaction source that produced the seek.
+    pub source: TimelineSeekSource,
+}
 
 /// Action factory for dropping an asset onto a timeline track.
 pub type TimelineAssetDropAction = dyn Fn(TimelineAssetDrop, &TimelineTrack) -> Action;
@@ -958,7 +976,7 @@ impl TimelineView {
     }
 
     /// Set a dynamic seek action factory.
-    pub fn on_seek(mut self, action: impl Fn(i64) -> Action + 'static) -> Self {
+    pub fn on_seek(mut self, action: impl Fn(TimelineSeek) -> Action + 'static) -> Self {
         self.on_seek = Some(Box::new(action));
         self
     }
@@ -2136,13 +2154,17 @@ impl TimelineView {
         true
     }
 
-    fn seek_from_input(&mut self, frame: i64, ctx: &mut EventContext) {
+    fn dispatch_seek(&self, frame: i64, source: TimelineSeekSource, ctx: &mut EventContext) {
+        if let Some(factory) = &self.on_seek {
+            (ctx.dispatch)(factory(TimelineSeek { frame: frame.max(0), source }));
+        }
+    }
+
+    fn seek_from_input(&mut self, frame: i64, source: TimelineSeekSource, ctx: &mut EventContext) {
         let frame = frame.max(0);
         if self.playhead_frame != frame {
             self.playhead_frame = frame;
-            if let Some(factory) = &self.on_seek {
-                (ctx.dispatch)(factory(frame));
-            }
+            self.dispatch_seek(frame, source, ctx);
             ctx.request_repaint();
         }
     }
@@ -2151,7 +2173,11 @@ impl TimelineView {
         let proposed = frame.max(0);
         let snap = self.snap_frame(proposed, None, false);
         self.set_active_snap(snap, ctx);
-        self.seek_from_input(snap.map_or(proposed, |snap| snap.frame), ctx);
+        self.seek_from_input(
+            snap.map_or(proposed, |snap| snap.frame),
+            TimelineSeekSource::PointerDrag,
+            ctx,
+        );
     }
 
     fn asset_drop_target_at(&self, position: Point) -> Option<(usize, i64)> {
@@ -2479,7 +2505,7 @@ impl TimelineView {
     }
 
     fn split_at_pointer_frame(&mut self, point: Point, ctx: &mut EventContext) -> EventResult {
-        self.seek_from_input(self.x_to_frame(point.x), ctx);
+        self.seek_from_input(self.x_to_frame(point.x), TimelineSeekSource::Settled, ctx);
         if self.dispatch_edit_command(TimelineEditCommand::SplitAtPlayhead, ctx) {
             EventResult::Handled
         } else {
@@ -2501,7 +2527,7 @@ impl TimelineView {
         ) else {
             return false;
         };
-        self.seek_from_input(target, ctx);
+        self.seek_from_input(target, TimelineSeekSource::Settled, ctx);
         true
     }
 
@@ -4111,7 +4137,11 @@ impl Widget for TimelineView {
                         self.seek_from_drag_input(self.x_to_frame(position.x), ctx);
                         return EventResult::Handled;
                     }
-                    self.seek_from_input(self.x_to_frame(position.x), ctx);
+                    self.seek_from_input(
+                        self.x_to_frame(position.x),
+                        TimelineSeekSource::Settled,
+                        ctx,
+                    );
                     return EventResult::Handled;
                 }
             }
@@ -4207,6 +4237,7 @@ impl Widget for TimelineView {
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.playhead_dragging => {
                 self.playhead_dragging = false;
                 self.active_snap = None;
+                self.dispatch_seek(self.playhead_frame, TimelineSeekSource::Settled, ctx);
                 self.release_timeline_pointer_capture(ctx);
                 ctx.request_repaint();
                 return EventResult::Handled;
@@ -5042,8 +5073,11 @@ mod tests {
     fn ruler_drag_seeks_and_uses_pointer_capture() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().on_seek(|frame| {
-            if frame == 24 {
+        let seek_events = Rc::new(RefCell::new(Vec::new()));
+        let seek_log = Rc::clone(&seek_events);
+        let mut view = timeline().on_seek(move |seek| {
+            seek_log.borrow_mut().push(seek);
+            if seek.frame == 24 && seek.source == TimelineSeekSource::PointerDrag {
                 Action::Play
             } else {
                 Action::Pause
@@ -5078,6 +5112,10 @@ mod tests {
             Some(PointerCaptureRequest::Capture(view.id()))
         );
         assert_eq!(actions.borrow().last(), Some(&Action::Play));
+        assert_eq!(
+            seek_events.borrow().as_slice(),
+            &[TimelineSeek { frame: 24, source: TimelineSeekSource::PointerDrag }]
+        );
 
         view.event(
             &UiEvent::MouseUp {
@@ -5091,15 +5129,22 @@ mod tests {
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Release(view.id()))
         );
+        assert_eq!(
+            seek_events.borrow().as_slice(),
+            &[
+                TimelineSeek { frame: 24, source: TimelineSeekSource::PointerDrag },
+                TimelineSeek { frame: 24, source: TimelineSeekSource::Settled }
+            ]
+        );
     }
 
     #[test]
     fn ruler_drag_snaps_playhead_to_clip_edge() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().on_seek(|frame| Action::Custom {
+        let mut view = timeline().on_seek(|seek| Action::Custom {
             namespace: "timeline.seek".into(),
-            name: frame.to_string(),
+            name: seek.frame.to_string(),
             payload: Default::default(),
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -7914,9 +7959,9 @@ mod tests {
         let dispatch = |action| actions.borrow_mut().push(action);
         let command_log = Rc::clone(&commands);
         let mut view = timeline()
-            .on_seek(|frame| Action::Custom {
+            .on_seek(|seek| Action::Custom {
                 namespace: "timeline.seek".into(),
-                name: frame.to_string(),
+                name: seek.frame.to_string(),
                 payload: Default::default(),
             })
             .on_edit_command(move |command| {
@@ -8212,9 +8257,9 @@ mod tests {
     fn disabling_timeline_cancels_pending_playhead_drag() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().on_seek(|frame| Action::Custom {
+        let mut view = timeline().on_seek(|seek| Action::Custom {
             namespace: "timeline.seek".into(),
-            name: frame.to_string(),
+            name: seek.frame.to_string(),
             payload: Default::default(),
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -8308,10 +8353,15 @@ mod tests {
     fn focused_keyboard_seek_moves_playhead_and_dispatches() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().on_seek(|frame| Action::Custom {
-            namespace: "timeline.seek".into(),
-            name: frame.to_string(),
-            payload: Default::default(),
+        let seek_events = Rc::new(RefCell::new(Vec::new()));
+        let seek_log = Rc::clone(&seek_events);
+        let mut view = timeline().on_seek(move |seek| {
+            seek_log.borrow_mut().push(seek);
+            Action::Custom {
+                namespace: "timeline.seek".into(),
+                name: seek.frame.to_string(),
+                payload: Default::default(),
+            }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
@@ -8343,6 +8393,10 @@ mod tests {
                 payload: Default::default(),
             }]
         );
+        assert_eq!(
+            seek_events.borrow().first(),
+            Some(&TimelineSeek { frame: 22, source: TimelineSeekSource::Settled })
+        );
 
         view.event(
             &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::none() },
@@ -8361,9 +8415,9 @@ mod tests {
     fn focused_keyboard_seek_ignores_unowned_modified_keys() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().with_playhead(12).on_seek(|frame| Action::Custom {
+        let mut view = timeline().with_playhead(12).on_seek(|seek| Action::Custom {
             namespace: "timeline.seek".into(),
-            name: frame.to_string(),
+            name: seek.frame.to_string(),
             payload: Default::default(),
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));

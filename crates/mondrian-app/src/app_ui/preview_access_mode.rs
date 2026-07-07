@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_media::{PreviewDecodeAccessMode, PreviewFileFingerprint};
 
@@ -398,11 +399,17 @@ pub(crate) enum MediaPreviewAccessIntent {
     DeterministicStill,
 }
 
-pub(crate) fn media_preview_viewer_access_intent(is_playing: bool) -> MediaPreviewAccessIntent {
+pub(crate) fn media_preview_viewer_access_intent(
+    is_playing: bool,
+    seek_source: TimelineSeekSource,
+) -> MediaPreviewAccessIntent {
     if is_playing {
         MediaPreviewAccessIntent::Playback
     } else {
-        MediaPreviewAccessIntent::InteractiveScrub
+        match seek_source {
+            TimelineSeekSource::PointerDrag => MediaPreviewAccessIntent::InteractiveScrub,
+            TimelineSeekSource::Settled => MediaPreviewAccessIntent::DeterministicStill,
+        }
     }
 }
 
@@ -1639,12 +1646,16 @@ mod tests {
     #[test]
     fn media_preview_viewer_access_intent_tracks_playback_state() {
         assert_eq!(
-            media_preview_viewer_access_intent(true),
+            media_preview_viewer_access_intent(true, TimelineSeekSource::Settled),
             MediaPreviewAccessIntent::Playback
         );
         assert_eq!(
-            media_preview_viewer_access_intent(false),
+            media_preview_viewer_access_intent(false, TimelineSeekSource::PointerDrag),
             MediaPreviewAccessIntent::InteractiveScrub
+        );
+        assert_eq!(
+            media_preview_viewer_access_intent(false, TimelineSeekSource::Settled),
+            MediaPreviewAccessIntent::DeterministicStill
         );
     }
 

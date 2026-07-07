@@ -80,11 +80,11 @@ pub use timeline_view::{
     TimelineAssetDrop, TimelineAssetDropAction, TimelineClip, TimelineClipAction, TimelineClipKind,
     TimelineClipMove, TimelineClipMoveAction, TimelineClipRef, TimelineClipTrim,
     TimelineClipTrimAction, TimelineEditCommand, TimelineEditCommandAction, TimelineInOutPoint,
-    TimelineInOutPointAction, TimelineSeekAction, TimelineTool, TimelineToolbarIconSlot,
-    TimelineTrack, TimelineTrackAction, TimelineTrackAddAction, TimelineTrackControl,
-    TimelineTrackControlAction, TimelineTrackControlIconSlot, TimelineTrackKind, TimelineTrackMove,
-    TimelineTrackMoveAction, TimelineTrackRef, TimelineTrimEdge, TimelineView, TimelineViewState,
-    WaveformDisplay,
+    TimelineInOutPointAction, TimelineSeek, TimelineSeekAction, TimelineSeekSource, TimelineTool,
+    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackAction, TimelineTrackAddAction,
+    TimelineTrackControl, TimelineTrackControlAction, TimelineTrackControlIconSlot,
+    TimelineTrackKind, TimelineTrackMove, TimelineTrackMoveAction, TimelineTrackRef,
+    TimelineTrimEdge, TimelineView, TimelineViewState, WaveformDisplay,
 };
 pub use vector_icon::{VectorIcon, VectorIconError};
 pub use viewer_surface::{

@@ -96,8 +96,13 @@ impl AppState {
     }
 
     pub fn seek(&mut self, frame: i64) {
+        self.seek_with_source(frame, TimelineSeekSource::Settled);
+    }
+
+    pub fn seek_with_source(&mut self, frame: i64, source: TimelineSeekSource) {
         // 任何手动跳帧操作都清除「自然到达终点」标志，
         // 这样下一次 play() 不会误跳回 in_point。
+        self.last_timeline_seek_source = source;
         self.playback_reached_end = false;
         self.playback_buffering = false;
         self.playback_frame_accumulator = 0.0;
@@ -489,6 +494,22 @@ mod tests {
         assert_eq!(outcome.status, PlaybackAdvanceStatus::WaitingForFrame);
         assert_eq!(state.current_frame(), 10);
         assert!(!state.playback_reached_end);
+    }
+
+    #[test]
+    fn seek_records_preview_access_source() {
+        let mut state = state_with_sequence(30);
+
+        state.seek_with_source(12, TimelineSeekSource::PointerDrag);
+        assert_eq!(state.current_frame(), 12);
+        assert_eq!(
+            state.last_timeline_seek_source,
+            TimelineSeekSource::PointerDrag
+        );
+
+        state.seek(18);
+        assert_eq!(state.current_frame(), 18);
+        assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
     }
 
     #[test]

@@ -498,6 +498,17 @@ pub struct ViewerSetClipTransformPayload {
 pub struct TimelineSeekPayload {
     /// Target timeline frame.
     pub frame: i64,
+    /// User interaction source for this seek.
+    pub source: TimelineSeekSource,
+}
+
+/// User interaction source for timeline seek actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineSeekSource {
+    /// Continuous playhead/ruler pointer drag.
+    PointerDrag,
+    /// Stable click, keyboard command, programmatic seek, or drag release.
+    Settled,
 }
 
 /// Track control targeted by the timeline header.
@@ -1044,7 +1055,15 @@ pub fn timeline_set_selected_clips_enabled_action(
 
 /// Build an action that seeks the active timeline.
 pub fn timeline_seek_action(frame: i64) -> Action {
-    custom_timeline_action(TIMELINE_SEEK, TimelineSeekPayload { frame: frame.max(0) })
+    timeline_seek_with_source_action(frame, TimelineSeekSource::Settled)
+}
+
+/// Build an action that seeks the active timeline with explicit interaction source.
+pub fn timeline_seek_with_source_action(frame: i64, source: TimelineSeekSource) -> Action {
+    custom_timeline_action(
+        TIMELINE_SEEK,
+        TimelineSeekPayload { frame: frame.max(0), source },
+    )
 }
 
 /// Build an action that changes a timeline track header control.

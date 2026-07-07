@@ -42,9 +42,10 @@ use mondrian_ui_widgets::{
     PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage,
     ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipKind,
     TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
-    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
-    TimelineTrackMove, TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl,
-    ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    TimelineSeek, TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot,
+    TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove,
+    TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl, ViewerFrameContent,
+    ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -66,7 +67,7 @@ use crate::app::ui_actions::{
     inspector_set_effect_property_action, timeline_add_track_action,
     timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
     timeline_move_track_action, timeline_open_nested_sequence_action,
-    timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
+    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
     timeline_select_clip_action, timeline_set_in_out_point_action,
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
@@ -86,7 +87,8 @@ use crate::app::ui_actions::{
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSelectClipPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
     TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
@@ -2926,7 +2928,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 frame: frame.max(0),
             })
         })
-        .on_seek(timeline_seek_action)
+        .on_seek(timeline_seek_action_from_widget)
         .with_waveform_lookup(|asset_id, start_secs, end_secs, pixel_width| {
             AudioWaveformCache::try_with(|cache| {
                 cache.lookup(asset_id, 0, start_secs, end_secs, pixel_width)
@@ -2940,6 +2942,17 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         timeline
     };
     with_timeline_toolbar_icons(timeline)
+}
+
+fn timeline_seek_action_from_widget(seek: TimelineSeek) -> Action {
+    timeline_seek_with_source_action(seek.frame, timeline_seek_source_from_widget(seek.source))
+}
+
+fn timeline_seek_source_from_widget(source: WidgetTimelineSeekSource) -> AppTimelineSeekSource {
+    match source {
+        WidgetTimelineSeekSource::PointerDrag => AppTimelineSeekSource::PointerDrag,
+        WidgetTimelineSeekSource::Settled => AppTimelineSeekSource::Settled,
+    }
 }
 
 fn timeline_in_out_point_payload_kind(point: TimelineInOutPoint) -> TimelineInOutPointPayloadKind {

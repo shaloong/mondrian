@@ -64,10 +64,13 @@ filter by lane, enqueue and priority promotion wake all preview workers, not
 just one; otherwise a playback-only queue could wake an interactive worker and
 leave the playback worker asleep until another request arrives.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
-access modes. Viewer playback lowers to `PlaybackCursor`, non-playing viewer
-seek/scrub lowers to `ScrubCursor`, and deterministic one-off work such as
-thumbnail stills lowers to `RandomAccessStillFrame`. New UI states must extend
-that intent layer instead of passing booleans or strategy flags into
+access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
+dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
+deterministic one-off work such as thumbnail stills lower to
+`RandomAccessStillFrame`. The timeline widget emits explicit seek source
+events, including a settled event on drag release, so preview scheduling does
+not infer stillness from wall-clock timeouts. New UI states must extend that
+intent layer instead of passing booleans or strategy flags into
 `mondrian-media`.
 Playback cursor cancellation is cooperative but non-destructive to the playback
 decode session: a prefetch budget miss should not throw away the warmed

@@ -4325,6 +4325,7 @@ impl AppUiPreviewService {
         self.current_frame_pending.set(true);
         let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
             state.is_playing(),
+            state.last_timeline_seek_source,
         ));
         self.request_media_preview(
             key,
