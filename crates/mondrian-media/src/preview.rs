@@ -320,7 +320,39 @@ pub fn decode_video_frame_at_time_rgba_scaled(
     max_width: Option<u32>,
     max_height: Option<u32>,
 ) -> Result<RgbaFrame> {
-    decode_video_frame_at_time_impl(path, timestamp_secs, max_width, max_height)
+    match decode_video_frame_at_time_outcome(path, timestamp_secs, max_width, max_height, || false)?
+    {
+        PreviewDecodeOutcome::Frame(frame) => Ok(frame),
+        PreviewDecodeOutcome::Canceled => Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "preview decode canceled unexpectedly".to_owned(),
+        }),
+    }
+}
+
+/// Decode a preview frame, allowing the caller to cancel stale interactive work.
+///
+/// Cancellation is cooperative. It is checked before expensive decode phases,
+/// between packets, between received frames, and before software conversion.
+/// External-process decode cannot be interrupted while the child process is
+/// running, but a stale result is discarded before it is returned.
+pub fn decode_video_frame_at_time_rgba_scaled_cancellable(
+    path: &Path,
+    timestamp_secs: f64,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
+    decode_video_frame_at_time_outcome(path, timestamp_secs, max_width, max_height, should_cancel)
+}
+
+/// Result of a cancellable preview decode request.
+#[derive(Debug, Clone)]
+pub enum PreviewDecodeOutcome {
+    /// Decode completed with a CPU RGBA preview frame.
+    Frame(RgbaFrame),
+    /// The caller marked this request obsolete before a frame was returned.
+    Canceled,
 }
 
 thread_local! {
@@ -364,6 +396,25 @@ struct PreviewDecodeSession {
 struct PreviewDecodeForwardResult {
     frame: Option<RgbaFrame>,
     decoded_frame_count: usize,
+    canceled: bool,
+}
+
+impl PreviewDecodeForwardResult {
+    fn frame(frame: RgbaFrame, decoded_frame_count: usize) -> Self {
+        Self {
+            frame: Some(frame),
+            decoded_frame_count,
+            canceled: false,
+        }
+    }
+
+    fn empty(decoded_frame_count: usize) -> Self {
+        Self { frame: None, decoded_frame_count, canceled: false }
+    }
+
+    fn canceled(decoded_frame_count: usize) -> Self {
+        Self { frame: None, decoded_frame_count, canceled: true }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,7 +561,14 @@ impl PreviewDecodeSession {
             && self.backend == backend
     }
 
-    fn decode_at(&mut self, timestamp_secs: f64) -> Result<RgbaFrame> {
+    fn decode_at(
+        &mut self,
+        timestamp_secs: f64,
+        should_cancel: &impl Fn() -> bool,
+    ) -> Result<PreviewDecodeOutcome> {
+        if should_cancel() {
+            return Ok(PreviewDecodeOutcome::Canceled);
+        }
         let target_pts = timestamp_to_stream_pts(timestamp_secs, self.stream_tb);
 
         let cache_lookup_started_at = Instant::now();
@@ -522,13 +580,17 @@ impl PreviewDecodeSession {
             target_pts,
             self.cache_tolerance_pts,
         ) {
-            return Ok(hit
-                .frame
-                .into_cache_hit(cache_lookup_started_at.elapsed())
-                .with_stage_durations(PreviewDecodeStageDurations {
-                    cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
-                    ..PreviewDecodeStageDurations::default()
-                }));
+            if should_cancel() {
+                return Ok(PreviewDecodeOutcome::Canceled);
+            }
+            return Ok(PreviewDecodeOutcome::Frame(
+                hit.frame
+                    .into_cache_hit(cache_lookup_started_at.elapsed())
+                    .with_stage_durations(PreviewDecodeStageDurations {
+                        cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
+                        ..PreviewDecodeStageDurations::default()
+                    }),
+            ));
         }
         let cache_lookup_us = duration_us(cache_lookup_started_at.elapsed());
 
@@ -544,13 +606,22 @@ impl PreviewDecodeSession {
         let seek_performed = !should_continue_forward;
         let mut seek_us = 0;
         if seek_performed {
+            if should_cancel() {
+                return Ok(PreviewDecodeOutcome::Canceled);
+            }
             let seek_started_at = Instant::now();
             self.seek_to_target(target_pts)?;
             seek_us = duration_us(seek_started_at.elapsed());
         }
 
+        if should_cancel() {
+            return Ok(PreviewDecodeOutcome::Canceled);
+        }
         let decode_started_at = Instant::now();
-        let result = self.decode_forward_until(target_pts)?;
+        let result = self.decode_forward_until(target_pts, should_cancel)?;
+        if result.canceled {
+            return Ok(PreviewDecodeOutcome::Canceled);
+        }
         if let Some(frame) = result.frame {
             let conversion_us = frame
                 .diagnostics
@@ -559,15 +630,17 @@ impl PreviewDecodeSession {
                 .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
             let packet_decode_us =
                 duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
-            return Ok(frame
-                .with_stage_durations(PreviewDecodeStageDurations {
-                    cache_lookup_us,
-                    seek_us,
-                    packet_decode_us,
-                    ..PreviewDecodeStageDurations::default()
-                })
-                .with_decode_work(seek_performed, result.decoded_frame_count)
-                .with_threading(self.threading_kind, self.threading_count));
+            return Ok(PreviewDecodeOutcome::Frame(
+                frame
+                    .with_stage_durations(PreviewDecodeStageDurations {
+                        cache_lookup_us,
+                        seek_us,
+                        packet_decode_us,
+                        ..PreviewDecodeStageDurations::default()
+                    })
+                    .with_decode_work(seek_performed, result.decoded_frame_count)
+                    .with_threading(self.threading_kind, self.threading_count),
+            ));
         }
 
         Err(MondrianError::DecodeFailed {
@@ -634,7 +707,11 @@ impl PreviewDecodeSession {
         })
     }
 
-    fn decode_forward_until(&mut self, target_pts: i64) -> Result<PreviewDecodeForwardResult> {
+    fn decode_forward_until(
+        &mut self,
+        target_pts: i64,
+        should_cancel: &impl Fn() -> bool,
+    ) -> Result<PreviewDecodeForwardResult> {
         let mut best_before: Option<(i64, ffmpeg::util::frame::video::Video)> = None;
         let mut best_after: Option<(i64, ffmpeg::util::frame::video::Video)> = None;
         let mut frames_decoded: usize = 0;
@@ -646,6 +723,9 @@ impl PreviewDecodeSession {
         let mut choose_and_convert = |before: Option<&(i64, ffmpeg::util::frame::video::Video)>,
                                       after: Option<&(i64, ffmpeg::util::frame::video::Video)>|
          -> Result<Option<(i64, RgbaFrame)>> {
+            if should_cancel() {
+                return Ok(None);
+            }
             let selected = match (before, after) {
                 (Some((b_pts, b_frame)), Some((a_pts, a_frame))) => {
                     let before_dist = (target_pts - *b_pts).abs();
@@ -670,12 +750,18 @@ impl PreviewDecodeSession {
                 return Ok(None);
             }
 
+            if should_cancel() {
+                return Ok(None);
+            }
             let rgba =
                 convert_decoded_to_rgba(selected_frame, &mut self.scaler, self.path.as_path())?;
             Ok(Some((selected_pts, rgba)))
         };
 
         for (s, packet) in self.input.packets() {
+            if should_cancel() {
+                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+            }
             if s.index() != self.stream_index {
                 continue;
             }
@@ -689,6 +775,9 @@ impl PreviewDecodeSession {
             })?;
 
             while let Some(decoded) = receive_decoded_video_frame(&mut self.decoder)? {
+                if should_cancel() {
+                    return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                }
                 frames_decoded += 1;
                 let frame_pts = decoded.pts.unwrap_or(i64::MIN);
                 if frame_pts != i64::MIN {
@@ -696,6 +785,9 @@ impl PreviewDecodeSession {
                     if frame_pts <= target_pts {
                         best_before = Some((frame_pts, decoded.frame.clone()));
                         if frame_pts >= target_pts.saturating_sub(self.hit_tolerance_pts) {
+                            if should_cancel() {
+                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                            }
                             let rgba = convert_decoded_to_rgba(
                                 &decoded.frame,
                                 &mut self.scaler,
@@ -709,10 +801,7 @@ impl PreviewDecodeSession {
                                 frame_pts,
                                 rgba.clone(),
                             );
-                            return Ok(PreviewDecodeForwardResult {
-                                frame: Some(rgba),
-                                decoded_frame_count: frames_decoded,
-                            });
+                            return Ok(PreviewDecodeForwardResult::frame(rgba, frames_decoded));
                         }
                     } else {
                         best_after = Some((frame_pts, decoded.frame.clone()));
@@ -727,10 +816,7 @@ impl PreviewDecodeSession {
                                 selected_pts,
                                 rgba.clone(),
                             );
-                            return Ok(PreviewDecodeForwardResult {
-                                frame: Some(rgba),
-                                decoded_frame_count: frames_decoded,
-                            });
+                            return Ok(PreviewDecodeForwardResult::frame(rgba, frames_decoded));
                         }
                     }
                 }
@@ -746,12 +832,18 @@ impl PreviewDecodeSession {
         }
 
         if !self.reached_eof {
+            if should_cancel() {
+                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+            }
             self.decoder.send_eof().map_err(|e| MondrianError::DecodeFailed {
                 asset_id: self.path.display().to_string(),
                 reason: e.to_string(),
             })?;
 
             while let Some(decoded) = receive_decoded_video_frame(&mut self.decoder)? {
+                if should_cancel() {
+                    return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                }
                 frames_decoded += 1;
                 let frame_pts = decoded.pts.unwrap_or(i64::MIN);
                 if frame_pts != i64::MIN {
@@ -772,10 +864,7 @@ impl PreviewDecodeSession {
                                 rgba.clone(),
                             );
                             self.reached_eof = true;
-                            return Ok(PreviewDecodeForwardResult {
-                                frame: Some(rgba),
-                                decoded_frame_count: frames_decoded,
-                            });
+                            return Ok(PreviewDecodeForwardResult::frame(rgba, frames_decoded));
                         }
                     }
                 }
@@ -799,23 +888,24 @@ impl PreviewDecodeSession {
                 selected_pts,
                 rgba.clone(),
             );
-            return Ok(PreviewDecodeForwardResult {
-                frame: Some(rgba),
-                decoded_frame_count: frames_decoded,
-            });
+            return Ok(PreviewDecodeForwardResult::frame(rgba, frames_decoded));
         }
 
-        Ok(PreviewDecodeForwardResult { frame: None, decoded_frame_count: frames_decoded })
+        Ok(PreviewDecodeForwardResult::empty(frames_decoded))
     }
 }
 
-fn decode_video_frame_at_time_impl(
+fn decode_video_frame_at_time_outcome(
     path: &Path,
     timestamp_secs: f64,
     max_width: Option<u32>,
     max_height: Option<u32>,
-) -> Result<RgbaFrame> {
+    should_cancel: impl Fn() -> bool,
+) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
+    if should_cancel() {
+        return Ok(PreviewDecodeOutcome::Canceled);
+    }
     ensure_ffmpeg_initialized(path)?;
     let fingerprint = PreviewFileFingerprint::capture(path);
     PREVIEW_DECODE_SESSION.with(|slot| {
@@ -823,6 +913,9 @@ fn decode_video_frame_at_time_impl(
         let backend = preview_decode_backend();
         let mut session_open_us = 0;
 
+        if should_cancel() {
+            return Ok(PreviewDecodeOutcome::Canceled);
+        }
         let current_match = slot
             .as_ref()
             .map(|session| session.matches(path, fingerprint, max_width, max_height, backend))
@@ -844,6 +937,9 @@ fn decode_video_frame_at_time_impl(
         let mut external_process_us = 0;
 
         if preview_external_ffmpeg_cpu_rgba_enabled() {
+            if should_cancel() {
+                return Ok(PreviewDecodeOutcome::Canceled);
+            }
             let external_started_at = Instant::now();
             if let Some(result) = try_decode_with_external_ffmpeg_cpu_rgba(
                 path,
@@ -854,13 +950,17 @@ fn decode_video_frame_at_time_impl(
                 external_process_us = duration_us(external_started_at.elapsed());
                 match result {
                     Ok(frame) => {
-                        return Ok(frame
+                        if should_cancel() {
+                            *slot = None;
+                            return Ok(PreviewDecodeOutcome::Canceled);
+                        }
+                        return Ok(PreviewDecodeOutcome::Frame(frame
                             .with_stage_durations(PreviewDecodeStageDurations {
                                 session_open_us,
                                 external_process_us,
                                 ..PreviewDecodeStageDurations::default()
                             })
-                            .with_elapsed(started_at.elapsed()));
+                            .with_elapsed(started_at.elapsed())));
                     }
                     Err(err) => {
                         preview_trace(format!(
@@ -871,15 +971,22 @@ fn decode_video_frame_at_time_impl(
             }
         }
 
-        session.decode_at(timestamp_secs).map(|frame| {
-            frame
-                .with_stage_durations(PreviewDecodeStageDurations {
-                    session_open_us,
-                    external_process_us,
-                    ..PreviewDecodeStageDurations::default()
-                })
-                .with_elapsed(started_at.elapsed())
-        })
+        let outcome = session.decode_at(timestamp_secs, &should_cancel)?;
+        match outcome {
+            PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
+                frame
+                    .with_stage_durations(PreviewDecodeStageDurations {
+                        session_open_us,
+                        external_process_us,
+                        ..PreviewDecodeStageDurations::default()
+                    })
+                    .with_elapsed(started_at.elapsed()),
+            )),
+            PreviewDecodeOutcome::Canceled => {
+                *slot = None;
+                Ok(PreviewDecodeOutcome::Canceled)
+            }
+        }
     })
 }
 
@@ -1311,9 +1418,10 @@ fn convert_decoded_to_rgba(
 mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        decode_video_frame_at_time_rgba_scaled, preview_cache_get,
-        preview_cache_put_with_fingerprint, PreviewDecodeBackend, PreviewDecodePath,
-        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
+        decode_video_frame_at_time_rgba_scaled, decode_video_frame_at_time_rgba_scaled_cancellable,
+        preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeBackend,
+        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
+        PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1429,6 +1537,20 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&frame.data, &cloned.data));
         assert_eq!(cloned.rgba(), frame.rgba());
         assert_eq!(frame.into_data(), vec![0, 64, 128, 255, 255, 128, 64, 32]);
+    }
+
+    #[test]
+    fn cancellable_preview_decode_returns_canceled_before_opening_missing_file() {
+        let outcome = decode_video_frame_at_time_rgba_scaled_cancellable(
+            &PathBuf::from("E:/definitely-missing/canceled-preview.mov"),
+            0.0,
+            Some(320),
+            Some(180),
+            || true,
+        )
+        .expect("canceled decode should not fail missing media");
+
+        assert!(matches!(outcome, PreviewDecodeOutcome::Canceled));
     }
 
     #[test]

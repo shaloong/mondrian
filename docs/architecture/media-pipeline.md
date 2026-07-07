@@ -116,6 +116,14 @@ the current work; fresh same-generation prefetch remains eligible so playback
 can still warm nearby frames. This worker pool and pruning are scheduling
 guardrails only; they are not a substitute for future cancellable decode
 sessions or hardware-resident decode.
+Preview decode also exposes a cooperative cancellation boundary for interactive
+work: app workers pass a generation-aware predicate to the media decoder, and
+the media loop checks it before opening, seeking, packet decode, frame receive,
+EOF draining, and RGBA conversion. If cancellation fires, the decoder returns a
+typed canceled outcome rather than a media failure, and the thread-local FFmpeg
+session is discarded because its packet/frame state may be mid-stream. This
+keeps stale playback work from being cached or marked as a failed source while
+preserving correctness for the next request.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;

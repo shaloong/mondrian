@@ -17,7 +17,7 @@ use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, BlendMode, ColorEngine, ColorSpace, SequenceId};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
-    PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeStageDurations,
+    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
     PreviewDecodeThreadingKind, VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
@@ -188,6 +188,7 @@ impl AppUiPreviewService {
             decode_worker_count: self.decode_worker_count,
             decode_successes: self.metrics.decode_successes.get(),
             decode_failures: self.metrics.decode_failures.get(),
+            decode_canceled_jobs: self.metrics.decode_canceled_jobs.get(),
             decode_in_process_cpu_rgba_frames: self.metrics.decode_in_process_cpu_rgba_frames.get(),
             decode_external_ffmpeg_cpu_rgba_frames: self
                 .metrics
@@ -330,6 +331,11 @@ impl AppUiPreviewService {
         while let Ok(result) = self.results.borrow().try_recv() {
             let is_current = self.scheduler.complete(&result.key, result.generation);
             self.record_preview_decode_queue_wait(result.priority, result.queue_wait_us);
+            if result.canceled {
+                bump(&self.metrics.decode_canceled_jobs);
+                changed |= is_current;
+                continue;
+            }
             if let Some(diagnostics) = result.decode_diagnostics {
                 self.record_preview_decode(diagnostics);
             }
@@ -1289,6 +1295,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_successes: u64,
     /// Failed background media decodes received by the UI service.
     pub decode_failures: u64,
+    /// Background media decodes canceled because their render generation became obsolete.
+    pub decode_canceled_jobs: u64,
     /// Successful decodes produced by the in-process FFmpeg CPU RGBA path.
     pub decode_in_process_cpu_rgba_frames: u64,
     /// Successful decodes produced by the external ffmpeg CPU RGBA path.
@@ -3741,6 +3749,17 @@ impl MediaPreviewScheduler {
         false
     }
 
+    fn is_decode_current(&self, key: &MediaPreviewKey, generation: u64) -> bool {
+        let state = self.state.lock().expect("media preview scheduler poisoned");
+        state
+            .pending
+            .get(key)
+            .map(|pending| {
+                pending.generation == generation && generation >= state.latest_generation
+            })
+            .unwrap_or(false)
+    }
+
     fn complete(&self, key: &MediaPreviewKey, result_generation: u64) -> bool {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         let pending_generation = state
@@ -3819,6 +3838,7 @@ struct MediaPreviewResult {
     generation: u64,
     priority: MediaPreviewRequestPriority,
     queue_wait_us: u64,
+    canceled: bool,
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
@@ -4468,6 +4488,7 @@ struct AppUiPreviewMetrics {
     media_failure_hits: Cell<u64>,
     decode_successes: Cell<u64>,
     decode_failures: Cell<u64>,
+    decode_canceled_jobs: Cell<u64>,
     decode_in_process_cpu_rgba_frames: Cell<u64>,
     decode_external_ffmpeg_cpu_rgba_frames: Cell<u64>,
     decode_cache_hit_frames: Cell<u64>,
@@ -5125,23 +5146,33 @@ fn media_preview_worker(
         if !scheduler.should_decode(&job.key) {
             continue;
         }
-        let result = decode_media_preview(job, queue_wait_us);
+        let cancel_key = job.key.clone();
+        let cancel_generation = job.generation;
+        let cancel_scheduler = scheduler.clone();
+        let result = decode_media_preview(job, queue_wait_us, || {
+            !cancel_scheduler.is_decode_current(&cancel_key, cancel_generation)
+        });
         if results.send(result).is_err() {
             break;
         }
     }
 }
 
-fn decode_media_preview(job: MediaPreviewJob, queue_wait_us: u64) -> MediaPreviewResult {
+fn decode_media_preview(
+    job: MediaPreviewJob,
+    queue_wait_us: u64,
+    should_cancel: impl Fn() -> bool,
+) -> MediaPreviewResult {
     let signature = media_preview_frame_signature(&job.key);
     let priority = job.priority;
-    match mondrian_media::decode_video_frame_at_time_rgba_scaled(
+    match mondrian_media::decode_video_frame_at_time_rgba_scaled_cancellable(
         job.key.path.as_path(),
         job.source_secs,
         Some(job.key.target_width.max(1)),
         Some(job.key.target_height.max(1)),
+        should_cancel,
     ) {
-        Ok(frame) => {
+        Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
             let width = frame.width;
             let height = frame.height;
@@ -5169,11 +5200,24 @@ fn decode_media_preview(job: MediaPreviewJob, queue_wait_us: u64) -> MediaPrevie
                 generation: job.generation,
                 priority,
                 queue_wait_us,
+                canceled: false,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
             }
         }
+        Ok(PreviewDecodeOutcome::Canceled) => MediaPreviewResult {
+            key: job.key,
+            frame: None,
+            error: None,
+            generation: job.generation,
+            priority,
+            queue_wait_us,
+            canceled: true,
+            decode_diagnostics: None,
+            color_diagnostics: None,
+            color_stage_diagnostics: None,
+        },
         Err(err) => MediaPreviewResult {
             key: job.key,
             frame: None,
@@ -5181,6 +5225,7 @@ fn decode_media_preview(job: MediaPreviewJob, queue_wait_us: u64) -> MediaPrevie
             generation: job.generation,
             priority,
             queue_wait_us,
+            canceled: false,
             decode_diagnostics: None,
             color_diagnostics: None,
             color_stage_diagnostics: None,
@@ -7685,6 +7730,7 @@ mod tests {
                 enqueued_at: Instant::now(),
             },
             123,
+            || false,
         );
 
         assert_eq!(result.key, key);
@@ -7693,8 +7739,47 @@ mod tests {
         assert_eq!(result.generation, 7);
         assert_eq!(result.priority, MediaPreviewRequestPriority::Current);
         assert_eq!(result.queue_wait_us, 123);
+        assert!(!result.canceled);
         assert!(result.color_diagnostics.is_none());
         assert!(result.color_stage_diagnostics.is_none());
+    }
+
+    #[test]
+    fn decode_media_preview_cancellation_is_not_a_media_failure() {
+        let key = MediaPreviewKey {
+            asset_id: AssetId::new(),
+            path: PathBuf::from("E:/definitely-missing/canceled-preview.mov"),
+            fingerprint: None,
+            source_frame: 12,
+            source_micros: source_micros(0.5),
+            target_width: 320,
+            target_height: 180,
+            input_color_space: ColorSpace::Rec709,
+            working_color_space: ColorSpace::Rec709,
+            tone_map: false,
+            engine: ColorEngine::MondrianSmart,
+        };
+
+        let result = decode_media_preview(
+            MediaPreviewJob {
+                key: key.clone(),
+                source_secs: 0.5,
+                generation: 7,
+                priority: MediaPreviewRequestPriority::Prefetch,
+                enqueued_at: Instant::now(),
+            },
+            456,
+            || true,
+        );
+
+        assert_eq!(result.key, key);
+        assert!(result.frame.is_none());
+        assert!(result.error.is_none());
+        assert!(result.canceled);
+        assert_eq!(result.generation, 7);
+        assert_eq!(result.priority, MediaPreviewRequestPriority::Prefetch);
+        assert_eq!(result.queue_wait_us, 456);
+        assert!(result.decode_diagnostics.is_none());
     }
 
     fn test_media_key(source_frame: i64) -> MediaPreviewKey {
