@@ -128,7 +128,9 @@ runtime is only orchestration for queueing, timeout, cancellation watches, and
 join handling. Timeout/abort may release the caller and prevent queued blocking
 work from starting, but an already-running FFmpeg decode remains cooperatively
 canceled through the request predicate; do not depend on Tokio task abort to
-preempt synchronous packet decode.
+preempt synchronous packet decode. The decode concurrency semaphore must use an
+owned permit moved into the blocking task, so timeout/cancel does not release
+capacity while a synchronous decode is still running in the background.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older

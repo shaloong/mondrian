@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::runtime::Runtime;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 /// GPU 硬件加速后端
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -473,11 +473,8 @@ impl DecoderPool {
         };
 
         self.metrics.decode_executions.fetch_add(1, Ordering::Relaxed);
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|_| mondrian_core::MondrianError::Cancelled)?;
+        let permit =
+            acquire_decode_permit_or_cancel(Arc::clone(&self.semaphore), cancelled.clone()).await?;
         if decode_cancelled(cancelled.as_ref()) {
             self.rgba_inflight.remove(&key);
             notify.notify_waiters();
@@ -502,6 +499,7 @@ impl DecoderPool {
         let started = Instant::now();
         let decode_cancel_flag = cancelled.clone();
         let mut decode_task = self.preview_decode_runtime.spawn_blocking(move || {
+            let _permit = permit;
             let request = PreviewDecodeRgbaRequest::new(path.as_path(), secs, access_mode)
                 .with_max_size(Some(target_width.max(1)), Some(target_height.max(1)))
                 .with_fingerprint(fingerprint);
@@ -950,6 +948,23 @@ async fn wait_for_decode_cancel(cancelled: Option<Arc<AtomicBool>>) {
     }
 }
 
+async fn acquire_decode_permit_or_cancel(
+    semaphore: Arc<Semaphore>,
+    cancelled: Option<Arc<AtomicBool>>,
+) -> Result<OwnedSemaphorePermit> {
+    if decode_cancelled(cancelled.as_ref()) {
+        return Err(mondrian_core::MondrianError::Cancelled);
+    }
+    let acquire = semaphore.acquire_owned();
+    let cancel_watch = wait_for_decode_cancel(cancelled);
+    tokio::pin!(acquire);
+    tokio::pin!(cancel_watch);
+    tokio::select! {
+        permit = &mut acquire => permit.map_err(|_| mondrian_core::MondrianError::Cancelled),
+        _ = &mut cancel_watch => Err(mondrian_core::MondrianError::Cancelled),
+    }
+}
+
 async fn wait_for_inflight_or_cancel(
     notify: Arc<Notify>,
     cancelled: Option<Arc<AtomicBool>>,
@@ -1212,5 +1227,45 @@ mod tests {
         let result = runtime.block_on(wait_for_inflight_or_cancel(notify, None));
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn decode_permit_wait_returns_cancelled_when_cancelled_before_available() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let semaphore = Arc::new(Semaphore::new(0));
+        let cancelled = Arc::new(AtomicBool::new(true));
+
+        let result = runtime.block_on(acquire_decode_permit_or_cancel(
+            semaphore,
+            Some(Arc::clone(&cancelled)),
+        ));
+
+        assert!(matches!(
+            result,
+            Err(mondrian_core::MondrianError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn owned_decode_permit_holds_capacity_until_dropped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let semaphore = Arc::new(Semaphore::new(1));
+
+        let permit = runtime
+            .block_on(acquire_decode_permit_or_cancel(
+                Arc::clone(&semaphore),
+                None,
+            ))
+            .expect("permit");
+
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(permit);
+        assert_eq!(semaphore.available_permits(), 1);
     }
 }
