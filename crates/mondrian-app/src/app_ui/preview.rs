@@ -8,6 +8,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -56,6 +57,7 @@ const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
 const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
+const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
@@ -65,6 +67,7 @@ const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 pub struct AppUiPreviewService {
     jobs: MediaPreviewJobQueueSender,
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
+    shutdown: Arc<AtomicBool>,
     media_cache: RefCell<MediaPreviewCache>,
     media_failures: RefCell<MediaPreviewFailureCache>,
     viewer_frame_cache: RefCell<ViewerPreviewFrameCache>,
@@ -87,15 +90,23 @@ impl AppUiPreviewService {
         let (job_tx, job_rx) = media_preview_job_queue(MEDIA_PREVIEW_JOB_QUEUE_CAPACITY);
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let scheduler = MediaPreviewScheduler::default();
+        let shutdown = Arc::new(AtomicBool::new(false));
         let mut decode_worker_count = 0;
         for worker_index in 0..media_preview_worker_count() {
             let worker_jobs = job_rx.clone();
             let worker_results = result_tx.clone();
             let worker_scheduler = scheduler.clone();
+            let worker_shutdown = Arc::clone(&shutdown);
             match std::thread::Builder::new()
                 .name(format!("mondrian-ui-viewer-preview-{worker_index}"))
-                .spawn(move || media_preview_worker(worker_jobs, worker_results, worker_scheduler))
-            {
+                .spawn(move || {
+                    media_preview_worker(
+                        worker_jobs,
+                        worker_results,
+                        worker_scheduler,
+                        worker_shutdown,
+                    )
+                }) {
                 Ok(_) => {
                     decode_worker_count += 1;
                 }
@@ -111,6 +122,7 @@ impl AppUiPreviewService {
         Self {
             jobs: job_tx,
             results: RefCell::new(result_rx),
+            shutdown,
             media_cache: RefCell::new(MediaPreviewCache::new(MEDIA_PREVIEW_CACHE_CAPACITY)),
             media_failures: RefCell::new(MediaPreviewFailureCache::new(
                 MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY,
@@ -327,10 +339,42 @@ impl AppUiPreviewService {
         self.last_color_rejection.borrow().clone()
     }
 
+    /// Cancel outstanding preview decode work without shutting down workers.
+    ///
+    /// Closing a project, switching projects, or quitting should make any
+    /// queued/in-flight frame immediately obsolete so decode workers can
+    /// cooperatively stop instead of continuing to consume CPU for invisible
+    /// media.
+    pub fn cancel_interactive_work(&self) {
+        self.scheduler.cancel_all();
+        self.jobs.clear();
+        self.current_generation.set(self.current_generation.get().saturating_add(1));
+        self.current_frame_pending.set(false);
+        self.last_ready_frame.replace(None);
+        self.external_viewer_frame.replace(None);
+        self.media_cache.borrow_mut().clear();
+        self.media_failures.borrow_mut().clear();
+        self.viewer_frame_cache.borrow_mut().clear();
+    }
+
+    /// Shut down preview workers for application exit.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.cancel_interactive_work();
+        self.jobs.close();
+    }
+
     /// Poll completed background media preview decodes.
     pub fn poll_finished(&self) -> bool {
         let mut changed = false;
-        while let Ok(result) = self.results.borrow().try_recv() {
+        let mut drained = 0usize;
+        while drained < MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL {
+            let result = match self.results.borrow().try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            };
+            drained += 1;
             let is_current = self.scheduler.complete(&result.key, result.generation);
             self.record_preview_decode_queue_wait(result.priority, result.queue_wait_us);
             if result.canceled {
@@ -367,6 +411,9 @@ impl AppUiPreviewService {
                     changed |= is_current;
                 }
             }
+        }
+        if drained == MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL {
+            changed = true;
         }
         changed
     }
@@ -3311,6 +3358,12 @@ impl Default for AppUiPreviewService {
     }
 }
 
+impl Drop for AppUiPreviewService {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MediaPreviewKey {
     asset_id: AssetId,
@@ -3542,6 +3595,11 @@ impl MediaPreviewFailureCache {
         self.entries.len()
     }
 
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
+
     fn touch(&mut self, key: &MediaPreviewKey) {
         self.lru.retain(|candidate| candidate != key);
         self.lru.push_back(key.clone());
@@ -3578,6 +3636,11 @@ impl MediaPreviewCache {
 
     fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
     }
 
     fn touch(&mut self, key: &MediaPreviewKey) {
@@ -3779,6 +3842,14 @@ impl MediaPreviewScheduler {
         }
     }
 
+    fn cancel_all(&self) {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let canceled = state.pending.len() as u64;
+        state.pending.clear();
+        state.latest_generation = state.latest_generation.saturating_add(1);
+        state.metrics.canceled_requests = state.metrics.canceled_requests.saturating_add(canceled);
+    }
+
     fn prune_obsolete(&self) {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         Self::prune_obsolete_locked(&mut state);
@@ -3888,6 +3959,20 @@ fn media_preview_job_queue(
 }
 
 impl MediaPreviewJobQueueSender {
+    fn clear(&self) -> usize {
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        let cleared = state.queue.len();
+        state.queue.clear();
+        cleared
+    }
+
+    fn close(&self) {
+        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
+        state.queue.clear();
+        state.closed = true;
+        self.shared.changed.notify_all();
+    }
+
     fn prune_obsolete_prefetch(&self, generation: u64) -> usize {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         let before = state.queue.len();
@@ -3951,9 +4036,7 @@ impl MediaPreviewJobQueueSender {
 
 impl Drop for MediaPreviewJobQueueSender {
     fn drop(&mut self) {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        state.closed = true;
-        self.shared.changed.notify_all();
+        self.close();
     }
 }
 
@@ -5130,8 +5213,12 @@ fn media_preview_worker(
     jobs: MediaPreviewJobQueueReceiver,
     results: mpsc::Sender<MediaPreviewResult>,
     scheduler: MediaPreviewScheduler,
+    shutdown: Arc<AtomicBool>,
 ) {
     while let Some(job) = jobs.recv() {
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
         let queue_wait_us = app_duration_us(job.enqueued_at.elapsed());
         if !scheduler.should_decode(&job.key) {
             continue;
@@ -5142,6 +5229,9 @@ fn media_preview_worker(
         let cancel_scheduler = scheduler.clone();
         let decode_started_at = Instant::now();
         let result = decode_media_preview(job, queue_wait_us, || {
+            if shutdown.load(Ordering::Acquire) {
+                return true;
+            }
             media_preview_should_cancel_decode(
                 cancel_scheduler.is_decode_current(&cancel_key, cancel_generation),
                 cancel_priority,
@@ -8079,6 +8169,23 @@ mod tests {
     }
 
     #[test]
+    fn media_preview_cache_clear_removes_frames_and_failures() {
+        let mut cache = MediaPreviewCache::new(2);
+        let mut failures = MediaPreviewFailureCache::new(2);
+        let key = test_media_key(1);
+
+        cache.insert(key.clone(), test_media_frame(1));
+        failures.insert(key.clone());
+        cache.clear();
+        failures.clear();
+
+        assert_eq!(cache.len(), 0);
+        assert_eq!(failures.len(), 0);
+        assert!(cache.get(&key).is_none());
+        assert!(!failures.contains(&key));
+    }
+
+    #[test]
     fn media_preview_key_includes_file_length_in_identity() {
         let mut first = test_media_key(1);
         first.path = PathBuf::from("E:/media/replaced.mov");
@@ -8346,6 +8453,29 @@ mod tests {
     }
 
     #[test]
+    fn media_preview_scheduler_cancel_all_obsoletes_in_flight_decode() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(4);
+        let key = test_media_key(1);
+        let generation = scheduler.begin_generation();
+
+        assert_eq!(
+            scheduler.request(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert!(scheduler.is_decode_current(&key, generation));
+
+        scheduler.cancel_all();
+
+        assert!(!scheduler.is_decode_current(&key, generation));
+        assert_eq!(scheduler.pending_len(), 0);
+        assert_eq!(scheduler.diagnostics().canceled_requests, 1);
+    }
+
+    #[test]
     fn media_preview_scheduler_current_request_evicts_prefetch_when_window_is_full() {
         let scheduler = MediaPreviewScheduler::with_max_pending(1);
         let generation = scheduler.begin_generation();
@@ -8562,6 +8692,77 @@ mod tests {
 
         assert!(!sender.promote(&key, MediaPreviewRequestPriority::Current));
         assert!(!sender.promote(&key, MediaPreviewRequestPriority::Prefetch));
+    }
+
+    #[test]
+    fn media_preview_job_queue_clear_and_close_release_workers() {
+        let (sender, receiver) = media_preview_job_queue(2);
+        let first = test_media_key(1);
+        let second = test_media_key(2);
+
+        assert_eq!(
+            sender.enqueue(
+                test_media_job(first, 1.0, MediaPreviewRequestPriority::Prefetch),
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        assert_eq!(
+            sender.enqueue(
+                test_media_job(second, 2.0, MediaPreviewRequestPriority::Prefetch),
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+
+        assert_eq!(sender.clear(), 2);
+        sender.close();
+
+        assert!(receiver.recv().is_none());
+        assert_eq!(
+            sender.enqueue(
+                test_media_job(test_media_key(3), 3.0, MediaPreviewRequestPriority::Current),
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewJobEnqueueStatus::Closed
+        );
+    }
+
+    #[test]
+    fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
+        let service = AppUiPreviewService::new();
+        let key = test_media_key(1);
+        let generation = service.scheduler.begin_generation();
+        assert_eq!(
+            service.scheduler.request(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            service.jobs.enqueue(
+                test_media_job_with_generation(
+                    key.clone(),
+                    1.0,
+                    generation,
+                    MediaPreviewRequestPriority::Current,
+                ),
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        service.media_cache.borrow_mut().insert(key.clone(), test_media_frame(1));
+        service.media_failures.borrow_mut().insert(key.clone());
+
+        service.cancel_interactive_work();
+
+        assert_eq!(service.scheduler.pending_len(), 0);
+        assert!(!service.scheduler.is_decode_current(&key, generation));
+        assert_eq!(service.media_cache.borrow().len(), 0);
+        assert_eq!(service.media_failures.borrow().len(), 0);
+        service.shutdown();
     }
 
     #[test]

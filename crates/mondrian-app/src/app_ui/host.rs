@@ -844,6 +844,7 @@ impl AppUiHost {
     ) {
         match pending {
             PendingCloseAction::CloseProject => {
+                self.preview_service.cancel_interactive_work();
                 if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
                     tracing::warn!("close project failed: {err}");
                 }
@@ -851,6 +852,7 @@ impl AppUiHost {
                 self.mark_dirty();
             }
             PendingCloseAction::QuitApp => {
+                self.preview_service.shutdown();
                 if self.app_state.borrow().has_open_project() {
                     if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
                         tracing::warn!("close project before quit failed: {err}");

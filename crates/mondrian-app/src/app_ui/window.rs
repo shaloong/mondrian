@@ -3820,7 +3820,11 @@ fn drain_actions_and_sync_window_session(
     let commands =
         host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
     rebuild_global_shortcuts(&mut session.router, &host.preferences().shortcut_overrides);
+    let should_sync_window = shell_commands_should_sync_window_session(commands);
     apply_shell_commands(commands, &session.window, elwt);
+    if !should_sync_window {
+        return;
+    }
     sync_window_session_role(host, elwt, instance, adapter, device, session);
     if session.role == AppUiWindowRole::Workspace {
         let next_display_policy = host.resolved_display_management_policy();
@@ -3834,6 +3838,10 @@ fn drain_actions_and_sync_window_session(
             );
         }
     }
+}
+
+fn shell_commands_should_sync_window_session(commands: AppUiShellCommands) -> bool {
+    !commands.quit
 }
 
 fn rebuild_global_shortcuts(
@@ -5824,6 +5832,19 @@ mod tests {
     #[test]
     fn native_close_request_uses_app_shell_quit_action() {
         assert_eq!(native_close_request_action(), app_shell_quit_action());
+    }
+
+    #[test]
+    fn quit_shell_command_skips_window_role_sync() {
+        assert!(!shell_commands_should_sync_window_session(
+            AppUiShellCommands { quit: true, ..AppUiShellCommands::default() }
+        ));
+        assert!(shell_commands_should_sync_window_session(
+            AppUiShellCommands {
+                toggle_fullscreen: true,
+                ..AppUiShellCommands::default()
+            }
+        ));
     }
 
     #[test]

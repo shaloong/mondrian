@@ -196,6 +196,13 @@ generation checks that protect continuous playback from stale decode work.
 Current-frame media requests are scheduled before forward prefetch, and the
 worker queue/pending set are bounded. When playback outruns decode, obsolete or
 excess preview jobs are dropped instead of back-pressuring the UI thread.
+The UI thread must also consume completed background preview results with a
+small per-poll budget. Large bursts of completed decode jobs are spread across
+event-loop turns so pointer/keyboard/window events keep priority over cache and
+diagnostic bookkeeping. Project close cancels queued and in-flight preview work,
+clears preview caches/failure caches, and leaves workers alive for the next
+project. Application quit additionally closes the preview worker queue and must
+not perform a workspace-to-startup native-window role sync on the way out.
 `AppUiPreviewService::diagnostics()` exposes render, cache, queue, decode, and
 scheduler counters so performance tooling can distinguish cache misses,
 backpressure drops, stale completions, decode failures, and GPU preview
