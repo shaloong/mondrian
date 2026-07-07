@@ -70,6 +70,14 @@ cache and are reported as `PlaybackSessionRingHit`; they are not available to
 scrub or still-frame requests. This keeps continuous playback locality inside
 the media access-mode implementation rather than scattering playback caches
 through app UI code.
+Process-global RGBA in-flight coalescing is also access-mode aware. For a given
+RGBA frame key, exactly one request owns the decode work; matching requests wait
+on that owner and re-check the cache after notification. Waiters must never
+replace another owner's notification handle, because doing so can orphan older
+waiters or make later cancellation look like decode failure. Playback prefetch
+requests pass their cancellation flag through in-flight waits, semaphore waits,
+and the FFmpeg decode predicate so obsolete speculative work can yield without
+destroying the warmed playback cursor session.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older

@@ -7,6 +7,7 @@ use crate::preview::{
     decode_access_mode_rgba_scaled_cancellable_with_fingerprint, decode_still_frame_rgba,
     PreviewDecodeAccessMode, PreviewFileFingerprint, RgbaFrame,
 };
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use lru::LruCache;
 use mondrian_core::{types::*, Result};
@@ -342,6 +343,7 @@ impl DecoderPool {
             target_width,
             target_height,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
+            None,
         )
         .await
     }
@@ -366,6 +368,7 @@ impl DecoderPool {
             target_width,
             target_height,
             PreviewDecodeAccessMode::PlaybackCursor,
+            None,
         )
         .await
     }
@@ -389,6 +392,28 @@ impl DecoderPool {
             target_width,
             target_height,
             PreviewDecodeAccessMode::ScrubCursor,
+            None,
+        )
+        .await
+    }
+
+    async fn get_playback_cursor_frame_rgba_cancellable(
+        &self,
+        asset_id: AssetId,
+        path: PathBuf,
+        timecode: TimeCode,
+        target_width: u32,
+        target_height: u32,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Arc<RgbaFrame>> {
+        self.get_rgba_for_access_mode(
+            asset_id,
+            path,
+            timecode,
+            target_width,
+            target_height,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(cancelled),
         )
         .await
     }
@@ -401,8 +426,12 @@ impl DecoderPool {
         target_width: u32,
         target_height: u32,
         access_mode: PreviewDecodeAccessMode,
+        cancelled: Option<Arc<AtomicBool>>,
     ) -> Result<Arc<RgbaFrame>> {
         self.metrics.rgba_requests.fetch_add(1, Ordering::Relaxed);
+        if decode_cancelled(cancelled.as_ref()) {
+            return Err(mondrian_core::MondrianError::Cancelled);
+        }
         let frame_num = timecode.frame.max(0) as u64;
         let secs = timecode.to_secs().max(0.0);
         let source_micros = source_time_micros(secs);
@@ -417,27 +446,27 @@ impl DecoderPool {
             access_mode,
         };
 
-        if let Some(hit) = self.rgba_cache.lock().get(&key).cloned() {
-            self.metrics.rgba_cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(hit);
-        }
-
-        if let Some(waiter) = self.rgba_inflight.get(&key).map(|entry| Arc::clone(entry.value())) {
-            waiter.notified().await;
+        let notify = loop {
+            if decode_cancelled(cancelled.as_ref()) {
+                return Err(mondrian_core::MondrianError::Cancelled);
+            }
             if let Some(hit) = self.rgba_cache.lock().get(&key).cloned() {
                 self.metrics.rgba_cache_hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(hit);
             }
-        }
-
-        let notify = Arc::new(Notify::new());
-        if let Some(existing) = self.rgba_inflight.insert(key.clone(), Arc::clone(&notify)) {
-            existing.notified().await;
-            if let Some(hit) = self.rgba_cache.lock().get(&key).cloned() {
-                self.metrics.rgba_cache_hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(hit);
+            match self.rgba_inflight.entry(key.clone()) {
+                Entry::Occupied(entry) => {
+                    let waiter = Arc::clone(entry.get());
+                    drop(entry);
+                    wait_for_inflight_or_cancel(waiter, cancelled.clone()).await?;
+                }
+                Entry::Vacant(entry) => {
+                    let notify = Arc::new(Notify::new());
+                    entry.insert(Arc::clone(&notify));
+                    break notify;
+                }
             }
-        }
+        };
 
         self.metrics.decode_executions.fetch_add(1, Ordering::Relaxed);
         let _permit = self
@@ -445,6 +474,11 @@ impl DecoderPool {
             .acquire()
             .await
             .map_err(|_| mondrian_core::MondrianError::Cancelled)?;
+        if decode_cancelled(cancelled.as_ref()) {
+            self.rgba_inflight.remove(&key);
+            notify.notify_waiters();
+            return Err(mondrian_core::MondrianError::Cancelled);
+        }
 
         tracing::debug!(
             "[decoder] rgba request start asset={} frame={} target={}x{}",
@@ -462,6 +496,7 @@ impl DecoderPool {
         );
 
         let started = Instant::now();
+        let decode_cancel_flag = cancelled.clone();
         let mut decode_task = self.preview_decode_runtime.spawn(async move {
             decode_access_mode_rgba_scaled_cancellable_with_fingerprint(
                 path.as_path(),
@@ -470,7 +505,12 @@ impl DecoderPool {
                 Some(target_height.max(1)),
                 access_mode,
                 fingerprint,
-                || false,
+                || {
+                    decode_cancel_flag
+                        .as_ref()
+                        .map(|flag| flag.load(Ordering::Relaxed))
+                        .unwrap_or(false)
+                },
             )
             .and_then(|outcome| match outcome {
                 crate::preview::PreviewDecodeOutcome::Frame(frame) => Ok(frame),
@@ -489,7 +529,9 @@ impl DecoderPool {
             })?
         } else {
             let timeout = tokio::time::sleep(tokio::time::Duration::from_millis(decode_timeout_ms));
+            let cancel_watch = wait_for_decode_cancel(cancelled.clone());
             tokio::pin!(timeout);
+            tokio::pin!(cancel_watch);
 
             tokio::select! {
                 joined = &mut decode_task => {
@@ -520,6 +562,10 @@ impl DecoderPool {
                             secs
                         ),
                     })
+                }
+                _ = &mut cancel_watch => {
+                    decode_task.abort();
+                    Err(mondrian_core::MondrianError::Cancelled)
                 }
             }
         };
@@ -747,12 +793,13 @@ impl DecoderPool {
 
                 let tc = TimeCode::new(start_timecode.frame + offset as i64, tb);
                 if let Err(err) = pool
-                    .get_playback_cursor_frame_rgba(
+                    .get_playback_cursor_frame_rgba_cancellable(
                         asset_id,
                         path.clone(),
                         tc,
                         target_width.max(1),
                         target_height.max(1),
+                        Arc::clone(&cancelled),
                     )
                     .await
                 {
@@ -877,6 +924,37 @@ fn decode_timeout_budget_ms() -> u64 {
 
 fn source_time_micros(secs: f64) -> i64 {
     (secs.max(0.0) * 1_000_000.0).round() as i64
+}
+
+fn decode_cancelled(cancelled: Option<&Arc<AtomicBool>>) -> bool {
+    cancelled.map(|flag| flag.load(Ordering::Relaxed)).unwrap_or(false)
+}
+
+async fn wait_for_decode_cancel(cancelled: Option<Arc<AtomicBool>>) {
+    let Some(cancelled) = cancelled else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !cancelled.load(Ordering::Relaxed) {
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+    }
+}
+
+async fn wait_for_inflight_or_cancel(
+    notify: Arc<Notify>,
+    cancelled: Option<Arc<AtomicBool>>,
+) -> Result<()> {
+    if decode_cancelled(cancelled.as_ref()) {
+        return Err(mondrian_core::MondrianError::Cancelled);
+    }
+    let notified = notify.notified();
+    let cancel_watch = wait_for_decode_cancel(cancelled);
+    tokio::pin!(notified);
+    tokio::pin!(cancel_watch);
+    tokio::select! {
+        _ = &mut notified => Ok(()),
+        _ = &mut cancel_watch => Err(mondrian_core::MondrianError::Cancelled),
+    }
 }
 
 fn rgba_to_yuv420p(frame: &RgbaFrame) -> Result<([Vec<u8>; 3], [u32; 3])> {
@@ -1078,5 +1156,51 @@ mod tests {
                 ..base.clone()
             }
         );
+    }
+
+    #[test]
+    fn decoder_cancel_flag_helper_reports_state() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        assert!(!decode_cancelled(None));
+        assert!(!decode_cancelled(Some(&cancelled)));
+
+        cancelled.store(true, Ordering::Relaxed);
+
+        assert!(decode_cancelled(Some(&cancelled)));
+    }
+
+    #[test]
+    fn inflight_wait_returns_cancelled_when_prefetch_is_cancelled() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let notify = Arc::new(Notify::new());
+        let cancelled = Arc::new(AtomicBool::new(true));
+
+        let result = runtime.block_on(wait_for_inflight_or_cancel(
+            notify,
+            Some(Arc::clone(&cancelled)),
+        ));
+
+        assert!(matches!(
+            result,
+            Err(mondrian_core::MondrianError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn inflight_wait_returns_when_decode_notifies() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let notify = Arc::new(Notify::new());
+        notify.notify_one();
+
+        let result = runtime.block_on(wait_for_inflight_or_cancel(notify, None));
+
+        assert!(result.is_ok());
     }
 }
