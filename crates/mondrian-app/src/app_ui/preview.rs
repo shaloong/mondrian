@@ -55,6 +55,7 @@ const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
 const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
+const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
@@ -5137,14 +5138,32 @@ fn media_preview_worker(
         }
         let cancel_key = job.key.clone();
         let cancel_generation = job.generation;
+        let cancel_priority = job.priority;
         let cancel_scheduler = scheduler.clone();
+        let decode_started_at = Instant::now();
         let result = decode_media_preview(job, queue_wait_us, || {
-            !cancel_scheduler.is_decode_current(&cancel_key, cancel_generation)
+            media_preview_should_cancel_decode(
+                cancel_scheduler.is_decode_current(&cancel_key, cancel_generation),
+                cancel_priority,
+                decode_started_at.elapsed(),
+            )
         });
         if results.send(result).is_err() {
             break;
         }
     }
+}
+
+fn media_preview_should_cancel_decode(
+    scheduler_current: bool,
+    priority: MediaPreviewRequestPriority,
+    elapsed: Duration,
+) -> bool {
+    if !scheduler_current {
+        return true;
+    }
+    priority == MediaPreviewRequestPriority::Prefetch
+        && app_duration_us(elapsed) >= MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US
 }
 
 fn decode_media_preview(
@@ -8552,5 +8571,42 @@ mod tests {
         assert_eq!(media_preview_worker_count_for(5), 1);
         assert_eq!(media_preview_worker_count_for(6), 2);
         assert_eq!(media_preview_worker_count_for(32), 2);
+    }
+
+    #[test]
+    fn media_preview_decode_cancellation_keeps_current_frame_unbudgeted() {
+        assert!(!media_preview_should_cancel_decode(
+            true,
+            MediaPreviewRequestPriority::Current,
+            Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
+        ));
+    }
+
+    #[test]
+    fn media_preview_decode_cancellation_budgets_prefetch_work() {
+        assert!(!media_preview_should_cancel_decode(
+            true,
+            MediaPreviewRequestPriority::Prefetch,
+            Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US - 1),
+        ));
+        assert!(media_preview_should_cancel_decode(
+            true,
+            MediaPreviewRequestPriority::Prefetch,
+            Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US),
+        ));
+    }
+
+    #[test]
+    fn media_preview_decode_cancellation_stops_stale_work() {
+        assert!(media_preview_should_cancel_decode(
+            false,
+            MediaPreviewRequestPriority::Current,
+            Duration::ZERO,
+        ));
+        assert!(media_preview_should_cancel_decode(
+            false,
+            MediaPreviewRequestPriority::Prefetch,
+            Duration::ZERO,
+        ));
     }
 }

@@ -124,6 +124,10 @@ typed canceled outcome rather than a media failure, and the thread-local FFmpeg
 session is discarded because its packet/frame state may be mid-stream. This
 keeps stale playback work from being cached or marked as a failed source while
 preserving correctness for the next request.
+Speculative prefetch decode is also bounded by a short app-level wall-clock
+budget. Current-frame decode is not canceled by this budget; the budget only
+prevents long-GOP or 4K/HDR prefetch work from occupying decode workers that
+interactive current-frame requests need.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
