@@ -29,7 +29,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
 use mondrian_media::{
-    PreviewDecodeStageDurations, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
+    PreviewDecodeAccessMode, PreviewDecodeStageDurations, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
@@ -182,10 +183,63 @@ fn preview_media_decode_access_mode_coverage_failures(
     failures
 }
 
+fn preview_decode_access_mode_queue_wait_failures(
+    report: &AppUiPreviewDecodePerformanceReport,
+    access_modes: &[PreviewDecodeAccessMode],
+) -> Vec<&'static str> {
+    let Some(summary) = report.summary.as_ref() else {
+        return vec!["preview_decode_report_missing_summary"];
+    };
+
+    let mut failures = Vec::new();
+    for access_mode in access_modes {
+        let profile =
+            preview_decode_profile_for_access_mode(&summary.access_mode_profiles, *access_mode);
+        if profile.queue_wait_max_us <= summary.slow_frame_budget_us {
+            continue;
+        }
+        failures.push(preview_decode_access_mode_queue_wait_failure_code(
+            *access_mode,
+        ));
+    }
+    failures
+}
+
+fn preview_decode_profile_for_access_mode(
+    profiles: &AppUiPreviewDecodeAccessModeProfiles,
+    access_mode: PreviewDecodeAccessMode,
+) -> AppUiPreviewDecodeAccessModeProfile {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => profiles.playback_cursor,
+        PreviewDecodeAccessMode::ScrubCursor => profiles.scrub_cursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame => profiles.random_access_still,
+    }
+}
+
+fn preview_decode_access_mode_queue_wait_failure_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_queue_wait_over_budget"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => {
+            "preview_decode_scrub_cursor_queue_wait_over_budget"
+        }
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_queue_wait_over_budget"
+        }
+    }
+}
+
 fn preview_playback_decode_failures(
     report: &AppUiPreviewDecodePerformanceReport,
 ) -> Vec<&'static str> {
     let mut failures = preview_decode_hard_failures(report);
+    failures.extend(preview_decode_access_mode_queue_wait_failures(
+        report,
+        &[PreviewDecodeAccessMode::PlaybackCursor],
+    ));
     for root in &report.root_causes {
         match root.code {
             "preview_decode_playback_session_not_reused"
@@ -809,6 +863,20 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
             report_json
         );
     }
+    let queue_wait_failures = preview_decode_access_mode_queue_wait_failures(
+        &report.preview_decode_report,
+        &[
+            PreviewDecodeAccessMode::ScrubCursor,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        ],
+    );
+    if !queue_wait_failures.is_empty() {
+        anyhow::bail!(
+            "preview media interactive decode queue wait failed: {:?}; report: {}",
+            queue_wait_failures,
+            report_json
+        );
+    }
 
     Ok(())
 }
@@ -1360,6 +1428,91 @@ fn preview_media_decode_access_mode_coverage_passes_with_scrub_and_still_samples
     );
 
     assert!(preview_media_decode_access_mode_coverage_failures(&report).is_empty());
+}
+
+#[test]
+fn preview_decode_access_mode_queue_wait_failures_are_scoped_by_mode() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 2,
+        decode_in_process_cpu_rgba_frames: 2,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                queue_wait_total_us: 70_000,
+                queue_wait_max_us: 70_000,
+                queue_wait_last_us: 70_000,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                queue_wait_total_us: 10_000,
+                queue_wait_max_us: 10_000,
+                queue_wait_last_us: 10_000,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-interactive-queue-wait-test",
+        50_000,
+    );
+
+    assert_eq!(
+        preview_decode_access_mode_queue_wait_failures(
+            &report,
+            &[
+                PreviewDecodeAccessMode::ScrubCursor,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ],
+        ),
+        vec!["preview_decode_scrub_cursor_queue_wait_over_budget"]
+    );
+    assert!(preview_decode_access_mode_queue_wait_failures(
+        &report,
+        &[PreviewDecodeAccessMode::PlaybackCursor],
+    )
+    .is_empty());
+}
+
+#[test]
+fn preview_playback_decode_failures_include_playback_queue_wait_regressions() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 1,
+        decode_in_process_cpu_rgba_frames: 1,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                queue_wait_total_us: 85_000,
+                queue_wait_max_us: 85_000,
+                queue_wait_last_us: 85_000,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                queue_wait_total_us: 90_000,
+                queue_wait_max_us: 90_000,
+                queue_wait_last_us: 90_000,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-playback-queue-wait-test",
+        50_000,
+    );
+
+    let failures = preview_playback_decode_failures(&report);
+
+    assert!(failures.contains(&"preview_decode_playback_cursor_queue_wait_over_budget"));
+    assert!(!failures.contains(&"preview_decode_scrub_cursor_queue_wait_over_budget"));
 }
 
 #[test]

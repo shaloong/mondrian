@@ -145,6 +145,9 @@ random access costs.
 The versioned report must emit access-mode-specific latency checks and root
 causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` regressions without reverse-engineering raw counters.
+Perf smokes must gate queue-wait regressions for the access modes they exercise,
+because queue-lane contention can make the viewer feel stuck even when codec
+decode and color/render work are within budget.
 App media preview smokes must generate real samples for both active
 `ScrubCursor` playhead dragging and settled `RandomAccessStillFrame` requests;
 coverage is incomplete if the report merely defines both profiles. A common

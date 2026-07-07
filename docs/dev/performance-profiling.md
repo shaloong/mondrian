@@ -102,7 +102,9 @@ over-budget hard failures make the preview media smoke fail and should be
 diagnosed from `preview_decode_report.root_causes` before changing
 renderer/color code. Access-mode profiles include `queue_wait_max_us` and
 `queue_wait_total_us`; high values there point at worker-lane contention or
-stale prefetch/current admission before codec, color, or render work.
+stale prefetch/current admission before codec, color, or render work. The
+preview media smokes fail when the access modes exercised by that scenario have
+queue waits over the decode slow-frame budget.
 `preview_media_decode_cache_smoke` intentionally exercises both settled
 non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 (`ScrubCursor`). The active scrub window is controlled by
@@ -115,7 +117,9 @@ Continuous playback smoke also fails on playback-locality root causes such as
 `preview_decode_playback_session_not_reused` and
 `preview_decode_playback_without_locality`, even when the wall-clock window
 still passes. Those indicate `PlaybackCursor` is behaving like repeated random
-access instead of a warm mostly-forward decode stream.
+access instead of a warm mostly-forward decode stream. It also fails when
+`PlaybackCursor` queue wait exceeds the decode budget, because playback must
+not sit behind still-frame or scrub work.
 
 Preview media perf artifacts also include `preview_render_report`, which covers
 post-decode viewer work: sequence/media resolution, final-frame cache lookup,
