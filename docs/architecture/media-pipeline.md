@@ -44,6 +44,11 @@ or treating playback as repeated random-access still decode. The generic
 access-mode router is intentionally media-internal so public APIs describe the
 workload rather than exposing a strategy enum as a long-lived compatibility
 surface.
+App preview scheduling preserves playback cursor locality: worker 0 is the
+playback-capable lane and non-playback workers skip `PlaybackCursor` work
+instead of stealing it from the playback session. Scrub/still requests may still
+run on the remaining workers so interactive navigation can make progress while
+playback prefetch is decoding.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and

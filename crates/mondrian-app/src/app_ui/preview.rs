@@ -101,6 +101,7 @@ impl AppUiPreviewService {
                 .name(format!("mondrian-ui-viewer-preview-{worker_index}"))
                 .spawn(move || {
                     media_preview_worker(
+                        worker_index,
                         worker_jobs,
                         worker_results,
                         worker_scheduler,
@@ -4071,15 +4072,15 @@ impl Drop for MediaPreviewJobQueueSender {
 }
 
 impl MediaPreviewJobQueueReceiver {
+    #[cfg(test)]
     fn recv(&self) -> Option<MediaPreviewJob> {
+        self.recv_for_worker(true)
+    }
+
+    fn recv_for_worker(&self, allow_playback_cursor: bool) -> Option<MediaPreviewJob> {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         loop {
-            if let Some(index) = state
-                .queue
-                .iter()
-                .position(|queued| queued.priority == MediaPreviewRequestPriority::Current)
-                .or_else(|| (!state.queue.is_empty()).then_some(0))
-            {
+            if let Some(index) = next_media_preview_job_index(&state.queue, allow_playback_cursor) {
                 return state.queue.remove(index).map(|queued| queued.job);
             }
             if state.closed {
@@ -4091,6 +4092,21 @@ impl MediaPreviewJobQueueReceiver {
             };
         }
     }
+}
+
+fn next_media_preview_job_index(
+    queue: &VecDeque<QueuedMediaPreviewJob>,
+    allow_playback_cursor: bool,
+) -> Option<usize> {
+    let eligible = |queued: &QueuedMediaPreviewJob| {
+        allow_playback_cursor || queued.job.access_mode != PreviewDecodeAccessMode::PlaybackCursor
+    };
+    queue
+        .iter()
+        .position(|queued| {
+            queued.priority == MediaPreviewRequestPriority::Current && eligible(queued)
+        })
+        .or_else(|| queue.iter().position(eligible))
 }
 
 fn lock_media_preview_job_queue_state(
@@ -5260,12 +5276,14 @@ fn source_micros(source_secs: f64) -> i64 {
 }
 
 fn media_preview_worker(
+    worker_index: usize,
     jobs: MediaPreviewJobQueueReceiver,
     results: mpsc::Sender<MediaPreviewResult>,
     scheduler: MediaPreviewScheduler,
     shutdown: Arc<AtomicBool>,
 ) {
-    while let Some(job) = jobs.recv() {
+    let allow_playback_cursor = worker_index == 0;
+    while let Some(job) = jobs.recv_for_worker(allow_playback_cursor) {
         if shutdown.load(Ordering::Acquire) {
             break;
         }
@@ -8762,6 +8780,38 @@ mod tests {
             receiver.recv().expect("second prefetch").key,
             second_prefetch
         );
+    }
+
+    #[test]
+    fn media_preview_job_queue_keeps_playback_cursor_on_playback_worker() {
+        let (sender, receiver) = media_preview_job_queue(2);
+        let playback = test_media_key(1);
+        let still = test_media_key(2);
+        let mut playback_job =
+            test_media_job(playback.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        playback_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        let mut still_job =
+            test_media_job(still.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
+
+        assert_eq!(
+            sender.enqueue(playback_job, MediaPreviewRequestPriority::Current),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        assert_eq!(
+            sender.enqueue(still_job, MediaPreviewRequestPriority::Current),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+
+        let non_playback_job = receiver
+            .recv_for_worker(false)
+            .expect("non-playback worker should skip playback cursor work");
+        assert_eq!(non_playback_job.key, still);
+
+        let playback_job = receiver
+            .recv_for_worker(true)
+            .expect("playback worker should retain playback cursor work");
+        assert_eq!(playback_job.key, playback);
     }
 
     #[test]
