@@ -76,6 +76,10 @@ impl PreviewDecodeAccessMode {
             Self::RandomAccessStillFrame => "RandomAccessStillFrame",
         }
     }
+
+    fn preserves_session_on_cancel(self) -> bool {
+        matches!(self, Self::PlaybackCursor)
+    }
 }
 
 /// FFmpeg decoder threading mode requested for preview software decode.
@@ -1251,7 +1255,9 @@ fn decode_preview_rgba_frame_outcome(
                     .with_elapsed(started_at.elapsed()),
             )),
             PreviewDecodeOutcome::Canceled => {
-                *slot = None;
+                if !access_mode.preserves_session_on_cancel() {
+                    *slot = None;
+                }
                 Ok(PreviewDecodeOutcome::Canceled)
             }
         }
@@ -1755,6 +1761,9 @@ mod tests {
             PreviewDecodeAccessMode::default(),
             PreviewDecodeAccessMode::RandomAccessStillFrame
         );
+        assert!(PreviewDecodeAccessMode::PlaybackCursor.preserves_session_on_cancel());
+        assert!(!PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
+        assert!(!PreviewDecodeAccessMode::RandomAccessStillFrame.preserves_session_on_cancel());
     }
 
     #[test]

@@ -4043,7 +4043,11 @@ impl MediaPreviewJobQueueSender {
         }
 
         state.queue.push_back(QueuedMediaPreviewJob { job, priority });
-        self.shared.changed.notify_one();
+        // Workers have lane-specific eligibility: only worker 0 may take
+        // PlaybackCursor work. Wake all workers so a playback-only queue cannot
+        // be observed only by non-playback workers and remain stuck until the
+        // next enqueue.
+        self.shared.changed.notify_all();
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch }
     }
 
@@ -4059,7 +4063,7 @@ impl MediaPreviewJobQueueSender {
         queued.priority = queued.priority.promote_with(priority);
         let promoted = previous != queued.priority;
         if promoted {
-            self.shared.changed.notify_one();
+            self.shared.changed.notify_all();
         }
         promoted
     }
