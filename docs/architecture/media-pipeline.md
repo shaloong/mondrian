@@ -57,6 +57,10 @@ decode session: a prefetch budget miss should not throw away the warmed
 mostly-forward decoder stream. Scrub and still-frame cancellation remain
 session-destructive because those modes represent latest-wins seeks or exact
 random-access work where stale decoder position is more dangerous than locality.
+The app preview scheduler stores access mode alongside the media-frame key for
+pending/in-flight work. A later scrub/current request for the same media frame
+must supersede an older playback/prefetch request instead of letting the older
+job complete and remove the pending scrub work.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and
