@@ -113,6 +113,21 @@ impl AssetLibrary {
         })?;
 
         let info = MediaInfo::probe(&canonical_path)?;
+        self.upsert_media_file_with_info(&canonical_path, info)
+    }
+
+    /// Insert or update a media asset using metadata already produced by the caller.
+    ///
+    /// This keeps synchronous metadata probing out of callers that already have a
+    /// bounded probe result, such as background import workers or performance
+    /// harnesses that need to isolate decode/access-mode latency from metadata
+    /// analysis latency.
+    pub fn upsert_media_file_with_info(&self, path: &Path, mut info: MediaInfo) -> Result<AssetId> {
+        let canonical_path = path.canonicalize().map_err(|e| MondrianError::MediaOpen {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
+        info.path = canonical_path.clone();
         let kind = detect_asset_kind(&info, &canonical_path)?;
 
         let name = canonical_path
@@ -800,10 +815,55 @@ mod tests {
         timeline_data::{AssetMediaInterpretation, MediaColorInterpretation},
         ColorSpace,
     };
+    use mondrian_media::{
+        info::{PixelFormat, VideoCodec},
+        DetectedColorInterpretation, VideoColorDetectionMethod, VideoColorInterpretationConfidence,
+        VideoColorInterpretationWarning, VideoColorSpaceSource, VideoStreamInfo,
+    };
+    use std::time::Duration;
 
     fn open_test_library() -> Arc<AssetLibrary> {
         let dir = tempfile::tempdir().expect("tempdir");
         AssetLibrary::open(dir.keep()).expect("open library")
+    }
+
+    fn lightweight_video_info(path: &Path) -> MediaInfo {
+        MediaInfo {
+            path: path.to_path_buf(),
+            duration: Duration::from_secs(1),
+            file_size: 1,
+            container: "mp4".to_string(),
+            video_streams: vec![VideoStreamInfo {
+                index: 0,
+                codec: VideoCodec::H264,
+                width: 1920,
+                height: 1080,
+                frame_rate: mondrian_core::types::Rational::FPS_30,
+                pixel_format: PixelFormat::Yuv420p,
+                detected_color_space: None,
+                color_interpretation: DetectedColorInterpretation {
+                    color_space: None,
+                    confidence: VideoColorInterpretationConfidence::None,
+                    source: VideoColorSpaceSource::MissingMetadata,
+                    method: VideoColorDetectionMethod::MissingMetadata,
+                    evidence: Vec::new(),
+                    warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+                    user_overridable: true,
+                },
+                color_space_source: VideoColorSpaceSource::MissingMetadata,
+                color_detection_method: VideoColorDetectionMethod::MissingMetadata,
+                color_metadata: None,
+                color_metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
+                bit_depth: 8,
+                has_alpha: false,
+                avg_bitrate: 0,
+                total_frames: Some(30),
+            }],
+            audio_streams: Vec::new(),
+            has_video: true,
+            has_audio: false,
+        }
     }
 
     #[test]
@@ -811,6 +871,27 @@ mod tests {
         let lib = open_test_library();
         let assets = lib.list_assets().expect("list_assets");
         assert!(assets.is_empty());
+    }
+
+    #[test]
+    fn upsert_media_file_with_info_registers_preprobed_video() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("preprobed.mp4");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+
+        let asset_id = lib
+            .upsert_media_file_with_info(&media_path, lightweight_video_info(&media_path))
+            .expect("upsert preprobed media");
+
+        let record = lib.get_asset(asset_id).expect("get").expect("asset exists");
+        assert_eq!(record.kind, AssetKind::Video);
+        assert_eq!(record.name, "preprobed.mp4");
+        assert_eq!(
+            record.path,
+            media_path.canonicalize().expect("canonical path")
+        );
+        assert_eq!(record.media_info.path, record.path);
     }
 
     #[test]

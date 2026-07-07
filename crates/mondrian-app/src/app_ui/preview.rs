@@ -10,6 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use mondrian_assets::AssetKind;
@@ -74,6 +75,7 @@ const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 pub struct AppUiPreviewService {
     jobs: MediaPreviewJobQueueSender,
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
+    workers: RefCell<Vec<JoinHandle<()>>>,
     shutdown: Arc<AtomicBool>,
     media_cache: RefCell<MediaPreviewCache>,
     media_failures: RefCell<MediaPreviewFailureCache>,
@@ -87,6 +89,7 @@ pub struct AppUiPreviewService {
     last_ready_frame: RefCell<Option<ScopedViewerFrame>>,
     last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
+    last_generation_key: RefCell<Option<ViewerPreviewGenerationKey>>,
     decode_worker_count: usize,
     metrics: AppUiPreviewMetrics,
 }
@@ -99,6 +102,7 @@ impl AppUiPreviewService {
         let scheduler = MediaPreviewScheduler::default();
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut decode_worker_count = 0;
+        let mut workers = Vec::new();
         let worker_count = media_preview_worker_count();
         for worker_index in 0..worker_count {
             let worker_jobs = job_rx.clone();
@@ -117,7 +121,8 @@ impl AppUiPreviewService {
                         worker_shutdown,
                     )
                 }) {
-                Ok(_) => {
+                Ok(handle) => {
+                    workers.push(handle);
                     decode_worker_count += 1;
                 }
                 Err(err) => {
@@ -132,6 +137,7 @@ impl AppUiPreviewService {
         Self {
             jobs: job_tx,
             results: RefCell::new(result_rx),
+            workers: RefCell::new(workers),
             shutdown,
             media_cache: RefCell::new(MediaPreviewCache::new(MEDIA_PREVIEW_CACHE_CAPACITY)),
             media_failures: RefCell::new(MediaPreviewFailureCache::new(
@@ -149,6 +155,7 @@ impl AppUiPreviewService {
             last_ready_frame: RefCell::new(None),
             last_color_rejection: RefCell::new(None),
             display_snapshot: RefCell::new(None),
+            last_generation_key: RefCell::new(None),
             decode_worker_count,
             metrics: AppUiPreviewMetrics::default(),
         }
@@ -378,6 +385,7 @@ impl AppUiPreviewService {
     /// media.
     pub fn cancel_interactive_work(&self) {
         self.scheduler.cancel_all();
+        self.last_generation_key.replace(None);
         self.jobs.clear();
         self.current_generation.set(self.current_generation.get().saturating_add(1));
         self.current_frame_pending.set(false);
@@ -393,6 +401,19 @@ impl AppUiPreviewService {
         self.shutdown.store(true, Ordering::Release);
         self.cancel_interactive_work();
         self.jobs.close();
+        self.join_workers();
+    }
+
+    fn join_workers(&self) {
+        let handles = self.workers.borrow_mut().drain(..).collect::<Vec<_>>();
+        for handle in handles {
+            if handle.thread().id() == std::thread::current().id() {
+                continue;
+            }
+            if handle.join().is_err() {
+                tracing::warn!("app UI viewer preview worker panicked during shutdown");
+            }
+        }
     }
 
     /// Poll completed background media preview decodes.
@@ -460,11 +481,10 @@ impl AppUiPreviewService {
 
     fn render_preview(&self, state: &AppState) -> ViewerPreviewState {
         bump(&self.metrics.render_requests);
-        let generation = self.scheduler.begin_generation();
-        self.current_generation.set(generation);
         self.current_frame_pending.set(false);
         self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
+            self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
             self.last_ready_frame.replace(None);
             bump(&self.metrics.unavailable_frames);
@@ -491,6 +511,14 @@ impl AppUiPreviewService {
             &state.project_settings.color_management,
             display_color_space,
         );
+        self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
+            state,
+            sequence,
+            frame,
+            width,
+            height,
+            display_color_space,
+        ));
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
         let resolved =
@@ -605,11 +633,10 @@ impl AppUiPreviewService {
         state: &AppState,
     ) -> AppUiGpuPreviewFrameState {
         bump(&self.metrics.gpu_preview_candidate_requests);
-        let generation = self.scheduler.begin_generation();
-        self.current_generation.set(generation);
         self.current_frame_pending.set(false);
         self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
+            self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
             self.external_viewer_frame.replace(None);
             bump(&self.metrics.gpu_preview_candidate_unavailable);
@@ -636,6 +663,14 @@ impl AppUiPreviewService {
             &state.project_settings.color_management,
             display_color_space,
         );
+        self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
+            state,
+            sequence,
+            frame,
+            width,
+            height,
+            display_color_space,
+        ));
         let resolved = match self.resolve_sequence_elements(
             state,
             sequence,
@@ -793,8 +828,25 @@ impl AppUiPreviewService {
         self.viewer_frame_cache.borrow_mut().clear();
         self.external_viewer_frame.replace(None);
         self.last_ready_frame.replace(None);
-        self.current_generation.set(self.current_generation.get().saturating_add(1));
+        self.invalidate_preview_generation();
         self.scheduler.prune_obsolete();
+    }
+
+    fn activate_preview_generation(&self, key: ViewerPreviewGenerationKey) -> u64 {
+        let mut last_key = self.last_generation_key.borrow_mut();
+        if last_key.as_ref() == Some(&key) {
+            return self.current_generation.get();
+        }
+        *last_key = Some(key);
+        let generation = self.scheduler.begin_generation();
+        self.current_generation.set(generation);
+        generation
+    }
+
+    fn invalidate_preview_generation(&self) {
+        self.last_generation_key.replace(None);
+        let generation = self.scheduler.begin_generation();
+        self.current_generation.set(generation);
     }
 
     fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
@@ -1341,6 +1393,38 @@ struct ResolvedPreviewPlan {
     elements: Vec<ResolvedPreviewElement>,
     cache_key: Option<ViewerPreviewCacheKey>,
     color_context: ColorContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewerPreviewGenerationKey {
+    sequence_id: SequenceId,
+    frame: i64,
+    width: u32,
+    height: u32,
+    display_color_space: ColorSpace,
+    playing: bool,
+    seek_source: crate::app::ui_actions::TimelineSeekSource,
+}
+
+impl ViewerPreviewGenerationKey {
+    fn from_state(
+        state: &AppState,
+        sequence: &Sequence,
+        frame: i64,
+        width: u32,
+        height: u32,
+        display_color_space: ColorSpace,
+    ) -> Self {
+        Self {
+            sequence_id: sequence.id,
+            frame,
+            width,
+            height,
+            display_color_space,
+            playing: state.is_playing(),
+            seek_source: state.last_timeline_seek_source,
+        }
+    }
 }
 
 /// Aggregated CPU-side viewer render stage timings after media decode.
@@ -5540,6 +5624,7 @@ fn media_preview_worker(
             break;
         }
     }
+    mondrian_media::clear_thread_local_preview_decode_session();
 }
 
 fn media_preview_cancel_reason(
@@ -7455,6 +7540,36 @@ mod tests {
             service.viewer_preview_for_state(&state),
             ViewerPreviewState::Unavailable
         ));
+    }
+
+    #[test]
+    fn repeated_same_viewer_request_does_not_obsolete_in_flight_decode() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("media");
+        let tb = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(Clip::new(
+                AssetId::new(),
+                TimeCode::new(0, tb),
+                TimeCode::new(24, tb),
+            ))
+            .expect("media clip should be insertable");
+        state.sequence = Some(sequence);
+        state.seek(3);
+
+        let service = AppUiPreviewService::new();
+        let _ = service.viewer_preview_for_state(&state);
+        let first_generation = service.diagnostics().scheduler.latest_generation;
+        let _ = service.viewer_preview_for_state(&state);
+        let second_generation = service.diagnostics().scheduler.latest_generation;
+
+        assert_eq!(first_generation, second_generation);
+
+        state.seek(4);
+        let _ = service.viewer_preview_for_state(&state);
+        let third_generation = service.diagnostics().scheduler.latest_generation;
+
+        assert!(third_generation > second_generation);
     }
 
     #[test]

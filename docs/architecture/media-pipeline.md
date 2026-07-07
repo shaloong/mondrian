@@ -13,6 +13,13 @@
 
 The probe runs off the UI thread.
 
+Asset registration is separate from metadata probing. `AssetLibrary` can import
+a path by calling `MediaInfo::probe`, but callers that already own a bounded
+probe result may register the media with that `MediaInfo` directly. This keeps
+UI and performance harnesses from blocking on synchronous metadata analysis
+when they need to isolate decode/access-mode latency, while preserving one
+canonical asset-record write path.
+
 ## Decode and Cache
 
 Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state.
@@ -63,6 +70,14 @@ worker, the lane is `Any` so all modes still make progress. Because workers
 filter by lane, enqueue and priority promotion wake all preview workers, not
 just one; otherwise a playback-only queue could wake an interactive worker and
 leave the playback worker asleep until another request arrives.
+Forward prefetch is a playback-only behavior. Settled still-frame preview and
+active scrubbing must not enqueue `PlaybackCursor` prefetch work, because that
+turns random access or latest-wins interaction into hidden background playback
+decode and can keep project shutdown waiting on invisible media.
+The app preview service owns worker thread lifetimes. Workers are joined during
+service shutdown after the job queue is closed, and each worker explicitly drops
+its thread-local media decode sessions before exit. Thread-local FFmpeg decoder
+state must not be left to implicit TLS teardown at project/app close.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus

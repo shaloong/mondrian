@@ -122,6 +122,15 @@ gates against a caller-supplied real media file via
 `MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH`. Use it for 4K HEVC/HDR, camera originals,
 and other slow-path samples; tune only its `MONDRIAN_PREVIEW_EXTERNAL_MEDIA_*`
 thresholds so the generated fixture smoke remains a stable fast regression gate.
+The external access-mode smoke registers the file with lightweight caller-owned
+`MediaInfo` instead of running synchronous import metadata probing; this keeps
+the benchmark focused on decode scheduling, preview readiness, color/render
+handoff, and access-mode diagnostics. Metadata probe/import latency needs its
+own bounded smoke and must not be hidden inside this access-mode gate.
+`MONDRIAN_PREVIEW_EXTERNAL_MEDIA_TOTAL_TIMEOUT_MS` bounds the preview/access-mode
+portion of the external probe once lightweight registration has completed, so
+a pathological decode or scheduler path fails with preview diagnostics instead
+of leaving the test process running for many minutes.
 Continuous playback smoke also fails on playback-locality root causes such as
 `preview_decode_playback_session_not_reused` and
 `preview_decode_playback_without_locality`, even when the wall-clock window

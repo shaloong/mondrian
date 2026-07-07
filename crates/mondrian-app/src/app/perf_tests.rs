@@ -28,9 +28,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
+use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{
-    PreviewDecodeAccessMode, PreviewDecodeStageDurations, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueAggregate,
+    DetectedColorInterpretation, MediaInfo, PreviewDecodeAccessMode, PreviewDecodeStageDurations,
+    VideoColorDetectionMethod, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
+    VideoColorInterpretationConfidence, VideoColorInterpretationWarning, VideoColorSpaceSource,
+    VideoStreamInfo,
 };
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
@@ -739,6 +742,7 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
         sequential_threshold_ms,
         scrub_threshold_ms,
         ready_timeout,
+        None,
     );
 
     let _ = fs::remove_dir_all(&root_dir);
@@ -765,9 +769,49 @@ fn run_preview_media_access_mode_probe(
     sequential_threshold_ms: u128,
     scrub_threshold_ms: u128,
     ready_timeout: Duration,
+    overall_deadline: Option<Instant>,
 ) -> anyhow::Result<PreviewMediaPerfReport> {
-    let mut state = build_preview_media_perf_state(root_dir, video_path, frame_count)?;
+    run_preview_media_access_mode_probe_with_media_info(
+        root_dir,
+        video_path,
+        None,
+        scenario,
+        frame_count,
+        cache_iterations,
+        first_frame_threshold_ms,
+        cache_threshold_ms,
+        gpu_candidate_threshold_ms,
+        sequential_threshold_ms,
+        scrub_threshold_ms,
+        ready_timeout,
+        overall_deadline,
+    )
+}
+
+fn run_preview_media_access_mode_probe_with_media_info(
+    root_dir: &Path,
+    video_path: &Path,
+    media_info: Option<MediaInfo>,
+    scenario: &'static str,
+    frame_count: usize,
+    cache_iterations: usize,
+    first_frame_threshold_ms: u128,
+    cache_threshold_ms: u128,
+    gpu_candidate_threshold_ms: u128,
+    sequential_threshold_ms: u128,
+    scrub_threshold_ms: u128,
+    ready_timeout: Duration,
+    overall_deadline: Option<Instant>,
+) -> anyhow::Result<PreviewMediaPerfReport> {
+    ensure_preview_media_access_mode_deadline(overall_deadline, scenario, None)?;
+    let mut state = build_preview_media_perf_state_with_media_info(
+        root_dir,
+        video_path,
+        media_info,
+        frame_count,
+    )?;
     let preview_service = AppUiPreviewService::new();
+    ensure_preview_media_access_mode_deadline(overall_deadline, scenario, Some(&preview_service))?;
 
     let first_frame_case = run_case(
         "preview_media.first_frame_ready",
@@ -775,7 +819,13 @@ fn run_preview_media_access_mode_probe(
         first_frame_threshold_ms,
         || {
             state.seek(0);
-            wait_for_preview_ready(&preview_service, &state, ready_timeout)
+            wait_for_preview_ready_until(
+                &preview_service,
+                &state,
+                ready_timeout,
+                overall_deadline,
+                scenario,
+            )
         },
     )?;
 
@@ -798,7 +848,13 @@ fn run_preview_media_access_mode_probe(
         || {
             for frame in 0..frame_count {
                 state.seek_with_source(frame as i64, TimelineSeekSource::PointerDrag);
-                wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+                wait_for_preview_ready_until(
+                    &preview_service,
+                    &state,
+                    ready_timeout,
+                    overall_deadline,
+                    scenario,
+                )?;
             }
             state.seek(frame_count.saturating_sub(1) as i64);
             Ok(())
@@ -812,7 +868,13 @@ fn run_preview_media_access_mode_probe(
         || {
             for frame in 0..frame_count {
                 state.seek(frame as i64);
-                wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+                wait_for_preview_ready_until(
+                    &preview_service,
+                    &state,
+                    ready_timeout,
+                    overall_deadline,
+                    scenario,
+                )?;
             }
             Ok(())
         },
@@ -861,6 +923,25 @@ fn run_preview_media_access_mode_probe(
             gpu_candidate_case,
         ],
     })
+}
+
+fn ensure_preview_media_access_mode_deadline(
+    overall_deadline: Option<Instant>,
+    scenario: &str,
+    preview_service: Option<&AppUiPreviewService>,
+) -> anyhow::Result<()> {
+    if overall_deadline.is_some_and(|deadline| Instant::now() > deadline) {
+        if let Some(preview_service) = preview_service {
+            anyhow::bail!(
+                "preview access-mode probe exceeded total timeout in scenario {scenario}; diagnostics: {:?}",
+                preview_service.diagnostics()
+            );
+        }
+        anyhow::bail!(
+            "preview access-mode probe exceeded total timeout in scenario {scenario} before preview diagnostics were available"
+        );
+    }
+    Ok(())
 }
 
 fn validate_preview_media_access_mode_report(
@@ -947,14 +1028,22 @@ fn preview_media_external_access_mode_smoke() -> anyhow::Result<()> {
         "MONDRIAN_PREVIEW_EXTERNAL_MEDIA_READY_TIMEOUT_MS",
         30_000,
     ) as u64);
+    let overall_timeout = Duration::from_millis(env_u128(
+        "MONDRIAN_PREVIEW_EXTERNAL_MEDIA_TOTAL_TIMEOUT_MS",
+        120_000,
+    ) as u64);
 
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_preview_external_media_{uniq}"));
     fs::create_dir_all(&root_dir)?;
 
-    let result = run_preview_media_access_mode_probe(
+    let overall_deadline = Instant::now() + overall_timeout;
+    let media_info = preview_external_access_mode_media_info(&video_path, frame_count)?;
+
+    let result = run_preview_media_access_mode_probe_with_media_info(
         &root_dir,
         &video_path,
+        Some(media_info),
         "preview_media_external_access_mode",
         frame_count,
         cache_iterations,
@@ -964,8 +1053,8 @@ fn preview_media_external_access_mode_smoke() -> anyhow::Result<()> {
         sequential_threshold_ms,
         scrub_threshold_ms,
         ready_timeout,
+        Some(overall_deadline),
     );
-
     let _ = fs::remove_dir_all(&root_dir);
 
     let report = result?;
@@ -1254,8 +1343,20 @@ fn build_preview_media_perf_state(
     video_path: &Path,
     frame_count: usize,
 ) -> anyhow::Result<AppState> {
+    build_preview_media_perf_state_with_media_info(root_dir, video_path, None, frame_count)
+}
+
+fn build_preview_media_perf_state_with_media_info(
+    root_dir: &Path,
+    video_path: &Path,
+    media_info: Option<MediaInfo>,
+    frame_count: usize,
+) -> anyhow::Result<AppState> {
     let library = AssetLibrary::open(root_dir.join("library"))?;
-    let asset_id = library.import_media_file(video_path)?;
+    let asset_id = match media_info {
+        Some(info) => library.upsert_media_file_with_info(video_path, info)?,
+        None => library.import_media_file(video_path)?,
+    };
 
     let mut sequence = Sequence::new("Preview media perf");
     sequence.settings.frame_rate = Rational::FPS_30;
@@ -1273,6 +1374,107 @@ fn build_preview_media_perf_state(
     state.sequences = vec![sequence.clone()];
     state.sequence = Some(sequence);
     Ok(state)
+}
+
+fn preview_external_access_mode_media_info(
+    video_path: &Path,
+    frame_count: usize,
+) -> anyhow::Result<MediaInfo> {
+    let canonical_path = video_path.canonicalize().with_context(|| {
+        format!(
+            "canonicalize external preview media path {}",
+            video_path.display()
+        )
+    })?;
+    let file_size = std::fs::metadata(&canonical_path).map(|metadata| metadata.len()).unwrap_or(0);
+    let container = canonical_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "external".to_string());
+    let frame_count = frame_count.max(1);
+    let bit_depth = external_preview_media_bit_depth(video_path);
+    let pixel_format = if bit_depth > 8 {
+        PixelFormat::Yuv420p10le
+    } else {
+        PixelFormat::Yuv420p
+    };
+
+    Ok(MediaInfo {
+        path: canonical_path,
+        duration: Duration::from_secs_f64(frame_count as f64 / 30.0),
+        file_size,
+        container,
+        video_streams: vec![VideoStreamInfo {
+            index: 0,
+            codec: external_preview_media_codec(video_path),
+            width: 0,
+            height: 0,
+            frame_rate: Rational::FPS_30,
+            pixel_format,
+            detected_color_space: None,
+            color_interpretation: DetectedColorInterpretation {
+                color_space: None,
+                confidence: VideoColorInterpretationConfidence::None,
+                source: VideoColorSpaceSource::MissingMetadata,
+                method: VideoColorDetectionMethod::MissingMetadata,
+                evidence: Vec::new(),
+                warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+                user_overridable: true,
+            },
+            color_space_source: VideoColorSpaceSource::MissingMetadata,
+            color_detection_method: VideoColorDetectionMethod::MissingMetadata,
+            color_metadata: None,
+            color_metadata_hints: Vec::new(),
+            hdr_metadata: Vec::new(),
+            bit_depth,
+            has_alpha: false,
+            avg_bitrate: 0,
+            total_frames: Some(frame_count as u64),
+        }],
+        audio_streams: Vec::new(),
+        has_video: true,
+        has_audio: false,
+    })
+}
+
+fn external_preview_media_codec(video_path: &Path) -> VideoCodec {
+    let name = video_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let extension = video_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if name.contains("hevc") || name.contains("h265") {
+        return VideoCodec::H265;
+    }
+    if name.contains("h264") || name.contains("avc") {
+        return VideoCodec::H264;
+    }
+    match extension.as_str() {
+        "hevc" | "h265" => VideoCodec::H265,
+        "h264" | "avc" => VideoCodec::H264,
+        "av1" => VideoCodec::Av1,
+        "vp9" => VideoCodec::Vp9,
+        _ => VideoCodec::Other(extension),
+    }
+}
+
+fn external_preview_media_bit_depth(video_path: &Path) -> u8 {
+    let name = video_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if name.contains("main10") || name.contains("10bit") || name.contains("p010") {
+        10
+    } else {
+        8
+    }
 }
 
 fn summarize_active_sequence_media_color_issues(
@@ -1311,6 +1513,16 @@ fn wait_for_preview_ready(
     state: &AppState,
     timeout: Duration,
 ) -> anyhow::Result<()> {
+    wait_for_preview_ready_until(preview_service, state, timeout, None, "preview")
+}
+
+fn wait_for_preview_ready_until(
+    preview_service: &AppUiPreviewService,
+    state: &AppState,
+    timeout: Duration,
+    overall_deadline: Option<Instant>,
+    scenario: &str,
+) -> anyhow::Result<()> {
     let started_at = Instant::now();
     loop {
         match preview_service.viewer_preview_for_state(state) {
@@ -1326,6 +1538,12 @@ fn wait_for_preview_ready(
             anyhow::bail!(
                 "preview frame did not become ready within {} ms; diagnostics: {:?}",
                 timeout.as_millis(),
+                preview_service.diagnostics()
+            );
+        }
+        if overall_deadline.is_some_and(|deadline| Instant::now() > deadline) {
+            anyhow::bail!(
+                "preview access-mode probe exceeded total timeout in scenario {scenario}; diagnostics: {:?}",
                 preview_service.diagnostics()
             );
         }
