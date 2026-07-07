@@ -61,6 +61,10 @@ The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older
 job complete and remove the pending scrub work.
+Queued current-frame work is latest-wins for playback and scrubbing. Before a
+new current frame is enqueued, obsolete queued jobs from older generations are
+removed regardless of priority so old current jobs cannot fill the bounded queue
+and cause the visible current frame to be dropped.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and

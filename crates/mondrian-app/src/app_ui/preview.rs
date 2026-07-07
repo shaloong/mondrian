@@ -240,10 +240,7 @@ impl AppUiPreviewService {
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
-            queue_pruned_obsolete_prefetch_jobs: self
-                .metrics
-                .queue_pruned_obsolete_prefetch_jobs
-                .get(),
+            queue_pruned_obsolete_jobs: self.metrics.queue_pruned_obsolete_jobs.get(),
             queue_promoted_current_jobs: self.metrics.queue_promoted_current_jobs.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
             scheduler,
@@ -1428,8 +1425,8 @@ pub struct AppUiPreviewDiagnostics {
     pub queue_full_drops: u64,
     /// Queued prefetch jobs evicted so current-frame decode work can run.
     pub queue_evicted_prefetch_jobs: u64,
-    /// Obsolete queued prefetch jobs removed before scheduling current-frame decode.
-    pub queue_pruned_obsolete_prefetch_jobs: u64,
+    /// Obsolete queued jobs removed before scheduling current-frame decode.
+    pub queue_pruned_obsolete_jobs: u64,
     /// Queued prefetch jobs promoted after the same key became current-frame work.
     pub queue_promoted_current_jobs: u64,
     /// Media preview jobs dropped because the worker channel was disconnected.
@@ -4056,13 +4053,10 @@ impl MediaPreviewJobQueueSender {
         self.shared.changed.notify_all();
     }
 
-    fn prune_obsolete_prefetch(&self, generation: u64) -> usize {
+    fn prune_obsolete_jobs(&self, generation: u64) -> usize {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         let before = state.queue.len();
-        state.queue.retain(|queued| {
-            queued.priority != MediaPreviewRequestPriority::Prefetch
-                || queued.job.generation >= generation
-        });
+        state.queue.retain(|queued| queued.job.generation >= generation);
         before.saturating_sub(state.queue.len())
     }
 
@@ -4530,8 +4524,8 @@ impl AppUiPreviewService {
             enqueued_at: Instant::now(),
         };
         if priority == MediaPreviewRequestPriority::Current {
-            let pruned = self.jobs.prune_obsolete_prefetch(generation) as u64;
-            add_cell(&self.metrics.queue_pruned_obsolete_prefetch_jobs, pruned);
+            let pruned = self.jobs.prune_obsolete_jobs(generation) as u64;
+            add_cell(&self.metrics.queue_pruned_obsolete_jobs, pruned);
         }
         match self.jobs.enqueue(job, priority) {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch } => {
@@ -4734,7 +4728,7 @@ struct AppUiPreviewMetrics {
     enqueued_jobs: Cell<u64>,
     queue_full_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
-    queue_pruned_obsolete_prefetch_jobs: Cell<u64>,
+    queue_pruned_obsolete_jobs: Cell<u64>,
     queue_promoted_current_jobs: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
     color_input_transform_calls: Cell<u64>,
@@ -9086,17 +9080,30 @@ mod tests {
     }
 
     #[test]
-    fn media_preview_job_queue_prunes_obsolete_prefetch_before_current_work() {
-        let (sender, receiver) = media_preview_job_queue(4);
-        let old_prefetch = test_media_key(1);
-        let fresh_prefetch = test_media_key(2);
-        let current = test_media_key(3);
+    fn media_preview_job_queue_prunes_obsolete_jobs_before_current_work() {
+        let (sender, receiver) = media_preview_job_queue(3);
+        let old_current = test_media_key(1);
+        let old_prefetch = test_media_key(2);
+        let fresh_prefetch = test_media_key(3);
+        let current = test_media_key(4);
 
         assert_eq!(
             sender.enqueue(
                 test_media_job_with_generation(
-                    old_prefetch.clone(),
+                    old_current.clone(),
                     1.0,
+                    1,
+                    MediaPreviewRequestPriority::Current,
+                ),
+                MediaPreviewRequestPriority::Current,
+            ),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+        );
+        assert_eq!(
+            sender.enqueue(
+                test_media_job_with_generation(
+                    old_prefetch.clone(),
+                    2.0,
                     1,
                     MediaPreviewRequestPriority::Prefetch,
                 ),
@@ -9108,7 +9115,7 @@ mod tests {
             sender.enqueue(
                 test_media_job_with_generation(
                     fresh_prefetch.clone(),
-                    2.0,
+                    3.0,
                     3,
                     MediaPreviewRequestPriority::Prefetch,
                 ),
@@ -9117,12 +9124,12 @@ mod tests {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
         );
 
-        assert_eq!(sender.prune_obsolete_prefetch(3), 1);
+        assert_eq!(sender.prune_obsolete_jobs(3), 2);
         assert_eq!(
             sender.enqueue(
                 test_media_job_with_generation(
                     current.clone(),
-                    3.0,
+                    4.0,
                     3,
                     MediaPreviewRequestPriority::Current,
                 ),
