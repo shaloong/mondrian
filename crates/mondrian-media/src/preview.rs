@@ -20,7 +20,6 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const DECODE_BUDGET: usize = 1800;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
-const PREVIEW_CACHE_TOLERANCE_SECS: f64 = 0.050;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -554,7 +553,6 @@ struct PreviewDecodeSession {
     stream_tb: ffmpeg::Rational,
     frame_duration_pts: i64,
     hit_tolerance_pts: i64,
-    cache_tolerance_pts: i64,
     target_width: u32,
     target_height: u32,
     threading_kind: PreviewDecodeThreadingKind,
@@ -702,10 +700,7 @@ impl PreviewDecodeSession {
 
         let frame_duration_pts = estimate_frame_duration_pts(stream_tb, stream_rate).max(1);
         let max_hit_tolerance_pts = seconds_to_stream_pts(PREVIEW_HIT_TOLERANCE_SECS, stream_tb);
-        let max_cache_tolerance_pts =
-            seconds_to_stream_pts(PREVIEW_CACHE_TOLERANCE_SECS, stream_tb);
         let hit_tolerance_pts = (frame_duration_pts / 2).max(1).min(max_hit_tolerance_pts.max(1));
-        let cache_tolerance_pts = frame_duration_pts.max(1).min(max_cache_tolerance_pts.max(1));
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -720,7 +715,6 @@ impl PreviewDecodeSession {
             stream_tb,
             frame_duration_pts,
             hit_tolerance_pts,
-            cache_tolerance_pts,
             target_width,
             target_height,
             threading_kind,
@@ -763,11 +757,7 @@ impl PreviewDecodeSession {
             self.target_width,
             self.target_height,
             target_pts,
-            preview_cache_tolerance_pts_for_access_mode(
-                access_mode,
-                self.hit_tolerance_pts,
-                self.cache_tolerance_pts,
-            ),
+            self.hit_tolerance_pts,
         ) {
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled);
@@ -1236,19 +1226,6 @@ fn preview_trace(message: String) {
     }
 }
 
-fn preview_cache_tolerance_pts_for_access_mode(
-    access_mode: PreviewDecodeAccessMode,
-    hit_tolerance_pts: i64,
-    cache_tolerance_pts: i64,
-) -> i64 {
-    match access_mode {
-        PreviewDecodeAccessMode::PlaybackCursor | PreviewDecodeAccessMode::ScrubCursor => {
-            cache_tolerance_pts
-        }
-        PreviewDecodeAccessMode::RandomAccessStillFrame => hit_tolerance_pts,
-    }
-}
-
 fn preview_fast_any_seek_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -1627,9 +1604,9 @@ mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
         decode_video_frame_at_time_rgba_scaled, decode_video_frame_at_time_rgba_scaled_cancellable,
-        duration_us, preview_cache_get, preview_cache_put_with_fingerprint,
-        preview_cache_tolerance_pts_for_access_mode, PreviewDecodeAccessMode, PreviewDecodeBackend,
-        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
+        decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint, duration_us,
+        preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeAccessMode,
+        PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
         PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
     };
     use serde::Serialize;
@@ -1694,34 +1671,6 @@ mod tests {
         assert_eq!(
             PreviewDecodeAccessMode::default(),
             PreviewDecodeAccessMode::RandomAccessStillFrame
-        );
-    }
-
-    #[test]
-    fn preview_decode_access_modes_select_cache_tolerance() {
-        assert_eq!(
-            preview_cache_tolerance_pts_for_access_mode(
-                PreviewDecodeAccessMode::PlaybackCursor,
-                5,
-                10,
-            ),
-            10
-        );
-        assert_eq!(
-            preview_cache_tolerance_pts_for_access_mode(
-                PreviewDecodeAccessMode::ScrubCursor,
-                5,
-                10
-            ),
-            10
-        );
-        assert_eq!(
-            preview_cache_tolerance_pts_for_access_mode(
-                PreviewDecodeAccessMode::RandomAccessStillFrame,
-                5,
-                10,
-            ),
-            5
         );
     }
 
@@ -1864,6 +1813,29 @@ mod tests {
     }
 
     #[test]
+    fn preview_frame_cache_respects_strict_pts_tolerance() {
+        clear_global_preview_frame_cache();
+        let path = PathBuf::from("strict-cache-window.mp4");
+        let fingerprint = PreviewFileFingerprint {
+            len: Some(3),
+            modified_secs: Some(1),
+            modified_nanos: Some(0),
+        };
+        let frame = RgbaFrame::new(
+            2,
+            1,
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
+
+        preview_cache_put_with_fingerprint(&path, fingerprint, 2, 1, 100, frame);
+
+        assert!(preview_cache_get(&path, fingerprint, 2, 1, 105, 5).is_some());
+        assert!(preview_cache_get(&path, fingerprint, 2, 1, 106, 5).is_none());
+        clear_global_preview_frame_cache();
+    }
+
+    #[test]
     #[ignore = "manual decode performance diagnostic; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
     fn preview_decode_fixture_perf_smoke() {
         let Some(path) = std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE").map(PathBuf::from)
@@ -1945,6 +1917,8 @@ mod tests {
             .and_then(|value| value.parse::<u32>().ok());
 
         clear_thread_local_preview_decode_session();
+        let access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        let fingerprint = PreviewFileFingerprint::capture(&path);
         let mut frames = Vec::with_capacity(frame_count);
         let mut total_us = 0u64;
         let mut max_us = 0u64;
@@ -1957,13 +1931,23 @@ mod tests {
         for index in 0..frame_count {
             let timestamp_secs = start_secs + index as f64 / frame_rate;
             let frame_started = Instant::now();
-            let frame = decode_video_frame_at_time_rgba_scaled(
-                &path,
-                timestamp_secs,
-                max_width,
-                max_height,
-            )
-            .expect("decode preview fixture frame");
+            let frame =
+                match decode_video_frame_for_access_mode_rgba_scaled_cancellable_with_fingerprint(
+                    &path,
+                    timestamp_secs,
+                    max_width,
+                    max_height,
+                    access_mode,
+                    fingerprint,
+                    || false,
+                )
+                .expect("decode preview fixture frame")
+                {
+                    PreviewDecodeOutcome::Frame(frame) => frame,
+                    PreviewDecodeOutcome::Canceled => {
+                        panic!("playback sequence perf decode canceled")
+                    }
+                };
             let elapsed_us = duration_us(frame_started.elapsed());
             total_us = total_us.saturating_add(elapsed_us);
             max_us = max_us.max(elapsed_us);
@@ -1992,6 +1976,7 @@ mod tests {
         let wall_us = duration_us(started.elapsed());
         let report = PreviewDecodeSequencePerfReport {
             path: path.display().to_string(),
+            access_mode: access_mode.as_str(),
             start_secs,
             frame_rate,
             frame_count,
@@ -2010,8 +1995,9 @@ mod tests {
         };
         let json = serde_json::to_string(&report).expect("serialize sequence decode perf report");
         eprintln!(
-            "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" frames={} avg_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_max_us={} packet_decode_us={} swscale_us={} rgba_copy_us={}",
+            "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" access_mode={} frames={} avg_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_max_us={} packet_decode_us={} swscale_us={} rgba_copy_us={}",
             report.path,
+            report.access_mode,
             report.frame_count,
             report.avg_us,
             report.max_us,
@@ -2072,6 +2058,7 @@ mod tests {
     #[derive(Debug, Serialize)]
     struct PreviewDecodeSequencePerfReport {
         path: String,
+        access_mode: &'static str,
         start_secs: f64,
         frame_rate: f64,
         frame_count: usize,

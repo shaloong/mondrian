@@ -29,16 +29,19 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   long forward queue.
 - `PreviewDecodeAccessMode::RandomAccessStillFrame` is for deterministic still
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
-  one-off requests. It must not use playback-style whole-frame-neighbor cache
-  hits; its cache tolerance is capped to the frame hit tolerance so adjacent
-  frames are not silently reused. Existing timestamp-based public helpers are
-  explicitly this mode, not the playback path.
+  one-off requests. Existing timestamp-based public helpers are explicitly this
+  mode, not the playback path.
 
 These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app
 scheduling distinguish the requested access mode. Future hardware-resident
 decode must specialize behind these contracts instead of adding app-layer flags
 or treating playback as repeated random-access still decode.
+Process-global decoded-frame cache hits are capped to the same strict frame-hit
+tolerance for every access mode. Playback performance must come from the
+playback cursor's decoder/session locality, ring buffers, hardware decode, and
+GPU-resident frame delivery, not from silently reusing adjacent timestamp
+requests as if they were the requested frame.
 
 Current decode residency is intentionally explicit and fail-closed. The active
 preview/media decode path produces CPU RGBA frames and, for legacy YUV callers,
