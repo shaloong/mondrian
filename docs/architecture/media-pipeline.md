@@ -105,7 +105,10 @@ stage timings plus max queue wait, while aggregate stage totals remain trend
 evidence. This avoids blaming a cumulative stage total when an interactive stall
 came from one pathological seek, decode, software-scale/copy, composite,
 output-boundary frame, or current-frame job waiting behind other decode work.
-The in-process preview decoder uses bounded slice threading by default. The app
+The in-process preview decoder uses bounded frame threading by default. This is
+the product default because 4K HEVC Main10/Long-GOP preview seeks are commonly
+packet-decode bound, and frame threading is the safer general FFmpeg software
+decode default than slice threading for this class of media. The app
 preview service runs a conservative decode worker pool: one worker on small CPU
 budgets and at most two workers on wider machines, so current-frame decode can
 make progress while another worker is occupied by prefetch or a long-GOP seek

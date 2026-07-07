@@ -55,9 +55,9 @@ pub enum PreviewDecodeThreadingKind {
     /// Decoder threading disabled.
     None,
     /// Frame-level decoder threading.
+    #[default]
     Frame,
     /// Slice-level decoder threading.
-    #[default]
     Slice,
 }
 
@@ -1472,7 +1472,7 @@ mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
         decode_video_frame_at_time_rgba_scaled, decode_video_frame_at_time_rgba_scaled_cancellable,
-        preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeBackend,
+        duration_us, preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeBackend,
         PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
         PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
     };
@@ -1505,6 +1505,10 @@ mod tests {
         assert_eq!(PreviewDecodeThreadingKind::None.as_str(), "None");
         assert_eq!(PreviewDecodeThreadingKind::Frame.as_str(), "Frame");
         assert_eq!(PreviewDecodeThreadingKind::Slice.as_str(), "Slice");
+        assert_eq!(
+            PreviewDecodeThreadingKind::default(),
+            PreviewDecodeThreadingKind::Frame
+        );
         assert_eq!(
             PreviewDecodeThreadingKind::from_env("off"),
             Some(PreviewDecodeThreadingKind::None)
@@ -1690,10 +1694,146 @@ mod tests {
             decoded_frame_count: frame.diagnostics.decoded_frame_count,
             threading_kind: frame.diagnostics.threading_kind.as_str(),
             threading_count: frame.diagnostics.threading_count,
+            stage_durations: frame.diagnostics.stage_durations,
         };
         let json = serde_json::to_string(&report).expect("serialize decode perf report");
         eprintln!("MONDRIAN_PREVIEW_DECODE_PERF_JSON={json}");
         clear_thread_local_preview_decode_session();
+    }
+
+    #[test]
+    #[ignore = "manual sequential decode performance diagnostic; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
+    fn preview_decode_fixture_sequence_perf_smoke() {
+        let Some(path) = std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE").map(PathBuf::from)
+        else {
+            eprintln!(
+                "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_JSON={{\"skipped\":\"MONDRIAN_PREVIEW_DECODE_FIXTURE not set\"}}"
+            );
+            return;
+        };
+        let start_secs = std::env::var("MONDRIAN_PREVIEW_DECODE_TIMESTAMP")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let frame_rate = std::env::var("MONDRIAN_PREVIEW_DECODE_FRAME_RATE")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(25.0)
+            .max(1.0);
+        let frame_count = std::env::var("MONDRIAN_PREVIEW_DECODE_SEQUENCE_FRAMES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(25)
+            .clamp(1, 240);
+        let max_width = std::env::var("MONDRIAN_PREVIEW_DECODE_MAX_WIDTH")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        let max_height = std::env::var("MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+
+        clear_thread_local_preview_decode_session();
+        let mut frames = Vec::with_capacity(frame_count);
+        let mut total_us = 0u64;
+        let mut max_us = 0u64;
+        let mut uncached_total_us = 0u64;
+        let mut uncached_frame_count = 0usize;
+        let mut uncached_max_us = 0u64;
+        let mut total_stage_durations = PreviewDecodeStageDurations::default();
+        let mut max_frame_stage_durations = PreviewDecodeStageDurations::default();
+        let started = Instant::now();
+        for index in 0..frame_count {
+            let timestamp_secs = start_secs + index as f64 / frame_rate;
+            let frame_started = Instant::now();
+            let frame = decode_video_frame_at_time_rgba_scaled(
+                &path,
+                timestamp_secs,
+                max_width,
+                max_height,
+            )
+            .expect("decode preview fixture frame");
+            let elapsed_us = duration_us(frame_started.elapsed());
+            total_us = total_us.saturating_add(elapsed_us);
+            max_us = max_us.max(elapsed_us);
+            if !frame.diagnostics.cache_hit {
+                uncached_total_us = uncached_total_us.saturating_add(elapsed_us);
+                uncached_frame_count = uncached_frame_count.saturating_add(1);
+                uncached_max_us = uncached_max_us.max(elapsed_us);
+            }
+            total_stage_durations.accumulate(frame.diagnostics.stage_durations);
+            max_frame_stage_durations =
+                max_stage_durations(max_frame_stage_durations, frame.diagnostics.stage_durations);
+            frames.push(PreviewDecodeSequenceFrameReport {
+                index,
+                timestamp_secs,
+                elapsed_us,
+                decoded_width: frame.width,
+                decoded_height: frame.height,
+                cache_hit: frame.diagnostics.cache_hit,
+                seek_performed: frame.diagnostics.seek_performed,
+                decoded_frame_count: frame.diagnostics.decoded_frame_count,
+                threading_kind: frame.diagnostics.threading_kind.as_str(),
+                threading_count: frame.diagnostics.threading_count,
+                stage_durations: frame.diagnostics.stage_durations,
+            });
+        }
+        let wall_us = duration_us(started.elapsed());
+        let report = PreviewDecodeSequencePerfReport {
+            path: path.display().to_string(),
+            start_secs,
+            frame_rate,
+            frame_count,
+            max_width,
+            max_height,
+            total_us,
+            wall_us,
+            avg_us: total_us / frame_count as u64,
+            max_us,
+            uncached_frame_count,
+            uncached_avg_us: average_us(uncached_total_us, uncached_frame_count),
+            uncached_max_us,
+            total_stage_durations,
+            max_frame_stage_durations,
+            frames,
+        };
+        let json = serde_json::to_string(&report).expect("serialize sequence decode perf report");
+        eprintln!(
+            "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" frames={} avg_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_max_us={} packet_decode_us={} swscale_us={} rgba_copy_us={}",
+            report.path,
+            report.frame_count,
+            report.avg_us,
+            report.max_us,
+            report.uncached_frame_count,
+            report.uncached_avg_us,
+            report.uncached_max_us,
+            report.total_stage_durations.packet_decode_us,
+            report.total_stage_durations.swscale_us,
+            report.total_stage_durations.rgba_copy_us,
+        );
+        eprintln!("MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_JSON={json}");
+        clear_thread_local_preview_decode_session();
+    }
+
+    fn average_us(total_us: u64, frame_count: usize) -> u64 {
+        if frame_count == 0 {
+            return 0;
+        }
+        total_us / frame_count as u64
+    }
+
+    fn max_stage_durations(
+        lhs: PreviewDecodeStageDurations,
+        rhs: PreviewDecodeStageDurations,
+    ) -> PreviewDecodeStageDurations {
+        PreviewDecodeStageDurations {
+            session_open_us: lhs.session_open_us.max(rhs.session_open_us),
+            cache_lookup_us: lhs.cache_lookup_us.max(rhs.cache_lookup_us),
+            seek_us: lhs.seek_us.max(rhs.seek_us),
+            packet_decode_us: lhs.packet_decode_us.max(rhs.packet_decode_us),
+            swscale_us: lhs.swscale_us.max(rhs.swscale_us),
+            rgba_copy_us: lhs.rgba_copy_us.max(rhs.rgba_copy_us),
+            external_process_us: lhs.external_process_us.max(rhs.external_process_us),
+        }
     }
 
     #[derive(Debug, Serialize)]
@@ -1714,5 +1854,41 @@ mod tests {
         decoded_frame_count: u32,
         threading_kind: &'static str,
         threading_count: u32,
+        stage_durations: PreviewDecodeStageDurations,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct PreviewDecodeSequencePerfReport {
+        path: String,
+        start_secs: f64,
+        frame_rate: f64,
+        frame_count: usize,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+        total_us: u64,
+        wall_us: u64,
+        avg_us: u64,
+        max_us: u64,
+        uncached_frame_count: usize,
+        uncached_avg_us: u64,
+        uncached_max_us: u64,
+        total_stage_durations: PreviewDecodeStageDurations,
+        max_frame_stage_durations: PreviewDecodeStageDurations,
+        frames: Vec<PreviewDecodeSequenceFrameReport>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct PreviewDecodeSequenceFrameReport {
+        index: usize,
+        timestamp_secs: f64,
+        elapsed_us: u64,
+        decoded_width: u32,
+        decoded_height: u32,
+        cache_hit: bool,
+        seek_performed: bool,
+        decoded_frame_count: u32,
+        threading_kind: &'static str,
+        threading_count: u32,
+        stage_durations: PreviewDecodeStageDurations,
     }
 }
