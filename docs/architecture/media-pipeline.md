@@ -30,20 +30,15 @@ NLEs separate playback, interactive navigation, and precise still extraction:
 - `PreviewDecodeAccessMode::PlaybackCursor` is for sustained timeline playback
   and forward prefetch. It is mostly-forward, should keep decoder/session
   locality, and is the seam where hardware decode, low-copy P010/NV12
-  residency, deadline/drop policy, and GPU input transforms belong. Public
-  callers must enter through `decode_playback_cursor_frame_*` helpers or
-  `DecoderPool::get_playback_cursor_frame_rgba`.
+  residency, deadline/drop policy, and GPU input transforms belong.
 - `PreviewDecodeAccessMode::ScrubCursor` is for latest-wins playhead dragging,
   jog, and shuttle. It prioritizes cancellation and seek latency over warming a
-  long forward queue. Public callers must enter through
-  `decode_scrub_cursor_frame_*` helpers or
-  `DecoderPool::get_scrub_cursor_frame_rgba`.
+  long forward queue.
 - `PreviewDecodeAccessMode::RandomAccessStillFrame` is for deterministic still
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
-  one-off requests. Public `decode_still_frame_*` helpers are explicitly this
-  mode, not the playback path.
+  one-off requests.
   App thumbnail workers must pass the already-probed `PreviewFileFingerprint`
-  into the still helper and use the same fingerprint for thumbnail cache and
+  into the still-frame request and use the same fingerprint for thumbnail cache and
   failure invalidation, so replaced files cannot reuse stale still-frame UI
   rasters.
 
@@ -52,9 +47,12 @@ share the same CPU RGBA FFmpeg implementation while diagnostics and app
 scheduling distinguish the requested access mode. Future hardware-resident
 decode must specialize behind these contracts instead of adding app-layer flags
 or treating playback as repeated random-access still decode. The generic
-access-mode router is intentionally media-internal so public APIs describe the
-workload rather than exposing a strategy enum as a long-lived compatibility
-surface.
+access-mode router is intentionally media-internal. Public callers enter through
+one request seam: `PreviewDecodeRgbaRequest` for direct preview decode or
+`DecoderPoolPreviewRgbaRequest` plus `DecoderPool::get_preview_rgba` when they
+need DecoderPool coalescing, cache, runtime, prefetch, and cancellation
+ownership. Do not add mode-specific public helpers; they become compatibility
+debt and split future hardware/low-copy routing across shallow wrappers.
 `PreviewDecodeAccessMode` intentionally has no default value, and serialized
 decode diagnostics must include it. Missing access-mode evidence is a diagnostic
 coverage bug, not a reason to assume still-frame semantics.

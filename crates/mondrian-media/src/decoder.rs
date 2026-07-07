@@ -293,6 +293,56 @@ pub struct DecoderPool {
     metrics: DecoderMetrics,
 }
 
+/// Request for one access-mode-aware DecoderPool RGBA preview frame.
+///
+/// This is the DecoderPool interface for playback, scrub, and deterministic
+/// still-frame preview work. Callers choose an explicit access mode; DecoderPool
+/// owns how that mode maps to in-flight coalescing, cache keys, cancellation,
+/// runtime scheduling, and future hardware-resident decode adapters.
+#[derive(Debug, Clone)]
+pub struct DecoderPoolPreviewRgbaRequest {
+    /// Asset identity used for diagnostics and decoder context ownership.
+    pub asset_id: AssetId,
+    /// Source media path to decode.
+    pub path: PathBuf,
+    /// Source timeline/media time to decode.
+    pub timecode: TimeCode,
+    /// Maximum output width requested by the preview surface.
+    pub target_width: u32,
+    /// Maximum output height requested by the preview surface.
+    pub target_height: u32,
+    /// Access pattern that drives decoder residency and seek policy.
+    pub access_mode: PreviewDecodeAccessMode,
+    cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl DecoderPoolPreviewRgbaRequest {
+    /// Create one DecoderPool RGBA preview request.
+    pub fn new(
+        asset_id: AssetId,
+        path: PathBuf,
+        timecode: TimeCode,
+        target_width: u32,
+        target_height: u32,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> Self {
+        Self {
+            asset_id,
+            path,
+            timecode,
+            target_width,
+            target_height,
+            access_mode,
+            cancelled: None,
+        }
+    }
+
+    fn with_cancellation_flag(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.cancelled = Some(cancelled);
+        self
+    }
+}
+
 impl DecoderPool {
     pub fn new(frame_cache: Arc<FrameCache>) -> Arc<Self> {
         let max_concurrent = (num_cpus() - 2).max(1);
@@ -331,108 +381,21 @@ impl DecoderPool {
         })
     }
 
-    /// Get one random-access still frame as CPU RGBA memory.
-    pub async fn get_still_frame_rgba(
+    /// Get one access-mode-aware preview frame as CPU RGBA memory.
+    pub async fn get_preview_rgba(
         &self,
-        asset_id: AssetId,
-        path: PathBuf,
-        timecode: TimeCode,
-        target_width: u32,
-        target_height: u32,
-    ) -> Result<Arc<RgbaFrame>> {
-        self.get_rgba_for_access_mode(
-            asset_id,
-            path,
-            timecode,
-            target_width,
-            target_height,
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-            None,
-        )
-        .await
-    }
-
-    /// Get one playback-cursor preview frame as CPU RGBA memory.
-    ///
-    /// Playback cursor requests are sustained timeline playback/prefetch work.
-    /// They are kept as a distinct public contract so future hardware-resident
-    /// decode can specialize without changing callers.
-    pub async fn get_playback_cursor_frame_rgba(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-        timecode: TimeCode,
-        target_width: u32,
-        target_height: u32,
-    ) -> Result<Arc<RgbaFrame>> {
-        self.get_rgba_for_access_mode(
-            asset_id,
-            path,
-            timecode,
-            target_width,
-            target_height,
-            PreviewDecodeAccessMode::PlaybackCursor,
-            None,
-        )
-        .await
-    }
-
-    /// Get one scrub-cursor preview frame as CPU RGBA memory.
-    ///
-    /// Scrub cursor requests are latest-wins interactive navigation work and
-    /// should prioritize cancellation and seek latency over forward locality.
-    pub async fn get_scrub_cursor_frame_rgba(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-        timecode: TimeCode,
-        target_width: u32,
-        target_height: u32,
-    ) -> Result<Arc<RgbaFrame>> {
-        self.get_rgba_for_access_mode(
-            asset_id,
-            path,
-            timecode,
-            target_width,
-            target_height,
-            PreviewDecodeAccessMode::ScrubCursor,
-            None,
-        )
-        .await
-    }
-
-    async fn get_playback_cursor_frame_rgba_cancellable(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-        timecode: TimeCode,
-        target_width: u32,
-        target_height: u32,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<Arc<RgbaFrame>> {
-        self.get_rgba_for_access_mode(
-            asset_id,
-            path,
-            timecode,
-            target_width,
-            target_height,
-            PreviewDecodeAccessMode::PlaybackCursor,
-            Some(cancelled),
-        )
-        .await
-    }
-
-    async fn get_rgba_for_access_mode(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-        timecode: TimeCode,
-        target_width: u32,
-        target_height: u32,
-        access_mode: PreviewDecodeAccessMode,
-        cancelled: Option<Arc<AtomicBool>>,
+        request: DecoderPoolPreviewRgbaRequest,
     ) -> Result<Arc<RgbaFrame>> {
         self.metrics.rgba_requests.fetch_add(1, Ordering::Relaxed);
+        let DecoderPoolPreviewRgbaRequest {
+            asset_id,
+            path,
+            timecode,
+            target_width,
+            target_height,
+            access_mode,
+            cancelled,
+        } = request;
         if decode_cancelled(cancelled.as_ref()) {
             return Err(mondrian_core::MondrianError::Cancelled);
         }
@@ -820,13 +783,16 @@ impl DecoderPool {
 
                 let tc = TimeCode::new(start_timecode.frame + offset as i64, tb);
                 if let Err(err) = pool
-                    .get_playback_cursor_frame_rgba_cancellable(
-                        asset_id,
-                        path.clone(),
-                        tc,
-                        target_width.max(1),
-                        target_height.max(1),
-                        Arc::clone(&cancelled),
+                    .get_preview_rgba(
+                        DecoderPoolPreviewRgbaRequest::new(
+                            asset_id,
+                            path.clone(),
+                            tc,
+                            target_width.max(1),
+                            target_height.max(1),
+                            PreviewDecodeAccessMode::PlaybackCursor,
+                        )
+                        .with_cancellation_flag(Arc::clone(&cancelled)),
                     )
                     .await
                 {
@@ -1176,6 +1142,35 @@ mod tests {
 
         assert_ne!(first.source_micros, second.source_micros);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn decoder_pool_preview_rgba_request_preserves_explicit_access_contract() {
+        let asset_id = AssetId::new();
+        let path = PathBuf::from("E:/media/source.mov");
+        let timecode = TimeCode::new(42, Rational::new(1, 24));
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let request = DecoderPoolPreviewRgbaRequest::new(
+            asset_id,
+            path.clone(),
+            timecode,
+            1920,
+            1080,
+            PreviewDecodeAccessMode::ScrubCursor,
+        )
+        .with_cancellation_flag(Arc::clone(&cancel));
+
+        assert_eq!(request.asset_id, asset_id);
+        assert_eq!(request.path, path);
+        assert_eq!(request.timecode, timecode);
+        assert_eq!(request.target_width, 1920);
+        assert_eq!(request.target_height, 1080);
+        assert_eq!(request.access_mode, PreviewDecodeAccessMode::ScrubCursor);
+        assert!(Arc::ptr_eq(
+            request.cancelled.as_ref().expect("cancel flag"),
+            &cancel
+        ));
     }
 
     #[test]
