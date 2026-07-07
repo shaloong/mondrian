@@ -218,6 +218,10 @@ impl AppUiPreviewService {
                 .metrics
                 .decode_external_ffmpeg_cpu_rgba_frames
                 .get(),
+            decode_playback_session_ring_hit_frames: self
+                .metrics
+                .decode_playback_session_ring_hit_frames
+                .get(),
             decode_cache_hit_frames: self.metrics.decode_cache_hit_frames.get(),
             decode_playback_cursor_frames: self.metrics.decode_playback_cursor_frames.get(),
             decode_scrub_cursor_frames: self.metrics.decode_scrub_cursor_frames.get(),
@@ -919,6 +923,9 @@ impl AppUiPreviewService {
             PreviewDecodePath::ExternalFfmpegCpuRgba => {
                 bump(&self.metrics.decode_external_ffmpeg_cpu_rgba_frames);
             }
+            PreviewDecodePath::PlaybackSessionRingHit => {
+                bump(&self.metrics.decode_playback_session_ring_hit_frames);
+            }
             PreviewDecodePath::PreviewCacheHit => {
                 bump(&self.metrics.decode_cache_hit_frames);
             }
@@ -1416,6 +1423,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_in_process_cpu_rgba_frames: u64,
     /// Successful decodes produced by the external ffmpeg CPU RGBA path.
     pub decode_external_ffmpeg_cpu_rgba_frames: u64,
+    /// Successful playback decodes served from the playback session-local ring.
+    pub decode_playback_session_ring_hit_frames: u64,
     /// Successful decodes served from the preview frame cache.
     pub decode_cache_hit_frames: u64,
     /// Decode results requested through the playback cursor access contract.
@@ -1679,6 +1688,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub in_process_cpu_rgba_frames: u64,
     /// Successful decodes served from the external ffmpeg CPU RGBA path.
     pub external_ffmpeg_cpu_rgba_frames: u64,
+    /// Successful playback decodes served from the playback session-local ring.
+    pub playback_session_ring_hit_frames: u64,
     /// Successful decodes served from preview cache.
     pub cache_hit_frames: u64,
     /// Decode results requested through the playback cursor access contract.
@@ -2148,7 +2159,9 @@ pub fn build_preview_decode_performance_report(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::ProxyCache,
             "preview_decode_cache_hit_frames",
-            summary.cache_hit_frames,
+            summary
+                .cache_hit_frames
+                .saturating_add(summary.playback_session_ring_hit_frames),
             1,
         );
         push_decode_warn_max_check(
@@ -2465,6 +2478,7 @@ fn push_preview_decode_root_causes_and_actions(
             .in_process_cpu_rgba_frames
             .saturating_add(summary.external_ffmpeg_cpu_rgba_frames)
             > 0
+        && summary.playback_session_ring_hit_frames == 0
     {
         push_decode_root_cause_with_action(
             root_causes,
@@ -3282,6 +3296,7 @@ impl AppUiPreviewDiagnostics {
             canceled_unknown_jobs: self.decode_canceled_unknown_jobs,
             in_process_cpu_rgba_frames: self.decode_in_process_cpu_rgba_frames,
             external_ffmpeg_cpu_rgba_frames: self.decode_external_ffmpeg_cpu_rgba_frames,
+            playback_session_ring_hit_frames: self.decode_playback_session_ring_hit_frames,
             cache_hit_frames: self.decode_cache_hit_frames,
             playback_cursor_frames: self.decode_playback_cursor_frames,
             scrub_cursor_frames: self.decode_scrub_cursor_frames,
@@ -4997,6 +5012,7 @@ struct AppUiPreviewMetrics {
     decode_canceled_unknown_jobs: Cell<u64>,
     decode_in_process_cpu_rgba_frames: Cell<u64>,
     decode_external_ffmpeg_cpu_rgba_frames: Cell<u64>,
+    decode_playback_session_ring_hit_frames: Cell<u64>,
     decode_cache_hit_frames: Cell<u64>,
     decode_playback_cursor_frames: Cell<u64>,
     decode_scrub_cursor_frames: Cell<u64>,
@@ -6410,6 +6426,27 @@ mod tests {
                 external_process_us: 0,
             },
         });
+        service.record_preview_decode(PreviewDecodeDiagnostics {
+            path: PreviewDecodePath::PlaybackSessionRingHit,
+            elapsed_us: 40,
+            cache_hit: true,
+            access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+            external_process: false,
+            cpu_resident: true,
+            seek_performed: false,
+            decoded_frame_count: 0,
+            threading_kind: PreviewDecodeThreadingKind::None,
+            threading_count: 0,
+            stage_durations: PreviewDecodeStageDurations {
+                session_open_us: 0,
+                cache_lookup_us: 12,
+                seek_us: 0,
+                packet_decode_us: 0,
+                swscale_us: 0,
+                rgba_copy_us: 0,
+                external_process_us: 0,
+            },
+        });
         service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Prefetch, 400);
         service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Current, 1_200);
         service.record_preview_decode_queue_wait(MediaPreviewRequestPriority::Current, 20);
@@ -6435,16 +6472,17 @@ mod tests {
         assert_eq!(diagnostics.decode_canceled_unknown_jobs, 0);
         assert_eq!(diagnostics.decode_in_process_cpu_rgba_frames, 1);
         assert_eq!(diagnostics.decode_external_ffmpeg_cpu_rgba_frames, 1);
+        assert_eq!(diagnostics.decode_playback_session_ring_hit_frames, 1);
         assert_eq!(diagnostics.decode_cache_hit_frames, 1);
-        assert_eq!(diagnostics.decode_playback_cursor_frames, 1);
+        assert_eq!(diagnostics.decode_playback_cursor_frames, 2);
         assert_eq!(diagnostics.decode_scrub_cursor_frames, 1);
         assert_eq!(diagnostics.decode_random_access_still_frames, 1);
         assert_eq!(diagnostics.decode_canceled_playback_cursor_jobs, 1);
         assert_eq!(diagnostics.decode_canceled_scrub_cursor_jobs, 1);
         assert_eq!(diagnostics.decode_canceled_random_access_still_jobs, 1);
-        assert_eq!(diagnostics.decode_total_duration_us, 3_525);
+        assert_eq!(diagnostics.decode_total_duration_us, 3_565);
         assert_eq!(diagnostics.decode_max_duration_us, 2_500);
-        assert_eq!(diagnostics.decode_last_duration_us, 25);
+        assert_eq!(diagnostics.decode_last_duration_us, 40);
         assert_eq!(diagnostics.decode_queue_wait_total_us, 1_620);
         assert_eq!(diagnostics.decode_queue_wait_max_us, 1_200);
         assert_eq!(diagnostics.decode_queue_wait_last_us, 20);
@@ -6453,13 +6491,13 @@ mod tests {
         assert_eq!(diagnostics.decode_seeked_frames, 1);
         assert_eq!(diagnostics.decode_decoded_frame_count, 48);
         assert_eq!(diagnostics.decode_max_decoded_frame_count, 48);
-        assert_eq!(diagnostics.decode_threading_none_frames, 2);
+        assert_eq!(diagnostics.decode_threading_none_frames, 3);
         assert_eq!(diagnostics.decode_threading_frame_frames, 1);
         assert_eq!(diagnostics.decode_threading_slice_frames, 0);
         assert_eq!(diagnostics.decode_last_threading_count, 0);
         assert_eq!(diagnostics.decode_max_threading_count, 6);
         assert_eq!(diagnostics.decode_stage_durations.session_open_us, 100);
-        assert_eq!(diagnostics.decode_stage_durations.cache_lookup_us, 22);
+        assert_eq!(diagnostics.decode_stage_durations.cache_lookup_us, 34);
         assert_eq!(diagnostics.decode_stage_durations.seek_us, 300);
         assert_eq!(diagnostics.decode_stage_durations.packet_decode_us, 500);
         assert_eq!(diagnostics.decode_stage_durations.swscale_us, 70);

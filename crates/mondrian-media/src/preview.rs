@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 /// 提高到 1800（足以覆盖常见 2 分钟超长 GOP 文件，例如广播流）
 const DECODE_BUDGET: usize = 1800;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
+const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
 const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 
@@ -44,6 +45,8 @@ pub enum PreviewDecodePath {
     InProcessFfmpegCpuRgba,
     /// Experimental external `ffmpeg` process returned CPU RGBA bytes.
     ExternalFfmpegCpuRgba,
+    /// Playback cursor reused a frame from its session-local forward ring.
+    PlaybackSessionRingHit,
     /// The frame was served from the process-global preview frame cache.
     PreviewCacheHit,
 }
@@ -141,6 +144,7 @@ impl PreviewDecodePath {
         match self {
             Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
+            Self::PlaybackSessionRingHit => "PlaybackSessionRingHit",
             Self::PreviewCacheHit => "PreviewCacheHit",
         }
     }
@@ -226,7 +230,10 @@ impl PreviewDecodeDiagnostics {
         Self {
             path,
             elapsed_us: 0,
-            cache_hit: path == PreviewDecodePath::PreviewCacheHit,
+            cache_hit: matches!(
+                path,
+                PreviewDecodePath::PreviewCacheHit | PreviewDecodePath::PlaybackSessionRingHit
+            ),
             access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
             cpu_resident: true,
@@ -246,6 +253,12 @@ impl PreviewDecodeDiagnostics {
     fn cache_hit_for_mode(elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
         Self::new(PreviewDecodePath::PreviewCacheHit)
             .with_access_mode(access_mode)
+            .with_elapsed(elapsed)
+    }
+
+    fn playback_ring_hit(elapsed: Duration) -> Self {
+        Self::new(PreviewDecodePath::PlaybackSessionRingHit)
+            .with_access_mode(PreviewDecodeAccessMode::PlaybackCursor)
             .with_elapsed(elapsed)
     }
 
@@ -349,6 +362,11 @@ impl RgbaFrame {
 
     fn into_cache_hit(mut self, elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
         self.diagnostics = PreviewDecodeDiagnostics::cache_hit_for_mode(elapsed, access_mode);
+        self
+    }
+
+    fn into_playback_ring_hit(mut self, elapsed: Duration) -> Self {
+        self.diagnostics = PreviewDecodeDiagnostics::playback_ring_hit(elapsed);
         self
     }
 }
@@ -644,29 +662,92 @@ struct PreviewDecodeSession {
     threading_count: usize,
     last_pts: Option<i64>,
     reached_eof: bool,
+    playback_ring: PreviewPlaybackRing,
 }
 
 struct PreviewDecodeForwardResult {
     frame: Option<RgbaFrame>,
+    selected_pts: Option<i64>,
     decoded_frame_count: usize,
     canceled: bool,
 }
 
 impl PreviewDecodeForwardResult {
-    fn frame(frame: RgbaFrame, decoded_frame_count: usize) -> Self {
+    fn frame(frame: RgbaFrame, selected_pts: i64, decoded_frame_count: usize) -> Self {
         Self {
             frame: Some(frame),
+            selected_pts: Some(selected_pts),
             decoded_frame_count,
             canceled: false,
         }
     }
 
     fn empty(decoded_frame_count: usize) -> Self {
-        Self { frame: None, decoded_frame_count, canceled: false }
+        Self {
+            frame: None,
+            selected_pts: None,
+            decoded_frame_count,
+            canceled: false,
+        }
     }
 
     fn canceled(decoded_frame_count: usize) -> Self {
-        Self { frame: None, decoded_frame_count, canceled: true }
+        Self {
+            frame: None,
+            selected_pts: None,
+            decoded_frame_count,
+            canceled: true,
+        }
+    }
+}
+
+struct PreviewPlaybackRingEntry {
+    pts: i64,
+    frame: RgbaFrame,
+}
+
+struct PreviewPlaybackRing {
+    capacity: usize,
+    entries: VecDeque<PreviewPlaybackRingEntry>,
+}
+
+impl PreviewPlaybackRing {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, target_pts: i64, tolerance_pts: i64) -> Option<RgbaFrame> {
+        let mut best_index = None;
+        let mut best_distance = i64::MAX;
+        for (index, entry) in self.entries.iter().enumerate() {
+            let distance = (entry.pts - target_pts).abs();
+            if distance < best_distance {
+                best_distance = distance;
+                best_index = Some(index);
+            }
+        }
+        let index = best_index?;
+        if best_distance > tolerance_pts.max(1) {
+            return None;
+        }
+
+        let entry = self.entries.remove(index)?;
+        let frame = entry.frame.clone();
+        self.entries.push_front(entry);
+        Some(frame)
+    }
+
+    fn put(&mut self, pts: i64, frame: RgbaFrame) {
+        if let Some(index) = self.entries.iter().position(|entry| entry.pts == pts) {
+            self.entries.remove(index);
+        }
+        self.entries.push_front(PreviewPlaybackRingEntry { pts, frame });
+        while self.entries.len() > self.capacity {
+            self.entries.pop_back();
+        }
     }
 }
 
@@ -806,6 +887,7 @@ impl PreviewDecodeSession {
             threading_count,
             last_pts: None,
             reached_eof: false,
+            playback_ring: PreviewPlaybackRing::new(PREVIEW_PLAYBACK_SESSION_RING_CAPACITY),
         })
     }
 
@@ -836,6 +918,20 @@ impl PreviewDecodeSession {
         let target_pts = timestamp_to_stream_pts(timestamp_secs, self.stream_tb);
 
         let cache_lookup_started_at = Instant::now();
+        if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+            if let Some(hit) = self.playback_ring.get(target_pts, self.hit_tolerance_pts) {
+                if should_cancel() {
+                    return Ok(PreviewDecodeOutcome::Canceled);
+                }
+                return Ok(PreviewDecodeOutcome::Frame(
+                    hit.into_playback_ring_hit(cache_lookup_started_at.elapsed())
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
+                            ..PreviewDecodeStageDurations::default()
+                        }),
+                ));
+            }
+        }
         if let Some(hit) = preview_cache_get(
             &self.path,
             self.fingerprint,
@@ -846,6 +942,9 @@ impl PreviewDecodeSession {
         ) {
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled);
+            }
+            if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+                self.playback_ring.put(hit.pts, hit.frame.clone());
             }
             return Ok(PreviewDecodeOutcome::Frame(
                 hit.frame
@@ -887,6 +986,11 @@ impl PreviewDecodeSession {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
         if let Some(frame) = result.frame {
+            if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+                if let Some(selected_pts) = result.selected_pts {
+                    self.playback_ring.put(selected_pts, frame.clone());
+                }
+            }
             let conversion_us = frame
                 .diagnostics
                 .stage_durations
@@ -1066,7 +1170,11 @@ impl PreviewDecodeSession {
                                 frame_pts,
                                 rgba.clone(),
                             );
-                            return Ok(PreviewDecodeForwardResult::frame(rgba, frames_decoded));
+                            return Ok(PreviewDecodeForwardResult::frame(
+                                rgba,
+                                frame_pts,
+                                frames_decoded,
+                            ));
                         }
                     } else {
                         best_after = Some((frame_pts, decoded.frame.clone()));
@@ -1081,7 +1189,11 @@ impl PreviewDecodeSession {
                                 selected_pts,
                                 rgba.clone(),
                             );
-                            return Ok(PreviewDecodeForwardResult::frame(rgba, frames_decoded));
+                            return Ok(PreviewDecodeForwardResult::frame(
+                                rgba,
+                                selected_pts,
+                                frames_decoded,
+                            ));
                         }
                     }
                 }
@@ -1129,7 +1241,11 @@ impl PreviewDecodeSession {
                                 rgba.clone(),
                             );
                             self.reached_eof = true;
-                            return Ok(PreviewDecodeForwardResult::frame(rgba, frames_decoded));
+                            return Ok(PreviewDecodeForwardResult::frame(
+                                rgba,
+                                selected_pts,
+                                frames_decoded,
+                            ));
                         }
                     }
                 }
@@ -1153,7 +1269,11 @@ impl PreviewDecodeSession {
                 selected_pts,
                 rgba.clone(),
             );
-            return Ok(PreviewDecodeForwardResult::frame(rgba, frames_decoded));
+            return Ok(PreviewDecodeForwardResult::frame(
+                rgba,
+                selected_pts,
+                frames_decoded,
+            ));
         }
 
         Ok(PreviewDecodeForwardResult::empty(frames_decoded))
@@ -1345,6 +1465,7 @@ fn default_preview_decode_thread_count() -> usize {
 #[derive(Clone)]
 struct PreviewCacheHit {
     frame: RgbaFrame,
+    pts: i64,
 }
 
 #[derive(Clone)]
@@ -1392,7 +1513,7 @@ fn preview_cache_get(
     }
 
     let entry = guard.remove(index)?;
-    let hit = PreviewCacheHit { frame: entry.frame.clone() };
+    let hit = PreviewCacheHit { frame: entry.frame.clone(), pts: entry.pts };
     guard.push_front(entry);
     Some(hit)
 }
@@ -1694,7 +1815,7 @@ mod tests {
         decode_still_frame_rgba_scaled, decode_still_frame_rgba_scaled_cancellable, duration_us,
         preview_cache_get, preview_cache_put_with_fingerprint, PreviewDecodeAccessMode,
         PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeStageDurations,
-        PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
+        PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewPlaybackRing, RgbaFrame,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1826,6 +1947,60 @@ mod tests {
             cached.diagnostics.access_mode,
             PreviewDecodeAccessMode::PlaybackCursor
         );
+
+        let ring_hit = cached.into_playback_ring_hit(std::time::Duration::from_micros(2));
+        assert_eq!(
+            ring_hit.diagnostics.path,
+            PreviewDecodePath::PlaybackSessionRingHit
+        );
+        assert_eq!(ring_hit.diagnostics.elapsed_us, 2);
+        assert!(ring_hit.diagnostics.cache_hit);
+        assert!(ring_hit.diagnostics.cpu_resident);
+        assert_eq!(
+            ring_hit.diagnostics.access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
+    }
+
+    #[test]
+    fn playback_session_ring_uses_strict_tolerance_and_lru_capacity() {
+        let mut ring = PreviewPlaybackRing::new(2);
+        let frame_a = RgbaFrame::new(
+            1,
+            1,
+            vec![1, 2, 3, 4],
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
+        let frame_b = RgbaFrame::new(
+            1,
+            1,
+            vec![5, 6, 7, 8],
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
+        let frame_c = RgbaFrame::new(
+            1,
+            1,
+            vec![9, 10, 11, 12],
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
+
+        ring.put(100, frame_a.clone());
+        ring.put(110, frame_b.clone());
+
+        assert_eq!(
+            ring.get(103, 3).expect("within tolerance").rgba(),
+            frame_a.rgba()
+        );
+        assert!(ring.get(104, 3).is_none());
+
+        ring.put(120, frame_c.clone());
+
+        assert!(ring.get(110, 1).is_none());
+        assert_eq!(
+            ring.get(100, 1).expect("recently used").rgba(),
+            frame_a.rgba()
+        );
+        assert_eq!(ring.get(120, 1).expect("newest").rgba(), frame_c.rgba());
     }
 
     #[test]
