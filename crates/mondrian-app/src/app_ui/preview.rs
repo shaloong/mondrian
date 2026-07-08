@@ -1865,6 +1865,77 @@ pub struct AppUiPreviewColorHealthSummary {
     pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
 }
 
+/// Fixed latency buckets for compact preview decode distribution diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewDecodeLatencyBuckets {
+    /// Samples at or below 10 ms.
+    pub le_10ms: u64,
+    /// Samples above 10 ms and at or below 16 ms.
+    pub le_16ms: u64,
+    /// Samples above 16 ms and at or below 25 ms.
+    pub le_25ms: u64,
+    /// Samples above 25 ms and at or below 40 ms.
+    pub le_40ms: u64,
+    /// Samples above 40 ms and at or below 50 ms.
+    pub le_50ms: u64,
+    /// Samples above 50 ms and at or below 80 ms.
+    pub le_80ms: u64,
+    /// Samples above 80 ms.
+    pub gt_80ms: u64,
+}
+
+impl AppUiPreviewDecodeLatencyBuckets {
+    fn record(&mut self, duration_us: u64) {
+        match duration_us {
+            0..=10_000 => self.le_10ms = self.le_10ms.saturating_add(1),
+            10_001..=16_000 => self.le_16ms = self.le_16ms.saturating_add(1),
+            16_001..=25_000 => self.le_25ms = self.le_25ms.saturating_add(1),
+            25_001..=40_000 => self.le_40ms = self.le_40ms.saturating_add(1),
+            40_001..=50_000 => self.le_50ms = self.le_50ms.saturating_add(1),
+            50_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
+            _ => self.gt_80ms = self.gt_80ms.saturating_add(1),
+        }
+    }
+
+    fn total(self) -> u64 {
+        self.le_10ms
+            .saturating_add(self.le_16ms)
+            .saturating_add(self.le_25ms)
+            .saturating_add(self.le_40ms)
+            .saturating_add(self.le_50ms)
+            .saturating_add(self.le_80ms)
+            .saturating_add(self.gt_80ms)
+    }
+
+    fn estimated_p95_upper_bound_us(self) -> u64 {
+        self.estimated_quantile_upper_bound_us(95)
+    }
+
+    fn estimated_quantile_upper_bound_us(self, percentile: u64) -> u64 {
+        let total = self.total();
+        if total == 0 {
+            return 0;
+        }
+        let rank = total.saturating_mul(percentile.min(100)).saturating_add(99) / 100;
+        let mut cumulative = 0_u64;
+        for (count, upper_bound_us) in [
+            (self.le_10ms, 10_000),
+            (self.le_16ms, 16_000),
+            (self.le_25ms, 25_000),
+            (self.le_40ms, 40_000),
+            (self.le_50ms, 50_000),
+            (self.le_80ms, 80_000),
+            (self.gt_80ms, 80_001),
+        ] {
+            cumulative = cumulative.saturating_add(count);
+            if cumulative >= rank {
+                return upper_bound_us;
+            }
+        }
+        80_001
+    }
+}
+
 /// Preview decode profile for one access mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AppUiPreviewDecodeAccessModeProfile {
@@ -1884,12 +1955,16 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub max_duration_us: u64,
     /// Most recent end-to-end decode duration for this access mode.
     pub last_duration_us: u64,
+    /// Fixed distribution buckets for end-to-end decode duration.
+    pub latency_buckets: AppUiPreviewDecodeLatencyBuckets,
     /// Total worker-queue wait before decode started for this access mode.
     pub queue_wait_total_us: u64,
     /// Slowest worker-queue wait before decode started for this access mode.
     pub queue_wait_max_us: u64,
     /// Most recent worker-queue wait before decode started for this access mode.
     pub queue_wait_last_us: u64,
+    /// Fixed distribution buckets for worker-queue wait.
+    pub queue_wait_buckets: AppUiPreviewDecodeLatencyBuckets,
     /// Canceled decode jobs for this access mode.
     pub canceled_jobs: u64,
     /// Canceled jobs caused by preview shutdown for this access mode.
@@ -1954,6 +2029,7 @@ impl AppUiPreviewDecodeAccessModeProfile {
             }
         }
         self.total_duration_us = self.total_duration_us.saturating_add(diagnostics.elapsed_us);
+        self.latency_buckets.record(diagnostics.elapsed_us);
         if diagnostics.elapsed_us >= self.max_duration_us {
             self.max_duration_us = diagnostics.elapsed_us;
             self.max_frame_stage_durations = diagnostics.stage_durations;
@@ -1980,6 +2056,7 @@ impl AppUiPreviewDecodeAccessModeProfile {
         self.queue_wait_total_us = self.queue_wait_total_us.saturating_add(queue_wait_us);
         self.queue_wait_max_us = self.queue_wait_max_us.max(queue_wait_us);
         self.queue_wait_last_us = queue_wait_us;
+        self.queue_wait_buckets.record(queue_wait_us);
     }
 
     fn record_cancel(
@@ -2267,7 +2344,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 6;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 7;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2968,6 +3045,7 @@ fn push_preview_decode_access_mode_checks(
             continue;
         }
         if profile.frames > 0 {
+            let p95_upper_bound_us = profile.latency_buckets.estimated_p95_upper_bound_us();
             checks.push(AppUiPreviewDecodePerformanceCheck {
                 area: AppUiPreviewDecodePerformanceArea::AccessMode,
                 code: preview_decode_access_mode_budget_code(access_mode),
@@ -2979,7 +3057,20 @@ fn push_preview_decode_access_mode_checks(
                 observed: profile.max_duration_us,
                 limit: Some(slow_frame_budget_us),
             });
+            checks.push(AppUiPreviewDecodePerformanceCheck {
+                area: AppUiPreviewDecodePerformanceArea::AccessMode,
+                code: preview_decode_access_mode_p95_budget_code(access_mode),
+                severity: if p95_upper_bound_us > slow_frame_budget_us {
+                    AppUiPreviewDecodePerformanceSeverity::Fail
+                } else {
+                    AppUiPreviewDecodePerformanceSeverity::Pass
+                },
+                observed: p95_upper_bound_us,
+                limit: Some(slow_frame_budget_us),
+            });
         }
+        let queue_wait_p95_upper_bound_us =
+            profile.queue_wait_buckets.estimated_p95_upper_bound_us();
         checks.push(AppUiPreviewDecodePerformanceCheck {
             area: AppUiPreviewDecodePerformanceArea::AccessMode,
             code: preview_decode_access_mode_queue_wait_budget_code(access_mode),
@@ -2989,6 +3080,17 @@ fn push_preview_decode_access_mode_checks(
                 AppUiPreviewDecodePerformanceSeverity::Pass
             },
             observed: profile.queue_wait_max_us,
+            limit: Some(slow_frame_budget_us),
+        });
+        checks.push(AppUiPreviewDecodePerformanceCheck {
+            area: AppUiPreviewDecodePerformanceArea::AccessMode,
+            code: preview_decode_access_mode_queue_wait_p95_budget_code(access_mode),
+            severity: if queue_wait_p95_upper_bound_us > slow_frame_budget_us {
+                AppUiPreviewDecodePerformanceSeverity::Warn
+            } else {
+                AppUiPreviewDecodePerformanceSeverity::Pass
+            },
+            observed: queue_wait_p95_upper_bound_us,
             limit: Some(slow_frame_budget_us),
         });
     }
@@ -3030,6 +3132,32 @@ fn preview_decode_access_mode_queue_wait_budget_code(
         PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_queue_wait_max_us",
         PreviewDecodeAccessMode::RandomAccessStillFrame => {
             "preview_decode_random_access_still_queue_wait_max_us"
+        }
+    }
+}
+
+fn preview_decode_access_mode_p95_budget_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => "preview_decode_playback_cursor_p95_frame_us",
+        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_p95_frame_us",
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_p95_frame_us"
+        }
+    }
+}
+
+fn preview_decode_access_mode_queue_wait_p95_budget_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_queue_wait_p95_us"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_queue_wait_p95_us",
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_queue_wait_p95_us"
         }
     }
 }
@@ -3101,16 +3229,18 @@ fn push_preview_decode_root_causes_and_actions(
         if profile.frames == 0 || profile.max_duration_us <= summary.slow_frame_budget_us {
             continue;
         }
+        let p95_upper_bound_us = profile.latency_buckets.estimated_p95_upper_bound_us();
         push_decode_root_cause_with_action(
             root_causes,
             actions,
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} seeked_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} decoded_frame_count={} max_decoded_frame_count={} packet_decode_us={} seek_us={} swscale_us={} rgba_copy_us={} cache_hit_frames={} playback_session_ring_hit_frames={}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} seeked_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} decoded_frame_count={} max_decoded_frame_count={} packet_decode_us={} seek_us={} swscale_us={} rgba_copy_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
+                p95_upper_bound_us,
                 profile.total_duration_us,
                 profile.queue_wait_max_us,
                 profile.queue_wait_total_us,
@@ -3125,7 +3255,8 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.max_frame_stage_durations.swscale_us,
                 profile.max_frame_stage_durations.rgba_copy_us,
                 profile.cache_hit_frames,
-                profile.playback_session_ring_hit_frames
+                profile.playback_session_ring_hit_frames,
+                profile.latency_buckets
             ),
             "inspect_preview_decode_access_mode_profile",
             "Inspect the per-access-mode decode profile before changing global decode concurrency or color/render code.",
@@ -3137,19 +3268,23 @@ fn push_preview_decode_root_causes_and_actions(
         if profile.queue_wait_max_us <= summary.slow_frame_budget_us {
             continue;
         }
+        let queue_wait_p95_upper_bound_us =
+            profile.queue_wait_buckets.estimated_p95_upper_bound_us();
         push_decode_root_cause_with_action(
             root_causes,
             actions,
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_queue_wait_bound",
             format!(
-                "access_mode={} queue_wait_max_us={} queue_wait_total_us={} queue_wait_last_us={} frames={} slow_frame_budget_us={}",
+                "access_mode={} queue_wait_max_us={} queue_wait_p95_upper_bound_us={} queue_wait_total_us={} queue_wait_last_us={} frames={} slow_frame_budget_us={} queue_wait_buckets={:?}",
                 access_mode.as_str(),
                 profile.queue_wait_max_us,
+                queue_wait_p95_upper_bound_us,
                 profile.queue_wait_total_us,
                 profile.queue_wait_last_us,
                 profile.frames,
-                summary.slow_frame_budget_us
+                summary.slow_frame_budget_us,
+                profile.queue_wait_buckets
             ),
             "inspect_preview_access_mode_queue",
             "Inspect per-access-mode worker lane pressure so playback, scrub, and still-frame requests cannot hide each other's queue latency.",
@@ -7004,9 +7139,13 @@ mod tests {
         assert_eq!(playback_profile.total_duration_us, 2_540);
         assert_eq!(playback_profile.max_duration_us, 2_500);
         assert_eq!(playback_profile.last_duration_us, 40);
+        assert_eq!(playback_profile.latency_buckets.le_10ms, 2);
+        assert_eq!(playback_profile.latency_buckets.total(), 2);
         assert_eq!(playback_profile.queue_wait_total_us, 400);
         assert_eq!(playback_profile.queue_wait_max_us, 400);
         assert_eq!(playback_profile.queue_wait_last_us, 400);
+        assert_eq!(playback_profile.queue_wait_buckets.le_10ms, 1);
+        assert_eq!(playback_profile.queue_wait_buckets.total(), 1);
         assert_eq!(playback_profile.canceled_jobs, 1);
         assert_eq!(playback_profile.canceled_prefetch_deadline_jobs, 1);
         assert_eq!(playback_profile.canceled_total_duration_us, 700);
@@ -7029,6 +7168,8 @@ mod tests {
         let scrub_profile = diagnostics.decode_access_mode_profiles.scrub_cursor;
         assert_eq!(scrub_profile.frames, 1);
         assert_eq!(scrub_profile.in_process_cpu_rgba_frames, 1);
+        assert_eq!(scrub_profile.latency_buckets.le_10ms, 1);
+        assert_eq!(scrub_profile.latency_buckets.total(), 1);
         assert_eq!(scrub_profile.seeked_frames, 1);
         assert_eq!(scrub_profile.session_reused_frames, 0);
         assert_eq!(scrub_profile.session_opened_frames, 1);
@@ -7036,6 +7177,8 @@ mod tests {
         assert_eq!(scrub_profile.queue_wait_total_us, 1_200);
         assert_eq!(scrub_profile.queue_wait_max_us, 1_200);
         assert_eq!(scrub_profile.queue_wait_last_us, 1_200);
+        assert_eq!(scrub_profile.queue_wait_buckets.le_10ms, 1);
+        assert_eq!(scrub_profile.queue_wait_buckets.total(), 1);
         assert_eq!(scrub_profile.canceled_jobs, 1);
         assert_eq!(scrub_profile.canceled_obsolete_jobs, 1);
         assert_eq!(scrub_profile.canceled_total_duration_us, 1_400);
@@ -7053,9 +7196,13 @@ mod tests {
         let still_profile = diagnostics.decode_access_mode_profiles.random_access_still;
         assert_eq!(still_profile.frames, 1);
         assert_eq!(still_profile.cache_hit_frames, 1);
+        assert_eq!(still_profile.latency_buckets.le_10ms, 1);
+        assert_eq!(still_profile.latency_buckets.total(), 1);
         assert_eq!(still_profile.queue_wait_total_us, 20);
         assert_eq!(still_profile.queue_wait_max_us, 20);
         assert_eq!(still_profile.queue_wait_last_us, 20);
+        assert_eq!(still_profile.queue_wait_buckets.le_10ms, 1);
+        assert_eq!(still_profile.queue_wait_buckets.total(), 1);
         assert_eq!(still_profile.canceled_jobs, 1);
         assert_eq!(still_profile.canceled_shutdown_jobs, 1);
         assert_eq!(still_profile.canceled_total_duration_us, 20);
@@ -7453,6 +7600,71 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_preview_access_mode_transitions"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
+        let slow_buckets = AppUiPreviewDecodeLatencyBuckets {
+            le_50ms: 1,
+            le_80ms: 19,
+            ..AppUiPreviewDecodeLatencyBuckets::default()
+        };
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 20,
+            decode_in_process_cpu_rgba_frames: 20,
+            decode_total_duration_us: 1_250_000,
+            decode_max_duration_us: 70_000,
+            decode_last_duration_us: 60_000,
+            decode_queue_wait_total_us: 1_200_000,
+            decode_queue_wait_max_us: 70_000,
+            decode_queue_wait_last_us: 60_000,
+            decode_current_queue_wait_max_us: 70_000,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 20,
+                    in_process_cpu_rgba_frames: 20,
+                    total_duration_us: 1_250_000,
+                    max_duration_us: 70_000,
+                    last_duration_us: 60_000,
+                    latency_buckets: slow_buckets,
+                    queue_wait_total_us: 1_200_000,
+                    queue_wait_max_us: 70_000,
+                    queue_wait_last_us: 60_000,
+                    queue_wait_buckets: slow_buckets,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-p95-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_scrub_cursor_p95_frame_us"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 80_000
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_scrub_cursor_queue_wait_p95_us"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 80_000
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_access_mode_over_budget"
+                && root.evidence.contains("p95_upper_bound_us=80000")
+                && root.evidence.contains("latency_buckets=")
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_access_mode_queue_wait_bound"
+                && root.evidence.contains("queue_wait_p95_upper_bound_us=80000")
+                && root.evidence.contains("queue_wait_buckets=")
+        }));
     }
 
     #[test]

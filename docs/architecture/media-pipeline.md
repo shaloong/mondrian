@@ -225,6 +225,12 @@ decoded-frame pressure, and stage-level timings. A slow preview report must
 identify the slowest access mode so engineers can distinguish playback locality
 failures from scrub seek latency, queue-lane contention, or exact still-frame
 random access costs.
+Each access-mode profile must also carry compact fixed latency buckets for
+successful decode duration and worker-queue wait. Reports derive a p95 upper
+bound from those buckets and emit per-mode p95 checks. This is intentionally a
+bounded diagnostic approximation, not an exact retained sample list: the JSONL
+should show whether real-media stalls are sustained across most frames or just
+single-frame spikes without growing unbounded UI telemetry state.
 The versioned report must emit access-mode-specific latency checks and root
 causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` regressions without reverse-engineering raw counters.
