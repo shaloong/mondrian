@@ -345,6 +345,7 @@ impl AppUiPreviewService {
             worker_queue: self.jobs.diagnostics(),
             worker_activity: self.worker_activity.snapshot(),
             scheduler,
+            playback_schedule: self.playback_schedule_diagnostics(),
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
             viewer_frame_cache_misses: self.metrics.viewer_frame_cache_misses.get(),
             viewer_frame_cache_entries: self.viewer_frame_cache.borrow().len(),
@@ -1230,6 +1231,52 @@ impl AppUiPreviewService {
         self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
+    fn playback_schedule_diagnostics(&self) -> AppUiPreviewPlaybackScheduleDiagnostics {
+        AppUiPreviewPlaybackScheduleDiagnostics {
+            last_current_deadline_budget_us: self.metrics.playback_current_deadline_budget_us.get(),
+            current_deadline_assignments: self.metrics.playback_current_deadline_assignments.get(),
+            current_deadline_missing_frame_rate: self
+                .metrics
+                .playback_current_deadline_missing_frame_rate
+                .get(),
+            forward_prefetch_horizon_us: MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US,
+            last_forward_prefetch_window_frames: self
+                .metrics
+                .playback_forward_prefetch_window_frames
+                .get(),
+            forward_prefetch_min_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+            forward_prefetch_max_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+            forward_prefetch_window_evaluations: self
+                .metrics
+                .playback_forward_prefetch_window_evaluations
+                .get(),
+            forward_prefetch_invalid_frame_rate: self
+                .metrics
+                .playback_forward_prefetch_invalid_frame_rate
+                .get(),
+        }
+    }
+
+    fn record_playback_current_deadline_budget(&self, budget_us: Option<u64>) {
+        match budget_us {
+            Some(budget_us) => {
+                self.metrics.playback_current_deadline_budget_us.set(Some(budget_us));
+                bump(&self.metrics.playback_current_deadline_assignments);
+            }
+            None => bump(&self.metrics.playback_current_deadline_missing_frame_rate),
+        }
+    }
+
+    fn record_playback_forward_prefetch_window(&self, window_frames: Option<usize>) {
+        match window_frames {
+            Some(window_frames) => {
+                self.metrics.playback_forward_prefetch_window_frames.set(Some(window_frames));
+                bump(&self.metrics.playback_forward_prefetch_window_evaluations);
+            }
+            None => bump(&self.metrics.playback_forward_prefetch_invalid_frame_rate),
+        }
+    }
+
     fn record_render_stage_durations(
         &self,
         total_duration_us: u64,
@@ -1580,6 +1627,29 @@ impl AppUiPreviewRenderStageDurations {
     }
 }
 
+/// Playback-clock scheduling contract observed by the app preview service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AppUiPreviewPlaybackScheduleDiagnostics {
+    /// Most recent current-frame playback deadline budget derived from sequence frame rate.
+    pub last_current_deadline_budget_us: Option<u64>,
+    /// Current playback requests that received a display deadline.
+    pub current_deadline_assignments: u64,
+    /// Current playback requests whose frame rate could not produce a valid deadline.
+    pub current_deadline_missing_frame_rate: u64,
+    /// Wall-clock horizon used to derive the forward prefetch window.
+    pub forward_prefetch_horizon_us: u64,
+    /// Most recent forward prefetch window derived from sequence frame rate.
+    pub last_forward_prefetch_window_frames: Option<usize>,
+    /// Minimum allowed forward prefetch window.
+    pub forward_prefetch_min_frames: usize,
+    /// Maximum allowed forward prefetch window.
+    pub forward_prefetch_max_frames: usize,
+    /// Playback prefetch passes whose frame rate produced a valid dynamic window.
+    pub forward_prefetch_window_evaluations: u64,
+    /// Playback prefetch passes skipped because frame rate could not produce a valid window.
+    pub forward_prefetch_invalid_frame_rate: u64,
+}
+
 /// Point-in-time preview service counters for local performance diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AppUiPreviewDiagnostics {
@@ -1783,6 +1853,8 @@ pub struct AppUiPreviewDiagnostics {
     pub worker_activity: PreviewWorkerActivityDiagnostics,
     /// Scheduler-side request, drop, completion, and pruning counters.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
+    /// Playback-clock deadline and forward-prefetch scheduling contract.
+    pub playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics,
     /// Final viewer preview frame cache hits.
     pub viewer_frame_cache_hits: u64,
     /// Final viewer preview frame cache misses.
@@ -2524,6 +2596,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub primary_bottleneck: AppUiPreviewDecodeBottleneck,
     /// Scheduler-side access-mode/drop/stale diagnostics captured with decode evidence.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
+    /// Playback-clock deadline and forward-prefetch scheduling contract.
+    pub playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics,
 }
 
 /// Dominant preview decode bottleneck inferred from stage diagnostics.
@@ -2549,7 +2623,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 17;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 18;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3016,6 +3090,20 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_preempted_by_current_cancellations",
             summary.canceled_prefetch_preempted_jobs,
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_playback_deadline_invalid_frame_rate",
+            summary.playback_schedule.current_deadline_missing_frame_rate,
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_prefetch_window_invalid_frame_rate",
+            summary.playback_schedule.forward_prefetch_invalid_frame_rate,
             0,
         );
         push_decode_warn_max_check(
@@ -3839,6 +3927,51 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "tune_preview_prefetch_deadline_or_proxy",
             "Inspect prefetch cancellation pressure, proxy readiness, and playback decode locality before increasing decode concurrency.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if summary.playback_schedule.current_deadline_missing_frame_rate > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_playback_deadline_invalid_frame_rate",
+            format!(
+                "current_deadline_missing_frame_rate={} current_deadline_assignments={} last_current_deadline_budget_us={:?}",
+                summary
+                    .playback_schedule
+                    .current_deadline_missing_frame_rate,
+                summary.playback_schedule.current_deadline_assignments,
+                summary.playback_schedule.last_current_deadline_budget_us
+            ),
+            "fix_sequence_playback_frame_rate_contract",
+            "Ensure playback sequences expose a valid frame rate so current-frame decode receives a display deadline.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if summary.playback_schedule.forward_prefetch_invalid_frame_rate > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_prefetch_window_invalid_frame_rate",
+            format!(
+                "forward_prefetch_invalid_frame_rate={} forward_prefetch_window_evaluations={} last_forward_prefetch_window_frames={:?} forward_prefetch_horizon_us={} forward_prefetch_min_frames={} forward_prefetch_max_frames={}",
+                summary
+                    .playback_schedule
+                    .forward_prefetch_invalid_frame_rate,
+                summary
+                    .playback_schedule
+                    .forward_prefetch_window_evaluations,
+                summary
+                    .playback_schedule
+                    .last_forward_prefetch_window_frames,
+                summary.playback_schedule.forward_prefetch_horizon_us,
+                summary.playback_schedule.forward_prefetch_min_frames,
+                summary.playback_schedule.forward_prefetch_max_frames
+            ),
+            "fix_sequence_prefetch_frame_rate_contract",
+            "Ensure playback prefetch derives its window from a valid sequence frame rate instead of silently disabling cache warming.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -4963,6 +5096,7 @@ impl AppUiPreviewDiagnostics {
             slowest_access_mode: self.decode_access_mode_profiles.slowest_access_mode(),
             primary_bottleneck,
             scheduler: self.scheduler,
+            playback_schedule: self.playback_schedule,
         })
     }
 
@@ -5740,9 +5874,10 @@ impl AppUiPreviewService {
         let prefetch_pressure = worker_queue
             .queued_prefetch_jobs
             .saturating_add(worker_activity.in_flight_prefetch_jobs);
-        let Some(prefetch_window_frames) =
-            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
-        else {
+        let prefetch_window_frames =
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate);
+        self.record_playback_forward_prefetch_window(prefetch_window_frames);
+        let Some(prefetch_window_frames) = prefetch_window_frames else {
             return;
         };
         let prefetch_slots_available = prefetch_window_frames.saturating_sub(prefetch_pressure);
@@ -6050,6 +6185,8 @@ impl AppUiPreviewService {
         playback_current_deadline_budget_us: Option<u64>,
     ) -> bool {
         let generation = self.current_generation.get();
+        let is_current_playback = priority == MediaPreviewRequestPriority::Current
+            && access_mode == PreviewDecodeAccessMode::PlaybackCursor;
         let should_enqueue_job = match self.scheduler.request(
             key.clone(),
             generation,
@@ -6057,6 +6194,11 @@ impl AppUiPreviewService {
             access_mode,
         ) {
             MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still } => {
+                if is_current_playback {
+                    self.record_playback_current_deadline_budget(
+                        playback_current_deadline_budget_us,
+                    );
+                }
                 if let Some(evicted_key) = evicted_prefetch {
                     let canceled = self.jobs.cancel_key(&evicted_key) as u64;
                     add_cell(&self.metrics.queue_canceled_jobs, canceled);
@@ -6085,6 +6227,11 @@ impl AppUiPreviewService {
                 );
                 if queued_update.priority_promoted {
                     bump(&self.metrics.queue_promoted_current_jobs);
+                }
+                if is_current_playback {
+                    self.record_playback_current_deadline_budget(
+                        playback_current_deadline_budget_us,
+                    );
                 }
                 access_mode_changed && !queued_update.updated
             }
@@ -6388,6 +6535,12 @@ struct AppUiPreviewMetrics {
     queue_pruned_obsolete_jobs: Cell<u64>,
     queue_promoted_current_jobs: Cell<u64>,
     worker_disconnected_drops: Cell<u64>,
+    playback_current_deadline_budget_us: Cell<Option<u64>>,
+    playback_current_deadline_assignments: Cell<u64>,
+    playback_current_deadline_missing_frame_rate: Cell<u64>,
+    playback_forward_prefetch_window_frames: Cell<Option<usize>>,
+    playback_forward_prefetch_window_evaluations: Cell<u64>,
+    playback_forward_prefetch_invalid_frame_rate: Cell<u64>,
     color_input_transform_calls: Cell<u64>,
     color_input_transform_pixels: Cell<u64>,
     color_output_transform_calls: Cell<u64>,
@@ -8433,6 +8586,85 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_access_mode_forward_decode_budget"));
+    }
+
+    #[test]
+    fn preview_playback_schedule_diagnostics_records_clock_contract() {
+        let service = AppUiPreviewService::new();
+
+        service.record_playback_current_deadline_budget(Some(33_333));
+        service.record_playback_forward_prefetch_window(Some(2));
+
+        let diagnostics = service.diagnostics().playback_schedule;
+        assert_eq!(diagnostics.last_current_deadline_budget_us, Some(33_333));
+        assert_eq!(diagnostics.current_deadline_assignments, 1);
+        assert_eq!(diagnostics.current_deadline_missing_frame_rate, 0);
+        assert_eq!(
+            diagnostics.forward_prefetch_horizon_us,
+            MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US
+        );
+        assert_eq!(diagnostics.last_forward_prefetch_window_frames, Some(2));
+        assert_eq!(
+            diagnostics.forward_prefetch_min_frames,
+            MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES
+        );
+        assert_eq!(
+            diagnostics.forward_prefetch_max_frames,
+            MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES
+        );
+        assert_eq!(diagnostics.forward_prefetch_window_evaluations, 1);
+        assert_eq!(diagnostics.forward_prefetch_invalid_frame_rate, 0);
+        service.shutdown();
+    }
+
+    #[test]
+    fn preview_decode_performance_report_warns_invalid_playback_clock_contract() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_canceled_jobs: 1,
+            playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+                current_deadline_missing_frame_rate: 1,
+                forward_prefetch_invalid_frame_rate: 1,
+                forward_prefetch_horizon_us: MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US,
+                forward_prefetch_min_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+                forward_prefetch_max_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+                ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-playback-clock-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_playback_deadline_invalid_frame_rate"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 1
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_prefetch_window_invalid_frame_rate"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 1
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_playback_deadline_invalid_frame_rate"
+                && root.evidence.contains("current_deadline_missing_frame_rate=1")
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_prefetch_window_invalid_frame_rate"
+                && root.evidence.contains("forward_prefetch_invalid_frame_rate=1")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "fix_sequence_playback_frame_rate_contract"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "fix_sequence_prefetch_frame_rate_contract"));
     }
 
     #[test]

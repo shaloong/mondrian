@@ -141,6 +141,13 @@ from the active sequence frame duration, with conservative min/max bounds, so
 slow playback at 24 fps and 60 fps playback are judged against different
 budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
 decode/drop policy, not as a reason to increase speculative prefetch.
+`preview_decode_report` schema v18 also includes `playback_schedule`, the
+app-owned playback-clock contract used by the scheduler. It records the last
+current-frame deadline budget, the dynamic forward-prefetch horizon/window, and
+invalid frame-rate counters. Checks
+`preview_decode_playback_deadline_invalid_frame_rate` and
+`preview_decode_prefetch_window_invalid_frame_rate` warn when a sequence frame
+rate prevents playback deadlines or prefetch cache warming from being derived.
 Prefetch preemption means the app protected visible current-frame work from
 in-flight playback speculation. Still preemption means deterministic still-frame
 work yielded to playback or scrub current-frame work. Both are scheduling

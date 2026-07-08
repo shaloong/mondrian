@@ -93,6 +93,11 @@ slow or long-GOP media. The configured forward window is derived from a
 wall-clock horizon and the active sequence frame rate, then capped before
 enqueueing; high frame-rate playback warms more timeline frames than 24/25/30
 fps playback without letting speculative work flood the bounded worker queue.
+Preview diagnostics expose this playback-clock contract as structured
+`playback_schedule` evidence, including the current-frame display deadline
+budget, the prefetch horizon/window, and invalid frame-rate counters. Invalid
+sequence frame-rate data must warn through diagnostics instead of silently
+removing playback deadlines or cache warming.
 When the prefetch backlog is below the forward window, scheduling must top up
 only the remaining queued-plus-in-flight prefetch job budget across the
 evaluated tracks and nested sequences, not enqueue a full new prefetch window
