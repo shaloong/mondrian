@@ -8,7 +8,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -86,6 +86,7 @@ pub struct AppUiPreviewService {
     external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
     next_gpu_preview_candidate_id: Cell<u64>,
     scheduler: MediaPreviewScheduler,
+    worker_activity: Arc<PreviewWorkerActivity>,
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
     current_frame_pending: Cell<bool>,
@@ -115,6 +116,7 @@ impl AppUiPreviewService {
         let (job_tx, job_rx) = media_preview_job_queue(MEDIA_PREVIEW_JOB_QUEUE_CAPACITY);
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let scheduler = MediaPreviewScheduler::default();
+        let worker_activity = Arc::new(PreviewWorkerActivity::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut decode_worker_count = 0;
         let mut workers = Vec::new();
@@ -122,6 +124,7 @@ impl AppUiPreviewService {
             let worker_jobs = job_rx.clone();
             let worker_results = result_tx.clone();
             let worker_scheduler = scheduler.clone();
+            let worker_activity = Arc::clone(&worker_activity);
             let worker_shutdown = Arc::clone(&shutdown);
             let worker_lane = media_preview_worker_lane(worker_index, worker_count);
             match std::thread::Builder::new()
@@ -132,6 +135,7 @@ impl AppUiPreviewService {
                         worker_jobs,
                         worker_results,
                         worker_scheduler,
+                        worker_activity,
                         worker_shutdown,
                     )
                 }) {
@@ -163,6 +167,7 @@ impl AppUiPreviewService {
             external_viewer_frame: RefCell::new(None),
             next_gpu_preview_candidate_id: Cell::new(0),
             scheduler,
+            worker_activity,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             current_generation: Cell::new(0),
             current_frame_pending: Cell::new(false),
@@ -330,6 +335,7 @@ impl AppUiPreviewService {
             queue_promoted_current_jobs: self.metrics.queue_promoted_current_jobs.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
             worker_queue: self.jobs.diagnostics(),
+            worker_activity: self.worker_activity.snapshot(),
             scheduler,
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
             viewer_frame_cache_misses: self.metrics.viewer_frame_cache_misses.get(),
@@ -1759,6 +1765,8 @@ pub struct AppUiPreviewDiagnostics {
     pub worker_disconnected_drops: u64,
     /// Current worker transport queue depth grouped by scheduling contract.
     pub worker_queue: MediaPreviewJobQueueDiagnostics,
+    /// Current preview worker in-flight decode activity grouped by scheduling contract.
+    pub worker_activity: PreviewWorkerActivityDiagnostics,
     /// Scheduler-side request, drop, completion, and pruning counters.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
     /// Final viewer preview frame cache hits.
@@ -1848,6 +1856,23 @@ pub struct AppUiPreviewDiagnostics {
         crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
     /// GPU compositing capability diagnostics.
     pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
+}
+
+/// Point-in-time preview worker decode activity grouped by scheduling contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewWorkerActivityDiagnostics {
+    /// Decode jobs currently running in preview workers.
+    pub in_flight_jobs: usize,
+    /// Current-frame decode jobs currently running in preview workers.
+    pub in_flight_current_jobs: usize,
+    /// Prefetch decode jobs currently running in preview workers.
+    pub in_flight_prefetch_jobs: usize,
+    /// Playback cursor decode jobs currently running in preview workers.
+    pub in_flight_playback_cursor_jobs: usize,
+    /// Scrub cursor decode jobs currently running in preview workers.
+    pub in_flight_scrub_cursor_jobs: usize,
+    /// Random-access still-frame decode jobs currently running in preview workers.
+    pub in_flight_random_access_still_jobs: usize,
 }
 
 /// Structured color-management rejection captured from the viewer preview path.
@@ -2422,6 +2447,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub worker_disconnected_drops: u64,
     /// Current worker transport queue depth grouped by scheduling contract.
     pub worker_queue: MediaPreviewJobQueueDiagnostics,
+    /// Current preview worker in-flight decode activity grouped by scheduling contract.
+    pub worker_activity: PreviewWorkerActivityDiagnostics,
     /// Decode requests that required a seek.
     pub seeked_frames: u64,
     /// Total decoded frames consumed before frame selection.
@@ -2467,7 +2494,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 16;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 17;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3573,7 +3600,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
@@ -3587,6 +3614,12 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_playback_cursor_jobs,
                 summary.worker_queue.queued_scrub_cursor_jobs,
                 summary.worker_queue.queued_random_access_still_jobs,
+                summary.worker_activity.in_flight_jobs,
+                summary.worker_activity.in_flight_current_jobs,
+                summary.worker_activity.in_flight_prefetch_jobs,
+                summary.worker_activity.in_flight_playback_cursor_jobs,
+                summary.worker_activity.in_flight_scrub_cursor_jobs,
+                summary.worker_activity.in_flight_random_access_still_jobs,
                 summary.queue_full_drops,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
@@ -3727,7 +3760,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_preempted_by_current",
             format!(
-                "canceled_prefetch_preempted_jobs={} playback_prefetch_preempted_jobs={} scrub_prefetch_preempted_jobs={} random_access_still_prefetch_preempted_jobs={} queued_current_jobs={} queued_prefetch_jobs={}",
+                "canceled_prefetch_preempted_jobs={} playback_prefetch_preempted_jobs={} scrub_prefetch_preempted_jobs={} random_access_still_prefetch_preempted_jobs={} queued_current_jobs={} queued_prefetch_jobs={} in_flight_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={}",
                 summary.canceled_prefetch_preempted_jobs,
                 summary
                     .access_mode_profiles
@@ -3742,7 +3775,10 @@ fn push_preview_decode_root_causes_and_actions(
                     .random_access_still
                     .canceled_prefetch_preempted_jobs,
                 summary.worker_queue.queued_current_jobs,
-                summary.worker_queue.queued_prefetch_jobs
+                summary.worker_queue.queued_prefetch_jobs,
+                summary.worker_activity.in_flight_jobs,
+                summary.worker_activity.in_flight_prefetch_jobs,
+                summary.worker_activity.in_flight_playback_cursor_jobs
             ),
             "reduce_speculative_prefetch_pressure",
             "Throttle playback prefetch when visible current-frame work is waiting; prefetch should yield before it consumes the only interactive decode opportunity.",
@@ -3756,7 +3792,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_still_preempted_by_realtime_current",
             format!(
-                "canceled_still_preempted_jobs={} random_access_still_preempted_jobs={} queued_current_jobs={} queued_scrub_cursor_jobs={} queued_playback_cursor_jobs={} queued_random_access_still_jobs={}",
+                "canceled_still_preempted_jobs={} random_access_still_preempted_jobs={} queued_current_jobs={} queued_scrub_cursor_jobs={} queued_playback_cursor_jobs={} queued_random_access_still_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_scrub_cursor_jobs={} in_flight_playback_cursor_jobs={} in_flight_random_access_still_jobs={}",
                 summary.canceled_still_preempted_jobs,
                 summary
                     .access_mode_profiles
@@ -3765,7 +3801,12 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_scrub_cursor_jobs,
                 summary.worker_queue.queued_playback_cursor_jobs,
-                summary.worker_queue.queued_random_access_still_jobs
+                summary.worker_queue.queued_random_access_still_jobs,
+                summary.worker_activity.in_flight_jobs,
+                summary.worker_activity.in_flight_current_jobs,
+                summary.worker_activity.in_flight_scrub_cursor_jobs,
+                summary.worker_activity.in_flight_playback_cursor_jobs,
+                summary.worker_activity.in_flight_random_access_still_jobs
             ),
             "preempt_still_decode_for_realtime_preview",
             "Keep random-access still decode from occupying the only interactive lane when playback or scrub current-frame work is waiting.",
@@ -3914,7 +3955,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
+                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
                 summary.prefetch_skipped_current_pending,
@@ -3926,6 +3967,12 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_playback_cursor_jobs,
                 summary.worker_queue.queued_scrub_cursor_jobs,
                 summary.worker_queue.queued_random_access_still_jobs,
+                summary.worker_activity.in_flight_jobs,
+                summary.worker_activity.in_flight_current_jobs,
+                summary.worker_activity.in_flight_prefetch_jobs,
+                summary.worker_activity.in_flight_playback_cursor_jobs,
+                summary.worker_activity.in_flight_scrub_cursor_jobs,
+                summary.worker_activity.in_flight_random_access_still_jobs,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
                 summary.queue_canceled_jobs,
@@ -4793,6 +4840,7 @@ impl AppUiPreviewDiagnostics {
             queue_promoted_current_jobs: self.queue_promoted_current_jobs,
             worker_disconnected_drops: self.worker_disconnected_drops,
             worker_queue: self.worker_queue,
+            worker_activity: self.worker_activity,
             seeked_frames: self.decode_seeked_frames,
             decoded_frame_count: self.decode_decoded_frame_count,
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
@@ -5401,6 +5449,92 @@ struct MediaPreviewResult {
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
+}
+
+#[derive(Default)]
+struct PreviewWorkerActivity {
+    in_flight_jobs: AtomicUsize,
+    in_flight_current_jobs: AtomicUsize,
+    in_flight_prefetch_jobs: AtomicUsize,
+    in_flight_playback_cursor_jobs: AtomicUsize,
+    in_flight_scrub_cursor_jobs: AtomicUsize,
+    in_flight_random_access_still_jobs: AtomicUsize,
+}
+
+impl PreviewWorkerActivity {
+    fn begin(
+        self: &Arc<Self>,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> PreviewWorkerActivityLease {
+        self.in_flight_jobs.fetch_add(1, Ordering::AcqRel);
+        match priority {
+            MediaPreviewRequestPriority::Current => {
+                self.in_flight_current_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+            MediaPreviewRequestPriority::Prefetch => {
+                self.in_flight_prefetch_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.in_flight_playback_cursor_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.in_flight_scrub_cursor_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.in_flight_random_access_still_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        PreviewWorkerActivityLease { activity: Arc::clone(self), priority, access_mode }
+    }
+
+    fn snapshot(&self) -> PreviewWorkerActivityDiagnostics {
+        PreviewWorkerActivityDiagnostics {
+            in_flight_jobs: self.in_flight_jobs.load(Ordering::Acquire),
+            in_flight_current_jobs: self.in_flight_current_jobs.load(Ordering::Acquire),
+            in_flight_prefetch_jobs: self.in_flight_prefetch_jobs.load(Ordering::Acquire),
+            in_flight_playback_cursor_jobs: self
+                .in_flight_playback_cursor_jobs
+                .load(Ordering::Acquire),
+            in_flight_scrub_cursor_jobs: self.in_flight_scrub_cursor_jobs.load(Ordering::Acquire),
+            in_flight_random_access_still_jobs: self
+                .in_flight_random_access_still_jobs
+                .load(Ordering::Acquire),
+        }
+    }
+}
+
+struct PreviewWorkerActivityLease {
+    activity: Arc<PreviewWorkerActivity>,
+    priority: MediaPreviewRequestPriority,
+    access_mode: PreviewDecodeAccessMode,
+}
+
+impl Drop for PreviewWorkerActivityLease {
+    fn drop(&mut self) {
+        self.activity.in_flight_jobs.fetch_sub(1, Ordering::AcqRel);
+        match self.priority {
+            MediaPreviewRequestPriority::Current => {
+                self.activity.in_flight_current_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+            MediaPreviewRequestPriority::Prefetch => {
+                self.activity.in_flight_prefetch_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        match self.access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.activity.in_flight_playback_cursor_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.activity.in_flight_scrub_cursor_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.activity.in_flight_random_access_still_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
 }
 
 impl AppUiPreviewService {
@@ -6659,6 +6793,7 @@ fn media_preview_worker(
     jobs: MediaPreviewJobQueueReceiver,
     results: mpsc::Sender<MediaPreviewResult>,
     scheduler: MediaPreviewScheduler,
+    worker_activity: Arc<PreviewWorkerActivity>,
     shutdown: Arc<AtomicBool>,
 ) {
     while let Some(job) = jobs.recv_for_worker(lane) {
@@ -6669,6 +6804,7 @@ fn media_preview_worker(
         if !scheduler.should_decode(&job.key, job.access_mode) {
             continue;
         }
+        let _activity_lease = worker_activity.begin(job.priority, job.access_mode);
         let cancel_key = job.key.clone();
         let cancel_generation = job.generation;
         let cancel_priority = job.priority;
@@ -8277,6 +8413,14 @@ mod tests {
                 queued_random_access_still_jobs: 1,
                 closed: false,
             },
+            worker_activity: PreviewWorkerActivityDiagnostics {
+                in_flight_jobs: 2,
+                in_flight_current_jobs: 1,
+                in_flight_prefetch_jobs: 1,
+                in_flight_playback_cursor_jobs: 1,
+                in_flight_scrub_cursor_jobs: 1,
+                ..PreviewWorkerActivityDiagnostics::default()
+            },
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
@@ -8352,6 +8496,11 @@ mod tests {
         assert_eq!(summary.worker_queue.queued_playback_cursor_jobs, 1);
         assert_eq!(summary.worker_queue.queued_scrub_cursor_jobs, 1);
         assert_eq!(summary.worker_queue.queued_random_access_still_jobs, 1);
+        assert_eq!(summary.worker_activity.in_flight_jobs, 2);
+        assert_eq!(summary.worker_activity.in_flight_current_jobs, 1);
+        assert_eq!(summary.worker_activity.in_flight_prefetch_jobs, 1);
+        assert_eq!(summary.worker_activity.in_flight_playback_cursor_jobs, 1);
+        assert_eq!(summary.worker_activity.in_flight_scrub_cursor_jobs, 1);
         assert_eq!(summary.scheduler.dropped_pending_window_requests, 2);
         assert!(report.root_causes.iter().any(|root| root.code
             == "preview_decode_queue_wait_bound"
@@ -8361,6 +8510,11 @@ mod tests {
             && root.evidence.contains("queued_playback_cursor_jobs=1")
             && root.evidence.contains("queued_scrub_cursor_jobs=1")
             && root.evidence.contains("queued_random_access_still_jobs=1")
+            && root.evidence.contains("in_flight_jobs=2")
+            && root.evidence.contains("in_flight_current_jobs=1")
+            && root.evidence.contains("in_flight_prefetch_jobs=1")
+            && root.evidence.contains("in_flight_playback_cursor_jobs=1")
+            && root.evidence.contains("in_flight_scrub_cursor_jobs=1")
             && root.evidence.contains("queue_evicted_prefetch_jobs=1")
             && root.evidence.contains("queue_canceled_jobs=3")
             && root.evidence.contains("queue_pruned_obsolete_jobs=2")
@@ -11523,6 +11677,33 @@ mod tests {
         assert_eq!(service.media_cache.borrow().len(), 0);
         assert_eq!(service.media_failures.borrow().len(), 0);
         service.shutdown();
+    }
+
+    #[test]
+    fn preview_worker_activity_tracks_in_flight_jobs_by_access_mode() {
+        let activity = Arc::new(PreviewWorkerActivity::default());
+        {
+            let _playback = activity.begin(
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+            );
+            let _scrub = activity.begin(
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            );
+            let snapshot = activity.snapshot();
+            assert_eq!(snapshot.in_flight_jobs, 2);
+            assert_eq!(snapshot.in_flight_current_jobs, 1);
+            assert_eq!(snapshot.in_flight_prefetch_jobs, 1);
+            assert_eq!(snapshot.in_flight_playback_cursor_jobs, 1);
+            assert_eq!(snapshot.in_flight_scrub_cursor_jobs, 1);
+            assert_eq!(snapshot.in_flight_random_access_still_jobs, 0);
+        }
+
+        assert_eq!(
+            activity.snapshot(),
+            PreviewWorkerActivityDiagnostics::default()
+        );
     }
 
     #[test]

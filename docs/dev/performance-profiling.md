@@ -205,7 +205,12 @@ The same report includes current worker-queue depth split by priority and access
 mode (`queued_current_jobs`, `queued_prefetch_jobs`,
 `queued_playback_cursor_jobs`, `queued_scrub_cursor_jobs`, and
 `queued_random_access_still_jobs`) so active transport backlog can be separated
-from codec, seek, or CPU RGBA boundary cost before tuning worker counts.
+from codec, seek, or CPU RGBA boundary cost before tuning worker counts. It also
+includes in-flight worker activity (`in_flight_current_jobs`,
+`in_flight_prefetch_jobs`, `in_flight_playback_cursor_jobs`,
+`in_flight_scrub_cursor_jobs`, and `in_flight_random_access_still_jobs`) so a
+slow report can distinguish jobs waiting for a lane from workers currently
+occupied by playback, scrub, or still-frame decode.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

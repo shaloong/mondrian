@@ -246,7 +246,12 @@ depth split by priority and access mode (`queued_current_jobs`,
 `queued_prefetch_jobs`, `queued_playback_cursor_jobs`,
 `queued_scrub_cursor_jobs`, and `queued_random_access_still_jobs`) so a slow
 preview report can distinguish active queue backlog from codec/decode cost
-without inspecting private queue internals.
+without inspecting private queue internals. The app preview layer must also
+expose in-flight worker activity split by the same priority and access-mode
+contracts (`in_flight_current_jobs`, `in_flight_prefetch_jobs`,
+`in_flight_playback_cursor_jobs`, `in_flight_scrub_cursor_jobs`, and
+`in_flight_random_access_still_jobs`) so diagnostics can separate queued backlog
+from workers actively occupied by playback, scrub, or exact still-frame decode.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
 end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,
