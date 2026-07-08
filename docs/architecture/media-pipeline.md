@@ -257,8 +257,11 @@ App media preview smokes must generate real samples for both active
 `ScrubCursor` playhead dragging and settled `RandomAccessStillFrame` requests;
 coverage is incomplete if the report merely defines both profiles. A common
 preview media smoke must fail when either access mode has zero successful
-profile samples, because cached-only coverage cannot prove the requested
-decode contract reached the media layer.
+profile samples. It must also fail when a required access mode is represented
+only by process-global `PreviewCacheHit` samples, because a cross-mode cache hit
+does not prove that mode's FFmpeg/session policy actually ran. Playback
+session-ring hits count as mode-local playback evidence; the process-global
+preview cache does not.
 Generated-fixture and external-real-media smokes must share the same
 access-mode probe and validation helpers. The external path exists to run 4K
 HEVC/HDR and camera-original samples through the exact same `ScrubCursor` and

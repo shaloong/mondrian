@@ -230,11 +230,20 @@ fn preview_decode_required_access_mode_failures(
             "preview_decode_playback_cursor_sampled" => {
                 failures.push("preview_decode_playback_cursor_not_sampled");
             }
+            "preview_decode_playback_cursor_mode_local_sampled" => {
+                failures.push("preview_decode_playback_cursor_cache_only");
+            }
             "preview_decode_scrub_cursor_sampled" => {
                 failures.push("preview_decode_scrub_cursor_not_sampled");
             }
+            "preview_decode_scrub_cursor_mode_local_sampled" => {
+                failures.push("preview_decode_scrub_cursor_cache_only");
+            }
             "preview_decode_random_access_still_sampled" => {
                 failures.push("preview_decode_random_access_still_not_sampled");
+            }
+            "preview_decode_random_access_still_mode_local_sampled" => {
+                failures.push("preview_decode_random_access_still_cache_only");
             }
             _ => {}
         }
@@ -1866,6 +1875,34 @@ fn preview_media_decode_access_mode_coverage_passes_with_scrub_and_still_samples
     );
 
     assert!(preview_decode_required_access_mode_failures(&report).is_empty());
+}
+
+#[test]
+fn preview_media_decode_access_mode_coverage_rejects_cache_only_samples() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 1,
+        decode_cache_hit_frames: 1,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                cache_hit_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report_with_required_access_modes(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-access-mode-cache-only-coverage-test",
+        50_000,
+        &[PreviewDecodeAccessMode::ScrubCursor],
+    );
+
+    assert_eq!(
+        preview_decode_required_access_mode_failures(&report),
+        vec!["preview_decode_scrub_cursor_cache_only"]
+    );
 }
 
 #[test]

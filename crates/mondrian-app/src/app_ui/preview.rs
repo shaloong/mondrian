@@ -2010,6 +2010,10 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
 }
 
 impl AppUiPreviewDecodeAccessModeProfile {
+    fn mode_local_evidence_frames(self) -> u64 {
+        self.frames.saturating_sub(self.cache_hit_frames)
+    }
+
     fn record(&mut self, diagnostics: PreviewDecodeDiagnostics) {
         self.frames = self.frames.saturating_add(1);
         match diagnostics.path {
@@ -2344,7 +2348,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 7;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 8;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3109,6 +3113,14 @@ fn push_preview_decode_access_mode_coverage_checks(
             preview_decode_access_mode_coverage_code(*access_mode),
             profile.frames > 0,
         );
+        if profile.frames > 0 {
+            push_decode_bool_check(
+                checks,
+                AppUiPreviewDecodePerformanceArea::CaptureIntegrity,
+                preview_decode_access_mode_local_coverage_code(*access_mode),
+                profile.mode_local_evidence_frames() > 0,
+            );
+        }
     }
 }
 
@@ -3172,6 +3184,20 @@ fn preview_decode_access_mode_coverage_code(access_mode: PreviewDecodeAccessMode
     }
 }
 
+fn preview_decode_access_mode_local_coverage_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_mode_local_sampled"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_mode_local_sampled",
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_mode_local_sampled"
+        }
+    }
+}
+
 fn push_preview_decode_root_causes_and_actions(
     summary: AppUiPreviewDecodePerformanceSummary,
     required_access_modes: &[PreviewDecodeAccessMode],
@@ -3199,6 +3225,27 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "exercise_required_preview_access_modes",
             "Drive this perf profile through every required preview access mode before treating the report as representative.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+    for access_mode in required_access_modes {
+        let profile = summary.access_mode_profiles.profile_for(*access_mode);
+        if profile.frames == 0 || profile.mode_local_evidence_frames() > 0 {
+            continue;
+        }
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::CaptureIntegrity,
+            "preview_decode_required_access_mode_cache_only",
+            format!(
+                "access_mode={} frames={} cache_hit_frames={} mode_local_evidence_frames=0",
+                access_mode.as_str(),
+                profile.frames,
+                profile.cache_hit_frames
+            ),
+            "exercise_required_preview_access_modes_without_global_cache",
+            "Drive required preview access modes through mode-local decode evidence; process-global cache hits alone do not prove the access-mode contract.",
             AppUiPreviewDecodePerformanceSeverity::Fail,
         );
     }
@@ -7375,6 +7422,84 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "exercise_required_preview_access_modes"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_rejects_cache_only_required_access_mode() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_cache_hit_frames: 1,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    cache_hit_frames: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report_with_required_access_modes(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-required-cache-only-test",
+            50_000,
+            &[PreviewDecodeAccessMode::ScrubCursor],
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_scrub_cursor_sampled"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_scrub_cursor_mode_local_sampled"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 0
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_required_access_mode_cache_only"
+                && root.evidence.contains("access_mode=ScrubCursor")
+                && root.evidence.contains("cache_hit_frames=1")
+        }));
+        assert!(report.actions.iter().any(|action| {
+            action.code == "exercise_required_preview_access_modes_without_global_cache"
+        }));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_accepts_playback_ring_as_mode_local_evidence() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_playback_session_ring_hit_frames: 1,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    playback_session_ring_hit_frames: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report_with_required_access_modes(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-required-playback-ring-test",
+            50_000,
+            &[PreviewDecodeAccessMode::PlaybackCursor],
+        );
+
+        assert_ne!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_playback_cursor_mode_local_sampled"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+                && check.observed == 1
+        }));
+        assert!(!report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_required_access_mode_cache_only"));
     }
 
     #[test]
