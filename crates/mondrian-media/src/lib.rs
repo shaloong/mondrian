@@ -9,6 +9,7 @@
 
 pub mod audio;
 pub mod decoder;
+mod ffmpeg_runtime;
 pub mod info;
 pub mod multilevel_cache;
 pub mod preview;

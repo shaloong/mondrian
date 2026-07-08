@@ -862,14 +862,30 @@ impl SequenceSettings {
             output_color_space,
         );
 
-        // Auto-populate OCIO display/view from config defaults.
+        // Auto-populate OCIO display/view from the resolved engine config.
+        //
+        // Do not call OCIO's process-global current config before Mondrian has
+        // explicitly loaded the selected source. Otherwise OCIO may probe
+        // `$OCIO` on its own and print "Color management disabled" even though
+        // Mondrian Standard should use the embedded default config.
         let (ocio_display, ocio_view) = if matches!(
             engine,
             ColorEngine::MondrianSmart | ColorEngine::Ocio { .. }
         ) {
-            mondrian_core::ocio_default_display_view()
-                .map(|(d, v)| (Some(d), Some(v)))
-                .unwrap_or((None, None))
+            match engine.ensure_loaded() {
+                Ok(()) => mondrian_core::ocio_default_display_view()
+                    .map(|(d, v)| (Some(d), Some(v)))
+                    .unwrap_or((None, None)),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "mondrian::color",
+                        engine = engine.name(),
+                        reason = %err,
+                        "preview OCIO display/view resolution failed"
+                    );
+                    (None, None)
+                }
+            }
         } else {
             (None, None)
         };
@@ -2166,6 +2182,18 @@ mod tests {
         // Default policy is None, so no delivery view is resolved.
         assert_eq!(ctx.ocio_display, None);
         assert_eq!(ctx.ocio_view, None);
+    }
+
+    #[test]
+    fn mondrian_smart_preview_context_loads_default_ocio_display_view() {
+        let settings = SequenceSettings::default();
+        let ctx = settings
+            .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
+
+        assert_eq!(ctx.engine, ColorEngine::MondrianSmart);
+        assert!(ctx.ocio_display.is_some());
+        assert!(ctx.ocio_view.is_some());
+        assert!(mondrian_core::mondrian_default_ocio_available());
     }
 
     #[test]

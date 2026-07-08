@@ -2208,38 +2208,7 @@ fn preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode(
 }
 
 fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
-    static INIT_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
-    let init = INIT_RESULT.get_or_init(|| {
-        let log_level = std::env::var("MONDRIAN_FFMPEG_LOG_LEVEL")
-            .ok()
-            .map(|value| value.to_ascii_lowercase())
-            .and_then(|value| match value.as_str() {
-                "quiet" => Some(ffmpeg::ffi::AV_LOG_QUIET),
-                "panic" => Some(ffmpeg::ffi::AV_LOG_PANIC),
-                "fatal" => Some(ffmpeg::ffi::AV_LOG_FATAL),
-                "error" => Some(ffmpeg::ffi::AV_LOG_ERROR),
-                "warning" => Some(ffmpeg::ffi::AV_LOG_WARNING),
-                "info" => Some(ffmpeg::ffi::AV_LOG_INFO),
-                "verbose" => Some(ffmpeg::ffi::AV_LOG_VERBOSE),
-                "debug" => Some(ffmpeg::ffi::AV_LOG_DEBUG),
-                "trace" => Some(ffmpeg::ffi::AV_LOG_TRACE),
-                _ => None,
-            })
-            .unwrap_or(ffmpeg::ffi::AV_LOG_ERROR);
-
-        unsafe {
-            ffmpeg::ffi::av_log_set_level(log_level);
-        }
-
-        ffmpeg::init().map_err(|e| format!("{e}"))
-    });
-    match init {
-        Ok(()) => Ok(()),
-        Err(reason) => Err(MondrianError::MediaOpen {
-            path: path.display().to_string(),
-            reason: format!("ffmpeg init failed: {reason}"),
-        }),
-    }
+    crate::ffmpeg_runtime::ensure_ffmpeg_initialized(path)
 }
 
 fn try_decode_with_external_ffmpeg_cpu_rgba(

@@ -598,6 +598,12 @@ media file fingerprint, not by path alone. Proxy regeneration finalizes fresh
 media at the same proxy path, so same-path cache hits or reused FFmpeg sessions
 are valid only while file length and modification timestamp still match the
 fingerprint captured when the session/cache entry was created.
+FFmpeg's default app log level is fatal for product preview decode. Codec-level
+warnings and recoverable decoder errors, such as HEVC reference-frame messages
+during aggressive seek/scrub, must not leak directly to the user terminal as the
+primary diagnostic channel. Developers can opt into noisier FFmpeg output with
+`MONDRIAN_FFMPEG_LOG_LEVEL`; product health should use structured decode
+diagnostics and explicit frame failure/cancellation reasons instead.
 Preview path resolution already probes the source/proxy file identity; app
 workers must forward that `PreviewFileFingerprint` into the media decode
 boundary instead of making the decode worker repeat the filesystem metadata

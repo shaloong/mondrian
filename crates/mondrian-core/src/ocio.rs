@@ -1428,6 +1428,9 @@ fn apply_cpu_processor_float(cpu: &CPUProcessor, data: &mut [f32]) {
 
 /// Return the list of display names from the current OCIO config.
 pub fn ocio_display_names() -> Vec<String> {
+    if !ocio_available() {
+        return Vec::new();
+    }
     let Some(config) = ocio_rs::current_config() else {
         return Vec::new();
     };
@@ -1437,6 +1440,9 @@ pub fn ocio_display_names() -> Vec<String> {
 
 /// Return the list of view names for a given display.
 pub fn ocio_view_names(display: &str) -> Vec<String> {
+    if !ocio_available() {
+        return Vec::new();
+    }
     let Some(config) = ocio_rs::current_config() else {
         return Vec::new();
     };
@@ -1446,12 +1452,18 @@ pub fn ocio_view_names(display: &str) -> Vec<String> {
 
 /// Return the default view for a display from the current OCIO config.
 pub fn ocio_default_view_for_display(display: &str) -> Option<String> {
+    if !ocio_available() {
+        return None;
+    }
     let config = ocio_rs::current_config()?;
     config.default_view(display)
 }
 
 /// Return the default display / view pair from the current OCIO config.
 pub fn ocio_default_display_view() -> Option<(String, String)> {
+    if !ocio_available() {
+        return None;
+    }
     let config = ocio_rs::current_config()?;
     let display = config.default_display()?;
     let view = config.default_view(&display)?;

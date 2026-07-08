@@ -438,6 +438,13 @@ contexts, the delivery view is resolved from `ExportDeliveryViewPolicy` — the 
 config defaults are NOT automatically used as export delivery views. Absence of a
 delivery view in the export context is valid when no policy is configured; it
 triggers a fail-closed diagnostic when tone mapping is requested.
+Mondrian Standard preview contexts must explicitly load the embedded
+`mondrian_default_ocio_v1` config before resolving the default display/view.
+They must not call OCIO's process-global current-config query while Mondrian's
+own OCIO state is empty, because that lets OCIO probe `$OCIO` independently and
+print "Color management disabled" even though Standard mode is supposed to use
+the bundled config. Explicit environment OCIO remains fail-closed when `$OCIO`
+is not configured.
 Preview cache keys and timeline color diagnostics treat display/view as part of
 the effective presentation context. A display/view change must invalidate cached
 viewer frames even when the output `ColorSpace` enum is unchanged.

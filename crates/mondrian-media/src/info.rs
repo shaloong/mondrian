@@ -910,10 +910,7 @@ impl MediaInfo {
 
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-        ffmpeg::init().map_err(|e| mondrian_core::MondrianError::MediaOpen {
-            path: path.display().to_string(),
-            reason: format!("ffmpeg init failed: {e}"),
-        })?;
+        crate::ffmpeg_runtime::ensure_ffmpeg_initialized(path)?;
 
         let input =
             ffmpeg::format::input(path).map_err(|e| mondrian_core::MondrianError::MediaOpen {
