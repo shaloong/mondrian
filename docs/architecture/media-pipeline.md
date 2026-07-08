@@ -131,6 +131,15 @@ preserves still-frame correctness while preventing latest-wins scrubbing from
 spending the same long-GOP CPU budget as deterministic extraction, and leaves a
 clear replacement point for future hardware-resident playback and low-latency
 scrub backends.
+Each in-process preview decode session also maintains a session-local,
+incremental keyframe seek index from video packet metadata observed during real
+decode work. The index may bound later seeks to an already-known keyframe
+anchor, but it must not perform a blocking whole-file scan on first frame or
+pretend that unknown GOP structure is known. This is a CPU fallback bridge
+toward a real GOP/keyframe map: future probe-backed indexes and hardware
+decode session adapters should replace the evidence source behind the media
+request boundary, while preserving the same diagnostics for availability,
+observed keyframes/packets, and whether a seek actually used an index anchor.
 App, export, and thumbnail callers submit a `PreviewDecodeRgbaRequest` to the
 media preview decode boundary instead of matching on `PreviewDecodeAccessMode`
 or calling mode-specific FFmpeg helpers. Access-mode routing, session
@@ -262,10 +271,11 @@ blaming codec throughput, color conversion, or GPU upload.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
 end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,
-decoded-frame pressure, and stage-level timings. A slow preview report must
-identify the slowest access mode so engineers can distinguish playback locality
-failures from scrub seek latency, queue-lane contention, or exact still-frame
-random access costs.
+session-local seek-index availability/use, decoded-frame pressure, and
+stage-level timings. A slow preview report must identify the slowest access mode
+so engineers can distinguish playback locality failures from scrub seek latency,
+missing GOP/index evidence, queue-lane contention, or exact still-frame random
+access costs.
 Slowest-frame evidence must stay frame-local. `max_frame_stage_durations`,
 `max_frame_queue_wait_us`, and `max_frame_bottleneck` are captured from the same
 successful decode result; `queue_wait_max_us` remains an independent worker
@@ -426,10 +436,11 @@ Every `RgbaFrame` returned by the preview decode boundary carries
 `PreviewDecodeDiagnostics`: concrete path (`InProcessFfmpegCpuRgba`,
 `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`), elapsed microseconds, cache-hit
 status, requested access mode, external-process status, CPU-residency evidence,
-seek status, requested seek strategy, decoded frame count, in-process FFmpeg
-decoder threading mode/count, and stage-level wall-clock timings for session
-open, cache lookup, seek, packet/decode, software scaling, RGBA copy, and the
-experimental external-process path.
+seek status, requested seek strategy, session-local seek-index availability and
+anchor-use evidence, decoded frame count, in-process FFmpeg decoder threading
+mode/count, and stage-level wall-clock timings for session open, cache lookup,
+seek, packet/decode, software scaling, RGBA copy, and the experimental
+external-process path.
 App-level preview diagnostics aggregate those fields so playback/perf JSON can
 show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
 single-thread decode-bound, software-scale/copy-bound, worker-queue-bound, or

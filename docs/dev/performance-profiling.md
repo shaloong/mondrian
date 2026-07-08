@@ -118,6 +118,16 @@ must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
 should fail before anyone tunes codec threads, proxy thresholds, color, or
 renderer code.
+The same profiles expose session-local seek-index counters:
+`seek_index_available_frames`, `seek_index_used_frames`,
+`seek_index_keyframes_max`, and `seek_index_observed_packets_max`. Slow scrub
+with `seeked_frames > 0` and no `seek_index_available_frames` means the decoder
+is seeking without observed keyframe/GOP evidence and should be improved by
+index/proxy/hardware-decode work, not by hiding the problem in UI timeouts.
+`seek_index_available_frames > 0` with low `seek_index_used_frames` means the
+current bounded-any seek window could not use the known anchors; inspect
+`seek_us`, `packet_decode_us`, and the seek-window policy before increasing
+worker counts.
 Cancellation counters are also split inside each access-mode profile; use those
 fields to identify whether obsolete, prefetch-deadline,
 prefetch-preempted-by-current, still-preempted-by-realtime-current, shutdown,

@@ -440,6 +440,21 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether this frame was produced by continuing forward in an existing session without seeking.
     #[serde(default)]
     pub forward_reused: bool,
+    /// Whether the session has observed any keyframe index evidence for this stream.
+    #[serde(default)]
+    pub seek_index_available: bool,
+    /// Number of distinct keyframe PTS entries observed by the session-local seek index.
+    #[serde(default)]
+    pub seek_index_keyframes: u32,
+    /// Number of video packets observed while building the session-local seek index.
+    #[serde(default)]
+    pub seek_index_observed_packets: u32,
+    /// Whether the current seek used a known keyframe anchor from the session-local index.
+    #[serde(default)]
+    pub seek_index_used: bool,
+    /// Keyframe PTS used to bound the current seek, when available.
+    #[serde(default)]
+    pub seek_index_anchor_pts: Option<i64>,
     /// Decoded frames consumed by this request before selecting the output frame.
     #[serde(default)]
     pub decoded_frame_count: u32,
@@ -470,6 +485,11 @@ impl PreviewDecodeDiagnostics {
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             session_reused: false,
             forward_reused: false,
+            seek_index_available: false,
+            seek_index_keyframes: 0,
+            seek_index_observed_packets: 0,
+            seek_index_used: false,
+            seek_index_anchor_pts: None,
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
@@ -599,6 +619,19 @@ impl RgbaFrame {
         self
     }
 
+    fn with_seek_index_diagnostics(
+        mut self,
+        diagnostics: PreviewSeekIndexDiagnostics,
+        resolution: PreviewSeekResolution,
+    ) -> Self {
+        self.diagnostics.seek_index_available = diagnostics.available;
+        self.diagnostics.seek_index_keyframes = diagnostics.keyframes;
+        self.diagnostics.seek_index_observed_packets = diagnostics.observed_packets;
+        self.diagnostics.seek_index_used = resolution.used_index;
+        self.diagnostics.seek_index_anchor_pts = resolution.anchor_pts;
+        self
+    }
+
     fn with_threading(mut self, kind: PreviewDecodeThreadingKind, count: usize) -> Self {
         self.diagnostics.threading_kind = kind;
         self.diagnostics.threading_count = count.min(u32::MAX as usize) as u32;
@@ -724,6 +757,7 @@ struct PreviewDecodeSession {
     last_pts: Option<i64>,
     reached_eof: bool,
     playback_ring: PreviewPlaybackRing,
+    seek_index: PreviewSeekIndex,
 }
 
 struct PreviewDecodeForwardResult {
@@ -758,6 +792,57 @@ impl PreviewDecodeForwardResult {
             selected_pts: None,
             decoded_frame_count,
             canceled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PreviewSeekIndexDiagnostics {
+    available: bool,
+    keyframes: u32,
+    observed_packets: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PreviewSeekResolution {
+    used_index: bool,
+    anchor_pts: Option<i64>,
+}
+
+#[derive(Debug, Default)]
+struct PreviewSeekIndex {
+    keyframe_pts: Vec<i64>,
+    observed_packets: u32,
+}
+
+impl PreviewSeekIndex {
+    fn observe_packet(&mut self, packet: &ffmpeg::Packet) {
+        self.observed_packets = self.observed_packets.saturating_add(1);
+        if !packet.is_key() {
+            return;
+        }
+        let Some(pts) = packet.pts().or_else(|| packet.dts()) else {
+            return;
+        };
+        match self.keyframe_pts.binary_search(&pts) {
+            Ok(_) => {}
+            Err(index) => self.keyframe_pts.insert(index, pts),
+        }
+    }
+
+    fn keyframe_at_or_before(&self, target_pts: i64) -> Option<i64> {
+        match self.keyframe_pts.binary_search(&target_pts) {
+            Ok(index) => self.keyframe_pts.get(index).copied(),
+            Err(0) => None,
+            Err(index) => self.keyframe_pts.get(index - 1).copied(),
+        }
+    }
+
+    fn diagnostics(&self) -> PreviewSeekIndexDiagnostics {
+        PreviewSeekIndexDiagnostics {
+            available: !self.keyframe_pts.is_empty(),
+            keyframes: self.keyframe_pts.len().min(u32::MAX as usize) as u32,
+            observed_packets: self.observed_packets,
         }
     }
 }
@@ -949,6 +1034,7 @@ impl PreviewDecodeSession {
             last_pts: None,
             reached_eof: false,
             playback_ring: PreviewPlaybackRing::new(PREVIEW_PLAYBACK_SESSION_RING_CAPACITY),
+            seek_index: PreviewSeekIndex::default(),
         })
     }
 
@@ -988,6 +1074,10 @@ impl PreviewDecodeSession {
                 return Ok(PreviewDecodeOutcome::Frame(
                     hit.into_playback_ring_hit(cache_lookup_started_at.elapsed())
                         .with_seek_strategy(policy.seek_strategy)
+                        .with_seek_index_diagnostics(
+                            self.seek_index.diagnostics(),
+                            PreviewSeekResolution::default(),
+                        )
                         .with_stage_durations(PreviewDecodeStageDurations {
                             cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                             ..PreviewDecodeStageDurations::default()
@@ -1013,6 +1103,10 @@ impl PreviewDecodeSession {
                 hit.frame
                     .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
                     .with_seek_strategy(policy.seek_strategy)
+                    .with_seek_index_diagnostics(
+                        self.seek_index.diagnostics(),
+                        PreviewSeekResolution::default(),
+                    )
                     .with_stage_durations(PreviewDecodeStageDurations {
                         cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                         ..PreviewDecodeStageDurations::default()
@@ -1034,13 +1128,14 @@ impl PreviewDecodeSession {
             .unwrap_or(false);
 
         let seek_performed = !should_continue_forward;
+        let mut seek_resolution = PreviewSeekResolution::default();
         let mut seek_us = 0;
         if seek_performed {
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled);
             }
             let seek_started_at = Instant::now();
-            self.seek_to_target(target_pts, policy)?;
+            seek_resolution = self.seek_to_target(target_pts, policy)?;
             seek_us = duration_us(seek_started_at.elapsed());
         }
 
@@ -1077,6 +1172,7 @@ impl PreviewDecodeSession {
                     .with_decode_work(seek_performed, result.decoded_frame_count)
                     .with_seek_strategy(policy.seek_strategy)
                     .with_forward_reused(should_continue_forward)
+                    .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
                     .with_threading(self.threading_kind, self.threading_count),
             ));
         }
@@ -1087,7 +1183,11 @@ impl PreviewDecodeSession {
         })
     }
 
-    fn seek_to_target(&mut self, target_pts: i64, policy: PreviewDecodeAccessPolicy) -> Result<()> {
+    fn seek_to_target(
+        &mut self,
+        target_pts: i64,
+        policy: PreviewDecodeAccessPolicy,
+    ) -> Result<PreviewSeekResolution> {
         let tb_num = self.stream_tb.numerator() as f64;
         let tb_den = self.stream_tb.denominator() as f64;
 
@@ -1107,18 +1207,29 @@ impl PreviewDecodeSession {
 
         let tb_secs = tb_num / tb_den;
 
-        let (min_ts, max_ts, seek_flags) = match policy.seek_strategy {
+        let seek_anchor_pts = self.seek_index.keyframe_at_or_before(target_pts);
+        let (min_ts, max_ts, seek_flags, used_anchor_pts) = match policy.seek_strategy {
             PreviewDecodeSeekStrategy::KeyframeBefore => {
                 // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
-                (i64::MIN, target_pts, ffmpeg::ffi::AVSEEK_FLAG_BACKWARD)
+                (
+                    seek_anchor_pts.unwrap_or(i64::MIN),
+                    target_pts,
+                    ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+                    seek_anchor_pts,
+                )
             }
             PreviewDecodeSeekStrategy::BoundedAnyFrame => {
                 let seek_window_secs = policy.any_seek_window_ms as f64 / 1_000.0;
                 let seek_window_pts = (seek_window_secs / tb_secs).round().max(1.0) as i64;
+                let window_min_ts = target_pts.saturating_sub(seek_window_pts);
+                let used_anchor_pts = seek_anchor_pts
+                    .filter(|anchor| *anchor >= window_min_ts && *anchor <= target_pts);
+                let min_ts = used_anchor_pts.unwrap_or(window_min_ts);
                 (
-                    target_pts.saturating_sub(seek_window_pts),
+                    min_ts,
                     target_pts.saturating_add(seek_window_pts),
                     ffmpeg::ffi::AVSEEK_FLAG_ANY,
+                    used_anchor_pts,
                 )
             }
         };
@@ -1140,7 +1251,10 @@ impl PreviewDecodeSession {
             }
             self.reached_eof = false;
             self.last_pts = None;
-            return Ok(());
+            return Ok(PreviewSeekResolution {
+                used_index: used_anchor_pts.is_some(),
+                anchor_pts: used_anchor_pts,
+            });
         }
 
         Err(MondrianError::DecodeFailed {
@@ -1208,6 +1322,7 @@ impl PreviewDecodeSession {
             if s.index() != self.stream_index {
                 continue;
             }
+            self.seek_index.observe_packet(&packet);
             if policy.forward_decode_budget_exhausted(frames_decoded) {
                 break;
             }
@@ -1903,11 +2018,13 @@ mod tests {
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, PreviewDecodeAccessMode,
         PreviewDecodeAccessPolicy, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
         PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-        PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewPlaybackRing, RgbaFrame,
+        PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewPlaybackRing, PreviewSeekIndex,
+        PreviewSeekIndexDiagnostics, PreviewSeekResolution, RgbaFrame,
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
         PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
     };
+    use ffmpeg_next as ffmpeg;
     use serde::Serialize;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -2170,6 +2287,46 @@ mod tests {
     }
 
     #[test]
+    fn preview_seek_index_records_distinct_keyframe_packets() {
+        let mut index = PreviewSeekIndex::default();
+
+        index.observe_packet(&test_packet(Some(200), None, true));
+        index.observe_packet(&test_packet(Some(100), None, true));
+        index.observe_packet(&test_packet(Some(200), None, true));
+        index.observe_packet(&test_packet(Some(150), None, false));
+        index.observe_packet(&test_packet(None, Some(50), true));
+
+        assert_eq!(index.keyframe_at_or_before(49), None);
+        assert_eq!(index.keyframe_at_or_before(50), Some(50));
+        assert_eq!(index.keyframe_at_or_before(199), Some(100));
+        assert_eq!(index.keyframe_at_or_before(200), Some(200));
+        assert_eq!(index.keyframe_at_or_before(1_000), Some(200));
+        assert_eq!(
+            index.diagnostics(),
+            PreviewSeekIndexDiagnostics { available: true, keyframes: 3, observed_packets: 5 }
+        );
+    }
+
+    #[test]
+    fn rgba_frame_diagnostics_record_seek_index_evidence() {
+        let frame = RgbaFrame::new(1, 1, vec![0; 4], PreviewDecodePath::InProcessFfmpegCpuRgba)
+            .with_seek_index_diagnostics(
+                PreviewSeekIndexDiagnostics {
+                    available: true,
+                    keyframes: 4,
+                    observed_packets: 12,
+                },
+                PreviewSeekResolution { used_index: true, anchor_pts: Some(240) },
+            );
+
+        assert!(frame.diagnostics.seek_index_available);
+        assert_eq!(frame.diagnostics.seek_index_keyframes, 4);
+        assert_eq!(frame.diagnostics.seek_index_observed_packets, 12);
+        assert!(frame.diagnostics.seek_index_used);
+        assert_eq!(frame.diagnostics.seek_index_anchor_pts, Some(240));
+    }
+
+    #[test]
     fn preview_decode_stage_durations_accumulate_saturating() {
         let mut durations = PreviewDecodeStageDurations {
             session_open_us: u64::MAX,
@@ -2215,6 +2372,11 @@ mod tests {
         assert!(frame.diagnostics.cpu_resident);
         assert!(!frame.diagnostics.session_reused);
         assert!(!frame.diagnostics.forward_reused);
+        assert!(!frame.diagnostics.seek_index_available);
+        assert_eq!(frame.diagnostics.seek_index_keyframes, 0);
+        assert_eq!(frame.diagnostics.seek_index_observed_packets, 0);
+        assert!(!frame.diagnostics.seek_index_used);
+        assert_eq!(frame.diagnostics.seek_index_anchor_pts, None);
         assert_eq!(
             frame.diagnostics.threading_kind,
             PreviewDecodeThreadingKind::None
@@ -2396,6 +2558,16 @@ mod tests {
         assert!(preview_cache_get(&path, fingerprint, 2, 1, 105, 5).is_some());
         assert!(preview_cache_get(&path, fingerprint, 2, 1, 106, 5).is_none());
         clear_global_preview_frame_cache();
+    }
+
+    fn test_packet(pts: Option<i64>, dts: Option<i64>, key: bool) -> ffmpeg::Packet {
+        let mut packet = ffmpeg::Packet::empty();
+        packet.set_pts(pts);
+        packet.set_dts(dts);
+        if key {
+            packet.set_flags(ffmpeg::codec::packet::Flags::KEY);
+        }
+        packet
     }
 
     #[test]

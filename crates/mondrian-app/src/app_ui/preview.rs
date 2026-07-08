@@ -2110,6 +2110,14 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub session_opened_frames: u64,
     /// Decode results produced by continuing forward in an existing session without seeking.
     pub forward_reused_frames: u64,
+    /// Decode results where the media session had observed keyframe seek-index evidence.
+    pub seek_index_available_frames: u64,
+    /// Decode results whose seek was bounded by a session-local keyframe index anchor.
+    pub seek_index_used_frames: u64,
+    /// Largest distinct keyframe count observed in the session-local seek index.
+    pub seek_index_keyframes_max: u64,
+    /// Largest video-packet observation count used to build session-local seek-index evidence.
+    pub seek_index_observed_packets_max: u64,
     /// Total decoded frames consumed by this access mode.
     pub decoded_frame_count: u64,
     /// Largest decoded-frame count consumed by one request in this access mode.
@@ -2178,6 +2186,17 @@ impl AppUiPreviewDecodeAccessModeProfile {
         if diagnostics.forward_reused {
             self.forward_reused_frames = self.forward_reused_frames.saturating_add(1);
         }
+        if diagnostics.seek_index_available {
+            self.seek_index_available_frames = self.seek_index_available_frames.saturating_add(1);
+        }
+        if diagnostics.seek_index_used {
+            self.seek_index_used_frames = self.seek_index_used_frames.saturating_add(1);
+        }
+        self.seek_index_keyframes_max =
+            self.seek_index_keyframes_max.max(u64::from(diagnostics.seek_index_keyframes));
+        self.seek_index_observed_packets_max = self
+            .seek_index_observed_packets_max
+            .max(u64::from(diagnostics.seek_index_observed_packets));
         let decoded_frame_count = u64::from(diagnostics.decoded_frame_count);
         self.decoded_frame_count = self.decoded_frame_count.saturating_add(decoded_frame_count);
         self.max_decoded_frame_count = self.max_decoded_frame_count.max(decoded_frame_count);
@@ -3487,6 +3506,31 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceSeverity::Fail,
         );
     }
+    if scrub_profile.frames > 0
+        && scrub_profile.max_duration_us > summary.slow_frame_budget_us
+        && scrub_profile.seeked_frames > 0
+        && scrub_profile.seek_index_available_frames == 0
+    {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::AccessMode,
+            "preview_decode_scrub_cursor_without_seek_index_evidence",
+            format!(
+                "scrub_frames={} seeked_frames={} max_duration_us={} slow_frame_budget_us={} seek_index_available_frames=0 seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={}",
+                scrub_profile.frames,
+                scrub_profile.seeked_frames,
+                scrub_profile.max_duration_us,
+                summary.slow_frame_budget_us,
+                scrub_profile.seek_index_used_frames,
+                scrub_profile.seek_index_keyframes_max,
+                scrub_profile.seek_index_observed_packets_max
+            ),
+            "build_preview_seek_index_evidence",
+            "Collect keyframe/GOP seek evidence for scrub sessions before widening seek windows or adding decode workers.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
 
     for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
         if profile.frames == 0 || profile.max_duration_us <= summary.slow_frame_budget_us {
@@ -3499,7 +3543,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -3515,6 +3559,10 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.session_reused_frames,
                 profile.session_opened_frames,
                 profile.forward_reused_frames,
+                profile.seek_index_available_frames,
+                profile.seek_index_used_frames,
+                profile.seek_index_keyframes_max,
+                profile.seek_index_observed_packets_max,
                 profile.decoded_frame_count,
                 profile.max_decoded_frame_count,
                 profile.max_frame_stage_durations.session_open_us,
@@ -7716,6 +7764,11 @@ mod tests {
                 seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
                 session_reused: false,
                 forward_reused: false,
+                seek_index_available: true,
+                seek_index_keyframes: 3,
+                seek_index_observed_packets: 90,
+                seek_index_used: true,
+                seek_index_anchor_pts: Some(120),
                 decoded_frame_count: 48,
                 threading_kind: PreviewDecodeThreadingKind::Frame,
                 threading_count: 6,
@@ -7743,6 +7796,11 @@ mod tests {
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 session_reused: true,
                 forward_reused: false,
+                seek_index_available: false,
+                seek_index_keyframes: 0,
+                seek_index_observed_packets: 0,
+                seek_index_used: false,
+                seek_index_anchor_pts: None,
                 decoded_frame_count: 0,
                 threading_kind: PreviewDecodeThreadingKind::None,
                 threading_count: 0,
@@ -7770,6 +7828,11 @@ mod tests {
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 session_reused: false,
                 forward_reused: false,
+                seek_index_available: true,
+                seek_index_keyframes: 2,
+                seek_index_observed_packets: 40,
+                seek_index_used: false,
+                seek_index_anchor_pts: None,
                 decoded_frame_count: 0,
                 threading_kind: PreviewDecodeThreadingKind::None,
                 threading_count: 0,
@@ -7797,6 +7860,11 @@ mod tests {
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 session_reused: true,
                 forward_reused: false,
+                seek_index_available: true,
+                seek_index_keyframes: 4,
+                seek_index_observed_packets: 128,
+                seek_index_used: false,
+                seek_index_anchor_pts: None,
                 decoded_frame_count: 0,
                 threading_kind: PreviewDecodeThreadingKind::None,
                 threading_count: 0,
@@ -7937,6 +8005,10 @@ mod tests {
         assert_eq!(playback_profile.session_reused_frames, 2);
         assert_eq!(playback_profile.session_opened_frames, 0);
         assert_eq!(playback_profile.forward_reused_frames, 0);
+        assert_eq!(playback_profile.seek_index_available_frames, 1);
+        assert_eq!(playback_profile.seek_index_used_frames, 0);
+        assert_eq!(playback_profile.seek_index_keyframes_max, 4);
+        assert_eq!(playback_profile.seek_index_observed_packets_max, 128);
         assert_eq!(playback_profile.stage_durations.cache_lookup_us, 12);
         assert_eq!(
             playback_profile.max_frame_stage_durations.external_process_us,
@@ -7953,6 +8025,10 @@ mod tests {
         assert_eq!(scrub_profile.session_reused_frames, 0);
         assert_eq!(scrub_profile.session_opened_frames, 1);
         assert_eq!(scrub_profile.forward_reused_frames, 0);
+        assert_eq!(scrub_profile.seek_index_available_frames, 1);
+        assert_eq!(scrub_profile.seek_index_used_frames, 1);
+        assert_eq!(scrub_profile.seek_index_keyframes_max, 3);
+        assert_eq!(scrub_profile.seek_index_observed_packets_max, 90);
         assert_eq!(scrub_profile.queue_wait_total_us, 1_200);
         assert_eq!(scrub_profile.queue_wait_max_us, 1_200);
         assert_eq!(scrub_profile.queue_wait_last_us, 1_200);
@@ -7995,6 +8071,10 @@ mod tests {
         assert_eq!(still_profile.canceled_unknown_jobs, 0);
         assert_eq!(still_profile.session_reused_frames, 0);
         assert_eq!(still_profile.session_opened_frames, 1);
+        assert_eq!(still_profile.seek_index_available_frames, 1);
+        assert_eq!(still_profile.seek_index_used_frames, 0);
+        assert_eq!(still_profile.seek_index_keyframes_max, 2);
+        assert_eq!(still_profile.seek_index_observed_packets_max, 40);
         assert_eq!(still_profile.stage_durations.cache_lookup_us, 20);
         assert_eq!(
             diagnostics.decode_access_mode_profiles.slowest_access_mode(),
@@ -8459,6 +8539,12 @@ mod tests {
                 && root.area == AppUiPreviewDecodePerformanceArea::AccessMode
                 && root.evidence.contains("access_mode=ScrubCursor")
                 && root.evidence.contains("packet_decode_us=95000")
+                && root.evidence.contains("seek_index_available_frames=0")
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_scrub_cursor_without_seek_index_evidence"
+                && root.area == AppUiPreviewDecodePerformanceArea::AccessMode
+                && root.evidence.contains("seek_index_available_frames=0")
         }));
         assert!(report
             .root_causes
@@ -8468,6 +8554,10 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "enable_proxy_or_hardware_decode"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "build_preview_seek_index_evidence"));
         assert!(report
             .actions
             .iter()
