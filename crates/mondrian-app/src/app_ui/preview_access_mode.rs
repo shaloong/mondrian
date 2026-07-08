@@ -238,6 +238,25 @@ struct MediaPreviewJobQueueState {
     closed: bool,
 }
 
+/// Point-in-time worker transport queue depth grouped by scheduling contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MediaPreviewJobQueueDiagnostics {
+    /// Total jobs waiting in the worker transport queue.
+    pub queued_jobs: usize,
+    /// Current-frame jobs waiting in the worker transport queue.
+    pub queued_current_jobs: usize,
+    /// Prefetch jobs waiting in the worker transport queue.
+    pub queued_prefetch_jobs: usize,
+    /// Playback cursor jobs waiting in the worker transport queue.
+    pub queued_playback_cursor_jobs: usize,
+    /// Scrub cursor jobs waiting in the worker transport queue.
+    pub queued_scrub_cursor_jobs: usize,
+    /// Random-access still-frame jobs waiting in the worker transport queue.
+    pub queued_random_access_still_jobs: usize,
+    /// Whether the worker transport queue has been closed.
+    pub closed: bool,
+}
+
 struct QueuedMediaPreviewJob {
     job: MediaPreviewJob,
     priority: MediaPreviewRequestPriority,
@@ -303,6 +322,11 @@ impl MediaPreviewJobQueueSender {
         let before = state.queue.len();
         state.queue.retain(|queued| &queued.job.key != key);
         before.saturating_sub(state.queue.len())
+    }
+
+    pub(crate) fn diagnostics(&self) -> MediaPreviewJobQueueDiagnostics {
+        let state = lock_media_preview_job_queue_state(&self.shared.state);
+        media_preview_job_queue_diagnostics_locked(&state)
     }
 
     pub(crate) fn enqueue(&self, job: MediaPreviewJob) -> MediaPreviewJobEnqueueStatus {
@@ -422,6 +446,42 @@ impl MediaPreviewJobQueueReceiver {
             };
         }
     }
+}
+
+fn media_preview_job_queue_diagnostics_locked(
+    state: &MediaPreviewJobQueueState,
+) -> MediaPreviewJobQueueDiagnostics {
+    let mut diagnostics = MediaPreviewJobQueueDiagnostics {
+        queued_jobs: state.queue.len(),
+        closed: state.closed,
+        ..MediaPreviewJobQueueDiagnostics::default()
+    };
+    for queued in &state.queue {
+        match queued.priority {
+            MediaPreviewRequestPriority::Current => {
+                diagnostics.queued_current_jobs = diagnostics.queued_current_jobs.saturating_add(1);
+            }
+            MediaPreviewRequestPriority::Prefetch => {
+                diagnostics.queued_prefetch_jobs =
+                    diagnostics.queued_prefetch_jobs.saturating_add(1);
+            }
+        }
+        match queued.job.access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                diagnostics.queued_playback_cursor_jobs =
+                    diagnostics.queued_playback_cursor_jobs.saturating_add(1);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                diagnostics.queued_scrub_cursor_jobs =
+                    diagnostics.queued_scrub_cursor_jobs.saturating_add(1);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                diagnostics.queued_random_access_still_jobs =
+                    diagnostics.queued_random_access_still_jobs.saturating_add(1);
+            }
+        }
+    }
+    diagnostics
 }
 
 fn next_media_preview_job_index(
@@ -1980,6 +2040,64 @@ mod tests {
         assert_eq!(receiver.recv().expect("retained job").key, retained);
         sender.close();
         assert!(receiver.recv().is_none());
+    }
+
+    #[test]
+    fn media_preview_job_queue_diagnostics_break_down_current_depth_by_access_mode() {
+        let (sender, _receiver) = media_preview_job_queue(4);
+        let playback = test_media_key(1);
+        let scrub = test_media_key(2);
+        let still = test_media_key(3);
+
+        assert_eq!(
+            sender.enqueue(test_media_job(
+                playback,
+                1.0,
+                MediaPreviewRequestPriority::Prefetch
+            )),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            sender.enqueue(test_media_job(
+                scrub,
+                2.0,
+                MediaPreviewRequestPriority::Current
+            )),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            sender.enqueue(MediaPreviewJob {
+                key: still,
+                source_secs: 3.0,
+                generation: 1,
+                priority: MediaPreviewRequestPriority::Current,
+                access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
+                enqueued_at: Instant::now(),
+            }),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        assert_eq!(
+            sender.diagnostics(),
+            MediaPreviewJobQueueDiagnostics {
+                queued_jobs: 3,
+                queued_current_jobs: 2,
+                queued_prefetch_jobs: 1,
+                queued_playback_cursor_jobs: 1,
+                queued_scrub_cursor_jobs: 1,
+                queued_random_access_still_jobs: 1,
+                closed: false,
+            }
+        );
+
+        sender.close();
+        assert_eq!(
+            sender.diagnostics(),
+            MediaPreviewJobQueueDiagnostics {
+                closed: true,
+                ..MediaPreviewJobQueueDiagnostics::default()
+            }
+        );
     }
 
     #[test]

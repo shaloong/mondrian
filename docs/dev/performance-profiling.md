@@ -178,6 +178,11 @@ work accepted by scheduler policy did not reach a live preview worker. Treat
 `queue_canceled_jobs`, and `queue_promoted_current_jobs` as scheduling evidence
 that explains whether the queue protected visible current-frame work and removed
 canceled queued work before any codec or color/render optimization is attempted.
+The same report includes current worker-queue depth split by priority and access
+mode (`queued_current_jobs`, `queued_prefetch_jobs`,
+`queued_playback_cursor_jobs`, `queued_scrub_cursor_jobs`, and
+`queued_random_access_still_jobs`) so active transport backlog can be separated
+from codec, seek, or CPU RGBA boundary cost before tuning worker counts.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

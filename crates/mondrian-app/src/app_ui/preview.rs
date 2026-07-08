@@ -55,10 +55,10 @@ use crate::app_ui::panels::{
 use crate::app_ui::preview_access_mode::{
     media_preview_access_mode_for_intent, media_preview_job_queue,
     media_preview_viewer_access_intent, media_preview_worker_count, media_preview_worker_lane,
-    MediaPreviewJob, MediaPreviewJobEnqueueStatus, MediaPreviewJobQueueReceiver,
-    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewRequestPriority,
-    MediaPreviewRequestStatus, MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics,
-    MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
+    MediaPreviewJob, MediaPreviewJobEnqueueStatus, MediaPreviewJobQueueDiagnostics,
+    MediaPreviewJobQueueReceiver, MediaPreviewJobQueueSender, MediaPreviewKey,
+    MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
+    MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
@@ -306,6 +306,7 @@ impl AppUiPreviewService {
             queue_pruned_obsolete_jobs: self.metrics.queue_pruned_obsolete_jobs.get(),
             queue_promoted_current_jobs: self.metrics.queue_promoted_current_jobs.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
+            worker_queue: self.jobs.diagnostics(),
             scheduler,
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
             viewer_frame_cache_misses: self.metrics.viewer_frame_cache_misses.get(),
@@ -1706,6 +1707,8 @@ pub struct AppUiPreviewDiagnostics {
     pub queue_promoted_current_jobs: u64,
     /// Media preview jobs dropped because the worker channel was disconnected.
     pub worker_disconnected_drops: u64,
+    /// Current worker transport queue depth grouped by scheduling contract.
+    pub worker_queue: MediaPreviewJobQueueDiagnostics,
     /// Scheduler-side request, drop, completion, and pruning counters.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
     /// Final viewer preview frame cache hits.
@@ -2324,6 +2327,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub queue_promoted_current_jobs: u64,
     /// Jobs dropped because preview workers were unavailable.
     pub worker_disconnected_drops: u64,
+    /// Current worker transport queue depth grouped by scheduling contract.
+    pub worker_queue: MediaPreviewJobQueueDiagnostics,
     /// Decode requests that required a seek.
     pub seeked_frames: u64,
     /// Total decoded frames consumed before frame selection.
@@ -2367,7 +2372,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 9;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 10;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3417,11 +3422,17 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
                 summary.enqueued_jobs,
+                summary.worker_queue.queued_jobs,
+                summary.worker_queue.queued_current_jobs,
+                summary.worker_queue.queued_prefetch_jobs,
+                summary.worker_queue.queued_playback_cursor_jobs,
+                summary.worker_queue.queued_scrub_cursor_jobs,
+                summary.worker_queue.queued_random_access_still_jobs,
                 summary.queue_full_drops,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
@@ -3697,9 +3708,15 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
+                "queue_full_drops={} enqueued_jobs={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
+                summary.worker_queue.queued_jobs,
+                summary.worker_queue.queued_current_jobs,
+                summary.worker_queue.queued_prefetch_jobs,
+                summary.worker_queue.queued_playback_cursor_jobs,
+                summary.worker_queue.queued_scrub_cursor_jobs,
+                summary.worker_queue.queued_random_access_still_jobs,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
                 summary.queue_canceled_jobs,
@@ -4553,6 +4570,7 @@ impl AppUiPreviewDiagnostics {
             queue_pruned_obsolete_jobs: self.queue_pruned_obsolete_jobs,
             queue_promoted_current_jobs: self.queue_promoted_current_jobs,
             worker_disconnected_drops: self.worker_disconnected_drops,
+            worker_queue: self.worker_queue,
             seeked_frames: self.decode_seeked_frames,
             decoded_frame_count: self.decode_decoded_frame_count,
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
@@ -7732,6 +7750,15 @@ mod tests {
             queue_canceled_jobs: 3,
             queue_pruned_obsolete_jobs: 2,
             queue_promoted_current_jobs: 1,
+            worker_queue: MediaPreviewJobQueueDiagnostics {
+                queued_jobs: 3,
+                queued_current_jobs: 2,
+                queued_prefetch_jobs: 1,
+                queued_playback_cursor_jobs: 1,
+                queued_scrub_cursor_jobs: 1,
+                queued_random_access_still_jobs: 1,
+                closed: false,
+            },
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
@@ -7796,9 +7823,21 @@ mod tests {
         assert_eq!(summary.queue_canceled_jobs, 3);
         assert_eq!(summary.queue_pruned_obsolete_jobs, 2);
         assert_eq!(summary.queue_promoted_current_jobs, 1);
+        assert_eq!(summary.worker_queue.queued_jobs, 3);
+        assert_eq!(summary.worker_queue.queued_current_jobs, 2);
+        assert_eq!(summary.worker_queue.queued_prefetch_jobs, 1);
+        assert_eq!(summary.worker_queue.queued_playback_cursor_jobs, 1);
+        assert_eq!(summary.worker_queue.queued_scrub_cursor_jobs, 1);
+        assert_eq!(summary.worker_queue.queued_random_access_still_jobs, 1);
         assert_eq!(summary.scheduler.dropped_pending_window_requests, 2);
         assert!(report.root_causes.iter().any(|root| root.code
             == "preview_decode_queue_wait_bound"
+            && root.evidence.contains("queued_jobs=3")
+            && root.evidence.contains("queued_current_jobs=2")
+            && root.evidence.contains("queued_prefetch_jobs=1")
+            && root.evidence.contains("queued_playback_cursor_jobs=1")
+            && root.evidence.contains("queued_scrub_cursor_jobs=1")
+            && root.evidence.contains("queued_random_access_still_jobs=1")
             && root.evidence.contains("queue_evicted_prefetch_jobs=1")
             && root.evidence.contains("queue_canceled_jobs=3")
             && root.evidence.contains("queue_pruned_obsolete_jobs=2")

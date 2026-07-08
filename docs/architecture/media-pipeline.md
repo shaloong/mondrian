@@ -238,7 +238,12 @@ because they mean scheduler-accepted work did not reach a preview worker.
 `queue_promoted_current_jobs` are evidence fields: they should explain how the
 system protected real-time current-frame work and kept the worker transport
 queue aligned with scheduler cancellation, not be folded into opaque
-backpressure.
+backpressure. Diagnostics must also expose the current worker transport queue
+depth split by priority and access mode (`queued_current_jobs`,
+`queued_prefetch_jobs`, `queued_playback_cursor_jobs`,
+`queued_scrub_cursor_jobs`, and `queued_random_access_still_jobs`) so a slow
+preview report can distinguish active queue backlog from codec/decode cost
+without inspecting private queue internals.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
 end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,
