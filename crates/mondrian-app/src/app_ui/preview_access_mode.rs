@@ -93,10 +93,15 @@ pub(crate) fn promoted_access_mode(
 }
 
 /// Result of admitting a preview decode request into the scheduler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaPreviewRequestStatus {
-    Scheduled,
-    AlreadyPending { access_mode_changed: bool },
+    Scheduled {
+        evicted_prefetch: Option<Box<MediaPreviewKey>>,
+        evicted_still: Option<Box<MediaPreviewKey>>,
+    },
+    AlreadyPending {
+        access_mode_changed: bool,
+    },
     DroppedBackpressure,
     DroppedInvalidAccessMode,
 }
@@ -592,6 +597,8 @@ impl MediaPreviewScheduler {
             return MediaPreviewRequestStatus::AlreadyPending { access_mode_changed };
         }
         Self::prune_obsolete_locked(&mut state);
+        let mut evicted_prefetch = None;
+        let mut evicted_still = None;
         if state.pending.len() >= self.max_pending {
             if priority == MediaPreviewRequestPriority::Current {
                 if let Some(evicted) = state
@@ -601,6 +608,7 @@ impl MediaPreviewScheduler {
                     .map(|(key, _)| key.clone())
                 {
                     state.pending.remove(&evicted);
+                    evicted_prefetch = Some(Box::new(evicted));
                     bump_value(&mut state.metrics.evicted_prefetch_requests);
                 } else if access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame {
                     if let Some(evicted) = state
@@ -614,6 +622,7 @@ impl MediaPreviewScheduler {
                         .map(|(key, _)| key.clone())
                     {
                         state.pending.remove(&evicted);
+                        evicted_still = Some(Box::new(evicted));
                         bump_value(&mut state.metrics.evicted_still_requests);
                     } else {
                         bump_value(&mut state.metrics.dropped_backpressure_requests);
@@ -636,7 +645,7 @@ impl MediaPreviewScheduler {
             MediaPreviewPendingRequest { generation, priority, access_mode },
         );
         bump_value(&mut state.metrics.scheduled_requests);
-        MediaPreviewRequestStatus::Scheduled
+        MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still }
     }
 
     pub(crate) fn should_decode(
@@ -875,6 +884,10 @@ mod tests {
         )
     }
 
+    fn scheduled_request() -> MediaPreviewRequestStatus {
+        MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+    }
+
     fn test_scheduler_should_decode(
         scheduler: &MediaPreviewScheduler,
         key: &MediaPreviewKey,
@@ -957,7 +970,7 @@ mod tests {
                 first_generation,
                 MediaPreviewRequestPriority::Current,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
 
         scheduler.begin_generation();
@@ -986,7 +999,7 @@ mod tests {
                 first_generation,
                 MediaPreviewRequestPriority::Prefetch,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
 
         let second_generation = scheduler.begin_generation();
@@ -1037,7 +1050,7 @@ mod tests {
                 first_generation,
                 MediaPreviewRequestPriority::Current,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert!(test_scheduler_is_decode_current(
             &scheduler,
@@ -1087,7 +1100,7 @@ mod tests {
                 first_generation,
                 MediaPreviewRequestPriority::Current,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             test_scheduler_request(
@@ -1096,7 +1109,7 @@ mod tests {
                 first_generation,
                 MediaPreviewRequestPriority::Current,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
 
         scheduler.begin_generation();
@@ -1130,7 +1143,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Current
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             test_scheduler_request(
@@ -1139,7 +1152,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Current
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             test_scheduler_request(
@@ -1190,7 +1203,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Current,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             test_scheduler_request(
@@ -1258,7 +1271,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Current,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
 
         scheduler.begin_generation();
@@ -1289,7 +1302,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Current
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert!(test_scheduler_is_decode_current(
             &scheduler,
@@ -1328,7 +1341,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Prefetch,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
 
         scheduler.cancel(&key);
@@ -1362,7 +1375,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Prefetch,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             test_scheduler_request(
@@ -1406,7 +1419,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Prefetch,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             test_scheduler_request(
@@ -1415,7 +1428,10 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Current,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            MediaPreviewRequestStatus::Scheduled {
+                evicted_prefetch: Some(Box::new(prefetch.clone())),
+                evicted_still: None,
+            }
         );
 
         assert_eq!(scheduler.pending_len(), 1);
@@ -1448,7 +1464,7 @@ mod tests {
                 generation,
                 MediaPreviewRequestPriority::Current,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             test_scheduler_request(
@@ -1485,7 +1501,7 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::RandomAccessStillFrame,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             scheduler.request(
@@ -1494,7 +1510,10 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            MediaPreviewRequestStatus::Scheduled {
+                evicted_prefetch: None,
+                evicted_still: Some(Box::new(still.clone())),
+            }
         );
 
         assert_eq!(scheduler.pending_len(), 1);
@@ -1519,7 +1538,7 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            scheduled_request()
         );
         assert_eq!(
             scheduler.request(

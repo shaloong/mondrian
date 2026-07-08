@@ -5465,7 +5465,17 @@ impl AppUiPreviewService {
             priority,
             access_mode,
         ) {
-            MediaPreviewRequestStatus::Scheduled => true,
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still } => {
+                if let Some(evicted_key) = evicted_prefetch {
+                    let canceled = self.jobs.cancel_key(&evicted_key) as u64;
+                    add_cell(&self.metrics.queue_canceled_jobs, canceled);
+                }
+                if let Some(evicted_key) = evicted_still {
+                    let canceled = self.jobs.cancel_key(&evicted_key) as u64;
+                    add_cell(&self.metrics.queue_canceled_jobs, canceled);
+                }
+                true
+            }
             MediaPreviewRequestStatus::AlreadyPending { access_mode_changed } => {
                 let queued_update = self.jobs.promote(
                     &key,
@@ -10584,7 +10594,7 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
             ),
-            MediaPreviewRequestStatus::Scheduled
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             service.jobs.enqueue(MediaPreviewJob {

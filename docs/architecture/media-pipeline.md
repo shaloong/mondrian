@@ -222,6 +222,11 @@ Scheduler diagnostics keep aggregate skip/drop/stale counters plus reason
 breakdowns for missing pending work, access-mode mismatch, obsolete generation,
 obsolete request generation, and pending-window backpressure. Access-mode
 failures must be diagnosable without inferring from one opaque skipped count.
+When scheduler admission evicts prefetch or still-frame pending work to admit
+real-time current-frame work, the admission result must return the evicted media
+keys. The app layer must immediately cancel matching jobs from the worker
+transport queue so already-obsolete work does not sit in the bounded queue until
+a worker later discovers the missing pending request.
 The decode performance summary/report carries the same scheduler diagnostics and
 emits stable Scheduling root causes for access-mode mismatch, obsolete
 generation churn, and pending-window backpressure.
