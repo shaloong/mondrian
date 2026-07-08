@@ -1873,6 +1873,20 @@ pub struct PreviewWorkerActivityDiagnostics {
     pub in_flight_scrub_cursor_jobs: usize,
     /// Random-access still-frame decode jobs currently running in preview workers.
     pub in_flight_random_access_still_jobs: usize,
+    /// Jobs currently running on the single-worker fallback lane.
+    pub in_flight_any_lane_jobs: usize,
+    /// Jobs currently running on the playback-reserved worker lane.
+    pub in_flight_playback_lane_jobs: usize,
+    /// Jobs currently running on the scrub-reserved worker lane.
+    pub in_flight_scrub_lane_jobs: usize,
+    /// Jobs currently running on the still-frame-reserved worker lane.
+    pub in_flight_still_lane_jobs: usize,
+    /// Jobs currently running on the shared non-playback interactive lane.
+    pub in_flight_interactive_lane_jobs: usize,
+    /// Current-frame jobs running on a worker lane that would not normally
+    /// accept their access mode. This is allowed as overflow for visible work,
+    /// but persistent counts mean the lane split or worker budget is too tight.
+    pub in_flight_cross_lane_current_jobs: usize,
 }
 
 /// Structured color-management rejection captured from the viewer preview path.
@@ -3600,7 +3614,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+            "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} in_flight_playback_lane_jobs={} in_flight_scrub_lane_jobs={} in_flight_still_lane_jobs={} in_flight_interactive_lane_jobs={} in_flight_cross_lane_current_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
@@ -3620,6 +3634,11 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_activity.in_flight_playback_cursor_jobs,
                 summary.worker_activity.in_flight_scrub_cursor_jobs,
                 summary.worker_activity.in_flight_random_access_still_jobs,
+                summary.worker_activity.in_flight_playback_lane_jobs,
+                summary.worker_activity.in_flight_scrub_lane_jobs,
+                summary.worker_activity.in_flight_still_lane_jobs,
+                summary.worker_activity.in_flight_interactive_lane_jobs,
+                summary.worker_activity.in_flight_cross_lane_current_jobs,
                 summary.queue_full_drops,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
@@ -5459,11 +5478,18 @@ struct PreviewWorkerActivity {
     in_flight_playback_cursor_jobs: AtomicUsize,
     in_flight_scrub_cursor_jobs: AtomicUsize,
     in_flight_random_access_still_jobs: AtomicUsize,
+    in_flight_any_lane_jobs: AtomicUsize,
+    in_flight_playback_lane_jobs: AtomicUsize,
+    in_flight_scrub_lane_jobs: AtomicUsize,
+    in_flight_still_lane_jobs: AtomicUsize,
+    in_flight_interactive_lane_jobs: AtomicUsize,
+    in_flight_cross_lane_current_jobs: AtomicUsize,
 }
 
 impl PreviewWorkerActivity {
     fn begin(
         self: &Arc<Self>,
+        lane: MediaPreviewWorkerLane,
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
     ) -> PreviewWorkerActivityLease {
@@ -5487,7 +5513,32 @@ impl PreviewWorkerActivity {
                 self.in_flight_random_access_still_jobs.fetch_add(1, Ordering::AcqRel);
             }
         }
-        PreviewWorkerActivityLease { activity: Arc::clone(self), priority, access_mode }
+        match lane {
+            MediaPreviewWorkerLane::Any => {
+                self.in_flight_any_lane_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+            MediaPreviewWorkerLane::Playback => {
+                self.in_flight_playback_lane_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+            MediaPreviewWorkerLane::Scrub => {
+                self.in_flight_scrub_lane_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+            MediaPreviewWorkerLane::Still => {
+                self.in_flight_still_lane_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+            MediaPreviewWorkerLane::Interactive => {
+                self.in_flight_interactive_lane_jobs.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        if priority == MediaPreviewRequestPriority::Current && !lane.accepts(access_mode) {
+            self.in_flight_cross_lane_current_jobs.fetch_add(1, Ordering::AcqRel);
+        }
+        PreviewWorkerActivityLease {
+            activity: Arc::clone(self),
+            lane,
+            priority,
+            access_mode,
+        }
     }
 
     fn snapshot(&self) -> PreviewWorkerActivityDiagnostics {
@@ -5502,12 +5553,23 @@ impl PreviewWorkerActivity {
             in_flight_random_access_still_jobs: self
                 .in_flight_random_access_still_jobs
                 .load(Ordering::Acquire),
+            in_flight_any_lane_jobs: self.in_flight_any_lane_jobs.load(Ordering::Acquire),
+            in_flight_playback_lane_jobs: self.in_flight_playback_lane_jobs.load(Ordering::Acquire),
+            in_flight_scrub_lane_jobs: self.in_flight_scrub_lane_jobs.load(Ordering::Acquire),
+            in_flight_still_lane_jobs: self.in_flight_still_lane_jobs.load(Ordering::Acquire),
+            in_flight_interactive_lane_jobs: self
+                .in_flight_interactive_lane_jobs
+                .load(Ordering::Acquire),
+            in_flight_cross_lane_current_jobs: self
+                .in_flight_cross_lane_current_jobs
+                .load(Ordering::Acquire),
         }
     }
 }
 
 struct PreviewWorkerActivityLease {
     activity: Arc<PreviewWorkerActivity>,
+    lane: MediaPreviewWorkerLane,
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
 }
@@ -5533,6 +5595,28 @@ impl Drop for PreviewWorkerActivityLease {
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
                 self.activity.in_flight_random_access_still_jobs.fetch_sub(1, Ordering::AcqRel);
             }
+        }
+        match self.lane {
+            MediaPreviewWorkerLane::Any => {
+                self.activity.in_flight_any_lane_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+            MediaPreviewWorkerLane::Playback => {
+                self.activity.in_flight_playback_lane_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+            MediaPreviewWorkerLane::Scrub => {
+                self.activity.in_flight_scrub_lane_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+            MediaPreviewWorkerLane::Still => {
+                self.activity.in_flight_still_lane_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+            MediaPreviewWorkerLane::Interactive => {
+                self.activity.in_flight_interactive_lane_jobs.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        if self.priority == MediaPreviewRequestPriority::Current
+            && !self.lane.accepts(self.access_mode)
+        {
+            self.activity.in_flight_cross_lane_current_jobs.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -6808,7 +6892,7 @@ fn media_preview_worker(
         if !scheduler.should_decode(&job.key, job.access_mode) {
             continue;
         }
-        let _activity_lease = worker_activity.begin(job.priority, job.access_mode);
+        let _activity_lease = worker_activity.begin(lane, job.priority, job.access_mode);
         let cancel_key = job.key.clone();
         let cancel_generation = job.generation;
         let cancel_priority = job.priority;
@@ -11085,6 +11169,7 @@ mod tests {
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
         let _current = service.worker_activity.begin(
+            MediaPreviewWorkerLane::Scrub,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
         );
@@ -11145,10 +11230,12 @@ mod tests {
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
         let _first = service.worker_activity.begin(
+            MediaPreviewWorkerLane::Playback,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
         );
         let _second = service.worker_activity.begin(
+            MediaPreviewWorkerLane::Playback,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
         );
@@ -11208,6 +11295,7 @@ mod tests {
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
         let _prefetch = service.worker_activity.begin(
+            MediaPreviewWorkerLane::Playback,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
         );
@@ -11764,10 +11852,12 @@ mod tests {
         let activity = Arc::new(PreviewWorkerActivity::default());
         {
             let _playback = activity.begin(
+                MediaPreviewWorkerLane::Playback,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
             );
             let _scrub = activity.begin(
+                MediaPreviewWorkerLane::Scrub,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
             );
@@ -11778,6 +11868,34 @@ mod tests {
             assert_eq!(snapshot.in_flight_playback_cursor_jobs, 1);
             assert_eq!(snapshot.in_flight_scrub_cursor_jobs, 1);
             assert_eq!(snapshot.in_flight_random_access_still_jobs, 0);
+            assert_eq!(snapshot.in_flight_playback_lane_jobs, 1);
+            assert_eq!(snapshot.in_flight_scrub_lane_jobs, 1);
+            assert_eq!(snapshot.in_flight_still_lane_jobs, 0);
+            assert_eq!(snapshot.in_flight_interactive_lane_jobs, 0);
+            assert_eq!(snapshot.in_flight_cross_lane_current_jobs, 0);
+        }
+
+        assert_eq!(
+            activity.snapshot(),
+            PreviewWorkerActivityDiagnostics::default()
+        );
+    }
+
+    #[test]
+    fn preview_worker_activity_tracks_cross_lane_current_overflow() {
+        let activity = Arc::new(PreviewWorkerActivity::default());
+        {
+            let _scrub_on_playback_lane = activity.begin(
+                MediaPreviewWorkerLane::Playback,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            );
+            let snapshot = activity.snapshot();
+            assert_eq!(snapshot.in_flight_jobs, 1);
+            assert_eq!(snapshot.in_flight_current_jobs, 1);
+            assert_eq!(snapshot.in_flight_scrub_cursor_jobs, 1);
+            assert_eq!(snapshot.in_flight_playback_lane_jobs, 1);
+            assert_eq!(snapshot.in_flight_cross_lane_current_jobs, 1);
         }
 
         assert_eq!(

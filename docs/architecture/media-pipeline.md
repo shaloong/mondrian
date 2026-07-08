@@ -253,6 +253,12 @@ contracts (`in_flight_current_jobs`, `in_flight_prefetch_jobs`,
 `in_flight_playback_cursor_jobs`, `in_flight_scrub_cursor_jobs`, and
 `in_flight_random_access_still_jobs`) so diagnostics can separate queued backlog
 from workers actively occupied by playback, scrub, or exact still-frame decode.
+The same activity snapshot must include worker-lane occupancy and
+`in_flight_cross_lane_current_jobs`. Cross-lane current-frame work is allowed as
+visible-work overflow, such as an idle playback lane helping a scrub current
+frame before playback prefetch, but persistent cross-lane evidence means the
+worker split or software-decode budget is too tight and should be tuned before
+blaming codec throughput, color conversion, or GPU upload.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
 end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,

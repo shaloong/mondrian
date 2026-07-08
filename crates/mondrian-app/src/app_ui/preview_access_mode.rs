@@ -586,7 +586,7 @@ pub(crate) enum MediaPreviewWorkerLane {
 }
 
 impl MediaPreviewWorkerLane {
-    fn accepts(self, access_mode: PreviewDecodeAccessMode) -> bool {
+    pub(crate) fn accepts(self, access_mode: PreviewDecodeAccessMode) -> bool {
         match self {
             Self::Any => true,
             Self::Playback => access_mode == PreviewDecodeAccessMode::PlaybackCursor,
