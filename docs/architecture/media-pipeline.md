@@ -82,6 +82,11 @@ requests are rejected at admission and surfaced as structured diagnostics. The
 worker transport queue repeats this invariant and derives priority only from
 `MediaPreviewJob::priority`; queue callers must not pass a second priority value
 that can drift from the job payload.
+Playback forward prefetch is also slack-only. If visible current-frame media is
+pending, the app must skip that prefetch pass instead of adding more speculative
+jobs; diagnostics report this as `prefetch_skipped_current_pending`. This keeps
+first-frame display and dropped-frame recovery ahead of cache warming on slow or
+long-GOP media.
 The app preview service owns worker thread lifetimes. Workers are joined during
 service shutdown after the job queue is closed, and each worker explicitly drops
 its thread-local media decode sessions before exit. Thread-local FFmpeg decoder
@@ -432,7 +437,8 @@ worker is occupied by prefetch or a long-GOP seek without oversubscribing the
 UI, renderer, audio, or FFmpeg's own codec threads. When a current-frame request
 is scheduled, the job queue also prunes obsolete prefetch jobs from older render
 generations before enqueueing the current work; fresh same-generation prefetch
-remains eligible so playback can still warm nearby frames. This worker pool and
+remains eligible only after the current frame is not pending, so playback can
+warm nearby frames without stealing first-frame or recovery budget. This worker pool and
 pruning are scheduling guardrails only; they are not a substitute for future
 cancellable decode sessions or hardware-resident decode.
 Preview decode also exposes a cooperative cancellation boundary for interactive

@@ -309,6 +309,7 @@ impl AppUiPreviewService {
             render_stage_durations: self.metrics.render_stage_durations.get(),
             render_max_frame_stage_durations: self.metrics.render_max_frame_stage_durations.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
+            prefetch_skipped_current_pending: self.metrics.prefetch_skipped_current_pending.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_invalid_access_mode_drops: self.metrics.queue_invalid_access_mode_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
@@ -1723,6 +1724,8 @@ pub struct AppUiPreviewDiagnostics {
     pub render_max_frame_stage_durations: AppUiPreviewRenderStageDurations,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
+    /// Playback prefetch passes skipped because visible current-frame media was pending.
+    pub prefetch_skipped_current_pending: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
     pub queue_full_drops: u64,
     /// Media preview jobs rejected by the worker queue for invalid priority/access-mode pairs.
@@ -2380,6 +2383,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub prefetch_queue_wait_max_us: u64,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
+    /// Playback prefetch passes skipped while visible current-frame work was pending.
+    pub prefetch_skipped_current_pending: u64,
     /// Jobs dropped because the bounded worker queue was full.
     pub queue_full_drops: u64,
     /// Jobs rejected by the worker queue for invalid priority/access-mode pairs.
@@ -2443,7 +2448,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 14;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 15;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3549,11 +3554,12 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
                 summary.enqueued_jobs,
+                summary.prefetch_skipped_current_pending,
                 summary.worker_queue.queued_jobs,
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_prefetch_jobs,
@@ -3887,9 +3893,10 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
+                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
+                summary.prefetch_skipped_current_pending,
                 summary.worker_queue.queued_jobs,
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_prefetch_jobs,
@@ -4751,6 +4758,7 @@ impl AppUiPreviewDiagnostics {
             current_queue_wait_max_us: self.decode_current_queue_wait_max_us,
             prefetch_queue_wait_max_us: self.decode_prefetch_queue_wait_max_us,
             enqueued_jobs: self.enqueued_jobs,
+            prefetch_skipped_current_pending: self.prefetch_skipped_current_pending,
             queue_full_drops: self.queue_full_drops,
             queue_invalid_access_mode_drops: self.queue_invalid_access_mode_drops,
             queue_evicted_prefetch_jobs: self.queue_evicted_prefetch_jobs,
@@ -5382,6 +5390,10 @@ impl AppUiPreviewService {
         if !state.is_playing() {
             return;
         }
+        if self.current_frame_pending.get() {
+            bump(&self.metrics.prefetch_skipped_current_pending);
+            return;
+        }
         let display_snapshot = self.display_snapshot.borrow();
         let Ok(display_color_space) = preview_display_color_space(
             sequence,
@@ -5973,6 +5985,7 @@ struct AppUiPreviewMetrics {
     render_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
     render_max_frame_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
     enqueued_jobs: Cell<u64>,
+    prefetch_skipped_current_pending: Cell<u64>,
     queue_full_drops: Cell<u64>,
     queue_invalid_access_mode_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
@@ -10764,6 +10777,23 @@ mod tests {
         assert!(service
             .stale_frame_for_sequence(sequence, width.saturating_add(1), height)
             .is_none());
+    }
+
+    #[test]
+    fn playback_prefetch_yields_while_current_frame_is_pending() {
+        let service = AppUiPreviewService::new();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+
+        service.current_frame_pending.set(true);
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.prefetch_skipped_current_pending, 1);
+        assert_eq!(diagnostics.enqueued_jobs, 0);
+        assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
     }
 
     #[test]

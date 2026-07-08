@@ -188,10 +188,14 @@ queue sizes or decode worker counts.
 The decode performance report also carries worker-transport counters. Treat
 `queue_full_drops` and `worker_disconnected_drops` as hard failures: they mean
 work accepted by scheduler policy did not reach a live preview worker. Treat
-`queue_pruned_obsolete_jobs`, `queue_evicted_prefetch_jobs`,
-`queue_canceled_jobs`, and `queue_promoted_current_jobs` as scheduling evidence
-that explains whether the queue protected visible current-frame work and removed
-canceled queued work before any codec or color/render optimization is attempted.
+`prefetch_skipped_current_pending`, `queue_pruned_obsolete_jobs`,
+`queue_evicted_prefetch_jobs`, `queue_canceled_jobs`, and
+`queue_promoted_current_jobs` as scheduling evidence that explains whether the
+queue protected visible current-frame work and removed canceled queued work
+before any codec or color/render optimization is attempted. A nonzero
+`prefetch_skipped_current_pending` is intentional slack-only prefetch behavior:
+the app did not add speculative playback work while the visible frame was still
+waiting on media.
 The same report includes current worker-queue depth split by priority and access
 mode (`queued_current_jobs`, `queued_prefetch_jobs`,
 `queued_playback_cursor_jobs`, `queued_scrub_cursor_jobs`, and
