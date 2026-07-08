@@ -498,6 +498,17 @@ promoted to current-frame work. This cancellation is reported separately as
 prefetch-preempted-by-current rather than as obsolete work or a deadline miss,
 so diagnostics can distinguish intentional current-frame protection from
 expired speculative work.
+Playback current-frame decode has a separate display deadline. The app layer
+assigns that deadline when a `Current + PlaybackCursor` job is admitted or
+promoted, because only the app owns viewer/playback-clock intent. A playback
+current job that reaches a worker after its deadline is canceled before FFmpeg
+work begins; a job that crosses the deadline while decoding is cooperatively
+canceled through the same media predicate. This is intentionally not a media
+crate concept: `mondrian-media` still receives only an access-mode request and
+a cancellation predicate. Diagnostics must report playback-deadline
+cancellations separately from prefetch-deadline cancellations so late visible
+frames can drive drop/proxy/hardware-decode work instead of being hidden as
+generic obsolete work.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;

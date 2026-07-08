@@ -216,6 +216,7 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) priority: MediaPreviewRequestPriority,
     pub(crate) access_mode: PreviewDecodeAccessMode,
     pub(crate) enqueued_at: Instant,
+    pub(crate) deadline_at: Option<Instant>,
 }
 
 pub(crate) struct MediaPreviewJobQueueSender {
@@ -385,6 +386,7 @@ impl MediaPreviewJobQueueSender {
         generation: u64,
         source_secs: f64,
         enqueued_at: Instant,
+        deadline_at: Option<Instant>,
     ) -> MediaPreviewJobPromoteStatus {
         if priority != MediaPreviewRequestPriority::Current {
             return MediaPreviewJobPromoteStatus::default();
@@ -403,6 +405,7 @@ impl MediaPreviewJobQueueSender {
         queued.job.generation = generation;
         queued.job.source_secs = source_secs;
         queued.job.enqueued_at = enqueued_at;
+        queued.job.deadline_at = deadline_at;
         let priority_promoted = previous != queued.priority;
         let access_mode_changed = previous_access_mode != queued.job.access_mode;
         let generation_changed = previous_generation != queued.job.generation;
@@ -948,6 +951,7 @@ mod tests {
             priority,
             access_mode: test_access_mode_for_priority(priority),
             enqueued_at: Instant::now(),
+            deadline_at: None,
         }
     }
 
@@ -1999,6 +2003,7 @@ mod tests {
             7,
             1.25,
             promoted_at,
+            None,
         );
         assert_eq!(
             status,
@@ -2015,6 +2020,7 @@ mod tests {
         assert_eq!(promoted_job.generation, 7);
         assert_eq!(promoted_job.source_secs, 1.25);
         assert_eq!(promoted_job.enqueued_at, promoted_at);
+        assert_eq!(promoted_job.deadline_at, None);
         assert_eq!(
             promoted_job.access_mode,
             PreviewDecodeAccessMode::ScrubCursor
@@ -2041,6 +2047,7 @@ mod tests {
         );
 
         let refreshed_at = Instant::now();
+        let refreshed_deadline = Some(refreshed_at);
         let status = sender.promote(
             &key,
             MediaPreviewRequestPriority::Current,
@@ -2048,6 +2055,7 @@ mod tests {
             5,
             1.0,
             refreshed_at,
+            refreshed_deadline,
         );
 
         assert_eq!(
@@ -2065,6 +2073,7 @@ mod tests {
         assert_eq!(job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
         assert_eq!(job.generation, 5);
         assert_eq!(job.enqueued_at, refreshed_at);
+        assert_eq!(job.deadline_at, refreshed_deadline);
     }
 
     #[test]
@@ -2186,6 +2195,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
                 enqueued_at: Instant::now(),
+                deadline_at: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -2226,6 +2236,7 @@ mod tests {
                 1,
                 1.0,
                 Instant::now(),
+                None,
             ),
             MediaPreviewJobPromoteStatus::default()
         );
@@ -2237,6 +2248,7 @@ mod tests {
                 1,
                 1.0,
                 Instant::now(),
+                None,
             ),
             MediaPreviewJobPromoteStatus::default()
         );

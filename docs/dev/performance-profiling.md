@@ -132,6 +132,13 @@ Cancellation counters are also split inside each access-mode profile; use those
 fields to identify whether obsolete, prefetch-deadline,
 prefetch-preempted-by-current, still-preempted-by-realtime-current, shutdown,
 or unknown cancellations came from playback, active scrub, or still-frame work.
+`canceled_playback_deadline_jobs` is different from
+`canceled_prefetch_deadline_jobs`: playback-deadline cancellations mean a
+visible `PlaybackCursor` current frame missed its display deadline and was
+dropped before or during decode, while prefetch-deadline cancellations mean
+speculative cache warming exceeded its budget. Treat playback deadline pressure
+as a reason to improve proxy/hardware decode/drop policy, not as a reason to
+increase speculative prefetch.
 Prefetch preemption means the app protected visible current-frame work from
 in-flight playback speculation. Still preemption means deterministic still-frame
 work yielded to playback or scrub current-frame work. Both are scheduling
