@@ -246,6 +246,11 @@ parallel coverage model. Playback-specific validators must surface missing
 decode report. General UI diagnostics may leave the required list empty; an
 idle or partial user session should not fail merely because it did not exercise
 every access contract.
+Media preview smoke validators must fail on both decode and post-decode render
+report failures, and their error codes should include failing check/root-cause
+codes before the generic failed-report code. A real sample whose UI cases fit
+their broad wall-clock window can still be unacceptable if access-mode p95,
+packet decode, or viewer output-boundary diagnostics exceed the frame budget.
 App media preview smokes must generate real samples for both active
 `ScrubCursor` playhead dragging and settled `RandomAccessStillFrame` requests;
 coverage is incomplete if the report merely defines both profiles. A common

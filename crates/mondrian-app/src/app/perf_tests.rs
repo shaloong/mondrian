@@ -8,8 +8,9 @@ use crate::app_ui::preview::{
     AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
     AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeAccessModeProfiles,
     AppUiPreviewDecodePerformanceReport, AppUiPreviewDecodePerformanceVerdict,
-    AppUiPreviewDiagnostics, AppUiPreviewRenderPerformanceReport, AppUiPreviewService,
-    APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    AppUiPreviewDiagnostics, AppUiPreviewRenderPerformanceReport,
+    AppUiPreviewRenderPerformanceSeverity, AppUiPreviewRenderPerformanceVerdict,
+    AppUiPreviewService, APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
     APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app_ui::shell::AppUiAppRoot;
@@ -163,11 +164,58 @@ fn write_report_if_needed(report_json: &str) {
 }
 
 fn preview_decode_hard_failures(report: &AppUiPreviewDecodePerformanceReport) -> Vec<&'static str> {
-    if report.verdict == AppUiPreviewDecodePerformanceVerdict::Fail {
-        vec!["preview_decode_report_failed"]
-    } else {
-        Vec::new()
+    let mut failures = Vec::new();
+    if report.verdict != AppUiPreviewDecodePerformanceVerdict::Fail {
+        return failures;
     }
+    failures.extend(
+        report
+            .checks
+            .iter()
+            .filter(|check| {
+                check.severity
+                    == crate::app_ui::preview::AppUiPreviewDecodePerformanceSeverity::Fail
+            })
+            .map(|check| check.code),
+    );
+    failures.extend(
+        report
+            .root_causes
+            .iter()
+            .filter(|root| {
+                root.severity == crate::app_ui::preview::AppUiPreviewDecodePerformanceSeverity::Fail
+            })
+            .map(|root| root.code),
+    );
+    failures.push("preview_decode_report_failed");
+    failures.sort_unstable();
+    failures.dedup();
+    failures
+}
+
+fn preview_render_hard_failures(report: &AppUiPreviewRenderPerformanceReport) -> Vec<&'static str> {
+    let mut failures = Vec::new();
+    if report.verdict != AppUiPreviewRenderPerformanceVerdict::Fail {
+        return failures;
+    }
+    failures.extend(
+        report
+            .checks
+            .iter()
+            .filter(|check| check.severity == AppUiPreviewRenderPerformanceSeverity::Fail)
+            .map(|check| check.code),
+    );
+    failures.extend(
+        report
+            .root_causes
+            .iter()
+            .filter(|root| root.severity == AppUiPreviewRenderPerformanceSeverity::Fail)
+            .map(|root| root.code),
+    );
+    failures.push("preview_render_report_failed");
+    failures.sort_unstable();
+    failures.dedup();
+    failures
 }
 
 fn preview_decode_required_access_mode_failures(
@@ -994,6 +1042,14 @@ fn validate_preview_media_access_mode_report(
             report_json
         );
     }
+    let render_failures = preview_render_hard_failures(&report.preview_render_report);
+    if !render_failures.is_empty() {
+        anyhow::bail!(
+            "preview media render report failed: {:?}; report: {}",
+            render_failures,
+            report_json
+        );
+    }
     let queue_wait_failures = preview_decode_access_mode_queue_wait_failures(
         &report.preview_decode_report,
         &[
@@ -1221,6 +1277,14 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         anyhow::bail!(
             "preview media continuous playback decode report failed: {:?}; report: {}",
             decode_failures,
+            report_json
+        );
+    }
+    let render_failures = preview_render_hard_failures(&report.preview_render_report);
+    if !render_failures.is_empty() {
+        anyhow::bail!(
+            "preview media continuous playback render report failed: {:?}; report: {}",
+            render_failures,
             report_json
         );
     }
@@ -1701,10 +1765,43 @@ fn preview_decode_hard_failures_include_failed_report() {
     );
 
     assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
-    assert_eq!(
-        preview_decode_hard_failures(&report),
-        vec!["preview_decode_report_failed"]
+    let failures = preview_decode_hard_failures(&report);
+    assert!(failures.contains(&"preview_decode_report_failed"));
+    assert!(failures.contains(&"preview_decode_max_frame_us"));
+    assert!(failures.contains(&"preview_decode_frame_over_budget"));
+    assert!(failures.contains(&"preview_decode_access_mode_over_budget"));
+}
+
+#[test]
+fn preview_render_hard_failures_include_checks_and_root_causes() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        render_timed_frames: 1,
+        render_total_duration_us: 90_000,
+        render_max_duration_us: 90_000,
+        render_last_duration_us: 90_000,
+        render_stage_durations: crate::app_ui::preview::AppUiPreviewRenderStageDurations {
+            cpu_output_boundary_us: 80_000,
+            ..crate::app_ui::preview::AppUiPreviewRenderStageDurations::default()
+        },
+        render_max_frame_stage_durations:
+            crate::app_ui::preview::AppUiPreviewRenderStageDurations {
+                cpu_output_boundary_us: 80_000,
+                ..crate::app_ui::preview::AppUiPreviewRenderStageDurations::default()
+            },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_render_performance_report(
+        diagnostics.render_performance_summary(50_000),
+        "preview-render-hard-failure-test",
+        50_000,
     );
+
+    let failures = preview_render_hard_failures(&report);
+
+    assert!(failures.contains(&"preview_render_report_failed"));
+    assert!(failures.contains(&"preview_render_max_frame_us"));
+    assert!(failures.contains(&"preview_render_frame_over_budget"));
+    assert!(failures.contains(&"preview_render_cpu_output_boundary_bound"));
 }
 
 #[test]
