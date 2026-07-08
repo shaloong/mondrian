@@ -489,14 +489,22 @@ fn next_media_preview_job_index(
     lane: MediaPreviewWorkerLane,
 ) -> Option<usize> {
     let eligible = |queued: &QueuedMediaPreviewJob| lane.accepts(queued.job.access_mode);
+    let current_job =
+        |queued: &QueuedMediaPreviewJob| queued.priority == MediaPreviewRequestPriority::Current;
     queue
         .iter()
         .enumerate()
-        .filter(|(_, queued)| {
-            queued.priority == MediaPreviewRequestPriority::Current && eligible(queued)
-        })
+        .filter(|(_, queued)| current_job(queued) && eligible(queued))
         .min_by_key(|(_, queued)| media_preview_current_job_rank(queued.job.access_mode))
         .map(|(index, _)| index)
+        .or_else(|| {
+            queue
+                .iter()
+                .enumerate()
+                .filter(|(_, queued)| current_job(queued))
+                .min_by_key(|(_, queued)| media_preview_current_job_rank(queued.job.access_mode))
+                .map(|(index, _)| index)
+        })
         .or_else(|| queue.iter().position(eligible))
 }
 
@@ -1886,13 +1894,16 @@ mod tests {
     }
 
     #[test]
-    fn media_preview_job_queue_keeps_interactive_work_off_playback_lane() {
+    fn media_preview_job_queue_current_work_steals_idle_playback_lane_before_prefetch() {
         let (sender, receiver) = media_preview_job_queue(2);
         let scrub = test_media_key(1);
-        let playback = test_media_key(2);
-        let scrub_job = test_media_job(scrub, 1.0, MediaPreviewRequestPriority::Current);
-        let mut playback_job =
-            test_media_job(playback.clone(), 2.0, MediaPreviewRequestPriority::Prefetch);
+        let playback_prefetch = test_media_key(2);
+        let scrub_job = test_media_job(scrub.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        let mut playback_job = test_media_job(
+            playback_prefetch.clone(),
+            2.0,
+            MediaPreviewRequestPriority::Prefetch,
+        );
         playback_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
 
         assert_eq!(
@@ -1904,10 +1915,16 @@ mod tests {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
+        let scrub_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Playback)
+            .expect("idle playback lane should help visible current work before prefetch");
+        assert_eq!(scrub_job.key, scrub);
+        assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
+
         let playback_job = receiver
             .recv_for_worker(MediaPreviewWorkerLane::Playback)
-            .expect("playback lane should skip scrub work");
-        assert_eq!(playback_job.key, playback);
+            .expect("playback lane should still own playback prefetch after current work");
+        assert_eq!(playback_job.key, playback_prefetch);
         assert_eq!(
             playback_job.access_mode,
             PreviewDecodeAccessMode::PlaybackCursor

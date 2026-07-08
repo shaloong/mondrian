@@ -61,13 +61,17 @@ source media path, file fingerprint, output dimensions, and source time in
 microseconds. A bare timeline frame number is not a media identity: the same
 frame index can represent different source times under different time bases,
 and relink/proxy/source path changes must not reuse stale RGBA frames.
-App preview scheduling preserves playback cursor locality. When more than one
-preview decode worker exists, worker 0 is a dedicated playback lane and the
-remaining workers are interactive lanes for scrub/still work. With only one
-worker, the lane is `Any` so all modes still make progress. Because workers
-filter by lane, enqueue and priority promotion wake all preview workers, not
-just one; otherwise a playback-only queue could wake an interactive worker and
-leave the playback worker asleep until another request arrives.
+App preview scheduling preserves playback cursor locality without letting idle
+workers sit beside visible current-frame work. When more than one preview decode
+worker exists, worker 0 has playback affinity and the remaining workers have
+interactive affinities for scrub/still work. Those affinities are
+work-conserving for `Current` requests: any idle worker may steal the highest
+ranked current-frame job before taking lane-local background work. `Prefetch`
+remains playback-only and lower priority than every current-frame request. With
+only one worker, the lane is `Any` so all modes still make progress. Because
+workers filter by lane, enqueue and priority promotion wake all preview workers,
+not just one; otherwise a playback-only queue could wake an interactive worker
+and leave the playback worker asleep until another request arrives.
 Forward prefetch is a playback-only behavior. Settled still-frame preview and
 active scrubbing must not enqueue `PlaybackCursor` prefetch work, because that
 turns random access or latest-wins interaction into hidden background playback

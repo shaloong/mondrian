@@ -5469,7 +5469,6 @@ impl AppUiPreviewService {
             return Some(frame);
         }
         if self.failed_media_key(&key) {
-            self.current_frame_pending.set(true);
             return None;
         }
         self.current_frame_pending.set(true);
@@ -6777,9 +6776,15 @@ fn decode_media_preview_for_access_mode(
 mod tests {
     use super::*;
 
-    use mondrian_core::types::{AssetId, TimeCode};
+    use mondrian_assets::AssetLibrary;
+    use mondrian_core::types::{AssetId, Rational, TimeCode};
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, ProjectColorManagement};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
+    use mondrian_media::info::{PixelFormat, VideoCodec};
+    use mondrian_media::{
+        DetectedColorInterpretation, MediaInfo, VideoColorDetectionMethod,
+        VideoColorInterpretationConfidence, VideoColorSpaceSource, VideoStreamInfo,
+    };
     use mondrian_renderer::{ColorFrameDomain, RenderColorStageGpuBlockerBreakdown};
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
@@ -6805,6 +6810,86 @@ mod tests {
         state.sequence = Some(sequence);
         state.seek(4);
         state
+    }
+
+    fn unique_preview_test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ))
+    }
+
+    fn rec709_video_media_info(path: PathBuf, file_size: u64) -> MediaInfo {
+        MediaInfo {
+            path,
+            duration: Duration::from_secs(2),
+            file_size,
+            container: "mp4".to_owned(),
+            video_streams: vec![VideoStreamInfo {
+                index: 0,
+                codec: VideoCodec::H265,
+                width: 3840,
+                height: 2160,
+                frame_rate: Rational::new(25, 1),
+                pixel_format: PixelFormat::Yuv420p10le,
+                detected_color_space: Some(ColorSpace::Rec709),
+                color_interpretation: DetectedColorInterpretation {
+                    color_space: Some(ColorSpace::Rec709),
+                    confidence: VideoColorInterpretationConfidence::High,
+                    source: VideoColorSpaceSource::Metadata,
+                    method: VideoColorDetectionMethod::CicpTags,
+                    evidence: Vec::new(),
+                    warnings: Vec::new(),
+                    user_overridable: true,
+                },
+                color_space_source: VideoColorSpaceSource::Metadata,
+                color_detection_method: VideoColorDetectionMethod::CicpTags,
+                color_metadata: None,
+                color_metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
+                bit_depth: 10,
+                has_alpha: false,
+                avg_bitrate: 20_000_000,
+                total_frames: Some(50),
+            }],
+            audio_streams: Vec::new(),
+            has_video: true,
+            has_audio: false,
+        }
+    }
+
+    fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
+        ensure_test_ocio_loaded();
+        let root = unique_preview_test_root("mondrian-preview-invalid-video");
+        let media_path = root.join("source.mp4");
+        std::fs::create_dir_all(&root).expect("test root");
+        std::fs::write(&media_path, b"not a real video").expect("invalid media");
+        let file_size = std::fs::metadata(&media_path).expect("media metadata").len();
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let asset_id = library
+            .upsert_media_file_with_info(
+                &media_path,
+                rec709_video_media_info(media_path.clone(), file_size),
+            )
+            .expect("insert video asset");
+
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+        let mut sequence = Sequence::new("media");
+        let tb = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(Clip::new(
+                asset_id,
+                TimeCode::new(0, tb),
+                TimeCode::new(50, tb),
+            ))
+            .expect("media clip should be insertable");
+        state.sequence = Some(sequence);
+        state.seek(0);
+        (state, asset_id, root)
     }
 
     fn state_with_icc_display_policy(color: Color) -> AppState {
@@ -10626,6 +10711,42 @@ mod tests {
         assert_eq!(result.priority, MediaPreviewRequestPriority::Prefetch);
         assert_eq!(result.queue_wait_us, 456);
         assert!(result.decode_diagnostics.is_none());
+    }
+
+    #[test]
+    fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
+        let (state, asset_id, root) = state_with_invalid_video_asset();
+        let service = AppUiPreviewService::new();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let color_context = sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            ColorSpace::Rec709,
+        );
+        let (key, _) = service
+            .media_preview_key_for_asset(
+                &state,
+                &asset_id,
+                None,
+                0,
+                0.0,
+                width,
+                height,
+                &color_context,
+                true,
+            )
+            .expect("media preview key");
+        service.media_failures.borrow_mut().insert(key);
+
+        let preview = service.viewer_preview_for_state(&state);
+
+        assert!(matches!(preview, ViewerPreviewState::Unavailable));
+        assert!(
+            !service.current_frame_pending.get(),
+            "a cached decode failure is terminal evidence, not pending work"
+        );
+        service.shutdown();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn test_media_key(source_frame: i64) -> MediaPreviewKey {
