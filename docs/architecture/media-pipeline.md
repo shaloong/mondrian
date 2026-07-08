@@ -140,6 +140,14 @@ preserves still-frame correctness while preventing latest-wins scrubbing from
 spending the same long-GOP CPU budget as deterministic extraction, and leaves a
 clear replacement point for future hardware-resident playback and low-latency
 scrub backends.
+Every preview decode diagnostic emitted by `mondrian-media` must carry the
+resolved access-mode policy contract alongside the observed result:
+`seek_strategy`, `forward_reuse_frame_window`,
+`forward_decode_budget_frames`, and `any_seek_window_ms`. App/UI performance
+reports may aggregate those fields, but must not reconstruct them from app
+conditionals. This keeps policy bugs diagnosable: for example, a scrub sample
+that reports `BoundedAnyFrame` with a zero `any_seek_window_ms` is a broken
+media contract, not a UI presentation issue.
 Each in-process preview decode session also maintains a session-local,
 incremental keyframe seek index from video packet metadata observed during real
 decode work. The index may bound later seeks to an already-known keyframe

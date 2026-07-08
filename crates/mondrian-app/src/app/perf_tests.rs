@@ -1853,6 +1853,8 @@ fn preview_media_decode_access_mode_coverage_passes_with_scrub_and_still_samples
             scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_rgba_frames: 1,
+                bounded_any_seek_strategy_frames: 1,
+                any_seek_window_ms_max: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             random_access_still: AppUiPreviewDecodeAccessModeProfile {
@@ -1886,6 +1888,8 @@ fn preview_media_decode_access_mode_coverage_rejects_cache_only_samples() {
             scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
                 cache_hit_frames: 1,
+                bounded_any_seek_strategy_frames: 1,
+                any_seek_window_ms_max: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -1917,6 +1921,8 @@ fn preview_decode_access_mode_queue_wait_failures_are_scoped_by_mode() {
                 queue_wait_total_us: 70_000,
                 queue_wait_max_us: 70_000,
                 queue_wait_last_us: 70_000,
+                bounded_any_seek_strategy_frames: 1,
+                any_seek_window_ms_max: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             random_access_still: AppUiPreviewDecodeAccessModeProfile {
@@ -2082,6 +2088,8 @@ fn preview_playback_decode_failures_allow_non_playback_warnings() {
                 max_duration_us: 12_000,
                 last_duration_us: 12_000,
                 session_opened_frames: 1,
+                bounded_any_seek_strategy_frames: 1,
+                any_seek_window_ms_max: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             ..AppUiPreviewDecodeAccessModeProfiles::default()

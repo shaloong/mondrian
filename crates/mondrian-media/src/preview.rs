@@ -434,6 +434,15 @@ pub struct PreviewDecodeDiagnostics {
     /// Seek strategy requested by the access-mode policy for this frame.
     #[serde(default)]
     pub seek_strategy: PreviewDecodeSeekStrategy,
+    /// Forward session reuse window from the access-mode policy, in timeline frames.
+    #[serde(default)]
+    pub forward_reuse_frame_window: i64,
+    /// Maximum decoded frames allowed while scanning forward for this access mode.
+    #[serde(default)]
+    pub forward_decode_budget_frames: u32,
+    /// Bounded-any seek window from the access-mode policy, in milliseconds.
+    #[serde(default)]
+    pub any_seek_window_ms: u64,
     /// Whether an existing access-mode-local decode session was reused.
     #[serde(default)]
     pub session_reused: bool,
@@ -483,6 +492,9 @@ impl PreviewDecodeDiagnostics {
             cpu_resident: true,
             seek_performed: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
+            forward_reuse_frame_window: 0,
+            forward_decode_budget_frames: 0,
+            any_seek_window_ms: 0,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,
@@ -505,9 +517,6 @@ impl PreviewDecodeDiagnostics {
     fn cache_hit_for_mode(elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
         Self::new(PreviewDecodePath::PreviewCacheHit)
             .with_access_mode(access_mode)
-            .with_seek_strategy(
-                PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
-            )
             .with_elapsed(elapsed)
     }
 
@@ -519,11 +528,16 @@ impl PreviewDecodeDiagnostics {
 
     fn with_access_mode(mut self, access_mode: PreviewDecodeAccessMode) -> Self {
         self.access_mode = access_mode;
+        self = self.with_access_policy(PreviewDecodeAccessPolicy::for_access_mode(access_mode));
         self
     }
 
-    fn with_seek_strategy(mut self, seek_strategy: PreviewDecodeSeekStrategy) -> Self {
-        self.seek_strategy = seek_strategy;
+    fn with_access_policy(mut self, policy: PreviewDecodeAccessPolicy) -> Self {
+        self.seek_strategy = policy.seek_strategy;
+        self.forward_reuse_frame_window = policy.forward_reuse_frame_window;
+        self.forward_decode_budget_frames =
+            policy.forward_decode_budget_frames.min(u32::MAX as usize) as u32;
+        self.any_seek_window_ms = policy.any_seek_window_ms;
         self
     }
 }
@@ -639,7 +653,7 @@ impl RgbaFrame {
     }
 
     fn with_access_mode(mut self, access_mode: PreviewDecodeAccessMode) -> Self {
-        self.diagnostics.access_mode = access_mode;
+        self.diagnostics = self.diagnostics.with_access_mode(access_mode);
         self
     }
 
@@ -2310,6 +2324,7 @@ mod tests {
     #[test]
     fn rgba_frame_diagnostics_record_seek_index_evidence() {
         let frame = RgbaFrame::new(1, 1, vec![0; 4], PreviewDecodePath::InProcessFfmpegCpuRgba)
+            .with_access_mode(PreviewDecodeAccessMode::ScrubCursor)
             .with_seek_index_diagnostics(
                 PreviewSeekIndexDiagnostics {
                     available: true,
@@ -2320,6 +2335,26 @@ mod tests {
             );
 
         assert!(frame.diagnostics.seek_index_available);
+        assert_eq!(
+            frame.diagnostics.access_mode,
+            PreviewDecodeAccessMode::ScrubCursor
+        );
+        assert_eq!(
+            frame.diagnostics.seek_strategy,
+            PreviewDecodeSeekStrategy::BoundedAnyFrame
+        );
+        assert_eq!(
+            frame.diagnostics.forward_reuse_frame_window,
+            PREVIEW_SCRUB_FORWARD_REUSE_FRAMES
+        );
+        assert_eq!(
+            frame.diagnostics.forward_decode_budget_frames,
+            PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES as u32
+        );
+        assert_eq!(
+            frame.diagnostics.any_seek_window_ms,
+            PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS
+        );
         assert_eq!(frame.diagnostics.seek_index_keyframes, 4);
         assert_eq!(frame.diagnostics.seek_index_observed_packets, 12);
         assert!(frame.diagnostics.seek_index_used);
@@ -2390,6 +2425,9 @@ mod tests {
             frame.diagnostics.seek_strategy,
             PreviewDecodeSeekStrategy::KeyframeBefore
         );
+        assert_eq!(frame.diagnostics.forward_reuse_frame_window, 0);
+        assert_eq!(frame.diagnostics.forward_decode_budget_frames, 0);
+        assert_eq!(frame.diagnostics.any_seek_window_ms, 0);
         let reused = frame.clone().with_session_reused(true).with_forward_reused(true);
         assert!(reused.diagnostics.session_reused);
         assert!(reused.diagnostics.forward_reused);
@@ -2410,6 +2448,15 @@ mod tests {
             cached.diagnostics.seek_strategy,
             PreviewDecodeSeekStrategy::KeyframeBefore
         );
+        assert_eq!(
+            cached.diagnostics.forward_reuse_frame_window,
+            PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES
+        );
+        assert_eq!(
+            cached.diagnostics.forward_decode_budget_frames,
+            PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES as u32
+        );
+        assert_eq!(cached.diagnostics.any_seek_window_ms, 0);
 
         let ring_hit = cached.into_playback_ring_hit(std::time::Duration::from_micros(2));
         assert_eq!(
@@ -2423,6 +2470,15 @@ mod tests {
             ring_hit.diagnostics.access_mode,
             PreviewDecodeAccessMode::PlaybackCursor
         );
+        assert_eq!(
+            ring_hit.diagnostics.forward_reuse_frame_window,
+            PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES
+        );
+        assert_eq!(
+            ring_hit.diagnostics.forward_decode_budget_frames,
+            PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES as u32
+        );
+        assert_eq!(ring_hit.diagnostics.any_seek_window_ms, 0);
     }
 
     #[test]

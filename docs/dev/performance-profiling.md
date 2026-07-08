@@ -118,6 +118,13 @@ must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
 should fail before anyone tunes codec threads, proxy thresholds, color, or
 renderer code.
+`preview_decode_report` schema v19 also records the media-layer policy contract
+observed by each access mode: `forward_reuse_frame_window_max`,
+`forward_decode_budget_frames_max`, and `any_seek_window_ms_max`. A healthy
+`ScrubCursor` sample must have a non-zero `any_seek_window_ms_max`; otherwise
+the report fails with `preview_decode_scrub_cursor_any_seek_window_ms` because
+the UI would be claiming low-latency bounded-any seeking without carrying the
+actual bounded seek window through diagnostics.
 The same profiles expose session-local seek-index counters:
 `seek_index_available_frames`, `seek_index_used_frames`,
 `seek_index_keyframes_max`, and `seek_index_observed_packets_max`. Slow scrub
@@ -141,7 +148,7 @@ from the active sequence frame duration, with conservative min/max bounds, so
 slow playback at 24 fps and 60 fps playback are judged against different
 budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
 decode/drop policy, not as a reason to increase speculative prefetch.
-`preview_decode_report` schema v18 also includes `playback_schedule`, the
+`preview_decode_report` schema v19 also includes `playback_schedule`, the
 app-owned playback-clock contract used by the scheduler. It records the last
 current-frame deadline budget, the dynamic forward-prefetch horizon/window, and
 invalid frame-rate counters. Checks
