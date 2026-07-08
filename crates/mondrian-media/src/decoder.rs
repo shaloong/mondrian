@@ -1,6 +1,6 @@
 //! 解码器池
 //!
-//! 管理多个并发 FFmpeg 解码上下文，支持帧精确随机访问。
+//! Coordinates preview decode concurrency, cache residency, and access-mode requests.
 
 use crate::cache::{FrameCache, RawVideoFrame};
 use crate::preview::{
@@ -78,9 +78,9 @@ impl DecodedGpuFrameHandleKind {
 /// Hardware decode / zero-copy probe result for the current process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HwAccelProbe {
-    /// Backend that is actually selected for decode contexts.
+    /// Backend that is actually active for the media decode boundary.
     pub selected_backend: HwAccelBackend,
-    /// Whether decode contexts currently use a hardware decoder.
+    /// Whether the media decode boundary currently uses a hardware decoder.
     pub hardware_decode_active: bool,
     /// Whether decoded frames currently remain GPU-resident through the media boundary.
     pub zero_copy_active: bool,
@@ -95,7 +95,7 @@ pub struct HwAccelProbe {
 }
 
 impl HwAccelBackend {
-    /// Return the backend that is actually active for decode contexts.
+    /// Return the backend that is actually active for the media decode boundary.
     ///
     /// This intentionally fails closed to `None` until Mondrian has a real
     /// hardware-frame path that exports/imports decoder textures into the
@@ -158,15 +158,6 @@ fn hardware_decode_unavailable_reason() -> &'static str {
     {
         "hardware decode texture residency is not connected for this platform; using CPU RGBA decode"
     }
-}
-
-/// 单个媒体文件的解码上下文（FFmpeg AVFormatContext 包装）
-#[allow(dead_code)]
-struct DecoderContext {
-    asset_id: AssetId,
-    media_path: PathBuf,
-    hw_accel: HwAccelBackend,
-    // TODO: ffmpeg_next::format::context::Input
 }
 
 #[derive(Clone)]
@@ -343,23 +334,14 @@ impl DecoderMetrics {
     }
 }
 
-impl DecoderContext {
-    fn open(asset_id: AssetId, path: PathBuf, hw_accel: HwAccelBackend) -> Result<Self> {
-        tracing::debug!("Opened decoder for asset {asset_id}");
-        Ok(Self { asset_id, media_path: path, hw_accel })
-    }
-}
-
 /// 解码器池
 ///
-/// - 每个素材最多持有一个 `DecoderContext`
-/// - 通过 `Semaphore` 限制并发解码数 ≤ `max_concurrent`
-/// - 解码结果通过 `FrameCache` 缓存
+/// - Limits concurrent preview decode work with a semaphore.
+/// - Coalesces in-flight RGBA preview requests by access-mode-aware cache key.
+/// - Keeps decoded frame caches and prefetch task cancellation state.
 pub struct DecoderPool {
-    contexts: DashMap<AssetId, Arc<tokio::sync::Mutex<DecoderContext>>>,
     frame_cache: Arc<FrameCache>,
     semaphore: Arc<Semaphore>,
-    hw_accel: HwAccelBackend,
     hw_accel_probe: HwAccelProbe,
     prefetch_tasks: DashMap<u64, PrefetchTask>,
     next_prefetch_task_id: AtomicU64,
@@ -425,10 +407,8 @@ impl DecoderPool {
         let max_concurrent = (num_cpus() - 2).max(1);
         let hw_accel_probe = HwAccelBackend::probe();
         Arc::new(Self {
-            contexts: DashMap::new(),
             frame_cache,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
-            hw_accel: hw_accel_probe.selected_backend,
             hw_accel_probe,
             prefetch_tasks: DashMap::new(),
             next_prefetch_task_id: AtomicU64::new(1),
@@ -527,17 +507,6 @@ impl DecoderPool {
             frame_num,
             target_width,
             target_height
-        );
-
-        if let Err(err) = self.get_or_open_context(asset_id, path.clone()).await {
-            self.rgba_inflight.remove(&key);
-            notify.notify_waiters();
-            return Err(err);
-        }
-        tracing::debug!(
-            "[decoder] rgba context ready asset={} frame={}",
-            asset_id,
-            frame_num
         );
 
         let started = Instant::now();
@@ -658,31 +627,6 @@ impl DecoderPool {
         decode_result
     }
 
-    /// 获取或创建指定素材的解码上下文
-    async fn get_or_open_context(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-    ) -> Result<Arc<tokio::sync::Mutex<DecoderContext>>> {
-        if let Some(ctx) = self.contexts.get(&asset_id) {
-            return Ok(ctx.clone());
-        }
-        let ctx = tokio::task::spawn_blocking({
-            let hw = self.hw_accel;
-            let path = path.clone();
-            move || DecoderContext::open(asset_id, path, hw)
-        })
-        .await
-        .map_err(|e| mondrian_core::MondrianError::DecodeFailed {
-            asset_id: asset_id.to_string(),
-            reason: e.to_string(),
-        })??;
-
-        let ctx = Arc::new(tokio::sync::Mutex::new(ctx));
-        self.contexts.insert(asset_id, ctx.clone());
-        Ok(ctx)
-    }
-
     /// 获取指定时间码处的随机访问静帧（优先从缓存读取）。
     ///
     /// This legacy YUV-facing path derives YUV420p from a still-frame CPU RGBA
@@ -711,13 +655,9 @@ impl DecoderPool {
             .await
             .map_err(|_| mondrian_core::MondrianError::Cancelled)?;
 
-        // 3. 获取 context
-        let ctx = self.get_or_open_context(asset_id, path.clone()).await?;
-
-        // 4. 解码（在阻塞线程池执行）
+        // 3. 解码（在阻塞线程池执行）
         let started = Instant::now();
         let frame = tokio::task::spawn_blocking(move || {
-            let _ctx_lock = ctx.blocking_lock();
             tracing::debug!("Decoding frame {frame_num} for asset {asset_id}");
 
             let timestamp_secs = timecode.to_secs().max(0.0);
@@ -759,15 +699,14 @@ impl DecoderPool {
             .total_decode_ns
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        // 5. 写入缓存
+        // 4. 写入缓存
         self.frame_cache.insert(frame.clone());
 
         Ok(frame)
     }
 
-    /// 关闭并移除指定素材的解码上下文（素材被删除时）
-    pub fn close_context(&self, asset_id: AssetId) {
-        self.contexts.remove(&asset_id);
+    /// Cancel background work and evict decoded frames for an asset.
+    pub fn close_asset(&self, asset_id: AssetId) {
         self.cancel_prefetch_for_asset(asset_id);
         self.frame_cache.evict_asset(asset_id);
         self.evict_rgba_asset(asset_id);
@@ -938,7 +877,6 @@ impl DecoderPool {
     pub fn clear_all_caches(&self) {
         self.cancel_all_prefetch_tasks();
         self.prefetch_tasks.clear();
-        self.contexts.clear();
         self.frame_cache.clear_all();
         self.rgba_cache.lock().clear();
     }

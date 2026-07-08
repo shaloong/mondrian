@@ -61,6 +61,11 @@ access mode, source media path, file fingerprint, output dimensions, and source
 time in microseconds. A bare timeline frame number is not a media identity:
 the same frame index can represent different source times under different time
 bases, and relink/proxy/source path changes must not reuse stale RGBA frames.
+`DecoderPool` itself owns scheduling, in-flight coalescing, decode permits,
+prefetch cancellation, and frame caches only. It must not own a second
+per-asset placeholder FFmpeg context outside the access-mode preview decode
+boundary; otherwise playback/scrub/still session state is split across two
+modules and future hardware-resident adapters have an ambiguous home.
 App preview scheduling preserves playback cursor locality. When more than one
 preview decode worker exists, worker 0 is a dedicated playback lane and the
 remaining workers are interactive lanes for scrub/still work. With only one
