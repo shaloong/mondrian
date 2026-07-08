@@ -25,11 +25,12 @@ use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::HwAccelBackend;
 use mondrian_media::{
     decode_preview_rgba_scaled_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
-    DecodedVideoSurfaceFormat, PreviewDecodeAccessMode, PreviewDecodeCpuBudget,
-    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest,
-    PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
-    PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewSeekIndexSource,
-    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
+    DecodedVideoSurfaceFormat, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
+    PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -91,6 +92,7 @@ pub struct AppUiPreviewService {
     media_cache: RefCell<MediaPreviewCache>,
     media_failures: RefCell<MediaPreviewFailureCache>,
     requested_proxy_generations: RefCell<HashSet<PreviewProxyGenerationRequestKey>>,
+    scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     viewer_frame_cache: RefCell<ViewerPreviewFrameCache>,
     external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
     next_gpu_preview_candidate_id: Cell<u64>,
@@ -171,6 +173,7 @@ impl AppUiPreviewService {
                 MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY,
             )),
             requested_proxy_generations: RefCell::new(HashSet::new()),
+            scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
             viewer_frame_cache: RefCell::new(ViewerPreviewFrameCache::new(
                 VIEWER_PREVIEW_FRAME_CACHE_CAPACITY,
             )),
@@ -248,6 +251,16 @@ impl AppUiPreviewService {
                 .metrics
                 .media_proxy_generation_request_dedupes
                 .get(),
+            scrub_adaptive_normal_requests: self.metrics.scrub_adaptive_normal_requests.get(),
+            scrub_adaptive_hot_region_requests: self
+                .metrics
+                .scrub_adaptive_hot_region_requests
+                .get(),
+            scrub_adaptive_slow_latency_requests: self
+                .metrics
+                .scrub_adaptive_slow_latency_requests
+                .get(),
+            scrub_adaptive_recovery_requests: self.metrics.scrub_adaptive_recovery_requests.get(),
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
             media_failure_hits: self.metrics.media_failure_hits.get(),
@@ -521,6 +534,7 @@ impl AppUiPreviewService {
                 continue;
             }
             if let Some(diagnostics) = result.decode_diagnostics {
+                self.scrub_adaptation.borrow_mut().observe_decode(diagnostics);
                 self.record_preview_decode(diagnostics, result.queue_wait_us);
             }
             match result.frame {
@@ -1743,6 +1757,14 @@ pub struct AppUiPreviewDiagnostics {
     pub media_proxy_generation_requests: u64,
     /// Playback proxy generation candidates already queued for the same source revision.
     pub media_proxy_generation_request_dedupes: u64,
+    /// Scrub current-frame requests that used normal decode policy.
+    pub scrub_adaptive_normal_requests: u64,
+    /// Scrub current-frame requests that tightened policy for a hot seek region.
+    pub scrub_adaptive_hot_region_requests: u64,
+    /// Scrub current-frame requests that tightened policy because scrub latency is slow.
+    pub scrub_adaptive_slow_latency_requests: u64,
+    /// Scrub current-frame requests that used conservative recovery policy after slow latency.
+    pub scrub_adaptive_recovery_requests: u64,
     /// Media preview cache hits.
     pub media_cache_hits: u64,
     /// Media preview cache misses.
@@ -6149,6 +6171,7 @@ impl AppUiPreviewService {
                             MediaPreviewRequestPriority::Prefetch,
                             PreviewDecodeAccessMode::PlaybackCursor,
                             None,
+                            PreviewDecodeAdaptiveHints::default(),
                         );
                         if enqueued {
                             *remaining_prefetch_jobs = (*remaining_prefetch_jobs).saturating_sub(1);
@@ -6215,12 +6238,14 @@ impl AppUiPreviewService {
             return None;
         }
         self.current_frame_pending.set(true);
+        let adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
         self.request_media_preview(
             key,
             source_secs,
             MediaPreviewRequestPriority::Current,
             access_mode,
             media_preview_playback_current_deadline_budget_us(sequence_frame_rate),
+            adaptive_hints,
         );
         None
     }
@@ -6404,6 +6429,32 @@ impl AppUiPreviewService {
         request_proxy_generation(asset_id, source_path.to_path_buf(), proxy_config.clone());
     }
 
+    fn preview_decode_adaptive_hints(
+        &self,
+        access_mode: PreviewDecodeAccessMode,
+        key: &MediaPreviewKey,
+    ) -> PreviewDecodeAdaptiveHints {
+        if access_mode != PreviewDecodeAccessMode::ScrubCursor {
+            return PreviewDecodeAdaptiveHints::default();
+        }
+        let hints = self.scrub_adaptation.borrow_mut().observe_request(key);
+        match hints.scrub_class {
+            PreviewScrubAdaptiveClass::Normal => {
+                bump(&self.metrics.scrub_adaptive_normal_requests);
+            }
+            PreviewScrubAdaptiveClass::HotRegion => {
+                bump(&self.metrics.scrub_adaptive_hot_region_requests);
+            }
+            PreviewScrubAdaptiveClass::SlowLatency => {
+                bump(&self.metrics.scrub_adaptive_slow_latency_requests);
+            }
+            PreviewScrubAdaptiveClass::Recovery => {
+                bump(&self.metrics.scrub_adaptive_recovery_requests);
+            }
+        }
+        hints
+    }
+
     fn request_media_preview(
         &self,
         key: MediaPreviewKey,
@@ -6411,6 +6462,7 @@ impl AppUiPreviewService {
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
         playback_current_deadline_budget_us: Option<u64>,
+        adaptive_hints: PreviewDecodeAdaptiveHints,
     ) -> bool {
         let generation = self.current_generation.get();
         let is_current_playback = priority == MediaPreviewRequestPriority::Current
@@ -6452,6 +6504,7 @@ impl AppUiPreviewService {
                         enqueued_at,
                         playback_current_deadline_budget_us,
                     ),
+                    adaptive_hints,
                 );
                 if queued_update.priority_promoted {
                     bump(&self.metrics.queue_promoted_current_jobs);
@@ -6492,6 +6545,7 @@ impl AppUiPreviewService {
             generation,
             priority,
             access_mode,
+            adaptive_hints,
             enqueued_at,
             deadline_at: media_preview_job_deadline_at(
                 priority,
@@ -6693,6 +6747,10 @@ struct AppUiPreviewMetrics {
     media_proxy_path_bypasses: Cell<u64>,
     media_proxy_generation_requests: Cell<u64>,
     media_proxy_generation_request_dedupes: Cell<u64>,
+    scrub_adaptive_normal_requests: Cell<u64>,
+    scrub_adaptive_hot_region_requests: Cell<u64>,
+    scrub_adaptive_slow_latency_requests: Cell<u64>,
+    scrub_adaptive_recovery_requests: Cell<u64>,
     viewer_frame_cache_hits: Cell<u64>,
     viewer_frame_cache_misses: Cell<u64>,
     media_cache_hits: Cell<u64>,
@@ -7398,6 +7456,75 @@ fn media_path_metadata(path: &Path) -> Option<MediaPathMetadata> {
     })
 }
 
+const PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US: u64 = 250_000;
+const PREVIEW_SCRUB_HOT_SOURCE_WINDOW_US: i64 = 750_000;
+const PREVIEW_SCRUB_SLOW_LATENCY_US: u64 = 40_000;
+const PREVIEW_SCRUB_RECOVERY_LATENCY_US: u64 = 25_000;
+const PREVIEW_SCRUB_SLOW_SCORE_MAX: u8 = 3;
+
+#[derive(Debug, Clone, Copy)]
+struct PreviewScrubRequestObservation {
+    asset_id: AssetId,
+    source_micros: i64,
+    observed_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct PreviewScrubAdaptationState {
+    last_request: Option<PreviewScrubRequestObservation>,
+    hot_request_streak: u8,
+    slow_latency_score: u8,
+}
+
+impl PreviewScrubAdaptationState {
+    fn observe_request(&mut self, key: &MediaPreviewKey) -> PreviewDecodeAdaptiveHints {
+        let now = Instant::now();
+        let is_hot_region = self
+            .last_request
+            .map(|last| {
+                last.asset_id == key.asset_id
+                    && app_duration_us(now.saturating_duration_since(last.observed_at))
+                        <= PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US
+                    && key.source_micros.saturating_sub(last.source_micros).abs()
+                        <= PREVIEW_SCRUB_HOT_SOURCE_WINDOW_US
+            })
+            .unwrap_or(false);
+        self.hot_request_streak = if is_hot_region {
+            self.hot_request_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.last_request = Some(PreviewScrubRequestObservation {
+            asset_id: key.asset_id,
+            source_micros: key.source_micros,
+            observed_at: now,
+        });
+
+        let scrub_class = if self.slow_latency_score >= 2 {
+            PreviewScrubAdaptiveClass::SlowLatency
+        } else if self.slow_latency_score == 1 {
+            PreviewScrubAdaptiveClass::Recovery
+        } else if self.hot_request_streak >= 2 {
+            PreviewScrubAdaptiveClass::HotRegion
+        } else {
+            PreviewScrubAdaptiveClass::Normal
+        };
+        PreviewDecodeAdaptiveHints { scrub_class }
+    }
+
+    fn observe_decode(&mut self, diagnostics: PreviewDecodeDiagnostics) {
+        if diagnostics.access_mode != PreviewDecodeAccessMode::ScrubCursor {
+            return;
+        }
+        if diagnostics.elapsed_us >= PREVIEW_SCRUB_SLOW_LATENCY_US {
+            self.slow_latency_score =
+                self.slow_latency_score.saturating_add(1).min(PREVIEW_SCRUB_SLOW_SCORE_MAX);
+        } else if diagnostics.elapsed_us <= PREVIEW_SCRUB_RECOVERY_LATENCY_US {
+            self.slow_latency_score = self.slow_latency_score.saturating_sub(1);
+        }
+    }
+}
+
 fn source_micros(source_secs: f64) -> i64 {
     (source_secs.max(0.0) * 1_000_000.0).round() as i64
 }
@@ -7613,6 +7740,7 @@ fn decode_media_preview(
         Some(job.key.target_height.max(1)),
         access_mode,
         job.key.fingerprint,
+        job.adaptive_hints,
         should_cancel,
     );
     let decode_elapsed_us = app_duration_us(decode_started_at.elapsed());
@@ -7713,10 +7841,12 @@ fn decode_media_preview_for_access_mode(
     max_height: Option<u32>,
     access_mode: PreviewDecodeAccessMode,
     fingerprint: Option<PreviewFileFingerprint>,
+    adaptive_hints: PreviewDecodeAdaptiveHints,
     should_cancel: impl Fn() -> bool,
 ) -> mondrian_core::Result<PreviewDecodeOutcome> {
     let mut request = PreviewDecodeRgbaRequest::new(path, source_secs, access_mode)
-        .with_max_size(max_width, max_height);
+        .with_max_size(max_width, max_height)
+        .with_adaptive_hints(adaptive_hints);
     if let Some(fingerprint) = fingerprint {
         request = request.with_fingerprint(fingerprint);
     }
@@ -8340,6 +8470,7 @@ mod tests {
                 forward_reuse_frame_window: 1,
                 forward_decode_budget_frames: 8,
                 any_seek_window_ms: 120,
+                scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 session_reused: false,
                 forward_reused: false,
                 seek_index_available: true,
@@ -8384,6 +8515,7 @@ mod tests {
                 forward_reuse_frame_window: 3,
                 forward_decode_budget_frames: 48,
                 any_seek_window_ms: 0,
+                scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 session_reused: true,
                 forward_reused: false,
                 seek_index_available: false,
@@ -8428,6 +8560,7 @@ mod tests {
                 forward_reuse_frame_window: 0,
                 forward_decode_budget_frames: 48,
                 any_seek_window_ms: 0,
+                scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 session_reused: false,
                 forward_reused: false,
                 seek_index_available: true,
@@ -8472,6 +8605,7 @@ mod tests {
                 forward_reuse_frame_window: 3,
                 forward_decode_budget_frames: 48,
                 any_seek_window_ms: 0,
+                scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 session_reused: true,
                 forward_reused: false,
                 seek_index_available: true,
@@ -12111,6 +12245,7 @@ mod tests {
                 generation: 1,
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),
@@ -12170,6 +12305,7 @@ mod tests {
                     generation: 1,
                     priority: MediaPreviewRequestPriority::Prefetch,
                     access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                    adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                     enqueued_at: Instant::now(),
                     deadline_at: None,
                 }),
@@ -12245,6 +12381,7 @@ mod tests {
                 generation: 1,
                 priority: MediaPreviewRequestPriority::Prefetch,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),
@@ -12315,6 +12452,7 @@ mod tests {
                 generation: 1,
                 priority: MediaPreviewRequestPriority::Prefetch,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),
@@ -12360,6 +12498,7 @@ mod tests {
                 generation: 7,
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             },
@@ -12402,6 +12541,7 @@ mod tests {
                 generation: 7,
                 priority: MediaPreviewRequestPriority::Prefetch,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             },
@@ -12724,6 +12864,69 @@ mod tests {
     }
 
     #[test]
+    fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
+        let mut adaptation = PreviewScrubAdaptationState::default();
+        let mut key = test_media_key(100);
+
+        assert_eq!(
+            adaptation.observe_request(&key).scrub_class,
+            PreviewScrubAdaptiveClass::Normal
+        );
+        key.source_micros += 100_000;
+        assert_eq!(
+            adaptation.observe_request(&key).scrub_class,
+            PreviewScrubAdaptiveClass::Normal
+        );
+        key.source_micros += 100_000;
+        assert_eq!(
+            adaptation.observe_request(&key).scrub_class,
+            PreviewScrubAdaptiveClass::HotRegion
+        );
+
+        let slow_decode = PreviewDecodeDiagnostics {
+            path: PreviewDecodePath::InProcessFfmpegCpuRgba,
+            elapsed_us: PREVIEW_SCRUB_SLOW_LATENCY_US,
+            cache_hit: false,
+            access_mode: PreviewDecodeAccessMode::ScrubCursor,
+            external_process: false,
+            cpu_resident: true,
+            seek_performed: true,
+            seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
+            forward_reuse_frame_window: 0,
+            forward_decode_budget_frames: 0,
+            any_seek_window_ms: 0,
+            scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
+            session_reused: false,
+            forward_reused: false,
+            seek_index_available: false,
+            seek_index_keyframes: 0,
+            seek_index_observed_packets: 0,
+            seek_index_source: PreviewSeekIndexSource::None,
+            seek_index_used: false,
+            seek_index_anchor_pts: None,
+            decoded_frame_count: 0,
+            threading_kind: PreviewDecodeThreadingKind::None,
+            threading_count: 0,
+            stage_durations: PreviewDecodeStageDurations::default(),
+            hw_accel_backend: HwAccelBackend::None,
+            hardware_decode_active: false,
+            zero_copy_active: false,
+            decoded_frame_residency: DecodedFrameResidency::CpuRgba,
+            gpu_frame_handle_kind: None,
+            renderer_import_ready: false,
+            hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+            decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
+        };
+        adaptation.observe_decode(slow_decode);
+        adaptation.observe_decode(slow_decode);
+        key.source_micros += 100_000;
+        assert_eq!(
+            adaptation.observe_request(&key).scrub_class,
+            PreviewScrubAdaptiveClass::SlowLatency
+        );
+    }
+
+    #[test]
     fn media_preview_cache_evicts_least_recently_used_frame() {
         let mut cache = MediaPreviewCache::new(2);
         let first = test_media_key(1);
@@ -12866,6 +13069,7 @@ mod tests {
                 generation,
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),

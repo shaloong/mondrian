@@ -578,6 +578,16 @@ asset, source fingerprint, and missing/stale reason so a late playback frame
 does not enqueue proxy work every refresh. Preview must not spawn FFmpeg
 directly, change media color interpretation, or silently enable proxy mode; the
 media crate still owns only proxy file generation and status probing.
+Interactive scrub uses app-selected adaptive hints rather than a separate decode
+API. The app preview service observes recent scrub seek locality and scrub
+decode latency, then tags `PreviewDecodeRgbaRequest` with a
+`PreviewScrubAdaptiveClass`. The media layer preserves the requested frame
+semantics but may tighten bounded-any seek windows and forward-scan budgets for
+hot or slow scrub regions. This avoids long UI-blocking scrub attempts while
+keeping settled still-frame requests exact. Do not implement scrub speedups by
+silently changing color interpretation or by shrinking decoded media geometry
+unless the renderer has an explicit source-sample extent versus layout extent
+contract.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;

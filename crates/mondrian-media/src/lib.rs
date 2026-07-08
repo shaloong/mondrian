@@ -35,11 +35,11 @@ pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
     clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
     decode_preview_rgba_scaled_cancellable, preview_decode_backend, preview_decode_cpu_budget,
-    set_preview_decode_backend, PreviewDecodeAccessMode, PreviewDecodeBackend,
-    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
-    PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
-    PreviewSeekIndexSource, RgbaFrame,
+    set_preview_decode_backend, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    PreviewDecodeBackend, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
+    PreviewDecodePath, PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy,
+    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
+    PreviewHardwareDecodeBlocker, PreviewScrubAdaptiveClass, PreviewSeekIndexSource, RgbaFrame,
 };
 pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution, ProxyStatus};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

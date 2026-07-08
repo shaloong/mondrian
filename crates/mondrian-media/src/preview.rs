@@ -29,6 +29,12 @@ const PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES: usize = 240;
 const PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES: usize = 96;
 const PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES: usize = 12;
 const PREVIEW_SCRUB_SEEK_BUDGET_PADDING_FRAMES: usize = 4;
+const PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES: usize = 72;
+const PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES: usize = 36;
+const PREVIEW_SCRUB_RECOVERY_FORWARD_DECODE_BUDGET_FRAMES: usize = 48;
+const PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS: u64 = 250;
+const PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS: u64 = 120;
+const PREVIEW_SCRUB_RECOVERY_ANY_SEEK_WINDOW_MS: u64 = 180;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_SEEK_INDEX_CACHE_CAPACITY: usize = 32;
 const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
@@ -104,6 +110,27 @@ pub enum PreviewSeekIndexSource {
     SessionObserved,
     /// Evidence was seeded from the container/probe index before decode work.
     ProbeBacked,
+}
+
+/// App-provided scrub scheduling pressure for one preview decode request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewScrubAdaptiveClass {
+    /// No scrub-specific pressure was observed by the caller.
+    #[default]
+    Normal,
+    /// Recent scrub requests are clustered in a hot seek region.
+    HotRegion,
+    /// Recent scrub decode latency exceeded the interactive budget.
+    SlowLatency,
+    /// Latency recently recovered but remains under a conservative scrub cap.
+    Recovery,
+}
+
+/// Decode tuning hints that do not change the requested frame semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PreviewDecodeAdaptiveHints {
+    /// Scrub pressure selected by the app scheduler for interactive requests.
+    pub scrub_class: PreviewScrubAdaptiveClass,
 }
 
 /// Structured hardware-decode blocker observed by the preview decode boundary.
@@ -187,6 +214,8 @@ pub struct PreviewDecodeRgbaRequest<'a> {
     pub access_mode: PreviewDecodeAccessMode,
     /// Optional stable file fingerprint already resolved by the caller.
     pub fingerprint: Option<PreviewFileFingerprint>,
+    /// Adaptive scheduling hints selected by the caller.
+    pub adaptive_hints: PreviewDecodeAdaptiveHints,
 }
 
 impl<'a> PreviewDecodeRgbaRequest<'a> {
@@ -199,6 +228,7 @@ impl<'a> PreviewDecodeRgbaRequest<'a> {
             max_height: None,
             access_mode,
             fingerprint: None,
+            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
         }
     }
 
@@ -214,6 +244,12 @@ impl<'a> PreviewDecodeRgbaRequest<'a> {
         self.fingerprint = Some(fingerprint);
         self
     }
+
+    /// Attach decode tuning hints that preserve the requested frame semantics.
+    pub fn with_adaptive_hints(mut self, adaptive_hints: PreviewDecodeAdaptiveHints) -> Self {
+        self.adaptive_hints = adaptive_hints;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +261,7 @@ struct PreviewDecodeAccessPolicy {
     preserve_session_on_cancel: bool,
     seek_strategy: PreviewDecodeSeekStrategy,
     any_seek_window_ms: u64,
+    scrub_adaptive_class: PreviewScrubAdaptiveClass,
 }
 
 impl PreviewDecodeAccessPolicy {
@@ -238,6 +275,7 @@ impl PreviewDecodeAccessPolicy {
                 preserve_session_on_cancel: true,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 any_seek_window_ms: 0,
+                scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
             },
             PreviewDecodeAccessMode::ScrubCursor => Self {
                 access_mode,
@@ -247,6 +285,7 @@ impl PreviewDecodeAccessPolicy {
                 preserve_session_on_cancel: false,
                 seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
                 any_seek_window_ms: PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
+                scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
             },
             PreviewDecodeAccessMode::RandomAccessStillFrame => Self {
                 access_mode,
@@ -256,8 +295,41 @@ impl PreviewDecodeAccessPolicy {
                 preserve_session_on_cancel: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 any_seek_window_ms: 0,
+                scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
             },
         }
+    }
+
+    fn apply_adaptive_hints(mut self, adaptive_hints: PreviewDecodeAdaptiveHints) -> Self {
+        if self.access_mode != PreviewDecodeAccessMode::ScrubCursor {
+            return self;
+        }
+        self.scrub_adaptive_class = adaptive_hints.scrub_class;
+        match adaptive_hints.scrub_class {
+            PreviewScrubAdaptiveClass::Normal => {}
+            PreviewScrubAdaptiveClass::HotRegion => {
+                self.forward_decode_budget_frames = self
+                    .forward_decode_budget_frames
+                    .min(PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES);
+                self.any_seek_window_ms =
+                    self.any_seek_window_ms.min(PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS);
+            }
+            PreviewScrubAdaptiveClass::SlowLatency => {
+                self.forward_decode_budget_frames = self
+                    .forward_decode_budget_frames
+                    .min(PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES);
+                self.any_seek_window_ms =
+                    self.any_seek_window_ms.min(PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS);
+            }
+            PreviewScrubAdaptiveClass::Recovery => {
+                self.forward_decode_budget_frames = self
+                    .forward_decode_budget_frames
+                    .min(PREVIEW_SCRUB_RECOVERY_FORWARD_DECODE_BUDGET_FRAMES);
+                self.any_seek_window_ms =
+                    self.any_seek_window_ms.min(PREVIEW_SCRUB_RECOVERY_ANY_SEEK_WINDOW_MS);
+            }
+        }
+        self
     }
 
     fn can_continue_forward(
@@ -284,10 +356,12 @@ impl PreviewDecodeAccessPolicy {
         seek_index: &PreviewSeekIndex,
         target_pts: i64,
         frame_duration_pts: i64,
+        adaptive_hints: PreviewDecodeAdaptiveHints,
     ) -> Self {
         if self.access_mode != PreviewDecodeAccessMode::ScrubCursor {
             return self;
         }
+        self = self.apply_adaptive_hints(adaptive_hints);
 
         let Some(anchor_pts) = seek_index.keyframe_at_or_before(target_pts) else {
             self.forward_decode_budget_frames = self
@@ -559,6 +633,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Bounded-any seek window from the access-mode policy, in milliseconds.
     #[serde(default)]
     pub any_seek_window_ms: u64,
+    /// Adaptive scrub pressure applied by the caller.
+    #[serde(default)]
+    pub scrub_adaptive_class: PreviewScrubAdaptiveClass,
     /// Whether an existing access-mode-local decode session was reused.
     #[serde(default)]
     pub session_reused: bool,
@@ -638,6 +715,7 @@ impl PreviewDecodeDiagnostics {
             forward_reuse_frame_window: 0,
             forward_decode_budget_frames: 0,
             any_seek_window_ms: 0,
+            scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,
@@ -690,6 +768,7 @@ impl PreviewDecodeDiagnostics {
         self.forward_decode_budget_frames =
             policy.forward_decode_budget_frames.min(u32::MAX as usize) as u32;
         self.any_seek_window_ms = policy.any_seek_window_ms;
+        self.scrub_adaptive_class = policy.scrub_adaptive_class;
         self
     }
 }
@@ -864,6 +943,7 @@ pub fn decode_preview_rgba_scaled_cancellable(
         request.max_height,
         request.access_mode,
         request.fingerprint,
+        request.adaptive_hints,
         should_cancel,
     )
 }
@@ -1384,6 +1464,7 @@ impl PreviewDecodeSession {
         &mut self,
         timestamp_secs: f64,
         access_mode: PreviewDecodeAccessMode,
+        adaptive_hints: PreviewDecodeAdaptiveHints,
         should_cancel: &impl Fn() -> bool,
     ) -> Result<PreviewDecodeOutcome> {
         if should_cancel() {
@@ -1394,6 +1475,7 @@ impl PreviewDecodeSession {
             &self.seek_index,
             target_pts,
             self.frame_duration_pts,
+            adaptive_hints,
         );
 
         let cache_lookup_started_at = Instant::now();
@@ -1823,6 +1905,7 @@ fn decode_preview_rgba_frame_outcome(
     max_height: Option<u32>,
     access_mode: PreviewDecodeAccessMode,
     fingerprint: Option<PreviewFileFingerprint>,
+    adaptive_hints: PreviewDecodeAdaptiveHints,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
@@ -1903,7 +1986,8 @@ fn decode_preview_rgba_frame_outcome(
             }
         }
 
-        let outcome = session.decode_at(timestamp_secs, access_mode, &should_cancel)?;
+        let outcome =
+            session.decode_at(timestamp_secs, access_mode, adaptive_hints, &should_cancel)?;
         match outcome {
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame
@@ -2368,14 +2452,17 @@ mod tests {
         preview_cache_get, preview_cache_put_with_fingerprint,
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
         preview_seek_index_cache_put, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
-        PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest,
-        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
-        PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewPlaybackRing,
-        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
-        PreviewSeekResolution, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
-        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES,
+        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
+        PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+        PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+        PreviewPlaybackRing, PreviewScrubAdaptiveClass, PreviewSeekIndex,
+        PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution, RgbaFrame,
+        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
     };
     use crate::decoder::{DecodedFrameResidency, DecodedVideoSurfaceFormat, HwAccelBackend};
@@ -2497,7 +2584,10 @@ mod tests {
             PreviewDecodeAccessMode::ScrubCursor,
         )
         .with_max_size(Some(640), Some(360))
-        .with_fingerprint(fingerprint);
+        .with_fingerprint(fingerprint)
+        .with_adaptive_hints(PreviewDecodeAdaptiveHints {
+            scrub_class: PreviewScrubAdaptiveClass::HotRegion,
+        });
 
         assert_eq!(request.path, path.as_path());
         assert_eq!(request.timestamp_secs, 1.25);
@@ -2505,6 +2595,10 @@ mod tests {
         assert_eq!(request.max_height, Some(360));
         assert_eq!(request.access_mode, PreviewDecodeAccessMode::ScrubCursor);
         assert_eq!(request.fingerprint, Some(fingerprint));
+        assert_eq!(
+            request.adaptive_hints.scrub_class,
+            PreviewScrubAdaptiveClass::HotRegion
+        );
     }
 
     #[test]
@@ -2599,29 +2693,84 @@ mod tests {
             PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
         let probe_index = PreviewSeekIndex::from_probe_keyframes(vec![0, 300, 600]);
 
-        let close_scrub = scrub.adapt_for_request(&probe_index, 40, frame_duration_pts);
+        let close_scrub = scrub.adapt_for_request(
+            &probe_index,
+            40,
+            frame_duration_pts,
+            PreviewDecodeAdaptiveHints::default(),
+        );
         assert_eq!(
             close_scrub.forward_decode_budget_frames,
             PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES
         );
 
-        let near_next_keyframe_scrub =
-            scrub.adapt_for_request(&probe_index, 290, frame_duration_pts);
+        let near_next_keyframe_scrub = scrub.adapt_for_request(
+            &probe_index,
+            290,
+            frame_duration_pts,
+            PreviewDecodeAdaptiveHints::default(),
+        );
         assert_eq!(near_next_keyframe_scrub.forward_decode_budget_frames, 33);
 
-        let unindexed_scrub =
-            scrub.adapt_for_request(&PreviewSeekIndex::default(), 290, frame_duration_pts);
+        let unindexed_scrub = scrub.adapt_for_request(
+            &PreviewSeekIndex::default(),
+            290,
+            frame_duration_pts,
+            PreviewDecodeAdaptiveHints::default(),
+        );
         assert_eq!(
             unindexed_scrub.forward_decode_budget_frames,
             PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES
         );
 
-        let playback_after_adapt =
-            playback.adapt_for_request(&probe_index, 290, frame_duration_pts);
+        let playback_after_adapt = playback.adapt_for_request(
+            &probe_index,
+            290,
+            frame_duration_pts,
+            PreviewDecodeAdaptiveHints::default(),
+        );
         assert_eq!(
             playback_after_adapt.forward_decode_budget_frames,
             playback.forward_decode_budget_frames
         );
+    }
+
+    #[test]
+    fn scrub_policy_applies_adaptive_latency_hints() {
+        let frame_duration_pts = 1;
+        let scrub =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+        let probe_index = PreviewSeekIndex::from_probe_keyframes(vec![0, 240]);
+
+        let slow = scrub.adapt_for_request(
+            &probe_index,
+            120,
+            frame_duration_pts,
+            PreviewDecodeAdaptiveHints {
+                scrub_class: PreviewScrubAdaptiveClass::SlowLatency,
+            },
+        );
+        assert_eq!(
+            slow.scrub_adaptive_class,
+            PreviewScrubAdaptiveClass::SlowLatency
+        );
+        assert!(
+            slow.forward_decode_budget_frames <= PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES
+        );
+        assert!(slow.any_seek_window_ms <= PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS);
+
+        let hot = scrub.adapt_for_request(
+            &probe_index,
+            120,
+            frame_duration_pts,
+            PreviewDecodeAdaptiveHints { scrub_class: PreviewScrubAdaptiveClass::HotRegion },
+        );
+        assert_eq!(
+            hot.scrub_adaptive_class,
+            PreviewScrubAdaptiveClass::HotRegion
+        );
+        assert!(hot.forward_decode_budget_frames <= PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES);
+        assert!(hot.any_seek_window_ms <= PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS);
     }
 
     #[test]

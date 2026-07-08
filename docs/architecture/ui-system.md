@@ -217,11 +217,13 @@ not perform a workspace-to-startup native-window role sync on the way out.
 `AppUiPreviewService::diagnostics()` exposes render, cache, queue, decode, and
 scheduler counters so performance tooling can distinguish cache misses,
 backpressure drops, stale completions, decode failures, and GPU preview
-candidate readiness without changing timeline evaluation. Each service call produces
+candidate readiness without changing timeline evaluation. Scrub-adaptive
+request counters expose whether interactive seeks are using normal, hot-region,
+slow-latency, or recovery policy. Each service call produces
 `preview_candidate_id`, and the same id is propagated into `AppUiGpuPreviewFrame`
-when the frame is ready. Window-level telemetry records this candidate id and state
-alongside structured runtime/stage evidence so a JSONL record can be linked
-against the exact working-space attempt that fed it.
+when the frame is ready. Window-level telemetry records this candidate id and
+state alongside structured runtime/stage evidence so a JSONL record can be
+linked against the exact working-space attempt that fed it.
 Preview diagnostics keep decode-stage timings separate from post-decode viewer
 render timings. Decode reports classify session open, cache lookup, seek,
 packet/decode, software scale, RGBA copy, and external-process wait cost;

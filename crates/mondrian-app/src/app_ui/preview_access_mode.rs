@@ -11,7 +11,10 @@ use std::time::Instant;
 
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
-use mondrian_media::{preview_decode_cpu_budget, PreviewDecodeAccessMode, PreviewFileFingerprint};
+use mondrian_media::{
+    preview_decode_cpu_budget, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    PreviewFileFingerprint,
+};
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
@@ -215,6 +218,7 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) generation: u64,
     pub(crate) priority: MediaPreviewRequestPriority,
     pub(crate) access_mode: PreviewDecodeAccessMode,
+    pub(crate) adaptive_hints: PreviewDecodeAdaptiveHints,
     pub(crate) enqueued_at: Instant,
     pub(crate) deadline_at: Option<Instant>,
 }
@@ -397,6 +401,7 @@ impl MediaPreviewJobQueueSender {
         source_secs: f64,
         enqueued_at: Instant,
         deadline_at: Option<Instant>,
+        adaptive_hints: PreviewDecodeAdaptiveHints,
     ) -> MediaPreviewJobPromoteStatus {
         if priority != MediaPreviewRequestPriority::Current {
             return MediaPreviewJobPromoteStatus::default();
@@ -414,6 +419,7 @@ impl MediaPreviewJobQueueSender {
         queued.job.priority = queued.priority;
         queued.job.generation = generation;
         queued.job.source_secs = source_secs;
+        queued.job.adaptive_hints = adaptive_hints;
         queued.job.enqueued_at = enqueued_at;
         queued.job.deadline_at = deadline_at;
         let priority_promoted = previous != queued.priority;
@@ -980,6 +986,7 @@ mod tests {
             generation,
             priority,
             access_mode: test_access_mode_for_priority(priority),
+            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             enqueued_at: Instant::now(),
             deadline_at: None,
         }
@@ -2034,6 +2041,7 @@ mod tests {
             1.25,
             promoted_at,
             None,
+            PreviewDecodeAdaptiveHints::default(),
         );
         assert_eq!(
             status,
@@ -2086,6 +2094,7 @@ mod tests {
             1.0,
             refreshed_at,
             refreshed_deadline,
+            PreviewDecodeAdaptiveHints::default(),
         );
 
         assert_eq!(
@@ -2224,6 +2233,7 @@ mod tests {
                 generation: 1,
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),
@@ -2272,6 +2282,7 @@ mod tests {
                 1.0,
                 Instant::now(),
                 None,
+                PreviewDecodeAdaptiveHints::default(),
             ),
             MediaPreviewJobPromoteStatus::default()
         );
@@ -2284,6 +2295,7 @@ mod tests {
                 1.0,
                 Instant::now(),
                 None,
+                PreviewDecodeAdaptiveHints::default(),
             ),
             MediaPreviewJobPromoteStatus::default()
         );
