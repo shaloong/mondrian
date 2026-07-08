@@ -3,6 +3,7 @@ use crate::app::ui_actions::TimelineSeekSource;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::{
     build_preview_color_health_report, build_preview_decode_performance_report,
+    build_preview_decode_performance_report_with_required_access_modes,
     build_preview_render_performance_report, AppUiPreviewColorHealthReport,
     AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
     AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeAccessModeProfiles,
@@ -172,16 +173,27 @@ fn preview_decode_hard_failures(report: &AppUiPreviewDecodePerformanceReport) ->
 fn preview_media_decode_access_mode_coverage_failures(
     report: &AppUiPreviewDecodePerformanceReport,
 ) -> Vec<&'static str> {
-    let Some(summary) = report.summary.as_ref() else {
+    if report.summary.is_none() {
         return vec!["preview_decode_report_missing_summary"];
     };
 
     let mut failures = Vec::new();
-    if summary.access_mode_profiles.scrub_cursor.frames == 0 {
-        failures.push("preview_decode_scrub_cursor_not_sampled");
-    }
-    if summary.access_mode_profiles.random_access_still.frames == 0 {
-        failures.push("preview_decode_random_access_still_not_sampled");
+    for check in &report.checks {
+        if check.severity != crate::app_ui::preview::AppUiPreviewDecodePerformanceSeverity::Fail {
+            continue;
+        }
+        match check.code {
+            "preview_decode_playback_cursor_sampled" => {
+                failures.push("preview_decode_playback_cursor_not_sampled");
+            }
+            "preview_decode_scrub_cursor_sampled" => {
+                failures.push("preview_decode_scrub_cursor_not_sampled");
+            }
+            "preview_decode_random_access_still_sampled" => {
+                failures.push("preview_decode_random_access_still_not_sampled");
+            }
+            _ => {}
+        }
     }
     failures
 }
@@ -894,11 +906,15 @@ fn run_preview_media_access_mode_probe_with_media_info(
     let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
     let preview_color_report =
         build_preview_color_health_report(preview_diagnostics.color_health_summary(), scenario);
-    let preview_decode_report = build_preview_decode_performance_report(
+    let preview_decode_report = build_preview_decode_performance_report_with_required_access_modes(
         preview_diagnostics
             .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
         scenario,
         APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+        &[
+            PreviewDecodeAccessMode::ScrubCursor,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        ],
     );
     let preview_render_report = build_preview_render_performance_report(
         preview_diagnostics
@@ -960,20 +976,20 @@ fn validate_preview_media_access_mode_report(
     if report.preview_color_report.verdict == AppUiPreviewColorHealthVerdict::Fail {
         anyhow::bail!("preview media color report failed: {report_json}");
     }
-    let decode_failures = preview_decode_hard_failures(&report.preview_decode_report);
-    if !decode_failures.is_empty() {
-        anyhow::bail!(
-            "preview media decode report failed: {:?}; report: {}",
-            decode_failures,
-            report_json
-        );
-    }
     let access_mode_coverage_failures =
         preview_media_decode_access_mode_coverage_failures(&report.preview_decode_report);
     if !access_mode_coverage_failures.is_empty() {
         anyhow::bail!(
             "preview media decode access-mode coverage failed: {:?}; report: {}",
             access_mode_coverage_failures,
+            report_json
+        );
+    }
+    let decode_failures = preview_decode_hard_failures(&report.preview_decode_report);
+    if !decode_failures.is_empty() {
+        anyhow::bail!(
+            "preview media decode report failed: {:?}; report: {}",
+            decode_failures,
             report_json
         );
     }
@@ -1152,12 +1168,14 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             preview_diagnostics.color_health_summary(),
             "preview_media_continuous_playback",
         );
-        let preview_decode_report = build_preview_decode_performance_report(
-            preview_diagnostics
-                .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
-            "preview_media_continuous_playback",
-            APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
-        );
+        let preview_decode_report =
+            build_preview_decode_performance_report_with_required_access_modes(
+                preview_diagnostics
+                    .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+                "preview_media_continuous_playback",
+                APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+                &[PreviewDecodeAccessMode::PlaybackCursor],
+            );
         let preview_render_report = build_preview_render_performance_report(
             preview_diagnostics
                 .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
@@ -1703,10 +1721,14 @@ fn preview_media_decode_access_mode_coverage_requires_scrub_and_still_samples() 
         },
         ..AppUiPreviewDiagnostics::default()
     };
-    let report = build_preview_decode_performance_report(
+    let report = build_preview_decode_performance_report_with_required_access_modes(
         diagnostics.decode_performance_summary(50_000),
         "preview-access-mode-coverage-test",
         50_000,
+        &[
+            PreviewDecodeAccessMode::ScrubCursor,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        ],
     );
 
     assert_eq!(
@@ -1735,10 +1757,14 @@ fn preview_media_decode_access_mode_coverage_passes_with_scrub_and_still_samples
         },
         ..AppUiPreviewDiagnostics::default()
     };
-    let report = build_preview_decode_performance_report(
+    let report = build_preview_decode_performance_report_with_required_access_modes(
         diagnostics.decode_performance_summary(50_000),
         "preview-access-mode-coverage-test",
         50_000,
+        &[
+            PreviewDecodeAccessMode::ScrubCursor,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        ],
     );
 
     assert!(preview_media_decode_access_mode_coverage_failures(&report).is_empty());

@@ -231,6 +231,13 @@ causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 Perf smokes must gate queue-wait regressions for the access modes they exercise,
 because queue-lane contention can make the viewer feel stuck even when codec
 decode and color/render work are within budget.
+Perf smokes that claim access-mode coverage must pass their required access
+modes into the preview decode report builder. The report JSON must then include
+`required_access_modes` plus pass/fail coverage checks for each required mode,
+and the smoke validator should read those checks instead of reimplementing a
+parallel coverage model. General UI diagnostics may leave the required list
+empty; an idle or partial user session should not fail merely because it did not
+exercise every access contract.
 App media preview smokes must generate real samples for both active
 `ScrubCursor` playhead dragging and settled `RandomAccessStillFrame` requests;
 coverage is incomplete if the report merely defines both profiles. A common

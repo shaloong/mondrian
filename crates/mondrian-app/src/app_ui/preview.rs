@@ -2035,6 +2035,17 @@ pub struct AppUiPreviewDecodeAccessModeProfiles {
 }
 
 impl AppUiPreviewDecodeAccessModeProfiles {
+    fn profile_for(
+        self,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> AppUiPreviewDecodeAccessModeProfile {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => self.playback_cursor,
+            PreviewDecodeAccessMode::ScrubCursor => self.scrub_cursor,
+            PreviewDecodeAccessMode::RandomAccessStillFrame => self.random_access_still,
+        }
+    }
+
     fn record(&mut self, diagnostics: PreviewDecodeDiagnostics) {
         match diagnostics.access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => {
@@ -2256,7 +2267,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 5;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 6;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2270,6 +2281,8 @@ pub struct AppUiPreviewDecodePerformanceReport {
     pub profile: String,
     /// Overall preview decode performance verdict.
     pub verdict: AppUiPreviewDecodePerformanceVerdict,
+    /// Access modes this report profile required to be sampled.
+    pub required_access_modes: Vec<PreviewDecodeAccessMode>,
     /// Structured decode performance summary used as report evidence.
     pub summary: Option<AppUiPreviewDecodePerformanceSummary>,
     /// Structured checks by preview decode area.
@@ -2606,9 +2619,30 @@ pub fn build_preview_decode_performance_report(
     profile: impl Into<String>,
     slow_frame_budget_us: u64,
 ) -> AppUiPreviewDecodePerformanceReport {
+    build_preview_decode_performance_report_with_required_access_modes(
+        summary,
+        profile,
+        slow_frame_budget_us,
+        &[],
+    )
+}
+
+/// Build a preview decode report with an explicit access-mode coverage contract.
+///
+/// Perf smokes use this when a scenario is only valid if selected access modes
+/// actually reached the media decode boundary. General UI diagnostics should
+/// use [`build_preview_decode_performance_report`] so idle profiles do not fail
+/// merely because they did not exercise every mode.
+pub fn build_preview_decode_performance_report_with_required_access_modes(
+    summary: Option<AppUiPreviewDecodePerformanceSummary>,
+    profile: impl Into<String>,
+    slow_frame_budget_us: u64,
+    required_access_modes: &[PreviewDecodeAccessMode],
+) -> AppUiPreviewDecodePerformanceReport {
     let mut checks = Vec::new();
     let mut root_causes = Vec::new();
     let mut actions = Vec::new();
+    let required_access_modes = required_access_modes.to_vec();
 
     push_decode_bool_check(
         &mut checks,
@@ -2637,6 +2671,11 @@ pub fn build_preview_decode_performance_report(
             "preview_decode_max_frame_us",
             summary.max_duration_us,
             slow_frame_budget_us,
+        );
+        push_preview_decode_access_mode_coverage_checks(
+            &mut checks,
+            summary,
+            &required_access_modes,
         );
         push_preview_decode_access_mode_checks(&mut checks, summary, slow_frame_budget_us);
         push_decode_max_check(
@@ -2726,13 +2765,19 @@ pub fn build_preview_decode_performance_report(
             0,
         );
 
-        push_preview_decode_root_causes_and_actions(summary, &mut root_causes, &mut actions);
+        push_preview_decode_root_causes_and_actions(
+            summary,
+            &required_access_modes,
+            &mut root_causes,
+            &mut actions,
+        );
 
         let verdict = preview_decode_verdict(&checks);
         return AppUiPreviewDecodePerformanceReport {
             schema_version: APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
             profile: profile.into(),
             verdict,
+            required_access_modes,
             summary: Some(summary),
             checks,
             root_causes,
@@ -2756,6 +2801,7 @@ pub fn build_preview_decode_performance_report(
         schema_version: APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
         profile: profile.into(),
         verdict,
+        required_access_modes,
         summary: None,
         checks,
         root_causes,
@@ -2948,6 +2994,22 @@ fn push_preview_decode_access_mode_checks(
     }
 }
 
+fn push_preview_decode_access_mode_coverage_checks(
+    checks: &mut Vec<AppUiPreviewDecodePerformanceCheck>,
+    summary: AppUiPreviewDecodePerformanceSummary,
+    required_access_modes: &[PreviewDecodeAccessMode],
+) {
+    for access_mode in required_access_modes {
+        let profile = summary.access_mode_profiles.profile_for(*access_mode);
+        push_decode_bool_check(
+            checks,
+            AppUiPreviewDecodePerformanceArea::CaptureIntegrity,
+            preview_decode_access_mode_coverage_code(*access_mode),
+            profile.frames > 0,
+        );
+    }
+}
+
 fn preview_decode_access_mode_budget_code(access_mode: PreviewDecodeAccessMode) -> &'static str {
     match access_mode {
         PreviewDecodeAccessMode::PlaybackCursor => "preview_decode_playback_cursor_max_frame_us",
@@ -2972,11 +3034,47 @@ fn preview_decode_access_mode_queue_wait_budget_code(
     }
 }
 
+fn preview_decode_access_mode_coverage_code(access_mode: PreviewDecodeAccessMode) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => "preview_decode_playback_cursor_sampled",
+        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_sampled",
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_sampled"
+        }
+    }
+}
+
 fn push_preview_decode_root_causes_and_actions(
     summary: AppUiPreviewDecodePerformanceSummary,
+    required_access_modes: &[PreviewDecodeAccessMode],
     root_causes: &mut Vec<AppUiPreviewDecodePerformanceRootCause>,
     actions: &mut Vec<AppUiPreviewDecodePerformanceAction>,
 ) {
+    for access_mode in required_access_modes {
+        let profile = summary.access_mode_profiles.profile_for(*access_mode);
+        if profile.frames > 0 {
+            continue;
+        }
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::CaptureIntegrity,
+            "preview_decode_required_access_mode_missing",
+            format!(
+                "access_mode={} required_access_modes={}",
+                access_mode.as_str(),
+                required_access_modes
+                    .iter()
+                    .map(|mode| mode.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            "exercise_required_preview_access_modes",
+            "Drive this perf profile through every required preview access mode before treating the report as representative.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+
     if summary.max_duration_us > summary.slow_frame_budget_us {
         push_decode_root_cause_with_action(
             root_causes,
@@ -7046,6 +7144,90 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_access_mode_decode_timeout_budget"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_defaults_to_no_required_access_modes() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_rgba_frames: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-default-coverage-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.required_access_modes.is_empty());
+        assert!(!report
+            .checks
+            .iter()
+            .any(|check| check.code == "preview_decode_scrub_cursor_sampled"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_fails_missing_required_access_modes() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_rgba_frames: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report_with_required_access_modes(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-required-coverage-test",
+            50_000,
+            &[
+                PreviewDecodeAccessMode::ScrubCursor,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ],
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        assert_eq!(
+            report.required_access_modes,
+            vec![
+                PreviewDecodeAccessMode::ScrubCursor,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ]
+        );
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_scrub_cursor_sampled"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 0
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_random_access_still_sampled"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+                && check.observed == 1
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_required_access_mode_missing"
+                && root.evidence.contains("access_mode=ScrubCursor")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "exercise_required_preview_access_modes"));
     }
 
     #[test]
