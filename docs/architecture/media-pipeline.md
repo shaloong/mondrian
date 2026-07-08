@@ -212,7 +212,11 @@ transport queue is full. Scheduler admission and the job queue may evict queued
 still-frame current work for `PlaybackCursor` or `ScrubCursor` current work;
 they must not let still-frame work evict those real-time modes. On a shared
 interactive worker lane, `ScrubCursor` jobs are selected ahead of still-frame
-jobs even when the still-frame request arrived first.
+jobs even when the still-frame request arrived first. If still-frame work is
+already running in a worker and a different realtime current-frame request is
+pending, the still-frame decode must cooperatively yield and report a structured
+still-preempted-by-realtime-current cancellation. Another still-frame request
+alone must not trigger that preemption.
 If an existing queued prefetch for the same media key becomes current-frame
 work, queue promotion must refresh the queued job's access mode, generation,
 source timing, and enqueue timestamp. The promoted job should be measured as

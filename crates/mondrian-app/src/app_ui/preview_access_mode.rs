@@ -760,6 +760,19 @@ impl MediaPreviewScheduler {
         })
     }
 
+    pub(crate) fn has_pending_realtime_current_request_other_than(
+        &self,
+        key: &MediaPreviewKey,
+    ) -> bool {
+        let state = self.state.lock().expect("media preview scheduler poisoned");
+        state.pending.iter().any(|(pending_key, pending)| {
+            pending_key != key
+                && pending.priority == MediaPreviewRequestPriority::Current
+                && pending.access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame
+                && pending.generation >= state.latest_generation
+        })
+    }
+
     pub(crate) fn complete(
         &self,
         key: &MediaPreviewKey,
@@ -1136,6 +1149,48 @@ mod tests {
 
         assert!(scheduler.has_pending_current_request_other_than(&prefetch));
         assert!(!scheduler.has_pending_current_request_other_than(&current));
+    }
+
+    #[test]
+    fn media_preview_scheduler_reports_realtime_current_pressure_for_still_work() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(3);
+        let generation = scheduler.begin_generation();
+        let still = test_media_key(1);
+        let other_still = test_media_key(2);
+        let scrub = test_media_key(3);
+
+        assert_eq!(
+            scheduler.request(
+                still.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ),
+            scheduled_request()
+        );
+        assert_eq!(
+            scheduler.request(
+                other_still.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ),
+            scheduled_request()
+        );
+        assert!(!scheduler.has_pending_realtime_current_request_other_than(&still));
+
+        assert_eq!(
+            scheduler.request(
+                scrub.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            ),
+            scheduled_request()
+        );
+
+        assert!(scheduler.has_pending_realtime_current_request_other_than(&still));
+        assert!(!scheduler.has_pending_realtime_current_request_other_than(&scrub));
     }
 
     #[test]
