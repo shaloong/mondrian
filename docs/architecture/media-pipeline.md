@@ -254,6 +254,13 @@ for telemetry and performance reports. Access-mode profiles must carry the
 reason breakdown for their own cancellations, so obsolete or unknown cancel
 pressure can be attributed to `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` without comparing independent totals.
+Canceled decode jobs also carry worker execution duration. A cancellation that
+arrives quickly but only returns after an expensive FFmpeg open/seek/decode/copy
+step is still a user-visible scheduling failure. Preview reports therefore keep
+total/max/last canceled-worker duration globally and per access mode, and emit a
+slow-cancellation root cause when cancellation exceeds the slow-frame budget.
+This evidence belongs in the app scheduler/worker layer because the media layer
+only owns cooperative cancellation checkpoints, not UI intent or cancel reasons.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and
