@@ -189,6 +189,14 @@ Queued current-frame work is latest-wins for playback and scrubbing. Before a
 new current frame is enqueued, obsolete queued jobs from older generations are
 removed regardless of priority so old current jobs cannot fill the bounded queue
 and cause the visible current frame to be dropped.
+`RandomAccessStillFrame` is the lowest real-time current-frame class. It may
+spend more time to produce deterministic still output, but it must not block
+active playback or interactive scrubbing when the pending window or worker
+transport queue is full. Scheduler admission and the job queue may evict queued
+still-frame current work for `PlaybackCursor` or `ScrubCursor` current work;
+they must not let still-frame work evict those real-time modes. On a shared
+interactive worker lane, `ScrubCursor` jobs are selected ahead of still-frame
+jobs even when the still-frame request arrived first.
 If an existing queued prefetch for the same media key becomes current-frame
 work, queue promotion must refresh the queued job's access mode, generation,
 source timing, and enqueue timestamp. The promoted job should be measured as
@@ -205,10 +213,11 @@ The app worker transport queue is diagnosed separately from scheduler
 admission. `queue_full_drops` and `worker_disconnected_drops` are hard failures
 because they mean scheduler-accepted work did not reach a preview worker.
 `queue_evicted_prefetch_jobs`, `queue_canceled_jobs`,
-`queue_pruned_obsolete_jobs`, and `queue_promoted_current_jobs` are evidence
-fields: they should explain how the system protected current-frame work and kept
-the worker transport queue aligned with scheduler cancellation, not be folded
-into opaque backpressure.
+`queue_evicted_still_jobs`, `queue_pruned_obsolete_jobs`, and
+`queue_promoted_current_jobs` are evidence fields: they should explain how the
+system protected real-time current-frame work and kept the worker transport
+queue aligned with scheduler cancellation, not be folded into opaque
+backpressure.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
 end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,

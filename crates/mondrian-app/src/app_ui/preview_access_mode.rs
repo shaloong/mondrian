@@ -143,6 +143,7 @@ struct MediaPreviewSchedulerMetrics {
     canceled_requests: u64,
     pruned_obsolete_requests: u64,
     evicted_prefetch_requests: u64,
+    evicted_still_requests: u64,
 }
 
 /// Scheduler-side preview media request counters.
@@ -197,6 +198,8 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub pruned_obsolete_requests: u64,
     /// Pending prefetch requests removed so a current-frame request can run.
     pub evicted_prefetch_requests: u64,
+    /// Pending still-frame requests removed so real-time current work can run.
+    pub evicted_still_requests: u64,
 }
 
 #[derive(Debug)]
@@ -238,7 +241,8 @@ struct QueuedMediaPreviewJob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaPreviewJobEnqueueStatus {
     Enqueued {
-        evicted_prefetch: Option<MediaPreviewKey>,
+        evicted_prefetch: Option<Box<MediaPreviewKey>>,
+        evicted_still: Option<Box<MediaPreviewKey>>,
     },
     DroppedFull,
     DroppedInvalidAccessMode,
@@ -307,6 +311,7 @@ impl MediaPreviewJobQueueSender {
         }
 
         let mut evicted_prefetch = None;
+        let mut evicted_still = None;
         if state.queue.len() >= self.shared.capacity {
             if priority == MediaPreviewRequestPriority::Current {
                 if let Some(index) = state
@@ -315,7 +320,18 @@ impl MediaPreviewJobQueueSender {
                     .position(|queued| queued.priority == MediaPreviewRequestPriority::Prefetch)
                 {
                     let evicted = state.queue.remove(index);
-                    evicted_prefetch = evicted.map(|queued| queued.job.key);
+                    evicted_prefetch = evicted.map(|queued| Box::new(queued.job.key));
+                } else if job.access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame {
+                    if let Some(index) = state.queue.iter().position(|queued| {
+                        queued.priority == MediaPreviewRequestPriority::Current
+                            && queued.job.access_mode
+                                == PreviewDecodeAccessMode::RandomAccessStillFrame
+                    }) {
+                        let evicted = state.queue.remove(index);
+                        evicted_still = evicted.map(|queued| Box::new(queued.job.key));
+                    } else {
+                        return MediaPreviewJobEnqueueStatus::DroppedFull;
+                    }
                 } else {
                     return MediaPreviewJobEnqueueStatus::DroppedFull;
                 }
@@ -329,7 +345,7 @@ impl MediaPreviewJobQueueSender {
         // item for one lane cannot remain asleep behind workers that are
         // waiting on a different lane.
         self.shared.changed.notify_all();
-        MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch }
+        MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch, evicted_still }
     }
 
     pub(crate) fn promote(
@@ -410,10 +426,21 @@ fn next_media_preview_job_index(
     let eligible = |queued: &QueuedMediaPreviewJob| lane.accepts(queued.job.access_mode);
     queue
         .iter()
-        .position(|queued| {
+        .enumerate()
+        .filter(|(_, queued)| {
             queued.priority == MediaPreviewRequestPriority::Current && eligible(queued)
         })
+        .min_by_key(|(_, queued)| media_preview_current_job_rank(queued.job.access_mode))
+        .map(|(index, _)| index)
         .or_else(|| queue.iter().position(eligible))
+}
+
+fn media_preview_current_job_rank(access_mode: PreviewDecodeAccessMode) -> u8 {
+    match access_mode {
+        PreviewDecodeAccessMode::ScrubCursor => 0,
+        PreviewDecodeAccessMode::PlaybackCursor => 1,
+        PreviewDecodeAccessMode::RandomAccessStillFrame => 2,
+    }
 }
 
 fn lock_media_preview_job_queue_state(
@@ -575,6 +602,24 @@ impl MediaPreviewScheduler {
                 {
                     state.pending.remove(&evicted);
                     bump_value(&mut state.metrics.evicted_prefetch_requests);
+                } else if access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame {
+                    if let Some(evicted) = state
+                        .pending
+                        .iter()
+                        .find(|(_, pending)| {
+                            pending.priority == MediaPreviewRequestPriority::Current
+                                && pending.access_mode
+                                    == PreviewDecodeAccessMode::RandomAccessStillFrame
+                        })
+                        .map(|(key, _)| key.clone())
+                    {
+                        state.pending.remove(&evicted);
+                        bump_value(&mut state.metrics.evicted_still_requests);
+                    } else {
+                        bump_value(&mut state.metrics.dropped_backpressure_requests);
+                        bump_value(&mut state.metrics.dropped_pending_window_requests);
+                        return MediaPreviewRequestStatus::DroppedBackpressure;
+                    }
                 } else {
                     bump_value(&mut state.metrics.dropped_backpressure_requests);
                     bump_value(&mut state.metrics.dropped_pending_window_requests);
@@ -745,6 +790,7 @@ impl MediaPreviewScheduler {
             canceled_requests: state.metrics.canceled_requests,
             pruned_obsolete_requests: state.metrics.pruned_obsolete_requests,
             evicted_prefetch_requests: state.metrics.evicted_prefetch_requests,
+            evicted_still_requests: state.metrics.evicted_still_requests,
         }
     }
 
@@ -1426,6 +1472,73 @@ mod tests {
     }
 
     #[test]
+    fn media_preview_scheduler_realtime_current_evicts_pending_still_when_full() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(1);
+        let generation = scheduler.begin_generation();
+        let still = test_media_key(1);
+        let scrub = test_media_key(2);
+
+        assert_eq!(
+            scheduler.request(
+                still.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            scheduler.request(
+                scrub.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+
+        assert_eq!(scheduler.pending_len(), 1);
+        assert!(!scheduler.should_decode(&still, PreviewDecodeAccessMode::RandomAccessStillFrame));
+        assert!(scheduler.should_decode(&scrub, PreviewDecodeAccessMode::ScrubCursor));
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.evicted_still_requests, 1);
+        assert_eq!(diagnostics.dropped_backpressure_requests, 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_still_does_not_evict_realtime_current_when_full() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(1);
+        let generation = scheduler.begin_generation();
+        let scrub = test_media_key(1);
+        let still = test_media_key(2);
+
+        assert_eq!(
+            scheduler.request(
+                scrub.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            ),
+            MediaPreviewRequestStatus::Scheduled
+        );
+        assert_eq!(
+            scheduler.request(
+                still,
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ),
+            MediaPreviewRequestStatus::DroppedBackpressure
+        );
+
+        assert_eq!(scheduler.pending_len(), 1);
+        assert!(scheduler.should_decode(&scrub, PreviewDecodeAccessMode::ScrubCursor));
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.evicted_still_requests, 0);
+        assert_eq!(diagnostics.dropped_pending_window_requests, 1);
+    }
+
+    #[test]
     fn media_preview_job_queue_current_request_evicts_prefetch_when_full() {
         let (sender, receiver) = media_preview_job_queue(1);
         let prefetch = test_media_key(1);
@@ -1437,15 +1550,76 @@ mod tests {
 
         assert_eq!(
             sender.enqueue(prefetch_job),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(current_job),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: Some(prefetch) }
+            MediaPreviewJobEnqueueStatus::Enqueued {
+                evicted_prefetch: Some(Box::new(prefetch)),
+                evicted_still: None,
+            }
         );
 
         let next = receiver.recv().expect("queued current job");
         assert_eq!(next.key, current);
+    }
+
+    #[test]
+    fn media_preview_job_queue_realtime_current_evicts_still_when_full() {
+        let (sender, receiver) = media_preview_job_queue(1);
+        let still = test_media_key(1);
+        let scrub = test_media_key(2);
+        let mut still_job =
+            test_media_job(still.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
+        let mut scrub_job =
+            test_media_job(scrub.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
+
+        assert_eq!(
+            sender.enqueue(still_job),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            sender.enqueue(scrub_job),
+            MediaPreviewJobEnqueueStatus::Enqueued {
+                evicted_prefetch: None,
+                evicted_still: Some(Box::new(still)),
+            }
+        );
+
+        let next = receiver.recv().expect("queued scrub job");
+        assert_eq!(next.key, scrub);
+        assert_eq!(next.access_mode, PreviewDecodeAccessMode::ScrubCursor);
+    }
+
+    #[test]
+    fn media_preview_job_queue_prioritizes_scrub_before_still_on_shared_lane() {
+        let (sender, receiver) = media_preview_job_queue(2);
+        let still = test_media_key(1);
+        let scrub = test_media_key(2);
+        let mut still_job =
+            test_media_job(still.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
+        let mut scrub_job =
+            test_media_job(scrub.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
+
+        assert_eq!(
+            sender.enqueue(still_job),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            sender.enqueue(scrub_job),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        let scrub_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Interactive)
+            .expect("interactive lane should prefer scrub over still");
+        assert_eq!(scrub_job.key, scrub);
+        assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
+        assert_eq!(receiver.recv().expect("still job").key, still);
     }
 
     #[test]
@@ -1477,7 +1651,7 @@ mod tests {
                 1.0,
                 MediaPreviewRequestPriority::Prefetch,
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job(
@@ -1485,7 +1659,7 @@ mod tests {
                 2.0,
                 MediaPreviewRequestPriority::Current
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job(
@@ -1493,7 +1667,7 @@ mod tests {
                 3.0,
                 MediaPreviewRequestPriority::Prefetch,
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         assert_eq!(receiver.recv().expect("current").key, current);
@@ -1518,11 +1692,11 @@ mod tests {
 
         assert_eq!(
             sender.enqueue(playback_job),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(still_job),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         let interactive_job = receiver
@@ -1548,11 +1722,11 @@ mod tests {
 
         assert_eq!(
             sender.enqueue(scrub_job),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(playback_job),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         let playback_job = receiver
@@ -1579,11 +1753,11 @@ mod tests {
 
         assert_eq!(
             sender.enqueue(still_job),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(scrub_job),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         let scrub_job = receiver
@@ -1614,7 +1788,7 @@ mod tests {
                 1.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job(
@@ -1622,7 +1796,7 @@ mod tests {
                 2.0,
                 MediaPreviewRequestPriority::Prefetch,
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         let promoted_at = Instant::now();
@@ -1671,7 +1845,7 @@ mod tests {
                 2,
                 MediaPreviewRequestPriority::Current,
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         let refreshed_at = Instant::now();
@@ -1716,7 +1890,7 @@ mod tests {
                 1,
                 MediaPreviewRequestPriority::Current,
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job_with_generation(
@@ -1725,7 +1899,7 @@ mod tests {
                 1,
                 MediaPreviewRequestPriority::Prefetch,
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job_with_generation(
@@ -1734,7 +1908,7 @@ mod tests {
                 3,
                 MediaPreviewRequestPriority::Prefetch,
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         assert_eq!(sender.prune_obsolete_jobs(3), 2);
@@ -1745,7 +1919,7 @@ mod tests {
                 3,
                 MediaPreviewRequestPriority::Current,
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         assert_eq!(receiver.recv().expect("current").key, current);
@@ -1764,7 +1938,7 @@ mod tests {
                 1.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job(
@@ -1772,7 +1946,7 @@ mod tests {
                 2.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job(
@@ -1780,7 +1954,7 @@ mod tests {
                 3.0,
                 MediaPreviewRequestPriority::Current
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         assert_eq!(sender.cancel_key(&canceled), 2);
@@ -1830,7 +2004,7 @@ mod tests {
                 1.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job(
@@ -1838,7 +2012,7 @@ mod tests {
                 2.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
         assert_eq!(sender.clear(), 2);

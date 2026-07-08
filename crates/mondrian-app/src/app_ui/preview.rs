@@ -285,6 +285,7 @@ impl AppUiPreviewService {
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_invalid_access_mode_drops: self.metrics.queue_invalid_access_mode_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
+            queue_evicted_still_jobs: self.metrics.queue_evicted_still_jobs.get(),
             queue_canceled_jobs: self.metrics.queue_canceled_jobs.get(),
             queue_pruned_obsolete_jobs: self.metrics.queue_pruned_obsolete_jobs.get(),
             queue_promoted_current_jobs: self.metrics.queue_promoted_current_jobs.get(),
@@ -1636,6 +1637,8 @@ pub struct AppUiPreviewDiagnostics {
     pub queue_invalid_access_mode_drops: u64,
     /// Queued prefetch jobs evicted so current-frame decode work can run.
     pub queue_evicted_prefetch_jobs: u64,
+    /// Queued still-frame jobs evicted so real-time current work can run.
+    pub queue_evicted_still_jobs: u64,
     /// Queued jobs removed because their scheduler-side pending request was canceled.
     pub queue_canceled_jobs: u64,
     /// Obsolete queued jobs removed before scheduling current-frame decode.
@@ -2110,6 +2113,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub queue_invalid_access_mode_drops: u64,
     /// Queued prefetch jobs evicted so current-frame decode can run.
     pub queue_evicted_prefetch_jobs: u64,
+    /// Queued still-frame jobs evicted so real-time current work can run.
+    pub queue_evicted_still_jobs: u64,
     /// Queued jobs removed because their scheduler-side pending request was canceled.
     pub queue_canceled_jobs: u64,
     /// Obsolete queued jobs removed before scheduling current-frame decode.
@@ -3002,13 +3007,14 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
                 summary.enqueued_jobs,
                 summary.queue_full_drops,
                 summary.queue_evicted_prefetch_jobs,
+                summary.queue_evicted_still_jobs,
                 summary.queue_canceled_jobs,
                 summary.queue_pruned_obsolete_jobs,
                 summary.queue_promoted_current_jobs
@@ -3208,14 +3214,16 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} queue_evicted_prefetch_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={}",
+                "queue_full_drops={} enqueued_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
                 summary.queue_evicted_prefetch_jobs,
+                summary.queue_evicted_still_jobs,
                 summary.queue_canceled_jobs,
                 summary.queue_pruned_obsolete_jobs,
                 summary.queue_promoted_current_jobs,
-                summary.scheduler.dropped_pending_window_requests
+                summary.scheduler.dropped_pending_window_requests,
+                summary.scheduler.evicted_still_requests
             ),
             "reduce_preview_worker_transport_backpressure",
             "Fix preview worker transport backpressure so scheduler-accepted current-frame work cannot be dropped after admission.",
@@ -4050,6 +4058,7 @@ impl AppUiPreviewDiagnostics {
             queue_full_drops: self.queue_full_drops,
             queue_invalid_access_mode_drops: self.queue_invalid_access_mode_drops,
             queue_evicted_prefetch_jobs: self.queue_evicted_prefetch_jobs,
+            queue_evicted_still_jobs: self.queue_evicted_still_jobs,
             queue_canceled_jobs: self.queue_canceled_jobs,
             queue_pruned_obsolete_jobs: self.queue_pruned_obsolete_jobs,
             queue_promoted_current_jobs: self.queue_promoted_current_jobs,
@@ -5013,10 +5022,16 @@ impl AppUiPreviewService {
             add_cell(&self.metrics.queue_pruned_obsolete_jobs, pruned);
         }
         match self.jobs.enqueue(job) {
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch } => {
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch, evicted_still } => {
                 bump(&self.metrics.enqueued_jobs);
                 if let Some(evicted_key) = evicted_prefetch {
                     bump(&self.metrics.queue_evicted_prefetch_jobs);
+                    let canceled = self.jobs.cancel_key(&evicted_key) as u64;
+                    add_cell(&self.metrics.queue_canceled_jobs, canceled);
+                    self.scheduler.cancel(&evicted_key);
+                }
+                if let Some(evicted_key) = evicted_still {
+                    bump(&self.metrics.queue_evicted_still_jobs);
                     let canceled = self.jobs.cancel_key(&evicted_key) as u64;
                     add_cell(&self.metrics.queue_canceled_jobs, canceled);
                     self.scheduler.cancel(&evicted_key);
@@ -5241,6 +5256,7 @@ struct AppUiPreviewMetrics {
     queue_full_drops: Cell<u64>,
     queue_invalid_access_mode_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
+    queue_evicted_still_jobs: Cell<u64>,
     queue_canceled_jobs: Cell<u64>,
     queue_pruned_obsolete_jobs: Cell<u64>,
     queue_promoted_current_jobs: Cell<u64>,
@@ -9650,7 +9666,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
                 enqueued_at: Instant::now(),
             }),
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None }
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         service.media_cache.borrow_mut().insert(key.clone(), test_media_frame(1));
         service.media_failures.borrow_mut().insert(key.clone());
