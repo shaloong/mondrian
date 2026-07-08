@@ -337,9 +337,10 @@ GPU-resident frame delivery, not from silently reusing adjacent timestamp
 requests as if they were the requested frame.
 
 Current decode residency is intentionally explicit and fail-closed. The active
-preview/media decode path produces CPU RGBA frames and, for legacy YUV callers,
-CPU YUV420p frames derived from that CPU RGBA decode. `DecoderMetricsSnapshot`
-reports the selected hardware backend, decoded frame residency,
+preview/media decode path produces CPU RGBA frames. Legacy YUV preview
+surfaces were removed before release so access-mode decode has one media
+payload contract until a real hardware-resident adapter replaces it.
+`DecoderMetricsSnapshot` reports the selected hardware backend, decoded frame residency,
 `hardware_decode_active`, `zero_copy_active`, optional
 `decoded_gpu_frame_handle_kind`, `renderer_import_ready`, and a stable reason
 string. Until DXVA/D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC hardware frames

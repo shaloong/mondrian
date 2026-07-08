@@ -2,10 +2,9 @@
 //!
 //! Coordinates preview decode concurrency, cache residency, and access-mode requests.
 
-use crate::cache::{FrameCache, RawVideoFrame};
 use crate::preview::{
-    decode_preview_rgba_scaled_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
-    PreviewDecodeRgbaRequest, PreviewFileFingerprint, RgbaFrame,
+    decode_preview_rgba_scaled_cancellable, PreviewDecodeAccessMode, PreviewDecodeRgbaRequest,
+    PreviewFileFingerprint, RgbaFrame,
 };
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
@@ -40,8 +39,6 @@ pub enum HwAccelBackend {
 pub enum DecodedFrameResidency {
     /// Decoder output is CPU RGBA memory.
     CpuRgba,
-    /// Decoder output is CPU YUV 4:2:0 memory.
-    CpuYuv420p,
     /// Decoder output is a GPU texture or hardware frame.
     GpuTexture,
 }
@@ -135,7 +132,6 @@ impl DecodedFrameResidency {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CpuRgba => "CpuRgba",
-            Self::CpuYuv420p => "CpuYuv420p",
             Self::GpuTexture => "GpuTexture",
         }
     }
@@ -179,8 +175,6 @@ struct RgbaFrameKey {
 
 #[derive(Default)]
 struct DecoderMetrics {
-    yuv_requests: AtomicU64,
-    yuv_cache_hits: AtomicU64,
     rgba_requests: AtomicU64,
     rgba_cache_hits: AtomicU64,
     decode_executions: AtomicU64,
@@ -247,8 +241,6 @@ pub struct DecoderMetricsSnapshot {
     pub hardware_decode_active: bool,
     pub zero_copy_active: bool,
     pub hw_accel_reason: String,
-    pub yuv_requests: u64,
-    pub yuv_cache_hits: u64,
     pub rgba_requests: u64,
     pub rgba_cache_hits: u64,
     pub decode_executions: u64,
@@ -271,9 +263,7 @@ pub struct DecoderMetricsSnapshot {
 
 impl DecoderMetrics {
     fn snapshot(&self, hw_probe: &HwAccelProbe) -> DecoderMetricsSnapshot {
-        let yuv_requests = self.yuv_requests.load(Ordering::Relaxed);
         let rgba_requests = self.rgba_requests.load(Ordering::Relaxed);
-        let decode_requests = yuv_requests + rgba_requests;
         let decode_executions = self.decode_executions.load(Ordering::Relaxed);
         let total_decode_ns = self.total_decode_ns.load(Ordering::Relaxed);
         DecoderMetricsSnapshot {
@@ -284,8 +274,6 @@ impl DecoderMetrics {
             hardware_decode_active: hw_probe.hardware_decode_active,
             zero_copy_active: hw_probe.zero_copy_active,
             hw_accel_reason: hw_probe.reason.clone(),
-            yuv_requests,
-            yuv_cache_hits: self.yuv_cache_hits.load(Ordering::Relaxed),
             rgba_requests,
             rgba_cache_hits: self.rgba_cache_hits.load(Ordering::Relaxed),
             decode_executions,
@@ -300,8 +288,8 @@ impl DecoderMetrics {
             prefetch_started: self.prefetch_started.load(Ordering::Relaxed),
             prefetch_cancelled: self.prefetch_cancelled.load(Ordering::Relaxed),
             prefetch_completed: self.prefetch_completed.load(Ordering::Relaxed),
-            avg_decode_ms: if decode_requests > 0 {
-                (total_decode_ns as f64 / decode_requests as f64) / 1_000_000.0
+            avg_decode_ms: if rgba_requests > 0 {
+                (total_decode_ns as f64 / rgba_requests as f64) / 1_000_000.0
             } else {
                 0.0
             },
@@ -310,8 +298,8 @@ impl DecoderMetrics {
             } else {
                 0.0
             },
-            decode_miss_rate_pct: if decode_requests > 0 {
-                decode_executions as f64 / decode_requests as f64 * 100.0
+            decode_miss_rate_pct: if rgba_requests > 0 {
+                decode_executions as f64 / rgba_requests as f64 * 100.0
             } else {
                 0.0
             },
@@ -340,7 +328,6 @@ impl DecoderMetrics {
 /// - Coalesces in-flight RGBA preview requests by access-mode-aware cache key.
 /// - Keeps decoded frame caches and prefetch task cancellation state.
 pub struct DecoderPool {
-    frame_cache: Arc<FrameCache>,
     semaphore: Arc<Semaphore>,
     hw_accel_probe: HwAccelProbe,
     prefetch_tasks: DashMap<u64, PrefetchTask>,
@@ -403,11 +390,10 @@ impl DecoderPoolPreviewRgbaRequest {
 }
 
 impl DecoderPool {
-    pub fn new(frame_cache: Arc<FrameCache>) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         let max_concurrent = (num_cpus() - 2).max(1);
         let hw_accel_probe = HwAccelBackend::probe();
         Arc::new(Self {
-            frame_cache,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             hw_accel_probe,
             prefetch_tasks: DashMap::new(),
@@ -627,145 +613,10 @@ impl DecoderPool {
         decode_result
     }
 
-    /// 获取指定时间码处的随机访问静帧（优先从缓存读取）。
-    ///
-    /// This legacy YUV-facing path derives YUV420p from a still-frame CPU RGBA
-    /// decode. It is not the playback cursor path.
-    pub async fn get_still_video_frame(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-        timecode: TimeCode,
-    ) -> Result<Arc<RawVideoFrame>> {
-        self.metrics.yuv_requests.fetch_add(1, Ordering::Relaxed);
-        let frame_num = timecode.frame.max(0) as u64;
-
-        // 1. 检查缓存
-        if let Some(frame) = self.frame_cache.get(asset_id, frame_num) {
-            self.metrics.yuv_cache_hits.fetch_add(1, Ordering::Relaxed);
-            tracing::trace!("Cache hit: asset={asset_id} frame={frame_num}");
-            return Ok(frame);
-        }
-
-        self.metrics.decode_executions.fetch_add(1, Ordering::Relaxed);
-        // 2. 限流（最多 N 个并发解码）
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|_| mondrian_core::MondrianError::Cancelled)?;
-
-        // 3. 解码（在阻塞线程池执行）
-        let started = Instant::now();
-        let frame = tokio::task::spawn_blocking(move || {
-            tracing::debug!("Decoding frame {frame_num} for asset {asset_id}");
-
-            let timestamp_secs = timecode.to_secs().max(0.0);
-            let request = PreviewDecodeRgbaRequest::new(
-                path.as_path(),
-                timestamp_secs,
-                PreviewDecodeAccessMode::RandomAccessStillFrame,
-            );
-            let rgba = match decode_preview_rgba_scaled_cancellable(request, || false)? {
-                PreviewDecodeOutcome::Frame(frame) => frame,
-                PreviewDecodeOutcome::Canceled => {
-                    return Err(mondrian_core::MondrianError::Cancelled);
-                }
-            };
-            let (planes, strides) = rgba_to_yuv420p(&rgba)?;
-
-            Ok::<Arc<RawVideoFrame>, mondrian_core::MondrianError>(Arc::new(RawVideoFrame {
-                asset_id,
-                pts: timecode,
-                width: rgba.width,
-                height: rgba.height,
-                planes,
-                strides,
-                frame_num,
-            }))
-        })
-        .await
-        .map_err(|e| mondrian_core::MondrianError::DecodeFailed {
-            asset_id: asset_id.to_string(),
-            reason: e.to_string(),
-        })
-        .and_then(|r| r)
-        .inspect_err(|err| {
-            self.metrics
-                .record_decode_failure(PreviewDecodeAccessMode::RandomAccessStillFrame, err);
-        })?;
-
-        self.metrics
-            .total_decode_ns
-            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-        // 4. 写入缓存
-        self.frame_cache.insert(frame.clone());
-
-        Ok(frame)
-    }
-
     /// Cancel background work and evict decoded frames for an asset.
     pub fn close_asset(&self, asset_id: AssetId) {
         self.cancel_prefetch_for_asset(asset_id);
-        self.frame_cache.evict_asset(asset_id);
         self.evict_rgba_asset(asset_id);
-    }
-
-    /// 启动可取消的预取任务，返回任务 ID。
-    ///
-    /// 预取会顺序请求 `lookahead_frames` 帧，并尽量填充 `FrameCache`。
-    pub fn spawn_prefetch(
-        self: &Arc<Self>,
-        asset_id: AssetId,
-        path: PathBuf,
-        start_timecode: TimeCode,
-        lookahead_frames: u32,
-    ) -> u64 {
-        let task_id = self.next_prefetch_task_id.fetch_add(1, Ordering::Relaxed);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.prefetch_tasks.insert(
-            task_id,
-            PrefetchTask { asset_id, cancelled: cancelled.clone() },
-        );
-        self.metrics.prefetch_started.fetch_add(1, Ordering::Relaxed);
-
-        let pool = Arc::clone(self);
-        self.background_runtime.spawn(async move {
-            let fps = start_timecode.time_base;
-            let mut was_cancelled = false;
-            for offset in 0..lookahead_frames {
-                if cancelled.load(Ordering::Relaxed) {
-                    was_cancelled = true;
-                    break;
-                }
-
-                let tc = TimeCode::new(start_timecode.frame + offset as i64, fps);
-                if let Err(err) = pool.get_still_video_frame(asset_id, path.clone(), tc).await {
-                    if matches!(err, mondrian_core::MondrianError::Cancelled) {
-                        was_cancelled = true;
-                        break;
-                    }
-                    tracing::debug!(
-                        "prefetch frame failed: task_id={} asset={} frame={} err={}",
-                        task_id,
-                        asset_id,
-                        tc.frame,
-                        err
-                    );
-                    break;
-                }
-            }
-
-            pool.prefetch_tasks.remove(&task_id);
-            if was_cancelled {
-                pool.metrics.prefetch_cancelled.fetch_add(1, Ordering::Relaxed);
-            } else {
-                pool.metrics.prefetch_completed.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-
-        task_id
     }
 
     /// 启动 RGBA 预取任务（按目标预览分辨率缓存）。
@@ -877,7 +728,6 @@ impl DecoderPool {
     pub fn clear_all_caches(&self) {
         self.cancel_all_prefetch_tasks();
         self.prefetch_tasks.clear();
-        self.frame_cache.clear_all();
         self.rgba_cache.lock().clear();
     }
 
@@ -1054,86 +904,9 @@ async fn wait_for_inflight_or_cancel(
     }
 }
 
-fn rgba_to_yuv420p(frame: &RgbaFrame) -> Result<([Vec<u8>; 3], [u32; 3])> {
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    let expected_len = width.saturating_mul(height).saturating_mul(4);
-    if frame.data.len() < expected_len {
-        return Err(mondrian_core::MondrianError::DecodeFailed {
-            asset_id: "rgba_to_yuv420p".to_string(),
-            reason: format!(
-                "rgba buffer too small: actual={} expected={}",
-                frame.data.len(),
-                expected_len
-            ),
-        });
-    }
-
-    let mut y_plane = vec![0u8; width * height];
-    let uv_width = width.div_ceil(2);
-    let uv_height = height.div_ceil(2);
-    let mut u_plane = vec![0u8; uv_width * uv_height];
-    let mut v_plane = vec![0u8; uv_width * uv_height];
-
-    for y in 0..height {
-        for x in 0..width {
-            let i = (y * width + x) * 4;
-            let r = frame.data[i] as f32;
-            let g = frame.data[i + 1] as f32;
-            let b = frame.data[i + 2] as f32;
-
-            let luma = (0.257 * r + 0.504 * g + 0.098 * b + 16.0).round().clamp(0.0, 255.0);
-            y_plane[y * width + x] = luma as u8;
-        }
-    }
-
-    for uv_y in 0..uv_height {
-        for uv_x in 0..uv_width {
-            let base_x = uv_x * 2;
-            let base_y = uv_y * 2;
-
-            let mut u_acc = 0.0f32;
-            let mut v_acc = 0.0f32;
-            let mut count = 0.0f32;
-
-            for oy in 0..2 {
-                for ox in 0..2 {
-                    let px = base_x + ox;
-                    let py = base_y + oy;
-                    if px >= width || py >= height {
-                        continue;
-                    }
-
-                    let i = (py * width + px) * 4;
-                    let r = frame.data[i] as f32;
-                    let g = frame.data[i + 1] as f32;
-                    let b = frame.data[i + 2] as f32;
-
-                    let u = (-0.148 * r - 0.291 * g + 0.439 * b + 128.0).round().clamp(0.0, 255.0);
-                    let v = (0.439 * r - 0.368 * g - 0.071 * b + 128.0).round().clamp(0.0, 255.0);
-
-                    u_acc += u;
-                    v_acc += v;
-                    count += 1.0;
-                }
-            }
-
-            let idx = uv_y * uv_width + uv_x;
-            u_plane[idx] = (u_acc / count.max(1.0)).round().clamp(0.0, 255.0) as u8;
-            v_plane[idx] = (v_acc / count.max(1.0)).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    Ok((
-        [y_plane, u_plane, v_plane],
-        [frame.width, uv_width as u32, uv_width as u32],
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::FrameCacheConfig;
 
     #[test]
     fn hw_accel_probe_fails_closed_until_texture_residency_exists() {
@@ -1170,8 +943,7 @@ mod tests {
 
     #[test]
     fn decoder_metrics_report_cpu_residency_and_no_zero_copy() {
-        let cache = FrameCache::new(FrameCacheConfig { max_frames: 2 });
-        let pool = DecoderPool::new(cache);
+        let pool = DecoderPool::new();
 
         let snapshot = pool.metrics_snapshot();
 

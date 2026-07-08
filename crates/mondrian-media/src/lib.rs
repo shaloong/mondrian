@@ -2,13 +2,12 @@
 //!
 //! 媒体处理核心模块。负责：
 //! - 媒体文件探针（格式/编解码/元数据）
-//! - 视频帧解码（当前为 FFmpeg CPU RGBA/YUV 路径；硬解/零拷贝必须通过显式 residency 诊断证明）
+//! - 视频帧解码（当前为 FFmpeg CPU RGBA 路径；硬解/零拷贝必须通过显式 residency 诊断证明）
 //! - 音频采样解码与混合
-//! - 帧缓存（LRU）
+//! - 预览帧缓存与解码调度
 //! - 代理文件生成（Proxy）
 
 pub mod audio;
-pub mod cache;
 pub mod decoder;
 pub mod info;
 pub mod multilevel_cache;
@@ -20,7 +19,6 @@ pub use audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData, ClockRole,
     RealtimeAudioOutput,
 };
-pub use cache::FrameCache;
 pub use decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecoderAccessModeMetricsSnapshot,
     DecoderMetricsSnapshot, DecoderPool, DecoderPoolPreviewRgbaRequest, HwAccelBackend,
