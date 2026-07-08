@@ -88,7 +88,9 @@ prefetch already covers the configured forward window, the app must skip that
 prefetch pass instead of adding more speculative jobs. Diagnostics report these
 as `prefetch_skipped_current_pending`, `prefetch_skipped_worker_busy`, and
 `prefetch_skipped_prefetch_backlog`. This keeps first-frame display and
-dropped-frame recovery ahead of cache warming on slow or long-GOP media.
+dropped-frame recovery ahead of cache warming on slow or long-GOP media. When
+the prefetch backlog is below the forward window, scheduling must top up only
+the remaining window slots, not enqueue a full new prefetch window.
 The app preview service owns worker thread lifetimes. Workers are joined during
 service shutdown after the job queue is closed, and each worker explicitly drops
 its thread-local media decode sessions before exit. Thread-local FFmpeg decoder
@@ -441,10 +443,10 @@ is scheduled, the job queue also prunes obsolete prefetch jobs from older render
 generations before enqueueing the current work; fresh same-generation prefetch
 remains eligible only after the current frame is not pending, no current-frame
 job is already queued, and the prefetch backlog is below the forward window.
-That lets playback warm nearby frames without stealing first-frame or recovery
-budget. This worker pool and pruning are scheduling guardrails only; they are
-not a substitute for future cancellable decode sessions or hardware-resident
-decode.
+It then tops up only the unfilled prefetch slots. That lets playback warm nearby
+frames without stealing first-frame or recovery budget. This worker pool and
+pruning are scheduling guardrails only; they are not a substitute for future
+cancellable decode sessions or hardware-resident decode.
 Preview decode also exposes a cooperative cancellation boundary for interactive
 work: app workers pass a generation-aware predicate to the media decoder, and
 the media loop checks it before opening, seeking, packet decode, frame receive,

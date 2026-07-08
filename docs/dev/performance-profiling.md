@@ -197,7 +197,9 @@ before any codec or color/render optimization is attempted. Nonzero prefetch
 skip counters are intentional slack-only prefetch behavior: the app did not add
 speculative playback work while the visible frame was still waiting on media,
 current-frame work was already queued, or the forward prefetch window was
-already covered.
+already covered. If queued prefetch is below the forward window, the scheduler
+only tops up the remaining slots; repeated playback ticks should not add full
+new speculative windows.
 The same report includes current worker-queue depth split by priority and access
 mode (`queued_current_jobs`, `queued_prefetch_jobs`,
 `queued_playback_cursor_jobs`, `queued_scrub_cursor_jobs`, and

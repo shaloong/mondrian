@@ -5424,7 +5424,9 @@ impl AppUiPreviewService {
             bump(&self.metrics.prefetch_skipped_worker_busy);
             return;
         }
-        if worker_queue.queued_prefetch_jobs >= MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize {
+        let prefetch_slots_available = (MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize)
+            .saturating_sub(worker_queue.queued_prefetch_jobs);
+        if prefetch_slots_available == 0 {
             bump(&self.metrics.prefetch_skipped_prefetch_backlog);
             return;
         }
@@ -5440,7 +5442,7 @@ impl AppUiPreviewService {
             &state.project_settings.color_management,
             display_color_space,
         );
-        for offset in 1..=MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES {
+        for offset in 1..=prefetch_slots_available as i64 {
             self.schedule_media_prefetch_for_sequence(
                 state,
                 sequence,
@@ -10898,6 +10900,39 @@ mod tests {
             diagnostics.worker_queue.queued_prefetch_jobs,
             MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
         );
+    }
+
+    #[test]
+    fn playback_prefetch_tops_up_only_remaining_window_slots() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let (mut state, _, root) = state_with_invalid_video_asset();
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+
+        assert_eq!(
+            service.jobs.enqueue(MediaPreviewJob {
+                key: test_media_key(300),
+                source_secs: 0.0,
+                generation: 1,
+                priority: MediaPreviewRequestPriority::Prefetch,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                enqueued_at: Instant::now(),
+            }),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
+        assert_eq!(
+            diagnostics.worker_queue.queued_prefetch_jobs,
+            MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
+        );
+        assert_eq!(diagnostics.enqueued_jobs, 1);
+        service.shutdown();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
