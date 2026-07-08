@@ -234,6 +234,10 @@ impl AppUiPreviewService {
                 .metrics
                 .decode_canceled_prefetch_deadline_jobs
                 .get(),
+            decode_canceled_prefetch_preempted_jobs: self
+                .metrics
+                .decode_canceled_prefetch_preempted_jobs
+                .get(),
             decode_canceled_unknown_jobs: self.metrics.decode_canceled_unknown_jobs.get(),
             decode_canceled_total_duration_us: self.metrics.decode_canceled_total_duration_us.get(),
             decode_canceled_max_duration_us: self.metrics.decode_canceled_max_duration_us.get(),
@@ -1096,6 +1100,9 @@ impl AppUiPreviewService {
             MediaPreviewCancelReason::PrefetchDeadline => {
                 bump(&self.metrics.decode_canceled_prefetch_deadline_jobs);
             }
+            MediaPreviewCancelReason::PrefetchPreemptedByCurrent => {
+                bump(&self.metrics.decode_canceled_prefetch_preempted_jobs);
+            }
             MediaPreviewCancelReason::Unknown => bump(&self.metrics.decode_canceled_unknown_jobs),
         }
         match access_mode {
@@ -1605,6 +1612,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_canceled_obsolete_jobs: u64,
     /// Prefetch decodes canceled by the app-level prefetch deadline.
     pub decode_canceled_prefetch_deadline_jobs: u64,
+    /// Prefetch decodes canceled because visible current-frame work was pending.
+    pub decode_canceled_prefetch_preempted_jobs: u64,
     /// Background media decodes canceled without a structured app-level reason.
     pub decode_canceled_unknown_jobs: u64,
     /// Total worker execution time spent in canceled decode jobs.
@@ -1985,6 +1994,8 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub canceled_obsolete_jobs: u64,
     /// Canceled prefetch jobs that exceeded their deadline for this access mode.
     pub canceled_prefetch_deadline_jobs: u64,
+    /// Canceled prefetch jobs that yielded to visible current-frame work.
+    pub canceled_prefetch_preempted_jobs: u64,
     /// Canceled jobs without a structured reason for this access mode.
     pub canceled_unknown_jobs: u64,
     /// Total worker execution time spent in canceled decode jobs for this access mode.
@@ -2094,6 +2105,10 @@ impl AppUiPreviewDecodeAccessModeProfile {
             MediaPreviewCancelReason::PrefetchDeadline => {
                 self.canceled_prefetch_deadline_jobs =
                     self.canceled_prefetch_deadline_jobs.saturating_add(1);
+            }
+            MediaPreviewCancelReason::PrefetchPreemptedByCurrent => {
+                self.canceled_prefetch_preempted_jobs =
+                    self.canceled_prefetch_preempted_jobs.saturating_add(1);
             }
             MediaPreviewCancelReason::Unknown => {
                 self.canceled_unknown_jobs = self.canceled_unknown_jobs.saturating_add(1);
@@ -2257,6 +2272,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub canceled_obsolete_jobs: u64,
     /// Prefetch decode jobs canceled by their deadline.
     pub canceled_prefetch_deadline_jobs: u64,
+    /// Prefetch decode jobs canceled because visible current-frame work was pending.
+    pub canceled_prefetch_preempted_jobs: u64,
     /// Canceled preview decode jobs with no structured reason.
     pub canceled_unknown_jobs: u64,
     /// Total worker execution time spent in canceled decode jobs.
@@ -2372,7 +2389,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 10;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 11;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2832,6 +2849,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_deadline_cancellations",
             summary.canceled_prefetch_deadline_jobs,
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_prefetch_preempted_by_current_cancellations",
+            summary.canceled_prefetch_preempted_jobs,
             0,
         );
         push_decode_warn_max_check(
@@ -3563,6 +3587,35 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "tune_preview_prefetch_deadline_or_proxy",
             "Inspect prefetch cancellation pressure, proxy readiness, and playback decode locality before increasing decode concurrency.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if summary.canceled_prefetch_preempted_jobs > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_prefetch_preempted_by_current",
+            format!(
+                "canceled_prefetch_preempted_jobs={} playback_prefetch_preempted_jobs={} scrub_prefetch_preempted_jobs={} random_access_still_prefetch_preempted_jobs={} queued_current_jobs={} queued_prefetch_jobs={}",
+                summary.canceled_prefetch_preempted_jobs,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .canceled_prefetch_preempted_jobs,
+                summary
+                    .access_mode_profiles
+                    .scrub_cursor
+                    .canceled_prefetch_preempted_jobs,
+                summary
+                    .access_mode_profiles
+                    .random_access_still
+                    .canceled_prefetch_preempted_jobs,
+                summary.worker_queue.queued_current_jobs,
+                summary.worker_queue.queued_prefetch_jobs
+            ),
+            "reduce_speculative_prefetch_pressure",
+            "Throttle playback prefetch when visible current-frame work is waiting; prefetch should yield before it consumes the only interactive decode opportunity.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -4535,6 +4588,7 @@ impl AppUiPreviewDiagnostics {
             canceled_shutdown_jobs: self.decode_canceled_shutdown_jobs,
             canceled_obsolete_jobs: self.decode_canceled_obsolete_jobs,
             canceled_prefetch_deadline_jobs: self.decode_canceled_prefetch_deadline_jobs,
+            canceled_prefetch_preempted_jobs: self.decode_canceled_prefetch_preempted_jobs,
             canceled_unknown_jobs: self.decode_canceled_unknown_jobs,
             canceled_total_duration_us: self.decode_canceled_total_duration_us,
             canceled_max_duration_us: self.decode_canceled_max_duration_us,
@@ -5152,6 +5206,7 @@ enum MediaPreviewCancelReason {
     Shutdown,
     Obsolete,
     PrefetchDeadline,
+    PrefetchPreemptedByCurrent,
     Unknown,
 }
 
@@ -5738,6 +5793,7 @@ struct AppUiPreviewMetrics {
     decode_canceled_shutdown_jobs: Cell<u64>,
     decode_canceled_obsolete_jobs: Cell<u64>,
     decode_canceled_prefetch_deadline_jobs: Cell<u64>,
+    decode_canceled_prefetch_preempted_jobs: Cell<u64>,
     decode_canceled_unknown_jobs: Cell<u64>,
     decode_canceled_total_duration_us: Cell<u64>,
     decode_canceled_max_duration_us: Cell<u64>,
@@ -6425,6 +6481,7 @@ fn media_preview_worker(
                     cancel_generation,
                     cancel_access_mode,
                 ),
+                cancel_scheduler.has_pending_current_request_other_than(&cancel_key),
                 cancel_priority,
                 cancel_access_mode,
                 decode_started_at.elapsed(),
@@ -6455,6 +6512,7 @@ fn media_preview_worker(
 fn media_preview_cancel_reason(
     shutdown: bool,
     scheduler_current: bool,
+    other_current_pending: bool,
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
     elapsed: Duration,
@@ -6464,6 +6522,12 @@ fn media_preview_cancel_reason(
     }
     if !scheduler_current {
         return Some(MediaPreviewCancelReason::Obsolete);
+    }
+    if priority == MediaPreviewRequestPriority::Prefetch
+        && access_mode == PreviewDecodeAccessMode::PlaybackCursor
+        && other_current_pending
+    {
+        return Some(MediaPreviewCancelReason::PrefetchPreemptedByCurrent);
     }
     if priority == MediaPreviewRequestPriority::Prefetch
         && access_mode == PreviewDecodeAccessMode::PlaybackCursor
@@ -7390,6 +7454,30 @@ mod tests {
     }
 
     #[test]
+    fn preview_diagnostics_count_prefetch_preemptions_by_access_mode() {
+        let service = AppUiPreviewService::new();
+
+        service.record_preview_decode_cancel(
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(MediaPreviewCancelReason::PrefetchPreemptedByCurrent),
+            120,
+            Some(80),
+        );
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.decode_canceled_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_prefetch_preempted_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_prefetch_deadline_jobs, 0);
+        assert_eq!(diagnostics.decode_canceled_obsolete_jobs, 0);
+        assert_eq!(diagnostics.decode_canceled_playback_cursor_jobs, 1);
+        let playback_profile = diagnostics.decode_access_mode_profiles.playback_cursor;
+        assert_eq!(playback_profile.canceled_jobs, 1);
+        assert_eq!(playback_profile.canceled_prefetch_preempted_jobs, 1);
+        assert_eq!(playback_profile.canceled_prefetch_deadline_jobs, 0);
+        assert_eq!(playback_profile.canceled_return_latency_total_us, 40);
+    }
+
+    #[test]
     fn preview_decode_performance_report_fails_structured_budget_exhaustion() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_failures: 1,
@@ -8223,13 +8311,19 @@ mod tests {
     fn preview_decode_performance_report_classifies_prefetch_deadline_cancellations() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_canceled_jobs: 2,
+            decode_canceled_jobs: 3,
             decode_canceled_prefetch_deadline_jobs: 2,
-            decode_canceled_playback_cursor_jobs: 2,
+            decode_canceled_prefetch_preempted_jobs: 1,
+            decode_canceled_playback_cursor_jobs: 3,
             decode_in_process_cpu_rgba_frames: 1,
             decode_total_duration_us: 12_000,
             decode_max_duration_us: 12_000,
             decode_last_duration_us: 12_000,
+            worker_queue: MediaPreviewJobQueueDiagnostics {
+                queued_current_jobs: 1,
+                queued_prefetch_jobs: 1,
+                ..MediaPreviewJobQueueDiagnostics::default()
+            },
             decode_stage_durations: PreviewDecodeStageDurations {
                 packet_decode_us: 10_000,
                 swscale_us: 1_000,
@@ -8246,8 +8340,9 @@ mod tests {
                 playback_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
                     in_process_cpu_rgba_frames: 1,
-                    canceled_jobs: 2,
+                    canceled_jobs: 3,
                     canceled_prefetch_deadline_jobs: 2,
+                    canceled_prefetch_preempted_jobs: 1,
                     ..AppUiPreviewDecodeAccessModeProfile::default()
                 },
                 ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -8263,18 +8358,29 @@ mod tests {
 
         assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
         let summary = report.summary.expect("decode summary");
-        assert_eq!(summary.canceled_jobs, 2);
+        assert_eq!(summary.canceled_jobs, 3);
         assert_eq!(summary.canceled_prefetch_deadline_jobs, 2);
-        assert_eq!(summary.canceled_playback_cursor_jobs, 2);
+        assert_eq!(summary.canceled_prefetch_preempted_jobs, 1);
+        assert_eq!(summary.canceled_playback_cursor_jobs, 3);
         assert!(report.root_causes.iter().any(|root| {
             root.code == "preview_decode_prefetch_deadline_cancellations"
                 && root.evidence.contains("playback_prefetch_deadline_jobs=2")
                 && root.evidence.contains("scrub_prefetch_deadline_jobs=0")
         }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_prefetch_preempted_by_current"
+                && root.evidence.contains("playback_prefetch_preempted_jobs=1")
+                && root.evidence.contains("queued_current_jobs=1")
+                && root.evidence.contains("queued_prefetch_jobs=1")
+        }));
         assert!(report
             .actions
             .iter()
             .any(|action| action.code == "tune_preview_prefetch_deadline_or_proxy"));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "reduce_speculative_prefetch_pressure"));
     }
 
     #[test]
@@ -10668,6 +10774,7 @@ mod tests {
             media_preview_cancel_reason(
                 false,
                 true,
+                true,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
                 Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
@@ -10680,6 +10787,7 @@ mod tests {
     fn media_preview_decode_cancellation_reports_shutdown() {
         assert_eq!(
             media_preview_cancel_reason(
+                true,
                 true,
                 true,
                 MediaPreviewRequestPriority::Current,
@@ -10696,6 +10804,7 @@ mod tests {
             media_preview_cancel_reason(
                 false,
                 true,
+                false,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
                 Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US - 1),
@@ -10706,6 +10815,7 @@ mod tests {
             media_preview_cancel_reason(
                 false,
                 true,
+                false,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
                 Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US),
@@ -10716,9 +10826,36 @@ mod tests {
             media_preview_cancel_reason(
                 false,
                 true,
+                true,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::ScrubCursor,
                 Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn media_preview_decode_cancellation_preempts_prefetch_for_current_work() {
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                true,
+                true,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Duration::ZERO,
+            ),
+            Some(MediaPreviewCancelReason::PrefetchPreemptedByCurrent),
+        );
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                true,
+                false,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US - 1),
             ),
             None,
         );
@@ -10730,6 +10867,7 @@ mod tests {
             media_preview_cancel_reason(
                 false,
                 false,
+                true,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
                 Duration::ZERO,
@@ -10740,6 +10878,7 @@ mod tests {
             media_preview_cancel_reason(
                 false,
                 false,
+                true,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
                 Duration::ZERO,

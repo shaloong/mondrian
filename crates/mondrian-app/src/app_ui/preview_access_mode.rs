@@ -751,6 +751,15 @@ impl MediaPreviewScheduler {
             .unwrap_or(false)
     }
 
+    pub(crate) fn has_pending_current_request_other_than(&self, key: &MediaPreviewKey) -> bool {
+        let state = self.state.lock().expect("media preview scheduler poisoned");
+        state.pending.iter().any(|(pending_key, pending)| {
+            pending_key != key
+                && pending.priority == MediaPreviewRequestPriority::Current
+                && pending.generation >= state.latest_generation
+        })
+    }
+
     pub(crate) fn complete(
         &self,
         key: &MediaPreviewKey,
@@ -1095,6 +1104,38 @@ mod tests {
             MediaPreviewRequestPriority::Current
         ));
         assert_eq!(scheduler.pending_len(), 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_reports_other_pending_current_pressure() {
+        let scheduler = MediaPreviewScheduler::default();
+        let generation = scheduler.begin_generation();
+        let prefetch = test_media_key(1);
+        let current = test_media_key(2);
+
+        assert_eq!(
+            test_scheduler_request(
+                &scheduler,
+                prefetch.clone(),
+                generation,
+                MediaPreviewRequestPriority::Prefetch,
+            ),
+            scheduled_request()
+        );
+        assert!(!scheduler.has_pending_current_request_other_than(&prefetch));
+
+        assert_eq!(
+            test_scheduler_request(
+                &scheduler,
+                current.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+            ),
+            scheduled_request()
+        );
+
+        assert!(scheduler.has_pending_current_request_other_than(&prefetch));
+        assert!(!scheduler.has_pending_current_request_other_than(&current));
     }
 
     #[test]

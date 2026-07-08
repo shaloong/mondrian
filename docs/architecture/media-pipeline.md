@@ -454,7 +454,13 @@ budget. Current-frame decode is not canceled by this budget, and the deadline
 applies only to playback prefetch work. Scrub and still-frame requests are
 latest-wins/current-frame work; if future callers try to submit them as
 prefetch, scheduler admission must reject them instead of letting the worker
-deadline silently reinterpret their access mode.
+deadline silently reinterpret their access mode. A playback prefetch that is
+already in a worker must also yield immediately when another current-frame
+request is pending, unless that prefetch is for the same media key that was
+promoted to current-frame work. This cancellation is reported separately as
+prefetch-preempted-by-current rather than as obsolete work or a deadline miss,
+so diagnostics can distinguish intentional current-frame protection from
+expired speculative work.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;

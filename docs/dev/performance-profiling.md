@@ -110,8 +110,11 @@ stale prefetch/current admission before codec, color, or render work. The
 preview media smokes fail when the access modes exercised by that scenario have
 queue waits over the decode slow-frame budget.
 Cancellation counters are also split inside each access-mode profile; use those
-fields to identify whether obsolete, prefetch-deadline, shutdown, or unknown
-cancellations came from playback, active scrub, or still-frame work.
+fields to identify whether obsolete, prefetch-deadline,
+prefetch-preempted-by-current, shutdown, or unknown cancellations came from
+playback, active scrub, or still-frame work. Prefetch preemption means the app
+protected visible current-frame work from in-flight playback speculation; it is
+a scheduling-pressure signal, not a media decode failure.
 `preview_media_decode_cache_smoke` intentionally exercises both settled
 non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 (`ScrubCursor`). The active scrub window is controlled by
