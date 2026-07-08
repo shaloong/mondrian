@@ -170,7 +170,7 @@ fn preview_decode_hard_failures(report: &AppUiPreviewDecodePerformanceReport) ->
     }
 }
 
-fn preview_media_decode_access_mode_coverage_failures(
+fn preview_decode_required_access_mode_failures(
     report: &AppUiPreviewDecodePerformanceReport,
 ) -> Vec<&'static str> {
     if report.summary.is_none() {
@@ -251,6 +251,7 @@ fn preview_playback_decode_failures(
     report: &AppUiPreviewDecodePerformanceReport,
 ) -> Vec<&'static str> {
     let mut failures = preview_decode_hard_failures(report);
+    failures.extend(preview_decode_required_access_mode_failures(report));
     failures.extend(preview_decode_access_mode_queue_wait_failures(
         report,
         &[PreviewDecodeAccessMode::PlaybackCursor],
@@ -977,7 +978,7 @@ fn validate_preview_media_access_mode_report(
         anyhow::bail!("preview media color report failed: {report_json}");
     }
     let access_mode_coverage_failures =
-        preview_media_decode_access_mode_coverage_failures(&report.preview_decode_report);
+        preview_decode_required_access_mode_failures(&report.preview_decode_report);
     if !access_mode_coverage_failures.is_empty() {
         anyhow::bail!(
             "preview media decode access-mode coverage failed: {:?}; report: {}",
@@ -1732,7 +1733,7 @@ fn preview_media_decode_access_mode_coverage_requires_scrub_and_still_samples() 
     );
 
     assert_eq!(
-        preview_media_decode_access_mode_coverage_failures(&report),
+        preview_decode_required_access_mode_failures(&report),
         vec!["preview_decode_scrub_cursor_not_sampled"]
     );
 }
@@ -1767,7 +1768,7 @@ fn preview_media_decode_access_mode_coverage_passes_with_scrub_and_still_samples
         ],
     );
 
-    assert!(preview_media_decode_access_mode_coverage_failures(&report).is_empty());
+    assert!(preview_decode_required_access_mode_failures(&report).is_empty());
 }
 
 #[test]
@@ -1817,6 +1818,34 @@ fn preview_decode_access_mode_queue_wait_failures_are_scoped_by_mode() {
         &[PreviewDecodeAccessMode::PlaybackCursor],
     )
     .is_empty());
+}
+
+#[test]
+fn preview_playback_decode_failures_include_required_playback_coverage() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 1,
+        decode_in_process_cpu_rgba_frames: 1,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report_with_required_access_modes(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-playback-coverage-test",
+        50_000,
+        &[PreviewDecodeAccessMode::PlaybackCursor],
+    );
+
+    let failures = preview_playback_decode_failures(&report);
+
+    assert!(failures.contains(&"preview_decode_playback_cursor_not_sampled"));
+    assert!(failures.contains(&"preview_decode_report_failed"));
 }
 
 #[test]
