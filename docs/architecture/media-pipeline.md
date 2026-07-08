@@ -106,12 +106,15 @@ the media access-mode implementation rather than scattering playback caches
 through app UI code.
 Access-mode decode behavior is centralized in a media-layer policy, not in app
 conditionals or FFmpeg call sites. Playback has the widest mostly-forward
-session reuse window and the playback ring; scrub has only a very short forward
-reuse window and is the only mode allowed to opt into the experimental
-fast-any-seek path; random-access still extraction has no forward reuse and
-keeps keyframe-safe exact seeking. This preserves still-frame correctness while
-leaving a clear replacement point for future hardware-resident playback and
-low-latency scrub backends.
+session reuse window, the playback ring, and the exact-path forward decode
+budget; scrub has only a very short forward reuse window, a smaller CPU
+fallback forward-scan budget, and is the only mode allowed to opt into the
+experimental fast-any-seek path; random-access still extraction has no forward
+reuse and keeps keyframe-safe exact seeking with the exact-path budget. This
+preserves still-frame correctness while preventing latest-wins scrubbing from
+spending the same long-GOP CPU budget as deterministic extraction, and leaves a
+clear replacement point for future hardware-resident playback and low-latency
+scrub backends.
 App, export, and decoder-pool callers submit a `PreviewDecodeRgbaRequest` to
 the media preview decode boundary instead of matching on
 `PreviewDecodeAccessMode` or calling mode-specific FFmpeg helpers. Access-mode

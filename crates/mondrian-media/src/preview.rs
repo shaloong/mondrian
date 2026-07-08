@@ -15,9 +15,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-/// 从关键帧向前解码的最大帧数安全限制
-/// 提高到 1800（足以覆盖常见 2 分钟超长 GOP 文件，例如广播流）
-const DECODE_BUDGET: usize = 1800;
+/// Exact still/playback safety limit for forward decode from a keyframe.
+///
+/// This remains high enough for pathological long-GOP material, but interactive
+/// scrub uses a smaller access-policy budget so latest-wins navigation cannot
+/// spend seconds draining an old GOP on the CPU fallback path.
+const PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES: usize = 1800;
+const PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES: usize = 240;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
 const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
@@ -138,6 +142,7 @@ impl<'a> PreviewDecodeRgbaRequest<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreviewDecodeAccessPolicy {
     forward_reuse_frame_window: i64,
+    forward_decode_budget_frames: usize,
     use_playback_ring: bool,
     preserve_session_on_cancel: bool,
     allow_fast_any_seek: bool,
@@ -148,18 +153,21 @@ impl PreviewDecodeAccessPolicy {
         match access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => Self {
                 forward_reuse_frame_window: PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+                forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: true,
                 preserve_session_on_cancel: true,
                 allow_fast_any_seek: false,
             },
             PreviewDecodeAccessMode::ScrubCursor => Self {
                 forward_reuse_frame_window: PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+                forward_decode_budget_frames: PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
                 preserve_session_on_cancel: false,
                 allow_fast_any_seek: true,
             },
             PreviewDecodeAccessMode::RandomAccessStillFrame => Self {
                 forward_reuse_frame_window: 0,
+                forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
                 preserve_session_on_cancel: false,
                 allow_fast_any_seek: false,
@@ -988,7 +996,7 @@ impl PreviewDecodeSession {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
         let decode_started_at = Instant::now();
-        let result = self.decode_forward_until(target_pts, should_cancel)?;
+        let result = self.decode_forward_until(target_pts, policy, should_cancel)?;
         if result.canceled {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
@@ -1088,6 +1096,7 @@ impl PreviewDecodeSession {
     fn decode_forward_until(
         &mut self,
         target_pts: i64,
+        policy: PreviewDecodeAccessPolicy,
         should_cancel: &impl Fn() -> bool,
     ) -> Result<PreviewDecodeForwardResult> {
         let mut best_before: Option<(i64, ffmpeg::util::frame::video::Video)> = None;
@@ -1143,7 +1152,7 @@ impl PreviewDecodeSession {
             if s.index() != self.stream_index {
                 continue;
             }
-            if frames_decoded >= DECODE_BUDGET {
+            if frames_decoded >= policy.forward_decode_budget_frames {
                 break;
             }
 
@@ -1207,12 +1216,12 @@ impl PreviewDecodeSession {
                     }
                 }
 
-                if frames_decoded >= DECODE_BUDGET {
+                if frames_decoded >= policy.forward_decode_budget_frames {
                     break;
                 }
             }
 
-            if frames_decoded >= DECODE_BUDGET {
+            if frames_decoded >= policy.forward_decode_budget_frames {
                 break;
             }
         }
@@ -1259,7 +1268,7 @@ impl PreviewDecodeSession {
                     }
                 }
 
-                if frames_decoded >= DECODE_BUDGET {
+                if frames_decoded >= policy.forward_decode_budget_frames {
                     break;
                 }
             }
@@ -1833,7 +1842,8 @@ mod tests {
         PreviewDecodeAccessPolicy, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
         PreviewDecodeRgbaRequest, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
         PreviewFileFingerprint, PreviewPlaybackRing, RgbaFrame,
-        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1983,6 +1993,10 @@ mod tests {
             playback.forward_reuse_frame_window,
             PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES
         );
+        assert_eq!(
+            playback.forward_decode_budget_frames,
+            PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES
+        );
         assert!(playback.use_playback_ring);
         assert!(playback.preserve_session_on_cancel);
         assert!(!playback.allow_fast_any_seek);
@@ -1991,11 +2005,20 @@ mod tests {
             scrub.forward_reuse_frame_window,
             PREVIEW_SCRUB_FORWARD_REUSE_FRAMES
         );
+        assert_eq!(
+            scrub.forward_decode_budget_frames,
+            PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES
+        );
+        assert!(scrub.forward_decode_budget_frames < playback.forward_decode_budget_frames);
         assert!(!scrub.use_playback_ring);
         assert!(!scrub.preserve_session_on_cancel);
         assert!(scrub.allow_fast_any_seek);
 
         assert_eq!(still.forward_reuse_frame_window, 0);
+        assert_eq!(
+            still.forward_decode_budget_frames,
+            PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES
+        );
         assert!(!still.use_playback_ring);
         assert!(!still.preserve_session_on_cancel);
         assert!(!still.allow_fast_any_seek);
