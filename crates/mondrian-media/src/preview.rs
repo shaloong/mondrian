@@ -1333,7 +1333,7 @@ fn decode_preview_rgba_frame_outcome(
         let session = slot.as_mut().expect("preview decode session must exist");
         let mut external_process_us = 0;
 
-        if preview_external_ffmpeg_cpu_rgba_enabled() {
+        if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled);
             }
@@ -1576,7 +1576,10 @@ pub fn clear_global_preview_frame_cache() {
     }
 }
 
-fn preview_external_ffmpeg_cpu_rgba_enabled() -> bool {
+fn preview_external_ffmpeg_cpu_rgba_enabled(access_mode: PreviewDecodeAccessMode) -> bool {
+    if !preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode(access_mode) {
+        return false;
+    }
     match preview_decode_backend() {
         PreviewDecodeBackend::ExternalFfmpegCpuRgba => true,
         PreviewDecodeBackend::Software => false,
@@ -1589,6 +1592,12 @@ fn preview_external_ffmpeg_cpu_rgba_enabled() -> bool {
             })
         }
     }
+}
+
+fn preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode(
+    access_mode: PreviewDecodeAccessMode,
+) -> bool {
+    access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
 }
 
 fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
@@ -1819,11 +1828,12 @@ mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
         decode_preview_rgba_scaled_cancellable, duration_us, preview_cache_get,
-        preview_cache_put_with_fingerprint, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
-        PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest,
-        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-        PreviewPlaybackRing, RgbaFrame, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        preview_cache_put_with_fingerprint,
+        preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, PreviewDecodeAccessMode,
+        PreviewDecodeAccessPolicy, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
+        PreviewDecodeRgbaRequest, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+        PreviewFileFingerprint, PreviewPlaybackRing, RgbaFrame,
+        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1847,6 +1857,19 @@ mod tests {
             PreviewDecodeBackend::from_u8(255),
             PreviewDecodeBackend::Auto
         );
+    }
+
+    #[test]
+    fn external_ffmpeg_cpu_rgba_policy_is_still_frame_only() {
+        assert!(!preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode(
+            PreviewDecodeAccessMode::PlaybackCursor
+        ));
+        assert!(!preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode(
+            PreviewDecodeAccessMode::ScrubCursor
+        ));
+        assert!(preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode(
+            PreviewDecodeAccessMode::RandomAccessStillFrame
+        ));
     }
 
     #[test]
