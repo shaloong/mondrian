@@ -109,6 +109,10 @@ renderer/color code. Access-mode profiles include `queue_wait_max_us` and
 stale prefetch/current admission before codec, color, or render work. The
 preview media smokes fail when the access modes exercised by that scenario have
 queue waits over the decode slow-frame budget.
+For slowest-frame bottleneck attribution, use `max_frame_queue_wait_us` together
+with `max_frame_stage_durations` and `max_frame_bottleneck`; those fields come
+from the same decoded frame. `queue_wait_max_us` may come from another job and
+is worker-pressure evidence, not automatically the slowest frame's bottleneck.
 Access-mode profiles also include seek-strategy counters. `ScrubCursor` samples
 must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test

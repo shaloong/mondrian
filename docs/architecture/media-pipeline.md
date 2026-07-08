@@ -244,6 +244,12 @@ decoded-frame pressure, and stage-level timings. A slow preview report must
 identify the slowest access mode so engineers can distinguish playback locality
 failures from scrub seek latency, queue-lane contention, or exact still-frame
 random access costs.
+Slowest-frame evidence must stay frame-local. `max_frame_stage_durations`,
+`max_frame_queue_wait_us`, and `max_frame_bottleneck` are captured from the same
+successful decode result; `queue_wait_max_us` remains an independent worker
+pressure counter and must not be mixed into the slowest-frame bottleneck. This
+prevents a codec-bound frame and an unrelated queued frame from being reported
+as one impossible root cause.
 Each access-mode profile must also carry compact fixed latency buckets for
 successful decode duration and worker-queue wait. Reports derive a p95 upper
 bound from those buckets and emit per-mode p95 checks. This is intentionally a

@@ -299,6 +299,8 @@ impl AppUiPreviewService {
             decode_max_threading_count: self.metrics.decode_max_threading_count.get(),
             decode_stage_durations: self.metrics.decode_stage_durations.get(),
             decode_max_frame_stage_durations: self.metrics.decode_max_frame_stage_durations.get(),
+            decode_max_frame_queue_wait_us: self.metrics.decode_max_frame_queue_wait_us.get(),
+            decode_max_frame_bottleneck: self.metrics.decode_max_frame_bottleneck.get(),
             decode_access_mode_profiles: self.metrics.decode_access_mode_profiles.get(),
             render_timed_frames: self.metrics.render_timed_frames.get(),
             render_total_duration_us: self.metrics.render_total_duration_us.get(),
@@ -481,7 +483,7 @@ impl AppUiPreviewService {
                 continue;
             }
             if let Some(diagnostics) = result.decode_diagnostics {
-                self.record_preview_decode(diagnostics);
+                self.record_preview_decode(diagnostics, result.queue_wait_us);
             }
             match result.frame {
                 Some(frame) => {
@@ -1024,7 +1026,7 @@ impl AppUiPreviewService {
         add_cell(&self.metrics.color_stage_pixels, diagnostics.stage_pixels);
     }
 
-    fn record_preview_decode(&self, diagnostics: PreviewDecodeDiagnostics) {
+    fn record_preview_decode(&self, diagnostics: PreviewDecodeDiagnostics, queue_wait_us: u64) {
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba => {
                 bump(&self.metrics.decode_in_process_cpu_rgba_frames);
@@ -1057,6 +1059,11 @@ impl AppUiPreviewService {
         if diagnostics.elapsed_us >= self.metrics.decode_max_duration_us.get() {
             self.metrics.decode_max_duration_us.set(diagnostics.elapsed_us);
             self.metrics.decode_max_frame_stage_durations.set(diagnostics.stage_durations);
+            self.metrics.decode_max_frame_queue_wait_us.set(queue_wait_us);
+            self.metrics.decode_max_frame_bottleneck.set(classify_preview_decode_bottleneck(
+                diagnostics.stage_durations,
+                queue_wait_us,
+            ));
         }
         self.metrics.decode_last_duration_us.set(diagnostics.elapsed_us);
         if diagnostics.seek_performed {
@@ -1086,7 +1093,7 @@ impl AppUiPreviewService {
         stage_durations.accumulate(diagnostics.stage_durations);
         self.metrics.decode_stage_durations.set(stage_durations);
         let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
-        access_mode_profiles.record(diagnostics);
+        access_mode_profiles.record(diagnostics, queue_wait_us);
         self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
@@ -1694,6 +1701,12 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_stage_durations: PreviewDecodeStageDurations,
     /// Stage-level timings from the slowest decoded preview frame.
     pub decode_max_frame_stage_durations: PreviewDecodeStageDurations,
+    /// Queue wait observed by the same decoded preview frame that produced
+    /// `decode_max_frame_stage_durations`.
+    pub decode_max_frame_queue_wait_us: u64,
+    /// Dominant bottleneck for the same decoded preview frame that produced
+    /// `decode_max_frame_stage_durations`.
+    pub decode_max_frame_bottleneck: AppUiPreviewDecodeBottleneck,
     /// Decode profile split by playback, scrub, and random-access still modes.
     pub decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles,
     /// Viewer render requests with post-decode stage timing evidence.
@@ -2048,6 +2061,10 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub stage_durations: PreviewDecodeStageDurations,
     /// Stage timings from the slowest frame in this access mode.
     pub max_frame_stage_durations: PreviewDecodeStageDurations,
+    /// Queue wait from the same slowest frame in this access mode.
+    pub max_frame_queue_wait_us: u64,
+    /// Dominant bottleneck from the same slowest frame in this access mode.
+    pub max_frame_bottleneck: AppUiPreviewDecodeBottleneck,
 }
 
 impl AppUiPreviewDecodeAccessModeProfile {
@@ -2055,7 +2072,7 @@ impl AppUiPreviewDecodeAccessModeProfile {
         self.frames.saturating_sub(self.cache_hit_frames)
     }
 
-    fn record(&mut self, diagnostics: PreviewDecodeDiagnostics) {
+    fn record(&mut self, diagnostics: PreviewDecodeDiagnostics, queue_wait_us: u64) {
         self.frames = self.frames.saturating_add(1);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba => {
@@ -2078,6 +2095,9 @@ impl AppUiPreviewDecodeAccessModeProfile {
         if diagnostics.elapsed_us >= self.max_duration_us {
             self.max_duration_us = diagnostics.elapsed_us;
             self.max_frame_stage_durations = diagnostics.stage_durations;
+            self.max_frame_queue_wait_us = queue_wait_us;
+            self.max_frame_bottleneck =
+                classify_preview_decode_bottleneck(diagnostics.stage_durations, queue_wait_us);
         }
         self.last_duration_us = diagnostics.elapsed_us;
         if diagnostics.seek_performed {
@@ -2192,16 +2212,16 @@ impl AppUiPreviewDecodeAccessModeProfiles {
         }
     }
 
-    fn record(&mut self, diagnostics: PreviewDecodeDiagnostics) {
+    fn record(&mut self, diagnostics: PreviewDecodeDiagnostics, queue_wait_us: u64) {
         match diagnostics.access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => {
-                self.playback_cursor.record(diagnostics);
+                self.playback_cursor.record(diagnostics, queue_wait_us);
             }
             PreviewDecodeAccessMode::ScrubCursor => {
-                self.scrub_cursor.record(diagnostics);
+                self.scrub_cursor.record(diagnostics, queue_wait_us);
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
-                self.random_access_still.record(diagnostics);
+                self.random_access_still.record(diagnostics, queue_wait_us);
             }
         }
     }
@@ -2388,11 +2408,13 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub stage_durations: PreviewDecodeStageDurations,
     /// Stage timings from the slowest decode frame.
     pub max_frame_stage_durations: PreviewDecodeStageDurations,
+    /// Queue wait from the same slowest decode frame.
+    pub max_frame_queue_wait_us: u64,
     /// Decode profile split by playback, scrub, and random-access still modes.
     pub access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles,
     /// Access mode that produced the slowest successful decode frame.
     pub slowest_access_mode: Option<PreviewDecodeAccessMode>,
-    /// Dominant stage inferred from the slowest-frame timings.
+    /// Dominant stage inferred from the slowest successful decode frame.
     pub primary_bottleneck: AppUiPreviewDecodeBottleneck,
     /// Scheduler-side access-mode/drop/stale diagnostics captured with decode evidence.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
@@ -2421,7 +2443,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 13;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 14;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2817,7 +2839,7 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         summary.slow_frame_budget_us = slow_frame_budget_us;
         summary.primary_bottleneck = classify_preview_decode_bottleneck(
             summary.max_frame_stage_durations,
-            summary.queue_wait_max_us,
+            summary.max_frame_queue_wait_us,
         );
         push_decode_max_check(
             &mut checks,
@@ -3364,9 +3386,10 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::LatencyBudget,
             "preview_decode_frame_over_budget",
             format!(
-                "max_duration_us={} slow_frame_budget_us={} primary_bottleneck={:?} slowest_access_mode={}",
+                "max_duration_us={} slow_frame_budget_us={} max_frame_queue_wait_us={} primary_bottleneck={:?} slowest_access_mode={}",
                 summary.max_duration_us,
                 summary.slow_frame_budget_us,
+                summary.max_frame_queue_wait_us,
                 summary.primary_bottleneck,
                 summary
                     .slowest_access_mode
@@ -3411,7 +3434,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} decoded_frame_count={} max_decoded_frame_count={} packet_decode_us={} seek_us={} swscale_us={} rgba_copy_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -3419,6 +3442,8 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.total_duration_us,
                 profile.queue_wait_max_us,
                 profile.queue_wait_total_us,
+                profile.max_frame_queue_wait_us,
+                profile.max_frame_bottleneck,
                 profile.seeked_frames,
                 profile.keyframe_seek_strategy_frames,
                 profile.bounded_any_seek_strategy_frames,
@@ -3427,10 +3452,13 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.forward_reused_frames,
                 profile.decoded_frame_count,
                 profile.max_decoded_frame_count,
-                profile.max_frame_stage_durations.packet_decode_us,
+                profile.max_frame_stage_durations.session_open_us,
+                profile.max_frame_stage_durations.cache_lookup_us,
                 profile.max_frame_stage_durations.seek_us,
+                profile.max_frame_stage_durations.packet_decode_us,
                 profile.max_frame_stage_durations.swscale_us,
                 profile.max_frame_stage_durations.rgba_copy_us,
+                profile.max_frame_stage_durations.external_process_us,
                 profile.cache_hit_frames,
                 profile.playback_session_ring_hit_frames,
                 profile.latency_buckets
@@ -4676,6 +4704,14 @@ impl AppUiPreviewDiagnostics {
         }
         let stage_durations = self.decode_stage_durations;
         let max_frame_stage_durations = self.decode_max_frame_stage_durations;
+        let max_frame_queue_wait_us = self.decode_max_frame_queue_wait_us;
+        let mut primary_bottleneck = self.decode_max_frame_bottleneck;
+        if primary_bottleneck == AppUiPreviewDecodeBottleneck::None {
+            primary_bottleneck = classify_preview_decode_bottleneck(
+                max_frame_stage_durations,
+                max_frame_queue_wait_us,
+            );
+        }
         Some(AppUiPreviewDecodePerformanceSummary {
             cpu_budget: self.decode_cpu_budget,
             decode_successes,
@@ -4729,12 +4765,10 @@ impl AppUiPreviewDiagnostics {
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
             stage_durations,
             max_frame_stage_durations,
+            max_frame_queue_wait_us,
             access_mode_profiles: self.decode_access_mode_profiles,
             slowest_access_mode: self.decode_access_mode_profiles.slowest_access_mode(),
-            primary_bottleneck: classify_preview_decode_bottleneck(
-                max_frame_stage_durations,
-                self.decode_queue_wait_max_us,
-            ),
+            primary_bottleneck,
             scheduler: self.scheduler,
         })
     }
@@ -5929,6 +5963,8 @@ struct AppUiPreviewMetrics {
     decode_max_threading_count: Cell<u64>,
     decode_stage_durations: Cell<PreviewDecodeStageDurations>,
     decode_max_frame_stage_durations: Cell<PreviewDecodeStageDurations>,
+    decode_max_frame_queue_wait_us: Cell<u64>,
+    decode_max_frame_bottleneck: Cell<AppUiPreviewDecodeBottleneck>,
     decode_access_mode_profiles: Cell<AppUiPreviewDecodeAccessModeProfiles>,
     render_timed_frames: Cell<u64>,
     render_total_duration_us: Cell<u64>,
@@ -7339,102 +7375,114 @@ mod tests {
     fn preview_diagnostics_count_decode_paths_and_duration() {
         let service = AppUiPreviewService::new();
 
-        service.record_preview_decode(PreviewDecodeDiagnostics {
-            path: PreviewDecodePath::InProcessFfmpegCpuRgba,
-            elapsed_us: 1_000,
-            cache_hit: false,
-            access_mode: PreviewDecodeAccessMode::ScrubCursor,
-            external_process: false,
-            cpu_resident: true,
-            seek_performed: true,
-            seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
-            session_reused: false,
-            forward_reused: false,
-            decoded_frame_count: 48,
-            threading_kind: PreviewDecodeThreadingKind::Frame,
-            threading_count: 6,
-            stage_durations: PreviewDecodeStageDurations {
-                session_open_us: 100,
-                cache_lookup_us: 2,
-                seek_us: 300,
-                packet_decode_us: 500,
-                swscale_us: 70,
-                rgba_copy_us: 30,
-                external_process_us: 0,
+        service.record_preview_decode(
+            PreviewDecodeDiagnostics {
+                path: PreviewDecodePath::InProcessFfmpegCpuRgba,
+                elapsed_us: 1_000,
+                cache_hit: false,
+                access_mode: PreviewDecodeAccessMode::ScrubCursor,
+                external_process: false,
+                cpu_resident: true,
+                seek_performed: true,
+                seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
+                session_reused: false,
+                forward_reused: false,
+                decoded_frame_count: 48,
+                threading_kind: PreviewDecodeThreadingKind::Frame,
+                threading_count: 6,
+                stage_durations: PreviewDecodeStageDurations {
+                    session_open_us: 100,
+                    cache_lookup_us: 2,
+                    seek_us: 300,
+                    packet_decode_us: 500,
+                    swscale_us: 70,
+                    rgba_copy_us: 30,
+                    external_process_us: 0,
+                },
             },
-        });
-        service.record_preview_decode(PreviewDecodeDiagnostics {
-            path: PreviewDecodePath::ExternalFfmpegCpuRgba,
-            elapsed_us: 2_500,
-            cache_hit: false,
-            access_mode: PreviewDecodeAccessMode::PlaybackCursor,
-            external_process: true,
-            cpu_resident: true,
-            seek_performed: false,
-            seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
-            session_reused: true,
-            forward_reused: false,
-            decoded_frame_count: 0,
-            threading_kind: PreviewDecodeThreadingKind::None,
-            threading_count: 0,
-            stage_durations: PreviewDecodeStageDurations {
-                session_open_us: 0,
-                cache_lookup_us: 0,
-                seek_us: 0,
-                packet_decode_us: 0,
-                swscale_us: 0,
-                rgba_copy_us: 0,
-                external_process_us: 2_450,
+            1_200,
+        );
+        service.record_preview_decode(
+            PreviewDecodeDiagnostics {
+                path: PreviewDecodePath::ExternalFfmpegCpuRgba,
+                elapsed_us: 2_500,
+                cache_hit: false,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                external_process: true,
+                cpu_resident: true,
+                seek_performed: false,
+                seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
+                session_reused: true,
+                forward_reused: false,
+                decoded_frame_count: 0,
+                threading_kind: PreviewDecodeThreadingKind::None,
+                threading_count: 0,
+                stage_durations: PreviewDecodeStageDurations {
+                    session_open_us: 0,
+                    cache_lookup_us: 0,
+                    seek_us: 0,
+                    packet_decode_us: 0,
+                    swscale_us: 0,
+                    rgba_copy_us: 0,
+                    external_process_us: 2_450,
+                },
             },
-        });
-        service.record_preview_decode(PreviewDecodeDiagnostics {
-            path: PreviewDecodePath::PreviewCacheHit,
-            elapsed_us: 25,
-            cache_hit: true,
-            access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
-            external_process: false,
-            cpu_resident: true,
-            seek_performed: false,
-            seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
-            session_reused: false,
-            forward_reused: false,
-            decoded_frame_count: 0,
-            threading_kind: PreviewDecodeThreadingKind::None,
-            threading_count: 0,
-            stage_durations: PreviewDecodeStageDurations {
-                session_open_us: 0,
-                cache_lookup_us: 20,
-                seek_us: 0,
-                packet_decode_us: 0,
-                swscale_us: 0,
-                rgba_copy_us: 0,
-                external_process_us: 0,
+            400,
+        );
+        service.record_preview_decode(
+            PreviewDecodeDiagnostics {
+                path: PreviewDecodePath::PreviewCacheHit,
+                elapsed_us: 25,
+                cache_hit: true,
+                access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
+                external_process: false,
+                cpu_resident: true,
+                seek_performed: false,
+                seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
+                session_reused: false,
+                forward_reused: false,
+                decoded_frame_count: 0,
+                threading_kind: PreviewDecodeThreadingKind::None,
+                threading_count: 0,
+                stage_durations: PreviewDecodeStageDurations {
+                    session_open_us: 0,
+                    cache_lookup_us: 20,
+                    seek_us: 0,
+                    packet_decode_us: 0,
+                    swscale_us: 0,
+                    rgba_copy_us: 0,
+                    external_process_us: 0,
+                },
             },
-        });
-        service.record_preview_decode(PreviewDecodeDiagnostics {
-            path: PreviewDecodePath::PlaybackSessionRingHit,
-            elapsed_us: 40,
-            cache_hit: true,
-            access_mode: PreviewDecodeAccessMode::PlaybackCursor,
-            external_process: false,
-            cpu_resident: true,
-            seek_performed: false,
-            seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
-            session_reused: true,
-            forward_reused: false,
-            decoded_frame_count: 0,
-            threading_kind: PreviewDecodeThreadingKind::None,
-            threading_count: 0,
-            stage_durations: PreviewDecodeStageDurations {
-                session_open_us: 0,
-                cache_lookup_us: 12,
-                seek_us: 0,
-                packet_decode_us: 0,
-                swscale_us: 0,
-                rgba_copy_us: 0,
-                external_process_us: 0,
+            20,
+        );
+        service.record_preview_decode(
+            PreviewDecodeDiagnostics {
+                path: PreviewDecodePath::PlaybackSessionRingHit,
+                elapsed_us: 40,
+                cache_hit: true,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                external_process: false,
+                cpu_resident: true,
+                seek_performed: false,
+                seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
+                session_reused: true,
+                forward_reused: false,
+                decoded_frame_count: 0,
+                threading_kind: PreviewDecodeThreadingKind::None,
+                threading_count: 0,
+                stage_durations: PreviewDecodeStageDurations {
+                    session_open_us: 0,
+                    cache_lookup_us: 12,
+                    seek_us: 0,
+                    packet_decode_us: 0,
+                    swscale_us: 0,
+                    rgba_copy_us: 0,
+                    external_process_us: 0,
+                },
             },
-        });
+            0,
+        );
         service.record_preview_decode_queue_wait(
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -7522,6 +7570,11 @@ mod tests {
             diagnostics.decode_max_frame_stage_durations.external_process_us,
             2_450
         );
+        assert_eq!(diagnostics.decode_max_frame_queue_wait_us, 400);
+        assert_eq!(
+            diagnostics.decode_max_frame_bottleneck,
+            AppUiPreviewDecodeBottleneck::ExternalProcess
+        );
         let playback_profile = diagnostics.decode_access_mode_profiles.playback_cursor;
         assert_eq!(playback_profile.frames, 2);
         assert_eq!(playback_profile.external_ffmpeg_cpu_rgba_frames, 1);
@@ -7536,6 +7589,11 @@ mod tests {
         assert_eq!(playback_profile.queue_wait_last_us, 400);
         assert_eq!(playback_profile.queue_wait_buckets.le_10ms, 1);
         assert_eq!(playback_profile.queue_wait_buckets.total(), 1);
+        assert_eq!(playback_profile.max_frame_queue_wait_us, 400);
+        assert_eq!(
+            playback_profile.max_frame_bottleneck,
+            AppUiPreviewDecodeBottleneck::ExternalProcess
+        );
         assert_eq!(playback_profile.canceled_jobs, 1);
         assert_eq!(playback_profile.canceled_prefetch_deadline_jobs, 1);
         assert_eq!(playback_profile.canceled_total_duration_us, 700);
@@ -8137,6 +8195,8 @@ mod tests {
                         rgba_copy_us: 500,
                         ..PreviewDecodeStageDurations::default()
                     },
+                    max_frame_queue_wait_us: 95_000,
+                    max_frame_bottleneck: AppUiPreviewDecodeBottleneck::QueueWait,
                     ..AppUiPreviewDecodeAccessModeProfile::default()
                 },
                 ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -8153,6 +8213,8 @@ mod tests {
                 rgba_copy_us: 500,
                 ..PreviewDecodeStageDurations::default()
             },
+            decode_max_frame_queue_wait_us: 95_000,
+            decode_max_frame_bottleneck: AppUiPreviewDecodeBottleneck::QueueWait,
             scheduler: MediaPreviewSchedulerDiagnostics {
                 skipped_decode_access_mode_mismatch: 1,
                 completed_stale_access_mode_mismatch: 1,
@@ -8936,6 +8998,78 @@ mod tests {
             .root_causes
             .iter()
             .any(|root| root.evidence.contains("cpu_output_boundary_us=90000")));
+    }
+
+    #[test]
+    fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_total_duration_us: 120_000,
+            decode_max_duration_us: 120_000,
+            decode_last_duration_us: 120_000,
+            decode_queue_wait_total_us: 201_000,
+            decode_queue_wait_max_us: 200_000,
+            decode_queue_wait_last_us: 200_000,
+            decode_current_queue_wait_max_us: 200_000,
+            decode_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 95_000,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_max_frame_stage_durations: PreviewDecodeStageDurations {
+                packet_decode_us: 95_000,
+                ..PreviewDecodeStageDurations::default()
+            },
+            decode_max_frame_queue_wait_us: 1_000,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_rgba_frames: 1,
+                    total_duration_us: 120_000,
+                    max_duration_us: 120_000,
+                    last_duration_us: 120_000,
+                    queue_wait_total_us: 201_000,
+                    queue_wait_max_us: 200_000,
+                    bounded_any_seek_strategy_frames: 1,
+                    stage_durations: PreviewDecodeStageDurations {
+                        packet_decode_us: 95_000,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    max_frame_stage_durations: PreviewDecodeStageDurations {
+                        packet_decode_us: 95_000,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    max_frame_queue_wait_us: 1_000,
+                    max_frame_bottleneck: AppUiPreviewDecodeBottleneck::PacketDecode,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-same-frame-bottleneck-test",
+            50_000,
+        );
+
+        let summary = report.summary.expect("decode summary");
+        assert_eq!(
+            summary.primary_bottleneck,
+            AppUiPreviewDecodeBottleneck::PacketDecode
+        );
+        assert_eq!(summary.queue_wait_max_us, 200_000);
+        assert_eq!(summary.max_frame_queue_wait_us, 1_000);
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_frame_over_budget"
+                && root.evidence.contains("max_frame_queue_wait_us=1000")
+                && root.evidence.contains("primary_bottleneck=PacketDecode")
+        }));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_access_mode_queue_wait_bound"));
     }
 
     #[test]
