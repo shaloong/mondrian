@@ -193,6 +193,10 @@ impl PreviewDecodeAccessPolicy {
             frame_duration_pts.max(1).saturating_mul(self.forward_reuse_frame_window);
         target_pts.saturating_sub(last_pts) <= max_distance
     }
+
+    fn forward_decode_budget_exhausted(self, frames_decoded: usize) -> bool {
+        frames_decoded >= self.forward_decode_budget_frames
+    }
 }
 
 /// FFmpeg decoder threading mode requested for preview software decode.
@@ -1156,7 +1160,7 @@ impl PreviewDecodeSession {
             if s.index() != self.stream_index {
                 continue;
             }
-            if frames_decoded >= policy.forward_decode_budget_frames {
+            if policy.forward_decode_budget_exhausted(frames_decoded) {
                 break;
             }
 
@@ -1220,19 +1224,17 @@ impl PreviewDecodeSession {
                     }
                 }
 
-                if frames_decoded >= policy.forward_decode_budget_frames {
+                if policy.forward_decode_budget_exhausted(frames_decoded) {
                     break;
                 }
             }
 
-            if frames_decoded >= policy.forward_decode_budget_frames {
+            if policy.forward_decode_budget_exhausted(frames_decoded) {
                 break;
             }
         }
 
-        let budget_exhausted = frames_decoded >= policy.forward_decode_budget_frames;
-
-        if !self.reached_eof && !budget_exhausted {
+        if !self.reached_eof && !policy.forward_decode_budget_exhausted(frames_decoded) {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
@@ -1274,7 +1276,7 @@ impl PreviewDecodeSession {
                     }
                 }
 
-                if frames_decoded >= policy.forward_decode_budget_frames {
+                if policy.forward_decode_budget_exhausted(frames_decoded) {
                     break;
                 }
             }
@@ -1300,7 +1302,7 @@ impl PreviewDecodeSession {
             ));
         }
 
-        if budget_exhausted {
+        if policy.forward_decode_budget_exhausted(frames_decoded) {
             return Err(MondrianError::DecodeBudgetExhausted {
                 asset_id: self.path.display().to_string(),
                 access_mode: policy.access_mode.as_str().to_owned(),
@@ -2038,6 +2040,17 @@ mod tests {
         assert!(!still.use_playback_ring);
         assert!(!still.preserve_session_on_cancel);
         assert!(!still.allow_fast_any_seek);
+    }
+
+    #[test]
+    fn preview_decode_access_policy_budget_exhaustion_is_inclusive() {
+        let scrub =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+
+        assert!(!scrub
+            .forward_decode_budget_exhausted(scrub.forward_decode_budget_frames.saturating_sub(1)));
+        assert!(scrub.forward_decode_budget_exhausted(scrub.forward_decode_budget_frames));
+        assert!(scrub.forward_decode_budget_exhausted(scrub.forward_decode_budget_frames + 1));
     }
 
     #[test]

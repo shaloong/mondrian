@@ -164,7 +164,10 @@ an acceptable frame, the media crate must return a typed
 frame count, budget, and target PTS. App preview diagnostics must aggregate
 these failures globally and per access mode, and perf reports must surface a
 budget-exhausted root cause instead of folding the event into an opaque decode
-error or pretending the sample merely timed out.
+error or pretending the sample merely timed out. `DecoderPool` metrics must
+also expose budget-exhausted failures separately from timeouts and aggregate
+decode failures, so pool users can diagnose access-policy pressure without app
+preview-specific reports.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older

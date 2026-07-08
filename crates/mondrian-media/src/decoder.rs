@@ -195,6 +195,7 @@ struct DecoderMetrics {
     decode_executions: AtomicU64,
     decode_failures: AtomicU64,
     decode_timeouts: AtomicU64,
+    decode_budget_exhausted: AtomicU64,
     prefetch_started: AtomicU64,
     prefetch_cancelled: AtomicU64,
     prefetch_completed: AtomicU64,
@@ -217,6 +218,7 @@ pub struct DecoderMetricsSnapshot {
     pub decode_executions: u64,
     pub decode_failures: u64,
     pub decode_timeouts: u64,
+    pub decode_budget_exhausted: u64,
     pub prefetch_started: u64,
     pub prefetch_cancelled: u64,
     pub prefetch_completed: u64,
@@ -247,6 +249,7 @@ impl DecoderMetrics {
             decode_executions,
             decode_failures: self.decode_failures.load(Ordering::Relaxed),
             decode_timeouts: self.decode_timeouts.load(Ordering::Relaxed),
+            decode_budget_exhausted: self.decode_budget_exhausted.load(Ordering::Relaxed),
             prefetch_started: self.prefetch_started.load(Ordering::Relaxed),
             prefetch_cancelled: self.prefetch_cancelled.load(Ordering::Relaxed),
             prefetch_completed: self.prefetch_completed.load(Ordering::Relaxed),
@@ -567,6 +570,9 @@ impl DecoderPool {
             self.metrics.decode_failures.fetch_add(1, Ordering::Relaxed);
             if matches!(err, MondrianError::DecodeTimeout { .. }) {
                 self.metrics.decode_timeouts.fetch_add(1, Ordering::Relaxed);
+            }
+            if matches!(err, MondrianError::DecodeBudgetExhausted { .. }) {
+                self.metrics.decode_budget_exhausted.fetch_add(1, Ordering::Relaxed);
             }
         });
 
@@ -1175,6 +1181,21 @@ mod tests {
         assert!(!snapshot.hardware_decode_active);
         assert!(!snapshot.zero_copy_active);
         assert!(snapshot.hw_accel_reason.contains("CPU RGBA decode"));
+        assert_eq!(snapshot.decode_budget_exhausted, 0);
+    }
+
+    #[test]
+    fn decoder_metrics_report_forward_budget_exhaustion() {
+        let metrics = DecoderMetrics::default();
+        metrics.decode_failures.store(3, Ordering::Relaxed);
+        metrics.decode_timeouts.store(1, Ordering::Relaxed);
+        metrics.decode_budget_exhausted.store(2, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot(&HwAccelBackend::probe());
+
+        assert_eq!(snapshot.decode_failures, 3);
+        assert_eq!(snapshot.decode_timeouts, 1);
+        assert_eq!(snapshot.decode_budget_exhausted, 2);
     }
 
     #[test]
