@@ -254,6 +254,16 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub queued_scrub_cursor_jobs: usize,
     /// Random-access still-frame jobs waiting in the worker transport queue.
     pub queued_random_access_still_jobs: usize,
+    /// Jobs currently eligible for any-lane workers.
+    pub queued_any_lane_eligible_jobs: usize,
+    /// Jobs currently eligible for playback-lane workers.
+    pub queued_playback_lane_eligible_jobs: usize,
+    /// Jobs currently eligible for scrub-lane workers.
+    pub queued_scrub_lane_eligible_jobs: usize,
+    /// Jobs currently eligible for still-lane workers.
+    pub queued_still_lane_eligible_jobs: usize,
+    /// Jobs currently eligible for shared interactive-lane workers.
+    pub queued_interactive_lane_eligible_jobs: usize,
     /// Whether the worker transport queue has been closed.
     pub closed: bool,
 }
@@ -460,6 +470,26 @@ fn media_preview_job_queue_diagnostics_locked(
         ..MediaPreviewJobQueueDiagnostics::default()
     };
     for queued in &state.queue {
+        if MediaPreviewWorkerLane::Any.accepts(queued.job.access_mode) {
+            diagnostics.queued_any_lane_eligible_jobs =
+                diagnostics.queued_any_lane_eligible_jobs.saturating_add(1);
+        }
+        if MediaPreviewWorkerLane::Playback.accepts(queued.job.access_mode) {
+            diagnostics.queued_playback_lane_eligible_jobs =
+                diagnostics.queued_playback_lane_eligible_jobs.saturating_add(1);
+        }
+        if MediaPreviewWorkerLane::Scrub.accepts(queued.job.access_mode) {
+            diagnostics.queued_scrub_lane_eligible_jobs =
+                diagnostics.queued_scrub_lane_eligible_jobs.saturating_add(1);
+        }
+        if MediaPreviewWorkerLane::Still.accepts(queued.job.access_mode) {
+            diagnostics.queued_still_lane_eligible_jobs =
+                diagnostics.queued_still_lane_eligible_jobs.saturating_add(1);
+        }
+        if MediaPreviewWorkerLane::Interactive.accepts(queued.job.access_mode) {
+            diagnostics.queued_interactive_lane_eligible_jobs =
+                diagnostics.queued_interactive_lane_eligible_jobs.saturating_add(1);
+        }
         match queued.priority {
             MediaPreviewRequestPriority::Current => {
                 diagnostics.queued_current_jobs = diagnostics.queued_current_jobs.saturating_add(1);
@@ -2209,6 +2239,11 @@ mod tests {
                 queued_playback_cursor_jobs: 1,
                 queued_scrub_cursor_jobs: 1,
                 queued_random_access_still_jobs: 1,
+                queued_any_lane_eligible_jobs: 3,
+                queued_playback_lane_eligible_jobs: 1,
+                queued_scrub_lane_eligible_jobs: 1,
+                queued_still_lane_eligible_jobs: 1,
+                queued_interactive_lane_eligible_jobs: 2,
                 closed: false,
             }
         );

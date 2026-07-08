@@ -118,7 +118,7 @@ must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
 should fail before anyone tunes codec threads, proxy thresholds, color, or
 renderer code.
-`preview_decode_report` schema v19 also records the media-layer policy contract
+`preview_decode_report` schema v20 records the media-layer policy contract
 observed by each access mode: `forward_reuse_frame_window_max`,
 `forward_decode_budget_frames_max`, and `any_seek_window_ms_max`. A healthy
 `ScrubCursor` sample must have a non-zero `any_seek_window_ms_max`; otherwise
@@ -148,7 +148,7 @@ from the active sequence frame duration, with conservative min/max bounds, so
 slow playback at 24 fps and 60 fps playback are judged against different
 budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
 decode/drop policy, not as a reason to increase speculative prefetch.
-`preview_decode_report` schema v19 also includes `playback_schedule`, the
+`preview_decode_report` schema v20 also includes `playback_schedule`, the
 app-owned playback-clock contract used by the scheduler. It records the last
 current-frame deadline budget, the dynamic forward-prefetch horizon/window, and
 invalid frame-rate counters. Checks
@@ -250,7 +250,12 @@ The same report includes current worker-queue depth split by priority and access
 mode (`queued_current_jobs`, `queued_prefetch_jobs`,
 `queued_playback_cursor_jobs`, `queued_scrub_cursor_jobs`, and
 `queued_random_access_still_jobs`) so active transport backlog can be separated
-from codec, seek, or CPU RGBA boundary cost before tuning worker counts. It also
+from codec, seek, or CPU RGBA boundary cost before tuning worker counts. Schema
+v20 also includes worker-lane eligibility for queued jobs
+(`queued_playback_lane_eligible_jobs`, `queued_scrub_lane_eligible_jobs`,
+`queued_still_lane_eligible_jobs`, and
+`queued_interactive_lane_eligible_jobs`) so a slow report can distinguish
+generic queue depth from work that a particular lane is allowed to take. It also
 includes in-flight worker activity (`in_flight_current_jobs`,
 `in_flight_prefetch_jobs`, `in_flight_playback_cursor_jobs`,
 `in_flight_scrub_cursor_jobs`, and `in_flight_random_access_still_jobs`) so a

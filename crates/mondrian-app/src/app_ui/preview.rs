@@ -2637,7 +2637,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 19;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 20;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3818,7 +3818,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-            "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} in_flight_playback_lane_jobs={} in_flight_scrub_lane_jobs={} in_flight_still_lane_jobs={} in_flight_interactive_lane_jobs={} in_flight_cross_lane_current_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+            "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_interactive_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} in_flight_playback_lane_jobs={} in_flight_scrub_lane_jobs={} in_flight_still_lane_jobs={} in_flight_interactive_lane_jobs={} in_flight_cross_lane_current_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
@@ -3832,6 +3832,11 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_playback_cursor_jobs,
                 summary.worker_queue.queued_scrub_cursor_jobs,
                 summary.worker_queue.queued_random_access_still_jobs,
+                summary.worker_queue.queued_any_lane_eligible_jobs,
+                summary.worker_queue.queued_playback_lane_eligible_jobs,
+                summary.worker_queue.queued_scrub_lane_eligible_jobs,
+                summary.worker_queue.queued_still_lane_eligible_jobs,
+                summary.worker_queue.queued_interactive_lane_eligible_jobs,
                 summary.worker_activity.in_flight_jobs,
                 summary.worker_activity.in_flight_current_jobs,
                 summary.worker_activity.in_flight_prefetch_jobs,
@@ -4257,7 +4262,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
+                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_interactive_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
                 summary.prefetch_skipped_current_pending,
@@ -4269,6 +4274,11 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_playback_cursor_jobs,
                 summary.worker_queue.queued_scrub_cursor_jobs,
                 summary.worker_queue.queued_random_access_still_jobs,
+                summary.worker_queue.queued_any_lane_eligible_jobs,
+                summary.worker_queue.queued_playback_lane_eligible_jobs,
+                summary.worker_queue.queued_scrub_lane_eligible_jobs,
+                summary.worker_queue.queued_still_lane_eligible_jobs,
+                summary.worker_queue.queued_interactive_lane_eligible_jobs,
                 summary.worker_activity.in_flight_jobs,
                 summary.worker_activity.in_flight_current_jobs,
                 summary.worker_activity.in_flight_prefetch_jobs,
@@ -9131,6 +9141,11 @@ mod tests {
                 queued_playback_cursor_jobs: 1,
                 queued_scrub_cursor_jobs: 1,
                 queued_random_access_still_jobs: 1,
+                queued_any_lane_eligible_jobs: 3,
+                queued_playback_lane_eligible_jobs: 1,
+                queued_scrub_lane_eligible_jobs: 1,
+                queued_still_lane_eligible_jobs: 1,
+                queued_interactive_lane_eligible_jobs: 2,
                 closed: false,
             },
             worker_activity: PreviewWorkerActivityDiagnostics {
@@ -9217,6 +9232,14 @@ mod tests {
         assert_eq!(summary.worker_queue.queued_playback_cursor_jobs, 1);
         assert_eq!(summary.worker_queue.queued_scrub_cursor_jobs, 1);
         assert_eq!(summary.worker_queue.queued_random_access_still_jobs, 1);
+        assert_eq!(summary.worker_queue.queued_any_lane_eligible_jobs, 3);
+        assert_eq!(summary.worker_queue.queued_playback_lane_eligible_jobs, 1);
+        assert_eq!(summary.worker_queue.queued_scrub_lane_eligible_jobs, 1);
+        assert_eq!(summary.worker_queue.queued_still_lane_eligible_jobs, 1);
+        assert_eq!(
+            summary.worker_queue.queued_interactive_lane_eligible_jobs,
+            2
+        );
         assert_eq!(summary.worker_activity.in_flight_jobs, 2);
         assert_eq!(summary.worker_activity.in_flight_current_jobs, 1);
         assert_eq!(summary.worker_activity.in_flight_prefetch_jobs, 1);
@@ -9231,6 +9254,11 @@ mod tests {
             && root.evidence.contains("queued_playback_cursor_jobs=1")
             && root.evidence.contains("queued_scrub_cursor_jobs=1")
             && root.evidence.contains("queued_random_access_still_jobs=1")
+            && root.evidence.contains("queued_any_lane_eligible_jobs=3")
+            && root.evidence.contains("queued_playback_lane_eligible_jobs=1")
+            && root.evidence.contains("queued_scrub_lane_eligible_jobs=1")
+            && root.evidence.contains("queued_still_lane_eligible_jobs=1")
+            && root.evidence.contains("queued_interactive_lane_eligible_jobs=2")
             && root.evidence.contains("in_flight_jobs=2")
             && root.evidence.contains("in_flight_current_jobs=1")
             && root.evidence.contains("in_flight_prefetch_jobs=1")

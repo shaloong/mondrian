@@ -282,7 +282,14 @@ depth split by priority and access mode (`queued_current_jobs`,
 `queued_scrub_cursor_jobs`, and `queued_random_access_still_jobs`) so a slow
 preview report can distinguish active queue backlog from codec/decode cost
 without inspecting private queue internals. The app preview layer must also
-expose in-flight worker activity split by the same priority and access-mode
+expose worker-lane eligibility for the same queued jobs
+(`queued_playback_lane_eligible_jobs`, `queued_scrub_lane_eligible_jobs`,
+`queued_still_lane_eligible_jobs`, and
+`queued_interactive_lane_eligible_jobs`) so reports can distinguish a backlog
+that has an idle compatible lane from one waiting behind an occupied or missing
+lane. The UI/report layer must consume these queue diagnostics rather than
+recomputing lane acceptance from access-mode conditionals.
+In-flight worker activity is exposed separately and split by the same priority and access-mode
 contracts (`in_flight_current_jobs`, `in_flight_prefetch_jobs`,
 `in_flight_playback_cursor_jobs`, `in_flight_scrub_cursor_jobs`, and
 `in_flight_random_access_still_jobs`) so diagnostics can separate queued backlog
