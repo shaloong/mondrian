@@ -1743,9 +1743,9 @@ pub struct AppUiPreviewDiagnostics {
     pub enqueued_jobs: u64,
     /// Playback prefetch passes skipped because visible current-frame media was pending.
     pub prefetch_skipped_current_pending: u64,
-    /// Playback prefetch passes skipped because current-frame work was already queued.
+    /// Playback prefetch passes skipped because current-frame work was queued or running.
     pub prefetch_skipped_worker_busy: u64,
-    /// Playback prefetch passes skipped because the prefetch queue already held the forward window.
+    /// Playback prefetch passes skipped because queued/running prefetch already held the window.
     pub prefetch_skipped_prefetch_backlog: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
     pub queue_full_drops: u64,
@@ -2425,9 +2425,9 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub enqueued_jobs: u64,
     /// Playback prefetch passes skipped while visible current-frame work was pending.
     pub prefetch_skipped_current_pending: u64,
-    /// Playback prefetch passes skipped while current-frame worker-queue work existed.
+    /// Playback prefetch passes skipped while current-frame worker work was queued or running.
     pub prefetch_skipped_worker_busy: u64,
-    /// Playback prefetch passes skipped because queued prefetch already covered the window.
+    /// Playback prefetch passes skipped because queued/running prefetch already covered the window.
     pub prefetch_skipped_prefetch_backlog: u64,
     /// Jobs dropped because the bounded worker queue was full.
     pub queue_full_drops: u64,
@@ -5554,12 +5554,16 @@ impl AppUiPreviewService {
             return;
         }
         let worker_queue = self.jobs.diagnostics();
-        if worker_queue.queued_current_jobs > 0 {
+        let worker_activity = self.worker_activity.snapshot();
+        if worker_queue.queued_current_jobs > 0 || worker_activity.in_flight_current_jobs > 0 {
             bump(&self.metrics.prefetch_skipped_worker_busy);
             return;
         }
-        let prefetch_slots_available = (MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize)
-            .saturating_sub(worker_queue.queued_prefetch_jobs);
+        let prefetch_pressure = worker_queue
+            .queued_prefetch_jobs
+            .saturating_add(worker_activity.in_flight_prefetch_jobs);
+        let prefetch_slots_available =
+            (MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize).saturating_sub(prefetch_pressure);
         if prefetch_slots_available == 0 {
             bump(&self.metrics.prefetch_skipped_prefetch_backlog);
             return;
@@ -11074,6 +11078,29 @@ mod tests {
     }
 
     #[test]
+    fn playback_prefetch_yields_while_current_work_is_in_flight() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let _current = service.worker_activity.begin(
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+        );
+
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
+        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 1);
+        assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
+        assert_eq!(diagnostics.enqueued_jobs, 0);
+        assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
+        assert_eq!(diagnostics.worker_activity.in_flight_current_jobs, 1);
+    }
+
+    #[test]
     fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
@@ -11111,6 +11138,36 @@ mod tests {
     }
 
     #[test]
+    fn playback_prefetch_yields_when_in_flight_prefetch_covers_window() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let _first = service.worker_activity.begin(
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        );
+        let _second = service.worker_activity.begin(
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        );
+
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
+        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 0);
+        assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 1);
+        assert_eq!(diagnostics.enqueued_jobs, 0);
+        assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
+        assert_eq!(
+            diagnostics.worker_activity.in_flight_prefetch_jobs,
+            MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
+        );
+    }
+
+    #[test]
     fn playback_prefetch_tops_up_only_remaining_window_slots() {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let (mut state, _, root) = state_with_invalid_video_asset();
@@ -11138,6 +11195,29 @@ mod tests {
             diagnostics.worker_queue.queued_prefetch_jobs,
             MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
         );
+        assert_eq!(diagnostics.enqueued_jobs, 1);
+        service.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let (mut state, _, root) = state_with_invalid_video_asset();
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let _prefetch = service.worker_activity.begin(
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        );
+
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
+        assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 1);
+        assert_eq!(diagnostics.worker_activity.in_flight_prefetch_jobs, 1);
         assert_eq!(diagnostics.enqueued_jobs, 1);
         service.shutdown();
         let _ = std::fs::remove_dir_all(root);
