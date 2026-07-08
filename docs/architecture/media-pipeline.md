@@ -102,10 +102,14 @@ When the prefetch backlog is below the forward window, scheduling must top up
 only the remaining queued-plus-in-flight prefetch job budget across the
 evaluated tracks and nested sequences, not enqueue a full new prefetch window
 for each future frame offset.
-The app preview service owns worker thread lifetimes. Workers are joined during
-service shutdown after the job queue is closed, and each worker explicitly drops
-its thread-local media decode sessions before exit. Thread-local FFmpeg decoder
-state must not be left to implicit TLS teardown at project/app close.
+The app preview service owns worker thread lifetimes. Service shutdown must be
+non-blocking on the UI/event thread: it sets the shutdown flag, cancels queued
+and in-flight scheduler generations, closes the job queue, and moves worker
+handles to a background reaper that joins them after FFmpeg exits. A codec,
+filesystem, or driver stall inside a preview worker must not prevent pause,
+window close, or app quit from being processed. Each worker still explicitly
+drops its thread-local media decode sessions before exit; thread-local FFmpeg
+decoder state must not be left to implicit TLS teardown at project/app close.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus

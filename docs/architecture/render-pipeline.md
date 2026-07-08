@@ -649,8 +649,13 @@ contains only supported media/solid layers:
 - all layers must use `BlendMode::Normal`;
 - layer count must be ≤5.
 
-If any condition is not met, the preview service records
-`GpuCompositingDiagnostics { cpu_fallback_composites, first_blocker }` and uses
-the CPU reference compositor. This fail-closed gate is intentional: unsupported
-effects, blend modes, transforms, or resampling must not silently run through a
-visually different GPU approximation.
+If any condition is not met, the GPU-preview candidate path records
+`GpuCompositingDiagnostics { cpu_fallback_composites, first_blocker }` and
+returns unavailable for that GPU candidate instead of running the CPU reference
+compositor on the UI/event thread. Playback and buffering paths may show a stale
+viewer frame or loading state, but they must not synchronously composite media
+frames just to produce a fallback candidate. Paused still-frame preview may use
+the raster CPU correctness path. This fail-closed gate is intentional:
+unsupported effects, blend modes, transforms, or resampling must not silently
+run through a visually different GPU approximation, and unsupported GPU
+compositing must not make transport controls or window close unresponsive.

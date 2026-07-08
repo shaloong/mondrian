@@ -339,7 +339,6 @@ enum AppUiViewerGpuOutputDecodeResidency {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiViewerGpuOutputWorkingResidency {
-    CpuWorkingFrame,
     GpuWorkingComposite,
 }
 
@@ -778,17 +777,6 @@ impl AppUiViewerGpuOutputFrameContext {
 impl AppUiViewerGpuOutputFrameResidency {
     fn from_frame(frame: &AppUiGpuPreviewFrame) -> Self {
         match &frame.working_input {
-            AppUiGpuPreviewWorkingInput::CpuFrame(_) => Self {
-                decode_residency: AppUiViewerGpuOutputDecodeResidency::CpuDecodedRgba,
-                working_residency: AppUiViewerGpuOutputWorkingResidency::CpuWorkingFrame,
-                input_transform_path: AppUiViewerGpuOutputInputTransformPath::CpuOcio,
-                zero_copy: false,
-                low_copy: false,
-                upload_count: 1,
-                readback_count: 0,
-                reason: "CPU working frame is uploaded before the GPU output boundary".to_owned(),
-                native_video_import: None,
-            },
             AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
                 let media_layers = layers
                     .iter()
@@ -3004,20 +2992,6 @@ fn prepare_viewer_gpu_preview(
         label: Some("app_ui_viewer_gpu_preview_output_encoder"),
     });
     let record = match &frame.working_input {
-        AppUiGpuPreviewWorkingInput::CpuFrame(working_frame) => {
-            session.color_output_runtime.record_wgpu_output_boundary_owned_backend(
-                &frame.boundary,
-                working_frame,
-                GpuColorFrameTextureFormat::Rgba8Unorm,
-                RenderColorTransformGpuOptions::default(),
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device,
-                    queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                },
-            )
-        }
         AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
             let prepared_composite = match prepare_preview_gpu_composite(
                 &frame,

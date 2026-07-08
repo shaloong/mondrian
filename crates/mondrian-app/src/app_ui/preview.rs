@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use mondrian_assets::AssetKind;
@@ -487,21 +487,27 @@ impl AppUiPreviewService {
 
     /// Shut down preview workers for application exit.
     pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Release);
+        let already_shutdown = self.shutdown.swap(true, Ordering::AcqRel);
         self.cancel_interactive_work();
         self.jobs.close();
-        self.join_workers();
+        if !already_shutdown {
+            self.reap_workers_async();
+        }
     }
 
-    fn join_workers(&self) {
+    fn reap_workers_async(&self) {
         let handles = self.workers.borrow_mut().drain(..).collect::<Vec<_>>();
-        for handle in handles {
-            if handle.thread().id() == std::thread::current().id() {
-                continue;
-            }
-            if handle.join().is_err() {
-                tracing::warn!("app UI viewer preview worker panicked during shutdown");
-            }
+        if handles.is_empty() {
+            return;
+        }
+
+        if let Err(err) = thread::Builder::new()
+            .name("mondrian-ui-viewer-preview-reaper".to_owned())
+            .spawn(move || join_preview_workers(handles))
+        {
+            tracing::warn!(
+                "failed to start app UI viewer preview reaper; workers will finish detached: {err}"
+            );
         }
     }
 
@@ -655,6 +661,18 @@ impl AppUiPreviewService {
                         frame: frame.clone(),
                     }));
                     ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
+                } else if state.is_playing()
+                    && preview_elements_require_deferred_composite(&resolved.elements)
+                {
+                    render_stage_durations.final_cache_lookup_us =
+                        app_duration_us(final_cache_lookup_started_at.elapsed());
+                    self.record_render_stage_durations(
+                        app_duration_us(render_started_at.elapsed()),
+                        render_stage_durations,
+                    );
+                    self.stale_frame_for_sequence(sequence, width, height)
+                        .map(|frame| ViewerPreviewState::Stale(ViewerFrameContent::Raster(frame)))
+                        .unwrap_or(ViewerPreviewState::Loading)
                 } else {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
@@ -825,37 +843,10 @@ impl AppUiPreviewService {
                     first_blocker: Some(reason),
                     ..GpuCompositingDiagnostics::default()
                 });
-                let output = match composite_resolved_preview_working(
-                    width,
-                    height,
-                    &resolved.elements,
-                    &resolved.color_context,
-                    &mut self.scratch.borrow_mut(),
-                ) {
-                    Ok(output) => output,
-                    Err(err) => {
-                        tracing::warn!("viewer GPU preview working composite failed: {err}");
-                        self.scheduler.prune_obsolete();
-                        bump(&self.metrics.gpu_preview_candidate_unavailable);
-                        return AppUiGpuPreviewFrameState::Unavailable;
-                    }
-                };
-                for diagnostics in output.input_color_diagnostics {
-                    self.record_color_transform(diagnostics);
-                }
-                if output.input_color_stage_diagnostics != RenderColorStageDiagnostics::default() {
-                    self.record_color_stage(output.input_color_stage_diagnostics);
-                }
-                self.record_composite(output.composite_diagnostics);
-                if output.composite_diagnostics.legacy_rgba8_composites > 0 {
-                    use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
-                    self.record_preview_gpu_output_blocker(
-                        &PreviewGpuOutputBlocker::LegacyRgba8CompositeBoundary {
-                            legacy_composites: output.composite_diagnostics.legacy_rgba8_composites,
-                        },
-                    );
-                }
-                AppUiGpuPreviewWorkingInput::CpuFrame(output.frame)
+                self.schedule_media_prefetches(state, sequence, frame, width, height);
+                self.scheduler.prune_obsolete();
+                bump(&self.metrics.gpu_preview_candidate_unavailable);
+                return AppUiGpuPreviewFrameState::Unavailable;
             }
         };
         self.schedule_media_prefetches(state, sequence, frame, width, height);
@@ -1598,6 +1589,18 @@ impl AppUiPreviewService {
         ));
 
         Some(ResolvedPreviewPlan { elements: resolved, cache_key, color_context })
+    }
+}
+
+fn join_preview_workers(handles: Vec<JoinHandle<()>>) {
+    let current_thread_id = thread::current().id();
+    for handle in handles {
+        if handle.thread().id() == current_thread_id {
+            continue;
+        }
+        if handle.join().is_err() {
+            tracing::warn!("app UI viewer preview worker panicked during shutdown");
+        }
     }
 }
 
@@ -5466,9 +5469,6 @@ pub(crate) struct AppUiGpuPreviewFrame {
 
 /// Working-space input for the app-window GPU output path.
 pub(crate) enum AppUiGpuPreviewWorkingInput {
-    /// CPU-composited working frame. The window uploads this frame before the
-    /// GPU output transform.
-    CpuFrame(CpuColorFrame),
     /// Layer stack to composite directly on GPU before the GPU output transform.
     GpuComposite {
         /// Layers in bottom-to-top order.
@@ -7292,6 +7292,12 @@ fn gpu_composite_layers_for_resolved(
     Ok(layers)
 }
 
+fn preview_elements_require_deferred_composite(resolved: &[ResolvedPreviewElement]) -> bool {
+    resolved
+        .iter()
+        .any(|element| matches!(element, ResolvedPreviewElement::Media { .. }))
+}
+
 fn is_preview_identity_transform(transform: [f32; 6]) -> bool {
     const EPSILON: f32 = 1.0e-6;
     (transform[0] - 1.0).abs() <= EPSILON
@@ -8206,9 +8212,6 @@ mod tests {
                     layers[0],
                     AppUiGpuPreviewCompositeLayer::SolidColor { .. }
                 ));
-            }
-            AppUiGpuPreviewWorkingInput::CpuFrame(_) => {
-                panic!("solid-only preview should use GPU working composite candidate")
             }
         }
         assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
@@ -12597,6 +12600,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn playing_cached_media_preview_defers_sync_raster_composite() {
+        let (mut state, asset_id, root) = state_with_invalid_video_asset();
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let color_context = sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            ColorSpace::Rec709,
+        );
+        let (key, _) = service
+            .media_preview_key_for_asset(
+                &state,
+                &asset_id,
+                None,
+                0,
+                0.0,
+                width,
+                height,
+                &color_context,
+                true,
+                false,
+            )
+            .expect("media preview key");
+        service
+            .media_cache
+            .borrow_mut()
+            .insert(key, test_media_frame_with_size(80, width, height, 123));
+
+        state.play();
+        let playing_preview = service.viewer_preview_for_state(&state);
+        assert!(
+            matches!(
+                playing_preview,
+                ViewerPreviewState::Loading | ViewerPreviewState::Stale(_)
+            ),
+            "playback must not synchronously CPU-composite cached media on the UI thread"
+        );
+
+        state.pause();
+        let paused_preview = service.viewer_preview_for_state(&state);
+        assert!(
+            matches!(paused_preview, ViewerPreviewState::Ready(_)),
+            "paused still-frame preview may use the CPU correctness path"
+        );
+        service.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn test_media_key(source_frame: i64) -> MediaPreviewKey {
         MediaPreviewKey {
             asset_id: AssetId::new(),
@@ -13293,6 +13345,29 @@ mod tests {
             ),
             Some(MediaPreviewCancelReason::Shutdown),
         );
+    }
+
+    #[test]
+    fn preview_service_shutdown_does_not_block_on_busy_worker() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            entered_tx.send(()).expect("signal worker started");
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+        service.workers.borrow_mut().push(handle);
+        entered_rx.recv_timeout(Duration::from_secs(1)).expect("worker should start");
+
+        let started_at = Instant::now();
+        service.shutdown();
+        assert!(
+            started_at.elapsed() < Duration::from_millis(100),
+            "preview shutdown must not block the UI event loop while decode workers exit"
+        );
+
+        release_tx.send(()).expect("release worker");
     }
 
     #[test]
