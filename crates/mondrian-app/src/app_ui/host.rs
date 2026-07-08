@@ -466,10 +466,16 @@ impl AppUiHost {
                 continue;
             }
             tracing::debug!(?action, "custom UI action");
+            let lightweight_transport_refresh =
+                action_prefers_transport_refresh_without_preview(&action);
             if let Err(err) = self.dispatch_editor_action(action) {
                 tracing::warn!("custom UI action failed: {err}");
             }
-            self.mark_dirty();
+            if lightweight_transport_refresh {
+                self.refresh_transport_state_without_preview();
+            } else {
+                self.mark_dirty();
+            }
             needs_layout = true;
         }
 
@@ -492,6 +498,11 @@ impl AppUiHost {
             );
             TreeWalker::layout(self.active_root_mut(), bounds);
         }
+    }
+
+    fn refresh_transport_state_without_preview(&mut self) {
+        let state = self.app_state.borrow();
+        self.root.refresh_playback_frame_from_app_state(&state, None);
     }
 
     fn is_action_enabled(&self, action: &Action) -> bool {
@@ -888,6 +899,20 @@ impl AppUiHost {
             }
         }
     }
+}
+
+fn action_prefers_transport_refresh_without_preview(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Play
+            | Action::Pause
+            | Action::TogglePlay
+            | Action::Seek(_)
+            | Action::StepForward
+            | Action::StepBack
+            | Action::GoToStart
+            | Action::GoToEnd
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1624,6 +1649,37 @@ mod tests {
         let _ = std::fs::remove_file(project_file);
         let _ = std::fs::remove_file(preferences_path);
         let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
+    fn transport_action_drain_does_not_request_preview_refresh() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path("transport-preview-free-refresh"),
+        );
+        let pending = PendingUiActions::default();
+        let before_render_requests = host.preview_service.diagnostics().render_requests;
+
+        pending.push(Action::TogglePlay);
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert!(host.app_state().is_playing());
+        assert_eq!(
+            host.preview_service.diagnostics().render_requests,
+            before_render_requests,
+            "transport actions must update controls without synchronously requesting preview"
+        );
+        assert!(
+            !host.ui_dirty.get(),
+            "transport actions should not leave a full preview-backed refresh queued"
+        );
     }
 
     #[test]

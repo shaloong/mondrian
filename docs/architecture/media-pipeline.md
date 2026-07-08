@@ -180,6 +180,14 @@ slow CPU fallback decode from chasing ever-newer playback frames and dragging
 the UI through unbounded obsolete work. Future hardware playback may replace
 this with stricter clock-driven frame dropping, but it must preserve the same
 readiness feedback contract.
+Buffering must not make the UI event loop behave like normal frame playback.
+While the clock is held, playback wakeups are throttled to a low-frequency
+health tick instead of the sequence frame cadence. Transport actions such as
+play, pause, toggle-play, stepping, and seek must refresh controls and timeline
+state without synchronously requesting viewer preview/composite work; preview
+catch-up is driven by worker completion, cache state, and later render ticks.
+This keeps pause, close, and other shell input responsive even when a 4K
+Long-GOP decode or GPU-preview blocker is still unresolved.
 App preview decode timeout is access-mode-specific, not a single global
 playback policy. `ScrubCursor` has the shortest caller-release budget because
 interactive latest-wins work must not leave the UI waiting behind pathological

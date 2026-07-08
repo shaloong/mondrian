@@ -2,6 +2,7 @@ use super::*;
 
 const MIN_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(1);
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
+const BUFFERING_PLAYBACK_WAKE_DELAY: Duration = MAX_PLAYBACK_WAKE_DELAY;
 
 /// Result category for one playback clock advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +401,9 @@ impl AppState {
         if !self.is_playing() {
             return None;
         }
+        if self.playback_buffering {
+            return Some(BUFFERING_PLAYBACK_WAKE_DELAY);
+        }
 
         let fps = self.fps();
         let secs = match self.audio_sync.role {
@@ -506,6 +510,18 @@ mod tests {
         assert_eq!(advanced.status, PlaybackAdvanceStatus::Advanced);
         assert_eq!(advanced.current_frame, 1);
         assert!(!state.is_playback_buffering());
+    }
+
+    #[test]
+    fn playback_next_frame_delay_is_throttled_while_buffering() {
+        let mut state = state_with_sequence(20);
+        state.play();
+        state.set_playback_buffering(true);
+
+        assert_eq!(
+            state.playback_next_frame_delay(),
+            Some(BUFFERING_PLAYBACK_WAKE_DELAY)
+        );
     }
 
     #[test]
