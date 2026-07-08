@@ -101,14 +101,23 @@ pub struct AppUiPreviewService {
 impl AppUiPreviewService {
     /// Create an empty preview service.
     pub fn new() -> Self {
+        let decode_cpu_budget = preview_decode_cpu_budget();
+        let worker_count = media_preview_worker_count().min(decode_cpu_budget.preview_worker_count);
+        Self::with_worker_count(decode_cpu_budget, worker_count)
+    }
+
+    #[cfg(test)]
+    fn new_without_workers_for_test() -> Self {
+        Self::with_worker_count(preview_decode_cpu_budget(), 0)
+    }
+
+    fn with_worker_count(decode_cpu_budget: PreviewDecodeCpuBudget, worker_count: usize) -> Self {
         let (job_tx, job_rx) = media_preview_job_queue(MEDIA_PREVIEW_JOB_QUEUE_CAPACITY);
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let scheduler = MediaPreviewScheduler::default();
         let shutdown = Arc::new(AtomicBool::new(false));
-        let decode_cpu_budget = preview_decode_cpu_budget();
         let mut decode_worker_count = 0;
         let mut workers = Vec::new();
-        let worker_count = media_preview_worker_count().min(decode_cpu_budget.preview_worker_count);
         for worker_index in 0..worker_count {
             let worker_jobs = job_rx.clone();
             let worker_results = result_tx.clone();
@@ -310,6 +319,8 @@ impl AppUiPreviewService {
             render_max_frame_stage_durations: self.metrics.render_max_frame_stage_durations.get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             prefetch_skipped_current_pending: self.metrics.prefetch_skipped_current_pending.get(),
+            prefetch_skipped_worker_busy: self.metrics.prefetch_skipped_worker_busy.get(),
+            prefetch_skipped_prefetch_backlog: self.metrics.prefetch_skipped_prefetch_backlog.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_invalid_access_mode_drops: self.metrics.queue_invalid_access_mode_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
@@ -1726,6 +1737,10 @@ pub struct AppUiPreviewDiagnostics {
     pub enqueued_jobs: u64,
     /// Playback prefetch passes skipped because visible current-frame media was pending.
     pub prefetch_skipped_current_pending: u64,
+    /// Playback prefetch passes skipped because current-frame work was already queued.
+    pub prefetch_skipped_worker_busy: u64,
+    /// Playback prefetch passes skipped because the prefetch queue already held the forward window.
+    pub prefetch_skipped_prefetch_backlog: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
     pub queue_full_drops: u64,
     /// Media preview jobs rejected by the worker queue for invalid priority/access-mode pairs.
@@ -2385,6 +2400,10 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub enqueued_jobs: u64,
     /// Playback prefetch passes skipped while visible current-frame work was pending.
     pub prefetch_skipped_current_pending: u64,
+    /// Playback prefetch passes skipped while current-frame worker-queue work existed.
+    pub prefetch_skipped_worker_busy: u64,
+    /// Playback prefetch passes skipped because queued prefetch already covered the window.
+    pub prefetch_skipped_prefetch_backlog: u64,
     /// Jobs dropped because the bounded worker queue was full.
     pub queue_full_drops: u64,
     /// Jobs rejected by the worker queue for invalid priority/access-mode pairs.
@@ -2448,7 +2467,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 15;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 16;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3554,12 +3573,14 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+                "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
                 summary.enqueued_jobs,
                 summary.prefetch_skipped_current_pending,
+                summary.prefetch_skipped_worker_busy,
+                summary.prefetch_skipped_prefetch_backlog,
                 summary.worker_queue.queued_jobs,
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_prefetch_jobs,
@@ -3893,10 +3914,12 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
+                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
                 summary.prefetch_skipped_current_pending,
+                summary.prefetch_skipped_worker_busy,
+                summary.prefetch_skipped_prefetch_backlog,
                 summary.worker_queue.queued_jobs,
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_prefetch_jobs,
@@ -4759,6 +4782,8 @@ impl AppUiPreviewDiagnostics {
             prefetch_queue_wait_max_us: self.decode_prefetch_queue_wait_max_us,
             enqueued_jobs: self.enqueued_jobs,
             prefetch_skipped_current_pending: self.prefetch_skipped_current_pending,
+            prefetch_skipped_worker_busy: self.prefetch_skipped_worker_busy,
+            prefetch_skipped_prefetch_backlog: self.prefetch_skipped_prefetch_backlog,
             queue_full_drops: self.queue_full_drops,
             queue_invalid_access_mode_drops: self.queue_invalid_access_mode_drops,
             queue_evicted_prefetch_jobs: self.queue_evicted_prefetch_jobs,
@@ -5394,6 +5419,15 @@ impl AppUiPreviewService {
             bump(&self.metrics.prefetch_skipped_current_pending);
             return;
         }
+        let worker_queue = self.jobs.diagnostics();
+        if worker_queue.queued_current_jobs > 0 {
+            bump(&self.metrics.prefetch_skipped_worker_busy);
+            return;
+        }
+        if worker_queue.queued_prefetch_jobs >= MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize {
+            bump(&self.metrics.prefetch_skipped_prefetch_backlog);
+            return;
+        }
         let display_snapshot = self.display_snapshot.borrow();
         let Ok(display_color_space) = preview_display_color_space(
             sequence,
@@ -5986,6 +6020,8 @@ struct AppUiPreviewMetrics {
     render_max_frame_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
     enqueued_jobs: Cell<u64>,
     prefetch_skipped_current_pending: Cell<u64>,
+    prefetch_skipped_worker_busy: Cell<u64>,
+    prefetch_skipped_prefetch_backlog: Cell<u64>,
     queue_full_drops: Cell<u64>,
     queue_invalid_access_mode_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
@@ -10781,7 +10817,7 @@ mod tests {
 
     #[test]
     fn playback_prefetch_yields_while_current_frame_is_pending() {
-        let service = AppUiPreviewService::new();
+        let service = AppUiPreviewService::new_without_workers_for_test();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
         state.play();
         let sequence = state.sequence.as_ref().expect("sequence");
@@ -10794,6 +10830,74 @@ mod tests {
         assert_eq!(diagnostics.prefetch_skipped_current_pending, 1);
         assert_eq!(diagnostics.enqueued_jobs, 0);
         assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
+    }
+
+    #[test]
+    fn playback_prefetch_yields_while_current_work_is_queued() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let current_key = test_media_key(100);
+
+        assert_eq!(
+            service.jobs.enqueue(MediaPreviewJob {
+                key: current_key,
+                source_secs: 1.0,
+                generation: 1,
+                priority: MediaPreviewRequestPriority::Current,
+                access_mode: PreviewDecodeAccessMode::ScrubCursor,
+                enqueued_at: Instant::now(),
+            }),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
+        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 1);
+        assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
+        assert_eq!(diagnostics.worker_queue.queued_current_jobs, 1);
+        assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
+    }
+
+    #[test]
+    fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+
+        for offset in 0..MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES {
+            assert_eq!(
+                service.jobs.enqueue(MediaPreviewJob {
+                    key: test_media_key(200 + offset),
+                    source_secs: offset as f64,
+                    generation: 1,
+                    priority: MediaPreviewRequestPriority::Prefetch,
+                    access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                    enqueued_at: Instant::now(),
+                }),
+                MediaPreviewJobEnqueueStatus::Enqueued {
+                    evicted_prefetch: None,
+                    evicted_still: None
+                }
+            );
+        }
+
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
+        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 0);
+        assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 1);
+        assert_eq!(
+            diagnostics.worker_queue.queued_prefetch_jobs,
+            MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
+        );
     }
 
     #[test]
