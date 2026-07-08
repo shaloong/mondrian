@@ -571,6 +571,13 @@ Schedule diagnostics also count current playback decode decisions, late-frame
 drop decisions, and proxy/hardware recommendations. Those are app scheduler
 facts, not media decoder facts, and they are how perf tooling distinguishes
 clock-driven playback from best-effort frame extraction.
+When playback pressure resolves an asset that is already in proxy mode but the
+proxy is missing or stale, the app preview service may request proxy generation
+through the shared app-layer proxy dispatcher. The request is deduplicated by
+asset, source fingerprint, and missing/stale reason so a late playback frame
+does not enqueue proxy work every refresh. Preview must not spawn FFmpeg
+directly, change media color interpretation, or silently enable proxy mode; the
+media crate still owns only proxy file generation and status probing.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;

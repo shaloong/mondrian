@@ -7,6 +7,7 @@
 //! 其余 Action 记录日志后忽略。每个 Stage 逐步增加映射。
 
 use crate::app::exporting::TimelineExportRequest;
+use crate::app::proxy_generation::request_proxy_generation;
 use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
@@ -63,7 +64,6 @@ use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 impl AppState {
@@ -378,7 +378,7 @@ impl AppState {
                         if let Ok(Some(asset)) = library.get_asset(asset_id) {
                             if matches!(asset.kind, AssetKind::Video) {
                                 self.set_asset_proxy_mode(asset_id, true);
-                                spawn_proxy_generation(asset_id, asset.path, self.proxy_config());
+                                request_proxy_generation(asset_id, asset.path, self.proxy_config());
                                 proxy_started = true;
                             } else {
                                 self.set_asset_proxy_mode(asset_id, false);
@@ -583,11 +583,11 @@ impl AppState {
             match proxy_generator.proxy_status(&asset.path) {
                 mondrian_media::ProxyStatus::Fresh => {}
                 mondrian_media::ProxyStatus::Missing => {
-                    spawn_proxy_generation(payload.asset_id, asset.path, proxy_config);
+                    request_proxy_generation(payload.asset_id, asset.path, proxy_config);
                     status.push_str("（后台生成中）");
                 }
                 mondrian_media::ProxyStatus::Stale => {
-                    spawn_proxy_generation(payload.asset_id, asset.path, proxy_config);
+                    request_proxy_generation(payload.asset_id, asset.path, proxy_config);
                     status.push_str("（代理过期，后台重新生成中）");
                 }
             }
@@ -2307,118 +2307,6 @@ fn source_trim_target_frame(clip: &Clip, edge: TrimEdge, source_time: TimeCode) 
     Ok(clip.position.frame.saturating_add(timeline_delta).max(0))
 }
 
-fn spawn_proxy_generation(
-    asset_id: mondrian_core::types::AssetId,
-    source_path: PathBuf,
-    proxy_config: mondrian_media::ProxyConfig,
-) {
-    proxy_generation_dispatcher().enqueue(ProxyGenerationJob {
-        asset_id,
-        source_path,
-        proxy_config,
-    });
-}
-
-struct ProxyGenerationJob {
-    asset_id: mondrian_core::types::AssetId,
-    source_path: PathBuf,
-    proxy_config: mondrian_media::ProxyConfig,
-}
-
-struct ProxyGenerationDispatcher {
-    sender: mpsc::Sender<ProxyGenerationJob>,
-}
-
-impl ProxyGenerationDispatcher {
-    fn start(worker_count: usize) -> Self {
-        let (sender, receiver) = mpsc::channel::<ProxyGenerationJob>();
-        let receiver = Arc::new(Mutex::new(receiver));
-        for index in 0..worker_count.max(1) {
-            let receiver = Arc::clone(&receiver);
-            let spawn_result = std::thread::Builder::new()
-                .name(format!("mondrian-proxy-generator-{index}"))
-                .spawn(move || proxy_generation_worker_loop(receiver));
-            if let Err(err) = spawn_result {
-                tracing::error!(
-                    target: "mondrian::proxy",
-                    worker_index = index,
-                    "failed to start proxy generation worker: {err}"
-                );
-            }
-        }
-        Self { sender }
-    }
-
-    fn enqueue(&self, job: ProxyGenerationJob) {
-        if let Err(err) = self.sender.send(job) {
-            tracing::warn!(
-                target: "mondrian::proxy",
-                asset_id = %err.0.asset_id,
-                path = %err.0.source_path.display(),
-                "proxy generation dispatcher is unavailable"
-            );
-        }
-    }
-}
-
-fn proxy_generation_dispatcher() -> &'static ProxyGenerationDispatcher {
-    static DISPATCHER: OnceLock<ProxyGenerationDispatcher> = OnceLock::new();
-    DISPATCHER.get_or_init(|| ProxyGenerationDispatcher::start(proxy_generation_worker_count()))
-}
-
-fn proxy_generation_worker_loop(receiver: Arc<Mutex<mpsc::Receiver<ProxyGenerationJob>>>) {
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            tracing::error!(
-                target: "mondrian::proxy",
-                "failed to build proxy generation worker runtime: {err}"
-            );
-            return;
-        }
-    };
-
-    loop {
-        let job = {
-            let receiver = match receiver.lock() {
-                Ok(receiver) => receiver,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            receiver.recv()
-        };
-        let Ok(job) = job else {
-            break;
-        };
-
-        runtime.block_on(async move {
-            let generator = mondrian_media::ProxyGenerator::new(job.proxy_config);
-            let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(8);
-            if let Err(err) =
-                generator.generate(job.asset_id, job.source_path.clone(), progress_tx).await
-            {
-                tracing::warn!(
-                    target: "mondrian::proxy",
-                    asset_id = %job.asset_id,
-                    path = %job.source_path.display(),
-                    "proxy generation failed: {err}"
-                );
-            }
-        });
-    }
-}
-
-const MAX_PROXY_GENERATION_WORKERS: usize = 8;
-
-fn proxy_generation_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| proxy_generation_worker_count_for(parallelism.get()))
-        .unwrap_or(1)
-}
-
-fn proxy_generation_worker_count_for(parallelism: usize) -> usize {
-    parallelism.saturating_sub(2).clamp(1, MAX_PROXY_GENERATION_WORKERS)
-}
-
 #[cfg(test)]
 fn unique_temp_path(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -2604,18 +2492,6 @@ mod tests {
     use mondrian_timeline::sequence::{
         PreviewRenderFormat, Sequence, SequencePreviewSettings, SequenceSettings,
     };
-
-    #[test]
-    fn proxy_generation_worker_count_reserves_capacity_for_preview() {
-        assert_eq!(proxy_generation_worker_count_for(0), 1);
-        assert_eq!(proxy_generation_worker_count_for(1), 1);
-        assert_eq!(proxy_generation_worker_count_for(2), 1);
-        assert_eq!(proxy_generation_worker_count_for(4), 2);
-        assert_eq!(
-            proxy_generation_worker_count_for(16),
-            MAX_PROXY_GENERATION_WORKERS
-        );
-    }
 
     fn state_with_two_video_tracks() -> (
         AppState,

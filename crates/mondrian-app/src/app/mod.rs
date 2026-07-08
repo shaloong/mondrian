@@ -43,6 +43,7 @@ mod clip_clipboard;
 pub(crate) mod exporting;
 mod playback;
 mod project_lifecycle;
+pub(crate) mod proxy_generation;
 mod selection;
 mod timeline_commands;
 mod timeline_editing;

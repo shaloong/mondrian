@@ -51,6 +51,7 @@ use mondrian_timeline::sequence::{
 };
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
+use crate::app::proxy_generation::request_proxy_generation;
 use crate::app::AppState;
 use crate::app_ui::panels::{
     ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
@@ -89,6 +90,7 @@ pub struct AppUiPreviewService {
     shutdown: Arc<AtomicBool>,
     media_cache: RefCell<MediaPreviewCache>,
     media_failures: RefCell<MediaPreviewFailureCache>,
+    requested_proxy_generations: RefCell<HashSet<PreviewProxyGenerationRequestKey>>,
     viewer_frame_cache: RefCell<ViewerPreviewFrameCache>,
     external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
     next_gpu_preview_candidate_id: Cell<u64>,
@@ -168,6 +170,7 @@ impl AppUiPreviewService {
             media_failures: RefCell::new(MediaPreviewFailureCache::new(
                 MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY,
             )),
+            requested_proxy_generations: RefCell::new(HashSet::new()),
             viewer_frame_cache: RefCell::new(ViewerPreviewFrameCache::new(
                 VIEWER_PREVIEW_FRAME_CACHE_CAPACITY,
             )),
@@ -240,6 +243,11 @@ impl AppUiPreviewService {
             media_proxy_path_misses: self.metrics.media_proxy_path_misses.get(),
             media_proxy_path_stale: self.metrics.media_proxy_path_stale.get(),
             media_proxy_path_bypasses: self.metrics.media_proxy_path_bypasses.get(),
+            media_proxy_generation_requests: self.metrics.media_proxy_generation_requests.get(),
+            media_proxy_generation_request_dedupes: self
+                .metrics
+                .media_proxy_generation_request_dedupes
+                .get(),
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
             media_failure_hits: self.metrics.media_failure_hits.get(),
@@ -1250,6 +1258,11 @@ impl AppUiPreviewService {
                 .metrics
                 .playback_current_proxy_or_hardware_recommended_decisions
                 .get(),
+            current_proxy_generation_requests: self.metrics.media_proxy_generation_requests.get(),
+            current_proxy_generation_request_dedupes: self
+                .metrics
+                .media_proxy_generation_request_dedupes
+                .get(),
             forward_prefetch_horizon_us: MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US,
             last_forward_prefetch_window_frames: self
                 .metrics
@@ -1657,6 +1670,10 @@ pub struct AppUiPreviewPlaybackScheduleDiagnostics {
     pub current_drop_late_decisions: u64,
     /// Current playback frames that should drive proxy or hardware-decode work.
     pub current_proxy_or_hardware_recommended_decisions: u64,
+    /// Current playback path resolutions that requested app-layer proxy generation.
+    pub current_proxy_generation_requests: u64,
+    /// Current playback proxy generation candidates already queued for the same source revision.
+    pub current_proxy_generation_request_dedupes: u64,
     /// Wall-clock horizon used to derive the forward prefetch window.
     pub forward_prefetch_horizon_us: u64,
     /// Most recent forward prefetch window derived from sequence frame rate.
@@ -1722,6 +1739,10 @@ pub struct AppUiPreviewDiagnostics {
     pub media_proxy_path_stale: u64,
     /// Media preview path resolutions that intentionally used source media.
     pub media_proxy_path_bypasses: u64,
+    /// Playback path resolutions that requested app-layer proxy generation.
+    pub media_proxy_generation_requests: u64,
+    /// Playback proxy generation candidates already queued for the same source revision.
+    pub media_proxy_generation_request_dedupes: u64,
     /// Media preview cache hits.
     pub media_cache_hits: u64,
     /// Media preview cache misses.
@@ -6117,6 +6138,7 @@ impl AppUiPreviewService {
                         target_height,
                         &color_context,
                         false,
+                        false,
                     ) else {
                         continue;
                     };
@@ -6170,6 +6192,10 @@ impl AppUiPreviewService {
         color_context: &ColorContext,
         sequence_frame_rate: Rational,
     ) -> Option<MediaPreviewFrame> {
+        let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
+            state.is_playing(),
+            state.last_timeline_seek_source,
+        ));
         let (key, source_secs) = self.media_preview_key_for_asset(
             state,
             asset_id,
@@ -6180,6 +6206,7 @@ impl AppUiPreviewService {
             target_height,
             color_context,
             true,
+            access_mode == PreviewDecodeAccessMode::PlaybackCursor,
         )?;
         if let Some(frame) = self.cached_media_frame(&key) {
             return Some(frame);
@@ -6188,10 +6215,6 @@ impl AppUiPreviewService {
             return None;
         }
         self.current_frame_pending.set(true);
-        let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
-            state.is_playing(),
-            state.last_timeline_seek_source,
-        ));
         self.request_media_preview(
             key,
             source_secs,
@@ -6231,6 +6254,7 @@ impl AppUiPreviewService {
         target_height: u32,
         color_context: &ColorContext,
         record_color_rejection: bool,
+        request_missing_proxy_generation: bool,
     ) -> Option<(MediaPreviewKey, f64)> {
         let library = state.asset_library.as_ref()?;
         let asset = match library.get_asset(*asset_id) {
@@ -6259,6 +6283,14 @@ impl AppUiPreviewService {
                 bump(&self.metrics.media_proxy_path_bypasses);
             }
         }
+        self.maybe_request_preview_proxy_generation(
+            request_missing_proxy_generation,
+            state,
+            *asset_id,
+            &asset.path,
+            &proxy_config,
+            &resolved_path,
+        );
 
         let detected_color_space = asset
             .media_info
@@ -6338,6 +6370,38 @@ impl AppUiPreviewService {
             },
             source_secs.max(0.0),
         ))
+    }
+
+    fn maybe_request_preview_proxy_generation(
+        &self,
+        request_missing_proxy_generation: bool,
+        state: &AppState,
+        asset_id: AssetId,
+        source_path: &Path,
+        proxy_config: &mondrian_media::ProxyConfig,
+        resolved_path: &PreviewMediaDecodePath,
+    ) {
+        if !should_request_preview_proxy_generation(
+            request_missing_proxy_generation,
+            state.project_settings.proxy_enabled,
+            state.is_asset_proxy_mode(asset_id),
+            resolved_path.resolution,
+        ) {
+            return;
+        }
+
+        let request_key = PreviewProxyGenerationRequestKey {
+            asset_id,
+            source_fingerprint: resolved_path.fingerprint,
+            resolution: resolved_path.resolution,
+        };
+        if !self.requested_proxy_generations.borrow_mut().insert(request_key) {
+            bump(&self.metrics.media_proxy_generation_request_dedupes);
+            return;
+        }
+
+        bump(&self.metrics.media_proxy_generation_requests);
+        request_proxy_generation(asset_id, source_path.to_path_buf(), proxy_config.clone());
     }
 
     fn request_media_preview(
@@ -6627,6 +6691,8 @@ struct AppUiPreviewMetrics {
     media_proxy_path_misses: Cell<u64>,
     media_proxy_path_stale: Cell<u64>,
     media_proxy_path_bypasses: Cell<u64>,
+    media_proxy_generation_requests: Cell<u64>,
+    media_proxy_generation_request_dedupes: Cell<u64>,
     viewer_frame_cache_hits: Cell<u64>,
     viewer_frame_cache_misses: Cell<u64>,
     media_cache_hits: Cell<u64>,
@@ -7250,12 +7316,35 @@ struct PreviewMediaDecodePath {
     fingerprint: PreviewFileFingerprint,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PreviewMediaDecodePathResolution {
     Source,
     Proxy,
     ProxyMissing,
     ProxyStale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PreviewProxyGenerationRequestKey {
+    asset_id: AssetId,
+    source_fingerprint: PreviewFileFingerprint,
+    resolution: PreviewMediaDecodePathResolution,
+}
+
+fn should_request_preview_proxy_generation(
+    request_missing_proxy_generation: bool,
+    project_proxy_enabled: bool,
+    asset_proxy_mode: bool,
+    resolution: PreviewMediaDecodePathResolution,
+) -> bool {
+    request_missing_proxy_generation
+        && project_proxy_enabled
+        && asset_proxy_mode
+        && matches!(
+            resolution,
+            PreviewMediaDecodePathResolution::ProxyMissing
+                | PreviewMediaDecodePathResolution::ProxyStale
+        )
 }
 
 fn resolve_preview_media_decode_path(
@@ -12352,6 +12441,7 @@ mod tests {
                 height,
                 &color_context,
                 true,
+                false,
             )
             .expect("media preview key");
         service.media_failures.borrow_mut().insert(key);
@@ -12585,6 +12675,52 @@ mod tests {
 
         assert!(resolve_preview_media_decode_path(false, &source, &proxy_config).is_none());
         assert!(resolve_preview_media_decode_path(true, &source, &proxy_config).is_none());
+    }
+
+    #[test]
+    fn preview_proxy_generation_requires_playback_proxy_mode_and_missing_proxy() {
+        assert!(should_request_preview_proxy_generation(
+            true,
+            true,
+            true,
+            PreviewMediaDecodePathResolution::ProxyMissing
+        ));
+        assert!(should_request_preview_proxy_generation(
+            true,
+            true,
+            true,
+            PreviewMediaDecodePathResolution::ProxyStale
+        ));
+        assert!(!should_request_preview_proxy_generation(
+            false,
+            true,
+            true,
+            PreviewMediaDecodePathResolution::ProxyMissing
+        ));
+        assert!(!should_request_preview_proxy_generation(
+            true,
+            false,
+            true,
+            PreviewMediaDecodePathResolution::ProxyMissing
+        ));
+        assert!(!should_request_preview_proxy_generation(
+            true,
+            true,
+            false,
+            PreviewMediaDecodePathResolution::ProxyMissing
+        ));
+        assert!(!should_request_preview_proxy_generation(
+            true,
+            true,
+            true,
+            PreviewMediaDecodePathResolution::Proxy
+        ));
+        assert!(!should_request_preview_proxy_generation(
+            true,
+            true,
+            true,
+            PreviewMediaDecodePathResolution::Source
+        ));
     }
 
     #[test]

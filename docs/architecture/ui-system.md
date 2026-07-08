@@ -97,6 +97,13 @@ If a later generation requests the same media-preview key while a worker is
 already decoding it, that in-flight decode remains current: generation changes
 alone must not cancel identical frame/key work, or the viewer can livelock in a
 permanent "preparing" state under repeated UI refreshes.
+Proxy generation is an app service, not an action-handler detail. Import,
+manual proxy-mode toggles, and preview playback pressure enqueue work through
+the same `app::proxy_generation` dispatcher, while the preview service only
+requests generation for already proxy-enabled video assets whose proxy path is
+missing or stale. The preview service records request and dedupe counters so
+deadline-driven proxy work is diagnosable without coupling viewer scheduling to
+the asset panel UI.
 
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
 media file fingerprint (file length plus modification timestamp), source
