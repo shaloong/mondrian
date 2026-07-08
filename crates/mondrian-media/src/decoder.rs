@@ -5,9 +5,10 @@
 //! expose a second preview decode pool.
 
 /// GPU hardware acceleration backend family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum HwAccelBackend {
     /// CPU software decode.
+    #[default]
     None,
     /// NVIDIA NVDEC.
     Cuda,
@@ -20,12 +21,38 @@ pub enum HwAccelBackend {
 }
 
 /// Residency of frames produced by the media decode boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum DecodedFrameResidency {
     /// Decoder output is CPU RGBA memory.
+    #[default]
     CpuRgba,
     /// Decoder output is a GPU texture or hardware frame.
     GpuTexture,
+}
+
+/// Decoder output surface format before Mondrian's preview CPU RGBA boundary.
+///
+/// This is a media-layer fact. Renderer-native import formats are modeled by
+/// `mondrian-renderer` and must be mapped at the app/readiness boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum DecodedVideoSurfaceFormat {
+    /// The decoder surface format is unknown or not yet reported.
+    #[default]
+    Unknown,
+    /// 8-bit NV12 two-plane YUV 4:2:0 surface.
+    Nv12,
+    /// 10/12-bit P010 two-plane YUV 4:2:0 surface.
+    P010,
+    /// Planar 8-bit YUV 4:2:0.
+    Yuv420p,
+    /// Planar 10-bit YUV 4:2:0.
+    Yuv420p10le,
+    /// Packed RGBA8.
+    Rgba8,
+    /// Packed BGRA8.
+    Bgra8,
+    /// A known but currently non-native preview surface format.
+    Other,
 }
 
 /// Native hardware-frame handle family produced by a decoder.
@@ -33,7 +60,7 @@ pub enum DecodedFrameResidency {
 /// This enum names the cross-crate contract only. It does not claim that
 /// Mondrian can import the handle into the renderer; that requires a separate
 /// renderer/platform import probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DecodedGpuFrameHandleKind {
     /// Windows D3D11 `ID3D11Texture2D` hardware decode surface.
     D3D11Texture2D,
@@ -122,6 +149,22 @@ impl DecodedFrameResidency {
     }
 }
 
+impl DecodedVideoSurfaceFormat {
+    /// Stable surface-format name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Nv12 => "Nv12",
+            Self::P010 => "P010",
+            Self::Yuv420p => "Yuv420p",
+            Self::Yuv420p10le => "Yuv420p10le",
+            Self::Rgba8 => "Rgba8",
+            Self::Bgra8 => "Bgra8",
+            Self::Other => "Other",
+        }
+    }
+}
+
 fn hardware_decode_unavailable_reason() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -182,6 +225,21 @@ mod tests {
     fn decoded_frame_residency_has_stable_names() {
         assert_eq!(DecodedFrameResidency::CpuRgba.as_str(), "CpuRgba");
         assert_eq!(DecodedFrameResidency::GpuTexture.as_str(), "GpuTexture");
+    }
+
+    #[test]
+    fn decoded_video_surface_format_has_stable_names() {
+        assert_eq!(DecodedVideoSurfaceFormat::Unknown.as_str(), "Unknown");
+        assert_eq!(DecodedVideoSurfaceFormat::Nv12.as_str(), "Nv12");
+        assert_eq!(DecodedVideoSurfaceFormat::P010.as_str(), "P010");
+        assert_eq!(DecodedVideoSurfaceFormat::Yuv420p.as_str(), "Yuv420p");
+        assert_eq!(
+            DecodedVideoSurfaceFormat::Yuv420p10le.as_str(),
+            "Yuv420p10le"
+        );
+        assert_eq!(DecodedVideoSurfaceFormat::Rgba8.as_str(), "Rgba8");
+        assert_eq!(DecodedVideoSurfaceFormat::Bgra8.as_str(), "Bgra8");
+        assert_eq!(DecodedVideoSurfaceFormat::Other.as_str(), "Other");
     }
 
     #[test]

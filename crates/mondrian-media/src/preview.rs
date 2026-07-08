@@ -3,6 +3,10 @@
 //! 使用 avformat_seek_file（安全 Rust API）定位到目标前的关键帧，
 //! flush 解码器后向前解码到目标 PTS，保证返回精确帧。
 
+use crate::decoder::{
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend,
+    HwAccelProbe,
+};
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
 use serde::{Deserialize, Serialize};
@@ -12,7 +16,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// Exact still/playback safety limit for forward decode from a keyframe.
@@ -22,7 +26,11 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 /// spend seconds draining an old GOP on the CPU fallback path.
 const PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES: usize = 1800;
 const PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES: usize = 240;
+const PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES: usize = 96;
+const PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES: usize = 12;
+const PREVIEW_SCRUB_SEEK_BUDGET_PADDING_FRAMES: usize = 4;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
+const PREVIEW_SEEK_INDEX_CACHE_CAPACITY: usize = 32;
 const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
 const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
@@ -84,6 +92,54 @@ pub enum PreviewDecodeSeekStrategy {
     KeyframeBefore,
     /// Seek close to the target using FFmpeg's any-frame seek flag for low-latency interaction.
     BoundedAnyFrame,
+}
+
+/// Source of keyframe seek-index evidence available to a preview decode session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewSeekIndexSource {
+    /// No keyframe seek-index evidence is currently available.
+    #[default]
+    None,
+    /// Evidence was learned incrementally from packets decoded by this session.
+    SessionObserved,
+    /// Evidence was seeded from the container/probe index before decode work.
+    ProbeBacked,
+}
+
+/// Structured hardware-decode blocker observed by the preview decode boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewHardwareDecodeBlocker {
+    /// Hardware decode and renderer import are not blocked by the media probe.
+    #[default]
+    None,
+    /// The active media boundary still returns CPU RGBA frames.
+    TextureResidencyNotConnected,
+    /// A GPU-resident decoder did not report a native handle family.
+    GpuHandleMissing,
+    /// Decoder GPU residency exists, but renderer import is not ready.
+    RendererImportNotReady,
+}
+
+impl PreviewHardwareDecodeBlocker {
+    fn from_probe(probe: &HwAccelProbe) -> Self {
+        if probe.hardware_decode_active
+            && probe.zero_copy_active
+            && probe.renderer_import_ready
+            && probe.gpu_frame_handle_kind.is_some()
+        {
+            return Self::None;
+        }
+        if probe.frame_residency == DecodedFrameResidency::CpuRgba {
+            return Self::TextureResidencyNotConnected;
+        }
+        if probe.gpu_frame_handle_kind.is_none() {
+            return Self::GpuHandleMissing;
+        }
+        if !probe.renderer_import_ready {
+            return Self::RendererImportNotReady;
+        }
+        Self::None
+    }
 }
 
 impl PreviewDecodeSeekStrategy {
@@ -222,6 +278,66 @@ impl PreviewDecodeAccessPolicy {
     fn forward_decode_budget_exhausted(self, frames_decoded: usize) -> bool {
         frames_decoded >= self.forward_decode_budget_frames
     }
+
+    fn adapt_for_request(
+        mut self,
+        seek_index: &PreviewSeekIndex,
+        target_pts: i64,
+        frame_duration_pts: i64,
+    ) -> Self {
+        if self.access_mode != PreviewDecodeAccessMode::ScrubCursor {
+            return self;
+        }
+
+        let Some(anchor_pts) = seek_index.keyframe_at_or_before(target_pts) else {
+            self.forward_decode_budget_frames = self
+                .forward_decode_budget_frames
+                .min(PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES);
+            return self;
+        };
+
+        let frames_from_anchor =
+            pts_distance_to_frames(target_pts.saturating_sub(anchor_pts), frame_duration_pts);
+        let padded_target_budget =
+            frames_from_anchor.saturating_add(PREVIEW_SCRUB_SEEK_BUDGET_PADDING_FRAMES);
+        let source_adjusted_budget = match seek_index.source {
+            PreviewSeekIndexSource::ProbeBacked => {
+                let gop_limited_budget =
+                    seek_index.keyframe_after(target_pts).map(|next_keyframe_pts| {
+                        pts_distance_to_frames(
+                            next_keyframe_pts.saturating_sub(anchor_pts),
+                            frame_duration_pts,
+                        )
+                        .saturating_add(PREVIEW_SCRUB_SEEK_BUDGET_PADDING_FRAMES)
+                    });
+                gop_limited_budget
+                    .map(|gop_budget| padded_target_budget.min(gop_budget))
+                    .unwrap_or(padded_target_budget)
+            }
+            PreviewSeekIndexSource::SessionObserved => padded_target_budget.clamp(
+                PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES,
+                PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
+            ),
+            PreviewSeekIndexSource::None => PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
+        };
+
+        self.forward_decode_budget_frames = self
+            .forward_decode_budget_frames
+            .min(source_adjusted_budget.max(PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES));
+        self
+    }
+}
+
+fn pts_distance_to_frames(distance_pts: i64, frame_duration_pts: i64) -> usize {
+    if distance_pts <= 0 {
+        return 0;
+    }
+    let distance = distance_pts as u128;
+    let frame_duration = frame_duration_pts.max(1) as u128;
+    distance
+        .saturating_add(frame_duration.saturating_sub(1))
+        .saturating_div(frame_duration)
+        .min(usize::MAX as u128) as usize
 }
 
 /// FFmpeg decoder threading mode requested for preview software decode.
@@ -458,6 +574,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Number of video packets observed while building the session-local seek index.
     #[serde(default)]
     pub seek_index_observed_packets: u32,
+    /// Source of keyframe seek-index evidence for this decode session.
+    #[serde(default)]
+    pub seek_index_source: PreviewSeekIndexSource,
     /// Whether the current seek used a known keyframe anchor from the session-local index.
     #[serde(default)]
     pub seek_index_used: bool,
@@ -476,6 +595,30 @@ pub struct PreviewDecodeDiagnostics {
     /// Stage-level decode timings in microseconds.
     #[serde(default)]
     pub stage_durations: PreviewDecodeStageDurations,
+    /// Hardware decode backend reported by the media decode boundary.
+    #[serde(default)]
+    pub hw_accel_backend: HwAccelBackend,
+    /// Whether the media decode boundary actively used hardware decode.
+    #[serde(default)]
+    pub hardware_decode_active: bool,
+    /// Whether decoded frames stayed GPU-resident through the media boundary.
+    #[serde(default)]
+    pub zero_copy_active: bool,
+    /// Residency reported by the active preview decode path.
+    #[serde(default)]
+    pub decoded_frame_residency: DecodedFrameResidency,
+    /// Native GPU frame handle family reported by hardware decode, if any.
+    #[serde(default)]
+    pub gpu_frame_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    /// Whether renderer import for the native decoded frame is ready.
+    #[serde(default)]
+    pub renderer_import_ready: bool,
+    /// Structured reason hardware decode / zero-copy is not active.
+    #[serde(default)]
+    pub hardware_decode_blocker: PreviewHardwareDecodeBlocker,
+    /// Decoder output surface format before preview conversion to CPU RGBA.
+    #[serde(default)]
+    pub decoded_surface_format: DecodedVideoSurfaceFormat,
 }
 
 impl PreviewDecodeDiagnostics {
@@ -500,12 +643,21 @@ impl PreviewDecodeDiagnostics {
             seek_index_available: false,
             seek_index_keyframes: 0,
             seek_index_observed_packets: 0,
+            seek_index_source: PreviewSeekIndexSource::None,
             seek_index_used: false,
             seek_index_anchor_pts: None,
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
             stage_durations: PreviewDecodeStageDurations::default(),
+            hw_accel_backend: HwAccelBackend::None,
+            hardware_decode_active: false,
+            zero_copy_active: false,
+            decoded_frame_residency: DecodedFrameResidency::CpuRgba,
+            gpu_frame_handle_kind: None,
+            renderer_import_ready: false,
+            hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+            decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
         }
     }
 
@@ -641,6 +793,7 @@ impl RgbaFrame {
         self.diagnostics.seek_index_available = diagnostics.available;
         self.diagnostics.seek_index_keyframes = diagnostics.keyframes;
         self.diagnostics.seek_index_observed_packets = diagnostics.observed_packets;
+        self.diagnostics.seek_index_source = diagnostics.source;
         self.diagnostics.seek_index_used = resolution.used_index;
         self.diagnostics.seek_index_anchor_pts = resolution.anchor_pts;
         self
@@ -652,8 +805,29 @@ impl RgbaFrame {
         self
     }
 
+    fn with_hw_accel_probe(mut self, probe: &HwAccelProbe) -> Self {
+        self.diagnostics.hw_accel_backend = probe.selected_backend;
+        self.diagnostics.hardware_decode_active = probe.hardware_decode_active;
+        self.diagnostics.zero_copy_active = probe.zero_copy_active;
+        self.diagnostics.decoded_frame_residency = probe.frame_residency;
+        self.diagnostics.gpu_frame_handle_kind = probe.gpu_frame_handle_kind;
+        self.diagnostics.renderer_import_ready = probe.renderer_import_ready;
+        self.diagnostics.hardware_decode_blocker = PreviewHardwareDecodeBlocker::from_probe(probe);
+        self
+    }
+
+    fn with_decoded_surface_format(mut self, format: DecodedVideoSurfaceFormat) -> Self {
+        self.diagnostics.decoded_surface_format = format;
+        self
+    }
+
     fn with_access_mode(mut self, access_mode: PreviewDecodeAccessMode) -> Self {
         self.diagnostics = self.diagnostics.with_access_mode(access_mode);
+        self
+    }
+
+    fn with_access_policy(mut self, policy: PreviewDecodeAccessPolicy) -> Self {
+        self.diagnostics = self.diagnostics.with_access_policy(policy);
         self
     }
 
@@ -768,6 +942,8 @@ struct PreviewDecodeSession {
     target_height: u32,
     threading_kind: PreviewDecodeThreadingKind,
     threading_count: usize,
+    hw_accel_probe: HwAccelProbe,
+    decoded_surface_format: DecodedVideoSurfaceFormat,
     last_pts: Option<i64>,
     reached_eof: bool,
     playback_ring: PreviewPlaybackRing,
@@ -815,6 +991,7 @@ struct PreviewSeekIndexDiagnostics {
     available: bool,
     keyframes: u32,
     observed_packets: u32,
+    source: PreviewSeekIndexSource,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -827,9 +1004,21 @@ struct PreviewSeekResolution {
 struct PreviewSeekIndex {
     keyframe_pts: Vec<i64>,
     observed_packets: u32,
+    source: PreviewSeekIndexSource,
 }
 
 impl PreviewSeekIndex {
+    fn from_probe_keyframes(mut keyframe_pts: Vec<i64>) -> Self {
+        keyframe_pts.sort_unstable();
+        keyframe_pts.dedup();
+        let source = if keyframe_pts.is_empty() {
+            PreviewSeekIndexSource::None
+        } else {
+            PreviewSeekIndexSource::ProbeBacked
+        };
+        Self { keyframe_pts, observed_packets: 0, source }
+    }
+
     fn observe_packet(&mut self, packet: &ffmpeg::Packet) {
         self.observed_packets = self.observed_packets.saturating_add(1);
         if !packet.is_key() {
@@ -838,9 +1027,19 @@ impl PreviewSeekIndex {
         let Some(pts) = packet.pts().or_else(|| packet.dts()) else {
             return;
         };
+        let inserted = self.insert_keyframe_pts(pts);
+        if inserted && self.source == PreviewSeekIndexSource::None {
+            self.source = PreviewSeekIndexSource::SessionObserved;
+        }
+    }
+
+    fn insert_keyframe_pts(&mut self, pts: i64) -> bool {
         match self.keyframe_pts.binary_search(&pts) {
-            Ok(_) => {}
-            Err(index) => self.keyframe_pts.insert(index, pts),
+            Ok(_) => false,
+            Err(index) => {
+                self.keyframe_pts.insert(index, pts);
+                true
+            }
         }
     }
 
@@ -852,13 +1051,108 @@ impl PreviewSeekIndex {
         }
     }
 
+    fn keyframe_after(&self, target_pts: i64) -> Option<i64> {
+        match self.keyframe_pts.binary_search(&target_pts) {
+            Ok(index) => self.keyframe_pts.get(index + 1).copied(),
+            Err(index) => self.keyframe_pts.get(index).copied(),
+        }
+    }
+
     fn diagnostics(&self) -> PreviewSeekIndexDiagnostics {
         PreviewSeekIndexDiagnostics {
             available: !self.keyframe_pts.is_empty(),
             keyframes: self.keyframe_pts.len().min(u32::MAX as usize) as u32,
             observed_packets: self.observed_packets,
+            source: self.source,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PreviewSeekIndexCacheEntry {
+    path: PathBuf,
+    fingerprint: PreviewFileFingerprint,
+    stream_index: usize,
+    keyframe_pts: Vec<i64>,
+}
+
+static PREVIEW_SEEK_INDEX_CACHE: OnceLock<Mutex<VecDeque<PreviewSeekIndexCacheEntry>>> =
+    OnceLock::new();
+
+fn preview_seek_index_cache() -> &'static Mutex<VecDeque<PreviewSeekIndexCacheEntry>> {
+    PREVIEW_SEEK_INDEX_CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn preview_seek_index_cache_get(
+    path: &Path,
+    fingerprint: PreviewFileFingerprint,
+    stream_index: usize,
+) -> Option<PreviewSeekIndex> {
+    let mut cache = preview_seek_index_cache().lock().ok()?;
+    let position = cache.iter().position(|entry| {
+        entry.path == path && entry.fingerprint == fingerprint && entry.stream_index == stream_index
+    })?;
+    let entry = cache.remove(position)?;
+    let seek_index = PreviewSeekIndex::from_probe_keyframes(entry.keyframe_pts.clone());
+    cache.push_front(entry);
+    Some(seek_index)
+}
+
+fn preview_seek_index_cache_put(
+    path: &Path,
+    fingerprint: PreviewFileFingerprint,
+    stream_index: usize,
+    keyframe_pts: &[i64],
+) {
+    if keyframe_pts.is_empty() {
+        return;
+    }
+    let Ok(mut cache) = preview_seek_index_cache().lock() else {
+        return;
+    };
+    if let Some(position) = cache.iter().position(|entry| {
+        entry.path == path && entry.fingerprint == fingerprint && entry.stream_index == stream_index
+    }) {
+        cache.remove(position);
+    }
+    cache.push_front(PreviewSeekIndexCacheEntry {
+        path: path.to_path_buf(),
+        fingerprint,
+        stream_index,
+        keyframe_pts: keyframe_pts.to_vec(),
+    });
+    while cache.len() > PREVIEW_SEEK_INDEX_CACHE_CAPACITY {
+        cache.pop_back();
+    }
+}
+
+fn preview_seek_index_from_stream(stream: &ffmpeg::format::stream::Stream<'_>) -> PreviewSeekIndex {
+    let stream_ptr = unsafe { stream.as_ptr() };
+    if stream_ptr.is_null() {
+        return PreviewSeekIndex::default();
+    }
+    let entry_count = unsafe { ffmpeg::ffi::avformat_index_get_entries_count(stream_ptr) };
+    if entry_count <= 0 {
+        return PreviewSeekIndex::default();
+    }
+
+    let mut keyframe_pts = Vec::with_capacity(entry_count as usize);
+    for entry_index in 0..entry_count {
+        let entry_ptr =
+            unsafe { ffmpeg::ffi::avformat_index_get_entry(stream_ptr.cast_mut(), entry_index) };
+        if entry_ptr.is_null() {
+            continue;
+        }
+        let entry = unsafe { &*entry_ptr };
+        if entry.timestamp == ffmpeg::ffi::AV_NOPTS_VALUE {
+            continue;
+        }
+        if entry.flags() & ffmpeg::ffi::AVINDEX_KEYFRAME == 0 {
+            continue;
+        }
+        keyframe_pts.push(entry.timestamp);
+    }
+    PreviewSeekIndex::from_probe_keyframes(keyframe_pts)
 }
 
 struct PreviewPlaybackRingEntry {
@@ -974,15 +1268,30 @@ impl PreviewDecodeSession {
         max_height: Option<u32>,
         backend: PreviewDecodeBackend,
     ) -> Result<Self> {
-        let (stream_index, parameters, stream_tb, stream_rate) = {
+        let (stream_index, parameters, stream_tb, stream_rate, seek_index) = {
             let stream = input.streams().best(ffmpeg::media::Type::Video).ok_or_else(|| {
                 MondrianError::UnsupportedFormat { format: "no video stream".to_string() }
             })?;
+            let stream_index = stream.index();
+            let seek_index = preview_seek_index_cache_get(path, fingerprint, stream_index)
+                .unwrap_or_else(|| {
+                    let seek_index = preview_seek_index_from_stream(&stream);
+                    if seek_index.source == PreviewSeekIndexSource::ProbeBacked {
+                        preview_seek_index_cache_put(
+                            path,
+                            fingerprint,
+                            stream_index,
+                            &seek_index.keyframe_pts,
+                        );
+                    }
+                    seek_index
+                });
             (
-                stream.index(),
+                stream_index,
                 stream.parameters(),
                 stream.time_base(),
                 stream.rate(),
+                seek_index,
             )
         };
 
@@ -1006,6 +1315,8 @@ impl PreviewDecodeSession {
         let active_threading = decoder.threading();
         let threading_kind = PreviewDecodeThreadingKind::from_ffmpeg(active_threading.kind);
         let threading_count = active_threading.count;
+        let hw_accel_probe = HwAccelBackend::probe();
+        let decoded_surface_format = decoded_surface_format_from_pixel(decoder.format());
 
         let (target_width, target_height) =
             fit_target_size(decoder.width(), decoder.height(), max_width, max_height);
@@ -1045,10 +1356,12 @@ impl PreviewDecodeSession {
             target_height,
             threading_kind,
             threading_count,
+            hw_accel_probe,
+            decoded_surface_format,
             last_pts: None,
             reached_eof: false,
             playback_ring: PreviewPlaybackRing::new(PREVIEW_PLAYBACK_SESSION_RING_CAPACITY),
-            seek_index: PreviewSeekIndex::default(),
+            seek_index,
         })
     }
 
@@ -1076,8 +1389,12 @@ impl PreviewDecodeSession {
         if should_cancel() {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
-        let policy = PreviewDecodeAccessPolicy::for_access_mode(access_mode);
         let target_pts = timestamp_to_stream_pts(timestamp_secs, self.stream_tb);
+        let policy = PreviewDecodeAccessPolicy::for_access_mode(access_mode).adapt_for_request(
+            &self.seek_index,
+            target_pts,
+            self.frame_duration_pts,
+        );
 
         let cache_lookup_started_at = Instant::now();
         if policy.use_playback_ring {
@@ -1087,7 +1404,7 @@ impl PreviewDecodeSession {
                 }
                 return Ok(PreviewDecodeOutcome::Frame(
                     hit.into_playback_ring_hit(cache_lookup_started_at.elapsed())
-                        .with_seek_strategy(policy.seek_strategy)
+                        .with_access_policy(policy)
                         .with_seek_index_diagnostics(
                             self.seek_index.diagnostics(),
                             PreviewSeekResolution::default(),
@@ -1095,7 +1412,9 @@ impl PreviewDecodeSession {
                         .with_stage_durations(PreviewDecodeStageDurations {
                             cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                             ..PreviewDecodeStageDurations::default()
-                        }),
+                        })
+                        .with_hw_accel_probe(&self.hw_accel_probe)
+                        .with_decoded_surface_format(self.decoded_surface_format),
                 ));
             }
         }
@@ -1116,7 +1435,7 @@ impl PreviewDecodeSession {
             return Ok(PreviewDecodeOutcome::Frame(
                 hit.frame
                     .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
-                    .with_seek_strategy(policy.seek_strategy)
+                    .with_access_policy(policy)
                     .with_seek_index_diagnostics(
                         self.seek_index.diagnostics(),
                         PreviewSeekResolution::default(),
@@ -1124,7 +1443,9 @@ impl PreviewDecodeSession {
                     .with_stage_durations(PreviewDecodeStageDurations {
                         cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                         ..PreviewDecodeStageDurations::default()
-                    }),
+                    })
+                    .with_hw_accel_probe(&self.hw_accel_probe)
+                    .with_decoded_surface_format(self.decoded_surface_format),
             ));
         }
         let cache_lookup_us = duration_us(cache_lookup_started_at.elapsed());
@@ -1184,10 +1505,12 @@ impl PreviewDecodeSession {
                         ..PreviewDecodeStageDurations::default()
                     })
                     .with_decode_work(seek_performed, result.decoded_frame_count)
-                    .with_seek_strategy(policy.seek_strategy)
+                    .with_access_policy(policy)
                     .with_forward_reused(should_continue_forward)
                     .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
-                    .with_threading(self.threading_kind, self.threading_count),
+                    .with_threading(self.threading_kind, self.threading_count)
+                    .with_hw_accel_probe(&self.hw_accel_probe)
+                    .with_decoded_surface_format(self.decoded_surface_format),
             ));
         }
 
@@ -1934,6 +2257,20 @@ fn fit_target_size(
     (out_w, out_h)
 }
 
+fn decoded_surface_format_from_pixel(
+    pixel: ffmpeg::util::format::pixel::Pixel,
+) -> DecodedVideoSurfaceFormat {
+    match pixel {
+        ffmpeg::util::format::pixel::Pixel::NV12 => DecodedVideoSurfaceFormat::Nv12,
+        ffmpeg::util::format::pixel::Pixel::P010LE => DecodedVideoSurfaceFormat::P010,
+        ffmpeg::util::format::pixel::Pixel::YUV420P => DecodedVideoSurfaceFormat::Yuv420p,
+        ffmpeg::util::format::pixel::Pixel::YUV420P10LE => DecodedVideoSurfaceFormat::Yuv420p10le,
+        ffmpeg::util::format::pixel::Pixel::RGBA => DecodedVideoSurfaceFormat::Rgba8,
+        ffmpeg::util::format::pixel::Pixel::BGRA => DecodedVideoSurfaceFormat::Bgra8,
+        _ => DecodedVideoSurfaceFormat::Other,
+    }
+}
+
 fn timestamp_to_stream_pts(timestamp_secs: f64, stream_tb: ffmpeg::Rational) -> i64 {
     if stream_tb.denominator() == 0 {
         return 0;
@@ -2027,20 +2364,24 @@ fn convert_decoded_to_rgba(
 mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        decode_preview_rgba_scaled_cancellable, duration_us, preview_cache_get,
-        preview_cache_put_with_fingerprint,
-        preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, PreviewDecodeAccessMode,
-        PreviewDecodeAccessPolicy, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
-        PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-        PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewPlaybackRing, PreviewSeekIndex,
-        PreviewSeekIndexDiagnostics, PreviewSeekResolution, RgbaFrame,
-        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        decode_preview_rgba_scaled_cancellable, decoded_surface_format_from_pixel, duration_us,
+        preview_cache_get, preview_cache_put_with_fingerprint,
+        preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
+        preview_seek_index_cache_put, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
+        PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest,
+        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+        PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewPlaybackRing,
+        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
+        PreviewSeekResolution, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
     };
+    use crate::decoder::{DecodedFrameResidency, DecodedVideoSurfaceFormat, HwAccelBackend};
     use ffmpeg_next as ffmpeg;
     use serde::Serialize;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -2250,6 +2591,40 @@ mod tests {
     }
 
     #[test]
+    fn preview_decode_access_policy_adapts_scrub_budget_from_seek_index() {
+        let frame_duration_pts = 10;
+        let scrub =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+        let playback =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
+        let probe_index = PreviewSeekIndex::from_probe_keyframes(vec![0, 300, 600]);
+
+        let close_scrub = scrub.adapt_for_request(&probe_index, 40, frame_duration_pts);
+        assert_eq!(
+            close_scrub.forward_decode_budget_frames,
+            PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES
+        );
+
+        let near_next_keyframe_scrub =
+            scrub.adapt_for_request(&probe_index, 290, frame_duration_pts);
+        assert_eq!(near_next_keyframe_scrub.forward_decode_budget_frames, 33);
+
+        let unindexed_scrub =
+            scrub.adapt_for_request(&PreviewSeekIndex::default(), 290, frame_duration_pts);
+        assert_eq!(
+            unindexed_scrub.forward_decode_budget_frames,
+            PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES
+        );
+
+        let playback_after_adapt =
+            playback.adapt_for_request(&probe_index, 290, frame_duration_pts);
+        assert_eq!(
+            playback_after_adapt.forward_decode_budget_frames,
+            playback.forward_decode_budget_frames
+        );
+    }
+
+    #[test]
     fn preview_decode_access_policy_forward_reuse_is_mode_specific() {
         let playback =
             PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
@@ -2317,7 +2692,62 @@ mod tests {
         assert_eq!(index.keyframe_at_or_before(1_000), Some(200));
         assert_eq!(
             index.diagnostics(),
-            PreviewSeekIndexDiagnostics { available: true, keyframes: 3, observed_packets: 5 }
+            PreviewSeekIndexDiagnostics {
+                available: true,
+                keyframes: 3,
+                observed_packets: 5,
+                source: PreviewSeekIndexSource::SessionObserved,
+            }
+        );
+    }
+
+    #[test]
+    fn preview_seek_index_can_be_seeded_from_probe_keyframes() {
+        let index = PreviewSeekIndex::from_probe_keyframes(vec![200, 100, 200]);
+
+        assert_eq!(index.keyframe_at_or_before(99), None);
+        assert_eq!(index.keyframe_at_or_before(100), Some(100));
+        assert_eq!(index.keyframe_at_or_before(150), Some(100));
+        assert_eq!(index.keyframe_at_or_before(200), Some(200));
+        assert_eq!(
+            index.diagnostics(),
+            PreviewSeekIndexDiagnostics {
+                available: true,
+                keyframes: 2,
+                observed_packets: 0,
+                source: PreviewSeekIndexSource::ProbeBacked,
+            }
+        );
+    }
+
+    #[test]
+    fn preview_seek_index_cache_is_keyed_by_path_fingerprint_and_stream() {
+        let path = Path::new("cache-keyed-video.mov");
+        let fingerprint = PreviewFileFingerprint {
+            len: Some(10),
+            modified_secs: Some(20),
+            modified_nanos: Some(30),
+        };
+
+        preview_seek_index_cache_put(path, fingerprint, 1, &[300, 100, 300]);
+
+        assert!(preview_seek_index_cache_get(path, fingerprint, 0).is_none());
+        assert!(
+            preview_seek_index_cache_get(Path::new("other-video.mov"), fingerprint, 1).is_none()
+        );
+
+        let index = preview_seek_index_cache_get(path, fingerprint, 1)
+            .expect("probe-backed seek index should round-trip through cache");
+        assert_eq!(index.keyframe_at_or_before(250), Some(100));
+        assert_eq!(index.keyframe_at_or_before(400), Some(300));
+        assert_eq!(
+            index.diagnostics(),
+            PreviewSeekIndexDiagnostics {
+                available: true,
+                keyframes: 2,
+                observed_packets: 0,
+                source: PreviewSeekIndexSource::ProbeBacked,
+            }
         );
     }
 
@@ -2330,6 +2760,7 @@ mod tests {
                     available: true,
                     keyframes: 4,
                     observed_packets: 12,
+                    source: PreviewSeekIndexSource::ProbeBacked,
                 },
                 PreviewSeekResolution { used_index: true, anchor_pts: Some(240) },
             );
@@ -2357,8 +2788,60 @@ mod tests {
         );
         assert_eq!(frame.diagnostics.seek_index_keyframes, 4);
         assert_eq!(frame.diagnostics.seek_index_observed_packets, 12);
+        assert_eq!(
+            frame.diagnostics.seek_index_source,
+            PreviewSeekIndexSource::ProbeBacked
+        );
         assert!(frame.diagnostics.seek_index_used);
         assert_eq!(frame.diagnostics.seek_index_anchor_pts, Some(240));
+    }
+
+    #[test]
+    fn rgba_frame_diagnostics_record_hw_accel_probe_fail_closed() {
+        let probe = HwAccelBackend::probe();
+        let frame = RgbaFrame::new(1, 1, vec![0; 4], PreviewDecodePath::InProcessFfmpegCpuRgba)
+            .with_hw_accel_probe(&probe);
+
+        assert_eq!(frame.diagnostics.hw_accel_backend, HwAccelBackend::None);
+        assert!(!frame.diagnostics.hardware_decode_active);
+        assert!(!frame.diagnostics.zero_copy_active);
+        assert_eq!(
+            frame.diagnostics.decoded_frame_residency,
+            DecodedFrameResidency::CpuRgba
+        );
+        assert_eq!(frame.diagnostics.gpu_frame_handle_kind, None);
+        assert!(!frame.diagnostics.renderer_import_ready);
+        assert_eq!(
+            frame.diagnostics.hardware_decode_blocker,
+            PreviewHardwareDecodeBlocker::TextureResidencyNotConnected
+        );
+    }
+
+    #[test]
+    fn decoded_surface_format_maps_native_yuv_candidates() {
+        assert_eq!(
+            decoded_surface_format_from_pixel(ffmpeg::util::format::pixel::Pixel::NV12),
+            DecodedVideoSurfaceFormat::Nv12
+        );
+        assert_eq!(
+            decoded_surface_format_from_pixel(ffmpeg::util::format::pixel::Pixel::P010LE),
+            DecodedVideoSurfaceFormat::P010
+        );
+        assert_eq!(
+            decoded_surface_format_from_pixel(ffmpeg::util::format::pixel::Pixel::YUV420P10LE),
+            DecodedVideoSurfaceFormat::Yuv420p10le
+        );
+        assert_eq!(
+            decoded_surface_format_from_pixel(ffmpeg::util::format::pixel::Pixel::RGBA),
+            DecodedVideoSurfaceFormat::Rgba8
+        );
+    }
+
+    #[test]
+    fn percentile_upper_bound_uses_sorted_nearest_rank() {
+        assert_eq!(percentile_upper_bound_us([30, 10, 20].into_iter(), 95), 30);
+        assert_eq!(percentile_upper_bound_us([30, 10, 20].into_iter(), 50), 20);
+        assert_eq!(percentile_upper_bound_us(std::iter::empty(), 95), 0);
     }
 
     #[test]
@@ -2717,6 +3200,9 @@ mod tests {
         let max_height = std::env::var("MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT")
             .ok()
             .and_then(|value| value.parse::<u32>().ok());
+        let p95_budget_us = std::env::var("MONDRIAN_PREVIEW_DECODE_P95_BUDGET_US")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
 
         clear_thread_local_preview_decode_session();
         let access_mode = PreviewDecodeAccessMode::PlaybackCursor;
@@ -2774,6 +3260,11 @@ mod tests {
             });
         }
         let wall_us = duration_us(started.elapsed());
+        let p95_us = percentile_upper_bound_us(frames.iter().map(|frame| frame.elapsed_us), 95);
+        let uncached_p95_us = percentile_upper_bound_us(
+            frames.iter().filter(|frame| !frame.cache_hit).map(|frame| frame.elapsed_us),
+            95,
+        );
         let report = PreviewDecodeSequencePerfReport {
             path: path.display().to_string(),
             access_mode: access_mode.as_str(),
@@ -2785,30 +3276,44 @@ mod tests {
             total_us,
             wall_us,
             avg_us: total_us / frame_count as u64,
+            p95_us,
             max_us,
             uncached_frame_count,
             uncached_avg_us: average_us(uncached_total_us, uncached_frame_count),
+            uncached_p95_us,
             uncached_max_us,
+            p95_budget_us,
             total_stage_durations,
             max_frame_stage_durations,
             frames,
         };
         let json = serde_json::to_string(&report).expect("serialize sequence decode perf report");
         eprintln!(
-            "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" access_mode={} frames={} avg_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_max_us={} packet_decode_us={} swscale_us={} rgba_copy_us={}",
+            "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" access_mode={} frames={} avg_us={} p95_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_p95_us={} uncached_max_us={} p95_budget_us={:?} packet_decode_us={} swscale_us={} rgba_copy_us={}",
             report.path,
             report.access_mode,
             report.frame_count,
             report.avg_us,
+            report.p95_us,
             report.max_us,
             report.uncached_frame_count,
             report.uncached_avg_us,
+            report.uncached_p95_us,
             report.uncached_max_us,
+            report.p95_budget_us,
             report.total_stage_durations.packet_decode_us,
             report.total_stage_durations.swscale_us,
             report.total_stage_durations.rgba_copy_us,
         );
         eprintln!("MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_JSON={json}");
+        if let Some(p95_budget_us) = report.p95_budget_us {
+            assert!(
+                report.p95_us <= p95_budget_us,
+                "preview decode p95 {}us exceeded budget {}us",
+                report.p95_us,
+                p95_budget_us
+            );
+        }
         clear_thread_local_preview_decode_session();
     }
 
@@ -2832,6 +3337,17 @@ mod tests {
             rgba_copy_us: lhs.rgba_copy_us.max(rhs.rgba_copy_us),
             external_process_us: lhs.external_process_us.max(rhs.external_process_us),
         }
+    }
+
+    fn percentile_upper_bound_us(samples: impl Iterator<Item = u64>, percentile: usize) -> u64 {
+        let mut samples = samples.collect::<Vec<_>>();
+        if samples.is_empty() {
+            return 0;
+        }
+        samples.sort_unstable();
+        let percentile = percentile.min(100);
+        let rank = samples.len().saturating_mul(percentile).saturating_add(99) / 100;
+        samples[rank.saturating_sub(1).min(samples.len() - 1)]
     }
 
     #[derive(Debug, Serialize)]
@@ -2867,10 +3383,13 @@ mod tests {
         total_us: u64,
         wall_us: u64,
         avg_us: u64,
+        p95_us: u64,
         max_us: u64,
         uncached_frame_count: usize,
         uncached_avg_us: u64,
+        uncached_p95_us: u64,
         uncached_max_us: u64,
+        p95_budget_us: Option<u64>,
         total_stage_durations: PreviewDecodeStageDurations,
         max_frame_stage_durations: PreviewDecodeStageDurations,
         frames: Vec<PreviewDecodeSequenceFrameReport>,

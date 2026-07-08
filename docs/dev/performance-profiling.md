@@ -118,23 +118,45 @@ must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
 should fail before anyone tunes codec threads, proxy thresholds, color, or
 renderer code.
-`preview_decode_report` schema v20 records the media-layer policy contract
+`preview_decode_report` schema v24 records the media-layer policy contract
 observed by each access mode: `forward_reuse_frame_window_max`,
 `forward_decode_budget_frames_max`, and `any_seek_window_ms_max`. A healthy
 `ScrubCursor` sample must have a non-zero `any_seek_window_ms_max`; otherwise
 the report fails with `preview_decode_scrub_cursor_any_seek_window_ms` because
 the UI would be claiming low-latency bounded-any seeking without carrying the
 actual bounded seek window through diagnostics.
+For `ScrubCursor`, `forward_decode_budget_frames_max` is the maximum effective
+per-request budget observed after media adapts the base scrub policy from
+probe-backed/session-observed seek-index evidence. It is not a static constant:
+low values on successful near-keyframe scrub frames are healthy, while budget
+exhaustion counters mean the scheduler needs proxy, hardware decode, or better
+GOP/index evidence rather than more UI patience.
 The same profiles expose session-local seek-index counters:
 `seek_index_available_frames`, `seek_index_used_frames`,
-`seek_index_keyframes_max`, and `seek_index_observed_packets_max`. Slow scrub
-with `seeked_frames > 0` and no `seek_index_available_frames` means the decoder
-is seeking without observed keyframe/GOP evidence and should be improved by
+`seek_index_keyframes_max`, `seek_index_observed_packets_max`,
+`seek_index_probe_backed_frames`, and `seek_index_session_observed_frames`.
+Slow scrub with `seeked_frames > 0` and no `seek_index_available_frames` means
+the decoder is seeking without keyframe/GOP evidence and should be improved by
 index/proxy/hardware-decode work, not by hiding the problem in UI timeouts.
+`seek_index_probe_backed_frames > 0` means media seeded the session from the
+container/probe stream index or the media-layer path/fingerprint/stream cache.
+`seek_index_session_observed_frames > 0` means keyframe anchors were learned
+only after decoding packets; this is useful evidence, but not a substitute for
+fast open-time probe-backed GOP maps on scrub-heavy media.
 `seek_index_available_frames > 0` with low `seek_index_used_frames` means the
 current bounded-any seek window could not use the known anchors; inspect
 `seek_us`, `packet_decode_us`, and the seek-window policy before increasing
 worker counts.
+Access-mode profiles also aggregate the hardware decode contract:
+`hardware_decode_active_frames`, `zero_copy_active_frames`,
+`gpu_texture_resident_frames`, `decoded_nv12_surface_frames`,
+`decoded_p010_surface_frames`, `renderer_import_ready_frames`, and
+`hardware_decode_texture_residency_blocker_frames`. For current alpha builds, a
+healthy honest CPU fallback will usually show zero hardware/zero-copy frames,
+non-zero texture-residency blocker frames, and possibly NV12/P010 surface
+candidate counts. Do not interpret NV12/P010 candidates as hardware playback;
+they only identify sources that are good targets for the native GPU residency
+path.
 Cancellation counters are also split inside each access-mode profile; use those
 fields to identify whether obsolete, prefetch-deadline,
 prefetch-preempted-by-current, still-preempted-by-realtime-current, shutdown,
@@ -148,10 +170,13 @@ from the active sequence frame duration, with conservative min/max bounds, so
 slow playback at 24 fps and 60 fps playback are judged against different
 budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
 decode/drop policy, not as a reason to increase speculative prefetch.
-`preview_decode_report` schema v20 also includes `playback_schedule`, the
+`preview_decode_report` schema v24 also includes `playback_schedule`, the
 app-owned playback-clock contract used by the scheduler. It records the last
 current-frame deadline budget, the dynamic forward-prefetch horizon/window, and
-invalid frame-rate counters. Checks
+invalid frame-rate counters. It also records `current_decode_decisions`,
+`current_drop_late_decisions`, and
+`current_proxy_or_hardware_recommended_decisions` so playback can be analyzed as
+a clock-driven scheduler instead of a best-effort decode queue. Checks
 `preview_decode_playback_deadline_invalid_frame_rate` and
 `preview_decode_prefetch_window_invalid_frame_rate` warn when a sequence frame
 rate prevents playback deadlines or prefetch cache warming from being derived.
@@ -173,6 +198,12 @@ non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 scrub path. The smoke fails closed when either `ScrubCursor` or
 `RandomAccessStillFrame` has no successful profile samples; a profile schema
 without exercised samples is not acceptable coverage.
+For real 4K HEVC/HDR decode fixtures, run the ignored
+`preview_decode_fixture_sequence_perf_smoke` with
+`MONDRIAN_PREVIEW_DECODE_FIXTURE`, `MONDRIAN_PREVIEW_DECODE_SEQUENCE_FRAMES`,
+and `MONDRIAN_PREVIEW_DECODE_P95_BUDGET_US`. The JSON report includes
+`p95_us` and `uncached_p95_us`; when the budget variable is set, the test fails
+if `p95_us` exceeds that gate.
 `preview_media_external_access_mode_smoke` runs the same access-mode probe and
 gates against a caller-supplied real media file via
 `MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH`. Use it for 4K HEVC/HDR, camera originals,

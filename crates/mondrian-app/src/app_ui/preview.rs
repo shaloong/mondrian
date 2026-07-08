@@ -21,12 +21,15 @@ use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
 use mondrian_core::MondrianError;
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
+#[cfg(test)]
+use mondrian_media::HwAccelBackend;
 use mondrian_media::{
-    decode_preview_rgba_scaled_cancellable, preview_decode_cpu_budget, PreviewDecodeAccessMode,
-    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
-    PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueSummary,
+    decode_preview_rgba_scaled_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
+    DecodedVideoSurfaceFormat, PreviewDecodeAccessMode, PreviewDecodeCpuBudget,
+    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest,
+    PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+    PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewSeekIndexSource,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -1141,6 +1144,8 @@ impl AppUiPreviewService {
             }
             MediaPreviewCancelReason::PlaybackDeadline => {
                 bump(&self.metrics.decode_canceled_playback_deadline_jobs);
+                bump(&self.metrics.playback_current_drop_late_decisions);
+                bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
             }
             MediaPreviewCancelReason::PrefetchPreemptedByCurrent => {
                 bump(&self.metrics.decode_canceled_prefetch_preempted_jobs);
@@ -1239,6 +1244,12 @@ impl AppUiPreviewService {
                 .metrics
                 .playback_current_deadline_missing_frame_rate
                 .get(),
+            current_decode_decisions: self.metrics.playback_current_decode_decisions.get(),
+            current_drop_late_decisions: self.metrics.playback_current_drop_late_decisions.get(),
+            current_proxy_or_hardware_recommended_decisions: self
+                .metrics
+                .playback_current_proxy_or_hardware_recommended_decisions
+                .get(),
             forward_prefetch_horizon_us: MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US,
             last_forward_prefetch_window_frames: self
                 .metrics
@@ -1262,8 +1273,12 @@ impl AppUiPreviewService {
             Some(budget_us) => {
                 self.metrics.playback_current_deadline_budget_us.set(Some(budget_us));
                 bump(&self.metrics.playback_current_deadline_assignments);
+                bump(&self.metrics.playback_current_decode_decisions);
             }
-            None => bump(&self.metrics.playback_current_deadline_missing_frame_rate),
+            None => {
+                bump(&self.metrics.playback_current_deadline_missing_frame_rate);
+                bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
+            }
         }
     }
 
@@ -1636,6 +1651,12 @@ pub struct AppUiPreviewPlaybackScheduleDiagnostics {
     pub current_deadline_assignments: u64,
     /// Current playback requests whose frame rate could not produce a valid deadline.
     pub current_deadline_missing_frame_rate: u64,
+    /// Current playback frames admitted for decode under the playback clock.
+    pub current_decode_decisions: u64,
+    /// Current playback frames dropped because their display deadline was missed.
+    pub current_drop_late_decisions: u64,
+    /// Current playback frames that should drive proxy or hardware-decode work.
+    pub current_proxy_or_hardware_recommended_decisions: u64,
     /// Wall-clock horizon used to derive the forward prefetch window.
     pub forward_prefetch_horizon_us: u64,
     /// Most recent forward prefetch window derived from sequence frame rate.
@@ -2212,6 +2233,24 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub seek_index_keyframes_max: u64,
     /// Largest video-packet observation count used to build session-local seek-index evidence.
     pub seek_index_observed_packets_max: u64,
+    /// Decode results whose keyframe index was seeded from container/probe metadata.
+    pub seek_index_probe_backed_frames: u64,
+    /// Decode results whose keyframe index was learned from packets decoded in-session.
+    pub seek_index_session_observed_frames: u64,
+    /// Decode results that reported active hardware decode at the media boundary.
+    pub hardware_decode_active_frames: u64,
+    /// Decode results that reported zero-copy decoded-frame residency.
+    pub zero_copy_active_frames: u64,
+    /// Decode results whose media frame residency was GPU texture backed.
+    pub gpu_texture_resident_frames: u64,
+    /// Decode results whose source decoder surface was NV12.
+    pub decoded_nv12_surface_frames: u64,
+    /// Decode results whose source decoder surface was P010.
+    pub decoded_p010_surface_frames: u64,
+    /// Decode results whose native decoded-frame renderer import was ready.
+    pub renderer_import_ready_frames: u64,
+    /// Decode results blocked because hardware texture residency is not connected.
+    pub hardware_decode_texture_residency_blocker_frames: u64,
     /// Total decoded frames consumed by this access mode.
     pub decoded_frame_count: u64,
     /// Largest decoded-frame count consumed by one request in this access mode.
@@ -2299,6 +2338,47 @@ impl AppUiPreviewDecodeAccessModeProfile {
         self.seek_index_observed_packets_max = self
             .seek_index_observed_packets_max
             .max(u64::from(diagnostics.seek_index_observed_packets));
+        match diagnostics.seek_index_source {
+            PreviewSeekIndexSource::None => {}
+            PreviewSeekIndexSource::ProbeBacked => {
+                self.seek_index_probe_backed_frames =
+                    self.seek_index_probe_backed_frames.saturating_add(1);
+            }
+            PreviewSeekIndexSource::SessionObserved => {
+                self.seek_index_session_observed_frames =
+                    self.seek_index_session_observed_frames.saturating_add(1);
+            }
+        }
+        if diagnostics.hardware_decode_active {
+            self.hardware_decode_active_frames =
+                self.hardware_decode_active_frames.saturating_add(1);
+        }
+        if diagnostics.zero_copy_active {
+            self.zero_copy_active_frames = self.zero_copy_active_frames.saturating_add(1);
+        }
+        if diagnostics.decoded_frame_residency == DecodedFrameResidency::GpuTexture {
+            self.gpu_texture_resident_frames = self.gpu_texture_resident_frames.saturating_add(1);
+        }
+        match diagnostics.decoded_surface_format {
+            DecodedVideoSurfaceFormat::Nv12 => {
+                self.decoded_nv12_surface_frames =
+                    self.decoded_nv12_surface_frames.saturating_add(1);
+            }
+            DecodedVideoSurfaceFormat::P010 => {
+                self.decoded_p010_surface_frames =
+                    self.decoded_p010_surface_frames.saturating_add(1);
+            }
+            _ => {}
+        }
+        if diagnostics.renderer_import_ready {
+            self.renderer_import_ready_frames = self.renderer_import_ready_frames.saturating_add(1);
+        }
+        if diagnostics.hardware_decode_blocker
+            == PreviewHardwareDecodeBlocker::TextureResidencyNotConnected
+        {
+            self.hardware_decode_texture_residency_blocker_frames =
+                self.hardware_decode_texture_residency_blocker_frames.saturating_add(1);
+        }
         let decoded_frame_count = u64::from(diagnostics.decoded_frame_count);
         self.decoded_frame_count = self.decoded_frame_count.saturating_add(decoded_frame_count);
         self.max_decoded_frame_count = self.max_decoded_frame_count.max(decoded_frame_count);
@@ -2637,7 +2717,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 20;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 24;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3670,14 +3750,16 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_scrub_cursor_without_seek_index_evidence",
             format!(
-                "scrub_frames={} seeked_frames={} max_duration_us={} slow_frame_budget_us={} seek_index_available_frames=0 seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={}",
+                "scrub_frames={} seeked_frames={} max_duration_us={} slow_frame_budget_us={} seek_index_available_frames=0 seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={}",
                 scrub_profile.frames,
                 scrub_profile.seeked_frames,
                 scrub_profile.max_duration_us,
                 summary.slow_frame_budget_us,
                 scrub_profile.seek_index_used_frames,
                 scrub_profile.seek_index_keyframes_max,
-                scrub_profile.seek_index_observed_packets_max
+                scrub_profile.seek_index_observed_packets_max,
+                scrub_profile.seek_index_probe_backed_frames,
+                scrub_profile.seek_index_session_observed_frames
             ),
             "build_preview_seek_index_evidence",
             "Collect keyframe/GOP seek evidence for scrub sessions before widening seek windows or adding decode workers.",
@@ -3696,7 +3778,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -3719,6 +3801,15 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.seek_index_used_frames,
                 profile.seek_index_keyframes_max,
                 profile.seek_index_observed_packets_max,
+                profile.seek_index_probe_backed_frames,
+                profile.seek_index_session_observed_frames,
+                profile.hardware_decode_active_frames,
+                profile.zero_copy_active_frames,
+                profile.gpu_texture_resident_frames,
+                profile.decoded_nv12_surface_frames,
+                profile.decoded_p010_surface_frames,
+                profile.renderer_import_ready_frames,
+                profile.hardware_decode_texture_residency_blocker_frames,
                 profile.decoded_frame_count,
                 profile.max_decoded_frame_count,
                 profile.max_frame_stage_durations.session_open_us,
@@ -4033,7 +4124,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_playback_deadline_cancellations",
             format!(
-                "canceled_playback_deadline_jobs={} playback_cursor_deadline_jobs={} playback_frames={} playback_queue_wait_max_us={} playback_max_duration_us={}",
+                "canceled_playback_deadline_jobs={} playback_cursor_deadline_jobs={} playback_frames={} playback_queue_wait_max_us={} playback_max_duration_us={} current_decode_decisions={} current_drop_late_decisions={} current_proxy_or_hardware_recommended_decisions={}",
                 summary.canceled_playback_deadline_jobs,
                 summary
                     .access_mode_profiles
@@ -4041,7 +4132,12 @@ fn push_preview_decode_root_causes_and_actions(
                     .canceled_playback_deadline_jobs,
                 summary.playback_cursor_frames,
                 summary.access_mode_profiles.playback_cursor.queue_wait_max_us,
-                summary.access_mode_profiles.playback_cursor.max_duration_us
+                summary.access_mode_profiles.playback_cursor.max_duration_us,
+                summary.playback_schedule.current_decode_decisions,
+                summary.playback_schedule.current_drop_late_decisions,
+                summary
+                    .playback_schedule
+                    .current_proxy_or_hardware_recommended_decisions
             ),
             "drop_late_playback_frames_or_use_proxy_hardware_decode",
             "Playback current frames that miss their display deadline should be dropped or served by proxy/hardware decode rather than decoded after they are obsolete.",
@@ -6606,6 +6702,9 @@ struct AppUiPreviewMetrics {
     playback_current_deadline_budget_us: Cell<Option<u64>>,
     playback_current_deadline_assignments: Cell<u64>,
     playback_current_deadline_missing_frame_rate: Cell<u64>,
+    playback_current_decode_decisions: Cell<u64>,
+    playback_current_drop_late_decisions: Cell<u64>,
+    playback_current_proxy_or_hardware_recommended_decisions: Cell<u64>,
     playback_forward_prefetch_window_frames: Cell<Option<usize>>,
     playback_forward_prefetch_window_evaluations: Cell<u64>,
     playback_forward_prefetch_invalid_frame_rate: Cell<u64>,
@@ -8157,6 +8256,7 @@ mod tests {
                 seek_index_available: true,
                 seek_index_keyframes: 3,
                 seek_index_observed_packets: 90,
+                seek_index_source: PreviewSeekIndexSource::ProbeBacked,
                 seek_index_used: true,
                 seek_index_anchor_pts: Some(120),
                 decoded_frame_count: 48,
@@ -8171,6 +8271,14 @@ mod tests {
                     rgba_copy_us: 30,
                     external_process_us: 0,
                 },
+                hw_accel_backend: HwAccelBackend::None,
+                hardware_decode_active: false,
+                zero_copy_active: false,
+                decoded_frame_residency: DecodedFrameResidency::CpuRgba,
+                gpu_frame_handle_kind: None,
+                renderer_import_ready: false,
+                hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+                decoded_surface_format: DecodedVideoSurfaceFormat::P010,
             },
             1_200,
         );
@@ -8192,6 +8300,7 @@ mod tests {
                 seek_index_available: false,
                 seek_index_keyframes: 0,
                 seek_index_observed_packets: 0,
+                seek_index_source: PreviewSeekIndexSource::None,
                 seek_index_used: false,
                 seek_index_anchor_pts: None,
                 decoded_frame_count: 0,
@@ -8206,6 +8315,14 @@ mod tests {
                     rgba_copy_us: 0,
                     external_process_us: 2_450,
                 },
+                hw_accel_backend: HwAccelBackend::None,
+                hardware_decode_active: false,
+                zero_copy_active: false,
+                decoded_frame_residency: DecodedFrameResidency::CpuRgba,
+                gpu_frame_handle_kind: None,
+                renderer_import_ready: false,
+                hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+                decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
             },
             400,
         );
@@ -8227,6 +8344,7 @@ mod tests {
                 seek_index_available: true,
                 seek_index_keyframes: 2,
                 seek_index_observed_packets: 40,
+                seek_index_source: PreviewSeekIndexSource::SessionObserved,
                 seek_index_used: false,
                 seek_index_anchor_pts: None,
                 decoded_frame_count: 0,
@@ -8241,6 +8359,14 @@ mod tests {
                     rgba_copy_us: 0,
                     external_process_us: 0,
                 },
+                hw_accel_backend: HwAccelBackend::None,
+                hardware_decode_active: false,
+                zero_copy_active: false,
+                decoded_frame_residency: DecodedFrameResidency::CpuRgba,
+                gpu_frame_handle_kind: None,
+                renderer_import_ready: false,
+                hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+                decoded_surface_format: DecodedVideoSurfaceFormat::Nv12,
             },
             20,
         );
@@ -8262,6 +8388,7 @@ mod tests {
                 seek_index_available: true,
                 seek_index_keyframes: 4,
                 seek_index_observed_packets: 128,
+                seek_index_source: PreviewSeekIndexSource::ProbeBacked,
                 seek_index_used: false,
                 seek_index_anchor_pts: None,
                 decoded_frame_count: 0,
@@ -8276,6 +8403,14 @@ mod tests {
                     rgba_copy_us: 0,
                     external_process_us: 0,
                 },
+                hw_accel_backend: HwAccelBackend::None,
+                hardware_decode_active: false,
+                zero_copy_active: false,
+                decoded_frame_residency: DecodedFrameResidency::CpuRgba,
+                gpu_frame_handle_kind: None,
+                renderer_import_ready: false,
+                hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+                decoded_surface_format: DecodedVideoSurfaceFormat::Nv12,
             },
             0,
         );
@@ -8405,6 +8540,18 @@ mod tests {
         assert_eq!(playback_profile.session_opened_frames, 0);
         assert_eq!(playback_profile.forward_reused_frames, 0);
         assert_eq!(playback_profile.seek_index_available_frames, 1);
+        assert_eq!(playback_profile.seek_index_probe_backed_frames, 1);
+        assert_eq!(playback_profile.seek_index_session_observed_frames, 0);
+        assert_eq!(playback_profile.hardware_decode_active_frames, 0);
+        assert_eq!(playback_profile.zero_copy_active_frames, 0);
+        assert_eq!(playback_profile.gpu_texture_resident_frames, 0);
+        assert_eq!(playback_profile.decoded_nv12_surface_frames, 1);
+        assert_eq!(playback_profile.decoded_p010_surface_frames, 0);
+        assert_eq!(playback_profile.renderer_import_ready_frames, 0);
+        assert_eq!(
+            playback_profile.hardware_decode_texture_residency_blocker_frames,
+            2
+        );
         assert_eq!(playback_profile.seek_index_used_frames, 0);
         assert_eq!(playback_profile.seek_index_keyframes_max, 4);
         assert_eq!(playback_profile.seek_index_observed_packets_max, 128);
@@ -8428,6 +8575,10 @@ mod tests {
         assert_eq!(scrub_profile.session_opened_frames, 1);
         assert_eq!(scrub_profile.forward_reused_frames, 0);
         assert_eq!(scrub_profile.seek_index_available_frames, 1);
+        assert_eq!(scrub_profile.seek_index_probe_backed_frames, 1);
+        assert_eq!(scrub_profile.seek_index_session_observed_frames, 0);
+        assert_eq!(scrub_profile.decoded_nv12_surface_frames, 0);
+        assert_eq!(scrub_profile.decoded_p010_surface_frames, 1);
         assert_eq!(scrub_profile.seek_index_used_frames, 1);
         assert_eq!(scrub_profile.seek_index_keyframes_max, 3);
         assert_eq!(scrub_profile.seek_index_observed_packets_max, 90);
@@ -8474,6 +8625,10 @@ mod tests {
         assert_eq!(still_profile.session_reused_frames, 0);
         assert_eq!(still_profile.session_opened_frames, 1);
         assert_eq!(still_profile.seek_index_available_frames, 1);
+        assert_eq!(still_profile.seek_index_probe_backed_frames, 0);
+        assert_eq!(still_profile.seek_index_session_observed_frames, 1);
+        assert_eq!(still_profile.decoded_nv12_surface_frames, 1);
+        assert_eq!(still_profile.decoded_p010_surface_frames, 0);
         assert_eq!(still_profile.seek_index_used_frames, 0);
         assert_eq!(still_profile.seek_index_keyframes_max, 2);
         assert_eq!(still_profile.seek_index_observed_packets_max, 40);
@@ -8562,6 +8717,11 @@ mod tests {
         assert_eq!(diagnostics.decode_canceled_playback_deadline_jobs, 1);
         assert_eq!(diagnostics.decode_canceled_prefetch_deadline_jobs, 0);
         assert_eq!(diagnostics.decode_canceled_obsolete_jobs, 0);
+        assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 1);
+        assert_eq!(
+            diagnostics.playback_schedule.current_proxy_or_hardware_recommended_decisions,
+            1
+        );
         assert_eq!(diagnostics.decode_canceled_playback_cursor_jobs, 1);
         let playback_profile = diagnostics.decode_access_mode_profiles.playback_cursor;
         assert_eq!(playback_profile.canceled_jobs, 1);
@@ -8728,6 +8888,12 @@ mod tests {
         assert_eq!(diagnostics.last_current_deadline_budget_us, Some(33_333));
         assert_eq!(diagnostics.current_deadline_assignments, 1);
         assert_eq!(diagnostics.current_deadline_missing_frame_rate, 0);
+        assert_eq!(diagnostics.current_decode_decisions, 1);
+        assert_eq!(diagnostics.current_drop_late_decisions, 0);
+        assert_eq!(
+            diagnostics.current_proxy_or_hardware_recommended_decisions,
+            0
+        );
         assert_eq!(
             diagnostics.forward_prefetch_horizon_us,
             MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US
@@ -9739,6 +9905,12 @@ mod tests {
                 },
                 ..AppUiPreviewDecodeAccessModeProfiles::default()
             },
+            playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+                current_decode_decisions: 1,
+                current_drop_late_decisions: 1,
+                current_proxy_or_hardware_recommended_decisions: 1,
+                ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            },
             ..AppUiPreviewDiagnostics::default()
         };
 
@@ -9755,6 +9927,9 @@ mod tests {
             root.code == "preview_decode_playback_deadline_cancellations"
                 && root.evidence.contains("canceled_playback_deadline_jobs=1")
                 && root.evidence.contains("playback_cursor_deadline_jobs=1")
+                && root.evidence.contains("current_decode_decisions=1")
+                && root.evidence.contains("current_drop_late_decisions=1")
+                && root.evidence.contains("current_proxy_or_hardware_recommended_decisions=1")
         }));
         assert!(report.actions.iter().any(|action| {
             action.code == "drop_late_playback_frames_or_use_proxy_hardware_decode"

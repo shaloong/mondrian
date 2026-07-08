@@ -19,7 +19,10 @@ pub use audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData, ClockRole,
     RealtimeAudioOutput,
 };
-pub use decoder::{DecodedFrameResidency, DecodedGpuFrameHandleKind, HwAccelBackend, HwAccelProbe};
+pub use decoder::{
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend,
+    HwAccelProbe,
+};
 pub use info::{
     AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoColorDetectionMethod,
     VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary,
@@ -35,7 +38,8 @@ pub use preview::{
     set_preview_decode_backend, PreviewDecodeAccessMode, PreviewDecodeBackend,
     PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
     PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
+    PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+    PreviewSeekIndexSource, RgbaFrame,
 };
 pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution, ProxyStatus};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

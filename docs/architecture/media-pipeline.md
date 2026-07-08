@@ -469,10 +469,34 @@ Every `RgbaFrame` returned by the preview decode boundary carries
 `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`), elapsed microseconds, cache-hit
 status, requested access mode, external-process status, CPU-residency evidence,
 seek status, requested seek strategy, session-local seek-index availability and
-anchor-use evidence, decoded frame count, in-process FFmpeg decoder threading
-mode/count, and stage-level wall-clock timings for session open, cache lookup,
-seek, packet/decode, software scaling, RGBA copy, and the experimental
-external-process path.
+source (`None`, `SessionObserved`, or `ProbeBacked`), anchor-use evidence,
+decoded frame count, in-process FFmpeg decoder threading mode/count, and
+stage-level wall-clock timings for session open, cache lookup, seek,
+packet/decode, software scaling, RGBA copy, and the experimental external-process
+path.
+The same diagnostics carry the current hardware decode contract:
+`hw_accel_backend`, `hardware_decode_active`, `zero_copy_active`,
+`decoded_frame_residency`, `gpu_frame_handle_kind`, `renderer_import_ready`, and
+`hardware_decode_blocker`, plus `decoded_surface_format` for the decoder output
+format before CPU RGBA conversion. `Nv12` and `P010` are the primary GPU-native
+YUV/P010 residency candidates; they are media facts, not renderer import claims.
+These fields are fail-closed; until a real
+hardware-frame decoder and renderer import path are connected they must report
+CPU RGBA residency with `TextureResidencyNotConnected` rather than implying
+platform hwaccel is active.
+Preview sessions seed their seek index from FFmpeg's container/probe stream
+index when available, using a small media-layer LRU cache keyed by
+path/fingerprint/video-stream. That first production path gives scrub and still
+decode real keyframe/GOP evidence without a full packet scan before first frame.
+When a container exposes no usable index, sessions continue to learn keyframe
+anchors from decoded packets and report `SessionObserved` instead of pretending
+the source was probe-backed.
+`ScrubCursor` derives its effective forward-decode budget per request from that
+evidence: probe-backed anchors close to the target get a tight budget, missing
+or session-only evidence gets a smaller responsiveness-first budget, and exact
+playback/still requests keep their larger deterministic budget. The budget
+reported in `PreviewDecodeDiagnostics.forward_decode_budget_frames` is the
+effective budget that was actually used for that request.
 App-level preview diagnostics aggregate those fields so playback/perf JSON can
 show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
 single-thread decode-bound, software-scale/copy-bound, worker-queue-bound, or
@@ -543,6 +567,10 @@ an access-mode request and a cancellation predicate. Diagnostics must report
 playback-deadline cancellations separately from prefetch-deadline cancellations
 so late visible frames can drive drop/proxy/hardware-decode work instead of
 being hidden as generic obsolete work.
+Schedule diagnostics also count current playback decode decisions, late-frame
+drop decisions, and proxy/hardware recommendations. Those are app scheduler
+facts, not media decoder facts, and they are how perf tooling distinguishes
+clock-driven playback from best-effort frame extraction.
 `RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
