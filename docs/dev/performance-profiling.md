@@ -204,6 +204,12 @@ the same media key is promoted when it becomes current-frame work. Track this wi
 `queue_evicted_prefetch_jobs`, `queue_canceled_jobs`,
 `queue_promoted_current_jobs`, and `scheduler.skipped_decode_jobs` before tuning
 queue sizes or decode worker counts.
+Playback prefetch depth is frame-rate aware. The scheduler converts a bounded
+wall-clock horizon into sequence frames, so a 60 fps profile may show more
+queued/in-flight prefetch jobs than a 24/25/30 fps profile while still obeying
+the same time horizon and queue cap. `prefetch_skipped_prefetch_backlog` means
+queued plus in-flight prefetch already covers that dynamic window, not a fixed
+two-frame constant.
 The decode performance report also carries worker-transport counters. Treat
 `queue_full_drops` and `worker_disconnected_drops` as hard failures: they mean
 work accepted by scheduler policy did not reach a live preview worker. Treat

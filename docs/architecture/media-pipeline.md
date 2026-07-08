@@ -89,10 +89,14 @@ the app must skip that prefetch pass instead of adding more speculative jobs.
 Diagnostics report these as `prefetch_skipped_current_pending`,
 `prefetch_skipped_worker_busy`, and `prefetch_skipped_prefetch_backlog`. This
 keeps first-frame display and dropped-frame recovery ahead of cache warming on
-slow or long-GOP media. When the prefetch backlog is below the forward window,
-scheduling must top up only the remaining queued-plus-in-flight prefetch job
-budget across the evaluated tracks and nested sequences, not enqueue a full new
-prefetch window for each future frame offset.
+slow or long-GOP media. The configured forward window is derived from a
+wall-clock horizon and the active sequence frame rate, then capped before
+enqueueing; high frame-rate playback warms more timeline frames than 24/25/30
+fps playback without letting speculative work flood the bounded worker queue.
+When the prefetch backlog is below the forward window, scheduling must top up
+only the remaining queued-plus-in-flight prefetch job budget across the
+evaluated tracks and nested sequences, not enqueue a full new prefetch window
+for each future frame offset.
 The app preview service owns worker thread lifetimes. Workers are joined during
 service shutdown after the job queue is closed, and each worker explicitly drops
 its thread-local media decode sessions before exit. Thread-local FFmpeg decoder

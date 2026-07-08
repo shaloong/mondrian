@@ -66,7 +66,9 @@ use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
 const MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY: usize = MEDIA_PREVIEW_CACHE_CAPACITY * 2;
 const VIEWER_PREVIEW_FRAME_CACHE_CAPACITY: usize = 48;
-const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
+const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 80_000;
+const MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES: usize = 1;
+const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 6;
 const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US: u64 = 8_000;
 const MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US: u64 = 50_000;
@@ -5738,8 +5740,12 @@ impl AppUiPreviewService {
         let prefetch_pressure = worker_queue
             .queued_prefetch_jobs
             .saturating_add(worker_activity.in_flight_prefetch_jobs);
-        let prefetch_slots_available =
-            (MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize).saturating_sub(prefetch_pressure);
+        let Some(prefetch_window_frames) =
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+        else {
+            return;
+        };
+        let prefetch_slots_available = prefetch_window_frames.saturating_sub(prefetch_pressure);
         if prefetch_slots_available == 0 {
             bump(&self.metrics.prefetch_skipped_prefetch_backlog);
             return;
@@ -5757,7 +5763,7 @@ impl AppUiPreviewService {
             display_color_space,
         );
         let mut remaining_prefetch_jobs = prefetch_slots_available;
-        for offset in 1..=prefetch_slots_available as i64 {
+        for offset in 1..=prefetch_window_frames as i64 {
             if remaining_prefetch_jobs == 0 {
                 break;
             }
@@ -7014,6 +7020,21 @@ fn media_preview_playback_current_deadline_budget_us(frame_rate: Rational) -> Op
     Some((frame_duration_us as u64).clamp(
         MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US,
         MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US,
+    ))
+}
+
+fn media_preview_forward_prefetch_window_frames(frame_rate: Rational) -> Option<usize> {
+    let fps = frame_rate.to_f64();
+    if !fps.is_finite() || fps <= 0.0 {
+        return None;
+    }
+    let frames = ((MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US as f64 / 1_000_000.0) * fps).round();
+    if !frames.is_finite() || frames <= 0.0 {
+        return None;
+    }
+    Some((frames as usize).clamp(
+        MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+        MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
     ))
 }
 
@@ -11489,8 +11510,11 @@ mod tests {
         state.play();
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let prefetch_window =
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+                .expect("valid sequence frame rate");
 
-        for offset in 0..MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES {
+        for offset in 0..prefetch_window as i64 {
             assert_eq!(
                 service.jobs.enqueue(MediaPreviewJob {
                     key: test_media_key(200 + offset),
@@ -11516,7 +11540,7 @@ mod tests {
         assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 1);
         assert_eq!(
             diagnostics.worker_queue.queued_prefetch_jobs,
-            MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
+            prefetch_window
         );
     }
 
@@ -11527,6 +11551,9 @@ mod tests {
         state.play();
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let prefetch_window =
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+                .expect("valid sequence frame rate");
         let _first = service.worker_activity.begin(
             MediaPreviewWorkerLane::Playback,
             MediaPreviewRequestPriority::Prefetch,
@@ -11548,7 +11575,7 @@ mod tests {
         assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
         assert_eq!(
             diagnostics.worker_activity.in_flight_prefetch_jobs,
-            MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
+            prefetch_window
         );
     }
 
@@ -11559,6 +11586,9 @@ mod tests {
         state.play();
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let prefetch_window =
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+                .expect("valid sequence frame rate");
 
         assert_eq!(
             service.jobs.enqueue(MediaPreviewJob {
@@ -11579,7 +11609,7 @@ mod tests {
         assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
         assert_eq!(
             diagnostics.worker_queue.queued_prefetch_jobs,
-            MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
+            prefetch_window
         );
         assert_eq!(diagnostics.enqueued_jobs, 1);
         service.shutdown();
@@ -11593,6 +11623,9 @@ mod tests {
         state.play();
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let prefetch_window =
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+                .expect("valid sequence frame rate");
         let _prefetch = service.worker_activity.begin(
             MediaPreviewWorkerLane::Playback,
             MediaPreviewRequestPriority::Prefetch,
@@ -11603,9 +11636,15 @@ mod tests {
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
-        assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 1);
+        assert_eq!(
+            diagnostics.worker_queue.queued_prefetch_jobs,
+            prefetch_window.saturating_sub(1)
+        );
         assert_eq!(diagnostics.worker_activity.in_flight_prefetch_jobs, 1);
-        assert_eq!(diagnostics.enqueued_jobs, 1);
+        assert_eq!(
+            diagnostics.enqueued_jobs,
+            prefetch_window.saturating_sub(1) as u64
+        );
         service.shutdown();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -11617,6 +11656,9 @@ mod tests {
         state.play();
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let prefetch_window =
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+                .expect("valid sequence frame rate");
 
         assert_eq!(
             service.jobs.enqueue(MediaPreviewJob {
@@ -11637,7 +11679,7 @@ mod tests {
         assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
         assert_eq!(
             diagnostics.worker_queue.queued_prefetch_jobs,
-            MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
+            prefetch_window
         );
         assert_eq!(
             diagnostics.enqueued_jobs, 1,
@@ -12284,6 +12326,38 @@ mod tests {
         );
         assert_eq!(
             media_preview_playback_current_deadline_budget_us(Rational::new(24, 0)),
+            None
+        );
+    }
+
+    #[test]
+    fn media_preview_forward_prefetch_window_uses_sequence_frame_rate() {
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::FPS_24),
+            Some(2)
+        );
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::FPS_30),
+            Some(2)
+        );
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::FPS_60),
+            Some(5)
+        );
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::new(240, 1)),
+            Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES)
+        );
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::FPS_10),
+            Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES)
+        );
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::new(0, 1)),
+            None
+        );
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::new(24, 0)),
             None
         );
     }
