@@ -5442,7 +5442,11 @@ impl AppUiPreviewService {
             &state.project_settings.color_management,
             display_color_space,
         );
+        let mut remaining_prefetch_jobs = prefetch_slots_available;
         for offset in 1..=prefetch_slots_available as i64 {
+            if remaining_prefetch_jobs == 0 {
+                break;
+            }
             self.schedule_media_prefetch_for_sequence(
                 state,
                 sequence,
@@ -5451,6 +5455,7 @@ impl AppUiPreviewService {
                 target_height,
                 0,
                 color_context.clone(),
+                &mut remaining_prefetch_jobs,
             );
         }
     }
@@ -5464,8 +5469,9 @@ impl AppUiPreviewService {
         target_height: u32,
         depth: usize,
         color_context: ColorContext,
+        remaining_prefetch_jobs: &mut usize,
     ) {
-        if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
+        if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH || *remaining_prefetch_jobs == 0 {
             return;
         }
         let evaluation = evaluate_timeline_render_plan(
@@ -5477,6 +5483,9 @@ impl AppUiPreviewService {
         );
 
         for element in evaluation.elements {
+            if *remaining_prefetch_jobs == 0 {
+                break;
+            }
             match element {
                 TimelineRenderPlanElement::Media(media) => {
                     let Some((key, source_secs)) = self.media_preview_key_for_asset(
@@ -5493,12 +5502,15 @@ impl AppUiPreviewService {
                         continue;
                     };
                     if self.cached_media_frame(&key).is_none() && !self.failed_media_key(&key) {
-                        self.request_media_preview(
+                        let enqueued = self.request_media_preview(
                             key,
                             source_secs,
                             MediaPreviewRequestPriority::Prefetch,
                             PreviewDecodeAccessMode::PlaybackCursor,
                         );
+                        if enqueued {
+                            *remaining_prefetch_jobs = (*remaining_prefetch_jobs).saturating_sub(1);
+                        }
                     }
                 }
                 TimelineRenderPlanElement::NestedSequence(nested) => {
@@ -5516,6 +5528,7 @@ impl AppUiPreviewService {
                             nested_height,
                             depth + 1,
                             nested_context,
+                            remaining_prefetch_jobs,
                         );
                     }
                 }
@@ -5711,7 +5724,7 @@ impl AppUiPreviewService {
         source_secs: f64,
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
-    ) {
+    ) -> bool {
         let generation = self.current_generation.get();
         let should_enqueue_job = match self.scheduler.request(
             key.clone(),
@@ -5750,7 +5763,7 @@ impl AppUiPreviewService {
                     source_frame = key.source_frame,
                     "viewer preview request dropped by backpressure"
                 );
-                return;
+                return false;
             }
             MediaPreviewRequestStatus::DroppedInvalidAccessMode => {
                 tracing::warn!(
@@ -5760,11 +5773,11 @@ impl AppUiPreviewService {
                     access_mode = access_mode.as_str(),
                     "viewer preview request dropped because priority/access-mode pair is invalid"
                 );
-                return;
+                return false;
             }
         };
         if !should_enqueue_job {
-            return;
+            return false;
         }
         let job = MediaPreviewJob {
             key: key.clone(),
@@ -5793,6 +5806,7 @@ impl AppUiPreviewService {
                     add_cell(&self.metrics.queue_canceled_jobs, canceled);
                     self.scheduler.cancel(&evicted_key);
                 }
+                true
             }
             MediaPreviewJobEnqueueStatus::DroppedFull => {
                 bump(&self.metrics.queue_full_drops);
@@ -5804,6 +5818,7 @@ impl AppUiPreviewService {
                     source_frame = key.source_frame,
                     "viewer preview queue full; dropping media preview request"
                 );
+                false
             }
             MediaPreviewJobEnqueueStatus::DroppedInvalidAccessMode => {
                 bump(&self.metrics.queue_invalid_access_mode_drops);
@@ -5815,6 +5830,7 @@ impl AppUiPreviewService {
                     access_mode = access_mode.as_str(),
                     "viewer preview queue rejected invalid priority/access-mode pair"
                 );
+                false
             }
             MediaPreviewJobEnqueueStatus::Closed => {
                 bump(&self.metrics.worker_disconnected_drops);
@@ -5822,6 +5838,7 @@ impl AppUiPreviewService {
                 add_cell(&self.metrics.queue_canceled_jobs, canceled);
                 self.scheduler.cancel(&key);
                 tracing::debug!("viewer preview worker unavailable");
+                false
             }
         }
     }
@@ -6977,6 +6994,43 @@ mod tests {
         state.sequence = Some(sequence);
         state.seek(0);
         (state, asset_id, root)
+    }
+
+    fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
+        ensure_test_ocio_loaded();
+        let root = unique_preview_test_root("mondrian-preview-two-invalid-videos");
+        std::fs::create_dir_all(&root).expect("test root");
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let mut asset_ids = Vec::new();
+        for name in ["bottom.mp4", "top.mp4"] {
+            let media_path = root.join(name);
+            std::fs::write(&media_path, b"not a real video").expect("invalid media");
+            let file_size = std::fs::metadata(&media_path).expect("media metadata").len();
+            let asset_id = library
+                .upsert_media_file_with_info(
+                    &media_path,
+                    rec709_video_media_info(media_path.clone(), file_size),
+                )
+                .expect("insert video asset");
+            asset_ids.push(asset_id);
+        }
+
+        let mut state = AppState::new();
+        state.asset_library = Some(library);
+        let mut sequence = Sequence::new("multi-track media");
+        let tb = sequence.time_base();
+        for (track_index, asset_id) in asset_ids.into_iter().enumerate() {
+            sequence.video_tracks[track_index]
+                .add_clip(Clip::new(
+                    asset_id,
+                    TimeCode::new(0, tb),
+                    TimeCode::new(50, tb),
+                ))
+                .expect("media clip should be insertable");
+        }
+        state.sequence = Some(sequence);
+        state.seek(0);
+        (state, root)
     }
 
     fn state_with_icc_display_policy(color: Color) -> AppState {
@@ -10931,6 +10985,42 @@ mod tests {
             MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
         );
         assert_eq!(diagnostics.enqueued_jobs, 1);
+        service.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let (mut state, root) = state_with_two_invalid_video_assets();
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+
+        assert_eq!(
+            service.jobs.enqueue(MediaPreviewJob {
+                key: test_media_key(400),
+                source_secs: 0.0,
+                generation: 1,
+                priority: MediaPreviewRequestPriority::Prefetch,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                enqueued_at: Instant::now(),
+            }),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
+        assert_eq!(
+            diagnostics.worker_queue.queued_prefetch_jobs,
+            MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES as usize
+        );
+        assert_eq!(
+            diagnostics.enqueued_jobs, 1,
+            "one remaining prefetch slot must admit only one media job even if the next frame has multiple active tracks"
+        );
         service.shutdown();
         let _ = std::fs::remove_dir_all(root);
     }
