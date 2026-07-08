@@ -578,6 +578,7 @@ pub struct ViewerPanelModel {
     pub width: u32,
     pub height: u32,
     pub playing: bool,
+    pub preview_waiting: bool,
     pub enabled: bool,
     pub frame_content: Option<ViewerFrameContent>,
     pub empty_message: Option<String>,
@@ -659,6 +660,7 @@ impl ViewerPanelModel {
             width: resolution.width,
             height: resolution.height,
             playing: state.is_playing(),
+            preview_waiting,
             enabled: true,
             frame_content,
             empty_message: if let Some(rejection) =
@@ -693,6 +695,7 @@ impl ViewerPanelModel {
             width: 16,
             height: 9,
             playing: false,
+            preview_waiting: false,
             enabled: false,
             frame_content: None,
             empty_message: Some("未载入序列".into()),
@@ -6899,6 +6902,7 @@ mod tests {
 
         assert_eq!(models.viewer.status, "预览准备中");
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
+        assert!(models.viewer.preview_waiting);
         assert!(models.viewer.frame_content.is_none());
         assert_eq!(models.viewer.empty_message.as_deref(), Some("预览准备中"));
     }
@@ -7004,6 +7008,7 @@ mod tests {
         };
         assert_eq!(models.viewer.status, "预览准备中");
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
+        assert!(models.viewer.preview_waiting);
         assert_eq!(frame.key, "stale-preview");
         assert_eq!(models.viewer.empty_message, None);
     }

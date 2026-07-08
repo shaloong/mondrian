@@ -340,6 +340,10 @@ impl AppUiHost {
         }
         self.mark_dirty();
         self.refresh_if_dirty(bounds);
+        if self.sync_playback_buffering_from_viewer() {
+            self.mark_dirty();
+            self.refresh_if_dirty(bounds);
+        }
         true
     }
 
@@ -354,8 +358,14 @@ impl AppUiHost {
         }
         {
             let state = self.app_state.borrow();
-            self.root
+            let preview_waiting = self
+                .root
                 .refresh_playback_frame_from_app_state(&state, Some(&self.preview_service));
+            drop(state);
+            if self.set_playback_buffering_from_preview(preview_waiting) {
+                self.mark_dirty();
+                self.refresh_if_dirty(bounds);
+            }
         }
         TreeWalker::layout(self.active_root_mut(), bounds);
         true
@@ -364,6 +374,20 @@ impl AppUiHost {
     /// Delay until the next playback frame should be polled, if playback is running.
     pub fn playback_next_frame_delay(&self) -> Option<Duration> {
         self.app_state.borrow().playback_next_frame_delay()
+    }
+
+    fn sync_playback_buffering_from_viewer(&mut self) -> bool {
+        self.set_playback_buffering_from_preview(self.root.viewer_preview_waiting())
+    }
+
+    fn set_playback_buffering_from_preview(&mut self, preview_waiting: bool) -> bool {
+        let mut state = self.app_state.borrow_mut();
+        if state.is_playing() || state.is_playback_buffering() {
+            let changed = state.is_playback_buffering() != preview_waiting;
+            state.set_playback_buffering(preview_waiting);
+            return changed;
+        }
+        false
     }
 
     /// Drain queued widget actions through shell-local handling and `AppState`.

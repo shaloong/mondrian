@@ -856,15 +856,22 @@ impl AppUiAppRoot {
         &mut self,
         state: &AppState,
         preview: Option<&dyn ViewerPreviewSource>,
-    ) {
+    ) -> bool {
         let frame = state.current_frame().max(0);
         self.status_bar.set_model(status_bar_model(state));
         let mut viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
+        let preview_waiting = viewer.preview_waiting;
         self.models.viewer = viewer;
         self.models.timeline.playhead_frame = frame;
         update_viewer_widgets(&mut self.dock, &self.models.viewer);
         update_timeline_playhead_widgets(&mut self.dock, frame);
+        preview_waiting
+    }
+
+    /// Return whether the current viewer model is waiting for a current preview frame.
+    pub(crate) fn viewer_preview_waiting(&self) -> bool {
+        self.models.viewer.preview_waiting
     }
 
     /// Refresh panel contents and preferences from a full app UI state
@@ -1835,6 +1842,7 @@ mod tests {
         EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
         PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
     };
+    use crate::app_ui::panels::ViewerPreviewState;
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use glam::Vec2;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
@@ -3266,11 +3274,34 @@ mod tests {
         let mut root = AppUiAppRoot::from_app_state(&state);
 
         state.set_playback_frame_running(48);
-        root.refresh_playback_frame_from_app_state(&state, None);
+        let preview_waiting = root.refresh_playback_frame_from_app_state(&state, None);
 
         assert_eq!(root.models.timeline.playhead_frame, 48);
         assert_eq!(root.models.viewer.frame_label, "F48");
         assert!(root.models.viewer.playing);
+        assert!(!preview_waiting);
+    }
+
+    #[test]
+    fn app_root_playback_frame_refresh_reports_preview_waiting() {
+        struct LoadingPreview;
+
+        impl ViewerPreviewSource for LoadingPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Loading
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        state.set_playback_frame_running(12);
+        let mut root = AppUiAppRoot::from_app_state(&state);
+
+        let preview_waiting =
+            root.refresh_playback_frame_from_app_state(&state, Some(&LoadingPreview));
+
+        assert!(preview_waiting);
+        assert!(root.models.viewer.preview_waiting);
     }
 
     #[test]

@@ -160,6 +160,14 @@ prefetch workers pass a cooperative cancellation predicate into
 `PreviewDecodeRgbaRequest`, and the media loop checks that predicate before
 open, seek, packet decode, frame receive, EOF drain, and RGBA conversion. Do
 not depend on thread abort to preempt synchronous packet decode.
+Viewer preview readiness feeds back into the app playback clock. While the
+current playback frame is still `Loading` or only a stale frame can be shown,
+the app enters a short buffering state, holds the video clock, and mutes/clears
+realtime audio output until the preview becomes current again. This prevents a
+slow CPU fallback decode from chasing ever-newer playback frames and dragging
+the UI through unbounded obsolete work. Future hardware playback may replace
+this with stricter clock-driven frame dropping, but it must preserve the same
+readiness feedback contract.
 App preview decode timeout is access-mode-specific, not a single global
 playback policy. `ScrubCursor` has the shortest caller-release budget because
 interactive latest-wins work must not leave the UI waiting behind pathological

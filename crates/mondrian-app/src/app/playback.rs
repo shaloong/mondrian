@@ -130,7 +130,23 @@ impl AppState {
     }
 
     pub fn set_playback_buffering(&mut self, buffering: bool) {
+        if self.playback_buffering == buffering {
+            return;
+        }
         self.playback_buffering = buffering;
+        if buffering {
+            if let Some(output) = &self.audio_output {
+                output.set_muted(true);
+                output.clear();
+            }
+        } else {
+            let frame = self.current_frame();
+            self.sync_audio_clock_to_frame(frame);
+            self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
+            if let Some(output) = &self.audio_output {
+                output.set_muted(false);
+            }
+        }
     }
 
     pub fn is_playback_buffering(&self) -> bool {
@@ -298,6 +314,14 @@ impl AppState {
                 status: PlaybackAdvanceStatus::Idle,
             };
         }
+        if self.playback_buffering {
+            return PlaybackAdvance {
+                previous_frame,
+                current_frame: previous_frame,
+                frames_advanced: 0,
+                status: PlaybackAdvanceStatus::WaitingForFrame,
+            };
+        }
 
         let fps = self.fps();
         let target_frame = match self.audio_sync.role {
@@ -459,6 +483,29 @@ mod tests {
         assert_eq!(state.current_frame(), 1);
         assert!(state.is_playing());
         assert!(!state.playback_reached_end);
+    }
+
+    #[test]
+    fn advance_playback_clock_waits_while_preview_is_buffering() {
+        let mut state = state_with_sequence(20);
+        state.play();
+        state.set_playback_buffering(true);
+
+        let waiting = state.advance_playback_clock(Duration::from_secs(1));
+
+        assert_eq!(waiting.status, PlaybackAdvanceStatus::WaitingForFrame);
+        assert_eq!(waiting.current_frame, 0);
+        assert_eq!(waiting.frames_advanced, 0);
+        assert_eq!(state.current_frame(), 0);
+        assert!(state.is_playing());
+        assert!(state.is_playback_buffering());
+
+        state.set_playback_buffering(false);
+        let advanced = state.advance_playback_clock(Duration::from_millis(40));
+
+        assert_eq!(advanced.status, PlaybackAdvanceStatus::Advanced);
+        assert_eq!(advanced.current_frame, 1);
+        assert!(!state.is_playback_buffering());
     }
 
     #[test]

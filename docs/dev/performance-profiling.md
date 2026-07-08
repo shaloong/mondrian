@@ -152,6 +152,12 @@ Prefetch preemption means the app protected visible current-frame work from
 in-flight playback speculation. Still preemption means deterministic still-frame
 work yielded to playback or scrub current-frame work. Both are scheduling
 pressure signals, not media decode failures.
+During playback, viewer `Loading` or stale-frame preview states put the app into
+preview buffering so the playback clock does not keep advancing into obsolete
+frames while CPU fallback decode catches up. Persistent buffering should be
+diagnosed from `preview_decode_report`, `preview_render_report`, and viewer
+state counts; do not hide it by widening timeouts without fixing decode,
+proxy/hardware residency, or render bottlenecks.
 `preview_media_decode_cache_smoke` intentionally exercises both settled
 non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 (`ScrubCursor`). The active scrub window is controlled by
