@@ -22,8 +22,9 @@ pub use audio::{
 };
 pub use cache::FrameCache;
 pub use decoder::{
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecoderMetricsSnapshot, DecoderPool,
-    DecoderPoolPreviewRgbaRequest, HwAccelBackend, HwAccelProbe,
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecoderAccessModeMetricsSnapshot,
+    DecoderMetricsSnapshot, DecoderPool, DecoderPoolPreviewRgbaRequest, HwAccelBackend,
+    HwAccelProbe,
 };
 pub use info::{
     AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoColorDetectionMethod,

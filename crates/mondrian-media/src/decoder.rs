@@ -196,10 +196,55 @@ struct DecoderMetrics {
     decode_failures: AtomicU64,
     decode_timeouts: AtomicU64,
     decode_budget_exhausted: AtomicU64,
+    decode_failures_by_access_mode: DecoderAccessModeCounters,
+    decode_timeouts_by_access_mode: DecoderAccessModeCounters,
+    decode_budget_exhausted_by_access_mode: DecoderAccessModeCounters,
     prefetch_started: AtomicU64,
     prefetch_cancelled: AtomicU64,
     prefetch_completed: AtomicU64,
     total_decode_ns: AtomicU64,
+}
+
+#[derive(Default)]
+struct DecoderAccessModeCounters {
+    playback_cursor: AtomicU64,
+    scrub_cursor: AtomicU64,
+    random_access_still: AtomicU64,
+}
+
+/// Per-access-mode decoder counter snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecoderAccessModeMetricsSnapshot {
+    /// Count attributed to sustained timeline playback requests.
+    pub playback_cursor: u64,
+    /// Count attributed to active playhead dragging / jog / shuttle requests.
+    pub scrub_cursor: u64,
+    /// Count attributed to deterministic still-frame extraction requests.
+    pub random_access_still: u64,
+}
+
+impl DecoderAccessModeCounters {
+    fn increment(&self, access_mode: PreviewDecodeAccessMode) {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.playback_cursor.fetch_add(1, Ordering::Relaxed);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.scrub_cursor.fetch_add(1, Ordering::Relaxed);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.random_access_still.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn snapshot(&self) -> DecoderAccessModeMetricsSnapshot {
+        DecoderAccessModeMetricsSnapshot {
+            playback_cursor: self.playback_cursor.load(Ordering::Relaxed),
+            scrub_cursor: self.scrub_cursor.load(Ordering::Relaxed),
+            random_access_still: self.random_access_still.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +264,12 @@ pub struct DecoderMetricsSnapshot {
     pub decode_failures: u64,
     pub decode_timeouts: u64,
     pub decode_budget_exhausted: u64,
+    /// Decode failures grouped by the caller's access-mode contract.
+    pub decode_failures_by_access_mode: DecoderAccessModeMetricsSnapshot,
+    /// Decode timeouts grouped by the caller's access-mode contract.
+    pub decode_timeouts_by_access_mode: DecoderAccessModeMetricsSnapshot,
+    /// Forward-decode budget exhaustions grouped by access-mode policy.
+    pub decode_budget_exhausted_by_access_mode: DecoderAccessModeMetricsSnapshot,
     pub prefetch_started: u64,
     pub prefetch_cancelled: u64,
     pub prefetch_completed: u64,
@@ -250,6 +301,11 @@ impl DecoderMetrics {
             decode_failures: self.decode_failures.load(Ordering::Relaxed),
             decode_timeouts: self.decode_timeouts.load(Ordering::Relaxed),
             decode_budget_exhausted: self.decode_budget_exhausted.load(Ordering::Relaxed),
+            decode_failures_by_access_mode: self.decode_failures_by_access_mode.snapshot(),
+            decode_timeouts_by_access_mode: self.decode_timeouts_by_access_mode.snapshot(),
+            decode_budget_exhausted_by_access_mode: self
+                .decode_budget_exhausted_by_access_mode
+                .snapshot(),
             prefetch_started: self.prefetch_started.load(Ordering::Relaxed),
             prefetch_cancelled: self.prefetch_cancelled.load(Ordering::Relaxed),
             prefetch_completed: self.prefetch_completed.load(Ordering::Relaxed),
@@ -268,6 +324,21 @@ impl DecoderMetrics {
             } else {
                 0.0
             },
+        }
+    }
+}
+
+impl DecoderMetrics {
+    fn record_decode_failure(&self, access_mode: PreviewDecodeAccessMode, err: &MondrianError) {
+        self.decode_failures.fetch_add(1, Ordering::Relaxed);
+        self.decode_failures_by_access_mode.increment(access_mode);
+        if matches!(err, MondrianError::DecodeTimeout { .. }) {
+            self.decode_timeouts.fetch_add(1, Ordering::Relaxed);
+            self.decode_timeouts_by_access_mode.increment(access_mode);
+        }
+        if matches!(err, MondrianError::DecodeBudgetExhausted { .. }) {
+            self.decode_budget_exhausted.fetch_add(1, Ordering::Relaxed);
+            self.decode_budget_exhausted_by_access_mode.increment(access_mode);
         }
     }
 }
@@ -567,13 +638,7 @@ impl DecoderPool {
         };
 
         let decode_result = decode_result.inspect_err(|err| {
-            self.metrics.decode_failures.fetch_add(1, Ordering::Relaxed);
-            if matches!(err, MondrianError::DecodeTimeout { .. }) {
-                self.metrics.decode_timeouts.fetch_add(1, Ordering::Relaxed);
-            }
-            if matches!(err, MondrianError::DecodeBudgetExhausted { .. }) {
-                self.metrics.decode_budget_exhausted.fetch_add(1, Ordering::Relaxed);
-            }
+            self.metrics.record_decode_failure(access_mode, err);
         });
 
         self.metrics
@@ -685,8 +750,9 @@ impl DecoderPool {
             reason: e.to_string(),
         })
         .and_then(|r| r)
-        .inspect_err(|_| {
-            self.metrics.decode_failures.fetch_add(1, Ordering::Relaxed);
+        .inspect_err(|err| {
+            self.metrics
+                .record_decode_failure(PreviewDecodeAccessMode::RandomAccessStillFrame, err);
         })?;
 
         self.metrics
@@ -1187,15 +1253,63 @@ mod tests {
     #[test]
     fn decoder_metrics_report_forward_budget_exhaustion() {
         let metrics = DecoderMetrics::default();
-        metrics.decode_failures.store(3, Ordering::Relaxed);
-        metrics.decode_timeouts.store(1, Ordering::Relaxed);
-        metrics.decode_budget_exhausted.store(2, Ordering::Relaxed);
+        metrics.record_decode_failure(
+            PreviewDecodeAccessMode::PlaybackCursor,
+            &MondrianError::DecodeTimeout {
+                asset_id: "asset-playback".to_owned(),
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor.as_str().to_owned(),
+                budget_ms: 200,
+                frame: 10,
+                secs: 0.4,
+            },
+        );
+        metrics.record_decode_failure(
+            PreviewDecodeAccessMode::ScrubCursor,
+            &MondrianError::DecodeBudgetExhausted {
+                asset_id: "asset-scrub".to_owned(),
+                access_mode: PreviewDecodeAccessMode::ScrubCursor.as_str().to_owned(),
+                decoded_frames: 240,
+                budget_frames: 240,
+                target_pts: 120,
+            },
+        );
+        metrics.record_decode_failure(
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            &MondrianError::DecodeFailed {
+                asset_id: "asset-still".to_owned(),
+                reason: "synthetic still failure".to_owned(),
+            },
+        );
 
         let snapshot = metrics.snapshot(&HwAccelBackend::probe());
 
         assert_eq!(snapshot.decode_failures, 3);
         assert_eq!(snapshot.decode_timeouts, 1);
-        assert_eq!(snapshot.decode_budget_exhausted, 2);
+        assert_eq!(snapshot.decode_budget_exhausted, 1);
+        assert_eq!(
+            snapshot.decode_failures_by_access_mode,
+            DecoderAccessModeMetricsSnapshot {
+                playback_cursor: 1,
+                scrub_cursor: 1,
+                random_access_still: 1,
+            }
+        );
+        assert_eq!(
+            snapshot.decode_timeouts_by_access_mode,
+            DecoderAccessModeMetricsSnapshot {
+                playback_cursor: 1,
+                scrub_cursor: 0,
+                random_access_still: 0,
+            }
+        );
+        assert_eq!(
+            snapshot.decode_budget_exhausted_by_access_mode,
+            DecoderAccessModeMetricsSnapshot {
+                playback_cursor: 0,
+                scrub_cursor: 1,
+                random_access_still: 0,
+            }
+        );
     }
 
     #[test]
