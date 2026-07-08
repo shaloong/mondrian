@@ -18,7 +18,7 @@ use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatu
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 #[cfg(test)]
 use mondrian_core::types::ColorEngine;
-use mondrian_core::types::{AssetId, BlendMode, ColorSpace, SequenceId};
+use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
 use mondrian_core::MondrianError;
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
@@ -68,7 +68,8 @@ const MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY: usize = MEDIA_PREVIEW_CACHE_CAPACITY
 const VIEWER_PREVIEW_FRAME_CACHE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_FORWARD_PREFETCH_FRAMES: i64 = 2;
 const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
-const MEDIA_PREVIEW_PLAYBACK_CURRENT_DECODE_DEADLINE_US: u64 = 50_000;
+const MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US: u64 = 8_000;
+const MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US: u64 = 50_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 
 /// Host-owned preview renderer used by the app UI viewer panel.
@@ -1456,6 +1457,7 @@ impl AppUiPreviewService {
                         width,
                         height,
                         &color_context,
+                        sequence.settings.frame_rate,
                     )?;
                     resolved.push(ResolvedPreviewElement::Media {
                         frame,
@@ -5819,6 +5821,7 @@ impl AppUiPreviewService {
                             source_secs,
                             MediaPreviewRequestPriority::Prefetch,
                             PreviewDecodeAccessMode::PlaybackCursor,
+                            None,
                         );
                         if enqueued {
                             *remaining_prefetch_jobs = (*remaining_prefetch_jobs).saturating_sub(1);
@@ -5860,6 +5863,7 @@ impl AppUiPreviewService {
         target_width: u32,
         target_height: u32,
         color_context: &ColorContext,
+        sequence_frame_rate: Rational,
     ) -> Option<MediaPreviewFrame> {
         let (key, source_secs) = self.media_preview_key_for_asset(
             state,
@@ -5888,6 +5892,7 @@ impl AppUiPreviewService {
             source_secs,
             MediaPreviewRequestPriority::Current,
             access_mode,
+            media_preview_playback_current_deadline_budget_us(sequence_frame_rate),
         );
         None
     }
@@ -6036,6 +6041,7 @@ impl AppUiPreviewService {
         source_secs: f64,
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
+        playback_current_deadline_budget_us: Option<u64>,
     ) -> bool {
         let generation = self.current_generation.get();
         let should_enqueue_job = match self.scheduler.request(
@@ -6064,7 +6070,12 @@ impl AppUiPreviewService {
                     generation,
                     source_secs,
                     enqueued_at,
-                    media_preview_job_deadline_at(priority, access_mode, enqueued_at),
+                    media_preview_job_deadline_at(
+                        priority,
+                        access_mode,
+                        enqueued_at,
+                        playback_current_deadline_budget_us,
+                    ),
                 );
                 if queued_update.priority_promoted {
                     bump(&self.metrics.queue_promoted_current_jobs);
@@ -6101,7 +6112,12 @@ impl AppUiPreviewService {
             priority,
             access_mode,
             enqueued_at,
-            deadline_at: media_preview_job_deadline_at(priority, access_mode, enqueued_at),
+            deadline_at: media_preview_job_deadline_at(
+                priority,
+                access_mode,
+                enqueued_at,
+                playback_current_deadline_budget_us,
+            ),
         };
         if priority == MediaPreviewRequestPriority::Current {
             let pruned = self.jobs.prune_obsolete_jobs(generation) as u64;
@@ -6975,15 +6991,30 @@ fn media_preview_job_deadline_at(
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
     enqueued_at: Instant,
+    playback_current_deadline_budget_us: Option<u64>,
 ) -> Option<Instant> {
     if priority == MediaPreviewRequestPriority::Current
         && access_mode == PreviewDecodeAccessMode::PlaybackCursor
     {
-        return Some(
-            enqueued_at + Duration::from_micros(MEDIA_PREVIEW_PLAYBACK_CURRENT_DECODE_DEADLINE_US),
-        );
+        let budget_us = playback_current_deadline_budget_us?;
+        return Some(enqueued_at + Duration::from_micros(budget_us));
     }
     None
+}
+
+fn media_preview_playback_current_deadline_budget_us(frame_rate: Rational) -> Option<u64> {
+    let fps = frame_rate.to_f64();
+    if !fps.is_finite() || fps <= 0.0 {
+        return None;
+    }
+    let frame_duration_us = (1_000_000.0 / fps).round();
+    if !frame_duration_us.is_finite() || frame_duration_us <= 0.0 {
+        return None;
+    }
+    Some((frame_duration_us as u64).clamp(
+        MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US,
+        MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US,
+    ))
 }
 
 fn media_preview_deadline_expired(deadline_at: Option<Instant>) -> bool {
@@ -12184,6 +12215,7 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::PlaybackCursor,
             now,
+            Some(33_333),
         )
         .is_some());
         assert_eq!(
@@ -12191,6 +12223,7 @@ mod tests {
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
                 now,
+                Some(33_333),
             ),
             None
         );
@@ -12199,6 +12232,7 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
                 now,
+                Some(33_333),
             ),
             None
         );
@@ -12207,7 +12241,49 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::RandomAccessStillFrame,
                 now,
+                Some(33_333),
             ),
+            None
+        );
+        assert_eq!(
+            media_preview_job_deadline_at(
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                now,
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn media_preview_playback_deadline_budget_uses_sequence_frame_duration() {
+        assert_eq!(
+            media_preview_playback_current_deadline_budget_us(Rational::FPS_25),
+            Some(40_000)
+        );
+        assert_eq!(
+            media_preview_playback_current_deadline_budget_us(Rational::FPS_30),
+            Some(33_333)
+        );
+        assert_eq!(
+            media_preview_playback_current_deadline_budget_us(Rational::FPS_60),
+            Some(16_667)
+        );
+        assert_eq!(
+            media_preview_playback_current_deadline_budget_us(Rational::new(240, 1)),
+            Some(MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US)
+        );
+        assert_eq!(
+            media_preview_playback_current_deadline_budget_us(Rational::FPS_10),
+            Some(MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US)
+        );
+        assert_eq!(
+            media_preview_playback_current_deadline_budget_us(Rational::new(0, 1)),
+            None
+        );
+        assert_eq!(
+            media_preview_playback_current_deadline_budget_us(Rational::new(24, 0)),
             None
         );
     }

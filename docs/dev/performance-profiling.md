@@ -136,9 +136,11 @@ or unknown cancellations came from playback, active scrub, or still-frame work.
 `canceled_prefetch_deadline_jobs`: playback-deadline cancellations mean a
 visible `PlaybackCursor` current frame missed its display deadline and was
 dropped before or during decode, while prefetch-deadline cancellations mean
-speculative cache warming exceeded its budget. Treat playback deadline pressure
-as a reason to improve proxy/hardware decode/drop policy, not as a reason to
-increase speculative prefetch.
+speculative cache warming exceeded its budget. The playback deadline is derived
+from the active sequence frame duration, with conservative min/max bounds, so
+slow playback at 24 fps and 60 fps playback are judged against different
+budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
+decode/drop policy, not as a reason to increase speculative prefetch.
 Prefetch preemption means the app protected visible current-frame work from
 in-flight playback speculation. Still preemption means deterministic still-frame
 work yielded to playback or scrub current-frame work. Both are scheduling
