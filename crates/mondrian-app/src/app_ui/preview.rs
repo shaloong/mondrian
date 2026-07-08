@@ -237,6 +237,18 @@ impl AppUiPreviewService {
             decode_canceled_total_duration_us: self.metrics.decode_canceled_total_duration_us.get(),
             decode_canceled_max_duration_us: self.metrics.decode_canceled_max_duration_us.get(),
             decode_canceled_last_duration_us: self.metrics.decode_canceled_last_duration_us.get(),
+            decode_canceled_return_latency_total_us: self
+                .metrics
+                .decode_canceled_return_latency_total_us
+                .get(),
+            decode_canceled_return_latency_max_us: self
+                .metrics
+                .decode_canceled_return_latency_max_us
+                .get(),
+            decode_canceled_return_latency_last_us: self
+                .metrics
+                .decode_canceled_return_latency_last_us
+                .get(),
             decode_in_process_cpu_rgba_frames: self.metrics.decode_in_process_cpu_rgba_frames.get(),
             decode_external_ffmpeg_cpu_rgba_frames: self
                 .metrics
@@ -452,6 +464,7 @@ impl AppUiPreviewService {
                     result.access_mode,
                     result.cancel_reason,
                     result.decode_elapsed_us,
+                    result.cancel_observed_elapsed_us,
                 );
                 changed |= completion.is_current();
                 continue;
@@ -1071,6 +1084,7 @@ impl AppUiPreviewService {
         access_mode: PreviewDecodeAccessMode,
         reason: Option<MediaPreviewCancelReason>,
         elapsed_us: u64,
+        observed_elapsed_us: Option<u64>,
     ) {
         bump(&self.metrics.decode_canceled_jobs);
         let reason = reason.unwrap_or(MediaPreviewCancelReason::Unknown);
@@ -1098,8 +1112,19 @@ impl AppUiPreviewService {
             .decode_canceled_max_duration_us
             .set(self.metrics.decode_canceled_max_duration_us.get().max(elapsed_us));
         self.metrics.decode_canceled_last_duration_us.set(elapsed_us);
+        let return_latency_us = observed_elapsed_us
+            .map(|observed_us| elapsed_us.saturating_sub(observed_us))
+            .unwrap_or(elapsed_us);
+        add_cell(
+            &self.metrics.decode_canceled_return_latency_total_us,
+            return_latency_us,
+        );
+        self.metrics
+            .decode_canceled_return_latency_max_us
+            .set(self.metrics.decode_canceled_return_latency_max_us.get().max(return_latency_us));
+        self.metrics.decode_canceled_return_latency_last_us.set(return_latency_us);
         let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
-        access_mode_profiles.record_cancel(access_mode, reason, elapsed_us);
+        access_mode_profiles.record_cancel(access_mode, reason, elapsed_us, return_latency_us);
         self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
@@ -1578,6 +1603,12 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_canceled_max_duration_us: u64,
     /// Most recent worker execution time for a canceled decode job.
     pub decode_canceled_last_duration_us: u64,
+    /// Total latency after canceled decode jobs first observed cancellation.
+    pub decode_canceled_return_latency_total_us: u64,
+    /// Slowest latency after a canceled decode job first observed cancellation.
+    pub decode_canceled_return_latency_max_us: u64,
+    /// Most recent latency after a canceled decode job first observed cancellation.
+    pub decode_canceled_return_latency_last_us: u64,
     /// Successful decodes produced by the in-process FFmpeg CPU RGBA path.
     pub decode_in_process_cpu_rgba_frames: u64,
     /// Successful decodes produced by the external ffmpeg CPU RGBA path.
@@ -1875,6 +1906,12 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub canceled_max_duration_us: u64,
     /// Most recent canceled decode worker execution time in this access mode.
     pub canceled_last_duration_us: u64,
+    /// Total latency after canceled jobs first observed cancellation for this access mode.
+    pub canceled_return_latency_total_us: u64,
+    /// Slowest latency after a canceled job first observed cancellation for this access mode.
+    pub canceled_return_latency_max_us: u64,
+    /// Most recent latency after a canceled job first observed cancellation for this access mode.
+    pub canceled_return_latency_last_us: u64,
     /// Failed decode jobs for this access mode.
     pub failed_jobs: u64,
     /// Failed decode jobs caused by structured decode timeouts for this access mode.
@@ -1945,7 +1982,12 @@ impl AppUiPreviewDecodeAccessModeProfile {
         self.queue_wait_last_us = queue_wait_us;
     }
 
-    fn record_cancel(&mut self, reason: MediaPreviewCancelReason, elapsed_us: u64) {
+    fn record_cancel(
+        &mut self,
+        reason: MediaPreviewCancelReason,
+        elapsed_us: u64,
+        return_latency_us: u64,
+    ) {
         self.canceled_jobs = self.canceled_jobs.saturating_add(1);
         match reason {
             MediaPreviewCancelReason::Shutdown => {
@@ -1966,6 +2008,11 @@ impl AppUiPreviewDecodeAccessModeProfile {
             self.canceled_total_duration_us.saturating_add(elapsed_us);
         self.canceled_max_duration_us = self.canceled_max_duration_us.max(elapsed_us);
         self.canceled_last_duration_us = elapsed_us;
+        self.canceled_return_latency_total_us =
+            self.canceled_return_latency_total_us.saturating_add(return_latency_us);
+        self.canceled_return_latency_max_us =
+            self.canceled_return_latency_max_us.max(return_latency_us);
+        self.canceled_return_latency_last_us = return_latency_us;
     }
 
     fn record_failure(&mut self, reason: MediaPreviewFailureReason) {
@@ -2021,16 +2068,17 @@ impl AppUiPreviewDecodeAccessModeProfiles {
         access_mode: PreviewDecodeAccessMode,
         reason: MediaPreviewCancelReason,
         elapsed_us: u64,
+        return_latency_us: u64,
     ) {
         match access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => {
-                self.playback_cursor.record_cancel(reason, elapsed_us);
+                self.playback_cursor.record_cancel(reason, elapsed_us, return_latency_us);
             }
             PreviewDecodeAccessMode::ScrubCursor => {
-                self.scrub_cursor.record_cancel(reason, elapsed_us);
+                self.scrub_cursor.record_cancel(reason, elapsed_us, return_latency_us);
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
-                self.random_access_still.record_cancel(reason, elapsed_us);
+                self.random_access_still.record_cancel(reason, elapsed_us, return_latency_us);
             }
         }
     }
@@ -2103,6 +2151,12 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub canceled_max_duration_us: u64,
     /// Most recent worker execution time for a canceled decode job.
     pub canceled_last_duration_us: u64,
+    /// Total latency after canceled decode jobs first observed cancellation.
+    pub canceled_return_latency_total_us: u64,
+    /// Slowest latency after a canceled decode job first observed cancellation.
+    pub canceled_return_latency_max_us: u64,
+    /// Most recent latency after a canceled decode job first observed cancellation.
+    pub canceled_return_latency_last_us: u64,
     /// Successful decodes served from the in-process FFmpeg CPU RGBA path.
     pub in_process_cpu_rgba_frames: u64,
     /// Successful decodes served from the external ffmpeg CPU RGBA path.
@@ -2202,7 +2256,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 4;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 5;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2634,6 +2688,13 @@ pub fn build_preview_decode_performance_report(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_canceled_max_frame_us",
             summary.canceled_max_duration_us,
+            slow_frame_budget_us,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_cancel_return_latency_max_us",
+            summary.canceled_return_latency_max_us,
             slow_frame_budget_us,
         );
         push_decode_max_check(
@@ -3229,6 +3290,35 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "inspect_preview_decode_cancellation_points",
             "Inspect FFmpeg open/seek/decode/copy cancellation points and avoid uncancellable external process work on realtime preview lanes.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if summary.canceled_return_latency_max_us > summary.slow_frame_budget_us {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_slow_cancel_return",
+            format!(
+                "canceled_return_latency_max_us={} canceled_return_latency_last_us={} canceled_jobs={} playback_cancel_return_latency_max_us={} scrub_cancel_return_latency_max_us={} random_access_still_cancel_return_latency_max_us={}",
+                summary.canceled_return_latency_max_us,
+                summary.canceled_return_latency_last_us,
+                summary.canceled_jobs,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .canceled_return_latency_max_us,
+                summary
+                    .access_mode_profiles
+                    .scrub_cursor
+                    .canceled_return_latency_max_us,
+                summary
+                    .access_mode_profiles
+                    .random_access_still
+                    .canceled_return_latency_max_us
+            ),
+            "shorten_preview_decode_cancel_cleanup",
+            "Inspect cleanup after cooperative cancellation is observed; canceled realtime decode jobs must return promptly after the first cancel checkpoint.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -4104,6 +4194,9 @@ impl AppUiPreviewDiagnostics {
             canceled_total_duration_us: self.decode_canceled_total_duration_us,
             canceled_max_duration_us: self.decode_canceled_max_duration_us,
             canceled_last_duration_us: self.decode_canceled_last_duration_us,
+            canceled_return_latency_total_us: self.decode_canceled_return_latency_total_us,
+            canceled_return_latency_max_us: self.decode_canceled_return_latency_max_us,
+            canceled_return_latency_last_us: self.decode_canceled_return_latency_last_us,
             in_process_cpu_rgba_frames: self.decode_in_process_cpu_rgba_frames,
             external_ffmpeg_cpu_rgba_frames: self.decode_external_ffmpeg_cpu_rgba_frames,
             playback_session_ring_hit_frames: self.decode_playback_session_ring_hit_frames,
@@ -4733,6 +4826,7 @@ struct MediaPreviewResult {
     access_mode: PreviewDecodeAccessMode,
     queue_wait_us: u64,
     decode_elapsed_us: u64,
+    cancel_observed_elapsed_us: Option<u64>,
     canceled: bool,
     cancel_reason: Option<MediaPreviewCancelReason>,
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
@@ -5290,6 +5384,9 @@ struct AppUiPreviewMetrics {
     decode_canceled_total_duration_us: Cell<u64>,
     decode_canceled_max_duration_us: Cell<u64>,
     decode_canceled_last_duration_us: Cell<u64>,
+    decode_canceled_return_latency_total_us: Cell<u64>,
+    decode_canceled_return_latency_max_us: Cell<u64>,
+    decode_canceled_return_latency_last_us: Cell<u64>,
     decode_in_process_cpu_rgba_frames: Cell<u64>,
     decode_external_ffmpeg_cpu_rgba_frames: Cell<u64>,
     decode_playback_session_ring_hit_frames: Cell<u64>,
@@ -5961,6 +6058,7 @@ fn media_preview_worker(
         let cancel_scheduler = scheduler.clone();
         let decode_started_at = Instant::now();
         let observed_cancel_reason = Cell::new(None);
+        let observed_cancel_elapsed_us = Cell::new(None);
         let mut result = decode_media_preview(job, queue_wait_us, || {
             let reason = media_preview_cancel_reason(
                 shutdown.load(Ordering::Acquire),
@@ -5974,6 +6072,10 @@ fn media_preview_worker(
                 decode_started_at.elapsed(),
             );
             if reason.is_some() {
+                if observed_cancel_elapsed_us.get().is_none() {
+                    observed_cancel_elapsed_us
+                        .set(Some(app_duration_us(decode_started_at.elapsed())));
+                }
                 observed_cancel_reason.set(reason);
             }
             reason.is_some()
@@ -5981,6 +6083,9 @@ fn media_preview_worker(
         if result.canceled && result.cancel_reason.is_none() {
             result.cancel_reason =
                 Some(observed_cancel_reason.get().unwrap_or(MediaPreviewCancelReason::Unknown));
+        }
+        if result.canceled && result.cancel_observed_elapsed_us.is_none() {
+            result.cancel_observed_elapsed_us = observed_cancel_elapsed_us.get();
         }
         if results.send(result).is_err() {
             break;
@@ -6062,6 +6167,7 @@ fn decode_media_preview(
                 access_mode,
                 queue_wait_us,
                 decode_elapsed_us,
+                cancel_observed_elapsed_us: None,
                 canceled: false,
                 cancel_reason: None,
                 decode_diagnostics: Some(decode_diagnostics),
@@ -6079,6 +6185,7 @@ fn decode_media_preview(
             access_mode,
             queue_wait_us,
             decode_elapsed_us,
+            cancel_observed_elapsed_us: None,
             canceled: true,
             cancel_reason: None,
             decode_diagnostics: None,
@@ -6097,6 +6204,7 @@ fn decode_media_preview(
                 access_mode,
                 queue_wait_us,
                 decode_elapsed_us,
+                cancel_observed_elapsed_us: None,
                 canceled: false,
                 cancel_reason: None,
                 decode_diagnostics: None,
@@ -6723,16 +6831,19 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             Some(MediaPreviewCancelReason::PrefetchDeadline),
             700,
+            Some(600),
         );
         service.record_preview_decode_cancel(
             PreviewDecodeAccessMode::ScrubCursor,
             Some(MediaPreviewCancelReason::Obsolete),
             1_400,
+            Some(1_000),
         );
         service.record_preview_decode_cancel(
             PreviewDecodeAccessMode::RandomAccessStillFrame,
             Some(MediaPreviewCancelReason::Shutdown),
             20,
+            Some(5),
         );
 
         let diagnostics = service.diagnostics();
@@ -6745,6 +6856,9 @@ mod tests {
         assert_eq!(diagnostics.decode_canceled_total_duration_us, 2_120);
         assert_eq!(diagnostics.decode_canceled_max_duration_us, 1_400);
         assert_eq!(diagnostics.decode_canceled_last_duration_us, 20);
+        assert_eq!(diagnostics.decode_canceled_return_latency_total_us, 515);
+        assert_eq!(diagnostics.decode_canceled_return_latency_max_us, 400);
+        assert_eq!(diagnostics.decode_canceled_return_latency_last_us, 15);
         assert_eq!(diagnostics.decode_in_process_cpu_rgba_frames, 1);
         assert_eq!(diagnostics.decode_external_ffmpeg_cpu_rgba_frames, 1);
         assert_eq!(diagnostics.decode_playback_session_ring_hit_frames, 1);
@@ -6800,6 +6914,9 @@ mod tests {
         assert_eq!(playback_profile.canceled_total_duration_us, 700);
         assert_eq!(playback_profile.canceled_max_duration_us, 700);
         assert_eq!(playback_profile.canceled_last_duration_us, 700);
+        assert_eq!(playback_profile.canceled_return_latency_total_us, 100);
+        assert_eq!(playback_profile.canceled_return_latency_max_us, 100);
+        assert_eq!(playback_profile.canceled_return_latency_last_us, 100);
         assert_eq!(playback_profile.canceled_shutdown_jobs, 0);
         assert_eq!(playback_profile.canceled_obsolete_jobs, 0);
         assert_eq!(playback_profile.canceled_unknown_jobs, 0);
@@ -6826,6 +6943,9 @@ mod tests {
         assert_eq!(scrub_profile.canceled_total_duration_us, 1_400);
         assert_eq!(scrub_profile.canceled_max_duration_us, 1_400);
         assert_eq!(scrub_profile.canceled_last_duration_us, 1_400);
+        assert_eq!(scrub_profile.canceled_return_latency_total_us, 400);
+        assert_eq!(scrub_profile.canceled_return_latency_max_us, 400);
+        assert_eq!(scrub_profile.canceled_return_latency_last_us, 400);
         assert_eq!(scrub_profile.canceled_shutdown_jobs, 0);
         assert_eq!(scrub_profile.canceled_prefetch_deadline_jobs, 0);
         assert_eq!(scrub_profile.canceled_unknown_jobs, 0);
@@ -6843,6 +6963,9 @@ mod tests {
         assert_eq!(still_profile.canceled_total_duration_us, 20);
         assert_eq!(still_profile.canceled_max_duration_us, 20);
         assert_eq!(still_profile.canceled_last_duration_us, 20);
+        assert_eq!(still_profile.canceled_return_latency_total_us, 15);
+        assert_eq!(still_profile.canceled_return_latency_max_us, 15);
+        assert_eq!(still_profile.canceled_return_latency_last_us, 15);
         assert_eq!(still_profile.canceled_obsolete_jobs, 0);
         assert_eq!(still_profile.canceled_prefetch_deadline_jobs, 0);
         assert_eq!(still_profile.canceled_unknown_jobs, 0);
@@ -7378,6 +7501,58 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_preview_decode_cancellation_points"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_canceled_jobs: 1,
+            decode_canceled_obsolete_jobs: 1,
+            decode_canceled_random_access_still_jobs: 1,
+            decode_canceled_total_duration_us: 90_000,
+            decode_canceled_max_duration_us: 90_000,
+            decode_canceled_last_duration_us: 90_000,
+            decode_canceled_return_latency_total_us: 70_000,
+            decode_canceled_return_latency_max_us: 70_000,
+            decode_canceled_return_latency_last_us: 70_000,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                    canceled_jobs: 1,
+                    canceled_obsolete_jobs: 1,
+                    canceled_total_duration_us: 90_000,
+                    canceled_max_duration_us: 90_000,
+                    canceled_last_duration_us: 90_000,
+                    canceled_return_latency_total_us: 70_000,
+                    canceled_return_latency_max_us: 70_000,
+                    canceled_return_latency_last_us: 70_000,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-cancel-return-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_cancel_return_latency_max_us"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 70_000
+                && check.limit == Some(50_000)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_slow_cancel_return"
+                && root.evidence.contains("random_access_still_cancel_return_latency_max_us=70000")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "shorten_preview_decode_cancel_cleanup"));
     }
 
     #[test]
