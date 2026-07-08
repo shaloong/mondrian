@@ -251,6 +251,8 @@ report failures, and their error codes should include failing check/root-cause
 codes before the generic failed-report code. A real sample whose UI cases fit
 their broad wall-clock window can still be unacceptable if access-mode p95,
 packet decode, or viewer output-boundary diagnostics exceed the frame budget.
+The same computed failure-code arrays must be serialized in the smoke JSON so
+CI dashboards and manual runs can inspect failures without parsing panic text.
 App media preview smokes must generate real samples for both active
 `ScrubCursor` playhead dragging and settled `RandomAccessStillFrame` requests;
 coverage is incomplete if the report merely defines both profiles. A common

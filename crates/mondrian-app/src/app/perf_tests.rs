@@ -79,6 +79,8 @@ struct PreviewMediaPerfReport {
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_report: AppUiPreviewColorHealthReport,
+    decode_failure_codes: Vec<&'static str>,
+    render_failure_codes: Vec<&'static str>,
     preview_decode_report: AppUiPreviewDecodePerformanceReport,
     preview_render_report: AppUiPreviewRenderPerformanceReport,
     cases: Vec<PerfCaseReport>,
@@ -101,6 +103,8 @@ struct PreviewMediaPlaybackPerfReport {
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_report: AppUiPreviewColorHealthReport,
+    decode_failure_codes: Vec<&'static str>,
+    render_failure_codes: Vec<&'static str>,
     preview_decode_report: AppUiPreviewDecodePerformanceReport,
     preview_render_report: AppUiPreviewRenderPerformanceReport,
     cases: Vec<PerfCaseReport>,
@@ -178,15 +182,7 @@ fn preview_decode_hard_failures(report: &AppUiPreviewDecodePerformanceReport) ->
             })
             .map(|check| check.code),
     );
-    failures.extend(
-        report
-            .root_causes
-            .iter()
-            .filter(|root| {
-                root.severity == crate::app_ui::preview::AppUiPreviewDecodePerformanceSeverity::Fail
-            })
-            .map(|root| root.code),
-    );
+    failures.extend(report.root_causes.iter().map(|root| root.code));
     failures.push("preview_decode_report_failed");
     failures.sort_unstable();
     failures.dedup();
@@ -971,6 +967,8 @@ fn run_preview_media_access_mode_probe_with_media_info(
         scenario,
         APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
     );
+    let decode_failure_codes = preview_decode_hard_failures(&preview_decode_report);
+    let render_failure_codes = preview_render_hard_failures(&preview_render_report);
     Ok(PreviewMediaPerfReport {
         scenario,
         frames: frame_count,
@@ -978,6 +976,8 @@ fn run_preview_media_access_mode_probe_with_media_info(
         media_color_issues,
         preview_diagnostics,
         preview_color_report,
+        decode_failure_codes,
+        render_failure_codes,
         preview_decode_report,
         preview_render_report,
         cases: vec![
@@ -1034,19 +1034,17 @@ fn validate_preview_media_access_mode_report(
             report_json
         );
     }
-    let decode_failures = preview_decode_hard_failures(&report.preview_decode_report);
-    if !decode_failures.is_empty() {
+    if !report.decode_failure_codes.is_empty() {
         anyhow::bail!(
             "preview media decode report failed: {:?}; report: {}",
-            decode_failures,
+            report.decode_failure_codes,
             report_json
         );
     }
-    let render_failures = preview_render_hard_failures(&report.preview_render_report);
-    if !render_failures.is_empty() {
+    if !report.render_failure_codes.is_empty() {
         anyhow::bail!(
             "preview media render report failed: {:?}; report: {}",
-            render_failures,
+            report.render_failure_codes,
             report_json
         );
     }
@@ -1239,6 +1237,8 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             "preview_media_continuous_playback",
             APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
         );
+        let decode_failure_codes = preview_playback_decode_failures(&preview_decode_report);
+        let render_failure_codes = preview_render_hard_failures(&preview_render_report);
         Ok(PreviewMediaPlaybackPerfReport {
             scenario: "preview_media_continuous_playback",
             frames: frame_count,
@@ -1247,6 +1247,8 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             media_color_issues,
             preview_diagnostics,
             preview_color_report,
+            decode_failure_codes,
+            render_failure_codes,
             preview_decode_report,
             preview_render_report,
             cases: vec![playback_case, gpu_candidate_case],
@@ -1272,19 +1274,17 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
     if report.preview_color_report.verdict == AppUiPreviewColorHealthVerdict::Fail {
         anyhow::bail!("preview media playback color report failed: {report_json}");
     }
-    let decode_failures = preview_playback_decode_failures(&report.preview_decode_report);
-    if !decode_failures.is_empty() {
+    if !report.decode_failure_codes.is_empty() {
         anyhow::bail!(
             "preview media continuous playback decode report failed: {:?}; report: {}",
-            decode_failures,
+            report.decode_failure_codes,
             report_json
         );
     }
-    let render_failures = preview_render_hard_failures(&report.preview_render_report);
-    if !render_failures.is_empty() {
+    if !report.render_failure_codes.is_empty() {
         anyhow::bail!(
             "preview media continuous playback render report failed: {:?}; report: {}",
-            render_failures,
+            report.render_failure_codes,
             report_json
         );
     }
@@ -2114,6 +2114,18 @@ fn preview_perf_report_serializes_color_report() {
         color_stage_cpu_output_stages: 1,
         ..AppUiPreviewDiagnostics::default()
     };
+    let preview_decode_report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+        "preview-color-health-test",
+        APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    );
+    let preview_render_report = build_preview_render_performance_report(
+        diagnostics.render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
+        "preview-color-health-test",
+        APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+    );
+    let decode_failure_codes = preview_decode_hard_failures(&preview_decode_report);
+    let render_failure_codes = preview_render_hard_failures(&preview_render_report);
     let report = PreviewMediaPerfReport {
         scenario: "preview-color-health-test",
         frames: 1,
@@ -2131,18 +2143,10 @@ fn preview_perf_report_serializes_color_report() {
             diagnostics.color_health_summary(),
             "preview-color-health-test",
         ),
-        preview_decode_report: build_preview_decode_performance_report(
-            diagnostics
-                .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
-            "preview-color-health-test",
-            APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
-        ),
-        preview_render_report: build_preview_render_performance_report(
-            diagnostics
-                .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
-            "preview-color-health-test",
-            APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
-        ),
+        decode_failure_codes,
+        render_failure_codes,
+        preview_decode_report,
+        preview_render_report,
         cases: Vec::new(),
     };
 
@@ -2168,6 +2172,16 @@ fn preview_perf_report_serializes_color_report() {
     assert_eq!(json["media_color_issues"]["diagnostics"], 1);
     assert_eq!(json["media_color_issues"]["method_cicp_tags"], 1);
     assert_eq!(json["preview_color_report"]["verdict"], "Pass");
+    assert!(json["decode_failure_codes"]
+        .as_array()
+        .expect("decode failure codes")
+        .iter()
+        .any(|code| code == "preview_decode_codec_or_gop_bound"));
+    assert!(json["render_failure_codes"]
+        .as_array()
+        .expect("render failure codes")
+        .iter()
+        .any(|code| code == "preview_render_cpu_output_boundary_bound"));
     assert_eq!(json["preview_decode_report"]["verdict"], "Fail");
     assert_eq!(
         json["preview_decode_report"]["summary"]["primary_bottleneck"],
