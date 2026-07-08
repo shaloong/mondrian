@@ -48,24 +48,19 @@ scheduling distinguish the requested access mode. Future hardware-resident
 decode must specialize behind these contracts instead of adding app-layer flags
 or treating playback as repeated random-access still decode. The generic
 access-mode router is intentionally media-internal. Public callers enter through
-one request seam: `PreviewDecodeRgbaRequest` for direct preview decode or
-`DecoderPoolPreviewRgbaRequest` plus `DecoderPool::get_preview_rgba` when they
-need DecoderPool coalescing, cache, runtime, prefetch, and cancellation
-ownership. Do not add mode-specific public helpers; they become compatibility
-debt and split future hardware/low-copy routing across shallow wrappers.
+one request seam: `PreviewDecodeRgbaRequest`. App preview owns worker lanes,
+priority admission, current/prefetch cancellation, queue diagnostics, and
+timeout reporting around that media request. Do not add mode-specific public
+helpers or a second preview decode pool; they become compatibility debt and
+split future hardware/low-copy routing across shallow wrappers.
 `PreviewDecodeAccessMode` intentionally has no default value, and serialized
 decode diagnostics must include it. Missing access-mode evidence is a diagnostic
 coverage bug, not a reason to assume still-frame semantics.
-`DecoderPool` cache and in-flight coalescing keys must include the requested
-access mode, source media path, file fingerprint, output dimensions, and source
-time in microseconds. A bare timeline frame number is not a media identity:
-the same frame index can represent different source times under different time
-bases, and relink/proxy/source path changes must not reuse stale RGBA frames.
-`DecoderPool` itself owns scheduling, in-flight coalescing, decode permits,
-prefetch cancellation, and frame caches only. It must not own a second
-per-asset placeholder FFmpeg context outside the access-mode preview decode
-boundary; otherwise playback/scrub/still session state is split across two
-modules and future hardware-resident adapters have an ambiguous home.
+Preview cache and in-flight identities must include the requested access mode,
+source media path, file fingerprint, output dimensions, and source time in
+microseconds. A bare timeline frame number is not a media identity: the same
+frame index can represent different source times under different time bases,
+and relink/proxy/source path changes must not reuse stale RGBA frames.
 App preview scheduling preserves playback cursor locality. When more than one
 preview decode worker exists, worker 0 is a dedicated playback lane and the
 remaining workers are interactive lanes for scrub/still work. With only one
@@ -121,32 +116,18 @@ preserves still-frame correctness while preventing latest-wins scrubbing from
 spending the same long-GOP CPU budget as deterministic extraction, and leaves a
 clear replacement point for future hardware-resident playback and low-latency
 scrub backends.
-App, export, and decoder-pool callers submit a `PreviewDecodeRgbaRequest` to
-the media preview decode boundary instead of matching on
-`PreviewDecodeAccessMode` or calling mode-specific FFmpeg helpers. Access-mode
-routing, session retention, cache lookup, playback-ring use, and future
-hardware/low-copy backend selection must stay behind the request boundary in
-`mondrian-media`.
-Process-global RGBA in-flight coalescing is also access-mode aware. For a given
-RGBA frame key, exactly one request owns the decode work; matching requests wait
-on that owner and re-check the cache after notification. Waiters must never
-replace another owner's notification handle, because doing so can orphan older
-waiters or make later cancellation look like decode failure. Playback prefetch
-requests pass their cancellation flag through in-flight waits, semaphore waits,
-and the FFmpeg decode predicate so obsolete speculative work can yield without
-destroying the warmed playback cursor session.
-DecoderPool RGBA decode execution must run synchronous FFmpeg preview decode on
-a bounded Tokio blocking pool, not on async runtime worker threads. The async
-runtime is only orchestration for queueing, timeout, cancellation watches, and
-join handling. Once a request owns a decode permit, timeout/cancel may release
-the caller but must not tear down the in-flight owner; the blocking task remains
-responsible for cache insertion, in-flight removal, waiter notification, and
-cooperative cancellation through the request predicate. Do not depend on Tokio
-task abort to preempt synchronous packet decode. The decode concurrency
-semaphore must use an owned permit moved into the blocking task, so
-timeout/cancel does not release capacity while a synchronous decode is still
-running in the background.
-DecoderPool decode timeout is access-mode-specific, not a single global
+App, export, and thumbnail callers submit a `PreviewDecodeRgbaRequest` to the
+media preview decode boundary instead of matching on `PreviewDecodeAccessMode`
+or calling mode-specific FFmpeg helpers. Access-mode routing, session
+retention, cache lookup, playback-ring use, and future hardware/low-copy
+backend selection must stay behind the request boundary in `mondrian-media`.
+App preview decode execution must run synchronous FFmpeg preview decode on
+dedicated preview worker threads, not on the UI/event thread. Current-frame and
+prefetch workers pass a cooperative cancellation predicate into
+`PreviewDecodeRgbaRequest`, and the media loop checks that predicate before
+open, seek, packet decode, frame receive, EOF drain, and RGBA conversion. Do
+not depend on thread abort to preempt synchronous packet decode.
+App preview decode timeout is access-mode-specific, not a single global
 playback policy. `ScrubCursor` has the shortest caller-release budget because
 interactive latest-wins work must not leave the UI waiting behind pathological
 seeks. `RandomAccessStillFrame` may wait longer because exact still extraction
@@ -156,11 +137,11 @@ Diagnostic environment overrides may tune or disable these watchdogs, but they
 must preserve the per-access-mode structure rather than reintroducing one
 opaque timeout for every request.
 Timeouts are first-class decode failures, not string-only log messages.
-`DecoderPool` emits `MondrianError::DecodeTimeout` with the asset id, requested
-access mode, timeout budget, frame number, and source timestamp. Its metrics
-separate `decode_timeouts` from aggregate `decode_failures`, and app preview
-diagnostics must preserve timeout counts per access mode. A timeout should
-therefore point directly at the failing access contract (`PlaybackCursor`,
+App preview diagnostics emit timeout evidence with the asset id, requested
+access mode, timeout budget, frame number, and source timestamp. Diagnostics
+must separate `decode_timeouts` from aggregate `decode_failures`, and preserve
+timeout counts per access mode. A timeout should therefore point directly at the
+failing access contract (`PlaybackCursor`,
 `ScrubCursor`, or `RandomAccessStillFrame`) instead of only showing a generic
 "decode failed" counter.
 Forward-scan budget exhaustion is also a structured decode failure. When a
@@ -170,12 +151,10 @@ an acceptable frame, the media crate must return a typed
 frame count, budget, and target PTS. App preview diagnostics must aggregate
 these failures globally and per access mode, and perf reports must surface a
 budget-exhausted root cause instead of folding the event into an opaque decode
-error or pretending the sample merely timed out. `DecoderPool` metrics must
-also expose budget-exhausted failures separately from timeouts and aggregate
-decode failures. The pool snapshot must also carry per-access-mode buckets for
-decode failures, timeouts, and budget exhaustion, so pool users can diagnose
-whether pressure is coming from `PlaybackCursor`, `ScrubCursor`, or
-`RandomAccessStillFrame` without app preview-specific reports.
+error or pretending the sample merely timed out. App preview reports must also
+carry per-access-mode buckets for decode failures, timeouts, and budget
+exhaustion, so engineers can diagnose whether pressure is coming from
+`PlaybackCursor`, `ScrubCursor`, or `RandomAccessStillFrame`.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older
@@ -340,7 +319,7 @@ Current decode residency is intentionally explicit and fail-closed. The active
 preview/media decode path produces CPU RGBA frames. Legacy YUV preview
 surfaces were removed before release so access-mode decode has one media
 payload contract until a real hardware-resident adapter replaces it.
-`DecoderMetricsSnapshot` reports the selected hardware backend, decoded frame residency,
+`HwAccelProbe` reports the selected hardware backend, decoded frame residency,
 `hardware_decode_active`, `zero_copy_active`, optional
 `decoded_gpu_frame_handle_kind`, `renderer_import_ready`, and a stable reason
 string. Until DXVA/D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC hardware frames
@@ -489,13 +468,14 @@ lookup. `mondrian-media` may capture the fingerprint itself only for lower-level
 callers that do not already have one.
 `MONDRIAN_PREVIEW_DECODE_THREADING`, `MONDRIAN_PREVIEW_DECODE_THREADS`, and
 `MONDRIAN_PREVIEW_DECODE_WORKERS` are diagnostic overrides, not separate decode
-semantics. `THREADS` means FFmpeg decoder threads per worker; `WORKERS` means
-DecoderPool runtime workers. The app viewer preview service uses the resolved
-budget directly for access-mode lane workers. Thread-local preview decode
-sessions are intentionally kept alive for playback locality and must be
-released through `clear_thread_local_preview_decode_session()` at explicit
-lifecycle boundaries such as perf probes, media/project shutdown, or tests that
-open threaded software decoders.
+semantics. `THREADS` means FFmpeg decoder threads per app preview worker;
+`WORKERS` means the app preview worker budget used for access-mode lanes. The
+app viewer preview service uses the resolved budget directly for playback and
+interactive lane workers. Thread-local preview decode sessions are
+intentionally kept alive for playback locality and must be released through
+`clear_thread_local_preview_decode_session()` at explicit lifecycle boundaries
+such as perf probes, media/project shutdown, or tests that open threaded
+software decoders.
 
 The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
 source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and

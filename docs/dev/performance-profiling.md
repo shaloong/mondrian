@@ -83,7 +83,7 @@ these only for profiling or platform-specific investigation:
 ```powershell
 $env:MONDRIAN_PREVIEW_DECODE_THREADING='slice' # none | frame | slice
 $env:MONDRIAN_PREVIEW_DECODE_THREADS='4'      # FFmpeg decoder threads per worker
-$env:MONDRIAN_PREVIEW_DECODE_WORKERS='2'      # DecoderPool runtime workers
+$env:MONDRIAN_PREVIEW_DECODE_WORKERS='2'      # app preview decode workers
 ```
 
 App preview diagnostics also report proxy path resolution:

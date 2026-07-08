@@ -19,11 +19,7 @@ pub use audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData, ClockRole,
     RealtimeAudioOutput,
 };
-pub use decoder::{
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecoderAccessModeMetricsSnapshot,
-    DecoderMetricsSnapshot, DecoderPool, DecoderPoolPreviewRgbaRequest, HwAccelBackend,
-    HwAccelProbe,
-};
+pub use decoder::{DecodedFrameResidency, DecodedGpuFrameHandleKind, HwAccelBackend, HwAccelProbe};
 pub use info::{
     AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoColorDetectionMethod,
     VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary,
