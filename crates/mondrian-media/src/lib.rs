@@ -40,8 +40,8 @@ pub use preview::{
     decode_preview_rgba_scaled_cancellable, preview_decode_backend, preview_decode_cpu_budget,
     set_preview_decode_backend, PreviewDecodeAccessMode, PreviewDecodeBackend,
     PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
-    PreviewDecodeRgbaRequest, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
-    PreviewFileFingerprint, RgbaFrame,
+    PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingKind, PreviewFileFingerprint, RgbaFrame,
 };
 pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution, ProxyStatus};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

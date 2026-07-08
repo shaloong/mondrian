@@ -108,9 +108,10 @@ Access-mode decode behavior is centralized in a media-layer policy, not in app
 conditionals or FFmpeg call sites. Playback has the widest mostly-forward
 session reuse window, the playback ring, and the exact-path forward decode
 budget; scrub has only a very short forward reuse window, a smaller CPU
-fallback forward-scan budget, and is the only mode allowed to opt into the
-experimental fast-any-seek path; random-access still extraction has no forward
-reuse and keeps keyframe-safe exact seeking with the exact-path budget. This
+fallback forward-scan budget, no playback ring, and the low-latency
+bounded-any seek strategy; random-access still extraction has no forward reuse
+and keeps keyframe-safe exact seeking with the exact-path budget. Scrub
+low-latency seek is product semantics, not an opt-in environment variable. This
 preserves still-frame correctness while preventing latest-wins scrubbing from
 spending the same long-GOP CPU budget as deterministic extraction, and leaves a
 clear replacement point for future hardware-resident playback and low-latency
@@ -408,10 +409,10 @@ Every `RgbaFrame` returned by the preview decode boundary carries
 `PreviewDecodeDiagnostics`: concrete path (`InProcessFfmpegCpuRgba`,
 `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`), elapsed microseconds, cache-hit
 status, requested access mode, external-process status, CPU-residency evidence,
-seek status, decoded frame count, in-process FFmpeg decoder threading
-mode/count, and stage-level wall-clock timings for session open, cache lookup,
-seek, packet/decode, software scaling, RGBA copy, and the experimental
-external-process path.
+seek status, requested seek strategy, decoded frame count, in-process FFmpeg
+decoder threading mode/count, and stage-level wall-clock timings for session
+open, cache lookup, seek, packet/decode, software scaling, RGBA copy, and the
+experimental external-process path.
 App-level preview diagnostics aggregate those fields so playback/perf JSON can
 show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
 single-thread decode-bound, software-scale/copy-bound, worker-queue-bound, or

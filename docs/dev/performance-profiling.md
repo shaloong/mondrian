@@ -109,6 +109,11 @@ renderer/color code. Access-mode profiles include `queue_wait_max_us` and
 stale prefetch/current admission before codec, color, or render work. The
 preview media smokes fail when the access modes exercised by that scenario have
 queue waits over the decode slow-frame budget.
+Access-mode profiles also include seek-strategy counters. `ScrubCursor` samples
+must use `bounded_any_seek_strategy_frames`; if scrub frames show
+`keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
+should fail before anyone tunes codec threads, proxy thresholds, color, or
+renderer code.
 Cancellation counters are also split inside each access-mode profile; use those
 fields to identify whether obsolete, prefetch-deadline,
 prefetch-preempted-by-current, still-preempted-by-realtime-current, shutdown,

@@ -28,6 +28,7 @@ const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 const PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES: i64 = 48;
 const PREVIEW_SCRUB_FORWARD_REUSE_FRAMES: i64 = 2;
+const PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS: u64 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewDecodeBackend {
@@ -73,6 +74,26 @@ pub enum PreviewDecodeAccessMode {
     /// Deterministic random-access still-frame decode for thumbnails, export
     /// fallback, diagnostics, and exact frame requests.
     RandomAccessStillFrame,
+}
+
+/// FFmpeg seek strategy selected by a preview access mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewDecodeSeekStrategy {
+    /// Seek to a preceding keyframe and decode forward for exact frame selection.
+    #[default]
+    KeyframeBefore,
+    /// Seek close to the target using FFmpeg's any-frame seek flag for low-latency interaction.
+    BoundedAnyFrame,
+}
+
+impl PreviewDecodeSeekStrategy {
+    /// Stable seek strategy name for telemetry and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::KeyframeBefore => "KeyframeBefore",
+            Self::BoundedAnyFrame => "BoundedAnyFrame",
+        }
+    }
 }
 
 impl PreviewDecodeAccessMode {
@@ -146,7 +167,8 @@ struct PreviewDecodeAccessPolicy {
     forward_decode_budget_frames: usize,
     use_playback_ring: bool,
     preserve_session_on_cancel: bool,
-    allow_fast_any_seek: bool,
+    seek_strategy: PreviewDecodeSeekStrategy,
+    any_seek_window_ms: u64,
 }
 
 impl PreviewDecodeAccessPolicy {
@@ -158,7 +180,8 @@ impl PreviewDecodeAccessPolicy {
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: true,
                 preserve_session_on_cancel: true,
-                allow_fast_any_seek: false,
+                seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
+                any_seek_window_ms: 0,
             },
             PreviewDecodeAccessMode::ScrubCursor => Self {
                 access_mode,
@@ -166,7 +189,8 @@ impl PreviewDecodeAccessPolicy {
                 forward_decode_budget_frames: PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
                 preserve_session_on_cancel: false,
-                allow_fast_any_seek: true,
+                seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
+                any_seek_window_ms: PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
             },
             PreviewDecodeAccessMode::RandomAccessStillFrame => Self {
                 access_mode,
@@ -174,7 +198,8 @@ impl PreviewDecodeAccessPolicy {
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
                 preserve_session_on_cancel: false,
-                allow_fast_any_seek: false,
+                seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
+                any_seek_window_ms: 0,
             },
         }
     }
@@ -406,6 +431,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether the decoder had to seek before producing this frame.
     #[serde(default)]
     pub seek_performed: bool,
+    /// Seek strategy requested by the access-mode policy for this frame.
+    #[serde(default)]
+    pub seek_strategy: PreviewDecodeSeekStrategy,
     /// Whether an existing access-mode-local decode session was reused.
     #[serde(default)]
     pub session_reused: bool,
@@ -439,6 +467,7 @@ impl PreviewDecodeDiagnostics {
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
             cpu_resident: true,
             seek_performed: false,
+            seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             session_reused: false,
             forward_reused: false,
             decoded_frame_count: 0,
@@ -456,6 +485,9 @@ impl PreviewDecodeDiagnostics {
     fn cache_hit_for_mode(elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
         Self::new(PreviewDecodePath::PreviewCacheHit)
             .with_access_mode(access_mode)
+            .with_seek_strategy(
+                PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
+            )
             .with_elapsed(elapsed)
     }
 
@@ -467,6 +499,11 @@ impl PreviewDecodeDiagnostics {
 
     fn with_access_mode(mut self, access_mode: PreviewDecodeAccessMode) -> Self {
         self.access_mode = access_mode;
+        self
+    }
+
+    fn with_seek_strategy(mut self, seek_strategy: PreviewDecodeSeekStrategy) -> Self {
+        self.seek_strategy = seek_strategy;
         self
     }
 }
@@ -544,6 +581,11 @@ impl RgbaFrame {
     fn with_decode_work(mut self, seek_performed: bool, decoded_frame_count: usize) -> Self {
         self.diagnostics.seek_performed = seek_performed;
         self.diagnostics.decoded_frame_count = decoded_frame_count.min(u32::MAX as usize) as u32;
+        self
+    }
+
+    fn with_seek_strategy(mut self, seek_strategy: PreviewDecodeSeekStrategy) -> Self {
+        self.diagnostics.seek_strategy = seek_strategy;
         self
     }
 
@@ -945,6 +987,7 @@ impl PreviewDecodeSession {
                 }
                 return Ok(PreviewDecodeOutcome::Frame(
                     hit.into_playback_ring_hit(cache_lookup_started_at.elapsed())
+                        .with_seek_strategy(policy.seek_strategy)
                         .with_stage_durations(PreviewDecodeStageDurations {
                             cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                             ..PreviewDecodeStageDurations::default()
@@ -969,6 +1012,7 @@ impl PreviewDecodeSession {
             return Ok(PreviewDecodeOutcome::Frame(
                 hit.frame
                     .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
+                    .with_seek_strategy(policy.seek_strategy)
                     .with_stage_durations(PreviewDecodeStageDurations {
                         cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                         ..PreviewDecodeStageDurations::default()
@@ -1031,6 +1075,7 @@ impl PreviewDecodeSession {
                         ..PreviewDecodeStageDurations::default()
                     })
                     .with_decode_work(seek_performed, result.decoded_frame_count)
+                    .with_seek_strategy(policy.seek_strategy)
                     .with_forward_reused(should_continue_forward)
                     .with_threading(self.threading_kind, self.threading_count),
             ));
@@ -1062,18 +1107,21 @@ impl PreviewDecodeSession {
 
         let tb_secs = tb_num / tb_den;
 
-        let (min_ts, max_ts, seek_flags) =
-            if policy.allow_fast_any_seek && preview_fast_any_seek_enabled() {
-                let seek_window_pts = (2.0 / tb_secs).round().max(1.0) as i64;
+        let (min_ts, max_ts, seek_flags) = match policy.seek_strategy {
+            PreviewDecodeSeekStrategy::KeyframeBefore => {
+                // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
+                (i64::MIN, target_pts, ffmpeg::ffi::AVSEEK_FLAG_BACKWARD)
+            }
+            PreviewDecodeSeekStrategy::BoundedAnyFrame => {
+                let seek_window_secs = policy.any_seek_window_ms as f64 / 1_000.0;
+                let seek_window_pts = (seek_window_secs / tb_secs).round().max(1.0) as i64;
                 (
                     target_pts.saturating_sub(seek_window_pts),
                     target_pts.saturating_add(seek_window_pts),
                     ffmpeg::ffi::AVSEEK_FLAG_ANY,
                 )
-            } else {
-                // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
-                (i64::MIN, target_pts, ffmpeg::ffi::AVSEEK_FLAG_BACKWARD)
-            };
+            }
+        };
 
         let ret = unsafe {
             ffmpeg::ffi::avformat_seek_file(
@@ -1382,6 +1430,10 @@ fn decode_preview_rgba_frame_outcome(
                         }
                         return Ok(PreviewDecodeOutcome::Frame(frame
                             .with_access_mode(access_mode)
+                            .with_seek_strategy(
+                                PreviewDecodeAccessPolicy::for_access_mode(access_mode)
+                                    .seek_strategy,
+                            )
                             .with_session_reused(current_match)
                             .with_stage_durations(PreviewDecodeStageDurations {
                                 session_open_us,
@@ -1404,6 +1456,7 @@ fn decode_preview_rgba_frame_outcome(
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame
                     .with_access_mode(access_mode)
+                    .with_seek_strategy(PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy)
                     .with_session_reused(current_match)
                     .with_stage_durations(PreviewDecodeStageDurations {
                         session_open_us,
@@ -1471,15 +1524,6 @@ fn preview_trace(message: String) {
     if enabled {
         eprintln!("{message}");
     }
-}
-
-fn preview_fast_any_seek_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("MONDRIAN_PREVIEW_FAST_ANY_SEEK")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
 }
 
 fn preview_decode_threading_config() -> PreviewDecodeThreadingConfig {
@@ -1858,10 +1902,11 @@ mod tests {
         preview_cache_put_with_fingerprint,
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, PreviewDecodeAccessMode,
         PreviewDecodeAccessPolicy, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
-        PreviewDecodeRgbaRequest, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
-        PreviewFileFingerprint, PreviewPlaybackRing, RgbaFrame,
+        PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+        PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewPlaybackRing, RgbaFrame,
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -1956,6 +2001,14 @@ mod tests {
         assert!(PreviewDecodeAccessMode::PlaybackCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::RandomAccessStillFrame.preserves_session_on_cancel());
+        assert_eq!(
+            PreviewDecodeSeekStrategy::KeyframeBefore.as_str(),
+            "KeyframeBefore"
+        );
+        assert_eq!(
+            PreviewDecodeSeekStrategy::BoundedAnyFrame.as_str(),
+            "BoundedAnyFrame"
+        );
     }
 
     #[test]
@@ -2017,7 +2070,11 @@ mod tests {
         );
         assert!(playback.use_playback_ring);
         assert!(playback.preserve_session_on_cancel);
-        assert!(!playback.allow_fast_any_seek);
+        assert_eq!(
+            playback.seek_strategy,
+            PreviewDecodeSeekStrategy::KeyframeBefore
+        );
+        assert_eq!(playback.any_seek_window_ms, 0);
 
         assert_eq!(
             scrub.forward_reuse_frame_window,
@@ -2030,7 +2087,11 @@ mod tests {
         assert!(scrub.forward_decode_budget_frames < playback.forward_decode_budget_frames);
         assert!(!scrub.use_playback_ring);
         assert!(!scrub.preserve_session_on_cancel);
-        assert!(scrub.allow_fast_any_seek);
+        assert_eq!(
+            scrub.seek_strategy,
+            PreviewDecodeSeekStrategy::BoundedAnyFrame
+        );
+        assert_eq!(scrub.any_seek_window_ms, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS);
 
         assert_eq!(still.forward_reuse_frame_window, 0);
         assert_eq!(
@@ -2039,7 +2100,11 @@ mod tests {
         );
         assert!(!still.use_playback_ring);
         assert!(!still.preserve_session_on_cancel);
-        assert!(!still.allow_fast_any_seek);
+        assert_eq!(
+            still.seek_strategy,
+            PreviewDecodeSeekStrategy::KeyframeBefore
+        );
+        assert_eq!(still.any_seek_window_ms, 0);
     }
 
     #[test]
@@ -2159,6 +2224,10 @@ mod tests {
             frame.diagnostics.access_mode,
             PreviewDecodeAccessMode::RandomAccessStillFrame
         );
+        assert_eq!(
+            frame.diagnostics.seek_strategy,
+            PreviewDecodeSeekStrategy::KeyframeBefore
+        );
         let reused = frame.clone().with_session_reused(true).with_forward_reused(true);
         assert!(reused.diagnostics.session_reused);
         assert!(reused.diagnostics.forward_reused);
@@ -2174,6 +2243,10 @@ mod tests {
         assert_eq!(
             cached.diagnostics.access_mode,
             PreviewDecodeAccessMode::PlaybackCursor
+        );
+        assert_eq!(
+            cached.diagnostics.seek_strategy,
+            PreviewDecodeSeekStrategy::KeyframeBefore
         );
 
         let ring_hit = cached.into_playback_ring_hit(std::time::Duration::from_micros(2));
