@@ -157,6 +157,14 @@ diagnostics must preserve timeout counts per access mode. A timeout should
 therefore point directly at the failing access contract (`PlaybackCursor`,
 `ScrubCursor`, or `RandomAccessStillFrame`) instead of only showing a generic
 "decode failed" counter.
+Forward-scan budget exhaustion is also a structured decode failure. When a
+media-layer access policy hits its forward decode frame budget without finding
+an acceptable frame, the media crate must return a typed
+`DecodeBudgetExhausted` error containing the requested access mode, decoded
+frame count, budget, and target PTS. App preview diagnostics must aggregate
+these failures globally and per access mode, and perf reports must surface a
+budget-exhausted root cause instead of folding the event into an opaque decode
+error or pretending the sample merely timed out.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older

@@ -226,6 +226,7 @@ impl AppUiPreviewService {
             decode_successes: self.metrics.decode_successes.get(),
             decode_failures: self.metrics.decode_failures.get(),
             decode_timeout_failures: self.metrics.decode_timeout_failures.get(),
+            decode_budget_exhausted_failures: self.metrics.decode_budget_exhausted_failures.get(),
             decode_canceled_jobs: self.metrics.decode_canceled_jobs.get(),
             decode_canceled_shutdown_jobs: self.metrics.decode_canceled_shutdown_jobs.get(),
             decode_canceled_obsolete_jobs: self.metrics.decode_canceled_obsolete_jobs.get(),
@@ -1135,8 +1136,14 @@ impl AppUiPreviewService {
     ) {
         let reason = reason.unwrap_or(MediaPreviewFailureReason::DecodeError);
         bump(&self.metrics.decode_failures);
-        if reason == MediaPreviewFailureReason::Timeout {
-            bump(&self.metrics.decode_timeout_failures);
+        match reason {
+            MediaPreviewFailureReason::Timeout => {
+                bump(&self.metrics.decode_timeout_failures);
+            }
+            MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
+                bump(&self.metrics.decode_budget_exhausted_failures);
+            }
+            MediaPreviewFailureReason::DecodeError => {}
         }
         let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         access_mode_profiles.record_failure(access_mode, reason);
@@ -1587,6 +1594,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_failures: u64,
     /// Failed background media decodes caused by a structured decode timeout.
     pub decode_timeout_failures: u64,
+    /// Failed background media decodes caused by access-mode forward-scan budget exhaustion.
+    pub decode_budget_exhausted_failures: u64,
     /// Background media decodes canceled before producing a frame.
     pub decode_canceled_jobs: u64,
     /// Background media decodes canceled because the preview service is shutting down.
@@ -1991,6 +2000,8 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub failed_jobs: u64,
     /// Failed decode jobs caused by structured decode timeouts for this access mode.
     pub timeout_failures: u64,
+    /// Failed decode jobs caused by forward-scan budget exhaustion for this access mode.
+    pub budget_exhausted_failures: u64,
     /// Decode requests for this access mode that required a seek.
     pub seeked_frames: u64,
     /// Decode results that reused an existing access-mode-local session.
@@ -2098,8 +2109,14 @@ impl AppUiPreviewDecodeAccessModeProfile {
 
     fn record_failure(&mut self, reason: MediaPreviewFailureReason) {
         self.failed_jobs = self.failed_jobs.saturating_add(1);
-        if reason == MediaPreviewFailureReason::Timeout {
-            self.timeout_failures = self.timeout_failures.saturating_add(1);
+        match reason {
+            MediaPreviewFailureReason::Timeout => {
+                self.timeout_failures = self.timeout_failures.saturating_add(1);
+            }
+            MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
+                self.budget_exhausted_failures = self.budget_exhausted_failures.saturating_add(1);
+            }
+            MediaPreviewFailureReason::DecodeError => {}
         }
     }
 }
@@ -2227,6 +2244,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub decode_failures: u64,
     /// Failed preview decode results caused by structured decode timeouts.
     pub decode_timeout_failures: u64,
+    /// Failed preview decode results caused by access-mode forward-scan budget exhaustion.
+    pub decode_budget_exhausted_failures: u64,
     /// Canceled preview decode jobs.
     pub canceled_jobs: u64,
     /// Canceled preview decode jobs caused by shutdown.
@@ -2348,7 +2367,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 8;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 9;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2764,6 +2783,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             AppUiPreviewDecodePerformanceArea::LatencyBudget,
             "preview_decode_timeout_failures",
             summary.decode_timeout_failures,
+            0,
+        );
+        push_decode_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::RandomAccess,
+            "preview_decode_forward_budget_exhausted_failures",
+            summary.decode_budget_exhausted_failures,
             0,
         );
         push_decode_warn_max_check(
@@ -3547,6 +3573,27 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "inspect_access_mode_decode_timeout_budget",
             "Inspect access-mode decode strategy, hardware decode residency, proxy readiness, and timeout budget before widening worker concurrency.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+    if summary.decode_budget_exhausted_failures > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::RandomAccess,
+            "preview_decode_forward_budget_exhausted",
+            format!(
+                "decode_budget_exhausted_failures={} playback_budget_exhausted_failures={} scrub_budget_exhausted_failures={} random_access_still_budget_exhausted_failures={}",
+                summary.decode_budget_exhausted_failures,
+                summary.access_mode_profiles.playback_cursor.budget_exhausted_failures,
+                summary.access_mode_profiles.scrub_cursor.budget_exhausted_failures,
+                summary
+                    .access_mode_profiles
+                    .random_access_still
+                    .budget_exhausted_failures
+            ),
+            "inspect_access_mode_forward_decode_budget",
+            "Inspect GOP length, proxy readiness, hardware decode residency, and access-mode forward decode budgets before widening CPU fallback work.",
             AppUiPreviewDecodePerformanceSeverity::Fail,
         );
     }
@@ -4466,6 +4513,7 @@ impl AppUiPreviewDiagnostics {
             decode_successes,
             decode_failures: self.decode_failures,
             decode_timeout_failures: self.decode_timeout_failures,
+            decode_budget_exhausted_failures: self.decode_budget_exhausted_failures,
             canceled_jobs: self.decode_canceled_jobs,
             canceled_shutdown_jobs: self.decode_canceled_shutdown_jobs,
             canceled_obsolete_jobs: self.decode_canceled_obsolete_jobs,
@@ -5093,6 +5141,7 @@ enum MediaPreviewCancelReason {
 enum MediaPreviewFailureReason {
     Timeout,
     DecodeError,
+    ForwardDecodeBudgetExhausted,
 }
 
 #[derive(Debug)]
@@ -5656,6 +5705,7 @@ struct AppUiPreviewMetrics {
     decode_successes: Cell<u64>,
     decode_failures: Cell<u64>,
     decode_timeout_failures: Cell<u64>,
+    decode_budget_exhausted_failures: Cell<u64>,
     decode_canceled_jobs: Cell<u64>,
     decode_canceled_shutdown_jobs: Cell<u64>,
     decode_canceled_obsolete_jobs: Cell<u64>,
@@ -6498,6 +6548,9 @@ fn decode_media_preview(
 fn media_preview_failure_reason(err: &MondrianError) -> MediaPreviewFailureReason {
     match err {
         MondrianError::DecodeTimeout { .. } => MediaPreviewFailureReason::Timeout,
+        MondrianError::DecodeBudgetExhausted { .. } => {
+            MediaPreviewFailureReason::ForwardDecodeBudgetExhausted
+        }
         _ => MediaPreviewFailureReason::DecodeError,
     }
 }
@@ -7282,14 +7335,20 @@ mod tests {
             PreviewDecodeAccessMode::RandomAccessStillFrame,
             Some(MediaPreviewFailureReason::DecodeError),
         );
+        service.record_preview_decode_failure(
+            PreviewDecodeAccessMode::ScrubCursor,
+            Some(MediaPreviewFailureReason::ForwardDecodeBudgetExhausted),
+        );
 
         let diagnostics = service.diagnostics();
 
-        assert_eq!(diagnostics.decode_failures, 2);
+        assert_eq!(diagnostics.decode_failures, 3);
         assert_eq!(diagnostics.decode_timeout_failures, 1);
+        assert_eq!(diagnostics.decode_budget_exhausted_failures, 1);
         let scrub_profile = diagnostics.decode_access_mode_profiles.scrub_cursor;
-        assert_eq!(scrub_profile.failed_jobs, 1);
+        assert_eq!(scrub_profile.failed_jobs, 2);
         assert_eq!(scrub_profile.timeout_failures, 1);
+        assert_eq!(scrub_profile.budget_exhausted_failures, 1);
         let still_profile = diagnostics.decode_access_mode_profiles.random_access_still;
         assert_eq!(still_profile.failed_jobs, 1);
         assert_eq!(still_profile.timeout_failures, 0);
@@ -7300,6 +7359,43 @@ mod tests {
                 .decode_timeout_failures,
             1
         );
+    }
+
+    #[test]
+    fn preview_decode_performance_report_fails_structured_budget_exhaustion() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_failures: 1,
+            decode_budget_exhausted_failures: 1,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    failed_jobs: 1,
+                    budget_exhausted_failures: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_forward_budget_exhausted_failures"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_forward_budget_exhausted"
+                && root.evidence.contains("scrub_budget_exhausted_failures=1")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_access_mode_forward_decode_budget"));
     }
 
     #[test]

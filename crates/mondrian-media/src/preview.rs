@@ -141,6 +141,7 @@ impl<'a> PreviewDecodeRgbaRequest<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreviewDecodeAccessPolicy {
+    access_mode: PreviewDecodeAccessMode,
     forward_reuse_frame_window: i64,
     forward_decode_budget_frames: usize,
     use_playback_ring: bool,
@@ -152,6 +153,7 @@ impl PreviewDecodeAccessPolicy {
     fn for_access_mode(access_mode: PreviewDecodeAccessMode) -> Self {
         match access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => Self {
+                access_mode,
                 forward_reuse_frame_window: PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: true,
@@ -159,6 +161,7 @@ impl PreviewDecodeAccessPolicy {
                 allow_fast_any_seek: false,
             },
             PreviewDecodeAccessMode::ScrubCursor => Self {
+                access_mode,
                 forward_reuse_frame_window: PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
                 forward_decode_budget_frames: PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
@@ -166,6 +169,7 @@ impl PreviewDecodeAccessPolicy {
                 allow_fast_any_seek: true,
             },
             PreviewDecodeAccessMode::RandomAccessStillFrame => Self {
+                access_mode,
                 forward_reuse_frame_window: 0,
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
@@ -1226,7 +1230,9 @@ impl PreviewDecodeSession {
             }
         }
 
-        if !self.reached_eof {
+        let budget_exhausted = frames_decoded >= policy.forward_decode_budget_frames;
+
+        if !self.reached_eof && !budget_exhausted {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
@@ -1292,6 +1298,16 @@ impl PreviewDecodeSession {
                 selected_pts,
                 frames_decoded,
             ));
+        }
+
+        if budget_exhausted {
+            return Err(MondrianError::DecodeBudgetExhausted {
+                asset_id: self.path.display().to_string(),
+                access_mode: policy.access_mode.as_str().to_owned(),
+                decoded_frames: frames_decoded as u64,
+                budget_frames: policy.forward_decode_budget_frames as u64,
+                target_pts,
+            });
         }
 
         Ok(PreviewDecodeForwardResult::empty(frames_decoded))

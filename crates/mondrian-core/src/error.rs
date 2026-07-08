@@ -23,6 +23,17 @@ pub enum MondrianError {
         secs: f64,
     },
 
+    #[error(
+        "解码前向扫描预算耗尽 (asset={asset_id}, access_mode={access_mode}, decoded_frames={decoded_frames}, budget_frames={budget_frames}, target_pts={target_pts})"
+    )]
+    DecodeBudgetExhausted {
+        asset_id: String,
+        access_mode: String,
+        decoded_frames: u64,
+        budget_frames: u64,
+        target_pts: i64,
+    },
+
     #[error("不支持的媒体格式: {format}")]
     UnsupportedFormat { format: String },
 
