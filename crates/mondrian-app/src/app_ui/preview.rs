@@ -19,6 +19,7 @@ use mondrian_core::timeline_data::AssetMediaInterpretation;
 #[cfg(test)]
 use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, SequenceId};
+use mondrian_core::MondrianError;
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
     decode_preview_rgba_scaled_cancellable, preview_decode_cpu_budget, PreviewDecodeAccessMode,
@@ -224,6 +225,7 @@ impl AppUiPreviewService {
             decode_worker_count: self.decode_worker_count,
             decode_successes: self.metrics.decode_successes.get(),
             decode_failures: self.metrics.decode_failures.get(),
+            decode_timeout_failures: self.metrics.decode_timeout_failures.get(),
             decode_canceled_jobs: self.metrics.decode_canceled_jobs.get(),
             decode_canceled_shutdown_jobs: self.metrics.decode_canceled_shutdown_jobs.get(),
             decode_canceled_obsolete_jobs: self.metrics.decode_canceled_obsolete_jobs.get(),
@@ -465,7 +467,7 @@ impl AppUiPreviewService {
                     changed |= completion.is_current();
                 }
                 None => {
-                    bump(&self.metrics.decode_failures);
+                    self.record_preview_decode_failure(result.access_mode, result.failure_reason);
                     if let Some(error) = result.error {
                         tracing::debug!(
                             asset_id = %result.key.asset_id,
@@ -1087,6 +1089,21 @@ impl AppUiPreviewService {
         self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
+    fn record_preview_decode_failure(
+        &self,
+        access_mode: PreviewDecodeAccessMode,
+        reason: Option<MediaPreviewFailureReason>,
+    ) {
+        let reason = reason.unwrap_or(MediaPreviewFailureReason::DecodeError);
+        bump(&self.metrics.decode_failures);
+        if reason == MediaPreviewFailureReason::Timeout {
+            bump(&self.metrics.decode_timeout_failures);
+        }
+        let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
+        access_mode_profiles.record_failure(access_mode, reason);
+        self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
+    }
+
     fn record_preview_decode_queue_wait(
         &self,
         priority: MediaPreviewRequestPriority,
@@ -1529,6 +1546,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_successes: u64,
     /// Failed background media decodes received by the UI service.
     pub decode_failures: u64,
+    /// Failed background media decodes caused by a structured decode timeout.
+    pub decode_timeout_failures: u64,
     /// Background media decodes canceled before producing a frame.
     pub decode_canceled_jobs: u64,
     /// Background media decodes canceled because the preview service is shutting down.
@@ -1828,6 +1847,10 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub canceled_prefetch_deadline_jobs: u64,
     /// Canceled jobs without a structured reason for this access mode.
     pub canceled_unknown_jobs: u64,
+    /// Failed decode jobs for this access mode.
+    pub failed_jobs: u64,
+    /// Failed decode jobs caused by structured decode timeouts for this access mode.
+    pub timeout_failures: u64,
     /// Decode requests for this access mode that required a seek.
     pub seeked_frames: u64,
     /// Decode results that reused an existing access-mode-local session.
@@ -1912,6 +1935,13 @@ impl AppUiPreviewDecodeAccessModeProfile {
             }
         }
     }
+
+    fn record_failure(&mut self, reason: MediaPreviewFailureReason) {
+        self.failed_jobs = self.failed_jobs.saturating_add(1);
+        if reason == MediaPreviewFailureReason::Timeout {
+            self.timeout_failures = self.timeout_failures.saturating_add(1);
+        }
+    }
 }
 
 /// Preview decode profiles split by access mode.
@@ -1972,6 +2002,24 @@ impl AppUiPreviewDecodeAccessModeProfiles {
         }
     }
 
+    fn record_failure(
+        &mut self,
+        access_mode: PreviewDecodeAccessMode,
+        reason: MediaPreviewFailureReason,
+    ) {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.playback_cursor.record_failure(reason);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.scrub_cursor.record_failure(reason);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.random_access_still.record_failure(reason);
+            }
+        }
+    }
+
     fn slowest_access_mode(self) -> Option<PreviewDecodeAccessMode> {
         self.named_profiles()
             .into_iter()
@@ -2004,6 +2052,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub decode_successes: u64,
     /// Failed preview decode results.
     pub decode_failures: u64,
+    /// Failed preview decode results caused by structured decode timeouts.
+    pub decode_timeout_failures: u64,
     /// Canceled preview decode jobs.
     pub canceled_jobs: u64,
     /// Canceled preview decode jobs caused by shutdown.
@@ -2111,7 +2161,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 3;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2494,6 +2544,13 @@ pub fn build_preview_decode_performance_report(
             slow_frame_budget_us,
         );
         push_preview_decode_access_mode_checks(&mut checks, summary, slow_frame_budget_us);
+        push_decode_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::LatencyBudget,
+            "preview_decode_timeout_failures",
+            summary.decode_timeout_failures,
+            0,
+        );
         push_decode_warn_max_check(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::RandomAccess,
@@ -3080,6 +3137,27 @@ fn push_preview_decode_root_causes_and_actions(
             "tune_preview_prefetch_deadline_or_proxy",
             "Inspect prefetch cancellation pressure, proxy readiness, and playback decode locality before increasing decode concurrency.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    if summary.decode_timeout_failures > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::LatencyBudget,
+            "preview_decode_timeout_failures",
+            format!(
+                "decode_timeout_failures={} playback_timeout_failures={} scrub_timeout_failures={} random_access_still_timeout_failures={}",
+                summary.decode_timeout_failures,
+                summary.access_mode_profiles.playback_cursor.timeout_failures,
+                summary.access_mode_profiles.scrub_cursor.timeout_failures,
+                summary
+                    .access_mode_profiles
+                    .random_access_still
+                    .timeout_failures
+            ),
+            "inspect_access_mode_decode_timeout_budget",
+            "Inspect access-mode decode strategy, hardware decode residency, proxy readiness, and timeout budget before widening worker concurrency.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
         );
     }
     if summary.canceled_obsolete_jobs > 0 {
@@ -3943,6 +4021,7 @@ impl AppUiPreviewDiagnostics {
             cpu_budget: self.decode_cpu_budget,
             decode_successes,
             decode_failures: self.decode_failures,
+            decode_timeout_failures: self.decode_timeout_failures,
             canceled_jobs: self.decode_canceled_jobs,
             canceled_shutdown_jobs: self.decode_canceled_shutdown_jobs,
             canceled_obsolete_jobs: self.decode_canceled_obsolete_jobs,
@@ -4559,11 +4638,18 @@ enum MediaPreviewCancelReason {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPreviewFailureReason {
+    Timeout,
+    DecodeError,
+}
+
 #[derive(Debug)]
 struct MediaPreviewResult {
     key: MediaPreviewKey,
     frame: Option<MediaPreviewFrame>,
     error: Option<String>,
+    failure_reason: Option<MediaPreviewFailureReason>,
     generation: u64,
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
@@ -5110,6 +5196,7 @@ struct AppUiPreviewMetrics {
     media_failure_hits: Cell<u64>,
     decode_successes: Cell<u64>,
     decode_failures: Cell<u64>,
+    decode_timeout_failures: Cell<u64>,
     decode_canceled_jobs: Cell<u64>,
     decode_canceled_shutdown_jobs: Cell<u64>,
     decode_canceled_obsolete_jobs: Cell<u64>,
@@ -5878,6 +5965,7 @@ fn decode_media_preview(
                     signature,
                 }),
                 error: None,
+                failure_reason: None,
                 generation: job.generation,
                 priority,
                 access_mode,
@@ -5893,6 +5981,7 @@ fn decode_media_preview(
             key: job.key,
             frame: None,
             error: None,
+            failure_reason: None,
             generation: job.generation,
             priority,
             access_mode,
@@ -5903,20 +5992,31 @@ fn decode_media_preview(
             color_diagnostics: None,
             color_stage_diagnostics: None,
         },
-        Err(err) => MediaPreviewResult {
-            key: job.key,
-            frame: None,
-            error: Some(err.to_string()),
-            generation: job.generation,
-            priority,
-            access_mode,
-            queue_wait_us,
-            canceled: false,
-            cancel_reason: None,
-            decode_diagnostics: None,
-            color_diagnostics: None,
-            color_stage_diagnostics: None,
-        },
+        Err(err) => {
+            let failure_reason = media_preview_failure_reason(&err);
+            MediaPreviewResult {
+                key: job.key,
+                frame: None,
+                error: Some(err.to_string()),
+                failure_reason: Some(failure_reason),
+                generation: job.generation,
+                priority,
+                access_mode,
+                queue_wait_us,
+                canceled: false,
+                cancel_reason: None,
+                decode_diagnostics: None,
+                color_diagnostics: None,
+                color_stage_diagnostics: None,
+            }
+        }
+    }
+}
+
+fn media_preview_failure_reason(err: &MondrianError) -> MediaPreviewFailureReason {
+    match err {
+        MondrianError::DecodeTimeout { .. } => MediaPreviewFailureReason::Timeout,
+        _ => MediaPreviewFailureReason::DecodeError,
     }
 }
 
@@ -6644,6 +6744,76 @@ mod tests {
             diagnostics.decode_access_mode_profiles.slowest_access_mode(),
             Some(PreviewDecodeAccessMode::PlaybackCursor)
         );
+    }
+
+    #[test]
+    fn preview_diagnostics_count_decode_failures_by_access_mode() {
+        let service = AppUiPreviewService::new();
+
+        service.record_preview_decode_failure(
+            PreviewDecodeAccessMode::ScrubCursor,
+            Some(MediaPreviewFailureReason::Timeout),
+        );
+        service.record_preview_decode_failure(
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            Some(MediaPreviewFailureReason::DecodeError),
+        );
+
+        let diagnostics = service.diagnostics();
+
+        assert_eq!(diagnostics.decode_failures, 2);
+        assert_eq!(diagnostics.decode_timeout_failures, 1);
+        let scrub_profile = diagnostics.decode_access_mode_profiles.scrub_cursor;
+        assert_eq!(scrub_profile.failed_jobs, 1);
+        assert_eq!(scrub_profile.timeout_failures, 1);
+        let still_profile = diagnostics.decode_access_mode_profiles.random_access_still;
+        assert_eq!(still_profile.failed_jobs, 1);
+        assert_eq!(still_profile.timeout_failures, 0);
+        assert_eq!(
+            diagnostics
+                .decode_performance_summary(50_000)
+                .expect("decode evidence")
+                .decode_timeout_failures,
+            1
+        );
+    }
+
+    #[test]
+    fn preview_decode_performance_report_fails_structured_timeout_failures() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_failures: 1,
+            decode_timeout_failures: 1,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    failed_jobs: 1,
+                    timeout_failures: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        assert!(
+            report.checks.iter().any(|check| check.code == "preview_decode_timeout_failures"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail)
+        );
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_timeout_failures"
+                && root.evidence.contains("scrub_timeout_failures=1")));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "inspect_access_mode_decode_timeout_budget"));
     }
 
     #[test]

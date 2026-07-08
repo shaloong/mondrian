@@ -146,6 +146,14 @@ relies on prefetch cancellation and session locality for sustained playback.
 Diagnostic environment overrides may tune or disable these watchdogs, but they
 must preserve the per-access-mode structure rather than reintroducing one
 opaque timeout for every request.
+Timeouts are first-class decode failures, not string-only log messages.
+`DecoderPool` emits `MondrianError::DecodeTimeout` with the asset id, requested
+access mode, timeout budget, frame number, and source timestamp. Its metrics
+separate `decode_timeouts` from aggregate `decode_failures`, and app preview
+diagnostics must preserve timeout counts per access mode. A timeout should
+therefore point directly at the failing access contract (`PlaybackCursor`,
+`ScrubCursor`, or `RandomAccessStillFrame`) instead of only showing a generic
+"decode failed" counter.
 The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older

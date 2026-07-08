@@ -10,7 +10,7 @@ use crate::preview::{
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use lru::LruCache;
-use mondrian_core::{types::*, Result};
+use mondrian_core::{types::*, MondrianError, Result};
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -194,6 +194,7 @@ struct DecoderMetrics {
     rgba_cache_hits: AtomicU64,
     decode_executions: AtomicU64,
     decode_failures: AtomicU64,
+    decode_timeouts: AtomicU64,
     prefetch_started: AtomicU64,
     prefetch_cancelled: AtomicU64,
     prefetch_completed: AtomicU64,
@@ -215,6 +216,7 @@ pub struct DecoderMetricsSnapshot {
     pub rgba_cache_hits: u64,
     pub decode_executions: u64,
     pub decode_failures: u64,
+    pub decode_timeouts: u64,
     pub prefetch_started: u64,
     pub prefetch_cancelled: u64,
     pub prefetch_completed: u64,
@@ -244,6 +246,7 @@ impl DecoderMetrics {
             rgba_cache_hits: self.rgba_cache_hits.load(Ordering::Relaxed),
             decode_executions,
             decode_failures: self.decode_failures.load(Ordering::Relaxed),
+            decode_timeouts: self.decode_timeouts.load(Ordering::Relaxed),
             prefetch_started: self.prefetch_started.load(Ordering::Relaxed),
             prefetch_cancelled: self.prefetch_cancelled.load(Ordering::Relaxed),
             prefetch_completed: self.prefetch_completed.load(Ordering::Relaxed),
@@ -517,7 +520,7 @@ impl DecoderPool {
 
         let decode_timeout_ms = decode_timeout_budget_ms(access_mode);
         let decode_result: Result<Arc<RgbaFrame>> = if decode_timeout_ms == 0 {
-            decode_task.await.map_err(|e| mondrian_core::MondrianError::DecodeFailed {
+            decode_task.await.map_err(|e| MondrianError::DecodeFailed {
                 asset_id: asset_id.to_string(),
                 reason: e.to_string(),
             })?
@@ -529,7 +532,7 @@ impl DecoderPool {
 
             tokio::select! {
                 joined = &mut decode_task => {
-                    joined.map_err(|e| mondrian_core::MondrianError::DecodeFailed {
+                    joined.map_err(|e| MondrianError::DecodeFailed {
                         asset_id: asset_id.to_string(),
                         reason: e.to_string(),
                     })?
@@ -546,25 +549,25 @@ impl DecoderPool {
                         target_width,
                         target_height
                     );
-                    Err(mondrian_core::MondrianError::DecodeFailed {
+                    Err(MondrianError::DecodeTimeout {
                         asset_id: asset_id.to_string(),
-                        reason: format!(
-                            "preview {} decode timeout after {}ms (frame={} secs={:.3})",
-                            access_mode.as_str(),
-                            decode_timeout_ms,
-                            frame_num,
-                            secs
-                        ),
+                        access_mode: access_mode.as_str().to_owned(),
+                        budget_ms: decode_timeout_ms,
+                        frame: frame_num,
+                        secs,
                     })
                 }
                 _ = &mut cancel_watch => {
-                    Err(mondrian_core::MondrianError::Cancelled)
+                    Err(MondrianError::Cancelled)
                 }
             }
         };
 
-        let decode_result = decode_result.inspect_err(|_| {
+        let decode_result = decode_result.inspect_err(|err| {
             self.metrics.decode_failures.fetch_add(1, Ordering::Relaxed);
+            if matches!(err, MondrianError::DecodeTimeout { .. }) {
+                self.metrics.decode_timeouts.fetch_add(1, Ordering::Relaxed);
+            }
         });
 
         self.metrics

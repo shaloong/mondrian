@@ -12,6 +12,17 @@ pub enum MondrianError {
     #[error("解码失败 (asset={asset_id}): {reason}")]
     DecodeFailed { asset_id: String, reason: String },
 
+    #[error(
+        "解码超时 (asset={asset_id}, access_mode={access_mode}, budget_ms={budget_ms}, frame={frame}, secs={secs:.3})"
+    )]
+    DecodeTimeout {
+        asset_id: String,
+        access_mode: String,
+        budget_ms: u64,
+        frame: u64,
+        secs: f64,
+    },
+
     #[error("不支持的媒体格式: {format}")]
     UnsupportedFormat { format: String },
 
