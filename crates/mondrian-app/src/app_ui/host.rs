@@ -340,10 +340,7 @@ impl AppUiHost {
         }
         self.mark_dirty();
         self.refresh_if_dirty(bounds);
-        if self.sync_playback_buffering_from_viewer() {
-            self.mark_dirty();
-            self.refresh_if_dirty(bounds);
-        }
+        self.refresh_playback_buffering_controls_without_preview();
         true
     }
 
@@ -378,6 +375,14 @@ impl AppUiHost {
 
     fn sync_playback_buffering_from_viewer(&mut self) -> bool {
         self.set_playback_buffering_from_preview(self.root.viewer_preview_waiting())
+    }
+
+    fn refresh_playback_buffering_controls_without_preview(&mut self) -> bool {
+        if !self.sync_playback_buffering_from_viewer() {
+            return false;
+        }
+        self.refresh_transport_state_without_preview();
+        true
     }
 
     fn set_playback_buffering_from_preview(&mut self, preview_waiting: bool) -> bool {
@@ -1679,6 +1684,46 @@ mod tests {
         assert!(
             !host.ui_dirty.get(),
             "transport actions should not leave a full preview-backed refresh queued"
+        );
+    }
+
+    #[test]
+    fn buffering_control_refresh_does_not_request_preview_refresh() {
+        struct LoadingPreview;
+
+        impl crate::app_ui::panels::ViewerPreviewSource for LoadingPreview {
+            fn viewer_preview_for_state(
+                &self,
+                _state: &AppState,
+            ) -> crate::app_ui::panels::ViewerPreviewState {
+                crate::app_ui::panels::ViewerPreviewState::Loading
+            }
+        }
+
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path("buffering-preview-free-refresh"),
+        );
+        host.app_state.borrow_mut().play();
+        {
+            let state = host.app_state.borrow();
+            host.root.refresh_playback_frame_from_app_state(&state, Some(&LoadingPreview));
+        }
+        let before_render_requests = host.preview_service.diagnostics().render_requests;
+
+        assert!(host.refresh_playback_buffering_controls_without_preview());
+
+        assert!(host.app_state.borrow().is_playback_buffering());
+        assert_eq!(
+            host.preview_service.diagnostics().render_requests,
+            before_render_requests,
+            "buffering control sync must not synchronously request preview"
+        );
+        assert!(
+            !host.ui_dirty.get(),
+            "buffering control sync should not leave a full preview-backed refresh queued"
         );
     }
 

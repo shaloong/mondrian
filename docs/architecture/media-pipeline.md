@@ -188,6 +188,12 @@ state without synchronously requesting viewer preview/composite work; preview
 catch-up is driven by worker completion, cache state, and later render ticks.
 This keeps pause, close, and other shell input responsive even when a 4K
 Long-GOP decode or GPU-preview blocker is still unresolved.
+When background preview completion changes the viewer waiting state, the app
+host may perform one preview-aware model refresh for the completed work, but
+the derived playback-buffering flag must be propagated with a transport/status
+refresh that does not request preview again. A buffering-state transition must
+not trigger a second full root refresh or layout pass that re-enters preview
+interpretation.
 The native app event loop also records stage-level responsiveness telemetry for
 action draining, redraw, GPU preview preparation, UI refresh, paint/render,
 background-task polling, and playback-clock advancement. Any stage that exceeds
