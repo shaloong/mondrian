@@ -4,6 +4,7 @@
 //! upload and surface-present path so renderer behavior does not drift between
 //! test windows and the real app shell.
 
+use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_renderer::{DrawCommand, ExternalTextureKey, GlyphUpload, UiRenderer};
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use std::time::Instant;
@@ -342,6 +343,14 @@ impl AppUiFrameRenderer {
     /// Number of external GPU texture views currently registered with the UI renderer.
     pub fn external_texture_count(&self) -> usize {
         self.ui_renderer.external_texture_count()
+    }
+
+    /// Renderer backend support for importing native hardware-decoded video surfaces.
+    ///
+    /// This remains fail-closed until the concrete wgpu backend can import and
+    /// sample an OS decoder surface into a renderer-owned float working frame.
+    pub fn native_decoded_frame_import_support(&self) -> GpuNativeDecodedFrameImportSupport {
+        GpuNativeDecodedFrameImportSupport::unavailable()
     }
 
     /// Resolve text draw commands, upload pending glyphs, and present a frame.

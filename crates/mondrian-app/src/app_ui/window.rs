@@ -838,7 +838,9 @@ impl AppUiViewerGpuOutputFrameResidency {
                         "Procedural layers are generated and composited on the GPU without media uploads".to_owned()
                     },
                     native_video_import: preview_gpu_composite_native_video_import_readiness(
-                        has_media, None,
+                        has_media,
+                        None,
+                        GpuNativeDecodedFrameImportSupport::unavailable(),
                     ),
                 }
             }
@@ -3174,9 +3176,11 @@ fn prepare_viewer_gpu_preview(
                     finish_prepare!();
                 }
             };
-            session
-                .viewer_gpu_output_telemetry
-                .record_actual_frame_residency(prepared_composite.residency.to_frame_residency());
+            session.viewer_gpu_output_telemetry.record_actual_frame_residency(
+                prepared_composite.residency.to_frame_residency(
+                    session.frame_renderer.native_decoded_frame_import_support(),
+                ),
+            );
             let mut input_stage_diagnostics = prepared_composite.input_stage_diagnostics;
             let gpu_layers = preview_gpu_composite_layers(
                 &prepared_composite.layers,
@@ -3360,12 +3364,16 @@ impl Default for PreviewGpuCompositeNativeVideoImportFacts {
 }
 
 impl PreviewGpuCompositeResidencySummary {
-    fn to_frame_residency(self) -> AppUiViewerGpuOutputFrameResidency {
+    fn to_frame_residency(
+        self,
+        renderer_support: GpuNativeDecodedFrameImportSupport,
+    ) -> AppUiViewerGpuOutputFrameResidency {
         let has_media = self.media_layers > 0;
         let has_procedural = self.procedural_layers > 0;
         let native_video_import = preview_gpu_composite_native_video_import_readiness(
             has_media,
             self.native_video_import,
+            renderer_support,
         );
         let all_media_native_gpu = has_media && self.native_decoder_gpu_layers == self.media_layers;
         let has_native_gpu_media = self.native_decoder_gpu_layers > 0;
@@ -3443,6 +3451,7 @@ impl PreviewGpuCompositeNativeVideoImportFacts {
 fn preview_gpu_composite_native_video_import_readiness(
     has_media: bool,
     facts: Option<PreviewGpuCompositeNativeVideoImportFacts>,
+    renderer_support: GpuNativeDecodedFrameImportSupport,
 ) -> Option<AppUiNativeVideoImportReadiness> {
     let facts = facts.unwrap_or_default();
     has_media.then(|| {
@@ -3452,7 +3461,7 @@ fn preview_gpu_composite_native_video_import_readiness(
             source_texture_format: facts.source_texture_format,
             working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             platform_probe: SystemPlatformService.native_video_texture_import(),
-            renderer_support: GpuNativeDecodedFrameImportSupport::unavailable(),
+            renderer_support,
         })
     })
 }
@@ -4379,6 +4388,10 @@ mod tests {
             alpha_modes: vec![wgpu::CompositeAlphaMode::Auto],
             usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
         }
+    }
+
+    fn native_import_support_unavailable() -> GpuNativeDecodedFrameImportSupport {
+        GpuNativeDecodedFrameImportSupport::unavailable()
     }
 
     #[test]
@@ -5573,7 +5586,7 @@ mod tests {
             gpu_input_layers: 2,
             ..PreviewGpuCompositeResidencySummary::default()
         }
-        .to_frame_residency();
+        .to_frame_residency(native_import_support_unavailable());
 
         assert_eq!(
             residency.decode_residency,
@@ -5614,7 +5627,7 @@ mod tests {
             }),
             ..PreviewGpuCompositeResidencySummary::default()
         }
-        .to_frame_residency();
+        .to_frame_residency(native_import_support_unavailable());
 
         assert_eq!(
             residency.decode_residency,
@@ -5638,6 +5651,39 @@ mod tests {
     }
 
     #[test]
+    fn preview_gpu_composite_residency_treats_cpu_transfer_as_cpu_decoded() {
+        let residency = PreviewGpuCompositeResidencySummary {
+            media_layers: 1,
+            gpu_input_layers: 1,
+            native_video_import: Some(PreviewGpuCompositeNativeVideoImportFacts {
+                decoder_residency: DecodedFrameResidency::CpuRgba,
+                decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
+                source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
+            }),
+            ..PreviewGpuCompositeResidencySummary::default()
+        }
+        .to_frame_residency(GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        ));
+
+        assert_eq!(
+            residency.decode_residency,
+            AppUiViewerGpuOutputDecodeResidency::CpuDecodedRgba
+        );
+        assert!(!residency.zero_copy);
+        let native_video_import = residency
+            .native_video_import
+            .expect("media path reports native import readiness");
+        assert_eq!(
+            native_video_import.status,
+            crate::app_ui::native_video_import::AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia
+        );
+        assert!(!native_video_import.decoder_gpu_resident);
+        assert!(!native_video_import.zero_copy_ready);
+    }
+
+    #[test]
     fn preview_gpu_composite_residency_reports_mixed_gpu_input_fallback() {
         let residency = PreviewGpuCompositeResidencySummary {
             media_layers: 2,
@@ -5646,7 +5692,7 @@ mod tests {
             gpu_input_failures: 1,
             ..PreviewGpuCompositeResidencySummary::default()
         }
-        .to_frame_residency();
+        .to_frame_residency(native_import_support_unavailable());
 
         assert_eq!(
             residency.input_transform_path,
@@ -5663,7 +5709,7 @@ mod tests {
             procedural_layers: 1,
             ..PreviewGpuCompositeResidencySummary::default()
         }
-        .to_frame_residency();
+        .to_frame_residency(native_import_support_unavailable());
 
         assert_eq!(
             residency.decode_residency,

@@ -105,8 +105,10 @@ facts into `GpuNativeDecodedFrameTextureFormat` only at the app readiness seam.
 Frame residency diagnostics can therefore distinguish CPU-decoded media,
 native GPU-decoded media, mixed CPU/native stacks, and procedural GPU-native
 content before the concrete D3D11/VideoToolbox/VA-API import adapters exist.
-The renderer backend support remains fail-closed until a real import pass can
-sample the native surface and produce a float linear working frame.
+The app window obtains renderer backend support from `AppUiFrameRenderer`, not
+from hard-coded window logic. That support remains fail-closed until a real
+import pass can sample the native surface and produce a float linear working
+frame.
 
 ## Effect Integration
 
