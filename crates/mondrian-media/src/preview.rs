@@ -232,14 +232,14 @@ impl PreviewDecodeAccessMode {
     }
 }
 
-/// Explicit media-layer request for one scaled CPU RGBA preview decode.
+/// Explicit media-layer request for one scaled preview decode outcome.
 ///
 /// Callers choose a [`PreviewDecodeAccessMode`] as part of the request instead
 /// of reimplementing mode-specific FFmpeg routing outside `mondrian-media`.
 /// The media layer owns how playback, scrubbing, and still-frame extraction map
 /// to session residency, seeking, caching, and future hardware-backed paths.
 #[derive(Debug, Clone, Copy)]
-pub struct PreviewDecodeRgbaRequest<'a> {
+pub struct PreviewDecodeRequest<'a> {
     /// Source media path to decode.
     pub path: &'a Path,
     /// Source timestamp in seconds.
@@ -258,8 +258,8 @@ pub struct PreviewDecodeRgbaRequest<'a> {
     pub hardware_decode_request: PreviewHardwareDecodeRequest,
 }
 
-impl<'a> PreviewDecodeRgbaRequest<'a> {
-    /// Create a request for one scaled CPU RGBA preview decode.
+impl<'a> PreviewDecodeRequest<'a> {
+    /// Create a request for one scaled preview decode outcome.
     pub fn new(path: &'a Path, timestamp_secs: f64, access_mode: PreviewDecodeAccessMode) -> Self {
         Self {
             path,
@@ -1101,17 +1101,17 @@ impl RgbaFrame {
     }
 }
 
-/// Decode one scaled CPU RGBA preview frame from an explicit media request.
+/// Decode one scaled preview frame outcome from an explicit media request.
 ///
 /// This is the single access-mode aware decode boundary. Callers must express
-/// playback, scrub, and still-frame work with [`PreviewDecodeRgbaRequest`] so
+/// playback, scrub, and still-frame work with [`PreviewDecodeRequest`] so
 /// `mondrian-media` owns routing, session residency, seeking, caching, and
 /// future hardware-backed decode selection.
-pub fn decode_preview_rgba_scaled_cancellable(
-    request: PreviewDecodeRgbaRequest<'_>,
+pub fn decode_preview_frame_cancellable(
+    request: PreviewDecodeRequest<'_>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
-    decode_preview_rgba_frame_outcome(
+    decode_preview_frame_outcome(
         request.path,
         request.timestamp_secs,
         request.max_width,
@@ -2450,7 +2450,7 @@ impl PreviewDecodeSession {
     }
 }
 
-fn decode_preview_rgba_frame_outcome(
+fn decode_preview_frame_outcome(
     path: &Path,
     timestamp_secs: f64,
     max_width: Option<u32>,
@@ -3102,17 +3102,17 @@ fn ensure_preview_rgba_scaler<'a>(
 mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        decode_preview_rgba_scaled_cancellable, decoded_surface_format_from_pixel, duration_us,
+        decode_preview_frame_cancellable, decoded_surface_format_from_pixel, duration_us,
         preview_cache_get, preview_cache_put_with_fingerprint,
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
         preview_seek_index_cache_put, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
-        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest,
-        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
-        PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeDecision,
-        PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
-        PreviewPlaybackRing, PreviewScrubAdaptiveClass, PreviewSeekIndex,
-        PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution, RgbaFrame,
+        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
+        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
+        PreviewHardwareDecodeBlocker, PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan,
+        PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame, PreviewPlaybackRing,
+        PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexDiagnostics,
+        PreviewSeekIndexSource, PreviewSeekResolution, RgbaFrame,
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
         PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
@@ -3164,7 +3164,7 @@ mod tests {
 
     #[test]
     fn preview_decode_request_defaults_to_auto_hardware_decode() {
-        let request = PreviewDecodeRgbaRequest::new(
+        let request = PreviewDecodeRequest::new(
             Path::new("clip.mov"),
             0.0,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -3349,16 +3349,13 @@ mod tests {
             modified_secs: Some(20),
             modified_nanos: Some(30),
         };
-        let request = PreviewDecodeRgbaRequest::new(
-            path.as_path(),
-            1.25,
-            PreviewDecodeAccessMode::ScrubCursor,
-        )
-        .with_max_size(Some(640), Some(360))
-        .with_fingerprint(fingerprint)
-        .with_adaptive_hints(PreviewDecodeAdaptiveHints {
-            scrub_class: PreviewScrubAdaptiveClass::HotRegion,
-        });
+        let request =
+            PreviewDecodeRequest::new(path.as_path(), 1.25, PreviewDecodeAccessMode::ScrubCursor)
+                .with_max_size(Some(640), Some(360))
+                .with_fingerprint(fingerprint)
+                .with_adaptive_hints(PreviewDecodeAdaptiveHints {
+                    scrub_class: PreviewScrubAdaptiveClass::HotRegion,
+                });
 
         assert_eq!(request.path, path.as_path());
         assert_eq!(request.timestamp_secs, 1.25);
@@ -3975,13 +3972,13 @@ mod tests {
     #[test]
     fn cancellable_preview_decode_returns_canceled_before_opening_missing_file() {
         let path = PathBuf::from("E:/definitely-missing/canceled-preview.mov");
-        let request = PreviewDecodeRgbaRequest::new(
+        let request = PreviewDecodeRequest::new(
             path.as_path(),
             0.0,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
         )
         .with_max_size(Some(320), Some(180));
-        let outcome = decode_preview_rgba_scaled_cancellable(request, || true)
+        let outcome = decode_preview_frame_cancellable(request, || true)
             .expect("canceled decode should not fail missing media");
 
         assert!(matches!(outcome, PreviewDecodeOutcome::Canceled));
@@ -4083,13 +4080,13 @@ mod tests {
             .and_then(|value| value.parse::<u32>().ok());
 
         let started = Instant::now();
-        let request = PreviewDecodeRgbaRequest::new(
+        let request = PreviewDecodeRequest::new(
             path.as_path(),
             timestamp_secs,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
         )
         .with_max_size(max_width, max_height);
-        let frame = match decode_preview_rgba_scaled_cancellable(request, || false)
+        let frame = match decode_preview_frame_cancellable(request, || false)
             .expect("decode preview fixture")
         {
             PreviewDecodeOutcome::Frame(frame) => frame,
@@ -4174,14 +4171,14 @@ mod tests {
         for index in 0..frame_count {
             let timestamp_secs = start_secs + index as f64 / frame_rate;
             let frame_started = Instant::now();
-            let request = PreviewDecodeRgbaRequest::new(
+            let request = PreviewDecodeRequest::new(
                 path.as_path(),
                 timestamp_secs,
                 PreviewDecodeAccessMode::PlaybackCursor,
             )
             .with_max_size(max_width, max_height)
             .with_fingerprint(fingerprint);
-            let frame = match decode_preview_rgba_scaled_cancellable(request, || false)
+            let frame = match decode_preview_frame_cancellable(request, || false)
                 .expect("decode preview fixture frame")
             {
                 PreviewDecodeOutcome::Frame(frame) => frame,

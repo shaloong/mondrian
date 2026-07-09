@@ -14,8 +14,8 @@ use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
 use mondrian_media::{
-    decode_preview_rgba_scaled_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
-    PreviewDecodeRgbaRequest, VideoColorDiagnosticIssueAggregate,
+    decode_preview_frame_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
+    PreviewDecodeRequest, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
@@ -2720,13 +2720,13 @@ fn decode_video_layer_scaled(
     width: u32,
     height: u32,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
-    let request = PreviewDecodeRgbaRequest::new(
+    let request = PreviewDecodeRequest::new(
         path,
         source_secs,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
     )
     .with_max_size(Some(width), Some(height));
-    let decoded = match decode_preview_rgba_scaled_cancellable(request, || false) {
+    let decoded = match decode_preview_frame_cancellable(request, || false) {
         Ok(PreviewDecodeOutcome::Frame(frame)) => frame,
         Ok(PreviewDecodeOutcome::Canceled) => {
             return Err(format!(

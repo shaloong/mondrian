@@ -22,10 +22,10 @@ use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId}
 use mondrian_core::MondrianError;
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
-    decode_preview_rgba_scaled_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
+    decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
-    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy,
+    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
     PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
     PreviewHardwareDecodeBlocker, PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest,
     PreviewScrubAdaptiveClass, PreviewSeekIndexSource, VideoColorDiagnostic,
@@ -8775,14 +8775,14 @@ fn decode_media_preview_for_access_mode(
     hardware_decode_request: PreviewHardwareDecodeRequest,
     should_cancel: impl Fn() -> bool,
 ) -> mondrian_core::Result<PreviewDecodeOutcome> {
-    let mut request = PreviewDecodeRgbaRequest::new(path, source_secs, access_mode)
+    let mut request = PreviewDecodeRequest::new(path, source_secs, access_mode)
         .with_max_size(max_width, max_height)
         .with_adaptive_hints(adaptive_hints)
         .with_hardware_decode_request(hardware_decode_request);
     if let Some(fingerprint) = fingerprint {
         request = request.with_fingerprint(fingerprint);
     }
-    decode_preview_rgba_scaled_cancellable(request, should_cancel)
+    decode_preview_frame_cancellable(request, should_cancel)
 }
 
 #[cfg(test)]

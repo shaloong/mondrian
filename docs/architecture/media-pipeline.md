@@ -60,7 +60,7 @@ scheduling distinguish the requested access mode. Future hardware-resident
 decode must specialize behind these contracts instead of adding app-layer flags
 or treating playback as repeated random-access still decode. The generic
 access-mode router is intentionally media-internal. Public callers enter through
-one request seam: `PreviewDecodeRgbaRequest`. App preview owns worker lanes,
+one request seam: `PreviewDecodeRequest`. App preview owns worker lanes,
 priority admission, current/prefetch cancellation, queue diagnostics, and
 timeout reporting around that media request. Do not add mode-specific public
 helpers or a second preview decode pool; they become compatibility debt and
@@ -173,7 +173,7 @@ toward a real GOP/keyframe map: future probe-backed indexes and hardware
 decode session adapters should replace the evidence source behind the media
 request boundary, while preserving the same diagnostics for availability,
 observed keyframes/packets, and whether a seek actually used an index anchor.
-App, export, and thumbnail callers submit a `PreviewDecodeRgbaRequest` to the
+App, export, and thumbnail callers submit a `PreviewDecodeRequest` to the
 media preview decode boundary instead of matching on `PreviewDecodeAccessMode`
 or calling mode-specific FFmpeg helpers. Access-mode routing, session
 retention, cache lookup, playback-ring use, and future hardware/low-copy
@@ -188,7 +188,7 @@ future backend explicitly supports those access patterns.
 App preview decode execution must run synchronous FFmpeg preview decode on
 dedicated preview worker threads, not on the UI/event thread. Current-frame and
 prefetch workers pass a cooperative cancellation predicate into
-`PreviewDecodeRgbaRequest`, and the media loop checks that predicate before
+`PreviewDecodeRequest`, and the media loop checks that predicate before
 open, seek, packet decode, frame receive, EOF drain, and RGBA conversion. Do
 not depend on thread abort to preempt synchronous packet decode.
 Viewer preview readiness feeds back into the app playback clock. While the
@@ -820,7 +820,7 @@ directly, change media color interpretation, or silently enable proxy mode; the
 media crate still owns only proxy file generation and status probing.
 Interactive scrub uses app-selected adaptive hints rather than a separate decode
 API. The app preview service observes recent scrub seek locality and scrub
-decode latency, then tags `PreviewDecodeRgbaRequest` with a
+decode latency, then tags `PreviewDecodeRequest` with a
 `PreviewScrubAdaptiveClass`. The media layer preserves the requested frame
 semantics but may tighten bounded-any seek windows and forward-scan budgets for
 hot or slow scrub regions. This avoids long UI-blocking scrub attempts while

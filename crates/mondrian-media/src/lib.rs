@@ -36,10 +36,10 @@ pub use info::{
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
     clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-    decode_preview_rgba_scaled_cancellable, preview_decode_backend, preview_decode_cpu_budget,
+    decode_preview_frame_cancellable, preview_decode_backend, preview_decode_cpu_budget,
     set_preview_decode_backend, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
     PreviewDecodeBackend, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
-    PreviewDecodePath, PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy,
+    PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
     PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
     PreviewHardwareDecodeBlocker, PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest,
     PreviewNativeDecodedFrame, PreviewScrubAdaptiveClass, PreviewSeekIndexSource, RgbaFrame,
