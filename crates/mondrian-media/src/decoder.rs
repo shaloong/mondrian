@@ -87,6 +87,18 @@ impl DecodedGpuFrameHandleKind {
 /// Hardware decode / zero-copy probe result for the current process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HwAccelProbe {
+    /// Hardware backend family that would be preferred on this platform, if a
+    /// real decoder adapter is connected.
+    pub candidate_backend: Option<HwAccelBackend>,
+    /// Native handle family the platform-preferred backend is expected to
+    /// produce, if known.
+    pub candidate_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    /// Native decoded surface formats the platform-preferred backend should
+    /// prioritize for GPU-native playback.
+    pub candidate_surface_formats: Vec<DecodedVideoSurfaceFormat>,
+    /// Whether Mondrian has an implemented decoder adapter for the candidate
+    /// backend in this build.
+    pub decoder_adapter_available: bool,
     /// Backend that is actually active for the media decode boundary.
     pub selected_backend: HwAccelBackend,
     /// Whether the media decode boundary currently uses a hardware decoder.
@@ -116,7 +128,14 @@ impl HwAccelBackend {
 
     /// Probe the active hardware decode / zero-copy residency state.
     pub fn probe() -> HwAccelProbe {
+        let candidate_backend = Self::platform_candidate();
         HwAccelProbe {
+            candidate_backend,
+            candidate_handle_kind: candidate_backend.and_then(Self::native_handle_kind),
+            candidate_surface_formats: candidate_backend
+                .map(Self::preferred_surface_formats)
+                .unwrap_or_default(),
+            decoder_adapter_available: false,
             selected_backend: Self::None,
             hardware_decode_active: false,
             zero_copy_active: false,
@@ -124,6 +143,51 @@ impl HwAccelBackend {
             gpu_frame_handle_kind: None,
             renderer_import_ready: false,
             reason: hardware_decode_unavailable_reason().to_owned(),
+        }
+    }
+
+    /// Preferred hardware backend for the current platform before runtime
+    /// adapter/device validation.
+    pub fn platform_candidate() -> Option<Self> {
+        #[cfg(target_os = "windows")]
+        {
+            Some(Self::D3D11VA)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Some(Self::VideoToolbox)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Some(Self::Vaapi)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            None
+        }
+    }
+
+    /// Native handle family expected from this hardware backend.
+    pub fn native_handle_kind(self) -> Option<DecodedGpuFrameHandleKind> {
+        match self {
+            Self::None => None,
+            Self::Cuda => Some(DecodedGpuFrameHandleKind::CudaDeviceMemory),
+            Self::D3D11VA => Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
+            Self::VideoToolbox => Some(DecodedGpuFrameHandleKind::CVPixelBuffer),
+            Self::Vaapi => Some(DecodedGpuFrameHandleKind::VaapiSurface),
+        }
+    }
+
+    /// Preferred decoded surface formats for GPU-native playback.
+    pub fn preferred_surface_formats(self) -> Vec<DecodedVideoSurfaceFormat> {
+        match self {
+            Self::None => Vec::new(),
+            Self::Cuda | Self::D3D11VA | Self::VideoToolbox | Self::Vaapi => {
+                vec![
+                    DecodedVideoSurfaceFormat::P010,
+                    DecodedVideoSurfaceFormat::Nv12,
+                ]
+            }
         }
     }
 
@@ -168,15 +232,15 @@ impl DecodedVideoSurfaceFormat {
 fn hardware_decode_unavailable_reason() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        "D3D11VA/DXVA hardware decode texture residency is not connected; using CPU RGBA decode"
+        "D3D11VA/DXVA hardware decode adapter and texture residency are not connected; using CPU RGBA decode"
     }
     #[cfg(target_os = "macos")]
     {
-        "VideoToolbox hardware decode texture residency is not connected; using CPU RGBA decode"
+        "VideoToolbox hardware decode adapter and texture residency are not connected; using CPU RGBA decode"
     }
     #[cfg(target_os = "linux")]
     {
-        "VA-API hardware decode texture residency is not connected; using CPU RGBA decode"
+        "VA-API hardware decode adapter and texture residency are not connected; using CPU RGBA decode"
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
@@ -192,6 +256,22 @@ mod tests {
     fn hw_accel_probe_fails_closed_until_texture_residency_exists() {
         let probe = HwAccelBackend::probe();
 
+        assert_eq!(
+            probe.candidate_backend,
+            HwAccelBackend::platform_candidate()
+        );
+        assert_eq!(
+            probe.candidate_handle_kind,
+            probe.candidate_backend.and_then(HwAccelBackend::native_handle_kind)
+        );
+        assert_eq!(
+            probe.candidate_surface_formats,
+            probe
+                .candidate_backend
+                .map(HwAccelBackend::preferred_surface_formats)
+                .unwrap_or_default()
+        );
+        assert!(!probe.decoder_adapter_available);
         assert_eq!(probe.selected_backend, HwAccelBackend::None);
         assert!(!probe.hardware_decode_active);
         assert!(!probe.zero_copy_active);
@@ -199,6 +279,34 @@ mod tests {
         assert_eq!(probe.gpu_frame_handle_kind, None);
         assert!(!probe.renderer_import_ready);
         assert!(probe.reason.contains("CPU RGBA decode"));
+    }
+
+    #[test]
+    fn hardware_backend_candidates_map_to_native_handles_and_surface_formats() {
+        assert_eq!(
+            HwAccelBackend::D3D11VA.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::D3D11Texture2D)
+        );
+        assert_eq!(
+            HwAccelBackend::VideoToolbox.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::CVPixelBuffer)
+        );
+        assert_eq!(
+            HwAccelBackend::Vaapi.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::VaapiSurface)
+        );
+        assert_eq!(
+            HwAccelBackend::Cuda.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::CudaDeviceMemory)
+        );
+        assert_eq!(HwAccelBackend::None.native_handle_kind(), None);
+        assert_eq!(
+            HwAccelBackend::D3D11VA.preferred_surface_formats(),
+            vec![
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12
+            ]
+        );
     }
 
     #[test]

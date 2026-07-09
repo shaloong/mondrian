@@ -523,13 +523,18 @@ is always a backend boundary, even if the CLI used platform hwaccel internally.
 `HwAccelProbe` reports the selected hardware backend, decoded frame residency,
 `hardware_decode_active`, `zero_copy_active`, optional
 `decoded_gpu_frame_handle_kind`, `renderer_import_ready`, and a stable reason
-string. Until DXVA/D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC hardware frames
-are actually exported/imported through the renderer native decoded-frame import
-contract, `HwAccelBackend::probe()` must return `None`,
-`hardware_decode_active=false`, `zero_copy_active=false`,
-`DecodedFrameResidency::CpuRgba`, no GPU handle kind, and
-`renderer_import_ready=false`. Platform preference alone is not a valid
-hardware decode signal.
+string. It may also report a platform-preferred candidate backend, candidate
+native handle kind, and preferred native surface formats such as P010/NV12.
+Those candidate fields are planning evidence only: on Windows the candidate may
+be D3D11VA/D3D11Texture2D, on macOS VideoToolbox/CVPixelBuffer, and on Linux
+VA-API/DMABUF-style surfaces, but they are not active decode facts. Until
+DXVA/D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC hardware frames are actually
+exported/imported through the renderer native decoded-frame import contract,
+`HwAccelBackend::probe()` must keep `selected_backend=None`,
+`decoder_adapter_available=false`, `hardware_decode_active=false`,
+`zero_copy_active=false`, `DecodedFrameResidency::CpuRgba`, no active GPU
+handle kind, and `renderer_import_ready=false`. Platform preference alone is
+not a valid hardware decode signal.
 
 Preview path resolution is proxy-aware but does not synchronously generate
 proxy media. `mondrian-media::ProxyGenerator` owns the shared proxy freshness
@@ -603,15 +608,20 @@ packet/decode, software scaling, RGBA copy, and the experimental external-proces
 path.
 The same diagnostics carry the current hardware decode contract:
 `hardware_decode_request`, `hardware_decode_decision`, `hw_accel_backend`,
-`hardware_decode_active`, `zero_copy_active`, `decoded_frame_residency`,
-`gpu_frame_handle_kind`, `renderer_import_ready`, and
+`hardware_decode_candidate_backend`, `hardware_decode_candidate_handle_kind`,
+`hardware_decode_adapter_available`, `hardware_decode_active`,
+`zero_copy_active`, `decoded_frame_residency`, `gpu_frame_handle_kind`,
+`renderer_import_ready`, and
 `hardware_decode_blocker`, plus `decoded_surface_format` for the decoder output
 format before CPU RGBA conversion. `Nv12` and `P010` are the primary GPU-native
 YUV/P010 residency candidates; they are media facts, not renderer import claims.
 These fields are fail-closed; until a real hardware-frame decoder and renderer
 import path are connected they must report CPU RGBA residency with
-`TextureResidencyNotConnected` and a CPU RGBA `PreviewHardwareDecodeDecision`
-rather than implying platform hwaccel is active.
+`TextureResidencyNotConnected` and a CPU RGBA `PreviewHardwareDecodeDecision`.
+When a platform candidate exists but no Mondrian decoder adapter is connected,
+the decision should be `CpuRgbaBackendUnavailable`; only after an adapter
+produces native GPU residency should later readiness failures move to renderer
+or platform import diagnostics.
 The app-window GPU preview path must preserve those media facts in its frame
 residency telemetry. Media decode diagnostics feed the
 `AppUiGpuPreviewMediaSource` contract, and window-side native video import

@@ -21,11 +21,9 @@ use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
 use mondrian_core::MondrianError;
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
-#[cfg(test)]
-use mondrian_media::HwAccelBackend;
 use mondrian_media::{
     decode_preview_rgba_scaled_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
-    DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewDecodeAccessMode,
+    DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
     PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy,
     PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
@@ -2576,6 +2574,16 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub hardware_decode_renderer_import_unavailable_frames: u64,
     /// Decode requests that selected GPU-resident native decode.
     pub hardware_decode_gpu_resident_native_frames: u64,
+    /// Decode requests with a D3D11VA backend candidate.
+    pub hardware_decode_candidate_d3d11va_frames: u64,
+    /// Decode requests with a VideoToolbox backend candidate.
+    pub hardware_decode_candidate_videotoolbox_frames: u64,
+    /// Decode requests with a VA-API backend candidate.
+    pub hardware_decode_candidate_vaapi_frames: u64,
+    /// Decode requests with a CUDA/NVDEC backend candidate.
+    pub hardware_decode_candidate_cuda_frames: u64,
+    /// Decode requests where a backend candidate exists but no decoder adapter is connected.
+    pub hardware_decode_adapter_unavailable_frames: u64,
     /// Total decoded frames consumed by this access mode.
     pub decoded_frame_count: u64,
     /// Largest decoded-frame count consumed by one request in this access mode.
@@ -2747,6 +2755,31 @@ impl AppUiPreviewDecodeAccessModeProfile {
                 self.hardware_decode_gpu_resident_native_frames =
                     self.hardware_decode_gpu_resident_native_frames.saturating_add(1);
             }
+        }
+        match diagnostics.hardware_decode_candidate_backend {
+            Some(HwAccelBackend::D3D11VA) => {
+                self.hardware_decode_candidate_d3d11va_frames =
+                    self.hardware_decode_candidate_d3d11va_frames.saturating_add(1);
+            }
+            Some(HwAccelBackend::VideoToolbox) => {
+                self.hardware_decode_candidate_videotoolbox_frames =
+                    self.hardware_decode_candidate_videotoolbox_frames.saturating_add(1);
+            }
+            Some(HwAccelBackend::Vaapi) => {
+                self.hardware_decode_candidate_vaapi_frames =
+                    self.hardware_decode_candidate_vaapi_frames.saturating_add(1);
+            }
+            Some(HwAccelBackend::Cuda) => {
+                self.hardware_decode_candidate_cuda_frames =
+                    self.hardware_decode_candidate_cuda_frames.saturating_add(1);
+            }
+            Some(HwAccelBackend::None) | None => {}
+        }
+        if diagnostics.hardware_decode_candidate_backend.is_some()
+            && !diagnostics.hardware_decode_adapter_available
+        {
+            self.hardware_decode_adapter_unavailable_frames =
+                self.hardware_decode_adapter_unavailable_frames.saturating_add(1);
         }
         let decoded_frame_count = u64::from(diagnostics.decoded_frame_count);
         self.decoded_frame_count = self.decoded_frame_count.saturating_add(decoded_frame_count);
@@ -4178,7 +4211,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_renderer_import_unavailable_frames={} hardware_decode_gpu_resident_native_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_renderer_import_unavailable_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -4220,6 +4253,11 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.hardware_decode_backend_boundary_frames,
                 profile.hardware_decode_renderer_import_unavailable_frames,
                 profile.hardware_decode_gpu_resident_native_frames,
+                profile.hardware_decode_candidate_d3d11va_frames,
+                profile.hardware_decode_candidate_videotoolbox_frames,
+                profile.hardware_decode_candidate_vaapi_frames,
+                profile.hardware_decode_candidate_cuda_frames,
+                profile.hardware_decode_adapter_unavailable_frames,
                 profile.decoded_frame_count,
                 profile.max_decoded_frame_count,
                 profile.max_frame_stage_durations.session_open_us,
@@ -9035,6 +9073,9 @@ mod tests {
                 scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaNotRequested,
+                hardware_decode_candidate_backend: None,
+                hardware_decode_candidate_handle_kind: None,
+                hardware_decode_adapter_available: false,
                 session_reused: false,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9083,6 +9124,9 @@ mod tests {
                 scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 hardware_decode_request: PreviewHardwareDecodeRequest::PreferGpuResident,
                 hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaBackendBoundary,
+                hardware_decode_candidate_backend: None,
+                hardware_decode_candidate_handle_kind: None,
+                hardware_decode_adapter_available: false,
                 session_reused: true,
                 forward_reused: false,
                 seek_index_available: false,
@@ -9131,6 +9175,9 @@ mod tests {
                 scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaNotRequested,
+                hardware_decode_candidate_backend: None,
+                hardware_decode_candidate_handle_kind: None,
+                hardware_decode_adapter_available: false,
                 session_reused: false,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9178,7 +9225,12 @@ mod tests {
                 any_seek_window_ms: 0,
                 scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 hardware_decode_request: PreviewHardwareDecodeRequest::PreferGpuResident,
-                hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable,
+                hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable,
+                hardware_decode_candidate_backend: Some(HwAccelBackend::D3D11VA),
+                hardware_decode_candidate_handle_kind: Some(
+                    DecodedGpuFrameHandleKind::D3D11Texture2D,
+                ),
+                hardware_decode_adapter_available: false,
                 session_reused: true,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9359,11 +9411,26 @@ mod tests {
             0
         );
         assert_eq!(playback_profile.hardware_decode_cpu_not_requested_frames, 0);
-        assert_eq!(playback_profile.hardware_decode_cpu_unavailable_frames, 1);
+        assert_eq!(playback_profile.hardware_decode_cpu_unavailable_frames, 0);
+        assert_eq!(
+            playback_profile.hardware_decode_backend_unavailable_frames,
+            1
+        );
         assert_eq!(playback_profile.hardware_decode_backend_boundary_frames, 1);
         assert_eq!(
             playback_profile.hardware_decode_gpu_resident_native_frames,
             0
+        );
+        assert_eq!(playback_profile.hardware_decode_candidate_d3d11va_frames, 1);
+        assert_eq!(
+            playback_profile.hardware_decode_candidate_videotoolbox_frames,
+            0
+        );
+        assert_eq!(playback_profile.hardware_decode_candidate_vaapi_frames, 0);
+        assert_eq!(playback_profile.hardware_decode_candidate_cuda_frames, 0);
+        assert_eq!(
+            playback_profile.hardware_decode_adapter_unavailable_frames,
+            1
         );
         assert_eq!(playback_profile.seek_index_used_frames, 0);
         assert_eq!(playback_profile.seek_index_keyframes_max, 4);
@@ -14054,6 +14121,9 @@ mod tests {
             scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaNotRequested,
+            hardware_decode_candidate_backend: None,
+            hardware_decode_candidate_handle_kind: None,
+            hardware_decode_adapter_available: false,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,

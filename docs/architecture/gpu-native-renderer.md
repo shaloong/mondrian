@@ -79,6 +79,11 @@ the renderer a platform dependency. Current media preview frames report
 `CpuDecodedMedia`; this is intentional and must remain distinct from
 `ReadyZeroCopy` / `ReadyLowCopy` until actual decoder GPU surfaces are handed to
 the renderer import path.
+Media may report a platform-preferred hardware decode candidate such as
+D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface formats, but a
+candidate is not renderer readiness. The renderer import support value remains
+`GpuNativeDecodedFrameImportSupport::unavailable()` until a concrete backend can
+sample the native surface and produce a renderer-owned float working frame.
 
 Viewer GPU output telemetry now preserves decoder residency facts through the
 CPU-upload GPU input path. `AppUiGpuPreviewMediaSource` carries

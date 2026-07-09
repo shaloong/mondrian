@@ -686,6 +686,15 @@ pub struct PreviewDecodeDiagnostics {
     /// Hardware decode/native-residency selection outcome for this frame.
     #[serde(default)]
     pub hardware_decode_decision: PreviewHardwareDecodeDecision,
+    /// Platform-preferred hardware backend candidate, if one is known.
+    #[serde(default)]
+    pub hardware_decode_candidate_backend: Option<HwAccelBackend>,
+    /// Native handle family expected from the candidate backend, if known.
+    #[serde(default)]
+    pub hardware_decode_candidate_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    /// Whether Mondrian has a decoder adapter for the candidate backend.
+    #[serde(default)]
+    pub hardware_decode_adapter_available: bool,
     /// Whether an existing access-mode-local decode session was reused.
     #[serde(default)]
     pub session_reused: bool,
@@ -768,6 +777,9 @@ impl PreviewDecodeDiagnostics {
             scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaNotRequested,
+            hardware_decode_candidate_backend: None,
+            hardware_decode_candidate_handle_kind: None,
+            hardware_decode_adapter_available: false,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,
@@ -938,6 +950,9 @@ impl RgbaFrame {
 
     fn with_hw_accel_probe(mut self, probe: &HwAccelProbe) -> Self {
         self.diagnostics.hw_accel_backend = probe.selected_backend;
+        self.diagnostics.hardware_decode_candidate_backend = probe.candidate_backend;
+        self.diagnostics.hardware_decode_candidate_handle_kind = probe.candidate_handle_kind;
+        self.diagnostics.hardware_decode_adapter_available = probe.decoder_adapter_available;
         self.diagnostics.hardware_decode_active = probe.hardware_decode_active;
         self.diagnostics.zero_copy_active = probe.zero_copy_active;
         self.diagnostics.decoded_frame_residency = probe.frame_residency;
@@ -1096,6 +1111,9 @@ impl PreviewHardwareDecodePlan {
         }
         if backend == PreviewDecodeBackend::ExternalFfmpegCpuRgba {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendBoundary;
+        }
+        if !probe.decoder_adapter_available {
+            return PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable;
         }
         if !probe.hardware_decode_active
             || !probe.zero_copy_active
@@ -2663,9 +2681,10 @@ mod tests {
         );
         assert_eq!(
             plan.decision,
-            PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable
+            PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable
         );
         assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
+        assert!(!plan.probe.decoder_adapter_available);
     }
 
     #[test]
