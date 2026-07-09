@@ -564,6 +564,13 @@ successful hardware decode session that still transfers frames to CPU is
 `HardwareDecodeCpuTransfer`; a future zero-copy adapter that cannot import into
 the renderer should use renderer/platform import diagnostics instead of this
 CPU-transfer state.
+The temporary FFmpeg hardware CPU-transfer fallback must report a structured
+`PreviewHardwareDecodeCpuTransferStatus`: `NotAttempted`,
+`ConfiguredAwaitingFrame`, `SetupFailed`, `DecoderOpenFailed`, or `Observed`.
+Setup/open failures must not disappear into trace logs or generic software
+decode counters. They remain a diagnostic fallback state only; `Observed` means
+hardware frames were transferred back to CPU, not that Mondrian achieved
+GPU-resident playback.
 Playback hardware-decode admission is an app-layer aggregation contract, not a
 media, renderer, or platform responsibility. The host combines renderer native
 decoded-frame import support, OS native texture import probing, and preview

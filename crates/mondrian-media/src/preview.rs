@@ -171,6 +171,22 @@ pub enum PreviewHardwareDecodeDecision {
     GpuResidentNative,
 }
 
+/// FFmpeg hardware-decode CPU-transfer setup state for one preview result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewHardwareDecodeCpuTransferStatus {
+    /// Hardware CPU-transfer fallback was not attempted for this request.
+    #[default]
+    NotAttempted,
+    /// FFmpeg hardware decode was configured; no hardware frame was observed yet.
+    ConfiguredAwaitingFrame,
+    /// FFmpeg hardware device/context setup failed before opening the decoder.
+    SetupFailed,
+    /// The hardware-configured decoder failed to open and fell back to software.
+    DecoderOpenFailed,
+    /// At least one hardware frame was transferred back to CPU.
+    Observed,
+}
+
 /// Structured hardware-decode blocker observed by the preview decode boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewHardwareDecodeBlocker {
@@ -730,6 +746,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether the session observed at least one hardware frame and transferred it to CPU.
     #[serde(default)]
     pub hardware_decode_cpu_transfer_observed: bool,
+    /// Structured FFmpeg hardware CPU-transfer setup state.
+    #[serde(default)]
+    pub hardware_decode_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus,
     /// Whether an existing access-mode-local decode session was reused.
     #[serde(default)]
     pub session_reused: bool,
@@ -823,6 +842,8 @@ impl PreviewDecodeDiagnostics {
             hardware_decode_ffmpeg_device_context_error_code: None,
             hardware_decode_cpu_transfer_configured: false,
             hardware_decode_cpu_transfer_observed: false,
+            hardware_decode_cpu_transfer_status:
+                PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,
@@ -1067,6 +1088,7 @@ impl RgbaFrame {
             plan.hardware_cpu_transfer_configured;
         self.diagnostics.hardware_decode_cpu_transfer_observed =
             plan.hardware_cpu_transfer_observed;
+        self.diagnostics.hardware_decode_cpu_transfer_status = plan.hardware_cpu_transfer_status;
         self.with_hw_accel_probe(&plan.probe)
     }
 
@@ -1192,6 +1214,7 @@ struct PreviewHardwareDecodePlan {
     ffmpeg_device_context: HwAccelDeviceContextProbe,
     hardware_cpu_transfer_configured: bool,
     hardware_cpu_transfer_observed: bool,
+    hardware_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus,
 }
 
 impl PreviewHardwareDecodePlan {
@@ -1229,6 +1252,7 @@ impl PreviewHardwareDecodePlan {
             ffmpeg_device_context,
             hardware_cpu_transfer_configured: false,
             hardware_cpu_transfer_observed: false,
+            hardware_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
         }
     }
 
@@ -1241,15 +1265,27 @@ impl PreviewHardwareDecodePlan {
 
     fn mark_hardware_cpu_transfer_configured(&mut self, backend: HwAccelBackend) {
         self.hardware_cpu_transfer_configured = true;
+        self.hardware_cpu_transfer_status =
+            PreviewHardwareDecodeCpuTransferStatus::ConfiguredAwaitingFrame;
         self.probe.reason = format!(
             "{} FFmpeg hardware decode is configured; waiting for hardware frames before reporting active CPU-transfer decode",
             backend.as_str()
         );
     }
 
+    fn mark_hardware_cpu_transfer_setup_failed(&mut self) {
+        self.hardware_cpu_transfer_status = PreviewHardwareDecodeCpuTransferStatus::SetupFailed;
+    }
+
+    fn mark_hardware_cpu_transfer_decoder_open_failed(&mut self) {
+        self.hardware_cpu_transfer_status =
+            PreviewHardwareDecodeCpuTransferStatus::DecoderOpenFailed;
+    }
+
     fn mark_hardware_cpu_transfer_observed(&mut self) {
         if self.hardware_cpu_transfer_configured {
             self.hardware_cpu_transfer_observed = true;
+            self.hardware_cpu_transfer_status = PreviewHardwareDecodeCpuTransferStatus::Observed;
             self.decision = PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer;
             let backend = self.probe.candidate_backend.unwrap_or(HwAccelBackend::None);
             self.probe.selected_backend = backend;
@@ -1860,6 +1896,7 @@ impl PreviewDecodeSession {
                     hardware_decode_context_state = Some(state);
                 }
                 Err(reason) => {
+                    hardware_decode_plan.mark_hardware_cpu_transfer_setup_failed();
                     preview_trace(format!(
                         "[preview] hardware decode CPU-transfer setup failed, fallback software: {reason}"
                     ));
@@ -1873,13 +1910,8 @@ impl PreviewDecodeSession {
                 preview_trace(format!(
                     "[preview] hardware decode open failed, fallback software: {err}"
                 ));
+                hardware_decode_plan.mark_hardware_cpu_transfer_decoder_open_failed();
                 hardware_decode_context_state = None;
-                hardware_decode_plan = PreviewHardwareDecodePlan::resolve(
-                    hardware_decode_request,
-                    access_mode,
-                    backend,
-                    codec_id,
-                );
                 preview_decode_context_from_parameters(parameters, ffmpeg_threading, path)?
                     .decoder()
                     .video()
@@ -3109,14 +3141,14 @@ mod tests {
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
         PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
         PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-        PreviewHardwareDecodeBlocker, PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan,
-        PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame, PreviewPlaybackRing,
-        PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexDiagnostics,
-        PreviewSeekIndexSource, PreviewSeekResolution, RgbaFrame,
-        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
-        PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+        PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+        PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
+        PreviewNativeDecodedFrame, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
+        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
+        PreviewSeekResolution, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS,
         PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
@@ -3253,6 +3285,10 @@ mod tests {
         plan.mark_hardware_cpu_transfer_configured(HwAccelBackend::D3D11VA);
         assert!(plan.hardware_cpu_transfer_configured);
         assert!(!plan.hardware_cpu_transfer_observed);
+        assert_eq!(
+            plan.hardware_cpu_transfer_status,
+            PreviewHardwareDecodeCpuTransferStatus::ConfiguredAwaitingFrame
+        );
         assert!(!plan.probe.hardware_decode_active);
         assert!(!plan.probe.zero_copy_active);
         assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
@@ -3264,6 +3300,10 @@ mod tests {
         plan.mark_hardware_cpu_transfer_observed();
         assert!(plan.hardware_cpu_transfer_observed);
         assert_eq!(
+            plan.hardware_cpu_transfer_status,
+            PreviewHardwareDecodeCpuTransferStatus::Observed
+        );
+        assert_eq!(
             plan.decision,
             PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer
         );
@@ -3273,6 +3313,38 @@ mod tests {
         );
         assert!(plan.probe.hardware_decode_active);
         assert!(!plan.probe.zero_copy_active);
+    }
+
+    #[test]
+    fn hardware_decode_cpu_transfer_setup_states_are_structured() {
+        let mut setup_failed = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Auto,
+            ffmpeg::codec::Id::H264,
+        );
+        setup_failed.mark_hardware_cpu_transfer_setup_failed();
+        assert_eq!(
+            setup_failed.hardware_cpu_transfer_status,
+            PreviewHardwareDecodeCpuTransferStatus::SetupFailed
+        );
+        assert!(!setup_failed.hardware_cpu_transfer_configured);
+        assert!(!setup_failed.hardware_cpu_transfer_observed);
+
+        let mut open_failed = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Auto,
+            ffmpeg::codec::Id::H264,
+        );
+        open_failed.mark_hardware_cpu_transfer_configured(HwAccelBackend::D3D11VA);
+        open_failed.mark_hardware_cpu_transfer_decoder_open_failed();
+        assert_eq!(
+            open_failed.hardware_cpu_transfer_status,
+            PreviewHardwareDecodeCpuTransferStatus::DecoderOpenFailed
+        );
+        assert!(open_failed.hardware_cpu_transfer_configured);
+        assert!(!open_failed.hardware_cpu_transfer_observed);
     }
 
     #[test]
