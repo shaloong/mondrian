@@ -306,7 +306,10 @@ When scheduler admission evicts prefetch or still-frame pending work to admit
 real-time current-frame work, the admission result must return the evicted media
 keys. The app layer must immediately cancel matching jobs from the worker
 transport queue so already-obsolete work does not sit in the bounded queue until
-a worker later discovers the missing pending request.
+a worker later discovers the missing pending request. Queue mutations that
+remove jobs (`clear`, obsolete-generation pruning, and key cancellation) must
+wake waiting lane workers just like enqueue, promotion, and close; otherwise a
+worker can remain parked on a stale queue state until unrelated work arrives.
 The decode performance summary/report carries the same scheduler diagnostics and
 emits stable Scheduling root causes for access-mode mismatch, obsolete
 generation churn, and pending-window backpressure.

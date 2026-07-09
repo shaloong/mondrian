@@ -315,6 +315,9 @@ impl MediaPreviewJobQueueSender {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         let cleared = state.queue.len();
         state.queue.clear();
+        if cleared > 0 {
+            self.shared.changed.notify_all();
+        }
         cleared
     }
 
@@ -329,14 +332,22 @@ impl MediaPreviewJobQueueSender {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         let before = state.queue.len();
         state.queue.retain(|queued| queued.job.generation >= generation);
-        before.saturating_sub(state.queue.len())
+        let pruned = before.saturating_sub(state.queue.len());
+        if pruned > 0 {
+            self.shared.changed.notify_all();
+        }
+        pruned
     }
 
     pub(crate) fn cancel_key(&self, key: &MediaPreviewKey) -> usize {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         let before = state.queue.len();
         state.queue.retain(|queued| &queued.job.key != key);
-        before.saturating_sub(state.queue.len())
+        let canceled = before.saturating_sub(state.queue.len());
+        if canceled > 0 {
+            self.shared.changed.notify_all();
+        }
+        canceled
     }
 
     pub(crate) fn diagnostics(&self) -> MediaPreviewJobQueueDiagnostics {
@@ -2199,6 +2210,35 @@ mod tests {
 
         assert_eq!(sender.cancel_key(&canceled), 2);
         assert_eq!(receiver.recv().expect("retained job").key, retained);
+        sender.close();
+        assert!(receiver.recv().is_none());
+    }
+
+    #[test]
+    fn media_preview_job_queue_clear_removes_all_queued_jobs() {
+        let (sender, receiver) = media_preview_job_queue(4);
+        let first = test_media_key(1);
+        let second = test_media_key(2);
+
+        assert_eq!(
+            sender.enqueue(test_media_job(
+                first,
+                1.0,
+                MediaPreviewRequestPriority::Current,
+            )),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            sender.enqueue(test_media_job(
+                second,
+                2.0,
+                MediaPreviewRequestPriority::Prefetch,
+            )),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        assert_eq!(sender.clear(), 2);
+        assert_eq!(sender.diagnostics().queued_jobs, 0);
         sender.close();
         assert!(receiver.recv().is_none());
     }
