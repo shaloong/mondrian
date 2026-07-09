@@ -227,6 +227,23 @@ Each expired realtime-current request released this way must also count as a
 playback late-drop decision and a proxy/hardware recommendation decision so
 clock-driven playback diagnostics do not under-report frames that were skipped
 before a worker produced a cancellation result.
+Consecutive current playback late drops form a sustained playback pressure
+state. Once the app preview service observes the pressure threshold, it must
+suppress forward playback prefetch and keep worker/queue capacity available for
+the visible current frame. The state exits only after a successful `Current`
+`PlaybackCursor` result. This recovery path must be structured diagnostics, not
+opaque logging: reports include the late streak, pressure entries, recoveries,
+and prefetch skips. It must not silently enable proxies, lower decode quality,
+or choose hardware decode outside the project/backend policy; those are
+separate recovery decisions layered behind the same playback controller.
+Performance gates must include real-media playback fixtures, not only synthetic
+generated clips. The ignored
+`preview_media_external_continuous_playback_smoke` test accepts
+`MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH` (or the shared
+`MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH`) so CI or a local workstation can run
+4K HEVC Main10, 4K H.264, HDR PQ/HLG, and Long-GOP camera samples through the
+same playback decode/render/color report contract. A sustained playback
+pressure root cause is a playback smoke failure, not merely advisory evidence.
 When background preview completion changes the viewer waiting state, the app
 host may perform one preview-aware model refresh for the completed work, but
 the derived playback-buffering flag must be propagated with a transport/status

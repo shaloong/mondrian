@@ -78,6 +78,7 @@ const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US: u64 = 8_000;
 const MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
+const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
@@ -641,14 +642,7 @@ impl AppUiPreviewService {
             &self.metrics.playback_current_stalled_expirations,
             expired.len() as u64,
         );
-        add_cell(
-            &self.metrics.playback_current_drop_late_decisions,
-            expired.len() as u64,
-        );
-        add_cell(
-            &self.metrics.playback_current_proxy_or_hardware_recommended_decisions,
-            expired.len() as u64,
-        );
+        self.record_playback_current_late_drop(expired.len() as u64);
         add_cell(&self.metrics.queue_canceled_jobs, canceled_queued_jobs);
         self.current_frame_pending.set(false);
         true
@@ -701,7 +695,7 @@ impl AppUiPreviewService {
             }
             if let Some(diagnostics) = result.decode_diagnostics {
                 self.scrub_adaptation.borrow_mut().observe_decode(diagnostics);
-                self.record_preview_decode(diagnostics, result.queue_wait_us);
+                self.record_preview_decode(diagnostics, result.priority, result.queue_wait_us);
             }
             match result.frame {
                 Some(frame) => {
@@ -1243,7 +1237,13 @@ impl AppUiPreviewService {
         add_cell(&self.metrics.color_stage_pixels, diagnostics.stage_pixels);
     }
 
-    fn record_preview_decode(&self, diagnostics: PreviewDecodeDiagnostics, queue_wait_us: u64) {
+    fn record_preview_decode(
+        &self,
+        diagnostics: PreviewDecodeDiagnostics,
+        priority: MediaPreviewRequestPriority,
+        queue_wait_us: u64,
+    ) {
+        self.record_playback_current_success(priority, diagnostics.access_mode);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba => {
                 bump(&self.metrics.decode_in_process_cpu_rgba_frames);
@@ -1331,8 +1331,7 @@ impl AppUiPreviewService {
             }
             MediaPreviewCancelReason::PlaybackDeadline => {
                 bump(&self.metrics.decode_canceled_playback_deadline_jobs);
-                bump(&self.metrics.playback_current_drop_late_decisions);
-                bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
+                self.record_playback_current_late_drop(1);
             }
             MediaPreviewCancelReason::PrefetchPreemptedByCurrent => {
                 bump(&self.metrics.decode_canceled_prefetch_preempted_jobs);
@@ -1442,6 +1441,17 @@ impl AppUiPreviewService {
                 .metrics
                 .media_proxy_generation_request_dedupes
                 .get(),
+            current_late_streak: self.metrics.playback_current_late_streak.get(),
+            sustained_pressure_active: self.playback_sustained_pressure_active(),
+            sustained_pressure_events: self.metrics.playback_sustained_pressure_events.get(),
+            sustained_pressure_recoveries: self
+                .metrics
+                .playback_sustained_pressure_recoveries
+                .get(),
+            prefetch_skipped_sustained_pressure: self
+                .metrics
+                .playback_prefetch_skipped_sustained_pressure
+                .get(),
             forward_prefetch_horizon_us: MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US,
             last_forward_prefetch_window_frames: self
                 .metrics
@@ -1472,6 +1482,46 @@ impl AppUiPreviewService {
                 bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
             }
         }
+    }
+
+    fn record_playback_current_late_drop(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        add_cell(&self.metrics.playback_current_drop_late_decisions, count);
+        add_cell(
+            &self.metrics.playback_current_proxy_or_hardware_recommended_decisions,
+            count,
+        );
+        let previous = self.metrics.playback_current_late_streak.get();
+        let next = previous.saturating_add(count);
+        self.metrics.playback_current_late_streak.set(next);
+        if previous < MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD
+            && next >= MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD
+        {
+            bump(&self.metrics.playback_sustained_pressure_events);
+        }
+    }
+
+    fn record_playback_current_success(
+        &self,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+    ) {
+        if priority != MediaPreviewRequestPriority::Current
+            || access_mode != PreviewDecodeAccessMode::PlaybackCursor
+        {
+            return;
+        }
+        let previous = self.metrics.playback_current_late_streak.replace(0);
+        if previous >= MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD {
+            bump(&self.metrics.playback_sustained_pressure_recoveries);
+        }
+    }
+
+    fn playback_sustained_pressure_active(&self) -> bool {
+        self.metrics.playback_current_late_streak.get()
+            >= MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD
     }
 
     fn record_playback_forward_prefetch_window(&self, window_frames: Option<usize>) {
@@ -1865,6 +1915,16 @@ pub struct AppUiPreviewPlaybackScheduleDiagnostics {
     pub current_proxy_generation_requests: u64,
     /// Current playback proxy generation candidates already queued for the same source revision.
     pub current_proxy_generation_request_dedupes: u64,
+    /// Consecutive current playback frames dropped or expired before a successful current frame.
+    pub current_late_streak: u64,
+    /// Whether playback is currently suppressing prefetch to recover from sustained late frames.
+    pub sustained_pressure_active: bool,
+    /// Times playback entered sustained pressure recovery.
+    pub sustained_pressure_events: u64,
+    /// Times a successful current playback frame exited sustained pressure recovery.
+    pub sustained_pressure_recoveries: u64,
+    /// Playback prefetch passes skipped while sustained pressure recovery was active.
+    pub prefetch_skipped_sustained_pressure: u64,
     /// Wall-clock horizon used to derive the forward prefetch window.
     pub forward_prefetch_horizon_us: u64,
     /// Most recent forward prefetch window derived from sequence frame rate.
@@ -2969,7 +3029,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 24;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 25;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -3438,6 +3498,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_playback_buffering_stall_expirations",
             summary.playback_current_stalled_expirations,
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_playback_sustained_pressure_events",
+            summary.playback_schedule.sustained_pressure_events,
             0,
         );
         push_decode_warn_max_check(
@@ -4223,6 +4290,40 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "diagnose_preview_current_frame_stalls",
             "Inspect realtime current-frame decode residency, worker queue pressure, and cooperative cancellation because playback buffering had to be released without a current preview frame.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+
+    if summary.playback_schedule.sustained_pressure_events > 0
+        || summary.playback_schedule.sustained_pressure_active
+    {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_playback_sustained_pressure",
+            format!(
+                "sustained_pressure_active={} sustained_pressure_events={} sustained_pressure_recoveries={} current_late_streak={} current_drop_late_decisions={} current_proxy_or_hardware_recommended_decisions={} prefetch_skipped_sustained_pressure={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} queued_current_jobs={} queued_prefetch_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={}",
+                summary.playback_schedule.sustained_pressure_active,
+                summary.playback_schedule.sustained_pressure_events,
+                summary.playback_schedule.sustained_pressure_recoveries,
+                summary.playback_schedule.current_late_streak,
+                summary.playback_schedule.current_drop_late_decisions,
+                summary
+                    .playback_schedule
+                    .current_proxy_or_hardware_recommended_decisions,
+                summary
+                    .playback_schedule
+                    .prefetch_skipped_sustained_pressure,
+                summary.prefetch_skipped_current_pending,
+                summary.prefetch_skipped_worker_busy,
+                summary.worker_queue.queued_current_jobs,
+                summary.worker_queue.queued_prefetch_jobs,
+                summary.worker_activity.in_flight_current_jobs,
+                summary.worker_activity.in_flight_prefetch_jobs
+            ),
+            "recover_playback_scheduler_pressure",
+            "Suppress forward prefetch while sustained playback pressure is active, then resume only after a current playback frame succeeds; use proxy or hardware decode when late frames continue.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -6364,6 +6465,10 @@ impl AppUiPreviewService {
             bump(&self.metrics.prefetch_skipped_current_pending);
             return;
         }
+        if self.playback_sustained_pressure_active() {
+            bump(&self.metrics.playback_prefetch_skipped_sustained_pressure);
+            return;
+        }
         let worker_queue = self.jobs.diagnostics();
         let worker_activity = self.worker_activity.snapshot();
         if worker_queue.queued_current_jobs > 0 || worker_activity.in_flight_current_jobs > 0 {
@@ -7133,6 +7238,10 @@ struct AppUiPreviewMetrics {
     playback_current_decode_decisions: Cell<u64>,
     playback_current_drop_late_decisions: Cell<u64>,
     playback_current_proxy_or_hardware_recommended_decisions: Cell<u64>,
+    playback_current_late_streak: Cell<u64>,
+    playback_sustained_pressure_events: Cell<u64>,
+    playback_sustained_pressure_recoveries: Cell<u64>,
+    playback_prefetch_skipped_sustained_pressure: Cell<u64>,
     playback_forward_prefetch_window_frames: Cell<Option<usize>>,
     playback_forward_prefetch_window_evaluations: Cell<u64>,
     playback_forward_prefetch_invalid_frame_rate: Cell<u64>,
@@ -8830,6 +8939,7 @@ mod tests {
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
                 decoded_surface_format: DecodedVideoSurfaceFormat::P010,
             },
+            MediaPreviewRequestPriority::Current,
             1_200,
         );
         service.record_preview_decode(
@@ -8875,6 +8985,7 @@ mod tests {
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
             },
+            MediaPreviewRequestPriority::Current,
             400,
         );
         service.record_preview_decode(
@@ -8920,6 +9031,7 @@ mod tests {
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Nv12,
             },
+            MediaPreviewRequestPriority::Current,
             20,
         );
         service.record_preview_decode(
@@ -8965,6 +9077,7 @@ mod tests {
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Nv12,
             },
+            MediaPreviewRequestPriority::Current,
             0,
         );
         service.record_preview_decode_queue_wait(
@@ -10154,6 +10267,57 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "diagnose_preview_current_frame_stalls"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_flags_playback_sustained_pressure() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_canceled_jobs: 2,
+            playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+                current_late_streak: 2,
+                sustained_pressure_active: true,
+                sustained_pressure_events: 1,
+                sustained_pressure_recoveries: 0,
+                current_drop_late_decisions: 2,
+                current_proxy_or_hardware_recommended_decisions: 2,
+                prefetch_skipped_sustained_pressure: 1,
+                ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            },
+            worker_queue: MediaPreviewJobQueueDiagnostics {
+                queued_prefetch_jobs: 1,
+                ..MediaPreviewJobQueueDiagnostics::default()
+            },
+            worker_activity: PreviewWorkerActivityDiagnostics {
+                in_flight_prefetch_jobs: 1,
+                ..PreviewWorkerActivityDiagnostics::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-playback-pressure-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_playback_sustained_pressure_events"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 1
+                && check.limit == Some(0)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_playback_sustained_pressure"
+                && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && root.evidence.contains("sustained_pressure_active=true")
+                && root.evidence.contains("current_late_streak=2")
+                && root.evidence.contains("prefetch_skipped_sustained_pressure=1")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "recover_playback_scheduler_pressure"));
     }
 
     #[test]
@@ -12722,6 +12886,9 @@ mod tests {
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.playback_current_stalled_expirations, 1);
         assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 1);
+        assert_eq!(diagnostics.playback_schedule.current_late_streak, 1);
+        assert!(!diagnostics.playback_schedule.sustained_pressure_active);
+        assert_eq!(diagnostics.playback_schedule.sustained_pressure_events, 0);
         assert_eq!(
             diagnostics.playback_schedule.current_proxy_or_hardware_recommended_decisions,
             1
@@ -12731,6 +12898,63 @@ mod tests {
         assert_eq!(diagnostics.scheduler.canceled_requests, 1);
         assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
         assert!(!service.current_frame_pending.get());
+    }
+
+    #[test]
+    fn repeated_late_playback_current_frames_enter_pressure_recovery() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+
+        service.seed_pending_playback_current_preview_work_for_test();
+        assert!(service.expire_stalled_playback_current_with_timeout(Duration::ZERO));
+        service.seed_pending_playback_current_preview_work_for_test();
+        assert!(service.expire_stalled_playback_current_with_timeout(Duration::ZERO));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.playback_current_stalled_expirations, 2);
+        assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 2);
+        assert_eq!(diagnostics.playback_schedule.current_late_streak, 2);
+        assert!(diagnostics.playback_schedule.sustained_pressure_active);
+        assert_eq!(diagnostics.playback_schedule.sustained_pressure_events, 1);
+        assert_eq!(
+            diagnostics.playback_schedule.sustained_pressure_recoveries,
+            0
+        );
+    }
+
+    #[test]
+    fn playback_pressure_recovery_suppresses_forward_prefetch_until_current_success() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+
+        service.record_playback_current_late_drop(
+            MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD,
+        );
+        service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+        let diagnostics = service.diagnostics();
+        assert!(diagnostics.playback_schedule.sustained_pressure_active);
+        assert_eq!(
+            diagnostics.playback_schedule.prefetch_skipped_sustained_pressure,
+            1
+        );
+        assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
+        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 0);
+        assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
+
+        service.record_playback_current_success(
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        );
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.playback_schedule.current_late_streak, 0);
+        assert!(!diagnostics.playback_schedule.sustained_pressure_active);
+        assert_eq!(
+            diagnostics.playback_schedule.sustained_pressure_recoveries,
+            1
+        );
     }
 
     #[test]

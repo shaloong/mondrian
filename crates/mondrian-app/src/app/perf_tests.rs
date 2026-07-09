@@ -312,7 +312,8 @@ fn preview_playback_decode_failures(
     for root in &report.root_causes {
         match root.code {
             "preview_decode_playback_session_not_reused"
-            | "preview_decode_playback_without_locality" => failures.push(root.code),
+            | "preview_decode_playback_without_locality"
+            | "preview_decode_playback_sustained_pressure" => failures.push(root.code),
             _ => {}
         }
     }
@@ -870,12 +871,15 @@ fn run_preview_media_access_mode_probe_with_media_info(
     overall_deadline: Option<Instant>,
 ) -> anyhow::Result<PreviewMediaPerfReport> {
     ensure_preview_media_access_mode_deadline(overall_deadline, scenario, None)?;
-    let mut state = build_preview_media_perf_state_with_media_info(
-        root_dir,
-        video_path,
-        media_info,
-        frame_count,
-    )?;
+    let mut state = match media_info {
+        Some(media_info) => build_preview_media_perf_state_with_media_info(
+            root_dir,
+            video_path,
+            Some(media_info),
+            frame_count,
+        )?,
+        None => build_preview_media_perf_state(root_dir, video_path, frame_count)?,
+    };
     let preview_service = AppUiPreviewService::new();
     ensure_preview_media_access_mode_deadline(overall_deadline, scenario, Some(&preview_service))?;
 
@@ -1174,95 +1178,17 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let result = (|| -> anyhow::Result<PreviewMediaPlaybackPerfReport> {
-        let mut state = build_preview_media_perf_state(&root_dir, &video_path, frame_count)?;
-        let preview_service = AppUiPreviewService::new();
-        let mut readiness = PreviewReadinessCounts::default();
-
-        state.seek(0);
-        wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
-        state.play();
-        let playback_case = run_case(
-            "preview_media.continuous_playback_readiness",
-            1,
-            playback_threshold_ms,
-            || {
-                for frame in 0..frame_count {
-                    state.set_playback_frame_running(frame as i64);
-                    let _ = preview_service.poll_finished();
-                    record_preview_readiness(
-                        &mut readiness,
-                        preview_service.viewer_preview_for_state(&state),
-                    );
-                    let _ = preview_service.poll_finished();
-                    thread::sleep(Duration::from_millis(frame_interval_ms));
-                }
-                let _ = preview_service.poll_finished();
-                Ok(())
-            },
-        )?;
-        state.pause();
-
-        let gpu_candidate_case = run_case(
-            "preview_media.playback_gpu_candidate_ready",
-            1,
-            gpu_candidate_threshold_ms,
-            || {
-                let _ = preview_service.gpu_preview_frame_for_state(&state);
-                Ok(())
-            },
-        )?;
-
-        anyhow::ensure!(
-            readiness.unavailable == 0,
-            "continuous playback returned unavailable frames: {:?}; diagnostics: {:?}",
-            readiness,
-            preview_service.diagnostics()
-        );
-        anyhow::ensure!(
-            readiness.ready + readiness.stale >= frame_count.saturating_sub(2),
-            "continuous playback did not keep enough frames visible: {:?}; diagnostics: {:?}",
-            readiness,
-            preview_service.diagnostics()
-        );
-
-        let preview_diagnostics = preview_service.diagnostics();
-        let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
-        let preview_color_report = build_preview_color_health_report(
-            preview_diagnostics.color_health_summary(),
-            "preview_media_continuous_playback",
-        );
-        let preview_decode_report =
-            build_preview_decode_performance_report_with_required_access_modes(
-                preview_diagnostics
-                    .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
-                "preview_media_continuous_playback",
-                APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
-                &[PreviewDecodeAccessMode::PlaybackCursor],
-            );
-        let preview_render_report = build_preview_render_performance_report(
-            preview_diagnostics
-                .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
-            "preview_media_continuous_playback",
-            APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
-        );
-        let decode_failure_codes = preview_playback_decode_failures(&preview_decode_report);
-        let render_failure_codes = preview_render_hard_failures(&preview_render_report);
-        Ok(PreviewMediaPlaybackPerfReport {
-            scenario: "preview_media_continuous_playback",
-            frames: frame_count,
-            frame_interval_ms,
-            readiness,
-            media_color_issues,
-            preview_diagnostics,
-            preview_color_report,
-            decode_failure_codes,
-            render_failure_codes,
-            preview_decode_report,
-            preview_render_report,
-            cases: vec![playback_case, gpu_candidate_case],
-        })
-    })();
+    let result = run_preview_media_continuous_playback_probe(
+        &root_dir,
+        &video_path,
+        None,
+        "preview_media_continuous_playback",
+        frame_count,
+        frame_interval_ms,
+        playback_threshold_ms,
+        gpu_candidate_threshold_ms,
+        ready_timeout,
+    );
 
     let _ = fs::remove_dir_all(&root_dir);
 
@@ -1299,6 +1225,202 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[test]
+#[ignore = "development preview media continuous playback smoke for a real external media file; run manually"]
+fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+
+    let Some(video_path) = std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH")
+        .or_else(|| std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_external_continuous_playback\",\"skipped\":\"MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH not set\"}}"
+        );
+        return Ok(());
+    };
+    anyhow::ensure!(
+        video_path.exists(),
+        "external playback media path does not exist: {}",
+        video_path.display()
+    );
+
+    let frame_count = env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAMES", 60, 8, 300);
+    let frame_interval_ms =
+        env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAME_MS", 33, 1, 250) as u64;
+    let playback_threshold_ms = env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_WINDOW_MS", 8_000);
+    let gpu_candidate_threshold_ms =
+        env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_GPU_CANDIDATE_MS", 2_000);
+    let ready_timeout = Duration::from_millis(env_u128(
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_TIMEOUT_MS",
+        30_000,
+    ) as u64);
+    let overall_timeout = Duration::from_millis(env_u128(
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_TOTAL_TIMEOUT_MS",
+        180_000,
+    ) as u64);
+
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_preview_external_playback_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let media_info = preview_external_access_mode_media_info(&video_path, frame_count)?;
+
+    let deadline = Instant::now() + overall_timeout;
+    let result = run_preview_media_continuous_playback_probe(
+        &root_dir,
+        &video_path,
+        Some(media_info),
+        "preview_media_external_continuous_playback",
+        frame_count,
+        frame_interval_ms,
+        playback_threshold_ms,
+        gpu_candidate_threshold_ms,
+        ready_timeout,
+    );
+    let _ = fs::remove_dir_all(&root_dir);
+
+    anyhow::ensure!(
+        Instant::now() <= deadline,
+        "external playback smoke exceeded total timeout {:?}",
+        overall_timeout
+    );
+    let report = result?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    write_report_if_needed(&report_json);
+
+    let failed_cases: Vec<_> =
+        report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();
+    if !failed_cases.is_empty() {
+        anyhow::bail!(
+            "preview media external continuous playback smoke failed: {:?}; report: {}",
+            failed_cases,
+            report_json
+        );
+    }
+    if report.preview_color_report.verdict == AppUiPreviewColorHealthVerdict::Fail {
+        anyhow::bail!("preview media external playback color report failed: {report_json}");
+    }
+    if !report.decode_failure_codes.is_empty() {
+        anyhow::bail!(
+            "preview media external continuous playback decode report failed: {:?}; report: {}",
+            report.decode_failure_codes,
+            report_json
+        );
+    }
+    if !report.render_failure_codes.is_empty() {
+        anyhow::bail!(
+            "preview media external continuous playback render report failed: {:?}; report: {}",
+            report.render_failure_codes,
+            report_json
+        );
+    }
+
+    Ok(())
+}
+
+fn run_preview_media_continuous_playback_probe(
+    root_dir: &Path,
+    video_path: &Path,
+    media_info: Option<MediaInfo>,
+    scenario: &'static str,
+    frame_count: usize,
+    frame_interval_ms: u64,
+    playback_threshold_ms: u128,
+    gpu_candidate_threshold_ms: u128,
+    ready_timeout: Duration,
+) -> anyhow::Result<PreviewMediaPlaybackPerfReport> {
+    let mut state = build_preview_media_perf_state_with_media_info(
+        root_dir,
+        video_path,
+        media_info,
+        frame_count,
+    )?;
+    let preview_service = AppUiPreviewService::new();
+    let mut readiness = PreviewReadinessCounts::default();
+
+    state.seek(0);
+    wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
+    state.play();
+    let playback_case = run_case(
+        "preview_media.continuous_playback_readiness",
+        1,
+        playback_threshold_ms,
+        || {
+            for frame in 0..frame_count {
+                state.set_playback_frame_running(frame as i64);
+                let _ = preview_service.poll_finished();
+                record_preview_readiness(
+                    &mut readiness,
+                    preview_service.viewer_preview_for_state(&state),
+                );
+                let _ = preview_service.poll_finished();
+                thread::sleep(Duration::from_millis(frame_interval_ms));
+            }
+            let _ = preview_service.poll_finished();
+            Ok(())
+        },
+    )?;
+    state.pause();
+
+    let gpu_candidate_case = run_case(
+        "preview_media.playback_gpu_candidate_ready",
+        1,
+        gpu_candidate_threshold_ms,
+        || {
+            let _ = preview_service.gpu_preview_frame_for_state(&state);
+            Ok(())
+        },
+    )?;
+
+    anyhow::ensure!(
+        readiness.unavailable == 0,
+        "continuous playback returned unavailable frames: {:?}; diagnostics: {:?}",
+        readiness,
+        preview_service.diagnostics()
+    );
+    anyhow::ensure!(
+        readiness.ready + readiness.stale >= frame_count.saturating_sub(2),
+        "continuous playback did not keep enough frames visible: {:?}; diagnostics: {:?}",
+        readiness,
+        preview_service.diagnostics()
+    );
+
+    let preview_diagnostics = preview_service.diagnostics();
+    let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
+    let preview_color_report =
+        build_preview_color_health_report(preview_diagnostics.color_health_summary(), scenario);
+    let preview_decode_report = build_preview_decode_performance_report_with_required_access_modes(
+        preview_diagnostics
+            .decode_performance_summary(APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+        scenario,
+        APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+        &[PreviewDecodeAccessMode::PlaybackCursor],
+    );
+    let preview_render_report = build_preview_render_performance_report(
+        preview_diagnostics
+            .render_performance_summary(APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US),
+        scenario,
+        APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+    );
+    let decode_failure_codes = preview_playback_decode_failures(&preview_decode_report);
+    let render_failure_codes = preview_render_hard_failures(&preview_render_report);
+    Ok(PreviewMediaPlaybackPerfReport {
+        scenario,
+        frames: frame_count,
+        frame_interval_ms,
+        readiness,
+        media_color_issues,
+        preview_diagnostics,
+        preview_color_report,
+        decode_failure_codes,
+        render_failure_codes,
+        preview_decode_report,
+        preview_render_report,
+        cases: vec![playback_case, gpu_candidate_case],
+    })
 }
 
 fn build_app_ui_perf_state(
@@ -2022,6 +2144,39 @@ fn preview_playback_decode_failures_include_playback_queue_wait_regressions() {
 
     assert!(failures.contains(&"preview_decode_playback_cursor_queue_wait_over_budget"));
     assert!(!failures.contains(&"preview_decode_scrub_cursor_queue_wait_over_budget"));
+}
+
+#[test]
+fn preview_playback_decode_failures_include_sustained_pressure() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 1,
+        decode_in_process_cpu_rgba_frames: 1,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        playback_schedule: crate::app_ui::preview::AppUiPreviewPlaybackScheduleDiagnostics {
+            sustained_pressure_active: true,
+            sustained_pressure_events: 1,
+            current_late_streak: 2,
+            ..crate::app_ui::preview::AppUiPreviewPlaybackScheduleDiagnostics::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-playback-pressure-test",
+        50_000,
+    );
+
+    let failures = preview_playback_decode_failures(&report);
+
+    assert!(failures.contains(&"preview_decode_playback_sustained_pressure"));
+    assert!(!failures.contains(&"preview_decode_report_failed"));
 }
 
 #[test]
