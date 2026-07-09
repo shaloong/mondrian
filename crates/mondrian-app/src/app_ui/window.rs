@@ -3496,17 +3496,17 @@ impl PreviewGpuCompositeNativeVideoImportFacts {
 
     fn from_native_source(source: &AppUiGpuPreviewNativeSource) -> Self {
         let source_texture_format =
-            native_source_texture_format_from_decoded(source.decoded_surface_format);
+            native_source_texture_format_from_decoded(source.native_frame.surface_format);
         let source_video_sampling = source_texture_format.and_then(|format| {
             native_video_sampling_from_decoded(
                 source.source_color_space,
                 format,
-                source.decoded_video_sampling,
+                source.native_frame.diagnostics.decoded_video_sampling,
             )
         });
         Self {
             decoder_residency: DecodedFrameResidency::GpuTexture,
-            decoder_handle_kind: Some(source.decoder_handle_kind),
+            decoder_handle_kind: Some(source.native_frame.handle_kind()),
             source_texture_format,
             source_video_sampling,
         }
@@ -3672,8 +3672,8 @@ fn prepare_preview_gpu_composite<'a>(
                             if let Some(native_source) = native_source.as_ref() {
                                 return Err(format!(
                                     "media layer has native GPU decoded source ({} {:?}) but renderer native video import execution is not connected",
-                                    native_source.decoder_handle_kind.as_str(),
-                                    native_source.decoded_surface_format
+                                    native_source.native_frame.handle_kind().as_str(),
+                                    native_source.native_frame.surface_format
                                 ));
                             }
                             return Err(

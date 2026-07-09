@@ -122,7 +122,11 @@ Viewer GPU output telemetry now preserves decoder residency and payload
 sampling facts through both preview source contracts. `AppUiGpuPreviewMediaSource`
 carries CPU RGBA source pixels plus decoder diagnostics for the GPU OCIO upload
 path; `AppUiGpuPreviewNativeSource` carries a native decoder surface contract
-without CPU pixels. Both expose `DecodedGpuFrameHandleKind`,
+without CPU pixels. It retains the complete media-owned
+`PreviewNativeDecodedFrame`, including the opaque process-local handle token,
+instead of flattening the payload into diagnostic facts; this preserves the
+resource identity and lifetime required by the renderer import backend. Both
+preview source contracts expose `DecodedGpuFrameHandleKind`,
 `DecodedVideoSurfaceFormat`, and `DecodedVideoSampling` (range, chroma location,
 and effective bit depth) when the decoder reported them. The window layer maps
 GPU-resident NV12/P010/RGBA facts into `GpuNativeDecodedFrameTextureFormat` and
