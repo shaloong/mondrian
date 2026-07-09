@@ -188,6 +188,15 @@ state without synchronously requesting viewer preview/composite work; preview
 catch-up is driven by worker completion, cache state, and later render ticks.
 This keeps pause, close, and other shell input responsive even when a 4K
 Long-GOP decode or GPU-preview blocker is still unresolved.
+The app/window layer owns the interactive escape hatch. If the host playback
+state is buffering, redraw handling must not synchronously re-enter GPU preview
+candidate construction just to repaint controls; it records a loading skip and
+lets worker completion or a later state change drive the next preview prepare.
+This gate must use the app playback state, not the viewer model, because
+lightweight transport refreshes intentionally avoid preview and may not preserve
+`viewer_preview_waiting`. The event loop also caps buffering wake delay to an
+interactive budget so status ticks and shell input stay responsive while media
+workers continue in the background.
 When background preview completion changes the viewer waiting state, the app
 host may perform one preview-aware model refresh for the completed work, but
 the derived playback-buffering flag must be propagated with a transport/status

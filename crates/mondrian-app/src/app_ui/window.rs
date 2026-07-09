@@ -72,6 +72,7 @@ const WORKSPACE_MIN_WIDTH: f32 = 1024.0;
 const WORKSPACE_MIN_HEIGHT: f32 = 600.0;
 const APP_UI_DISPLAY_CONTRACT_REFRESH_HISTORY_LIMIT: usize = 8;
 const APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US: u64 = 50_000;
+const APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY: Duration = Duration::from_millis(16);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppUiWindowRole {
@@ -1807,7 +1808,9 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     session.window.request_redraw();
                 }
                 if let Some(delay) = host.playback_next_frame_delay() {
-                    elwt.set_control_flow(ControlFlow::WaitUntil(Instant::now() + delay));
+                    elwt.set_control_flow(ControlFlow::WaitUntil(
+                        Instant::now() + app_ui_interactive_playback_wake_delay(&host, delay),
+                    ));
                 }
                 if session.pending_initial_redraw {
                     session.window.request_redraw();
@@ -2942,6 +2945,14 @@ fn viewer_gpu_output_diagnostics_output_path() -> Option<PathBuf> {
     std::env::var_os(VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV).map(PathBuf::from)
 }
 
+fn app_ui_interactive_playback_wake_delay(host: &AppUiHost, delay: Duration) -> Duration {
+    if host.is_playback_buffering() {
+        delay.min(APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY)
+    } else {
+        delay
+    }
+}
+
 fn prepare_viewer_gpu_preview(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -2961,6 +2972,14 @@ fn prepare_viewer_gpu_preview(
     session.viewer_gpu_output_telemetry.record_invocation();
     if session.role != AppUiWindowRole::Workspace {
         session.viewer_gpu_output_telemetry.record_non_workspace_skip();
+        finish_prepare!();
+    }
+    if host.should_defer_gpu_preview_prepare_for_interaction() {
+        session.viewer_gpu_output_telemetry.record_preview_candidate_state(
+            AppUiViewerGpuOutputPreviewCandidateState::Loading,
+            None,
+        );
+        session.viewer_gpu_output_telemetry.record_loading_skip();
         finish_prepare!();
     }
     let frame = match host.gpu_preview_frame_for_current_state() {

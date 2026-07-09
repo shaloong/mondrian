@@ -370,6 +370,22 @@ impl AppUiHost {
         self.app_state.borrow().playback_next_frame_delay()
     }
 
+    /// Whether playback is currently held waiting for a current preview frame.
+    pub(crate) fn is_playback_buffering(&self) -> bool {
+        self.app_state.borrow().is_playback_buffering()
+    }
+
+    /// Whether GPU preview preparation should yield to interactive shell input.
+    ///
+    /// When playback is held waiting for preview, another redraw must not
+    /// synchronously re-enter preview resolution/GPU candidate construction.
+    /// Lightweight transport refreshes intentionally avoid preview and may not
+    /// preserve `viewer_preview_waiting`, so the app playback state is the
+    /// authoritative gate here.
+    pub(crate) fn should_defer_gpu_preview_prepare_for_interaction(&self) -> bool {
+        self.is_playback_buffering()
+    }
+
     fn refresh_playback_buffering_controls_without_preview(&mut self) -> bool {
         let preview_waiting = self.root.viewer_preview_waiting();
         self.refresh_playback_buffering_controls_for_preview_waiting(preview_waiting)
@@ -1789,6 +1805,51 @@ mod tests {
             !host.ui_dirty.get(),
             "buffering control sync should not leave a full preview-backed refresh queued"
         );
+    }
+
+    #[test]
+    fn buffering_defers_gpu_preview_prepare_until_preview_state_changes() {
+        struct LoadingPreview;
+
+        impl crate::app_ui::panels::ViewerPreviewSource for LoadingPreview {
+            fn viewer_preview_for_state(
+                &self,
+                _state: &AppState,
+            ) -> crate::app_ui::panels::ViewerPreviewState {
+                crate::app_ui::panels::ViewerPreviewState::Loading
+            }
+        }
+
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path("buffering-defer-gpu-prepare"),
+        );
+        host.app_state.borrow_mut().play();
+        {
+            let state = host.app_state.borrow();
+            assert!(host.root.refresh_playback_frame_from_app_state(&state, Some(&LoadingPreview)));
+        }
+        assert!(host.refresh_playback_buffering_controls_without_preview());
+
+        assert!(host.app_state.borrow().is_playback_buffering());
+        assert!(
+            host.should_defer_gpu_preview_prepare_for_interaction(),
+            "a redraw while already waiting must not synchronously re-enter GPU preview preparation"
+        );
+
+        let pending = PendingUiActions::default();
+        pending.push(Action::TogglePlay);
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert!(!host.app_state.borrow().is_playback_buffering());
+        assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
     }
 
     #[test]
