@@ -3348,6 +3348,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         push_decode_warn_max_check(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_expired_playback_current_queue",
+            summary.worker_queue.queued_expired_playback_current_jobs as u64,
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_deadline_cancellations",
             summary.canceled_prefetch_deadline_jobs,
             0,
@@ -4071,6 +4078,35 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "improve_playback_decoder_residency",
             "Inspect playback cursor sequencing, proxy readiness, and decoder residency because playback is behaving like repeated random access.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+
+    if summary.worker_queue.queued_expired_playback_current_jobs > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_expired_playback_current_queue",
+            format!(
+                "queued_expired_playback_current_jobs={} queued_jobs={} queued_current_jobs={} queued_playback_cursor_jobs={} queued_prefetch_jobs={} in_flight_jobs={} in_flight_playback_cursor_jobs={} canceled_playback_deadline_jobs={} current_deadline_assignments={} current_decode_decisions={} current_drop_late_decisions={} current_proxy_or_hardware_recommended_decisions={}",
+                summary.worker_queue.queued_expired_playback_current_jobs,
+                summary.worker_queue.queued_jobs,
+                summary.worker_queue.queued_current_jobs,
+                summary.worker_queue.queued_playback_cursor_jobs,
+                summary.worker_queue.queued_prefetch_jobs,
+                summary.worker_activity.in_flight_jobs,
+                summary.worker_activity.in_flight_playback_cursor_jobs,
+                summary.canceled_playback_deadline_jobs,
+                summary.playback_schedule.current_deadline_assignments,
+                summary.playback_schedule.current_decode_decisions,
+                summary.playback_schedule.current_drop_late_decisions,
+                summary
+                    .playback_schedule
+                    .current_proxy_or_hardware_recommended_decisions
+            ),
+            "drop_expired_playback_queue_work",
+            "Drop or reprioritize expired playback-current work before it waits in the worker queue; playback must make clock-driven decode/drop/proxy decisions instead of decoding stale visible frames.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -9849,6 +9885,75 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "inspect_preview_access_mode_transitions"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_flags_expired_playback_current_queue() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_in_process_cpu_rgba_frames: 1,
+            decode_total_duration_us: 12_000,
+            decode_max_duration_us: 12_000,
+            decode_last_duration_us: 12_000,
+            decode_queue_wait_total_us: 10_000,
+            decode_queue_wait_max_us: 10_000,
+            decode_queue_wait_last_us: 10_000,
+            worker_queue: MediaPreviewJobQueueDiagnostics {
+                queued_jobs: 3,
+                queued_current_jobs: 2,
+                queued_prefetch_jobs: 1,
+                queued_playback_cursor_jobs: 2,
+                queued_expired_playback_current_jobs: 2,
+                queued_any_lane_eligible_jobs: 3,
+                queued_playback_lane_eligible_jobs: 2,
+                queued_interactive_lane_eligible_jobs: 2,
+                closed: false,
+                ..MediaPreviewJobQueueDiagnostics::default()
+            },
+            worker_activity: PreviewWorkerActivityDiagnostics {
+                in_flight_jobs: 1,
+                in_flight_playback_cursor_jobs: 1,
+                ..PreviewWorkerActivityDiagnostics::default()
+            },
+            playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+                current_deadline_assignments: 4,
+                current_decode_decisions: 3,
+                current_drop_late_decisions: 1,
+                current_proxy_or_hardware_recommended_decisions: 1,
+                ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-expired-playback-queue-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        let summary = report.summary.expect("decode summary");
+        assert_eq!(summary.worker_queue.queued_expired_playback_current_jobs, 2);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_expired_playback_current_queue"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 2
+                && check.limit == Some(0)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_expired_playback_current_queue"
+                && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && root.evidence.contains("queued_expired_playback_current_jobs=2")
+                && root.evidence.contains("queued_playback_cursor_jobs=2")
+                && root.evidence.contains("current_deadline_assignments=4")
+                && root.evidence.contains("current_decode_decisions=3")
+                && root.evidence.contains("current_drop_late_decisions=1")
+                && root.evidence.contains("current_proxy_or_hardware_recommended_decisions=1")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "drop_expired_playback_queue_work"));
     }
 
     #[test]

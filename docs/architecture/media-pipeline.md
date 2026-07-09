@@ -337,6 +337,11 @@ depth split by priority and access mode (`queued_current_jobs`,
 expired playback-current work (`queued_expired_playback_current_jobs`) so a
 slow preview report can distinguish active queue backlog, missed display
 deadlines, and codec/decode cost without inspecting private queue internals.
+Queued expired playback-current work is an active scheduling warning, not just
+passive evidence: if a playback frame has already missed its display deadline
+while still sitting in the worker queue, the report must point at the
+clock-driven decode/drop/proxy decision boundary rather than blaming generic
+decode latency.
 The app preview layer must also expose worker-lane eligibility for the same queued jobs
 (`queued_playback_lane_eligible_jobs`, `queued_scrub_lane_eligible_jobs`,
 `queued_still_lane_eligible_jobs`, and
