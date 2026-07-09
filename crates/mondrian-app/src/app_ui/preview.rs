@@ -1356,7 +1356,7 @@ impl AppUiPreviewService {
         queue_wait_us: u64,
     ) {
         self.record_playback_current_success(priority, diagnostics.access_mode);
-        self.record_playback_current_native_import_unavailable(priority, &diagnostics);
+        self.record_playback_current_hardware_recovery(priority, &diagnostics);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba => {
                 bump(&self.metrics.decode_in_process_cpu_rgba_frames);
@@ -1558,6 +1558,10 @@ impl AppUiPreviewService {
                 .metrics
                 .playback_current_native_import_unavailable_decisions
                 .get(),
+            current_hardware_fallback_not_engaged_decisions: self
+                .metrics
+                .playback_current_hardware_fallback_not_engaged_decisions
+                .get(),
             current_proxy_generation_requests: self.metrics.media_proxy_generation_requests.get(),
             current_proxy_generation_request_dedupes: self
                 .metrics
@@ -1655,7 +1659,7 @@ impl AppUiPreviewService {
         }
     }
 
-    fn record_playback_current_native_import_unavailable(
+    fn record_playback_current_hardware_recovery(
         &self,
         priority: MediaPreviewRequestPriority,
         diagnostics: &PreviewDecodeDiagnostics,
@@ -1665,15 +1669,24 @@ impl AppUiPreviewService {
         {
             return;
         }
-        if diagnostics.hardware_decode_decision
-            != PreviewHardwareDecodeDecision::CpuRgbaRendererImportUnavailable
-            && diagnostics.hardware_decode_blocker
-                != PreviewHardwareDecodeBlocker::RendererImportNotReady
-        {
-            return;
+
+        let native_import_unavailable = diagnostics.hardware_decode_decision
+            == PreviewHardwareDecodeDecision::CpuRgbaRendererImportUnavailable
+            || diagnostics.hardware_decode_blocker
+                == PreviewHardwareDecodeBlocker::RendererImportNotReady;
+        let hardware_fallback_not_engaged =
+            playback_hardware_decode_requested(diagnostics.hardware_decode_request)
+                && !preview_hardware_decode_effective(diagnostics);
+
+        if native_import_unavailable {
+            bump(&self.metrics.playback_current_native_import_unavailable_decisions);
         }
-        bump(&self.metrics.playback_current_native_import_unavailable_decisions);
-        bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
+        if hardware_fallback_not_engaged {
+            bump(&self.metrics.playback_current_hardware_fallback_not_engaged_decisions);
+        }
+        if native_import_unavailable || hardware_fallback_not_engaged {
+            bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
+        }
     }
 
     fn playback_sustained_pressure_active(&self) -> bool {
@@ -2072,6 +2085,8 @@ pub struct AppUiPreviewPlaybackScheduleDiagnostics {
     pub current_proxy_or_hardware_recommended_decisions: u64,
     /// Current playback frames whose native GPU residency path was blocked at renderer import.
     pub current_native_import_unavailable_decisions: u64,
+    /// Current playback frames that requested hardware decode but produced no effective hardware frame.
+    pub current_hardware_fallback_not_engaged_decisions: u64,
     /// Current playback path resolutions that requested app-layer proxy generation.
     pub current_proxy_generation_requests: u64,
     /// Current playback proxy generation candidates already queued for the same source revision.
@@ -3958,6 +3973,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         push_decode_warn_max_check(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_playback_hardware_fallback_not_engaged_decisions",
+            summary.playback_schedule.current_hardware_fallback_not_engaged_decisions,
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_deadline_cancellations",
             summary.canceled_prefetch_deadline_jobs,
             0,
@@ -4916,6 +4938,68 @@ fn push_preview_decode_root_causes_and_actions(
         );
     }
 
+    if summary.playback_schedule.current_hardware_fallback_not_engaged_decisions > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_playback_hardware_fallback_recovery_decisions",
+            format!(
+                "current_hardware_fallback_not_engaged_decisions={} current_proxy_or_hardware_recommended_decisions={} current_drop_late_decisions={} current_proxy_generation_requests={} current_proxy_generation_request_dedupes={} playback_requested_frames={} playback_effective_hardware_frames={} playback_cpu_transfer_observed_frames={} playback_gpu_resident_native_frames={} playback_backend_unavailable_frames={} playback_codec_unsupported_frames={} playback_device_context_unavailable_frames={} playback_setup_failed_frames={} playback_decoder_open_failed_frames={}",
+                summary
+                    .playback_schedule
+                    .current_hardware_fallback_not_engaged_decisions,
+                summary
+                    .playback_schedule
+                    .current_proxy_or_hardware_recommended_decisions,
+                summary.playback_schedule.current_drop_late_decisions,
+                summary.playback_schedule.current_proxy_generation_requests,
+                summary
+                    .playback_schedule
+                    .current_proxy_generation_request_dedupes,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_requested_frames(),
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_effective_frames(),
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_cpu_transfer_observed_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_gpu_resident_native_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_backend_unavailable_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_codec_unsupported_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_device_context_unavailable_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_cpu_transfer_setup_failed_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_cpu_transfer_decoder_open_failed_frames
+            ),
+            "recover_playback_hardware_decode_fallback",
+            "Route current playback hardware-decode misses into recovery policy: repair backend setup when possible, otherwise use existing proxy/optimized media policy instead of continuing slow soft decode.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+
     if summary.hardware_decode_admission.playback_native_import_gated() {
         push_decode_root_cause_with_action(
             root_causes,
@@ -5733,6 +5817,20 @@ fn push_decode_root_cause_with_action(
             description: action_description,
         });
     }
+}
+
+fn playback_hardware_decode_requested(request: PreviewHardwareDecodeRequest) -> bool {
+    matches!(
+        request,
+        PreviewHardwareDecodeRequest::PreferHardwareDecode
+            | PreviewHardwareDecodeRequest::PreferGpuResident
+            | PreviewHardwareDecodeRequest::RequireGpuResident
+    )
+}
+
+fn preview_hardware_decode_effective(diagnostics: &PreviewDecodeDiagnostics) -> bool {
+    diagnostics.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
+        || diagnostics.hardware_decode_cpu_transfer_observed
 }
 
 fn classify_preview_decode_bottleneck(
@@ -7940,6 +8038,7 @@ struct AppUiPreviewMetrics {
     playback_current_sustained_pressure_skips: Cell<u64>,
     playback_current_proxy_or_hardware_recommended_decisions: Cell<u64>,
     playback_current_native_import_unavailable_decisions: Cell<u64>,
+    playback_current_hardware_fallback_not_engaged_decisions: Cell<u64>,
     playback_current_late_streak: Cell<u64>,
     playback_sustained_pressure_events: Cell<u64>,
     playback_sustained_pressure_recoveries: Cell<u64>,
@@ -10528,18 +10627,24 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             0,
         );
+        let mut effective_cpu_transfer = test_preview_decode_diagnostics(
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer,
+            PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+        );
+        effective_cpu_transfer.hardware_decode_cpu_transfer_observed = true;
         service.record_preview_decode(
-            test_preview_decode_diagnostics(
-                PreviewDecodeAccessMode::PlaybackCursor,
-                PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer,
-                PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
-            ),
+            effective_cpu_transfer,
             MediaPreviewRequestPriority::Current,
             0,
         );
 
         let diagnostics = service.diagnostics().playback_schedule;
         assert_eq!(diagnostics.current_native_import_unavailable_decisions, 1);
+        assert_eq!(
+            diagnostics.current_hardware_fallback_not_engaged_decisions,
+            1
+        );
         assert_eq!(
             diagnostics.current_proxy_or_hardware_recommended_decisions,
             1
@@ -11118,6 +11223,64 @@ mod tests {
             .root_causes
             .iter()
             .any(|root| root.code == "preview_decode_playback_hardware_fallback_not_engaged"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_flags_hardware_fallback_recovery_decisions() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 2,
+            decode_playback_cursor_frames: 2,
+            playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+                current_hardware_fallback_not_engaged_decisions: 2,
+                current_proxy_or_hardware_recommended_decisions: 2,
+                current_drop_late_decisions: 1,
+                current_proxy_generation_requests: 1,
+                current_proxy_generation_request_dedupes: 1,
+                ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            },
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 2,
+                    hardware_decode_prefer_hardware_requested_frames: 2,
+                    hardware_decode_backend_unavailable_frames: 1,
+                    hardware_decode_codec_unsupported_frames: 1,
+                    hardware_decode_cpu_transfer_observed_frames: 0,
+                    hardware_decode_gpu_resident_native_frames: 0,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-hw-fallback-recovery-decisions-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_playback_hardware_fallback_not_engaged_decisions"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 2
+                && check.limit == Some(0)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_playback_hardware_fallback_recovery_decisions"
+                && root.area == AppUiPreviewDecodePerformanceArea::Scheduling
+                && root.evidence.contains("current_hardware_fallback_not_engaged_decisions=2")
+                && root.evidence.contains("current_proxy_generation_requests=1")
+                && root.evidence.contains("current_proxy_generation_request_dedupes=1")
+                && root.evidence.contains("playback_requested_frames=2")
+                && root.evidence.contains("playback_effective_hardware_frames=0")
+                && root.evidence.contains("playback_backend_unavailable_frames=1")
+                && root.evidence.contains("playback_codec_unsupported_frames=1")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "recover_playback_hardware_decode_fallback"));
     }
 
     #[test]

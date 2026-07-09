@@ -858,7 +858,13 @@ GPU-resident native decode nor an observed FFmpeg hardware CPU-transfer frame,
 the report must surface a `preview_decode_playback_hardware_fallback_not_engaged`
 root cause with backend, codec, device-context, decoder-open, setup, and native
 import evidence. This is a recovery signal for proxy/optimized-media or backend
-repair, not proof that the hardware path is active.
+repair, not proof that the hardware path is active. The app playback scheduler
+records the same condition as
+`current_hardware_fallback_not_engaged_decisions` and increments the broad
+proxy/hardware recommendation counter at most once for a completed current
+playback frame, even when the same frame also reports a native-import blocker.
+This keeps automated recovery policy clock-driven without inflating pressure
+metrics from overlapping hardware diagnostics.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
 through the shared app-layer proxy dispatcher. The request is deduplicated by
