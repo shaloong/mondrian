@@ -77,6 +77,7 @@ const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 6;
 const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US: u64 = 8_000;
 const MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US: u64 = 50_000;
+const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
@@ -205,6 +206,23 @@ impl AppUiPreviewService {
 
     #[cfg(test)]
     pub(crate) fn seed_pending_preview_work_for_test(&self) {
+        self.seed_pending_preview_work_with_access_mode_for_test(
+            PreviewDecodeAccessMode::ScrubCursor,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_pending_playback_current_preview_work_for_test(&self) {
+        self.seed_pending_preview_work_with_access_mode_for_test(
+            PreviewDecodeAccessMode::PlaybackCursor,
+        );
+    }
+
+    #[cfg(test)]
+    fn seed_pending_preview_work_with_access_mode_for_test(
+        &self,
+        access_mode: PreviewDecodeAccessMode,
+    ) {
         let key = MediaPreviewKey {
             asset_id: AssetId::new(),
             path: PathBuf::from("E:/media/pending-preview.mov"),
@@ -223,14 +241,14 @@ impl AppUiPreviewService {
             key.clone(),
             generation,
             MediaPreviewRequestPriority::Current,
-            PreviewDecodeAccessMode::ScrubCursor,
+            access_mode,
         );
         let _ = self.jobs.enqueue(MediaPreviewJob {
             key,
             source_secs: 0.0,
             generation,
             priority: MediaPreviewRequestPriority::Current,
-            access_mode: PreviewDecodeAccessMode::ScrubCursor,
+            access_mode,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             enqueued_at: Instant::now(),
             deadline_at: None,
@@ -248,6 +266,10 @@ impl AppUiPreviewService {
             loading_frames: self.metrics.loading_frames.get(),
             stale_frames: self.metrics.stale_frames.get(),
             unavailable_frames: self.metrics.unavailable_frames.get(),
+            playback_current_stalled_expirations: self
+                .metrics
+                .playback_current_stalled_expirations
+                .get(),
             gpu_preview_candidate_requests: self.metrics.gpu_preview_candidate_requests.get(),
             gpu_preview_candidate_ready: self.metrics.gpu_preview_candidate_ready.get(),
             gpu_preview_candidate_current: self.metrics.gpu_preview_candidate_current.get(),
@@ -597,6 +619,31 @@ impl AppUiPreviewService {
             MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL,
             Duration::from_micros(MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US),
         )
+    }
+
+    pub(crate) fn expire_stalled_playback_current(&self) -> bool {
+        self.expire_stalled_playback_current_with_timeout(Duration::from_micros(
+            MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US,
+        ))
+    }
+
+    fn expire_stalled_playback_current_with_timeout(&self, timeout: Duration) -> bool {
+        let expired = self.scheduler.expire_realtime_current_older_than(timeout);
+        if expired.is_empty() {
+            return false;
+        }
+        let mut canceled_queued_jobs = 0u64;
+        for key in &expired {
+            canceled_queued_jobs =
+                canceled_queued_jobs.saturating_add(self.jobs.cancel_key(key) as u64);
+        }
+        add_cell(
+            &self.metrics.playback_current_stalled_expirations,
+            expired.len() as u64,
+        );
+        add_cell(&self.metrics.queue_canceled_jobs, canceled_queued_jobs);
+        self.current_frame_pending.set(false);
+        true
     }
 
     #[cfg(test)]
@@ -1837,6 +1884,8 @@ pub struct AppUiPreviewDiagnostics {
     pub stale_frames: u64,
     /// Requests with no renderable preview frame.
     pub unavailable_frames: u64,
+    /// Playback current-frame requests expired so buffering cannot hold the shell indefinitely.
+    pub playback_current_stalled_expirations: u64,
     /// Requests for a CPU working-frame candidate for the app-window GPU output path.
     pub gpu_preview_candidate_requests: u64,
     /// GPU preview candidate requests that produced a working-frame candidate.
@@ -6924,6 +6973,7 @@ struct AppUiPreviewMetrics {
     loading_frames: Cell<u64>,
     stale_frames: Cell<u64>,
     unavailable_frames: Cell<u64>,
+    playback_current_stalled_expirations: Cell<u64>,
     gpu_preview_candidate_requests: Cell<u64>,
     gpu_preview_candidate_ready: Cell<u64>,
     gpu_preview_candidate_current: Cell<u64>,
@@ -12559,6 +12609,27 @@ mod tests {
         assert_eq!(diagnostics.prefetch_skipped_current_pending, 1);
         assert_eq!(diagnostics.enqueued_jobs, 0);
         assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
+    }
+
+    #[test]
+    fn stalled_playback_current_expiration_releases_pending_and_queued_work() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        service.seed_pending_playback_current_preview_work_for_test();
+
+        let before = service.diagnostics();
+        assert_eq!(before.scheduler.pending_requests, 1);
+        assert_eq!(before.worker_queue.queued_jobs, 1);
+        assert!(service.current_frame_pending.get());
+
+        assert!(service.expire_stalled_playback_current_with_timeout(Duration::ZERO));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.playback_current_stalled_expirations, 1);
+        assert_eq!(diagnostics.queue_canceled_jobs, 1);
+        assert_eq!(diagnostics.scheduler.pending_requests, 0);
+        assert_eq!(diagnostics.scheduler.canceled_requests, 1);
+        assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
+        assert!(!service.current_frame_pending.get());
     }
 
     #[test]

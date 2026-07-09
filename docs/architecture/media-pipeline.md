@@ -209,6 +209,17 @@ lightweight transport refreshes intentionally avoid preview and may not preserve
 `viewer_preview_waiting`. The event loop also caps buffering wake delay to an
 interactive budget so status ticks and shell input stay responsive while media
 workers continue in the background.
+Background polling must also enforce a hard escape hatch for the current
+realtime playback request. If a scheduler-accepted `Current` request for
+`PlaybackCursor` or `ScrubCursor` remains pending past the buffering stall
+budget, the app preview service expires only that realtime-current pending work,
+removes matching queued worker jobs, records
+`playback_current_stalled_expirations`, clears the current-frame pending flag,
+and lets the host release playback buffering through the preview-free transport
+path. This is not a renderer fallback and must not clear ready/stale frames,
+still-frame work, media caches, or external GPU viewer textures. It exists so a
+lost, wedged, or pathologically slow current decode cannot hold pause/close UI
+behind "preview buffering" indefinitely.
 When background preview completion changes the viewer waiting state, the app
 host may perform one preview-aware model refresh for the completed work, but
 the derived playback-buffering flag must be propagated with a transport/status

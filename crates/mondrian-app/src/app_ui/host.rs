@@ -336,12 +336,22 @@ impl AppUiHost {
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_outcome = self.preview_service.poll_finished_outcome();
         let waveform_changed = self.waveform_cache.poll_finished();
+        let playback_stall_released =
+            self.is_playback_buffering() && self.preview_service.expire_stalled_playback_current();
+        if playback_stall_released {
+            self.app_state.borrow_mut().set_playback_buffering(false);
+            self.refresh_transport_state_without_preview();
+        }
         let visible_model_changed = media_imports_changed
             || thumbnails_changed
             || preview_outcome.visible_change
-            || waveform_changed;
+            || waveform_changed
+            || playback_stall_released;
         if !visible_model_changed {
             return preview_outcome.needs_follow_up_poll;
+        }
+        if playback_stall_released && !preview_outcome.visible_change {
+            return true;
         }
         if self.is_playback_buffering() && !preview_outcome.visible_change {
             return self.refresh_playback_buffering_controls_without_preview()
@@ -1874,6 +1884,30 @@ mod tests {
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(!host.app_state.borrow().is_playback_buffering());
         assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
+    }
+
+    #[test]
+    fn poll_background_tasks_releases_stalled_playback_buffering_without_preview_refresh() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = workspace_host_without_preview_workers("buffering-stall-release");
+        host.app_state.borrow_mut().play();
+        host.app_state.borrow_mut().set_playback_buffering(true);
+        host.preview_service.seed_pending_playback_current_preview_work_for_test();
+        let before_render_requests = host.preview_service.diagnostics().render_requests;
+
+        std::thread::sleep(Duration::from_millis(275));
+
+        assert!(host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0)));
+        assert!(!host.app_state.borrow().is_playback_buffering());
+        assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
+        let diagnostics = host.preview_service.diagnostics();
+        assert_eq!(diagnostics.playback_current_stalled_expirations, 1);
+        assert_eq!(diagnostics.scheduler.pending_requests, 0);
+        assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
+        assert_eq!(
+            diagnostics.render_requests, before_render_requests,
+            "stalled buffering release must not synchronously request preview"
+        );
     }
 
     #[test]

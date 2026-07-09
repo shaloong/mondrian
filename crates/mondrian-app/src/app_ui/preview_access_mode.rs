@@ -7,7 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
@@ -55,6 +55,7 @@ struct MediaPreviewPendingRequest {
     generation: u64,
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
+    requested_at: Instant,
 }
 
 /// Preview decode request priority used by scheduler admission and job queues.
@@ -820,7 +821,12 @@ impl MediaPreviewScheduler {
         }
         state.pending.insert(
             key,
-            MediaPreviewPendingRequest { generation, priority, access_mode },
+            MediaPreviewPendingRequest {
+                generation,
+                priority,
+                access_mode,
+                requested_at: Instant::now(),
+            },
         );
         bump_value(&mut state.metrics.scheduled_requests);
         MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still }
@@ -939,6 +945,39 @@ impl MediaPreviewScheduler {
         }
     }
 
+    pub(crate) fn expire_realtime_current_older_than(
+        &self,
+        max_age: Duration,
+    ) -> Vec<MediaPreviewKey> {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let now = Instant::now();
+        let latest_generation = state.latest_generation;
+        let expired = state
+            .pending
+            .iter()
+            .filter_map(|(key, pending)| {
+                let realtime_current = pending.priority == MediaPreviewRequestPriority::Current
+                    && pending.access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame
+                    && pending.generation >= latest_generation;
+                let expired = now.saturating_duration_since(pending.requested_at) >= max_age;
+                if realtime_current && expired {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if expired.is_empty() {
+            return expired;
+        }
+        for key in &expired {
+            state.pending.remove(key);
+        }
+        state.metrics.canceled_requests =
+            state.metrics.canceled_requests.saturating_add(expired.len() as u64);
+        expired
+    }
+
     pub(crate) fn cancel_all(&self) -> u64 {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         let canceled = state.pending.len() as u64;
@@ -1006,6 +1045,15 @@ impl MediaPreviewScheduler {
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
         self.state.lock().expect("media preview scheduler poisoned").pending.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_key(&self, key: &MediaPreviewKey) -> bool {
+        self.state
+            .lock()
+            .expect("media preview scheduler poisoned")
+            .pending
+            .contains_key(key)
     }
 }
 
@@ -1311,6 +1359,56 @@ mod tests {
 
         assert!(scheduler.has_pending_realtime_current_request_other_than(&still));
         assert!(!scheduler.has_pending_realtime_current_request_other_than(&scrub));
+    }
+
+    #[test]
+    fn media_preview_scheduler_expires_only_stalled_realtime_current_requests() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(3);
+        let generation = scheduler.begin_generation();
+        let scrub = test_media_key(1);
+        let playback = test_media_key(2);
+        let still = test_media_key(3);
+
+        assert_eq!(
+            scheduler.request(
+                scrub.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            ),
+            scheduled_request()
+        );
+        assert_eq!(
+            scheduler.request(
+                playback.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+            ),
+            scheduled_request()
+        );
+        assert_eq!(
+            scheduler.request(
+                still.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ),
+            scheduled_request()
+        );
+
+        assert!(scheduler.expire_realtime_current_older_than(Duration::from_secs(60)).is_empty());
+        assert_eq!(scheduler.pending_len(), 3);
+
+        let expired = scheduler.expire_realtime_current_older_than(Duration::ZERO);
+        assert_eq!(expired.len(), 2);
+        assert!(expired.contains(&scrub));
+        assert!(expired.contains(&playback));
+        assert!(!expired.contains(&still));
+        assert!(!scheduler.has_pending_key(&scrub));
+        assert!(!scheduler.has_pending_key(&playback));
+        assert!(scheduler.has_pending_key(&still));
+        assert_eq!(scheduler.diagnostics().canceled_requests, 2);
     }
 
     #[test]
