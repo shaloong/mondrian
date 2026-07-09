@@ -120,7 +120,7 @@ impl AppUiPreviewService {
     }
 
     #[cfg(test)]
-    fn new_without_workers_for_test() -> Self {
+    pub(crate) fn new_without_workers_for_test() -> Self {
         Self::with_worker_count(preview_decode_cpu_budget(), 0)
     }
 
@@ -416,6 +416,12 @@ impl AppUiPreviewService {
             queue_invalid_access_mode_drops: self.metrics.queue_invalid_access_mode_drops.get(),
             queue_evicted_prefetch_jobs: self.metrics.queue_evicted_prefetch_jobs.get(),
             queue_evicted_still_jobs: self.metrics.queue_evicted_still_jobs.get(),
+            interactive_cancel_requests: self.metrics.interactive_cancel_requests.get(),
+            interactive_cancel_scheduler_requests: self
+                .metrics
+                .interactive_cancel_scheduler_requests
+                .get(),
+            interactive_cancel_queued_jobs: self.metrics.interactive_cancel_queued_jobs.get(),
             queue_canceled_jobs: self.metrics.queue_canceled_jobs.get(),
             queue_pruned_obsolete_jobs: self.metrics.queue_pruned_obsolete_jobs.get(),
             queue_promoted_current_jobs: self.metrics.queue_promoted_current_jobs.get(),
@@ -527,9 +533,17 @@ impl AppUiPreviewService {
     /// cooperatively stop instead of continuing to consume CPU for invisible
     /// media.
     pub fn cancel_interactive_work(&self) {
+        let pending_requests = self.scheduler.diagnostics().pending_requests as u64;
         let generation = self.scheduler.cancel_all();
+        let queued_jobs = self.jobs.clear() as u64;
+        bump(&self.metrics.interactive_cancel_requests);
+        add_cell(
+            &self.metrics.interactive_cancel_scheduler_requests,
+            pending_requests,
+        );
+        add_cell(&self.metrics.interactive_cancel_queued_jobs, queued_jobs);
+        add_cell(&self.metrics.queue_canceled_jobs, queued_jobs);
         self.last_generation_key.replace(None);
-        self.jobs.clear();
         self.current_generation.set(generation);
         self.current_frame_pending.set(false);
         self.last_ready_frame.replace(None);
@@ -2007,6 +2021,12 @@ pub struct AppUiPreviewDiagnostics {
     pub queue_evicted_prefetch_jobs: u64,
     /// Queued still-frame jobs evicted so real-time current work can run.
     pub queue_evicted_still_jobs: u64,
+    /// User escape-path cancellations requested by transport, close, or quit.
+    pub interactive_cancel_requests: u64,
+    /// Scheduler pending requests canceled by user escape-path cancellations.
+    pub interactive_cancel_scheduler_requests: u64,
+    /// Worker-queue jobs cleared by user escape-path cancellations.
+    pub interactive_cancel_queued_jobs: u64,
     /// Queued jobs removed because their scheduler-side pending request was canceled.
     pub queue_canceled_jobs: u64,
     /// Obsolete queued jobs removed before scheduling current-frame decode.
@@ -2805,6 +2825,12 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub queue_evicted_prefetch_jobs: u64,
     /// Queued still-frame jobs evicted so real-time current work can run.
     pub queue_evicted_still_jobs: u64,
+    /// User escape-path cancellations requested by transport, close, or quit.
+    pub interactive_cancel_requests: u64,
+    /// Scheduler pending requests canceled by user escape-path cancellations.
+    pub interactive_cancel_scheduler_requests: u64,
+    /// Worker-queue jobs cleared by user escape-path cancellations.
+    pub interactive_cancel_queued_jobs: u64,
     /// Queued jobs removed because their scheduler-side pending request was canceled.
     pub queue_canceled_jobs: u64,
     /// Obsolete queued jobs removed before scheduling current-frame decode.
@@ -4056,7 +4082,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-            "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_interactive_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} in_flight_playback_lane_jobs={} in_flight_scrub_lane_jobs={} in_flight_still_lane_jobs={} in_flight_interactive_lane_jobs={} in_flight_cross_lane_current_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+            "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_interactive_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} in_flight_playback_lane_jobs={} in_flight_scrub_lane_jobs={} in_flight_still_lane_jobs={} in_flight_interactive_lane_jobs={} in_flight_cross_lane_current_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} interactive_cancel_requests={} interactive_cancel_scheduler_requests={} interactive_cancel_queued_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
@@ -4089,6 +4115,9 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.queue_full_drops,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
+                summary.interactive_cancel_requests,
+                summary.interactive_cancel_scheduler_requests,
+                summary.interactive_cancel_queued_jobs,
                 summary.queue_canceled_jobs,
                 summary.queue_pruned_obsolete_jobs,
                 summary.queue_promoted_current_jobs
@@ -4505,7 +4534,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_interactive_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
+                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_interactive_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} interactive_cancel_requests={} interactive_cancel_scheduler_requests={} interactive_cancel_queued_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
                 summary.prefetch_skipped_current_pending,
@@ -4530,6 +4559,9 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_activity.in_flight_random_access_still_jobs,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
+                summary.interactive_cancel_requests,
+                summary.interactive_cancel_scheduler_requests,
+                summary.interactive_cancel_queued_jobs,
                 summary.queue_canceled_jobs,
                 summary.queue_pruned_obsolete_jobs,
                 summary.queue_promoted_current_jobs,
@@ -5391,6 +5423,9 @@ impl AppUiPreviewDiagnostics {
             queue_invalid_access_mode_drops: self.queue_invalid_access_mode_drops,
             queue_evicted_prefetch_jobs: self.queue_evicted_prefetch_jobs,
             queue_evicted_still_jobs: self.queue_evicted_still_jobs,
+            interactive_cancel_requests: self.interactive_cancel_requests,
+            interactive_cancel_scheduler_requests: self.interactive_cancel_scheduler_requests,
+            interactive_cancel_queued_jobs: self.interactive_cancel_queued_jobs,
             queue_canceled_jobs: self.queue_canceled_jobs,
             queue_pruned_obsolete_jobs: self.queue_pruned_obsolete_jobs,
             queue_promoted_current_jobs: self.queue_promoted_current_jobs,
@@ -6928,6 +6963,9 @@ struct AppUiPreviewMetrics {
     queue_invalid_access_mode_drops: Cell<u64>,
     queue_evicted_prefetch_jobs: Cell<u64>,
     queue_evicted_still_jobs: Cell<u64>,
+    interactive_cancel_requests: Cell<u64>,
+    interactive_cancel_scheduler_requests: Cell<u64>,
+    interactive_cancel_queued_jobs: Cell<u64>,
     queue_canceled_jobs: Cell<u64>,
     queue_pruned_obsolete_jobs: Cell<u64>,
     queue_promoted_current_jobs: Cell<u64>,
@@ -9632,6 +9670,9 @@ mod tests {
             decode_prefetch_queue_wait_max_us: 15_000,
             enqueued_jobs: 4,
             queue_evicted_prefetch_jobs: 1,
+            interactive_cancel_requests: 1,
+            interactive_cancel_scheduler_requests: 2,
+            interactive_cancel_queued_jobs: 3,
             queue_canceled_jobs: 3,
             queue_pruned_obsolete_jobs: 2,
             queue_promoted_current_jobs: 1,
@@ -9724,6 +9765,9 @@ mod tests {
         );
         assert_eq!(summary.enqueued_jobs, 4);
         assert_eq!(summary.queue_evicted_prefetch_jobs, 1);
+        assert_eq!(summary.interactive_cancel_requests, 1);
+        assert_eq!(summary.interactive_cancel_scheduler_requests, 2);
+        assert_eq!(summary.interactive_cancel_queued_jobs, 3);
         assert_eq!(summary.queue_canceled_jobs, 3);
         assert_eq!(summary.queue_pruned_obsolete_jobs, 2);
         assert_eq!(summary.queue_promoted_current_jobs, 1);
@@ -9766,6 +9810,9 @@ mod tests {
             && root.evidence.contains("in_flight_playback_cursor_jobs=1")
             && root.evidence.contains("in_flight_scrub_cursor_jobs=1")
             && root.evidence.contains("queue_evicted_prefetch_jobs=1")
+            && root.evidence.contains("interactive_cancel_requests=1")
+            && root.evidence.contains("interactive_cancel_scheduler_requests=2")
+            && root.evidence.contains("interactive_cancel_queued_jobs=3")
             && root.evidence.contains("queue_canceled_jobs=3")
             && root.evidence.contains("queue_pruned_obsolete_jobs=2")
             && root.evidence.contains("queue_promoted_current_jobs=1")));
@@ -9928,6 +9975,9 @@ mod tests {
             enqueued_jobs: 3,
             queue_full_drops: 1,
             queue_evicted_prefetch_jobs: 1,
+            interactive_cancel_requests: 1,
+            interactive_cancel_scheduler_requests: 2,
+            interactive_cancel_queued_jobs: 2,
             queue_canceled_jobs: 2,
             queue_pruned_obsolete_jobs: 2,
             queue_promoted_current_jobs: 1,
@@ -9961,6 +10011,9 @@ mod tests {
         let summary = report.summary.expect("decode summary");
         assert_eq!(summary.enqueued_jobs, 3);
         assert_eq!(summary.queue_full_drops, 1);
+        assert_eq!(summary.interactive_cancel_requests, 1);
+        assert_eq!(summary.interactive_cancel_scheduler_requests, 2);
+        assert_eq!(summary.interactive_cancel_queued_jobs, 2);
         assert_eq!(summary.queue_canceled_jobs, 2);
         assert_eq!(summary.worker_disconnected_drops, 1);
         assert!(report.checks.iter().any(|check| {
@@ -9979,6 +10032,9 @@ mod tests {
             root.code == "preview_decode_worker_queue_full_drops"
                 && root.severity == AppUiPreviewDecodePerformanceSeverity::Fail
                 && root.evidence.contains("queue_full_drops=1")
+                && root.evidence.contains("interactive_cancel_requests=1")
+                && root.evidence.contains("interactive_cancel_scheduler_requests=2")
+                && root.evidence.contains("interactive_cancel_queued_jobs=2")
                 && root.evidence.contains("queue_canceled_jobs=2")
                 && root.evidence.contains("scheduler_dropped_pending_window_requests=2")
         }));
@@ -13243,7 +13299,7 @@ mod tests {
 
     #[test]
     fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
-        let service = AppUiPreviewService::new();
+        let service = AppUiPreviewService::new_without_workers_for_test();
         let key = test_media_key(1);
         let generation = service.scheduler.begin_generation();
         assert_eq!(
@@ -13279,6 +13335,11 @@ mod tests {
             generation,
             PreviewDecodeAccessMode::ScrubCursor
         ));
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.interactive_cancel_requests, 1);
+        assert_eq!(diagnostics.interactive_cancel_scheduler_requests, 1);
+        assert_eq!(diagnostics.interactive_cancel_queued_jobs, 1);
+        assert_eq!(diagnostics.queue_canceled_jobs, 1);
         assert_eq!(service.media_cache.borrow().len(), 0);
         assert_eq!(service.media_failures.borrow().len(), 0);
         service.shutdown();

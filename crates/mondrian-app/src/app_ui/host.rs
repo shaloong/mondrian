@@ -1399,6 +1399,17 @@ mod tests {
         state
     }
 
+    fn workspace_host_without_preview_workers(name: &str) -> AppUiHost {
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path(name),
+        );
+        host.preview_service.shutdown();
+        host.preview_service = AppUiPreviewService::new_without_workers_for_test();
+        host
+    }
+
     #[test]
     fn editor_action_error_without_status_hint_surfaces_in_status_bar_state() {
         let mut host = AppUiHost::new_with_preferences_path(
@@ -1702,11 +1713,7 @@ mod tests {
     #[test]
     fn transport_action_while_buffering_cancels_obsolete_preview_work() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
-        let mut host = AppUiHost::new_with_preferences_path(
-            workspace_app_state(),
-            AppUiPreferences::default(),
-            temp_preferences_path("transport-cancel-preview-work"),
-        );
+        let mut host = workspace_host_without_preview_workers("transport-cancel-preview-work");
         host.app_state.borrow_mut().play();
         host.app_state.borrow_mut().set_playback_buffering(true);
         host.preview_service.seed_pending_preview_work_for_test();
@@ -1732,6 +1739,10 @@ mod tests {
         assert!(!host.app_state().is_playing());
         assert!(!host.app_state().is_playback_buffering());
         let diagnostics = host.preview_service.diagnostics();
+        assert_eq!(diagnostics.interactive_cancel_requests, 1);
+        assert_eq!(diagnostics.interactive_cancel_scheduler_requests, 1);
+        assert_eq!(diagnostics.interactive_cancel_queued_jobs, 1);
+        assert_eq!(diagnostics.queue_canceled_jobs, 1);
         assert_eq!(diagnostics.scheduler.pending_requests, 0);
         assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
         assert_eq!(
@@ -2165,7 +2176,7 @@ mod tests {
     #[test]
     fn host_guards_unsaved_quit_after_canceling_preview_work() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
-        let mut host = AppUiHost::new(workspace_app_state());
+        let mut host = workspace_host_without_preview_workers("quit-cancel-preview-work");
         host.preview_service.seed_pending_preview_work_for_test();
         let pending = PendingUiActions::default();
 
@@ -2180,6 +2191,10 @@ mod tests {
         assert!(host.app_state().has_open_project());
         assert!(host.root.has_pending_close_dialog());
         let diagnostics = host.preview_service.diagnostics();
+        assert_eq!(diagnostics.interactive_cancel_requests, 1);
+        assert_eq!(diagnostics.interactive_cancel_scheduler_requests, 1);
+        assert_eq!(diagnostics.interactive_cancel_queued_jobs, 1);
+        assert_eq!(diagnostics.queue_canceled_jobs, 1);
         assert_eq!(diagnostics.scheduler.pending_requests, 0);
         assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
     }

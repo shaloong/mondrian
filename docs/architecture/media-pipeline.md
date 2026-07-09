@@ -622,6 +622,11 @@ it must refresh transport controls without synchronously requesting a new
 preview frame. A visible pending-close confirmation must be repainted
 immediately; an invisible modal or a decode worker that is still finishing an
 old frame must never make pause, close, or quit feel locked.
+Diagnostics for this path must separately count escape-path requests, the
+scheduler pending requests they canceled, and the worker-queue jobs they
+cleared. Those counters are distinct from generic obsolete-generation churn so
+reports can distinguish healthy user-driven preemption from unstable playback
+rescheduling.
 Schedule diagnostics also count current playback decode decisions, late-frame
 drop decisions, and proxy/hardware recommendations. Those are app scheduler
 facts, not media decoder facts, and they are how perf tooling distinguishes
