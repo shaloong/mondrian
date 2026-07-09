@@ -702,6 +702,10 @@ missing sampling facts must not escape the media native-frame constructor.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
 reinterpret a native decoder surface as RGBA or silently force a CPU transfer.
+The app viewer preview path may preserve `NativeGpuFrame` as a native source
+payload and pass its residency/sampling facts into GPU preview admission. Until
+renderer native import execution is connected, that payload is a renderer
+readiness blocker, not a media decode failure and not a CPU fallback frame.
 When native payloads reach the renderer import contract, renderer-side video
 sampling metadata is mandatory. `Nv12` is 8-bit YCbCr and `P010` is 10-bit
 YCbCr; 12/16-bit hardware surfaces require a distinct future format such as

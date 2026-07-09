@@ -28,8 +28,13 @@ use mondrian_media::{
     PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
     PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
     PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
-    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewScrubAdaptiveClass,
-    PreviewSeekIndexSource, VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
+    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
+    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueSummary,
+};
+#[cfg(test)]
+use mondrian_media::{
+    DecodedVideoChromaLocation, DecodedVideoRange, PreviewNativeDecodedFrameHandle,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -1519,7 +1524,6 @@ impl AppUiPreviewService {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
                 bump(&self.metrics.decode_budget_exhausted_failures);
             }
-            MediaPreviewFailureReason::NativeGpuImportUnavailable => {}
             MediaPreviewFailureReason::DecodeError => {}
         }
         let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
@@ -1902,6 +1906,7 @@ impl AppUiPreviewService {
             height,
             frame: Some(frame.result.frame),
             gpu_source: None,
+            native_source: None,
             signature,
         })
     }
@@ -3203,7 +3208,6 @@ impl AppUiPreviewDecodeAccessModeProfile {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
                 self.budget_exhausted_failures = self.budget_exhausted_failures.saturating_add(1);
             }
-            MediaPreviewFailureReason::NativeGpuImportUnavailable => {}
             MediaPreviewFailureReason::DecodeError => {}
         }
     }
@@ -6646,6 +6650,8 @@ pub(crate) enum AppUiGpuPreviewCompositeLayer {
         frame: Option<CpuColorFrame>,
         /// Source/input contract for the preferred GPU color path.
         gpu_source: Option<AppUiGpuPreviewMediaSource>,
+        /// Native decoder surface contract for the future zero/low-copy path.
+        native_source: Option<AppUiGpuPreviewNativeSource>,
         /// Layer opacity.
         opacity: f32,
         /// Timeline affine transform.
@@ -6672,6 +6678,19 @@ pub(crate) struct AppUiGpuPreviewMediaSource {
     /// Decoder output surface format before any CPU RGBA conversion.
     pub decoded_surface_format: DecodedVideoSurfaceFormat,
     /// Decoder-reported sampling facts before any CPU RGBA conversion.
+    pub decoded_video_sampling: DecodedVideoSampling,
+}
+
+/// App-window native decoder source contract for renderer import.
+#[derive(Debug, Clone)]
+pub(crate) struct AppUiGpuPreviewNativeSource {
+    /// Resolved source color space represented by the decoded surface.
+    pub source_color_space: ColorSpace,
+    /// Native decoder handle family.
+    pub decoder_handle_kind: DecodedGpuFrameHandleKind,
+    /// Decoder output surface format.
+    pub decoded_surface_format: DecodedVideoSurfaceFormat,
+    /// Decoder-reported sampling facts.
     pub decoded_video_sampling: DecodedVideoSampling,
 }
 
@@ -6771,6 +6790,7 @@ impl Drop for AppUiPreviewService {
 struct MediaPreviewFrame {
     frame: Option<CpuColorFrame>,
     gpu_source: Option<MediaPreviewGpuSourceFrame>,
+    native_source: Option<MediaPreviewNativeSourceFrame>,
     width: u32,
     height: u32,
     signature: u64,
@@ -6796,6 +6816,15 @@ impl MediaPreviewFrame {
         })
     }
 
+    fn native_source(&self) -> Option<AppUiGpuPreviewNativeSource> {
+        self.native_source.as_ref().map(|source| AppUiGpuPreviewNativeSource {
+            source_color_space: source.source_color_space,
+            decoder_handle_kind: source.decoder_handle_kind,
+            decoded_surface_format: source.decoded_surface_format,
+            decoded_video_sampling: source.decoded_video_sampling,
+        })
+    }
+
     fn working_frame(&self) -> Result<MediaPreviewWorkingFrame, String> {
         if let Some(frame) = self.frame.as_ref() {
             return Ok(MediaPreviewWorkingFrame {
@@ -6805,6 +6834,13 @@ impl MediaPreviewFrame {
             });
         }
         let Some(source) = self.gpu_source.as_ref() else {
+            if let Some(native) = self.native_source.as_ref() {
+                return Err(format!(
+                    "media preview frame is native GPU decoded ({} {:?}) but renderer native import is not connected",
+                    native.decoder_handle_kind.as_str(),
+                    native.decoded_surface_format
+                ));
+            }
             return Err("media preview frame has no CPU working frame or GPU source".to_owned());
         };
         let cached_before = source.working_cache.get().is_some();
@@ -6850,6 +6886,31 @@ struct MediaPreviewGpuSourceFrame {
     decoded_surface_format: DecodedVideoSurfaceFormat,
     decoded_video_sampling: DecodedVideoSampling,
     working_cache: Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, String>>>,
+}
+
+#[derive(Debug, Clone)]
+struct MediaPreviewNativeSourceFrame {
+    source_color_space: ColorSpace,
+    input_transform: RenderInputTransform,
+    decoder_handle_kind: DecodedGpuFrameHandleKind,
+    decoded_surface_format: DecodedVideoSurfaceFormat,
+    decoded_video_sampling: DecodedVideoSampling,
+}
+
+impl MediaPreviewNativeSourceFrame {
+    fn from_native_frame(
+        frame: &PreviewNativeDecodedFrame,
+        source_color_space: ColorSpace,
+        input_transform: RenderInputTransform,
+    ) -> Self {
+        Self {
+            source_color_space,
+            input_transform,
+            decoder_handle_kind: frame.handle_kind(),
+            decoded_surface_format: frame.surface_format,
+            decoded_video_sampling: frame.diagnostics.decoded_video_sampling,
+        }
+    }
 }
 
 impl MediaPreviewGpuSourceFrame {
@@ -7082,7 +7143,6 @@ enum MediaPreviewFailureReason {
     Timeout,
     DecodeError,
     ForwardDecodeBudgetExhausted,
-    NativeGpuImportUnavailable,
 }
 
 #[derive(Debug)]
@@ -8525,6 +8585,12 @@ fn gpu_composite_layers_for_resolved(
                             .as_ref()
                             .map(|source| source.input_transform.working_color_space)
                     })
+                    .or_else(|| {
+                        frame
+                            .native_source
+                            .as_ref()
+                            .map(|source| source.input_transform.working_color_space)
+                    })
                     .ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
                 if layer_working_color_space != working_color_space {
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
@@ -8535,6 +8601,7 @@ fn gpu_composite_layers_for_resolved(
                 layers.push(AppUiGpuPreviewCompositeLayer::Media {
                     frame: frame.frame.clone(),
                     gpu_source: frame.gpu_source(),
+                    native_source: frame.native_source(),
                     opacity: *opacity,
                     transform: *transform,
                 });
@@ -9077,6 +9144,7 @@ fn decode_media_preview(
                     height,
                     frame: None,
                     gpu_source: Some(gpu_source),
+                    native_source: None,
                     signature,
                 }),
                 error: None,
@@ -9095,28 +9163,46 @@ fn decode_media_preview(
                 color_stage_diagnostics: None,
             }
         }
-        Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => MediaPreviewResult {
-            key: job.key,
-            frame: None,
-            error: Some(format!(
-                "native GPU preview decode produced {} {:?} but app renderer import is not connected",
-                frame.handle_kind().as_str(),
-                frame.surface_format
-            )),
-            failure_reason: Some(MediaPreviewFailureReason::NativeGpuImportUnavailable),
-            generation: job.generation,
-            priority,
-            access_mode,
-            queue_wait_us,
-            decode_elapsed_us,
-            deadline_at,
-            cancel_observed_elapsed_us: None,
-            canceled: false,
-            cancel_reason: None,
-            decode_diagnostics: Some(frame.diagnostics),
-            color_diagnostics: None,
-            color_stage_diagnostics: None,
-        },
+        Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
+            let decode_diagnostics = frame.diagnostics;
+            let width = frame.width;
+            let height = frame.height;
+            let input_transform = RenderInputTransform::to_working(
+                job.key.working_color_space,
+                job.key.tone_map,
+                job.key.engine.clone(),
+            );
+            let native_source = MediaPreviewNativeSourceFrame::from_native_frame(
+                &frame,
+                job.key.input_color_space,
+                input_transform,
+            );
+            MediaPreviewResult {
+                key: job.key,
+                frame: Some(MediaPreviewFrame {
+                    width,
+                    height,
+                    frame: None,
+                    gpu_source: None,
+                    native_source: Some(native_source),
+                    signature,
+                }),
+                error: None,
+                failure_reason: None,
+                generation: job.generation,
+                priority,
+                access_mode,
+                queue_wait_us,
+                decode_elapsed_us,
+                deadline_at,
+                cancel_observed_elapsed_us: None,
+                canceled: false,
+                cancel_reason: None,
+                decode_diagnostics: Some(decode_diagnostics),
+                color_diagnostics: None,
+                color_stage_diagnostics: None,
+            }
+        }
         Ok(PreviewDecodeOutcome::Canceled) => MediaPreviewResult {
             key: job.key,
             frame: None,
@@ -9606,6 +9692,7 @@ mod tests {
             height: 180,
             frame: None,
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
+            native_source: None,
             signature: 44,
         };
         let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
@@ -9625,14 +9712,81 @@ mod tests {
             .expect("source-only media should stay on GPU input/composite path");
 
         match &layers[0] {
-            AppUiGpuPreviewCompositeLayer::Media { frame, gpu_source, .. } => {
+            AppUiGpuPreviewCompositeLayer::Media { frame, gpu_source, native_source, .. } => {
                 assert!(frame.is_none());
                 assert!(gpu_source.is_some());
+                assert!(native_source.is_none());
             }
             AppUiGpuPreviewCompositeLayer::SolidColor { .. } => {
                 panic!("expected media layer")
             }
         }
+    }
+
+    #[test]
+    fn gpu_composite_layers_preserve_native_source_only_media_frame() {
+        let media = MediaPreviewFrame {
+            width: 320,
+            height: 180,
+            frame: None,
+            gpu_source: None,
+            native_source: Some(test_native_source_frame(320, 180)),
+            signature: 45,
+        };
+        let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+            &mondrian_effects::EffectRenderPlan::default(),
+        )
+        .expect("compile identity graph");
+        let elements = vec![ResolvedPreviewElement::Media {
+            frame: media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph,
+            frame_seed: 7,
+        }];
+
+        let layers = gpu_composite_layers_for_resolved(960, 540, &elements, ColorSpace::Rec709)
+            .expect("native source-only media should reach GPU composite admission");
+
+        match &layers[0] {
+            AppUiGpuPreviewCompositeLayer::Media { frame, gpu_source, native_source, .. } => {
+                assert!(frame.is_none());
+                assert!(gpu_source.is_none());
+                let native_source = native_source.as_ref().expect("native source");
+                assert_eq!(
+                    native_source.decoder_handle_kind,
+                    DecodedGpuFrameHandleKind::D3D11Texture2D
+                );
+                assert_eq!(
+                    native_source.decoded_surface_format,
+                    DecodedVideoSurfaceFormat::P010
+                );
+            }
+            AppUiGpuPreviewCompositeLayer::SolidColor { .. } => {
+                panic!("expected media layer")
+            }
+        }
+    }
+
+    #[test]
+    fn native_source_only_media_frame_fails_cpu_working_fallback() {
+        let frame = MediaPreviewFrame {
+            width: 320,
+            height: 180,
+            frame: None,
+            gpu_source: None,
+            native_source: Some(test_native_source_frame(320, 180)),
+            signature: 46,
+        };
+
+        let err = match frame.working_frame() {
+            Ok(_) => panic!("native source must not be reinterpreted as CPU RGBA"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("native GPU decoded"));
+        assert!(err.contains("renderer native import is not connected"));
     }
 
     #[test]
@@ -14189,6 +14343,7 @@ mod tests {
             height: frame.descriptor().height,
             frame: Some(frame),
             gpu_source: None,
+            native_source: None,
             signature: 2_020,
         };
         let solid = TimelineSolidColorLayer {
@@ -15363,8 +15518,37 @@ mod tests {
             height,
             frame: Some(frame),
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
+            native_source: None,
             signature,
         }
+    }
+
+    fn test_native_source_frame(width: u32, height: u32) -> MediaPreviewNativeSourceFrame {
+        let handle =
+            PreviewNativeDecodedFrameHandle::from_raw(DecodedGpuFrameHandleKind::D3D11Texture2D, 7)
+                .expect("non-zero native frame handle");
+        let native_frame = PreviewNativeDecodedFrame::new(
+            width,
+            height,
+            handle,
+            DecodedVideoSurfaceFormat::P010,
+            DecodedVideoSampling {
+                range: DecodedVideoRange::Limited,
+                chroma_location: DecodedVideoChromaLocation::Left,
+                bit_depth: 10,
+            },
+            test_preview_decode_diagnostics(
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewHardwareDecodeDecision::GpuResidentNative,
+                PreviewHardwareDecodeBlocker::None,
+            ),
+        )
+        .expect("test native decoded frame");
+        MediaPreviewNativeSourceFrame::from_native_frame(
+            &native_frame,
+            ColorSpace::Rec709,
+            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        )
     }
 
     fn test_media_frame_rgba8(frame: &MediaPreviewFrame) -> Vec<u8> {
@@ -15403,6 +15587,7 @@ mod tests {
             height: 1,
             frame: None,
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
+            native_source: None,
             signature: 42,
         };
 
