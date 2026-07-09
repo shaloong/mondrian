@@ -564,6 +564,21 @@ successful hardware decode session that still transfers frames to CPU is
 `HardwareDecodeCpuTransfer`; a future zero-copy adapter that cannot import into
 the renderer should use renderer/platform import diagnostics instead of this
 CPU-transfer state.
+Playback hardware-decode admission is an app-layer aggregation contract, not a
+media, renderer, or platform responsibility. The host combines renderer native
+decoded-frame import support, OS native texture import probing, and preview
+scheduler policy into `AppUiPreviewHardwareDecodeAdmissionDiagnostics`. That
+diagnostic must include the playback request, whether renderer support is
+known/ready, renderer-supported handle and source-format counts, platform
+discovery/zero-copy/low-copy facts, and a stable `admission_blocker` enum such
+as `RendererImportUnavailable`, `PlatformDiscoveryUnavailable`,
+`PlatformCopyPathUnavailable`, or `PlatformHandleUnsupported`. The scheduler
+may request `PreferGpuResident` only when renderer import and platform import
+are both ready for a shared handle family; otherwise it must remain `Auto` and
+the performance report must identify the precise admission blocker. Do not
+enable hardware decode from FFmpeg or OS capability probes alone: that produces
+CPU-transfer fallback or opaque stalls, not the production GPU-resident playback
+path.
 
 Preview path resolution is proxy-aware but does not synchronously generate
 proxy media. `mondrian-media::ProxyGenerator` owns the shared proxy freshness

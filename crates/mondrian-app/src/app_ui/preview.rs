@@ -120,6 +120,13 @@ pub struct AppUiPreviewService {
     playback_hardware_decode_renderer_import_ready: Cell<bool>,
     playback_hardware_decode_platform_import_ready: Cell<bool>,
     playback_hardware_decode_native_import_admission_ready: Cell<bool>,
+    playback_hardware_decode_admission_blocker:
+        Cell<Option<AppUiPreviewHardwareDecodeAdmissionBlocker>>,
+    playback_hardware_decode_platform_discovery_available: Cell<bool>,
+    playback_hardware_decode_platform_zero_copy_supported: Cell<bool>,
+    playback_hardware_decode_platform_low_copy_fallback_supported: Cell<bool>,
+    playback_hardware_decode_renderer_supported_handle_kinds: Cell<u8>,
+    playback_hardware_decode_renderer_supported_source_texture_formats: Cell<u8>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
     metrics: AppUiPreviewMetrics,
@@ -208,6 +215,12 @@ impl AppUiPreviewService {
             playback_hardware_decode_renderer_import_ready: Cell::new(false),
             playback_hardware_decode_platform_import_ready: Cell::new(false),
             playback_hardware_decode_native_import_admission_ready: Cell::new(false),
+            playback_hardware_decode_admission_blocker: Cell::new(None),
+            playback_hardware_decode_platform_discovery_available: Cell::new(false),
+            playback_hardware_decode_platform_zero_copy_supported: Cell::new(false),
+            playback_hardware_decode_platform_low_copy_fallback_supported: Cell::new(false),
+            playback_hardware_decode_renderer_supported_handle_kinds: Cell::new(0),
+            playback_hardware_decode_renderer_supported_source_texture_formats: Cell::new(0),
             decode_cpu_budget,
             decode_worker_count,
             metrics: AppUiPreviewMetrics::default(),
@@ -226,6 +239,12 @@ impl AppUiPreviewService {
         renderer_native_import_ready: bool,
         platform_native_import_ready: bool,
         native_import_admission_ready: bool,
+        admission_blocker: Option<AppUiPreviewHardwareDecodeAdmissionBlocker>,
+        platform_discovery_available: bool,
+        platform_zero_copy_supported: bool,
+        platform_low_copy_fallback_supported: bool,
+        renderer_supported_handle_kinds: u8,
+        renderer_supported_source_texture_formats: u8,
     ) {
         self.playback_hardware_decode_request.set(request);
         self.playback_hardware_decode_renderer_import_known.set(true);
@@ -235,6 +254,17 @@ impl AppUiPreviewService {
             .set(platform_native_import_ready);
         self.playback_hardware_decode_native_import_admission_ready
             .set(native_import_admission_ready);
+        self.playback_hardware_decode_admission_blocker.set(admission_blocker);
+        self.playback_hardware_decode_platform_discovery_available
+            .set(platform_discovery_available);
+        self.playback_hardware_decode_platform_zero_copy_supported
+            .set(platform_zero_copy_supported);
+        self.playback_hardware_decode_platform_low_copy_fallback_supported
+            .set(platform_low_copy_fallback_supported);
+        self.playback_hardware_decode_renderer_supported_handle_kinds
+            .set(renderer_supported_handle_kinds);
+        self.playback_hardware_decode_renderer_supported_source_texture_formats
+            .set(renderer_supported_source_texture_formats);
     }
 
     #[cfg(test)]
@@ -254,6 +284,22 @@ impl AppUiPreviewService {
             platform_native_import_ready: self.playback_hardware_decode_platform_import_ready.get(),
             native_import_admission_ready: self
                 .playback_hardware_decode_native_import_admission_ready
+                .get(),
+            admission_blocker: self.playback_hardware_decode_admission_blocker.get(),
+            platform_discovery_available: self
+                .playback_hardware_decode_platform_discovery_available
+                .get(),
+            platform_zero_copy_supported: self
+                .playback_hardware_decode_platform_zero_copy_supported
+                .get(),
+            platform_low_copy_fallback_supported: self
+                .playback_hardware_decode_platform_low_copy_fallback_supported
+                .get(),
+            renderer_supported_handle_kinds: self
+                .playback_hardware_decode_renderer_supported_handle_kinds
+                .get(),
+            renderer_supported_source_texture_formats: self
+                .playback_hardware_decode_renderer_supported_source_texture_formats
                 .get(),
         }
     }
@@ -2067,6 +2113,18 @@ pub struct AppUiPreviewHardwareDecodeAdmissionDiagnostics {
     pub platform_native_import_ready: bool,
     /// Whether playback is allowed to request GPU-resident decode.
     pub native_import_admission_ready: bool,
+    /// Stable reason playback cannot request GPU-resident decode, when gated.
+    pub admission_blocker: Option<AppUiPreviewHardwareDecodeAdmissionBlocker>,
+    /// Whether the platform native texture import probe is available.
+    pub platform_discovery_available: bool,
+    /// Whether the platform reports a zero-copy native texture path.
+    pub platform_zero_copy_supported: bool,
+    /// Whether the platform reports a declared low-copy fallback path.
+    pub platform_low_copy_fallback_supported: bool,
+    /// Renderer-supported native decoder handle-kind count.
+    pub renderer_supported_handle_kinds: u8,
+    /// Renderer-supported decoded source texture-format count.
+    pub renderer_supported_source_texture_formats: u8,
 }
 
 impl AppUiPreviewHardwareDecodeAdmissionDiagnostics {
@@ -2075,6 +2133,25 @@ impl AppUiPreviewHardwareDecodeAdmissionDiagnostics {
             && !self.native_import_admission_ready
             && self.playback_request == PreviewHardwareDecodeRequest::Auto
     }
+}
+
+/// Stable hardware-decode admission blocker reported by the app scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum AppUiPreviewHardwareDecodeAdmissionBlocker {
+    /// Renderer runtime has not reported native decoded-frame import support yet.
+    RendererSupportUnknown,
+    /// Renderer backend has no native decoded-frame import implementation.
+    RendererImportUnavailable,
+    /// Renderer reports native import but no decoder handle family.
+    RendererHandleSupportMissing,
+    /// Renderer reports native import but no decoded source texture format.
+    RendererSourceTextureFormatSupportMissing,
+    /// Platform native texture import probe is unavailable.
+    PlatformDiscoveryUnavailable,
+    /// Platform can be probed, but neither zero-copy nor low-copy import is declared.
+    PlatformCopyPathUnavailable,
+    /// Platform import exists but cannot consume any renderer-supported decoder handle.
+    PlatformHandleUnsupported,
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.
@@ -4698,12 +4775,28 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_hardware_decode_admission_gated",
             format!(
-                "playback_hardware_decode_request={:?} renderer_native_import_support_known={} renderer_native_import_ready={} platform_native_import_ready={} native_import_admission_ready={} playback_frames={} current_decode_decisions={} current_drop_late_decisions={}",
+                "playback_hardware_decode_request={:?} admission_blocker={:?} renderer_native_import_support_known={} renderer_native_import_ready={} renderer_supported_handle_kinds={} renderer_supported_source_texture_formats={} platform_discovery_available={} platform_zero_copy_supported={} platform_low_copy_fallback_supported={} platform_native_import_ready={} native_import_admission_ready={} playback_frames={} current_decode_decisions={} current_drop_late_decisions={}",
                 summary.hardware_decode_admission.playback_request,
+                summary.hardware_decode_admission.admission_blocker,
                 summary
                     .hardware_decode_admission
                     .renderer_native_import_support_known,
                 summary.hardware_decode_admission.renderer_native_import_ready,
+                summary
+                    .hardware_decode_admission
+                    .renderer_supported_handle_kinds,
+                summary
+                    .hardware_decode_admission
+                    .renderer_supported_source_texture_formats,
+                summary
+                    .hardware_decode_admission
+                    .platform_discovery_available,
+                summary
+                    .hardware_decode_admission
+                    .platform_zero_copy_supported,
+                summary
+                    .hardware_decode_admission
+                    .platform_low_copy_fallback_supported,
                 summary.hardware_decode_admission.platform_native_import_ready,
                 summary.hardware_decode_admission.native_import_admission_ready,
                 summary.playback_cursor_frames,
@@ -11156,6 +11249,14 @@ mod tests {
                 renderer_native_import_ready: false,
                 platform_native_import_ready: true,
                 native_import_admission_ready: false,
+                admission_blocker: Some(
+                    AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable,
+                ),
+                platform_discovery_available: true,
+                platform_zero_copy_supported: false,
+                platform_low_copy_fallback_supported: true,
+                renderer_supported_handle_kinds: 0,
+                renderer_supported_source_texture_formats: 0,
             },
             ..AppUiPreviewDiagnostics::default()
         };
@@ -11177,8 +11278,14 @@ mod tests {
             root.code == "preview_decode_hardware_decode_admission_gated"
                 && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
                 && root.evidence.contains("playback_hardware_decode_request=Auto")
+                && root.evidence.contains("admission_blocker=Some(RendererImportUnavailable)")
                 && root.evidence.contains("renderer_native_import_support_known=true")
                 && root.evidence.contains("renderer_native_import_ready=false")
+                && root.evidence.contains("renderer_supported_handle_kinds=0")
+                && root.evidence.contains("renderer_supported_source_texture_formats=0")
+                && root.evidence.contains("platform_discovery_available=true")
+                && root.evidence.contains("platform_zero_copy_supported=false")
+                && root.evidence.contains("platform_low_copy_fallback_supported=true")
                 && root.evidence.contains("platform_native_import_ready=true")
                 && root.evidence.contains("native_import_admission_ready=false")
         }));
@@ -14806,6 +14913,12 @@ mod tests {
             true,
             true,
             true,
+            None,
+            true,
+            true,
+            false,
+            1,
+            1,
         );
         assert_eq!(
             service

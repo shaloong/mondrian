@@ -43,6 +43,7 @@ use crate::app_ui::preferences_store::{
     app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
     AppUiPreferences,
 };
+use crate::app_ui::preview::AppUiPreviewHardwareDecodeAdmissionBlocker;
 use crate::app_ui::preview::{
     AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiPreviewColorRejection,
     AppUiPreviewService,
@@ -242,6 +243,12 @@ impl AppUiHost {
             admission.renderer_native_import_ready,
             admission.platform_native_import_ready,
             admission.native_import_admission_ready,
+            admission.admission_blocker,
+            admission.platform_discovery_available,
+            admission.platform_zero_copy_supported,
+            admission.platform_low_copy_fallback_supported,
+            admission.renderer_supported_handle_kinds,
+            admission.renderer_supported_source_texture_formats,
         );
     }
 
@@ -1303,6 +1310,12 @@ struct AppUiPlaybackHardwareDecodeAdmission {
     renderer_native_import_ready: bool,
     platform_native_import_ready: bool,
     native_import_admission_ready: bool,
+    admission_blocker: Option<AppUiPreviewHardwareDecodeAdmissionBlocker>,
+    platform_discovery_available: bool,
+    platform_zero_copy_supported: bool,
+    platform_low_copy_fallback_supported: bool,
+    renderer_supported_handle_kinds: u8,
+    renderer_supported_source_texture_formats: u8,
 }
 
 fn resolve_playback_hardware_decode_admission(
@@ -1310,14 +1323,39 @@ fn resolve_playback_hardware_decode_admission(
     platform_probe: &NativeVideoTextureImportProbeResult,
 ) -> AppUiPlaybackHardwareDecodeAdmission {
     let renderer_native_import_ready = renderer_support.renderer_backend_ready;
-    let platform_native_import_ready = renderer_native_import_ready
-        && platform_probe.discovery_available
-        && (platform_probe.zero_copy_supported || platform_probe.low_copy_fallback_supported)
-        && renderer_support.supported_handle_kinds.iter().copied().any(|handle_kind| {
+    let renderer_supported_handle_kinds =
+        saturated_u8_len(renderer_support.supported_handle_kinds.len());
+    let renderer_supported_source_texture_formats =
+        saturated_u8_len(renderer_support.supported_source_texture_formats.len());
+    let platform_copy_path_ready =
+        platform_probe.zero_copy_supported || platform_probe.low_copy_fallback_supported;
+    let platform_supports_renderer_handle =
+        renderer_support.supported_handle_kinds.iter().copied().any(|handle_kind| {
             platform_probe.supports(platform_handle_kind_for_decoder(handle_kind))
         });
+    let platform_native_import_ready = renderer_native_import_ready
+        && platform_probe.discovery_available
+        && platform_copy_path_ready
+        && platform_supports_renderer_handle;
     let native_import_admission_ready =
         renderer_native_import_ready && platform_native_import_ready;
+    let admission_blocker = if native_import_admission_ready {
+        None
+    } else if !renderer_support.renderer_backend_ready {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable)
+    } else if renderer_support.supported_handle_kinds.is_empty() {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererHandleSupportMissing)
+    } else if renderer_support.supported_source_texture_formats.is_empty() {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererSourceTextureFormatSupportMissing)
+    } else if !platform_probe.discovery_available {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformDiscoveryUnavailable)
+    } else if !platform_copy_path_ready {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
+    } else if !platform_supports_renderer_handle {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
+    } else {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererSupportUnknown)
+    };
     let request = if native_import_admission_ready {
         PreviewHardwareDecodeRequest::PreferGpuResident
     } else {
@@ -1328,7 +1366,17 @@ fn resolve_playback_hardware_decode_admission(
         renderer_native_import_ready,
         platform_native_import_ready,
         native_import_admission_ready,
+        admission_blocker,
+        platform_discovery_available: platform_probe.discovery_available,
+        platform_zero_copy_supported: platform_probe.zero_copy_supported,
+        platform_low_copy_fallback_supported: platform_probe.low_copy_fallback_supported,
+        renderer_supported_handle_kinds,
+        renderer_supported_source_texture_formats,
     }
+}
+
+fn saturated_u8_len(len: usize) -> u8 {
+    len.min(u8::MAX as usize) as u8
 }
 
 #[cfg(test)]
@@ -1412,6 +1460,12 @@ mod tests {
         assert!(admission.renderer_native_import_ready);
         assert!(admission.platform_native_import_ready);
         assert!(admission.native_import_admission_ready);
+        assert_eq!(admission.admission_blocker, None);
+        assert!(admission.platform_discovery_available);
+        assert!(!admission.platform_zero_copy_supported);
+        assert!(admission.platform_low_copy_fallback_supported);
+        assert_eq!(admission.renderer_supported_handle_kinds, 1);
+        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
     }
 
     #[test]
@@ -1430,6 +1484,13 @@ mod tests {
         assert!(admission.renderer_native_import_ready);
         assert!(!admission.platform_native_import_ready);
         assert!(!admission.native_import_admission_ready);
+        assert_eq!(
+            admission.admission_blocker,
+            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
+        );
+        assert!(admission.platform_discovery_available);
+        assert_eq!(admission.renderer_supported_handle_kinds, 1);
+        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
     }
 
     #[test]
@@ -1451,6 +1512,14 @@ mod tests {
         assert!(admission.renderer_native_import_ready);
         assert!(!admission.platform_native_import_ready);
         assert!(!admission.native_import_admission_ready);
+        assert_eq!(
+            admission.admission_blocker,
+            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
+        );
+        assert!(admission.platform_discovery_available);
+        assert!(admission.platform_zero_copy_supported);
+        assert_eq!(admission.renderer_supported_handle_kinds, 1);
+        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
     }
 
     #[derive(Default)]
