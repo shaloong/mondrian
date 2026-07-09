@@ -324,10 +324,11 @@ queue aligned with scheduler cancellation, not be folded into opaque
 backpressure. Diagnostics must also expose the current worker transport queue
 depth split by priority and access mode (`queued_current_jobs`,
 `queued_prefetch_jobs`, `queued_playback_cursor_jobs`,
-`queued_scrub_cursor_jobs`, and `queued_random_access_still_jobs`) so a slow
-preview report can distinguish active queue backlog from codec/decode cost
-without inspecting private queue internals. The app preview layer must also
-expose worker-lane eligibility for the same queued jobs
+`queued_scrub_cursor_jobs`, and `queued_random_access_still_jobs`) plus queued
+expired playback-current work (`queued_expired_playback_current_jobs`) so a
+slow preview report can distinguish active queue backlog, missed display
+deadlines, and codec/decode cost without inspecting private queue internals.
+The app preview layer must also expose worker-lane eligibility for the same queued jobs
 (`queued_playback_lane_eligible_jobs`, `queued_scrub_lane_eligible_jobs`,
 `queued_still_lane_eligible_jobs`, and
 `queued_interactive_lane_eligible_jobs`) so reports can distinguish a backlog

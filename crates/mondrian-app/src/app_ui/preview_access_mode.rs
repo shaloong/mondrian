@@ -254,6 +254,8 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub queued_prefetch_jobs: usize,
     /// Playback cursor jobs waiting in the worker transport queue.
     pub queued_playback_cursor_jobs: usize,
+    /// Current playback jobs whose display deadline expired while queued.
+    pub queued_expired_playback_current_jobs: usize,
     /// Scrub cursor jobs waiting in the worker transport queue.
     pub queued_scrub_cursor_jobs: usize,
     /// Random-access still-frame jobs waiting in the worker transport queue.
@@ -486,6 +488,7 @@ fn media_preview_job_queue_diagnostics_locked(
         closed: state.closed,
         ..MediaPreviewJobQueueDiagnostics::default()
     };
+    let now = Instant::now();
     for queued in &state.queue {
         if MediaPreviewWorkerLane::Any.accepts(queued.job.access_mode) {
             diagnostics.queued_any_lane_eligible_jobs =
@@ -510,6 +513,12 @@ fn media_preview_job_queue_diagnostics_locked(
         match queued.priority {
             MediaPreviewRequestPriority::Current => {
                 diagnostics.queued_current_jobs = diagnostics.queued_current_jobs.saturating_add(1);
+                if queued.job.access_mode == PreviewDecodeAccessMode::PlaybackCursor
+                    && media_preview_job_deadline_expired_at(queued.job.deadline_at, now)
+                {
+                    diagnostics.queued_expired_playback_current_jobs =
+                        diagnostics.queued_expired_playback_current_jobs.saturating_add(1);
+                }
             }
             MediaPreviewRequestPriority::Prefetch => {
                 diagnostics.queued_prefetch_jobs =
@@ -2038,6 +2047,41 @@ mod tests {
     }
 
     #[test]
+    fn media_preview_job_queue_diagnostics_counts_expired_playback_current_jobs() {
+        let (sender, _receiver) = media_preview_job_queue(4);
+        let expired = test_media_key(1);
+        let fresh = test_media_key(2);
+        let scrub = test_media_key(3);
+        let mut expired_job = test_media_job(expired, 1.0, MediaPreviewRequestPriority::Current);
+        expired_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        expired_job.deadline_at = Some(Instant::now() - std::time::Duration::from_millis(1));
+        let mut fresh_job = test_media_job(fresh, 2.0, MediaPreviewRequestPriority::Current);
+        fresh_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        fresh_job.deadline_at = Some(Instant::now() + std::time::Duration::from_secs(1));
+        let mut scrub_job = test_media_job(scrub, 3.0, MediaPreviewRequestPriority::Current);
+        scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
+
+        assert_eq!(
+            sender.enqueue(expired_job),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            sender.enqueue(fresh_job),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            sender.enqueue(scrub_job),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        let diagnostics = sender.diagnostics();
+
+        assert_eq!(diagnostics.queued_current_jobs, 3);
+        assert_eq!(diagnostics.queued_playback_cursor_jobs, 2);
+        assert_eq!(diagnostics.queued_expired_playback_current_jobs, 1);
+    }
+
+    #[test]
     fn media_preview_job_queue_splits_scrub_and_still_on_dedicated_lanes() {
         let (sender, receiver) = media_preview_job_queue(2);
         let still = test_media_key(1);
@@ -2341,6 +2385,7 @@ mod tests {
                 queued_current_jobs: 2,
                 queued_prefetch_jobs: 1,
                 queued_playback_cursor_jobs: 1,
+                queued_expired_playback_current_jobs: 0,
                 queued_scrub_cursor_jobs: 1,
                 queued_random_access_still_jobs: 1,
                 queued_any_lane_eligible_jobs: 3,
