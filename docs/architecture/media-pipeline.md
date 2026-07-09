@@ -214,6 +214,10 @@ completion poll calls, drained results, count-budget exhaustions, time-budget
 exhaustions, and poll durations. This keeps worker bursts, cache insertion, and
 decode diagnostic aggregation from delaying transport controls or close/quit
 events during buffering.
+The same event-loop rule applies to app-owned thumbnail and waveform completion
+queues consumed by `AppUiHost::poll_background_tasks`: they may request another
+tick when backlog remains, but they must not drain an unbounded worker burst on
+the UI thread.
 App preview decode timeout is access-mode-specific, not a single global
 playback policy. `ScrubCursor` has the shortest caller-release budget because
 interactive latest-wins work must not leave the UI waiting behind pathological

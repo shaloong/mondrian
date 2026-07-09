@@ -19,6 +19,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetLibrary;
 use mondrian_core::AssetId;
@@ -28,6 +29,9 @@ use mondrian_media::waveform::{compute_waveform, MAX_WAVEFORM_WIDTH};
 thread_local! {
     static CACHE: RefCell<*const AudioWaveformCache> = const { RefCell::new(std::ptr::null()) };
 }
+
+const WAVEFORM_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
+const WAVEFORM_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
 // ── Source cache ──────────────────────────────────────────────────────────
 
@@ -120,13 +124,31 @@ impl AudioWaveformCache {
     /// On the very first call the cache self-registers via the thread-local
     /// pointer so paint-time lookups can find it.
     pub fn poll_finished(&self) -> bool {
+        self.poll_finished_with_budget(
+            WAVEFORM_MAX_COMPLETED_RESULTS_PER_POLL,
+            Duration::from_micros(WAVEFORM_COMPLETED_RESULTS_POLL_BUDGET_US),
+        )
+    }
+
+    fn poll_finished_with_budget(&self, max_results: usize, time_budget: Duration) -> bool {
         // Lazy registration — must happen AFTER the cache has been moved
         // into its final memory location (the host struct field), not
         // before the constructor returns.
         self.ensure_registered();
+        let poll_started = Instant::now();
         let mut changed = false;
         let receiver = &mut *self.result_receiver.borrow_mut();
-        while let Ok(result) = receiver.try_recv() {
+        let mut drained = 0usize;
+        while drained < max_results {
+            if drained > 0 && poll_started.elapsed() >= time_budget {
+                changed = true;
+                break;
+            }
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+            };
+            drained += 1;
             self.source_pending.borrow_mut().remove(&result.key);
             match result.source {
                 Some(source) => {
@@ -137,6 +159,9 @@ impl AudioWaveformCache {
                     self.source_errors.borrow_mut().insert(result.key);
                 }
             }
+        }
+        if max_results > 0 && drained == max_results {
+            changed = true;
         }
         changed
     }
@@ -301,6 +326,25 @@ fn resample_peaks(peaks: &[f32], target_width: u32) -> Vec<f32> {
 mod tests {
     use super::*;
 
+    fn install_waveform_result_channel_for_test(
+        cache: &AudioWaveformCache,
+    ) -> mpsc::Sender<SourceResult> {
+        let (result_tx, result_rx) = mpsc::channel();
+        cache.result_receiver.replace(result_rx);
+        result_tx
+    }
+
+    fn source_result(key: SourceKey, seed: f32) -> SourceResult {
+        SourceResult {
+            key,
+            source: Some(WaveformSource {
+                envelope: vec![seed, seed * 0.5],
+                total_samples: 48_000,
+                sample_rate: 48_000,
+            }),
+        }
+    }
+
     #[test]
     fn resample_downscales() {
         let src: Vec<f32> = (0..100).map(|i| i as f32 / 100.0).collect();
@@ -321,5 +365,47 @@ mod tests {
         let src = vec![0.1, 0.5, 0.9];
         let out = resample_peaks(&src, 3);
         assert_eq!(out, src);
+    }
+
+    #[test]
+    fn waveform_completion_poll_respects_result_count_budget() {
+        let cache = AudioWaveformCache::new();
+        let results = install_waveform_result_channel_for_test(&cache);
+        let keys = [
+            (AssetId::new(), 1),
+            (AssetId::new(), 2),
+            (AssetId::new(), 3),
+        ];
+        for (index, key) in keys.iter().copied().enumerate() {
+            cache.source_pending.borrow_mut().insert(key);
+            results
+                .send(source_result(key, index as f32 + 1.0))
+                .expect("send waveform result");
+        }
+
+        assert!(cache.poll_finished_with_budget(2, Duration::from_secs(1)));
+        assert_eq!(cache.source_cache.borrow().len(), 2);
+        assert_eq!(cache.source_pending.borrow().len(), 1);
+
+        assert!(cache.poll_finished_with_budget(2, Duration::from_secs(1)));
+        assert_eq!(cache.source_cache.borrow().len(), 3);
+        assert!(cache.source_pending.borrow().is_empty());
+    }
+
+    #[test]
+    fn waveform_completion_poll_respects_time_budget() {
+        let cache = AudioWaveformCache::new();
+        let results = install_waveform_result_channel_for_test(&cache);
+        let keys = [(AssetId::new(), 1), (AssetId::new(), 2)];
+        for (index, key) in keys.iter().copied().enumerate() {
+            cache.source_pending.borrow_mut().insert(key);
+            results
+                .send(source_result(key, index as f32 + 1.0))
+                .expect("send waveform result");
+        }
+
+        assert!(cache.poll_finished_with_budget(8, Duration::ZERO));
+        assert_eq!(cache.source_cache.borrow().len(), 1);
+        assert_eq!(cache.source_pending.borrow().len(), 1);
     }
 }

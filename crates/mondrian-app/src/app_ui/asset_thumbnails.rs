@@ -20,9 +20,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 const THUMBNAIL_MAX_WIDTH: u32 = 320;
 const THUMBNAIL_MAX_HEIGHT: u32 = 180;
+const THUMBNAIL_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
+const THUMBNAIL_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
 #[derive(Debug, Clone)]
 struct ThumbnailCacheEntry {
@@ -86,8 +89,26 @@ impl AssetThumbnailCache {
     /// Poll completed background decodes. Returns true when visible model data
     /// may have changed and the host should refresh/repaint.
     pub fn poll_finished(&self) -> bool {
+        self.poll_finished_with_budget(
+            THUMBNAIL_MAX_COMPLETED_RESULTS_PER_POLL,
+            Duration::from_micros(THUMBNAIL_COMPLETED_RESULTS_POLL_BUDGET_US),
+        )
+    }
+
+    fn poll_finished_with_budget(&self, max_results: usize, time_budget: Duration) -> bool {
+        let poll_started = Instant::now();
         let mut changed = false;
-        while let Ok(result) = self.results.borrow().try_recv() {
+        let mut drained = 0usize;
+        while drained < max_results {
+            if drained > 0 && poll_started.elapsed() >= time_budget {
+                changed = true;
+                break;
+            }
+            let result = match self.results.borrow().try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+            };
+            drained += 1;
             self.pending.borrow_mut().remove(&result.asset_id);
             if let Some(image) = result.image {
                 self.cache.borrow_mut().insert(
@@ -113,6 +134,9 @@ impl AssetThumbnailCache {
                     ThumbnailFailureEntry { path: result.path, fingerprint: result.fingerprint },
                 );
             }
+        }
+        if max_results > 0 && drained == max_results {
+            changed = true;
         }
         changed
     }
@@ -262,6 +286,41 @@ mod tests {
         }
     }
 
+    fn fingerprint(seed: u64) -> PreviewFileFingerprint {
+        PreviewFileFingerprint {
+            len: Some(seed),
+            modified_secs: Some(seed),
+            modified_nanos: Some(seed as u32),
+        }
+    }
+
+    fn install_thumbnail_result_channel_for_test(
+        cache: &AssetThumbnailCache,
+    ) -> mpsc::Sender<ThumbnailResult> {
+        let (result_tx, result_rx) = mpsc::channel();
+        cache.results.replace(result_rx);
+        result_tx
+    }
+
+    fn thumbnail_result(asset_id: AssetId, seed: u64) -> ThumbnailResult {
+        let fingerprint = fingerprint(seed);
+        ThumbnailResult {
+            asset_id,
+            path: PathBuf::from(format!("E:/media/thumb-{seed}.mov")),
+            fingerprint,
+            image: Some(
+                RasterImage::new(
+                    thumbnail_key(asset_id, 1, 1, fingerprint),
+                    1,
+                    1,
+                    vec![seed as u8, 0, 0, 255],
+                )
+                .expect("test thumbnail image should be valid"),
+            ),
+            error: None,
+        }
+    }
+
     #[test]
     fn non_video_assets_do_not_schedule_thumbnail_decodes() {
         let cache = AssetThumbnailCache::new();
@@ -320,5 +379,43 @@ mod tests {
             key,
             format!("asset-thumb:{asset_id}:320x180:len1234:mtime0-42000000")
         );
+    }
+
+    #[test]
+    fn thumbnail_completion_poll_respects_result_count_budget() {
+        let cache = AssetThumbnailCache::new();
+        let results = install_thumbnail_result_channel_for_test(&cache);
+        let ids = [AssetId::new(), AssetId::new(), AssetId::new()];
+        for (index, id) in ids.iter().copied().enumerate() {
+            cache.pending.borrow_mut().insert(id);
+            results
+                .send(thumbnail_result(id, index as u64 + 1))
+                .expect("send thumbnail result");
+        }
+
+        assert!(cache.poll_finished_with_budget(2, Duration::from_secs(1)));
+        assert_eq!(cache.cache.borrow().len(), 2);
+        assert_eq!(cache.pending.borrow().len(), 1);
+
+        assert!(cache.poll_finished_with_budget(2, Duration::from_secs(1)));
+        assert_eq!(cache.cache.borrow().len(), 3);
+        assert!(cache.pending.borrow().is_empty());
+    }
+
+    #[test]
+    fn thumbnail_completion_poll_respects_time_budget() {
+        let cache = AssetThumbnailCache::new();
+        let results = install_thumbnail_result_channel_for_test(&cache);
+        let ids = [AssetId::new(), AssetId::new()];
+        for (index, id) in ids.iter().copied().enumerate() {
+            cache.pending.borrow_mut().insert(id);
+            results
+                .send(thumbnail_result(id, index as u64 + 1))
+                .expect("send thumbnail result");
+        }
+
+        assert!(cache.poll_finished_with_budget(8, Duration::ZERO));
+        assert_eq!(cache.cache.borrow().len(), 1);
+        assert_eq!(cache.pending.borrow().len(), 1);
     }
 }
