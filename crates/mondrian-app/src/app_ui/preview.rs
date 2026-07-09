@@ -805,9 +805,19 @@ impl AppUiPreviewService {
                 );
                 continue;
             }
+            let completed_after_playback_deadline =
+                media_preview_completed_after_playback_deadline(&result);
             if let Some(diagnostics) = result.decode_diagnostics {
                 self.scrub_adaptation.borrow_mut().observe_decode(diagnostics);
-                self.record_preview_decode(diagnostics, result.priority, result.queue_wait_us);
+                self.record_preview_decode(
+                    diagnostics,
+                    result.priority,
+                    result.queue_wait_us,
+                    !completed_after_playback_deadline,
+                );
+            }
+            if completed_after_playback_deadline {
+                self.record_playback_current_late_drop(1);
             }
             match result.frame {
                 Some(frame) => {
@@ -817,6 +827,9 @@ impl AppUiPreviewService {
                     }
                     if let Some(diagnostics) = result.color_stage_diagnostics {
                         self.record_color_stage(diagnostics);
+                    }
+                    if completed_after_playback_deadline {
+                        continue;
                     }
                     if completion.should_cache() {
                         self.media_cache.borrow_mut().insert(result.key.clone(), frame);
@@ -832,6 +845,9 @@ impl AppUiPreviewService {
                             path = %result.key.path.display(),
                             "viewer preview decode failed: {error}"
                         );
+                    }
+                    if completed_after_playback_deadline {
+                        continue;
                     }
                     if completion.should_cache() {
                         self.media_failures.borrow_mut().insert(result.key);
@@ -1354,8 +1370,11 @@ impl AppUiPreviewService {
         diagnostics: PreviewDecodeDiagnostics,
         priority: MediaPreviewRequestPriority,
         queue_wait_us: u64,
+        count_playback_current_success: bool,
     ) {
-        self.record_playback_current_success(priority, diagnostics.access_mode);
+        if count_playback_current_success {
+            self.record_playback_current_success(priority, diagnostics.access_mode);
+        }
         self.record_playback_current_hardware_recovery(priority, &diagnostics);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba => {
@@ -7071,6 +7090,7 @@ struct MediaPreviewResult {
     access_mode: PreviewDecodeAccessMode,
     queue_wait_us: u64,
     decode_elapsed_us: u64,
+    deadline_at: Option<Instant>,
     cancel_observed_elapsed_us: Option<u64>,
     canceled: bool,
     cancel_reason: Option<MediaPreviewCancelReason>,
@@ -8798,6 +8818,12 @@ fn media_preview_deadline_expired(deadline_at: Option<Instant>) -> bool {
     deadline_at.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
+fn media_preview_completed_after_playback_deadline(result: &MediaPreviewResult) -> bool {
+    result.priority == MediaPreviewRequestPriority::Current
+        && result.access_mode == PreviewDecodeAccessMode::PlaybackCursor
+        && media_preview_deadline_expired(result.deadline_at)
+}
+
 fn media_preview_worker(
     lane: MediaPreviewWorkerLane,
     jobs: MediaPreviewJobQueueReceiver,
@@ -8958,6 +8984,7 @@ fn media_preview_canceled_result(
         access_mode: job.access_mode,
         queue_wait_us,
         decode_elapsed_us,
+        deadline_at: job.deadline_at,
         cancel_observed_elapsed_us,
         canceled: true,
         cancel_reason: Some(reason),
@@ -8976,6 +9003,7 @@ fn decode_media_preview(
     let signature = media_preview_frame_signature(&job.key);
     let priority = job.priority;
     let access_mode = job.access_mode;
+    let deadline_at = job.deadline_at;
     let decode_outcome = decode_media_preview_for_access_mode(
         job.key.path.as_path(),
         job.source_secs,
@@ -9025,6 +9053,7 @@ fn decode_media_preview(
                 access_mode,
                 queue_wait_us,
                 decode_elapsed_us,
+                deadline_at,
                 cancel_observed_elapsed_us: None,
                 canceled: false,
                 cancel_reason: None,
@@ -9047,6 +9076,7 @@ fn decode_media_preview(
             access_mode,
             queue_wait_us,
             decode_elapsed_us,
+            deadline_at,
             cancel_observed_elapsed_us: None,
             canceled: false,
             cancel_reason: None,
@@ -9064,6 +9094,7 @@ fn decode_media_preview(
             access_mode,
             queue_wait_us,
             decode_elapsed_us,
+            deadline_at,
             cancel_observed_elapsed_us: None,
             canceled: true,
             cancel_reason: None,
@@ -9083,6 +9114,7 @@ fn decode_media_preview(
                 access_mode,
                 queue_wait_us,
                 decode_elapsed_us,
+                deadline_at,
                 cancel_observed_elapsed_us: None,
                 canceled: false,
                 cancel_reason: None,
@@ -9843,6 +9875,7 @@ mod tests {
             },
             MediaPreviewRequestPriority::Current,
             1_200,
+            true,
         );
         service.record_preview_decode(
             PreviewDecodeDiagnostics {
@@ -9905,6 +9938,7 @@ mod tests {
             },
             MediaPreviewRequestPriority::Current,
             400,
+            true,
         );
         service.record_preview_decode(
             PreviewDecodeDiagnostics {
@@ -9967,6 +10001,7 @@ mod tests {
             },
             MediaPreviewRequestPriority::Current,
             20,
+            true,
         );
         service.record_preview_decode(
             PreviewDecodeDiagnostics {
@@ -10031,6 +10066,7 @@ mod tests {
             },
             MediaPreviewRequestPriority::Current,
             0,
+            true,
         );
         service.record_preview_decode_queue_wait(
             MediaPreviewRequestPriority::Prefetch,
@@ -10617,6 +10653,7 @@ mod tests {
             ),
             MediaPreviewRequestPriority::Current,
             0,
+            true,
         );
         service.record_preview_decode(
             test_preview_decode_diagnostics(
@@ -10626,6 +10663,7 @@ mod tests {
             ),
             MediaPreviewRequestPriority::Current,
             0,
+            true,
         );
         let mut effective_cpu_transfer = test_preview_decode_diagnostics(
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -10637,6 +10675,7 @@ mod tests {
             effective_cpu_transfer,
             MediaPreviewRequestPriority::Current,
             0,
+            true,
         );
 
         let diagnostics = service.diagnostics().playback_schedule;
@@ -14932,6 +14971,50 @@ mod tests {
     }
 
     #[test]
+    fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let key = test_media_key(78);
+        let generation = service.scheduler.begin_generation();
+        assert_eq!(
+            service.scheduler.request(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+            ),
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+        );
+        let mut result = test_successful_media_preview_result(key.clone(), generation, 9);
+        result.priority = MediaPreviewRequestPriority::Current;
+        result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        result.deadline_at = Some(Instant::now() - Duration::from_millis(1));
+        result_tx.send(result).expect("send late successful result");
+
+        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+
+        assert!(
+            !outcome.visible_change,
+            "a successfully decoded but late playback frame must not refresh the viewer"
+        );
+        assert!(!outcome.needs_follow_up_poll);
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.scheduler.pending_requests, 0);
+        assert_eq!(diagnostics.decode_successes, 1);
+        assert_eq!(diagnostics.decode_canceled_jobs, 0);
+        assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 1);
+        assert_eq!(
+            diagnostics.playback_schedule.current_proxy_or_hardware_recommended_decisions,
+            1
+        );
+        assert!(
+            service.media_cache.borrow_mut().get(&key).is_none(),
+            "late playback completion should not enter the media preview cache"
+        );
+        service.shutdown();
+    }
+
+    #[test]
     fn preview_service_poll_separates_canceled_backlog_from_visible_change() {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let result_tx = install_preview_result_channel_for_test(&service);
@@ -15109,6 +15192,7 @@ mod tests {
             access_mode: PreviewDecodeAccessMode::ScrubCursor,
             queue_wait_us: 0,
             decode_elapsed_us: 0,
+            deadline_at: None,
             cancel_observed_elapsed_us: None,
             canceled: false,
             cancel_reason: None,

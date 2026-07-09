@@ -809,6 +809,12 @@ an access-mode request and a cancellation predicate. Diagnostics must report
 playback-deadline cancellations separately from prefetch-deadline cancellations
 so late visible frames can drive drop/proxy/hardware-decode work instead of
 being hidden as generic obsolete work.
+Completion polling repeats the same deadline contract as a final guard. If a
+`Current + PlaybackCursor` result reaches the app after its display deadline,
+the app may still record decode diagnostics and success/failure telemetry, but
+it must not cache the frame, mark it visible, or reset sustained-pressure
+recovery as a successful current playback frame. This protects the viewer from
+decode backends that return after missing a cooperative cancellation check.
 Repeated playback-current deadline misses put the app scheduler into sustained
 pressure recovery. In that state, a fresh `Current + PlaybackCursor` request
 must not pile onto the decode queue while another current or playback decode is
