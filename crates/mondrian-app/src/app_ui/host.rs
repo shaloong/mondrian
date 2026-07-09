@@ -1359,7 +1359,7 @@ fn resolve_playback_hardware_decode_admission(
     let request = if native_import_admission_ready {
         PreviewHardwareDecodeRequest::PreferGpuResident
     } else {
-        PreviewHardwareDecodeRequest::Auto
+        PreviewHardwareDecodeRequest::PreferHardwareDecode
     };
     AppUiPlaybackHardwareDecodeAdmission {
         request,
@@ -1413,7 +1413,7 @@ mod tests {
         );
         assert_eq!(
             host.preview_service.playback_hardware_decode_request_for_test(),
-            PreviewHardwareDecodeRequest::Auto
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
         );
         assert!(
             host.preview_service
@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_hardware_decode_admission_fails_closed_when_platform_import_is_missing() {
+    fn playback_hardware_decode_admission_uses_cpu_transfer_when_platform_import_is_missing() {
         let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
             vec![mondrian_media::DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
@@ -1480,7 +1480,10 @@ mod tests {
         let admission =
             resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
 
-        assert_eq!(admission.request, PreviewHardwareDecodeRequest::Auto);
+        assert_eq!(
+            admission.request,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        );
         assert!(admission.renderer_native_import_ready);
         assert!(!admission.platform_native_import_ready);
         assert!(!admission.native_import_admission_ready);
@@ -1494,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_hardware_decode_admission_fails_closed_on_handle_mismatch() {
+    fn playback_hardware_decode_admission_uses_cpu_transfer_on_handle_mismatch() {
         let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
             vec![mondrian_media::DecodedGpuFrameHandleKind::CVPixelBuffer],
             vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
@@ -1508,7 +1511,10 @@ mod tests {
         let admission =
             resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
 
-        assert_eq!(admission.request, PreviewHardwareDecodeRequest::Auto);
+        assert_eq!(
+            admission.request,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        );
         assert!(admission.renderer_native_import_ready);
         assert!(!admission.platform_native_import_ready);
         assert!(!admission.native_import_admission_ready);

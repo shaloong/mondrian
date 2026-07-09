@@ -142,6 +142,9 @@ pub enum PreviewHardwareDecodeRequest {
     /// Use the current media default; do not require a hardware-resident path.
     #[default]
     Auto,
+    /// Prefer a hardware decoder even when the only available product path
+    /// transfers decoded frames back to CPU RGBA.
+    PreferHardwareDecode,
     /// Prefer a hardware decoder that can produce GPU-resident native frames.
     PreferGpuResident,
     /// Require a hardware-resident decode path; fail closed when unavailable.
@@ -1369,14 +1372,20 @@ impl PreviewHardwareDecodePlan {
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
     ) -> bool {
-        request != PreviewHardwareDecodeRequest::Auto
-            && access_mode == PreviewDecodeAccessMode::PlaybackCursor
+        matches!(
+            request,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+                | PreviewHardwareDecodeRequest::PreferGpuResident
+        ) && access_mode == PreviewDecodeAccessMode::PlaybackCursor
             && backend != PreviewDecodeBackend::ExternalFfmpegCpuRgba
     }
 
     fn should_attempt_hardware_cpu_transfer(&self, access_mode: PreviewDecodeAccessMode) -> bool {
-        self.request != PreviewHardwareDecodeRequest::Auto
-            && access_mode == PreviewDecodeAccessMode::PlaybackCursor
+        matches!(
+            self.request,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+                | PreviewHardwareDecodeRequest::PreferGpuResident
+        ) && access_mode == PreviewDecodeAccessMode::PlaybackCursor
             && self.ffmpeg_codec_config.ffmpeg_codec_config_available
             && self.ffmpeg_device_context.device_context_created
     }
@@ -3327,6 +3336,12 @@ mod tests {
         );
         assert_eq!(
             request
+                .with_hardware_decode_request(PreviewHardwareDecodeRequest::PreferHardwareDecode)
+                .hardware_decode_request,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        );
+        assert_eq!(
+            request
                 .with_hardware_decode_request(PreviewHardwareDecodeRequest::PreferGpuResident)
                 .hardware_decode_request,
             PreviewHardwareDecodeRequest::PreferGpuResident
@@ -3360,6 +3375,48 @@ mod tests {
         assert_eq!(plan.decision, expected_decision);
         assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
         assert!(!plan.probe.decoder_adapter_available);
+    }
+
+    #[test]
+    fn hardware_decode_plan_can_prefer_cpu_transfer_without_requiring_native_residency() {
+        let plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::PreferHardwareDecode,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Auto,
+            ffmpeg::codec::Id::H264,
+        );
+
+        assert_eq!(
+            plan.request,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        );
+        if plan.ffmpeg_codec_config.ffmpeg_codec_config_available {
+            assert_eq!(
+                plan.ffmpeg_device_context.device_create_attempted,
+                plan.ffmpeg_device_context.ffmpeg_device_type_available
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_decode_plan_does_not_attempt_cpu_transfer_for_required_gpu_residency() {
+        let plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::RequireGpuResident,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Auto,
+            ffmpeg::codec::Id::H264,
+        );
+
+        assert_eq!(
+            plan.request,
+            PreviewHardwareDecodeRequest::RequireGpuResident
+        );
+        assert!(!plan.should_attempt_hardware_cpu_transfer(PreviewDecodeAccessMode::PlaybackCursor));
+        assert!(!plan.ffmpeg_device_context.device_create_attempted);
+        assert_eq!(
+            plan.ffmpeg_device_context.reason,
+            "hardware device context creation was not required for this preview plan"
+        );
     }
 
     #[test]

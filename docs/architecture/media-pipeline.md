@@ -179,12 +179,16 @@ or calling mode-specific FFmpeg helpers. Access-mode routing, session
 retention, cache lookup, playback-ring use, and future hardware/low-copy
 backend selection must stay behind the request boundary in `mondrian-media`.
 The request may carry a `PreviewHardwareDecodeRequest`, but this is only caller
-intent: `Auto` means use the media default, `PreferGpuResident` means prefer a
-native GPU-resident decoded surface when the access mode/backend can provide
-one, and `RequireGpuResident` means fail closed instead of silently returning a
-CPU RGBA frame. The app playback scheduler may use `PreferGpuResident` for
-`PlaybackCursor`; scrub and still-frame work should remain `Auto` unless a
-future backend explicitly supports those access patterns.
+intent: `Auto` means use the media default, `PreferHardwareDecode` means prefer
+FFmpeg hardware decode even when decoded frames must transfer back to CPU RGBA,
+`PreferGpuResident` means prefer a native GPU-resident decoded surface when the
+access mode/backend can provide one, and `RequireGpuResident` means fail closed
+instead of silently returning a CPU RGBA frame. The app playback scheduler may
+use `PreferHardwareDecode` for `PlaybackCursor` while renderer native import is
+not ready, then upgrade to `PreferGpuResident` only after renderer/platform
+native decoded-frame import admission succeeds. Scrub and still-frame work
+should remain `Auto` unless a future backend explicitly supports those access
+patterns.
 App preview decode execution must run synchronous FFmpeg preview decode on
 dedicated preview worker threads, not on the UI/event thread. Current-frame and
 prefetch workers pass a cooperative cancellation predicate into
@@ -586,11 +590,11 @@ discovery/zero-copy/low-copy facts, and a stable `admission_blocker` enum such
 as `RendererImportUnavailable`, `PlatformDiscoveryUnavailable`,
 `PlatformCopyPathUnavailable`, or `PlatformHandleUnsupported`. The scheduler
 may request `PreferGpuResident` only when renderer import and platform import
-are both ready for a shared handle family; otherwise it must remain `Auto` and
-the performance report must identify the precise admission blocker. Do not
-enable hardware decode from FFmpeg or OS capability probes alone: that produces
-CPU-transfer fallback or opaque stalls, not the production GPU-resident playback
-path.
+are both ready for a shared handle family. Otherwise playback may request
+`PreferHardwareDecode` to use FFmpeg hardware decode with CPU-transfer fallback,
+and the performance report must still identify the precise native-import
+admission blocker. Do not report FFmpeg hardware CPU-transfer as the production
+GPU-resident playback path.
 
 Preview path resolution is proxy-aware but does not synchronously generate
 proxy media. `mondrian-media::ProxyGenerator` owns the shared proxy freshness
@@ -835,18 +839,18 @@ missing GPU-resident path from deadline pressure or proxy-generation pressure.
 Preview decode performance reports must surface that case with a specific check,
 root-cause evidence, and an action to connect renderer native video import.
 Playback hardware-decode admission is also runtime-gated by the app preview
-service. The product default remains `PreviewHardwareDecodeRequest::Auto`;
-window/renderer code may raise playback jobs to `PreferGpuResident` only after
-the renderer native decoded-frame import contract reports ready and the
-platform probe supports at least one renderer-supported native handle family
-with zero-copy or declared low-copy import. This prevents hardware decode with
-CPU transfer, or a renderer-only readiness claim on a platform without native
-texture import, from becoming the default playback path when native GPU
-residency is not actually connected. The same admission state must be
+service. The media request default remains `PreviewHardwareDecodeRequest::Auto`;
+window/renderer code may raise playback jobs to `PreferHardwareDecode` for
+FFmpeg hardware CPU-transfer fallback, and to `PreferGpuResident` only after the
+renderer native decoded-frame import contract reports ready and the platform
+probe supports at least one renderer-supported native handle family with
+zero-copy or declared low-copy import. This prevents CPU-transfer playback from
+being mistaken for native GPU residency while still avoiding a pure software
+decode default for sustained playback. The same admission state must be
 serialized in preview diagnostics and performance reports as separate renderer,
 platform, and final-admission facts; a known native-import blocker must produce
 a specific gated-admission root cause instead of disappearing as a generic
-media-layer `Auto` decode.
+media-layer software decode.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
 through the shared app-layer proxy dispatcher. The request is deduplicated by

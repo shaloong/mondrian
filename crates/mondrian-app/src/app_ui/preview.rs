@@ -229,9 +229,9 @@ impl AppUiPreviewService {
 
     /// Set playback hardware-decode admission selected by the app runtime.
     ///
-    /// The default is `Auto` so preview does not pay hardware-frame CPU transfer
-    /// cost when renderer-native import is not connected. A window/renderer
-    /// runtime may raise this to `PreferGpuResident` once native video import
+    /// The default is `Auto` until renderer/platform readiness is reported. The
+    /// runtime may raise playback to `PreferHardwareDecode` for FFmpeg
+    /// CPU-transfer fallback or to `PreferGpuResident` once native video import
     /// support is actually ready.
     pub(crate) fn set_playback_hardware_decode_admission(
         &self,
@@ -2131,7 +2131,7 @@ impl AppUiPreviewHardwareDecodeAdmissionDiagnostics {
     fn playback_native_import_gated(self) -> bool {
         self.renderer_native_import_support_known
             && !self.native_import_admission_ready
-            && self.playback_request == PreviewHardwareDecodeRequest::Auto
+            && self.admission_blocker.is_some()
     }
 }
 
@@ -2772,6 +2772,8 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub renderer_import_ready_frames: u64,
     /// Decode results blocked because hardware texture residency is not connected.
     pub hardware_decode_texture_residency_blocker_frames: u64,
+    /// Decode requests that preferred hardware decode, allowing CPU transfer.
+    pub hardware_decode_prefer_hardware_requested_frames: u64,
     /// Decode requests that preferred GPU-resident native frames.
     pub hardware_decode_prefer_gpu_requested_frames: u64,
     /// Decode requests that required GPU-resident native frames.
@@ -2995,6 +2997,10 @@ impl AppUiPreviewDecodeAccessModeProfile {
             PreviewHardwareDecodeRequest::Auto => {
                 self.hardware_decode_auto_requested_frames =
                     self.hardware_decode_auto_requested_frames.saturating_add(1);
+            }
+            PreviewHardwareDecodeRequest::PreferHardwareDecode => {
+                self.hardware_decode_prefer_hardware_requested_frames =
+                    self.hardware_decode_prefer_hardware_requested_frames.saturating_add(1);
             }
             PreviewHardwareDecodeRequest::PreferGpuResident => {
                 self.hardware_decode_prefer_gpu_requested_frames =
@@ -4529,7 +4535,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_cpu_transfer_setup_failed_frames={} hardware_decode_cpu_transfer_decoder_open_failed_frames={} hardware_decode_cpu_transfer_awaiting_frame_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_renderer_import_unavailable_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d12va_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_dxva2_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_vdpau_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_hardware_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_cpu_transfer_setup_failed_frames={} hardware_decode_cpu_transfer_decoder_open_failed_frames={} hardware_decode_cpu_transfer_awaiting_frame_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_renderer_import_unavailable_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d12va_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_dxva2_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_vdpau_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -4562,6 +4568,7 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.renderer_import_ready_frames,
                 profile.hardware_decode_texture_residency_blocker_frames,
                 profile.hardware_decode_auto_requested_frames,
+                profile.hardware_decode_prefer_hardware_requested_frames,
                 profile.hardware_decode_prefer_gpu_requested_frames,
                 profile.hardware_decode_require_gpu_requested_frames,
                 profile.hardware_decode_cpu_not_requested_frames,
@@ -9997,6 +10004,10 @@ mod tests {
         );
         assert_eq!(playback_profile.hardware_decode_auto_requested_frames, 0);
         assert_eq!(
+            playback_profile.hardware_decode_prefer_hardware_requested_frames,
+            0
+        );
+        assert_eq!(
             playback_profile.hardware_decode_prefer_gpu_requested_frames,
             2
         );
@@ -10083,6 +10094,10 @@ mod tests {
         assert_eq!(scrub_profile.seek_index_keyframes_max, 3);
         assert_eq!(scrub_profile.seek_index_observed_packets_max, 90);
         assert_eq!(scrub_profile.hardware_decode_auto_requested_frames, 1);
+        assert_eq!(
+            scrub_profile.hardware_decode_prefer_hardware_requested_frames,
+            0
+        );
         assert_eq!(scrub_profile.hardware_decode_cpu_not_requested_frames, 1);
         assert_eq!(scrub_profile.hardware_decode_prefer_gpu_requested_frames, 0);
         assert_eq!(scrub_profile.queue_wait_total_us, 1_200);
@@ -10136,6 +10151,10 @@ mod tests {
         assert_eq!(still_profile.seek_index_keyframes_max, 2);
         assert_eq!(still_profile.seek_index_observed_packets_max, 40);
         assert_eq!(still_profile.hardware_decode_auto_requested_frames, 1);
+        assert_eq!(
+            still_profile.hardware_decode_prefer_hardware_requested_frames,
+            0
+        );
         assert_eq!(still_profile.hardware_decode_cpu_not_requested_frames, 1);
         assert_eq!(still_profile.stage_durations.cache_lookup_us, 20);
         assert_eq!(
@@ -10906,7 +10925,7 @@ mod tests {
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 playback_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 2,
-                    hardware_decode_prefer_gpu_requested_frames: 2,
+                    hardware_decode_prefer_hardware_requested_frames: 2,
                     hardware_decode_device_context_attempted_frames: 2,
                     hardware_decode_device_context_created_frames: 1,
                     hardware_decode_backend_unavailable_frames: 2,
@@ -11370,7 +11389,7 @@ mod tests {
                 ..AppUiPreviewPlaybackScheduleDiagnostics::default()
             },
             hardware_decode_admission: AppUiPreviewHardwareDecodeAdmissionDiagnostics {
-                playback_request: PreviewHardwareDecodeRequest::Auto,
+                playback_request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
                 renderer_native_import_support_known: true,
                 renderer_native_import_ready: false,
                 platform_native_import_ready: true,
@@ -11403,7 +11422,7 @@ mod tests {
         assert!(report.root_causes.iter().any(|root| {
             root.code == "preview_decode_hardware_decode_admission_gated"
                 && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
-                && root.evidence.contains("playback_hardware_decode_request=Auto")
+                && root.evidence.contains("playback_hardware_decode_request=PreferHardwareDecode")
                 && root.evidence.contains("admission_blocker=Some(RendererImportUnavailable)")
                 && root.evidence.contains("renderer_native_import_support_known=true")
                 && root.evidence.contains("renderer_native_import_ready=false")
