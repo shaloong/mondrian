@@ -2576,6 +2576,12 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub hardware_decode_device_context_created_frames: u64,
     /// Decode requests blocked because FFmpeg could not create a hardware device context.
     pub hardware_decode_device_context_unavailable_frames: u64,
+    /// Decode requests where FFmpeg hardware decode transfers frames back to CPU RGBA.
+    pub hardware_decode_cpu_transfer_frames: u64,
+    /// Decode requests whose session configured hardware decode with CPU transfer.
+    pub hardware_decode_cpu_transfer_configured_frames: u64,
+    /// Decode requests whose session observed hardware frames transferred to CPU.
+    pub hardware_decode_cpu_transfer_observed_frames: u64,
     /// Decode requests blocked at a CPU RGBA backend boundary.
     pub hardware_decode_backend_boundary_frames: u64,
     /// Decode requests blocked because renderer import is unavailable.
@@ -2731,6 +2737,14 @@ impl AppUiPreviewDecodeAccessModeProfile {
                     self.hardware_decode_device_context_unavailable_frames.saturating_add(1);
             }
         }
+        if diagnostics.hardware_decode_cpu_transfer_configured {
+            self.hardware_decode_cpu_transfer_configured_frames =
+                self.hardware_decode_cpu_transfer_configured_frames.saturating_add(1);
+        }
+        if diagnostics.hardware_decode_cpu_transfer_observed {
+            self.hardware_decode_cpu_transfer_observed_frames =
+                self.hardware_decode_cpu_transfer_observed_frames.saturating_add(1);
+        }
         match diagnostics.hardware_decode_request {
             PreviewHardwareDecodeRequest::Auto => {
                 self.hardware_decode_auto_requested_frames =
@@ -2773,6 +2787,10 @@ impl AppUiPreviewDecodeAccessModeProfile {
             PreviewHardwareDecodeDecision::CpuRgbaBackendBoundary => {
                 self.hardware_decode_backend_boundary_frames =
                     self.hardware_decode_backend_boundary_frames.saturating_add(1);
+            }
+            PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer => {
+                self.hardware_decode_cpu_transfer_frames =
+                    self.hardware_decode_cpu_transfer_frames.saturating_add(1);
             }
             PreviewHardwareDecodeDecision::GpuResidentNative => {
                 self.hardware_decode_gpu_resident_native_frames =
@@ -4234,7 +4252,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_renderer_import_unavailable_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_renderer_import_unavailable_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -4277,6 +4295,9 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.hardware_decode_device_context_attempted_frames,
                 profile.hardware_decode_device_context_created_frames,
                 profile.hardware_decode_device_context_unavailable_frames,
+                profile.hardware_decode_cpu_transfer_frames,
+                profile.hardware_decode_cpu_transfer_configured_frames,
+                profile.hardware_decode_cpu_transfer_observed_frames,
                 profile.hardware_decode_backend_boundary_frames,
                 profile.hardware_decode_renderer_import_unavailable_frames,
                 profile.hardware_decode_gpu_resident_native_frames,
@@ -9109,6 +9130,8 @@ mod tests {
                 hardware_decode_ffmpeg_device_context_attempted: false,
                 hardware_decode_ffmpeg_device_context_created: false,
                 hardware_decode_ffmpeg_device_context_error_code: None,
+                hardware_decode_cpu_transfer_configured: false,
+                hardware_decode_cpu_transfer_observed: false,
                 session_reused: false,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9166,6 +9189,8 @@ mod tests {
                 hardware_decode_ffmpeg_device_context_attempted: false,
                 hardware_decode_ffmpeg_device_context_created: false,
                 hardware_decode_ffmpeg_device_context_error_code: None,
+                hardware_decode_cpu_transfer_configured: false,
+                hardware_decode_cpu_transfer_observed: false,
                 session_reused: true,
                 forward_reused: false,
                 seek_index_available: false,
@@ -9223,6 +9248,8 @@ mod tests {
                 hardware_decode_ffmpeg_device_context_attempted: false,
                 hardware_decode_ffmpeg_device_context_created: false,
                 hardware_decode_ffmpeg_device_context_error_code: None,
+                hardware_decode_cpu_transfer_configured: false,
+                hardware_decode_cpu_transfer_observed: false,
                 session_reused: false,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9270,7 +9297,7 @@ mod tests {
                 any_seek_window_ms: 0,
                 scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
                 hardware_decode_request: PreviewHardwareDecodeRequest::PreferGpuResident,
-                hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable,
+                hardware_decode_decision: PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer,
                 hardware_decode_candidate_backend: Some(HwAccelBackend::D3D11VA),
                 hardware_decode_candidate_handle_kind: Some(
                     DecodedGpuFrameHandleKind::D3D11Texture2D,
@@ -9282,6 +9309,8 @@ mod tests {
                 hardware_decode_ffmpeg_device_context_attempted: true,
                 hardware_decode_ffmpeg_device_context_created: true,
                 hardware_decode_ffmpeg_device_context_error_code: None,
+                hardware_decode_cpu_transfer_configured: true,
+                hardware_decode_cpu_transfer_observed: true,
                 session_reused: true,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9302,8 +9331,8 @@ mod tests {
                     rgba_copy_us: 0,
                     external_process_us: 0,
                 },
-                hw_accel_backend: HwAccelBackend::None,
-                hardware_decode_active: false,
+                hw_accel_backend: HwAccelBackend::D3D11VA,
+                hardware_decode_active: true,
                 zero_copy_active: false,
                 decoded_frame_residency: DecodedFrameResidency::CpuRgba,
                 gpu_frame_handle_kind: None,
@@ -9442,7 +9471,7 @@ mod tests {
         assert_eq!(playback_profile.seek_index_available_frames, 1);
         assert_eq!(playback_profile.seek_index_probe_backed_frames, 1);
         assert_eq!(playback_profile.seek_index_session_observed_frames, 0);
-        assert_eq!(playback_profile.hardware_decode_active_frames, 0);
+        assert_eq!(playback_profile.hardware_decode_active_frames, 1);
         assert_eq!(playback_profile.zero_copy_active_frames, 0);
         assert_eq!(playback_profile.gpu_texture_resident_frames, 0);
         assert_eq!(playback_profile.decoded_nv12_surface_frames, 1);
@@ -9465,7 +9494,7 @@ mod tests {
         assert_eq!(playback_profile.hardware_decode_cpu_unavailable_frames, 0);
         assert_eq!(
             playback_profile.hardware_decode_backend_unavailable_frames,
-            1
+            0
         );
         assert_eq!(playback_profile.hardware_decode_codec_unsupported_frames, 0);
         assert_eq!(
@@ -9479,6 +9508,15 @@ mod tests {
         assert_eq!(
             playback_profile.hardware_decode_device_context_unavailable_frames,
             0
+        );
+        assert_eq!(playback_profile.hardware_decode_cpu_transfer_frames, 1);
+        assert_eq!(
+            playback_profile.hardware_decode_cpu_transfer_configured_frames,
+            1
+        );
+        assert_eq!(
+            playback_profile.hardware_decode_cpu_transfer_observed_frames,
+            1
         );
         assert_eq!(playback_profile.hardware_decode_backend_boundary_frames, 1);
         assert_eq!(
@@ -14194,6 +14232,8 @@ mod tests {
             hardware_decode_ffmpeg_device_context_attempted: false,
             hardware_decode_ffmpeg_device_context_created: false,
             hardware_decode_ffmpeg_device_context_error_code: None,
+            hardware_decode_cpu_transfer_configured: false,
+            hardware_decode_cpu_transfer_observed: false,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,

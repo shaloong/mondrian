@@ -92,6 +92,10 @@ The cached FFmpeg hardware device-context probe goes one step deeper by creating
 and releasing an `AVHWDeviceContext`, but it is still not a decoded-frame
 residency contract. Renderer readiness requires an actual decoded NV12/P010
 surface handle plus a platform import path that can sample that surface.
+`HardwareDecodeCpuTransfer` is also not renderer readiness: it proves FFmpeg
+hardware decode can be configured and hardware frames can be transferred back to
+CPU RGBA, but the compositor still receives CPU-uploaded RGBA rather than a
+native decoder surface.
 
 Viewer GPU output telemetry now preserves decoder residency facts through the
 CPU-upload GPU input path. `AppUiGpuPreviewMediaSource` carries
