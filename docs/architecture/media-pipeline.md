@@ -223,6 +223,10 @@ behind "preview buffering" indefinitely.
 The same counter must appear in the preview decode performance summary/report
 even before a worker returns a canceled decode result, because the product
 symptom is already user-visible at the moment buffering is released.
+Each expired realtime-current request released this way must also count as a
+playback late-drop decision and a proxy/hardware recommendation decision so
+clock-driven playback diagnostics do not under-report frames that were skipped
+before a worker produced a cancellation result.
 When background preview completion changes the viewer waiting state, the app
 host may perform one preview-aware model refresh for the completed work, but
 the derived playback-buffering flag must be propagated with a transport/status

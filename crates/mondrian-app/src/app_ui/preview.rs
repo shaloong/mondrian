@@ -641,6 +641,14 @@ impl AppUiPreviewService {
             &self.metrics.playback_current_stalled_expirations,
             expired.len() as u64,
         );
+        add_cell(
+            &self.metrics.playback_current_drop_late_decisions,
+            expired.len() as u64,
+        );
+        add_cell(
+            &self.metrics.playback_current_proxy_or_hardware_recommended_decisions,
+            expired.len() as u64,
+        );
         add_cell(&self.metrics.queue_canceled_jobs, canceled_queued_jobs);
         self.current_frame_pending.set(false);
         true
@@ -12713,6 +12721,11 @@ mod tests {
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.playback_current_stalled_expirations, 1);
+        assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 1);
+        assert_eq!(
+            diagnostics.playback_schedule.current_proxy_or_hardware_recommended_decisions,
+            1
+        );
         assert_eq!(diagnostics.queue_canceled_jobs, 1);
         assert_eq!(diagnostics.scheduler.pending_requests, 0);
         assert_eq!(diagnostics.scheduler.canceled_requests, 1);
