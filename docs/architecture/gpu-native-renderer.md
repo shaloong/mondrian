@@ -88,6 +88,10 @@ The media layer's FFmpeg hardware codec config probe is also only planning
 evidence. It can prove that the linked FFmpeg decoder advertises a backend
 config for H.264/HEVC/etc., but it does not create an OS device, expose a
 native surface handle, or satisfy renderer import support by itself.
+The cached FFmpeg hardware device-context probe goes one step deeper by creating
+and releasing an `AVHWDeviceContext`, but it is still not a decoded-frame
+residency contract. Renderer readiness requires an actual decoded NV12/P010
+surface handle plus a platform import path that can sample that surface.
 
 Viewer GPU output telemetry now preserves decoder residency facts through the
 CPU-upload GPU input path. `AppUiGpuPreviewMediaSource` carries

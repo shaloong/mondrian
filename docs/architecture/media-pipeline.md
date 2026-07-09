@@ -545,6 +545,16 @@ create an `AVHWDeviceContext`, change decoder format negotiation, allocate
 hardware frames, or report active hardware decode. Its purpose is to separate
 "FFmpeg/codec cannot use this backend" from "Mondrian has not connected the
 decoder adapter yet".
+When the codec config is present and hardware decode was requested for playback,
+media may run the cached FFmpeg hardware device-context probe. That probe calls
+`av_hwdevice_ctx_create`, immediately releases the returned `AVHWDeviceContext`,
+and records whether device creation was attempted, succeeded, or returned an
+FFmpeg error code. It must be cached per backend for the process lifetime so
+session open does not repeatedly initialize GPU drivers. It must not be attached
+to the preview decoder until the hardware-frame session owns get-format
+negotiation, frame lifetime, and renderer import. A failed device-context probe
+is `CpuRgbaHardwareUnavailable`; a successful device-context probe followed by
+an unimplemented Mondrian adapter is `CpuRgbaBackendUnavailable`.
 
 Preview path resolution is proxy-aware but does not synchronously generate
 proxy media. `mondrian-media::ProxyGenerator` owns the shared proxy freshness
@@ -622,7 +632,10 @@ The same diagnostics carry the current hardware decode contract:
 `hardware_decode_adapter_available`,
 `hardware_decode_ffmpeg_device_type_available`,
 `hardware_decode_ffmpeg_codec_config_available`,
-`hardware_decode_ffmpeg_hw_pixel_format`, `hardware_decode_active`,
+`hardware_decode_ffmpeg_hw_pixel_format`,
+`hardware_decode_ffmpeg_device_context_attempted`,
+`hardware_decode_ffmpeg_device_context_created`,
+`hardware_decode_ffmpeg_device_context_error_code`, `hardware_decode_active`,
 `zero_copy_active`, `decoded_frame_residency`, `gpu_frame_handle_kind`,
 `renderer_import_ready`, and
 `hardware_decode_blocker`, plus `decoded_surface_format` for the decoder output
@@ -632,8 +645,10 @@ These fields are fail-closed; until a real hardware-frame decoder and renderer
 import path are connected they must report CPU RGBA residency with
 `TextureResidencyNotConnected` and a CPU RGBA `PreviewHardwareDecodeDecision`.
 When FFmpeg has no matching codec/backend hardware config, the decision should
-be `CpuRgbaCodecUnsupported`. When FFmpeg advertises the config but no Mondrian
-decoder adapter is connected, the decision should be
+be `CpuRgbaCodecUnsupported`. When FFmpeg advertises the config but cannot
+create the hardware device context, the decision should be
+`CpuRgbaHardwareUnavailable`. When FFmpeg can create the device context but no
+Mondrian decoder adapter is connected, the decision should be
 `CpuRgbaBackendUnavailable`; only after an adapter produces native GPU residency
 should later readiness failures move to renderer or platform import diagnostics.
 The app-window GPU preview path must preserve those media facts in its frame

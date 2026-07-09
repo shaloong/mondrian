@@ -5,7 +5,7 @@
 
 use crate::decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend,
-    HwAccelCodecConfigProbe, HwAccelPixelFormat, HwAccelProbe,
+    HwAccelCodecConfigProbe, HwAccelDeviceContextProbe, HwAccelPixelFormat, HwAccelProbe,
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
@@ -706,6 +706,15 @@ pub struct PreviewDecodeDiagnostics {
     /// Hardware pixel format advertised by FFmpeg for the selected codec/backend.
     #[serde(default)]
     pub hardware_decode_ffmpeg_hw_pixel_format: Option<HwAccelPixelFormat>,
+    /// Whether FFmpeg hardware device context creation was attempted.
+    #[serde(default)]
+    pub hardware_decode_ffmpeg_device_context_attempted: bool,
+    /// Whether FFmpeg created a hardware device context for this backend.
+    #[serde(default)]
+    pub hardware_decode_ffmpeg_device_context_created: bool,
+    /// FFmpeg error code returned by hardware device creation, when any.
+    #[serde(default)]
+    pub hardware_decode_ffmpeg_device_context_error_code: Option<i32>,
     /// Whether an existing access-mode-local decode session was reused.
     #[serde(default)]
     pub session_reused: bool,
@@ -794,6 +803,9 @@ impl PreviewDecodeDiagnostics {
             hardware_decode_ffmpeg_device_type_available: false,
             hardware_decode_ffmpeg_codec_config_available: false,
             hardware_decode_ffmpeg_hw_pixel_format: None,
+            hardware_decode_ffmpeg_device_context_attempted: false,
+            hardware_decode_ffmpeg_device_context_created: false,
+            hardware_decode_ffmpeg_device_context_error_code: None,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,
@@ -985,6 +997,12 @@ impl RgbaFrame {
             plan.ffmpeg_codec_config.ffmpeg_codec_config_available;
         self.diagnostics.hardware_decode_ffmpeg_hw_pixel_format =
             plan.ffmpeg_codec_config.hw_pixel_format;
+        self.diagnostics.hardware_decode_ffmpeg_device_context_attempted =
+            plan.ffmpeg_device_context.device_create_attempted;
+        self.diagnostics.hardware_decode_ffmpeg_device_context_created =
+            plan.ffmpeg_device_context.device_context_created;
+        self.diagnostics.hardware_decode_ffmpeg_device_context_error_code =
+            plan.ffmpeg_device_context.device_create_error_code;
         self.with_hw_accel_probe(&plan.probe)
     }
 
@@ -1105,6 +1123,7 @@ struct PreviewHardwareDecodePlan {
     decision: PreviewHardwareDecodeDecision,
     probe: HwAccelProbe,
     ffmpeg_codec_config: HwAccelCodecConfigProbe,
+    ffmpeg_device_context: HwAccelDeviceContextProbe,
 }
 
 impl PreviewHardwareDecodePlan {
@@ -1119,9 +1138,49 @@ impl PreviewHardwareDecodePlan {
             .candidate_backend
             .unwrap_or(HwAccelBackend::None)
             .probe_ffmpeg_codec_config(codec_id);
-        let decision =
-            Self::decision_for(request, access_mode, backend, &probe, &ffmpeg_codec_config);
-        Self { request, decision, probe, ffmpeg_codec_config }
+        let ffmpeg_device_context = Self::device_context_probe_for_plan(
+            request,
+            access_mode,
+            backend,
+            &probe,
+            &ffmpeg_codec_config,
+        );
+        let decision = Self::decision_for(
+            request,
+            access_mode,
+            backend,
+            &probe,
+            &ffmpeg_codec_config,
+            &ffmpeg_device_context,
+        );
+        Self {
+            request,
+            decision,
+            probe,
+            ffmpeg_codec_config,
+            ffmpeg_device_context,
+        }
+    }
+
+    fn device_context_probe_for_plan(
+        request: PreviewHardwareDecodeRequest,
+        access_mode: PreviewDecodeAccessMode,
+        backend: PreviewDecodeBackend,
+        probe: &HwAccelProbe,
+        ffmpeg_codec_config: &HwAccelCodecConfigProbe,
+    ) -> HwAccelDeviceContextProbe {
+        let selected_backend = probe.candidate_backend.unwrap_or(HwAccelBackend::None);
+        if request == PreviewHardwareDecodeRequest::Auto
+            || access_mode != PreviewDecodeAccessMode::PlaybackCursor
+            || backend == PreviewDecodeBackend::ExternalFfmpegCpuRgba
+            || !ffmpeg_codec_config.ffmpeg_codec_config_available
+        {
+            return HwAccelDeviceContextProbe::unavailable(
+                selected_backend,
+                "hardware device context creation was not required for this preview plan",
+            );
+        }
+        selected_backend.cached_ffmpeg_device_context_probe()
     }
 
     fn decision_for(
@@ -1130,6 +1189,7 @@ impl PreviewHardwareDecodePlan {
         backend: PreviewDecodeBackend,
         probe: &HwAccelProbe,
         ffmpeg_codec_config: &HwAccelCodecConfigProbe,
+        ffmpeg_device_context: &HwAccelDeviceContextProbe,
     ) -> PreviewHardwareDecodeDecision {
         if request == PreviewHardwareDecodeRequest::Auto {
             return PreviewHardwareDecodeDecision::CpuRgbaNotRequested;
@@ -1150,6 +1210,9 @@ impl PreviewHardwareDecodePlan {
             || !ffmpeg_codec_config.ffmpeg_codec_config_available
         {
             return PreviewHardwareDecodeDecision::CpuRgbaCodecUnsupported;
+        }
+        if !ffmpeg_device_context.device_context_created {
+            return PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable;
         }
         if !probe.decoder_adapter_available {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable;
@@ -2729,6 +2792,8 @@ mod tests {
         );
         let expected_decision = if plan.probe.candidate_backend.is_none()
             || !plan.ffmpeg_codec_config.ffmpeg_device_type_available
+            || (plan.ffmpeg_codec_config.ffmpeg_codec_config_available
+                && !plan.ffmpeg_device_context.device_context_created)
         {
             PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable
         } else if plan.ffmpeg_codec_config.ffmpeg_codec_config_available {

@@ -4,6 +4,9 @@
 //! `preview.rs` plus the app preview worker. This module intentionally does not
 //! expose a second preview decode pool.
 
+use std::ptr;
+use std::sync::OnceLock;
+
 use ffmpeg_next as ffmpeg;
 
 /// GPU hardware acceleration backend family.
@@ -176,6 +179,44 @@ impl HwAccelCodecConfigProbe {
     }
 }
 
+/// FFmpeg hardware device context creation probe for a backend.
+///
+/// This is a runtime capability probe for the local machine and linked FFmpeg
+/// build. It creates and immediately releases an `AVHWDeviceContext`; it does
+/// not attach that context to a decoder or claim that decoded frames are
+/// GPU-resident.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HwAccelDeviceContextProbe {
+    /// Backend requested for this probe.
+    pub backend: HwAccelBackend,
+    /// Whether this backend maps to a known FFmpeg hardware device type.
+    pub backend_maps_to_ffmpeg_device: bool,
+    /// Whether the linked FFmpeg build lists this hardware device type.
+    pub ffmpeg_device_type_available: bool,
+    /// Whether Mondrian attempted `av_hwdevice_ctx_create`.
+    pub device_create_attempted: bool,
+    /// Whether FFmpeg created an `AVHWDeviceContext` for this backend.
+    pub device_context_created: bool,
+    /// Negative FFmpeg error code returned by device creation, when any.
+    pub device_create_error_code: Option<i32>,
+    /// Stable diagnostic reason for unavailable or partial support.
+    pub reason: String,
+}
+
+impl HwAccelDeviceContextProbe {
+    pub(crate) fn unavailable(backend: HwAccelBackend, reason: impl Into<String>) -> Self {
+        Self {
+            backend,
+            backend_maps_to_ffmpeg_device: backend.to_ffmpeg_device_type().is_some(),
+            ffmpeg_device_type_available: false,
+            device_create_attempted: false,
+            device_context_created: false,
+            device_create_error_code: None,
+            reason: reason.into(),
+        }
+    }
+}
+
 impl DecodedGpuFrameHandleKind {
     /// Stable handle-kind name for telemetry.
     pub fn as_str(self) -> &'static str {
@@ -314,6 +355,109 @@ impl HwAccelBackend {
                 "FFmpeg decoder for {codec_id:?} does not advertise {} hardware config",
                 self.as_str()
             ),
+        }
+    }
+
+    /// Cached runtime probe for FFmpeg hardware device context creation.
+    ///
+    /// Device creation can touch GPU drivers. The result is process-stable for
+    /// Mondrian's playback lifetime, so preview planning uses this cached
+    /// variant instead of probing on every session open.
+    pub fn cached_ffmpeg_device_context_probe(self) -> HwAccelDeviceContextProbe {
+        static CUDA: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
+        static D3D11VA: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
+        static VIDEOTOOLBOX: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
+        static VAAPI: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
+
+        match self {
+            Self::None => self.probe_ffmpeg_device_context(),
+            Self::Cuda => CUDA.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
+            Self::D3D11VA => D3D11VA.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
+            Self::VideoToolbox => {
+                VIDEOTOOLBOX.get_or_init(|| self.probe_ffmpeg_device_context()).clone()
+            }
+            Self::Vaapi => VAAPI.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
+        }
+    }
+
+    /// Probe whether FFmpeg can create a hardware device context for this
+    /// backend. This creates and immediately releases an `AVHWDeviceContext`;
+    /// it does not modify decoder negotiation or allocate hardware frames.
+    pub fn probe_ffmpeg_device_context(self) -> HwAccelDeviceContextProbe {
+        let Some(device_type) = self.to_ffmpeg_device_type() else {
+            return HwAccelDeviceContextProbe::unavailable(
+                self,
+                format!(
+                    "{} does not map to an FFmpeg hardware device",
+                    self.as_str()
+                ),
+            );
+        };
+        let _ = ffmpeg::init();
+        let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
+        if !ffmpeg_device_type_available {
+            return HwAccelDeviceContextProbe {
+                backend: self,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: false,
+                device_context_created: false,
+                device_create_error_code: None,
+                reason: format!(
+                    "linked FFmpeg build does not list {} hardware device type",
+                    self.as_str()
+                ),
+            };
+        }
+
+        let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device_context,
+                device_type,
+                ptr::null(),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            return HwAccelDeviceContextProbe {
+                backend: self,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: true,
+                device_context_created: false,
+                device_create_error_code: Some(result),
+                reason: format!(
+                    "FFmpeg could not create {} hardware device context: {}",
+                    self.as_str(),
+                    ffmpeg::Error::from(result)
+                ),
+            };
+        }
+
+        let device_context_created = !device_context.is_null();
+        unsafe {
+            ffmpeg::ffi::av_buffer_unref(&mut device_context);
+        }
+        HwAccelDeviceContextProbe {
+            backend: self,
+            backend_maps_to_ffmpeg_device: true,
+            ffmpeg_device_type_available,
+            device_create_attempted: true,
+            device_context_created,
+            device_create_error_code: None,
+            reason: if device_context_created {
+                format!(
+                    "FFmpeg created and released {} hardware device context",
+                    self.as_str()
+                )
+            } else {
+                format!(
+                    "FFmpeg reported success but returned no {} hardware device context",
+                    self.as_str()
+                )
+            },
         }
     }
 
@@ -556,6 +700,26 @@ mod tests {
                     || h264.methods.internal
                     || h264.methods.ad_hoc
             );
+        }
+    }
+
+    #[test]
+    fn ffmpeg_hw_device_context_probe_reports_structured_runtime_status() {
+        let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
+        let probe = backend.probe_ffmpeg_device_context();
+
+        assert_eq!(probe.backend, backend);
+        assert!(probe.backend_maps_to_ffmpeg_device);
+        assert!(!probe.reason.is_empty());
+        if probe.ffmpeg_device_type_available {
+            assert!(probe.device_create_attempted);
+        } else {
+            assert!(!probe.device_create_attempted);
+        }
+        if probe.device_context_created {
+            assert_eq!(probe.device_create_error_code, None);
+        } else if probe.device_create_attempted {
+            assert!(probe.device_create_error_code.is_some());
         }
     }
 
