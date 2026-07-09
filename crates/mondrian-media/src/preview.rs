@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -953,8 +954,8 @@ pub struct PreviewNativeDecodedFrame {
     pub width: u32,
     /// Frame height in pixels.
     pub height: u32,
-    /// Native decoder handle family that owns the frame.
-    pub handle_kind: DecodedGpuFrameHandleKind,
+    /// Process-local native decoder handle token that owns the frame.
+    pub handle: PreviewNativeDecodedFrameHandle,
     /// Decoder output surface format before renderer import.
     pub surface_format: DecodedVideoSurfaceFormat,
     /// Decode/cache diagnostics for this frame.
@@ -966,22 +967,76 @@ impl PreviewNativeDecodedFrame {
     pub fn new(
         width: u32,
         height: u32,
-        handle_kind: DecodedGpuFrameHandleKind,
+        handle: PreviewNativeDecodedFrameHandle,
         surface_format: DecodedVideoSurfaceFormat,
         mut diagnostics: PreviewDecodeDiagnostics,
-    ) -> Self {
+    ) -> std::result::Result<Self, PreviewNativeDecodedFrameError> {
+        if width == 0 || height == 0 {
+            return Err(PreviewNativeDecodedFrameError::EmptyExtent { width, height });
+        }
+        if !surface_format.supports_native_gpu_payload() {
+            return Err(PreviewNativeDecodedFrameError::UnsupportedSurfaceFormat {
+                surface_format,
+            });
+        }
         diagnostics.cpu_resident = false;
         diagnostics.decoded_frame_residency = DecodedFrameResidency::GpuTexture;
-        diagnostics.gpu_frame_handle_kind = Some(handle_kind);
+        diagnostics.gpu_frame_handle_kind = Some(handle.kind());
         diagnostics.decoded_surface_format = surface_format;
-        Self {
-            width,
-            height,
-            handle_kind,
-            surface_format,
-            diagnostics,
-        }
+        Ok(Self { width, height, handle, surface_format, diagnostics })
     }
+
+    /// Native decoder handle family that owns the frame.
+    pub fn handle_kind(&self) -> DecodedGpuFrameHandleKind {
+        self.handle.kind()
+    }
+}
+
+/// Process-local token for a native decoder frame handle.
+///
+/// The numeric id is not an OS handle and must not be interpreted outside the
+/// media/backend adapter that minted it. It exists so GPU-resident preview
+/// payloads cannot be constructed without a concrete backend-owned resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewNativeDecodedFrameHandle {
+    kind: DecodedGpuFrameHandleKind,
+    id: NonZeroU64,
+}
+
+impl PreviewNativeDecodedFrameHandle {
+    /// Create a native handle token from a backend-owned process-local id.
+    pub fn from_raw(kind: DecodedGpuFrameHandleKind, id: u64) -> Option<Self> {
+        Some(Self { kind, id: NonZeroU64::new(id)? })
+    }
+
+    /// Native decoder handle family for this token.
+    pub fn kind(self) -> DecodedGpuFrameHandleKind {
+        self.kind
+    }
+
+    /// Process-local backend handle id.
+    pub fn id(self) -> NonZeroU64 {
+        self.id
+    }
+}
+
+/// Error returned when constructing a native decoded preview frame payload.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum PreviewNativeDecodedFrameError {
+    /// Native GPU preview frames require a non-empty extent.
+    #[error("native decoded preview frame requires a non-empty extent, got {width}x{height}")]
+    EmptyExtent {
+        /// Frame width.
+        width: u32,
+        /// Frame height.
+        height: u32,
+    },
+    /// The decoded surface format cannot be carried as a native GPU payload.
+    #[error("decoded surface format {surface_format:?} cannot be carried as a native GPU payload")]
+    UnsupportedSurfaceFormat {
+        /// Unsupported decoded surface format.
+        surface_format: DecodedVideoSurfaceFormat,
+    },
 }
 
 impl RgbaFrame {
@@ -3143,12 +3198,13 @@ mod tests {
         PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
         PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
         PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
-        PreviewNativeDecodedFrame, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
-        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
-        PreviewSeekResolution, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
-        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+        PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
+        PreviewPlaybackRing, PreviewScrubAdaptiveClass, PreviewSeekIndex,
+        PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution, RgbaFrame,
+        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS,
         PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
@@ -4014,17 +4070,25 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_payload_forces_gpu_residency_diagnostics() {
+        let handle =
+            PreviewNativeDecodedFrameHandle::from_raw(DecodedGpuFrameHandleKind::D3D11Texture2D, 7)
+                .expect("non-zero native handle id");
         let frame = PreviewNativeDecodedFrame::new(
             1920,
             1080,
-            DecodedGpuFrameHandleKind::D3D11Texture2D,
+            handle,
             DecodedVideoSurfaceFormat::P010,
             PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
-        );
+        )
+        .expect("valid native frame");
 
         assert_eq!(frame.width, 1920);
         assert_eq!(frame.height, 1080);
-        assert_eq!(frame.handle_kind, DecodedGpuFrameHandleKind::D3D11Texture2D);
+        assert_eq!(frame.handle, handle);
+        assert_eq!(
+            frame.handle_kind(),
+            DecodedGpuFrameHandleKind::D3D11Texture2D
+        );
         assert_eq!(frame.surface_format, DecodedVideoSurfaceFormat::P010);
         assert!(!frame.diagnostics.cpu_resident);
         assert_eq!(
@@ -4038,6 +4102,46 @@ mod tests {
         assert_eq!(
             frame.diagnostics.decoded_surface_format,
             DecodedVideoSurfaceFormat::P010
+        );
+    }
+
+    #[test]
+    fn native_decoded_frame_payload_requires_real_handle_and_native_surface() {
+        assert!(PreviewNativeDecodedFrameHandle::from_raw(
+            DecodedGpuFrameHandleKind::D3D11Texture2D,
+            0
+        )
+        .is_none());
+
+        let handle =
+            PreviewNativeDecodedFrameHandle::from_raw(DecodedGpuFrameHandleKind::D3D11Texture2D, 7)
+                .expect("non-zero native handle id");
+        let empty = PreviewNativeDecodedFrame::new(
+            0,
+            1080,
+            handle,
+            DecodedVideoSurfaceFormat::P010,
+            PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
+        )
+        .expect_err("empty native payload extent must fail closed");
+        assert_eq!(
+            empty,
+            PreviewNativeDecodedFrameError::EmptyExtent { width: 0, height: 1080 }
+        );
+
+        let unsupported = PreviewNativeDecodedFrame::new(
+            1920,
+            1080,
+            handle,
+            DecodedVideoSurfaceFormat::Yuv420p,
+            PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
+        )
+        .expect_err("planar CPU surface must not masquerade as a native GPU payload");
+        assert_eq!(
+            unsupported,
+            PreviewNativeDecodedFrameError::UnsupportedSurfaceFormat {
+                surface_format: DecodedVideoSurfaceFormat::Yuv420p
+            }
         );
     }
 

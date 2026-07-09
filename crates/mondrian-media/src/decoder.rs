@@ -679,6 +679,11 @@ impl DecodedVideoSurfaceFormat {
             Self::Other => "Other",
         }
     }
+
+    /// Whether this decoded surface format can be carried as a native GPU payload.
+    pub fn supports_native_gpu_payload(self) -> bool {
+        matches!(self, Self::Nv12 | Self::P010 | Self::Rgba8 | Self::Bgra8)
+    }
 }
 
 fn hardware_decode_unavailable_reason() -> &'static str {
@@ -889,6 +894,18 @@ mod tests {
         assert_eq!(DecodedVideoSurfaceFormat::Rgba8.as_str(), "Rgba8");
         assert_eq!(DecodedVideoSurfaceFormat::Bgra8.as_str(), "Bgra8");
         assert_eq!(DecodedVideoSurfaceFormat::Other.as_str(), "Other");
+    }
+
+    #[test]
+    fn decoded_video_surface_format_declares_native_gpu_payload_support() {
+        assert!(DecodedVideoSurfaceFormat::Nv12.supports_native_gpu_payload());
+        assert!(DecodedVideoSurfaceFormat::P010.supports_native_gpu_payload());
+        assert!(DecodedVideoSurfaceFormat::Rgba8.supports_native_gpu_payload());
+        assert!(DecodedVideoSurfaceFormat::Bgra8.supports_native_gpu_payload());
+        assert!(!DecodedVideoSurfaceFormat::Unknown.supports_native_gpu_payload());
+        assert!(!DecodedVideoSurfaceFormat::Yuv420p.supports_native_gpu_payload());
+        assert!(!DecodedVideoSurfaceFormat::Yuv420p10le.supports_native_gpu_payload());
+        assert!(!DecodedVideoSurfaceFormat::Other.supports_native_gpu_payload());
     }
 
     #[test]

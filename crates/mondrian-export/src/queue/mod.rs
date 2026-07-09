@@ -2740,7 +2740,7 @@ fn decode_video_layer_scaled(
                 "asset={} path={} err=export still-frame CPU fallback requires CPU RGBA, got native GPU {} {:?}",
                 asset_id,
                 path.display(),
-                frame.handle_kind.as_str(),
+                frame.handle_kind().as_str(),
                 frame.surface_format
             ));
         }

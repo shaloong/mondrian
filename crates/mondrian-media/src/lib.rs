@@ -43,7 +43,8 @@ pub use preview::{
     PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
     PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
-    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, RgbaFrame,
+    PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle, PreviewScrubAdaptiveClass,
+    PreviewSeekIndexSource, RgbaFrame,
 };
 pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution, ProxyStatus};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

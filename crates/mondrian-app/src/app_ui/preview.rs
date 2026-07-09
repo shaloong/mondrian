@@ -8841,7 +8841,7 @@ fn decode_media_preview(
             frame: None,
             error: Some(format!(
                 "native GPU preview decode produced {} {:?} but app renderer import is not connected",
-                frame.handle_kind.as_str(),
+                frame.handle_kind().as_str(),
                 frame.surface_format
             )),
             failure_reason: Some(MediaPreviewFailureReason::NativeGpuImportUnavailable),

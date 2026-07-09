@@ -656,6 +656,13 @@ copy stages.
 Every frame returned by the preview decode boundary is a
 `PreviewDecodeOutcome`: `Frame(RgbaFrame)` for CPU RGBA payloads or
 `NativeGpuFrame(PreviewNativeDecodedFrame)` for GPU-resident decoder payloads.
+`PreviewNativeDecodedFrame` must carry a non-zero
+`PreviewNativeDecodedFrameHandle` minted by the media backend that owns the
+native decoder resource. A handle-kind-only payload is invalid because it can
+masquerade as GPU residency without an importable resource. Native payloads are
+limited to renderer-importable surface families such as NV12, P010, RGBA8, and
+BGRA8; unknown or planar CPU formats must fail closed before reaching the app
+or renderer.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
 reinterpret a native decoder surface as RGBA or silently force a CPU transfer.

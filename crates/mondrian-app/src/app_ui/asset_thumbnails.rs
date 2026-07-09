@@ -248,7 +248,7 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
             image: None,
             error: Some(format!(
                 "thumbnail decode requires CPU RGBA, got native GPU {} {:?}",
-                frame.handle_kind.as_str(),
+                frame.handle_kind().as_str(),
                 frame.surface_format
             )),
         },
