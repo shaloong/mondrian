@@ -239,6 +239,14 @@ family and source texture format, validates renderer backend support, and
 produces only the post-sampling/post-input-transform linear working
 `GpuColorFrameHandle`. This keeps media residency reporting, OS texture import
 probing, and renderer graph resource ownership decoupled.
+The renderer import helper must also validate the incoming native payload before
+backend execution. `GpuNativeDecodedFrameImportSource` exposes a
+`GpuNativeDecodedFrameSourceDescriptor` (extent, decoder handle family, and
+source texture format), and `execute_native_decoded_frame_import(...)` rejects a
+payload whose descriptor does not match the import contract. Backend support
+validation and output working-resource validation are not enough: a renderer
+backend must never be asked to import a D3D11/NV12 contract while receiving a
+different native surface.
 The app viewer path now carries each decoded media layer's `CpuEncodedColorFrame`
 plus `RenderInputTransform` alongside its CPU working-frame fallback. During
 window recording it first tries `record_wgpu_input_stage_owned_backend(...)`

@@ -844,6 +844,36 @@ pub struct GpuNativeDecodedFrameImportExecution<R> {
     pub resource: GpuColorFrameResource<R>,
 }
 
+/// Renderer-visible facts for a native decoded-frame payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuNativeDecodedFrameSourceDescriptor {
+    /// Source frame width in pixels.
+    pub width: u32,
+    /// Source frame height in pixels.
+    pub height: u32,
+    /// Decoder handle family carried by the native payload.
+    pub handle_kind: DecodedGpuFrameHandleKind,
+    /// Decoder source texture layout carried by the native payload.
+    pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+}
+
+impl GpuNativeDecodedFrameSourceDescriptor {
+    fn from_contract(contract: &GpuNativeDecodedFrameImportContract) -> Self {
+        Self {
+            width: contract.width,
+            height: contract.height,
+            handle_kind: contract.handle_kind,
+            source_texture_format: contract.source_texture_format,
+        }
+    }
+}
+
+/// Native decoded-frame payload that can expose renderer-visible import facts.
+pub trait GpuNativeDecodedFrameImportSource {
+    /// Return the source descriptor carried by this native payload.
+    fn native_decoded_frame_source_descriptor(&self) -> GpuNativeDecodedFrameSourceDescriptor;
+}
+
 /// Backend hook that imports one native decoded frame into a renderer resource.
 ///
 /// Platform-specific implementations own the concrete native-frame payload and
@@ -853,7 +883,7 @@ pub struct GpuNativeDecodedFrameImportExecution<R> {
 /// frame contract.
 pub trait GpuNativeDecodedFrameImportBackend {
     /// Native decoded-frame payload consumed by this backend.
-    type NativeFrame;
+    type NativeFrame: GpuNativeDecodedFrameImportSource;
     /// Concrete renderer resource produced by this backend.
     type Resource;
 
@@ -878,6 +908,16 @@ pub fn execute_native_decoded_frame_import<B>(
 where
     B: GpuNativeDecodedFrameImportBackend,
 {
+    let expected_source = GpuNativeDecodedFrameSourceDescriptor::from_contract(&contract);
+    let actual_source = native_frame.native_decoded_frame_source_descriptor();
+    if actual_source != expected_source {
+        return Err(
+            GpuNativeDecodedFrameImportError::NativeFrameContractMismatch {
+                expected: expected_source,
+                actual: actual_source,
+            },
+        );
+    }
     let plan = GpuNativeDecodedFrameImportPlan::from_contract(ids, contract, backend.support())?;
     let resource = backend.import_native_decoded_frame(&plan, native_frame)?;
     if resource.handle().contract() != plan.working_frame.contract() {
@@ -900,6 +940,14 @@ pub enum GpuNativeDecodedFrameImportError {
     BackendRejected {
         /// Stable backend rejection reason.
         reason: String,
+    },
+    /// The native payload does not match the import contract.
+    #[error("native decoded frame payload does not match the import contract")]
+    NativeFrameContractMismatch {
+        /// Source descriptor required by the import contract.
+        expected: GpuNativeDecodedFrameSourceDescriptor,
+        /// Source descriptor reported by the native payload.
+        actual: GpuNativeDecodedFrameSourceDescriptor,
     },
     /// Backend produced a resource that does not match the validated plan.
     #[error("native decoded frame import backend returned mismatched working resource")]
@@ -1697,7 +1745,38 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct FakeNativeDecodedFrame;
+    struct FakeNativeDecodedFrame {
+        width: u32,
+        height: u32,
+        handle_kind: DecodedGpuFrameHandleKind,
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    }
+
+    impl FakeNativeDecodedFrame {
+        fn matching_contract() -> Self {
+            Self {
+                width: 3840,
+                height: 2160,
+                handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,
+            }
+        }
+
+        fn mismatched_extent() -> Self {
+            Self { width: 1920, ..Self::matching_contract() }
+        }
+    }
+
+    impl GpuNativeDecodedFrameImportSource for FakeNativeDecodedFrame {
+        fn native_decoded_frame_source_descriptor(&self) -> GpuNativeDecodedFrameSourceDescriptor {
+            GpuNativeDecodedFrameSourceDescriptor {
+                width: self.width,
+                height: self.height,
+                handle_kind: self.handle_kind,
+                source_texture_format: self.source_texture_format,
+            }
+        }
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct FakeImportedResource;
@@ -1762,7 +1841,7 @@ mod tests {
             &mut backend,
             &mut ids,
             native_import_contract(),
-            &FakeNativeDecodedFrame,
+            &FakeNativeDecodedFrame::matching_contract(),
         )
         .expect_err("unavailable backend must fail before execution");
 
@@ -1784,7 +1863,7 @@ mod tests {
             &mut backend,
             &mut ids,
             native_import_contract(),
-            &FakeNativeDecodedFrame,
+            &FakeNativeDecodedFrame::matching_contract(),
         )
         .expect("ready backend can import a native frame");
 
@@ -1804,7 +1883,7 @@ mod tests {
             &mut backend,
             &mut ids,
             native_import_contract(),
-            &FakeNativeDecodedFrame,
+            &FakeNativeDecodedFrame::matching_contract(),
         )
         .expect_err("backend must return the planned working resource");
 
@@ -1823,6 +1902,32 @@ mod tests {
             }
             other => panic!("expected resource contract mismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn native_decoded_frame_import_execution_rejects_mismatched_native_payload() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut backend = FakeNativeImportBackend::ready();
+
+        let err = execute_native_decoded_frame_import(
+            &mut backend,
+            &mut ids,
+            native_import_contract(),
+            &FakeNativeDecodedFrame::mismatched_extent(),
+        )
+        .expect_err("native payload must match import contract before backend execution");
+
+        match err {
+            GpuNativeDecodedFrameImportError::NativeFrameContractMismatch { expected, actual } => {
+                assert_eq!(expected.width, 3840);
+                assert_eq!(actual.width, 1920);
+                assert_eq!(expected.height, actual.height);
+                assert_eq!(expected.handle_kind, actual.handle_kind);
+                assert_eq!(expected.source_texture_format, actual.source_texture_format);
+            }
+            other => panic!("expected native frame contract mismatch, got {other:?}"),
+        }
+        assert_eq!(ids.next_raw(), 500);
     }
 
     #[test]

@@ -36,7 +36,8 @@ pub use color_frame::{
     GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportBackend,
     GpuNativeDecodedFrameImportContract, GpuNativeDecodedFrameImportError,
     GpuNativeDecodedFrameImportExecution, GpuNativeDecodedFrameImportPlan,
-    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSource,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameSourceDescriptor,
     GpuNativeDecodedFrameTextureFormat, LinearFloatSource,
 };
 pub use color_stage::{
