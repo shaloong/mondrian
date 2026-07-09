@@ -474,6 +474,9 @@ impl AppUiHost {
             tracing::debug!(?action, "custom UI action");
             let lightweight_transport_refresh =
                 action_prefers_transport_refresh_without_preview(&action);
+            if action_preempts_preview_work(&action, &self.app_state.borrow()) {
+                self.preview_service.cancel_interactive_work();
+            }
             if let Err(err) = self.dispatch_editor_action(action) {
                 tracing::warn!("custom UI action failed: {err}");
             }
@@ -818,6 +821,7 @@ impl AppUiHost {
         let Some(pending) = close_request_from_action(action) else {
             return false;
         };
+        self.preview_service.cancel_interactive_work();
 
         if self.app_state.borrow().has_unsaved_project_changes() {
             self.pending_close_action = Some(pending);
@@ -919,6 +923,13 @@ fn action_prefers_transport_refresh_without_preview(action: &Action) -> bool {
             | Action::GoToStart
             | Action::GoToEnd
     )
+}
+
+fn action_preempts_preview_work(action: &Action, state: &AppState) -> bool {
+    if !action_prefers_transport_refresh_without_preview(action) {
+        return false;
+    }
+    state.is_playing() || state.is_playback_buffering()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1689,6 +1700,47 @@ mod tests {
     }
 
     #[test]
+    fn transport_action_while_buffering_cancels_obsolete_preview_work() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path("transport-cancel-preview-work"),
+        );
+        host.app_state.borrow_mut().play();
+        host.app_state.borrow_mut().set_playback_buffering(true);
+        host.preview_service.seed_pending_preview_work_for_test();
+        let before_render_requests = host.preview_service.diagnostics().render_requests;
+        assert_eq!(
+            host.preview_service.diagnostics().scheduler.pending_requests,
+            1
+        );
+        assert_eq!(
+            host.preview_service.diagnostics().worker_queue.queued_jobs,
+            1
+        );
+
+        let pending = PendingUiActions::default();
+        pending.push(Action::TogglePlay);
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert!(!host.app_state().is_playing());
+        assert!(!host.app_state().is_playback_buffering());
+        let diagnostics = host.preview_service.diagnostics();
+        assert_eq!(diagnostics.scheduler.pending_requests, 0);
+        assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
+        assert_eq!(
+            diagnostics.render_requests, before_render_requests,
+            "transport escape must not synchronously request preview while canceling stale work"
+        );
+    }
+
+    #[test]
     fn buffering_control_refresh_does_not_request_preview_refresh() {
         struct LoadingPreview;
 
@@ -2108,6 +2160,28 @@ mod tests {
             host.pending_close_action,
             Some(PendingCloseAction::CloseProject)
         );
+    }
+
+    #[test]
+    fn host_guards_unsaved_quit_after_canceling_preview_work() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new(workspace_app_state());
+        host.preview_service.seed_pending_preview_work_for_test();
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_quit_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert!(host.app_state().has_open_project());
+        assert!(host.root.has_pending_close_dialog());
+        let diagnostics = host.preview_service.diagnostics();
+        assert_eq!(diagnostics.scheduler.pending_requests, 0);
+        assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
     }
 
     #[test]

@@ -615,6 +615,13 @@ an access-mode request and a cancellation predicate. Diagnostics must report
 playback-deadline cancellations separately from prefetch-deadline cancellations
 so late visible frames can drive drop/proxy/hardware-decode work instead of
 being hidden as generic obsolete work.
+User transport and close/quit actions are interactive escape paths. When they
+arrive while playback or buffering is active, the app host must cancel obsolete
+preview generations and queued jobs before dispatching the state mutation, and
+it must refresh transport controls without synchronously requesting a new
+preview frame. A visible pending-close confirmation must be repainted
+immediately; an invisible modal or a decode worker that is still finishing an
+old frame must never make pause, close, or quit feel locked.
 Schedule diagnostics also count current playback decode decisions, late-frame
 drop decisions, and proxy/hardware recommendations. Those are app scheduler
 facts, not media decoder facts, and they are how perf tooling distinguishes

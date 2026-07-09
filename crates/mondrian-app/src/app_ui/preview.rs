@@ -195,6 +195,42 @@ impl AppUiPreviewService {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_pending_preview_work_for_test(&self) {
+        let key = MediaPreviewKey {
+            asset_id: AssetId::new(),
+            path: PathBuf::from("E:/media/pending-preview.mov"),
+            fingerprint: None,
+            source_frame: 0,
+            source_micros: 0,
+            target_width: 1920,
+            target_height: 1080,
+            input_color_space: ColorSpace::Srgb,
+            working_color_space: ColorSpace::Srgb,
+            tone_map: false,
+            engine: ColorEngine::MondrianSmart,
+        };
+        let generation = self.scheduler.begin_generation();
+        let _ = self.scheduler.request(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+        );
+        let _ = self.jobs.enqueue(MediaPreviewJob {
+            key,
+            source_secs: 0.0,
+            generation,
+            priority: MediaPreviewRequestPriority::Current,
+            access_mode: PreviewDecodeAccessMode::ScrubCursor,
+            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+            enqueued_at: Instant::now(),
+            deadline_at: None,
+        });
+        self.current_generation.set(generation);
+        self.current_frame_pending.set(true);
+    }
+
     /// Return a point-in-time snapshot of preview scheduling and cache health.
     pub fn diagnostics(&self) -> AppUiPreviewDiagnostics {
         let scheduler = self.scheduler.diagnostics();

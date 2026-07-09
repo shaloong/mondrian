@@ -1353,6 +1353,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
+                        session.window.request_redraw();
                     }
 
                     WindowEvent::ModifiersChanged(modifiers) => {
