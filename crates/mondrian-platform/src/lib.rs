@@ -110,9 +110,7 @@ fn system_display_hdr_state(_target: DisplayProfileProbeTarget) -> DisplayHdrPro
 fn system_native_video_texture_import() -> NativeVideoTextureImportProbeResult {
     #[cfg(target_os = "windows")]
     {
-        NativeVideoTextureImportProbeResult::missing(
-            "D3D11VA/DXGI texture import is not connected to the wgpu renderer",
-        )
+        windows_native_video_texture_import::probe()
     }
     #[cfg(target_os = "macos")]
     {
@@ -131,6 +129,128 @@ fn system_native_video_texture_import() -> NativeVideoTextureImportProbeResult {
         NativeVideoTextureImportProbeResult::unsupported(
             "native video texture import is not implemented for this platform",
         )
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows_native_video_texture_import {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    use mondrian_platform_core::{
+        NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult,
+    };
+    use windows_sys::Win32::Foundation::FreeLibrary;
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    const D3D_DRIVER_TYPE_HARDWARE: u32 = 1;
+    const D3D11_CREATE_DEVICE_BGRA_SUPPORT: u32 = 0x20;
+    const D3D11_SDK_VERSION: u32 = 7;
+    const D3D_FEATURE_LEVEL_11_1: u32 = 0xb100;
+    const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
+    const D3D_FEATURE_LEVEL_10_1: u32 = 0xa100;
+
+    type D3D11CreateDeviceFn = unsafe extern "system" fn(
+        padapter: *mut c_void,
+        drivertype: u32,
+        software: *mut c_void,
+        flags: u32,
+        pfeaturelevels: *const u32,
+        featurelevels: u32,
+        sdkversion: u32,
+        ppdevice: *mut *mut c_void,
+        pfeaturelevel: *mut u32,
+        ppimmediatecontext: *mut *mut c_void,
+    ) -> i32;
+
+    #[repr(C)]
+    struct IUnknownVtbl {
+        query_interface:
+            unsafe extern "system" fn(*mut c_void, *const c_void, *mut *mut c_void) -> i32,
+        add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
+        release: unsafe extern "system" fn(*mut c_void) -> u32,
+    }
+
+    /// Probe Windows D3D11 native video texture staging capability.
+    pub fn probe() -> NativeVideoTextureImportProbeResult {
+        match probe_d3d11_device() {
+            Ok(feature_level) => NativeVideoTextureImportProbeResult::found_partial(
+                vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+                false,
+                true,
+                format!(
+                "D3D11 device probe succeeded at feature level 0x{feature_level:x}; native zero-copy renderer import is still gated by renderer backend support"
+                ),
+            ),
+            Err(reason) => NativeVideoTextureImportProbeResult::missing(reason),
+        }
+    }
+
+    fn probe_d3d11_device() -> Result<u32, String> {
+        let library = unsafe { LoadLibraryW(wide_null("d3d11.dll").as_ptr()) };
+        if library.is_null() {
+            return Err(
+                "d3d11.dll is unavailable; D3D11 native video texture probe failed".to_owned(),
+            );
+        }
+
+        let result = unsafe { probe_d3d11_device_with_library(library) };
+        unsafe {
+            FreeLibrary(library);
+        }
+        result
+    }
+
+    unsafe fn probe_d3d11_device_with_library(library: *mut c_void) -> Result<u32, String> {
+        let symbol = GetProcAddress(library, c"D3D11CreateDevice".as_ptr().cast::<u8>());
+        let Some(symbol) = symbol else {
+            return Err("d3d11.dll does not export D3D11CreateDevice".to_owned());
+        };
+        let create_device: D3D11CreateDeviceFn = std::mem::transmute(symbol);
+        let feature_levels = [
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+        ];
+        let mut device: *mut c_void = ptr::null_mut();
+        let mut context: *mut c_void = ptr::null_mut();
+        let mut resolved_feature_level = 0;
+        let hr = create_device(
+            ptr::null_mut(),
+            D3D_DRIVER_TYPE_HARDWARE,
+            ptr::null_mut(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            feature_levels.as_ptr(),
+            feature_levels.len() as u32,
+            D3D11_SDK_VERSION,
+            &mut device,
+            &mut resolved_feature_level,
+            &mut context,
+        );
+
+        release_unknown(context);
+        release_unknown(device);
+
+        if hr < 0 {
+            return Err(format!(
+                "D3D11CreateDevice failed with HRESULT 0x{:08x}",
+                hr as u32
+            ));
+        }
+        Ok(resolved_feature_level)
+    }
+
+    unsafe fn release_unknown(ptr: *mut c_void) {
+        if ptr.is_null() {
+            return;
+        }
+        let vtbl = *(ptr as *mut *mut IUnknownVtbl);
+        ((*vtbl).release)(ptr);
+    }
+
+    fn wide_null(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain(Some(0)).collect()
     }
 }
 
@@ -944,6 +1064,23 @@ mod tests {
         assert_eq!(snapshot.sample(DesktopPoint::new(-8, 20)), None);
         assert_eq!(snapshot.sample(DesktopPoint::new(-10, 19)), None);
         assert_eq!(snapshot.sample(DesktopPoint::new(-10, 22)), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_native_video_texture_probe_reports_d3d11_without_zero_copy_claim() {
+        let result = system_native_video_texture_import();
+
+        assert!(result.discovery_available);
+        assert!(!result.zero_copy_supported);
+        if result.supports(NativeVideoTextureHandleKind::D3D11Texture2D) {
+            assert!(result.low_copy_fallback_supported);
+            assert!(result.error.as_deref().unwrap_or_default().contains("D3D11"));
+            assert!(result.error.as_deref().unwrap_or_default().contains("zero-copy"));
+        } else {
+            assert!(!result.low_copy_fallback_supported);
+            assert!(result.error.is_some());
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

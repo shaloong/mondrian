@@ -613,6 +613,11 @@ reported separately by `mondrian-platform-core` as native texture import support
 and renderer readiness is reported by `mondrian-renderer` through
 `GpuNativeDecodedFrameImportSupport` / `GpuNativeDecodedFrameImportPlan`. App
 code must not infer zero-copy playback from the media handle kind alone.
+On Windows, platform capability discovery now performs a real D3D11 device
+probe and can report `D3D11Texture2D` with a low-copy staging fallback. That is
+OS/device evidence only: zero-copy remains false until the renderer exposes a
+native import backend, and CPU-transfer hardware decode must still report CPU
+RGBA residency.
 
 The preview decoder's experimental external-process path is named
 `PreviewDecodeBackend::ExternalFfmpegCpuRgba` and is enabled only by explicitly

@@ -79,6 +79,11 @@ the renderer a platform dependency. Current media preview frames report
 `CpuDecodedMedia`; this is intentional and must remain distinct from
 `ReadyZeroCopy` / `ReadyLowCopy` until actual decoder GPU surfaces are handed to
 the renderer import path.
+On Windows, `mondrian-platform` performs a lightweight D3D11 device probe by
+loading `d3d11.dll` and calling `D3D11CreateDevice`. A successful result proves
+only that the OS/device layer can support the D3D11 texture handle family and a
+declared low-copy staging path; it still reports zero-copy as unsupported until
+the renderer backend can import and sample the decoder surface directly.
 Media may report a platform-preferred hardware decode candidate such as
 D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface formats, but a
 candidate is not renderer readiness. The renderer import support value remains

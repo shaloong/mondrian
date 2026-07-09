@@ -79,6 +79,9 @@ pub(crate) struct AppUiNativeVideoImportReadiness {
     pub platform_zero_copy_supported: bool,
     /// Whether the platform reports a low-copy fallback.
     pub platform_low_copy_fallback_supported: bool,
+    /// Platform probe diagnostic when discovery is partial or unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_error: Option<String>,
     /// Whether the renderer backend reports native import readiness.
     pub renderer_backend_ready: bool,
     /// Whether the renderer backend accepts this decoder handle family.
@@ -118,6 +121,7 @@ pub(crate) fn evaluate_native_video_import_readiness(
         platform_discovery_available: input.platform_probe.discovery_available,
         platform_zero_copy_supported: input.platform_probe.zero_copy_supported,
         platform_low_copy_fallback_supported: input.platform_probe.low_copy_fallback_supported,
+        platform_error: input.platform_probe.error.clone(),
         renderer_backend_ready: input.renderer_support.renderer_backend_ready,
         renderer_supports_handle_kind,
         renderer_supports_source_texture_format,
@@ -334,6 +338,28 @@ mod tests {
             AppUiNativeVideoImportReadinessStatus::RendererBackendUnavailable
         );
         assert!(!report.renderer_backend_ready);
+    }
+
+    #[test]
+    fn native_video_import_readiness_preserves_platform_partial_diagnostics() {
+        let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+            platform_probe: NativeVideoTextureImportProbeResult::found_partial(
+                vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+                false,
+                true,
+                "D3D11 device probe succeeded; zero-copy renderer import is gated",
+            ),
+            renderer_support: GpuNativeDecodedFrameImportSupport::unavailable(),
+            ..ready_input()
+        });
+
+        assert_eq!(
+            report.status,
+            AppUiNativeVideoImportReadinessStatus::RendererBackendUnavailable
+        );
+        assert!(!report.platform_zero_copy_supported);
+        assert!(report.platform_low_copy_fallback_supported);
+        assert!(report.platform_error.as_deref().unwrap_or_default().contains("D3D11"));
     }
 
     #[test]

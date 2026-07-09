@@ -147,6 +147,25 @@ impl NativeVideoTextureImportProbeResult {
         }
     }
 
+    /// Build a native texture import probe result with partial readiness.
+    ///
+    /// Use this when OS/device discovery succeeded but some higher-level piece,
+    /// such as zero-copy renderer import, is still unavailable.
+    pub fn found_partial(
+        supported_handle_kinds: Vec<NativeVideoTextureHandleKind>,
+        zero_copy_supported: bool,
+        low_copy_fallback_supported: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            discovery_available: true,
+            supported_handle_kinds,
+            zero_copy_supported,
+            low_copy_fallback_supported,
+            error: Some(reason.into()),
+        }
+    }
+
     /// Build a result for a platform adapter that is present but not ready.
     pub fn missing(reason: impl Into<String>) -> Self {
         Self {
@@ -516,6 +535,25 @@ mod tests {
         assert!(result.zero_copy_supported);
         assert!(!result.low_copy_fallback_supported);
         assert_eq!(result.error, None);
+    }
+
+    #[test]
+    fn native_video_texture_import_probe_preserves_partial_readiness_reason() {
+        let result = NativeVideoTextureImportProbeResult::found_partial(
+            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+            false,
+            true,
+            "renderer import not connected",
+        );
+
+        assert!(result.discovery_available);
+        assert!(result.supports(NativeVideoTextureHandleKind::D3D11Texture2D));
+        assert!(!result.zero_copy_supported);
+        assert!(result.low_copy_fallback_supported);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("renderer import not connected")
+        );
     }
 
     #[test]
