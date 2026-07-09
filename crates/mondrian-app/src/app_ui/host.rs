@@ -11,7 +11,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_media::PreviewHardwareDecodeRequest;
-use mondrian_platform::PlatformService;
+use mondrian_platform::{
+    NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, PlatformService,
+    SystemPlatformService,
+};
 use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
@@ -34,6 +37,7 @@ use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCand
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::asset_thumbnails::AssetThumbnailCache;
+use crate::app_ui::native_video_import::platform_handle_kind_for_decoder;
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::preferences_store::{
     app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
@@ -229,13 +233,16 @@ impl AppUiHost {
         &self,
         support: GpuNativeDecodedFrameImportSupport,
     ) {
-        let request = if support.renderer_backend_ready {
-            PreviewHardwareDecodeRequest::PreferGpuResident
-        } else {
-            PreviewHardwareDecodeRequest::Auto
-        };
-        self.preview_service
-            .set_playback_hardware_decode_admission(request, support.renderer_backend_ready);
+        let admission = resolve_playback_hardware_decode_admission(
+            &support,
+            &SystemPlatformService.native_video_texture_import(),
+        );
+        self.preview_service.set_playback_hardware_decode_admission(
+            admission.request,
+            admission.renderer_native_import_ready,
+            admission.platform_native_import_ready,
+            admission.native_import_admission_ready,
+        );
     }
 
     /// Advertise a registered GPU preview texture as the viewer frame for its resolved plan.
@@ -1290,6 +1297,40 @@ fn parse_asset_browser_navigation(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppUiPlaybackHardwareDecodeAdmission {
+    request: PreviewHardwareDecodeRequest,
+    renderer_native_import_ready: bool,
+    platform_native_import_ready: bool,
+    native_import_admission_ready: bool,
+}
+
+fn resolve_playback_hardware_decode_admission(
+    renderer_support: &GpuNativeDecodedFrameImportSupport,
+    platform_probe: &NativeVideoTextureImportProbeResult,
+) -> AppUiPlaybackHardwareDecodeAdmission {
+    let renderer_native_import_ready = renderer_support.renderer_backend_ready;
+    let platform_native_import_ready = renderer_native_import_ready
+        && platform_probe.discovery_available
+        && (platform_probe.zero_copy_supported || platform_probe.low_copy_fallback_supported)
+        && renderer_support.supported_handle_kinds.iter().copied().any(|handle_kind| {
+            platform_probe.supports(platform_handle_kind_for_decoder(handle_kind))
+        });
+    let native_import_admission_ready =
+        renderer_native_import_ready && platform_native_import_ready;
+    let request = if native_import_admission_ready {
+        PreviewHardwareDecodeRequest::PreferGpuResident
+    } else {
+        PreviewHardwareDecodeRequest::Auto
+    };
+    AppUiPlaybackHardwareDecodeAdmission {
+        request,
+        renderer_native_import_ready,
+        platform_native_import_ready,
+        native_import_admission_ready,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1297,7 +1338,9 @@ mod tests {
     use mondrian_core::types::{AssetId, ClipId, TrackId};
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
-    use mondrian_platform::{ClipboardError, FileFilter, NoopPlatformService};
+    use mondrian_platform::{
+        ClipboardError, FileFilter, NativeVideoTextureHandleKind, NoopPlatformService,
+    };
     use mondrian_timeline::Sequence;
     use mondrian_ui_core::tree::TreeWalker;
     use mondrian_ui_core::types::{Modifiers, MouseButton, Point, Rect, SplitDirection};
@@ -1314,7 +1357,7 @@ mod tests {
     use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
     #[test]
-    fn host_gates_playback_hardware_decode_on_renderer_native_import_support() {
+    fn host_reports_renderer_native_import_admission_to_preview() {
         let host = AppUiHost::new(AppState::new());
 
         host.set_native_decoded_frame_import_support(
@@ -1337,21 +1380,77 @@ mod tests {
                 .hardware_decode_admission
                 .renderer_native_import_ready
         );
-
-        host.set_native_decoded_frame_import_support(GpuNativeDecodedFrameImportSupport::ready(
-            vec![mondrian_media::DecodedGpuFrameHandleKind::D3D11Texture2D],
-            vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
-        ));
-        assert_eq!(
-            host.preview_service.playback_hardware_decode_request_for_test(),
-            PreviewHardwareDecodeRequest::PreferGpuResident
-        );
         assert!(
-            host.preview_service
+            !host
+                .preview_service
                 .diagnostics()
                 .hardware_decode_admission
-                .renderer_native_import_ready
+                .native_import_admission_ready
         );
+    }
+
+    #[test]
+    fn playback_hardware_decode_admission_requires_renderer_and_platform_import() {
+        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![mondrian_media::DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
+        );
+        let platform_probe = NativeVideoTextureImportProbeResult::found_partial(
+            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+            false,
+            true,
+            "D3D11 low-copy import is available",
+        );
+
+        let admission =
+            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
+
+        assert_eq!(
+            admission.request,
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+        assert!(admission.renderer_native_import_ready);
+        assert!(admission.platform_native_import_ready);
+        assert!(admission.native_import_admission_ready);
+    }
+
+    #[test]
+    fn playback_hardware_decode_admission_fails_closed_when_platform_import_is_missing() {
+        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![mondrian_media::DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
+        );
+        let platform_probe =
+            NativeVideoTextureImportProbeResult::missing("D3D11 import bridge missing");
+
+        let admission =
+            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
+
+        assert_eq!(admission.request, PreviewHardwareDecodeRequest::Auto);
+        assert!(admission.renderer_native_import_ready);
+        assert!(!admission.platform_native_import_ready);
+        assert!(!admission.native_import_admission_ready);
+    }
+
+    #[test]
+    fn playback_hardware_decode_admission_fails_closed_on_handle_mismatch() {
+        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![mondrian_media::DecodedGpuFrameHandleKind::CVPixelBuffer],
+            vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
+        );
+        let platform_probe = NativeVideoTextureImportProbeResult::found(
+            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+            true,
+            false,
+        );
+
+        let admission =
+            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
+
+        assert_eq!(admission.request, PreviewHardwareDecodeRequest::Auto);
+        assert!(admission.renderer_native_import_ready);
+        assert!(!admission.platform_native_import_ready);
+        assert!(!admission.native_import_admission_ready);
     }
 
     #[derive(Default)]

@@ -269,7 +269,7 @@ impl AppUiNativeVideoImportReadiness {
     }
 }
 
-fn platform_handle_kind_for_decoder(
+pub(crate) fn platform_handle_kind_for_decoder(
     handle_kind: DecodedGpuFrameHandleKind,
 ) -> NativeVideoTextureHandleKind {
     match handle_kind {

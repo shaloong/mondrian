@@ -118,6 +118,8 @@ pub struct AppUiPreviewService {
     playback_hardware_decode_request: Cell<PreviewHardwareDecodeRequest>,
     playback_hardware_decode_renderer_import_known: Cell<bool>,
     playback_hardware_decode_renderer_import_ready: Cell<bool>,
+    playback_hardware_decode_platform_import_ready: Cell<bool>,
+    playback_hardware_decode_native_import_admission_ready: Cell<bool>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
     metrics: AppUiPreviewMetrics,
@@ -204,6 +206,8 @@ impl AppUiPreviewService {
             playback_hardware_decode_request: Cell::new(PreviewHardwareDecodeRequest::Auto),
             playback_hardware_decode_renderer_import_known: Cell::new(false),
             playback_hardware_decode_renderer_import_ready: Cell::new(false),
+            playback_hardware_decode_platform_import_ready: Cell::new(false),
+            playback_hardware_decode_native_import_admission_ready: Cell::new(false),
             decode_cpu_budget,
             decode_worker_count,
             metrics: AppUiPreviewMetrics::default(),
@@ -220,11 +224,17 @@ impl AppUiPreviewService {
         &self,
         request: PreviewHardwareDecodeRequest,
         renderer_native_import_ready: bool,
+        platform_native_import_ready: bool,
+        native_import_admission_ready: bool,
     ) {
         self.playback_hardware_decode_request.set(request);
         self.playback_hardware_decode_renderer_import_known.set(true);
         self.playback_hardware_decode_renderer_import_ready
             .set(renderer_native_import_ready);
+        self.playback_hardware_decode_platform_import_ready
+            .set(platform_native_import_ready);
+        self.playback_hardware_decode_native_import_admission_ready
+            .set(native_import_admission_ready);
     }
 
     #[cfg(test)]
@@ -241,6 +251,10 @@ impl AppUiPreviewService {
                 .playback_hardware_decode_renderer_import_known
                 .get(),
             renderer_native_import_ready: self.playback_hardware_decode_renderer_import_ready.get(),
+            platform_native_import_ready: self.playback_hardware_decode_platform_import_ready.get(),
+            native_import_admission_ready: self
+                .playback_hardware_decode_native_import_admission_ready
+                .get(),
         }
     }
 
@@ -2048,12 +2062,16 @@ pub struct AppUiPreviewHardwareDecodeAdmissionDiagnostics {
     pub renderer_native_import_support_known: bool,
     /// Whether the renderer reports native decoded-frame import support.
     pub renderer_native_import_ready: bool,
+    /// Whether the platform reports native texture import support for a renderer-supported handle.
+    pub platform_native_import_ready: bool,
+    /// Whether playback is allowed to request GPU-resident decode.
+    pub native_import_admission_ready: bool,
 }
 
 impl AppUiPreviewHardwareDecodeAdmissionDiagnostics {
     fn playback_native_import_gated(self) -> bool {
         self.renderer_native_import_support_known
-            && !self.renderer_native_import_ready
+            && !self.native_import_admission_ready
             && self.playback_request == PreviewHardwareDecodeRequest::Auto
     }
 }
@@ -4678,18 +4696,20 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_hardware_decode_admission_gated",
             format!(
-                "playback_hardware_decode_request={:?} renderer_native_import_support_known={} renderer_native_import_ready={} playback_frames={} current_decode_decisions={} current_drop_late_decisions={}",
+                "playback_hardware_decode_request={:?} renderer_native_import_support_known={} renderer_native_import_ready={} platform_native_import_ready={} native_import_admission_ready={} playback_frames={} current_decode_decisions={} current_drop_late_decisions={}",
                 summary.hardware_decode_admission.playback_request,
                 summary
                     .hardware_decode_admission
                     .renderer_native_import_support_known,
                 summary.hardware_decode_admission.renderer_native_import_ready,
+                summary.hardware_decode_admission.platform_native_import_ready,
+                summary.hardware_decode_admission.native_import_admission_ready,
                 summary.playback_cursor_frames,
                 summary.playback_schedule.current_decode_decisions,
                 summary.playback_schedule.current_drop_late_decisions
             ),
             "connect_native_import_before_enabling_hardware_decode_admission",
-            "Keep playback hardware decode admission disabled until renderer native video import is ready; then allow GPU-resident playback jobs instead of hardware CPU-transfer fallback.",
+            "Keep playback hardware decode admission disabled until renderer and platform native video import are ready; then allow GPU-resident playback jobs instead of hardware CPU-transfer fallback.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -11110,6 +11130,8 @@ mod tests {
                 playback_request: PreviewHardwareDecodeRequest::Auto,
                 renderer_native_import_support_known: true,
                 renderer_native_import_ready: false,
+                platform_native_import_ready: true,
+                native_import_admission_ready: false,
             },
             ..AppUiPreviewDiagnostics::default()
         };
@@ -11133,6 +11155,8 @@ mod tests {
                 && root.evidence.contains("playback_hardware_decode_request=Auto")
                 && root.evidence.contains("renderer_native_import_support_known=true")
                 && root.evidence.contains("renderer_native_import_ready=false")
+                && root.evidence.contains("platform_native_import_ready=true")
+                && root.evidence.contains("native_import_admission_ready=false")
         }));
         assert!(report.actions.iter().any(|action| {
             action.code == "connect_native_import_before_enabling_hardware_decode_admission"
@@ -14755,6 +14779,8 @@ mod tests {
         );
         service.set_playback_hardware_decode_admission(
             PreviewHardwareDecodeRequest::PreferGpuResident,
+            true,
+            true,
             true,
         );
         assert_eq!(

@@ -796,12 +796,16 @@ root-cause evidence, and an action to connect renderer native video import.
 Playback hardware-decode admission is also runtime-gated by the app preview
 service. The product default remains `PreviewHardwareDecodeRequest::Auto`;
 window/renderer code may raise playback jobs to `PreferGpuResident` only after
-the renderer native decoded-frame import contract reports ready. This prevents
-hardware decode with CPU transfer from becoming the default playback path when
-native GPU residency is not actually connected. The same admission state must
-be serialized in preview diagnostics and performance reports; a known
-renderer-import blocker must produce a specific gated-admission root cause
-instead of disappearing as a generic media-layer `Auto` decode.
+the renderer native decoded-frame import contract reports ready and the
+platform probe supports at least one renderer-supported native handle family
+with zero-copy or declared low-copy import. This prevents hardware decode with
+CPU transfer, or a renderer-only readiness claim on a platform without native
+texture import, from becoming the default playback path when native GPU
+residency is not actually connected. The same admission state must be
+serialized in preview diagnostics and performance reports as separate renderer,
+platform, and final-admission facts; a known native-import blocker must produce
+a specific gated-admission root cause instead of disappearing as a generic
+media-layer `Auto` decode.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
 through the shared app-layer proxy dispatcher. The request is deduplicated by
