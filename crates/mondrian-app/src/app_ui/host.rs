@@ -333,10 +333,16 @@ impl AppUiHost {
             self.waveform_cache.set_library(Arc::clone(library));
         }
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
-        let preview_changed = self.preview_service.poll_finished();
+        let preview_outcome = self.preview_service.poll_finished_outcome();
         let waveform_changed = self.waveform_cache.poll_finished();
-        if !thumbnails_changed && !preview_changed && !waveform_changed {
-            return false;
+        let visible_model_changed =
+            thumbnails_changed || preview_outcome.visible_change || waveform_changed;
+        if !visible_model_changed {
+            return preview_outcome.needs_follow_up_poll;
+        }
+        if self.is_playback_buffering() && !preview_outcome.visible_change {
+            return self.refresh_playback_buffering_controls_without_preview()
+                || preview_outcome.needs_follow_up_poll;
         }
         self.mark_dirty();
         self.refresh_if_dirty(bounds);

@@ -80,6 +80,14 @@ const MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US: u64 = 50_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppUiPreviewPollOutcome {
+    /// A decoded frame or terminal decode failure changed visible viewer state.
+    pub visible_change: bool,
+    /// More completed decode results should be drained on a follow-up event-loop tick.
+    pub needs_follow_up_poll: bool,
+}
+
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
 /// This first path renders solid-color render-plan elements through the shared
@@ -581,24 +589,37 @@ impl AppUiPreviewService {
 
     /// Poll completed background media preview decodes.
     pub fn poll_finished(&self) -> bool {
-        self.poll_finished_with_budget(
+        self.poll_finished_outcome().visible_change
+    }
+
+    pub(crate) fn poll_finished_outcome(&self) -> AppUiPreviewPollOutcome {
+        self.poll_finished_outcome_with_budget(
             MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL,
             Duration::from_micros(MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US),
         )
     }
 
+    #[cfg(test)]
     fn poll_finished_with_budget(&self, max_results: usize, time_budget: Duration) -> bool {
+        self.poll_finished_outcome_with_budget(max_results, time_budget).visible_change
+    }
+
+    fn poll_finished_outcome_with_budget(
+        &self,
+        max_results: usize,
+        time_budget: Duration,
+    ) -> AppUiPreviewPollOutcome {
         let poll_started = Instant::now();
         bump(&self.metrics.completion_poll_calls);
         self.metrics
             .completion_poll_max_results_per_poll
             .set(self.metrics.completion_poll_max_results_per_poll.get().max(max_results as u64));
-        let mut changed = false;
+        let mut outcome = AppUiPreviewPollOutcome::default();
         let mut drained = 0usize;
         while drained < max_results {
             if drained > 0 && poll_started.elapsed() >= time_budget {
                 bump(&self.metrics.completion_poll_time_budget_exhaustions);
-                changed = true;
+                outcome.needs_follow_up_poll = true;
                 break;
             }
             let result = match self.results.borrow().try_recv() {
@@ -621,7 +642,6 @@ impl AppUiPreviewService {
                     result.decode_elapsed_us,
                     result.cancel_observed_elapsed_us,
                 );
-                changed |= completion.is_current();
                 continue;
             }
             if let Some(diagnostics) = result.decode_diagnostics {
@@ -641,7 +661,7 @@ impl AppUiPreviewService {
                         self.media_cache.borrow_mut().insert(result.key.clone(), frame);
                         self.media_failures.borrow_mut().remove(&result.key);
                     }
-                    changed |= completion.is_current();
+                    outcome.visible_change |= completion.is_current();
                 }
                 None => {
                     self.record_preview_decode_failure(result.access_mode, result.failure_reason);
@@ -655,19 +675,19 @@ impl AppUiPreviewService {
                     if completion.should_cache() {
                         self.media_failures.borrow_mut().insert(result.key);
                     }
-                    changed |= completion.is_current();
+                    outcome.visible_change |= completion.is_current();
                 }
             }
         }
         if max_results > 0 && drained == max_results {
             bump(&self.metrics.completion_poll_count_budget_exhaustions);
-            changed = true;
+            outcome.needs_follow_up_poll = true;
         }
         if drained > 0 {
             add_cell(&self.metrics.completion_poll_results, drained as u64);
         }
         self.record_completion_poll_duration(poll_started.elapsed());
-        changed
+        outcome
     }
 
     fn record_completion_poll_duration(&self, duration: Duration) {
@@ -12938,6 +12958,113 @@ mod tests {
             1
         );
         assert_eq!(worker_activity.snapshot().in_flight_jobs, 0);
+    }
+
+    #[test]
+    fn preview_service_poll_releases_expired_playback_deadline_without_preview_refresh() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let key = test_media_key(77);
+        let generation = service.scheduler.begin_generation();
+        assert_eq!(
+            service.scheduler.request(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+            ),
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(service.scheduler.diagnostics().pending_requests, 1);
+
+        let result = media_preview_canceled_result(
+            MediaPreviewJob {
+                key: key.clone(),
+                source_secs: 77.0,
+                generation,
+                priority: MediaPreviewRequestPriority::Current,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                enqueued_at: Instant::now(),
+                deadline_at: Some(Instant::now() - Duration::from_millis(1)),
+            },
+            12_000,
+            MediaPreviewCancelReason::PlaybackDeadline,
+            0,
+            Some(0),
+        );
+        result_tx.send(result).expect("send canceled result");
+
+        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+        assert!(
+            !outcome.visible_change,
+            "deadline cancellation is scheduler/diagnostic evidence, not a new visible frame"
+        );
+        assert!(!outcome.needs_follow_up_poll);
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.scheduler.pending_requests, 0);
+        assert_eq!(diagnostics.decode_canceled_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_playback_deadline_jobs, 1);
+        assert_eq!(diagnostics.decode_canceled_playback_cursor_jobs, 1);
+        assert_eq!(diagnostics.decode_queue_wait_max_us, 12_000);
+        assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 1);
+        assert_eq!(
+            diagnostics.playback_schedule.current_proxy_or_hardware_recommended_decisions,
+            1
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn preview_service_poll_separates_canceled_backlog_from_visible_change() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let generation = service.scheduler.begin_generation();
+
+        for index in 0..2 {
+            let key = test_media_key(80 + index);
+            assert_eq!(
+                service.scheduler.request(
+                    key.clone(),
+                    generation,
+                    MediaPreviewRequestPriority::Current,
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                ),
+                MediaPreviewRequestStatus::Scheduled {
+                    evicted_prefetch: None,
+                    evicted_still: None
+                }
+            );
+            result_tx
+                .send(media_preview_canceled_result(
+                    MediaPreviewJob {
+                        key,
+                        source_secs: index as f64,
+                        generation,
+                        priority: MediaPreviewRequestPriority::Current,
+                        access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                        adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                        enqueued_at: Instant::now(),
+                        deadline_at: Some(Instant::now() - Duration::from_millis(1)),
+                    },
+                    1_000,
+                    MediaPreviewCancelReason::PlaybackDeadline,
+                    0,
+                    Some(0),
+                ))
+                .expect("send canceled result");
+        }
+
+        let outcome = service.poll_finished_outcome_with_budget(1, Duration::from_millis(5));
+
+        assert!(!outcome.visible_change);
+        assert!(
+            outcome.needs_follow_up_poll,
+            "count-budget exhaustion should keep draining without forcing preview refresh"
+        );
+        assert_eq!(service.scheduler.diagnostics().pending_requests, 1);
+        assert_eq!(service.diagnostics().decode_canceled_jobs, 1);
+        service.shutdown();
     }
 
     #[test]
