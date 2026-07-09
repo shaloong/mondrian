@@ -538,24 +538,33 @@ fn next_media_preview_job_index(
     queue: &VecDeque<QueuedMediaPreviewJob>,
     lane: MediaPreviewWorkerLane,
 ) -> Option<usize> {
+    let now = Instant::now();
     let eligible = |queued: &QueuedMediaPreviewJob| lane.accepts(queued.job.access_mode);
     let current_job =
         |queued: &QueuedMediaPreviewJob| queued.priority == MediaPreviewRequestPriority::Current;
     queue
         .iter()
         .enumerate()
-        .filter(|(_, queued)| current_job(queued) && eligible(queued))
-        .min_by_key(|(_, queued)| media_preview_current_job_rank(queued.job.access_mode))
+        .filter(|(_, queued)| current_job(queued))
+        .min_by_key(|(_, queued)| media_preview_current_job_selection_key(queued, lane, now))
         .map(|(index, _)| index)
-        .or_else(|| {
-            queue
-                .iter()
-                .enumerate()
-                .filter(|(_, queued)| current_job(queued))
-                .min_by_key(|(_, queued)| media_preview_current_job_rank(queued.job.access_mode))
-                .map(|(index, _)| index)
-        })
         .or_else(|| queue.iter().position(eligible))
+}
+
+fn media_preview_current_job_selection_key(
+    queued: &QueuedMediaPreviewJob,
+    lane: MediaPreviewWorkerLane,
+    now: Instant,
+) -> (bool, bool, u8) {
+    (
+        media_preview_job_deadline_expired_at(queued.job.deadline_at, now),
+        !lane.accepts(queued.job.access_mode),
+        media_preview_current_job_rank(queued.job.access_mode),
+    )
+}
+
+fn media_preview_job_deadline_expired_at(deadline_at: Option<Instant>, now: Instant) -> bool {
+    deadline_at.is_some_and(|deadline| now >= deadline)
 }
 
 fn media_preview_current_job_rank(access_mode: PreviewDecodeAccessMode) -> u8 {
@@ -1979,6 +1988,51 @@ mod tests {
         assert_eq!(playback_job.key, playback_prefetch);
         assert_eq!(
             playback_job.access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
+    }
+
+    #[test]
+    fn media_preview_job_queue_prefers_fresh_current_over_expired_lane_match() {
+        let (sender, receiver) = media_preview_job_queue(2);
+        let expired_playback = test_media_key(1);
+        let fresh_scrub = test_media_key(2);
+        let mut expired_playback_job = test_media_job(
+            expired_playback.clone(),
+            1.0,
+            MediaPreviewRequestPriority::Current,
+        );
+        expired_playback_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        expired_playback_job.deadline_at =
+            Some(Instant::now() - std::time::Duration::from_millis(1));
+        let mut fresh_scrub_job = test_media_job(
+            fresh_scrub.clone(),
+            2.0,
+            MediaPreviewRequestPriority::Current,
+        );
+        fresh_scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
+
+        assert_eq!(
+            sender.enqueue(expired_playback_job),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            sender.enqueue(fresh_scrub_job),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        let scrub_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Playback)
+            .expect("fresh current scrub should beat expired playback on idle playback lane");
+        assert_eq!(scrub_job.key, fresh_scrub);
+        assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
+
+        let expired_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Playback)
+            .expect("expired playback job remains available for structured deadline cancellation");
+        assert_eq!(expired_job.key, expired_playback);
+        assert_eq!(
+            expired_job.access_mode,
             PreviewDecodeAccessMode::PlaybackCursor
         );
     }

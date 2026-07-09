@@ -605,7 +605,10 @@ promoted, because only the app owns viewer/playback-clock intent. The budget is
 derived from the active sequence frame duration and clamped to a conservative
 interactive range, so 24/25/30/60 fps playback does not all inherit one opaque
 timeout. A playback current job that reaches a worker after its deadline is
-canceled before FFmpeg work begins; a job that crosses the deadline while
+canceled before FFmpeg work begins. Expired playback-current jobs must not
+block fresher current-frame work in worker queue selection, but they must remain
+observable long enough to emit a structured deadline cancellation instead of
+disappearing as an opaque queue drop. A job that crosses the deadline while
 decoding is cooperatively canceled through the same media predicate. This is
 intentionally not a media crate concept: `mondrian-media` still receives only
 an access-mode request and a cancellation predicate. Diagnostics must report
