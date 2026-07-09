@@ -708,6 +708,11 @@ residency/sampling facts, into GPU preview admission. App adapters must not
 flatten that payload into diagnostics and discard the token. Until renderer
 native import execution is connected, the retained payload is a renderer
 readiness blocker, not a media decode failure and not a CPU fallback frame.
+The renderer owns the fallible mapping from media `DecodedVideoSurfaceFormat`
+to its native texture-format contract and implements its source-descriptor
+trait for `PreviewNativeDecodedFrame`. App readiness code delegates to that
+mapping instead of copying renderer format policy back into the media/app
+layers.
 When native payloads reach the renderer import contract, renderer-side video
 sampling metadata is mandatory. `Nv12` is 8-bit YCbCr and `P010` is 10-bit
 YCbCr; 12/16-bit hardware surfaces require a distinct future format such as

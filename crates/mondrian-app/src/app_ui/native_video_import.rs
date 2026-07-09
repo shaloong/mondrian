@@ -308,16 +308,7 @@ pub(crate) fn platform_handle_kind_for_decoder(
 pub(crate) fn native_source_texture_format_from_decoded(
     format: DecodedVideoSurfaceFormat,
 ) -> Option<GpuNativeDecodedFrameTextureFormat> {
-    match format {
-        DecodedVideoSurfaceFormat::Nv12 => Some(GpuNativeDecodedFrameTextureFormat::Nv12),
-        DecodedVideoSurfaceFormat::P010 => Some(GpuNativeDecodedFrameTextureFormat::P010),
-        DecodedVideoSurfaceFormat::Rgba8 => Some(GpuNativeDecodedFrameTextureFormat::Rgba8Unorm),
-        DecodedVideoSurfaceFormat::Bgra8 => Some(GpuNativeDecodedFrameTextureFormat::Bgra8Unorm),
-        DecodedVideoSurfaceFormat::Unknown
-        | DecodedVideoSurfaceFormat::Yuv420p
-        | DecodedVideoSurfaceFormat::Yuv420p10le
-        | DecodedVideoSurfaceFormat::Other => None,
-    }
+    GpuNativeDecodedFrameTextureFormat::try_from(format).ok()
 }
 
 /// Combine media decoder sampling facts with the resolved source color space.

@@ -2,7 +2,9 @@ use crate::color_transform::{RenderColorTransformBackend, RenderInputTransform};
 use mondrian_core::{
     types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, RgbaF32Frame,
 };
-use mondrian_media::DecodedGpuFrameHandleKind;
+use mondrian_media::{
+    DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -609,6 +611,36 @@ impl GpuNativeDecodedFrameTextureFormat {
     }
 }
 
+impl TryFrom<DecodedVideoSurfaceFormat> for GpuNativeDecodedFrameTextureFormat {
+    type Error = GpuNativeDecodedFrameSourceFormatError;
+
+    fn try_from(format: DecodedVideoSurfaceFormat) -> Result<Self, Self::Error> {
+        match format {
+            DecodedVideoSurfaceFormat::Nv12 => Ok(Self::Nv12),
+            DecodedVideoSurfaceFormat::P010 => Ok(Self::P010),
+            DecodedVideoSurfaceFormat::Rgba8 => Ok(Self::Rgba8Unorm),
+            DecodedVideoSurfaceFormat::Bgra8 => Ok(Self::Bgra8Unorm),
+            DecodedVideoSurfaceFormat::Unknown
+            | DecodedVideoSurfaceFormat::Yuv420p
+            | DecodedVideoSurfaceFormat::Yuv420p10le
+            | DecodedVideoSurfaceFormat::Other => {
+                Err(GpuNativeDecodedFrameSourceFormatError::Unsupported { format })
+            }
+        }
+    }
+}
+
+/// Error returned when a media decoder surface has no native renderer format.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum GpuNativeDecodedFrameSourceFormatError {
+    /// The decoder format is not a supported native GPU payload.
+    #[error("decoded video surface format {format:?} cannot enter native renderer import")]
+    Unsupported {
+        /// Unsupported media decoder format.
+        format: DecodedVideoSurfaceFormat,
+    },
+}
+
 /// Encoded video quantization range carried by a native decoder surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuVideoRange {
@@ -1071,7 +1103,22 @@ impl GpuNativeDecodedFrameSourceDescriptor {
 /// Native decoded-frame payload that can expose renderer-visible import facts.
 pub trait GpuNativeDecodedFrameImportSource {
     /// Return the source descriptor carried by this native payload.
-    fn native_decoded_frame_source_descriptor(&self) -> GpuNativeDecodedFrameSourceDescriptor;
+    fn native_decoded_frame_source_descriptor(
+        &self,
+    ) -> Result<GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError>;
+}
+
+impl GpuNativeDecodedFrameImportSource for PreviewNativeDecodedFrame {
+    fn native_decoded_frame_source_descriptor(
+        &self,
+    ) -> Result<GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError> {
+        Ok(GpuNativeDecodedFrameSourceDescriptor {
+            width: self.width,
+            height: self.height,
+            handle_kind: self.handle_kind(),
+            source_texture_format: self.surface_format.try_into()?,
+        })
+    }
 }
 
 /// Backend hook that imports one native decoded frame into a renderer resource.
@@ -1109,7 +1156,7 @@ where
     B: GpuNativeDecodedFrameImportBackend,
 {
     let expected_source = GpuNativeDecodedFrameSourceDescriptor::from_contract(&contract);
-    let actual_source = native_frame.native_decoded_frame_source_descriptor();
+    let actual_source = native_frame.native_decoded_frame_source_descriptor()?;
     if actual_source != expected_source {
         return Err(
             GpuNativeDecodedFrameImportError::NativeFrameContractMismatch {
@@ -1135,6 +1182,9 @@ pub enum GpuNativeDecodedFrameImportError {
     /// Planning failed before backend execution.
     #[error(transparent)]
     Plan(#[from] GpuNativeDecodedFrameImportPlanError),
+    /// The media payload could not produce a renderer source descriptor.
+    #[error(transparent)]
+    SourceFormat(#[from] GpuNativeDecodedFrameSourceFormatError),
     /// Backend rejected the native decoded frame.
     #[error("native decoded frame import backend rejected the frame: {reason}")]
     BackendRejected {
@@ -1805,6 +1855,32 @@ mod tests {
     }
 
     #[test]
+    fn native_decoded_frame_texture_format_maps_media_native_surfaces() {
+        assert_eq!(
+            GpuNativeDecodedFrameTextureFormat::try_from(DecodedVideoSurfaceFormat::Nv12),
+            Ok(GpuNativeDecodedFrameTextureFormat::Nv12)
+        );
+        assert_eq!(
+            GpuNativeDecodedFrameTextureFormat::try_from(DecodedVideoSurfaceFormat::P010),
+            Ok(GpuNativeDecodedFrameTextureFormat::P010)
+        );
+        assert_eq!(
+            GpuNativeDecodedFrameTextureFormat::try_from(DecodedVideoSurfaceFormat::Rgba8),
+            Ok(GpuNativeDecodedFrameTextureFormat::Rgba8Unorm)
+        );
+        assert_eq!(
+            GpuNativeDecodedFrameTextureFormat::try_from(DecodedVideoSurfaceFormat::Bgra8),
+            Ok(GpuNativeDecodedFrameTextureFormat::Bgra8Unorm)
+        );
+        assert_eq!(
+            GpuNativeDecodedFrameTextureFormat::try_from(DecodedVideoSurfaceFormat::Yuv420p),
+            Err(GpuNativeDecodedFrameSourceFormatError::Unsupported {
+                format: DecodedVideoSurfaceFormat::Yuv420p,
+            })
+        );
+    }
+
+    #[test]
     fn native_decoded_frame_import_defaults_to_fail_closed() {
         let mut ids = GpuColorFrameIdAllocator::new(500);
         let err = GpuNativeDecodedFrameImportPlan::from_contract(
@@ -2132,13 +2208,16 @@ mod tests {
     }
 
     impl GpuNativeDecodedFrameImportSource for FakeNativeDecodedFrame {
-        fn native_decoded_frame_source_descriptor(&self) -> GpuNativeDecodedFrameSourceDescriptor {
-            GpuNativeDecodedFrameSourceDescriptor {
+        fn native_decoded_frame_source_descriptor(
+            &self,
+        ) -> Result<GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError>
+        {
+            Ok(GpuNativeDecodedFrameSourceDescriptor {
                 width: self.width,
                 height: self.height,
                 handle_kind: self.handle_kind,
                 source_texture_format: self.source_texture_format,
-            }
+            })
         }
     }
 

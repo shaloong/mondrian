@@ -36,8 +36,6 @@ use mondrian_media::{
 use mondrian_media::{
     DecodedVideoChromaLocation, DecodedVideoRange, PreviewNativeDecodedFrameHandle,
 };
-#[cfg(test)]
-use mondrian_renderer::TimelineCompositeColorPath;
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_rgba8,
@@ -48,6 +46,11 @@ use mondrian_renderer::{
     TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
     TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+};
+#[cfg(test)]
+use mondrian_renderer::{
+    GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameTextureFormat,
+    TimelineCompositeColorPath,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -9760,6 +9763,19 @@ mod tests {
                         chroma_location: DecodedVideoChromaLocation::Left,
                         bit_depth: 10,
                     }
+                );
+                let descriptor = native_source
+                    .native_frame
+                    .native_decoded_frame_source_descriptor()
+                    .expect("validated media payload maps to renderer source descriptor");
+                assert_eq!((descriptor.width, descriptor.height), (320, 180));
+                assert_eq!(
+                    descriptor.handle_kind,
+                    DecodedGpuFrameHandleKind::D3D11Texture2D
+                );
+                assert_eq!(
+                    descriptor.source_texture_format,
+                    GpuNativeDecodedFrameTextureFormat::P010
                 );
             }
             AppUiGpuPreviewCompositeLayer::SolidColor { .. } => {

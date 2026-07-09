@@ -254,8 +254,14 @@ The renderer import helper must also validate the incoming native payload before
 backend execution. `GpuNativeDecodedFrameImportSource` exposes a
 `GpuNativeDecodedFrameSourceDescriptor` (extent, decoder handle family, and
 source texture format), and `execute_native_decoded_frame_import(...)` rejects a
-payload whose descriptor does not match the import contract. Backend support
-validation, video sampling validation, and output working-resource validation
+payload whose descriptor does not match the import contract.
+The renderer implements this source contract for media-owned
+`PreviewNativeDecodedFrame` payloads and owns the fallible
+`DecodedVideoSurfaceFormat` -> `GpuNativeDecodedFrameTextureFormat` mapping.
+Unsupported planar/unknown media formats return a structured source-format
+error before backend planning; app/window code does not duplicate that format
+table.
+Backend support validation, video sampling validation, and output working-resource validation
 are all required: a renderer backend must never be asked to import a
 D3D11/NV12 contract while receiving a different native surface, and it must not
 sample a YCbCr surface without explicit range/matrix/bit-depth/chroma metadata.

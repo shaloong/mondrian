@@ -156,6 +156,13 @@ actual `wgpu::AdapterInfo` so viewer telemetry can distinguish, for example,
 native decoder-surface import bridge connected".
 Concrete import execution belongs behind
 `GpuNativeDecodedFrameImportBackend`. The shared
+`PreviewNativeDecodedFrame` payload implements the renderer-owned
+`GpuNativeDecodedFrameImportSource` contract directly. Conversion from
+`DecodedVideoSurfaceFormat` to `GpuNativeDecodedFrameTextureFormat` is also
+renderer-owned and returns `GpuNativeDecodedFrameSourceFormatError` for
+non-native media formats. App code may consume that conversion for readiness
+diagnostics, but it must not maintain a parallel renderer-format mapping.
+The shared
 `execute_native_decoded_frame_import(...)` helper owns support validation,
 working-frame plan creation, backend invocation, and returned-resource contract
 verification. Platform/window/app code must not fabricate
