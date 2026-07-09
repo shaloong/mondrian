@@ -359,10 +359,7 @@ impl AppUiHost {
                 .root
                 .refresh_playback_frame_from_app_state(&state, Some(&self.preview_service));
             drop(state);
-            if self.set_playback_buffering_from_preview(preview_waiting) {
-                self.mark_dirty();
-                self.refresh_if_dirty(bounds);
-            }
+            self.refresh_playback_buffering_controls_for_preview_waiting(preview_waiting);
         }
         TreeWalker::layout(self.active_root_mut(), bounds);
         true
@@ -373,12 +370,16 @@ impl AppUiHost {
         self.app_state.borrow().playback_next_frame_delay()
     }
 
-    fn sync_playback_buffering_from_viewer(&mut self) -> bool {
-        self.set_playback_buffering_from_preview(self.root.viewer_preview_waiting())
+    fn refresh_playback_buffering_controls_without_preview(&mut self) -> bool {
+        let preview_waiting = self.root.viewer_preview_waiting();
+        self.refresh_playback_buffering_controls_for_preview_waiting(preview_waiting)
     }
 
-    fn refresh_playback_buffering_controls_without_preview(&mut self) -> bool {
-        if !self.sync_playback_buffering_from_viewer() {
+    fn refresh_playback_buffering_controls_for_preview_waiting(
+        &mut self,
+        preview_waiting: bool,
+    ) -> bool {
+        if !self.set_playback_buffering_from_preview(preview_waiting) {
             return false;
         }
         self.refresh_transport_state_without_preview();

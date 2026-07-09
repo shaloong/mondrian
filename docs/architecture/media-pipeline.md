@@ -193,7 +193,10 @@ host may perform one preview-aware model refresh for the completed work, but
 the derived playback-buffering flag must be propagated with a transport/status
 refresh that does not request preview again. A buffering-state transition must
 not trigger a second full root refresh or layout pass that re-enters preview
-interpretation.
+interpretation. The same rule applies when playback-clock advancement discovers
+that the new visible frame is still waiting on preview decode: the current-frame
+refresh may consult preview once, but buffering controls/status must then update
+through the lightweight transport path.
 The native app event loop also records stage-level responsiveness telemetry for
 action draining, redraw, GPU preview preparation, UI refresh, paint/render,
 background-task polling, and playback-clock advancement. Any stage that exceeds
