@@ -595,6 +595,14 @@ These fields are fail-closed; until a real
 hardware-frame decoder and renderer import path are connected they must report
 CPU RGBA residency with `TextureResidencyNotConnected` rather than implying
 platform hwaccel is active.
+The app-window GPU preview path must preserve those media facts in its frame
+residency telemetry. Media decode diagnostics feed the
+`AppUiGpuPreviewMediaSource` contract, and window-side native video import
+readiness combines decoder residency/handle/format with the platform import
+probe and renderer import support. This does not make CPU RGBA preview hardware
+decoded; it prevents the future hardware decoder adapter from being hidden
+behind a generic "GPU input upload" label once it starts producing NV12/P010
+native surfaces.
 Preview sessions seed their seek index from FFmpeg's container/probe stream
 index when available, using a small media-layer LRU cache keyed by
 path/fingerprint/video-stream. That first production path gives scrub and still

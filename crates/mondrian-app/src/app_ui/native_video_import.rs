@@ -5,7 +5,7 @@
 //! each other just to explain why preview playback is still using CPU RGBA
 //! uploads.
 
-use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
+use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat};
 use mondrian_platform::{NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult};
 use mondrian_renderer::{
     GpuColorFrameTextureFormat, GpuNativeDecodedFrameImportSupport,
@@ -266,6 +266,22 @@ fn platform_handle_kind_for_decoder(
     }
 }
 
+/// Map a media-layer decoded surface fact to the renderer native import format contract.
+pub(crate) fn native_source_texture_format_from_decoded(
+    format: DecodedVideoSurfaceFormat,
+) -> Option<GpuNativeDecodedFrameTextureFormat> {
+    match format {
+        DecodedVideoSurfaceFormat::Nv12 => Some(GpuNativeDecodedFrameTextureFormat::Nv12),
+        DecodedVideoSurfaceFormat::P010 => Some(GpuNativeDecodedFrameTextureFormat::P010),
+        DecodedVideoSurfaceFormat::Rgba8 => Some(GpuNativeDecodedFrameTextureFormat::Rgba8Unorm),
+        DecodedVideoSurfaceFormat::Bgra8 => Some(GpuNativeDecodedFrameTextureFormat::Bgra8Unorm),
+        DecodedVideoSurfaceFormat::Unknown
+        | DecodedVideoSurfaceFormat::Yuv420p
+        | DecodedVideoSurfaceFormat::Yuv420p10le
+        | DecodedVideoSurfaceFormat::Other => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +375,34 @@ mod tests {
         assert!(!report.low_copy_ready);
         assert!(report.renderer_supports_handle_kind);
         assert!(report.renderer_supports_source_texture_format);
+    }
+
+    #[test]
+    fn native_source_texture_format_maps_gpu_native_media_surfaces() {
+        assert_eq!(
+            native_source_texture_format_from_decoded(DecodedVideoSurfaceFormat::Nv12),
+            Some(GpuNativeDecodedFrameTextureFormat::Nv12)
+        );
+        assert_eq!(
+            native_source_texture_format_from_decoded(DecodedVideoSurfaceFormat::P010),
+            Some(GpuNativeDecodedFrameTextureFormat::P010)
+        );
+        assert_eq!(
+            native_source_texture_format_from_decoded(DecodedVideoSurfaceFormat::Rgba8),
+            Some(GpuNativeDecodedFrameTextureFormat::Rgba8Unorm)
+        );
+        assert_eq!(
+            native_source_texture_format_from_decoded(DecodedVideoSurfaceFormat::Bgra8),
+            Some(GpuNativeDecodedFrameTextureFormat::Bgra8Unorm)
+        );
+        assert_eq!(
+            native_source_texture_format_from_decoded(DecodedVideoSurfaceFormat::Yuv420p),
+            None
+        );
+        assert_eq!(
+            native_source_texture_format_from_decoded(DecodedVideoSurfaceFormat::Unknown),
+            None
+        );
     }
 
     fn cpu_decoded_input() -> AppUiNativeVideoImportReadinessInput {

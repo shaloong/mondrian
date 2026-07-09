@@ -80,6 +80,17 @@ the renderer a platform dependency. Current media preview frames report
 `ReadyZeroCopy` / `ReadyLowCopy` until actual decoder GPU surfaces are handed to
 the renderer import path.
 
+Viewer GPU output telemetry now preserves decoder residency facts through the
+CPU-upload GPU input path. `AppUiGpuPreviewMediaSource` carries
+`DecodedFrameResidency`, optional `DecodedGpuFrameHandleKind`, and
+`DecodedVideoSurfaceFormat`; the window layer maps GPU-resident NV12/P010/RGBA
+facts into `GpuNativeDecodedFrameTextureFormat` only at the app readiness seam.
+Frame residency diagnostics can therefore distinguish CPU-decoded media,
+native GPU-decoded media, mixed CPU/native stacks, and procedural GPU-native
+content before the concrete D3D11/VideoToolbox/VA-API import adapters exist.
+The renderer backend support remains fail-closed until a real import pass can
+sample the native surface and produce a float linear working frame.
+
 ## Effect Integration
 
 `mondrian-effects` already exposes `EffectGpuExecutor` as an acceleration hook. Long-term, effects should compile to graph nodes that the renderer can execute on GPU where supported, with CPU fallback only for unsupported ops/plugins.

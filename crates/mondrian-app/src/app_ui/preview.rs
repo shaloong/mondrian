@@ -25,12 +25,12 @@ use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::HwAccelBackend;
 use mondrian_media::{
     decode_preview_rgba_scaled_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
-    DecodedVideoSurfaceFormat, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
-    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
-    PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
-    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueSummary,
+    DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewDecodeAccessMode,
+    PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
+    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy,
+    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
+    PreviewHardwareDecodeBlocker, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_renderer::TimelineCompositeColorPath;
@@ -5897,6 +5897,12 @@ pub(crate) struct AppUiGpuPreviewMediaSource {
     pub source: CpuEncodedColorFrame,
     /// Source/import -> timeline working-space transform.
     pub input_transform: RenderInputTransform,
+    /// Residency reported by the media decode boundary.
+    pub decoder_residency: DecodedFrameResidency,
+    /// Native decoder handle family, when the media boundary produced a GPU surface.
+    pub decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    /// Decoder output surface format before any CPU RGBA conversion.
+    pub decoded_surface_format: DecodedVideoSurfaceFormat,
 }
 
 impl AppUiGpuPreviewFrame {
@@ -6013,6 +6019,9 @@ impl MediaPreviewFrame {
         self.gpu_source.as_ref().map(|source| AppUiGpuPreviewMediaSource {
             source: source.source.clone(),
             input_transform: source.input_transform.clone(),
+            decoder_residency: source.decoder_residency,
+            decoder_handle_kind: source.decoder_handle_kind,
+            decoded_surface_format: source.decoded_surface_format,
         })
     }
 
@@ -6065,14 +6074,36 @@ struct MediaPreviewWorkingFrame {
 struct MediaPreviewGpuSourceFrame {
     source: CpuEncodedColorFrame,
     input_transform: RenderInputTransform,
+    decoder_residency: DecodedFrameResidency,
+    decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    decoded_surface_format: DecodedVideoSurfaceFormat,
     working_cache: Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, String>>>,
 }
 
 impl MediaPreviewGpuSourceFrame {
+    #[cfg(test)]
     fn new(source: CpuEncodedColorFrame, input_transform: RenderInputTransform) -> Self {
         Self {
             source,
             input_transform,
+            decoder_residency: DecodedFrameResidency::CpuRgba,
+            decoder_handle_kind: None,
+            decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
+            working_cache: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn from_decode_diagnostics(
+        source: CpuEncodedColorFrame,
+        input_transform: RenderInputTransform,
+        diagnostics: PreviewDecodeDiagnostics,
+    ) -> Self {
+        Self {
+            source,
+            input_transform,
+            decoder_residency: diagnostics.decoded_frame_residency,
+            decoder_handle_kind: diagnostics.gpu_frame_handle_kind,
+            decoded_surface_format: diagnostics.decoded_surface_format,
             working_cache: Arc::new(OnceLock::new()),
         }
     }
@@ -8202,13 +8233,18 @@ fn decode_media_preview(
                 job.key.tone_map,
                 job.key.engine.clone(),
             );
+            let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
+                source,
+                input_transform,
+                decode_diagnostics,
+            );
             MediaPreviewResult {
                 key: job.key,
                 frame: Some(MediaPreviewFrame {
                     width,
                     height,
                     frame: None,
-                    gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
+                    gpu_source: Some(gpu_source),
                     signature,
                 }),
                 error: None,
