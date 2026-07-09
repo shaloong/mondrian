@@ -220,6 +220,9 @@ path. This is not a renderer fallback and must not clear ready/stale frames,
 still-frame work, media caches, or external GPU viewer textures. It exists so a
 lost, wedged, or pathologically slow current decode cannot hold pause/close UI
 behind "preview buffering" indefinitely.
+The same counter must appear in the preview decode performance summary/report
+even before a worker returns a canceled decode result, because the product
+symptom is already user-visible at the moment buffering is released.
 When background preview completion changes the viewer waiting state, the app
 host may perform one preview-aware model refresh for the completed work, but
 the derived playback-buffering flag must be propagated with a transport/status

@@ -2902,6 +2902,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub interactive_cancel_queued_jobs: u64,
     /// Queued jobs removed because their scheduler-side pending request was canceled.
     pub queue_canceled_jobs: u64,
+    /// Playback buffering releases caused by a stalled realtime current-frame request.
+    pub playback_current_stalled_expirations: u64,
     /// Obsolete queued jobs removed before scheduling current-frame decode.
     pub queue_pruned_obsolete_jobs: u64,
     /// Queued prefetch jobs promoted after the same key became current-frame work.
@@ -3346,6 +3348,7 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
                     .decode_successes
                     .saturating_add(summary.decode_failures)
                     .saturating_add(summary.canceled_jobs)
+                    .saturating_add(summary.playback_current_stalled_expirations)
                     > 0
             })
             .unwrap_or(false),
@@ -3420,6 +3423,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             "preview_decode_expired_playback_current_queue",
             (summary.worker_queue.queued_expired_playback_current_jobs as u64)
                 .saturating_add(summary.worker_queue.dropped_expired_playback_current_jobs),
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_playback_buffering_stall_expirations",
+            summary.playback_current_stalled_expirations,
             0,
         );
         push_decode_warn_max_check(
@@ -4180,6 +4190,31 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "drop_expired_playback_queue_work",
             "Drop or reprioritize expired playback-current work before it waits in the worker queue; playback must make clock-driven decode/drop/proxy decisions instead of decoding stale visible frames.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+
+    if summary.playback_current_stalled_expirations > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_playback_buffering_stall_expirations",
+            format!(
+                "playback_current_stalled_expirations={} queue_canceled_jobs={} scheduler_canceled_requests={} queued_jobs={} queued_current_jobs={} in_flight_jobs={} in_flight_current_jobs={} canceled_jobs={} canceled_obsolete_jobs={} canceled_playback_deadline_jobs={}",
+                summary.playback_current_stalled_expirations,
+                summary.queue_canceled_jobs,
+                summary.scheduler.canceled_requests,
+                summary.worker_queue.queued_jobs,
+                summary.worker_queue.queued_current_jobs,
+                summary.worker_activity.in_flight_jobs,
+                summary.worker_activity.in_flight_current_jobs,
+                summary.canceled_jobs,
+                summary.canceled_obsolete_jobs,
+                summary.canceled_playback_deadline_jobs
+            ),
+            "diagnose_preview_current_frame_stalls",
+            "Inspect realtime current-frame decode residency, worker queue pressure, and cooperative cancellation because playback buffering had to be released without a current preview frame.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -5473,6 +5508,7 @@ impl AppUiPreviewDiagnostics {
         if decode_successes
             .saturating_add(self.decode_failures)
             .saturating_add(self.decode_canceled_jobs)
+            .saturating_add(self.playback_current_stalled_expirations)
             == 0
         {
             return None;
@@ -5538,6 +5574,7 @@ impl AppUiPreviewDiagnostics {
             interactive_cancel_scheduler_requests: self.interactive_cancel_scheduler_requests,
             interactive_cancel_queued_jobs: self.interactive_cancel_queued_jobs,
             queue_canceled_jobs: self.queue_canceled_jobs,
+            playback_current_stalled_expirations: self.playback_current_stalled_expirations,
             queue_pruned_obsolete_jobs: self.queue_pruned_obsolete_jobs,
             queue_promoted_current_jobs: self.queue_promoted_current_jobs,
             worker_disconnected_drops: self.worker_disconnected_drops,
@@ -10058,6 +10095,57 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "drop_expired_playback_queue_work"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_flags_playback_buffering_stall_expiration() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            playback_current_stalled_expirations: 1,
+            queue_canceled_jobs: 1,
+            scheduler: MediaPreviewSchedulerDiagnostics {
+                canceled_requests: 1,
+                ..MediaPreviewSchedulerDiagnostics::default()
+            },
+            worker_activity: PreviewWorkerActivityDiagnostics {
+                in_flight_jobs: 1,
+                in_flight_current_jobs: 1,
+                ..PreviewWorkerActivityDiagnostics::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-playback-buffering-stall-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        let summary = report.summary.expect("decode summary");
+        assert_eq!(summary.playback_current_stalled_expirations, 1);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_evidence_present"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_playback_buffering_stall_expirations"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 1
+                && check.limit == Some(0)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_playback_buffering_stall_expirations"
+                && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && root.evidence.contains("playback_current_stalled_expirations=1")
+                && root.evidence.contains("queue_canceled_jobs=1")
+                && root.evidence.contains("scheduler_canceled_requests=1")
+                && root.evidence.contains("in_flight_jobs=1")
+                && root.evidence.contains("in_flight_current_jobs=1")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "diagnose_preview_current_frame_stalls"));
     }
 
     #[test]
