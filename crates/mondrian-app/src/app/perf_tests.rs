@@ -7,10 +7,12 @@ use crate::app_ui::preview::{
     build_preview_render_performance_report, AppUiPreviewColorHealthReport,
     AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
     AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeAccessModeProfiles,
-    AppUiPreviewDecodePerformanceReport, AppUiPreviewDecodePerformanceVerdict,
-    AppUiPreviewDiagnostics, AppUiPreviewRenderPerformanceReport,
-    AppUiPreviewRenderPerformanceSeverity, AppUiPreviewRenderPerformanceVerdict,
-    AppUiPreviewService, APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    AppUiPreviewDecodePerformanceArea, AppUiPreviewDecodePerformanceCheck,
+    AppUiPreviewDecodePerformanceReport, AppUiPreviewDecodePerformanceSeverity,
+    AppUiPreviewDecodePerformanceVerdict, AppUiPreviewDiagnostics,
+    AppUiPreviewRenderPerformanceReport, AppUiPreviewRenderPerformanceSeverity,
+    AppUiPreviewRenderPerformanceVerdict, AppUiPreviewService,
+    APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
     APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app_ui::shell::AppUiAppRoot;
@@ -100,6 +102,7 @@ struct PreviewMediaPlaybackPerfReport {
     frames: usize,
     frame_interval_ms: u64,
     readiness: PreviewReadinessCounts,
+    real_media_gates: Option<PreviewExternalPlaybackGateReport>,
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_report: AppUiPreviewColorHealthReport,
@@ -108,6 +111,19 @@ struct PreviewMediaPlaybackPerfReport {
     preview_decode_report: AppUiPreviewDecodePerformanceReport,
     preview_render_report: AppUiPreviewRenderPerformanceReport,
     cases: Vec<PerfCaseReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PreviewExternalPlaybackGateReport {
+    enabled: bool,
+    playback_decode_p95_limit_us: u64,
+    playback_decode_p95_observed_us: u64,
+    playback_queue_wait_p95_limit_us: u64,
+    playback_queue_wait_p95_observed_us: u64,
+    min_visible_frames: usize,
+    visible_frames: usize,
+    passed: bool,
+    failures: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1261,6 +1277,17 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_TOTAL_TIMEOUT_MS",
         180_000,
     ) as u64);
+    let playback_p95_limit_us = env_u64("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US", 40_000);
+    let playback_queue_wait_p95_limit_us = env_u64(
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_QUEUE_WAIT_P95_US",
+        10_000,
+    );
+    let min_visible_percent = env_usize_clamped(
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_VISIBLE_PERCENT",
+        95,
+        1,
+        100,
+    );
 
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_preview_external_playback_{uniq}"));
@@ -1286,7 +1313,16 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         "external playback smoke exceeded total timeout {:?}",
         overall_timeout
     );
-    let report = result?;
+    let mut report = result?;
+    let real_media_gates = evaluate_external_playback_gates(
+        &report.readiness,
+        report.frames,
+        &report.preview_decode_report,
+        playback_p95_limit_us,
+        playback_queue_wait_p95_limit_us,
+        min_visible_percent,
+    );
+    report.real_media_gates = Some(real_media_gates);
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
     write_report_if_needed(&report_json);
@@ -1317,8 +1353,68 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
             report_json
         );
     }
+    if let Some(gates) = &report.real_media_gates {
+        if !gates.passed {
+            anyhow::bail!(
+                "preview media external continuous playback real-media gates failed: {:?}; report: {}",
+                gates.failures,
+                report_json
+            );
+        }
+    }
 
     Ok(())
+}
+
+fn evaluate_external_playback_gates(
+    readiness: &PreviewReadinessCounts,
+    frames: usize,
+    decode_report: &AppUiPreviewDecodePerformanceReport,
+    playback_decode_p95_limit_us: u64,
+    playback_queue_wait_p95_limit_us: u64,
+    min_visible_percent: usize,
+) -> PreviewExternalPlaybackGateReport {
+    let playback_decode_p95_observed_us =
+        decode_check_observed(decode_report, "preview_decode_playback_cursor_p95_frame_us");
+    let playback_queue_wait_p95_observed_us = decode_check_observed(
+        decode_report,
+        "preview_decode_playback_cursor_queue_wait_p95_us",
+    );
+    let visible_frames = readiness.ready.saturating_add(readiness.stale);
+    let min_visible_frames = frames.saturating_mul(min_visible_percent).saturating_add(99) / 100;
+    let mut failures = Vec::new();
+    if playback_decode_p95_observed_us == 0
+        || playback_decode_p95_observed_us > playback_decode_p95_limit_us
+    {
+        failures.push("playback_decode_p95");
+    }
+    if playback_queue_wait_p95_observed_us > playback_queue_wait_p95_limit_us {
+        failures.push("playback_queue_wait_p95");
+    }
+    if visible_frames < min_visible_frames {
+        failures.push("visible_frame_ratio");
+    }
+
+    PreviewExternalPlaybackGateReport {
+        enabled: true,
+        playback_decode_p95_limit_us,
+        playback_decode_p95_observed_us,
+        playback_queue_wait_p95_limit_us,
+        playback_queue_wait_p95_observed_us,
+        min_visible_frames,
+        visible_frames,
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
+fn decode_check_observed(report: &AppUiPreviewDecodePerformanceReport, code: &'static str) -> u64 {
+    report
+        .checks
+        .iter()
+        .find(|check| check.code == code)
+        .map(|check| check.observed)
+        .unwrap_or(0)
 }
 
 fn run_preview_media_continuous_playback_probe(
@@ -1412,6 +1508,7 @@ fn run_preview_media_continuous_playback_probe(
         frames: frame_count,
         frame_interval_ms,
         readiness,
+        real_media_gates: None,
         media_color_issues,
         preview_diagnostics,
         preview_color_report,
@@ -2715,6 +2812,68 @@ fn viewer_gpu_output_budget_from_env_reads_reason_thresholds() {
             max_preview_candidate_id_regressions: 29,
         }
     );
+}
+
+#[test]
+fn external_playback_gates_fail_on_decode_queue_or_visibility_regression() {
+    let readiness = PreviewReadinessCounts { ready: 10, stale: 4, loading: 2, unavailable: 4 };
+    let report = preview_decode_report_with_playback_p95(80_000, 12_000);
+
+    let gates = evaluate_external_playback_gates(&readiness, 20, &report, 40_000, 10_000, 95);
+
+    assert!(!gates.passed);
+    assert_eq!(gates.visible_frames, 14);
+    assert_eq!(gates.min_visible_frames, 19);
+    assert_eq!(
+        gates.failures,
+        vec![
+            "playback_decode_p95",
+            "playback_queue_wait_p95",
+            "visible_frame_ratio"
+        ]
+    );
+}
+
+#[test]
+fn external_playback_gates_pass_when_real_media_thresholds_hold() {
+    let readiness = PreviewReadinessCounts { ready: 18, stale: 1, loading: 1, unavailable: 0 };
+    let report = preview_decode_report_with_playback_p95(25_000, 4_000);
+
+    let gates = evaluate_external_playback_gates(&readiness, 20, &report, 40_000, 10_000, 95);
+
+    assert!(gates.passed);
+    assert!(gates.failures.is_empty());
+}
+
+fn preview_decode_report_with_playback_p95(
+    playback_decode_p95_us: u64,
+    playback_queue_wait_p95_us: u64,
+) -> AppUiPreviewDecodePerformanceReport {
+    AppUiPreviewDecodePerformanceReport {
+        schema_version: 26,
+        profile: "test".to_owned(),
+        verdict: AppUiPreviewDecodePerformanceVerdict::Pass,
+        required_access_modes: vec![PreviewDecodeAccessMode::PlaybackCursor],
+        summary: None,
+        checks: vec![
+            AppUiPreviewDecodePerformanceCheck {
+                area: AppUiPreviewDecodePerformanceArea::AccessMode,
+                code: "preview_decode_playback_cursor_p95_frame_us",
+                severity: AppUiPreviewDecodePerformanceSeverity::Pass,
+                observed: playback_decode_p95_us,
+                limit: Some(40_000),
+            },
+            AppUiPreviewDecodePerformanceCheck {
+                area: AppUiPreviewDecodePerformanceArea::AccessMode,
+                code: "preview_decode_playback_cursor_queue_wait_p95_us",
+                severity: AppUiPreviewDecodePerformanceSeverity::Pass,
+                observed: playback_queue_wait_p95_us,
+                limit: Some(10_000),
+            },
+        ],
+        root_causes: Vec::new(),
+        actions: Vec::new(),
+    }
 }
 
 fn paint_command_count(

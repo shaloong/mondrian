@@ -225,6 +225,15 @@ still passes. Those indicate `PlaybackCursor` is behaving like repeated random
 access instead of a warm mostly-forward decode stream. It also fails when
 `PlaybackCursor` queue wait exceeds the decode budget, because playback must
 not sit behind still-frame or scrub work.
+The real external continuous-playback smoke additionally emits
+`real_media_gates` and fails when those gates fail. Defaults are deliberately
+closer to production playback expectations than the broad wall-clock timeout:
+`MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US=40000`,
+`MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_QUEUE_WAIT_P95_US=10000`, and
+`MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_VISIBLE_PERCENT=95`. These gates are
+intended for 4K HEVC/HDR/Long-GOP fixture runs: a failure should drive
+hardware decode, proxy, scheduler, or renderer-residency work, not timeout
+widening. Override them only when documenting a different fixture class.
 
 Preview media perf artifacts also include `preview_render_report`, which covers
 post-decode viewer work: sequence/media resolution, final-frame cache lookup,

@@ -9,7 +9,7 @@ use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVi
 use mondrian_platform::{NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult};
 use mondrian_renderer::{
     GpuColorFrameTextureFormat, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling,
 };
 
 /// Stable readiness category for native decoded-frame import.
@@ -31,6 +31,9 @@ pub(crate) enum AppUiNativeVideoImportReadinessStatus {
     RendererHandleUnsupported,
     /// The decoded source texture format was not reported.
     SourceTextureFormatUnknown,
+    /// The renderer cannot safely sample the native surface without explicit
+    /// range/matrix/transfer/bit-depth/chroma metadata.
+    SourceVideoSamplingUnknown,
     /// The renderer backend cannot consume the decoded source texture format.
     RendererSourceTextureFormatUnsupported,
     /// The requested working texture format cannot preserve linear working pixels.
@@ -50,6 +53,9 @@ pub(crate) struct AppUiNativeVideoImportReadinessInput {
     pub decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
     /// Source texture format of the decoded GPU surface, when known.
     pub source_texture_format: Option<GpuNativeDecodedFrameTextureFormat>,
+    /// Shader-visible sampling contract needed before renderer import can
+    /// convert native video surfaces into encoded RGB and then working space.
+    pub source_video_sampling: Option<GpuNativeDecodedFrameVideoSampling>,
     /// Renderer working texture format requested after import/input transform.
     pub working_texture_format: GpuColorFrameTextureFormat,
     /// OS/platform native texture import probe.
@@ -204,6 +210,12 @@ pub(crate) fn evaluate_native_video_import_readiness(
             "renderer backend does not support the decoded source texture format",
         );
     }
+    if input.source_video_sampling.is_none() {
+        return base.with_status(
+            AppUiNativeVideoImportReadinessStatus::SourceVideoSamplingUnknown,
+            "native decoded-frame import requires explicit video sampling metadata",
+        );
+    }
     if !matches!(
         input.working_texture_format,
         GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
@@ -306,6 +318,7 @@ pub(crate) fn native_source_texture_format_from_decoded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_renderer::{GpuVideoChromaLocation, GpuVideoRange};
 
     #[test]
     fn native_video_import_readiness_reports_cpu_decoded_media() {
@@ -327,6 +340,7 @@ mod tests {
             decoder_residency: DecodedFrameResidency::GpuTexture,
             decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
             source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
+            source_video_sampling: Some(native_video_sampling()),
             working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             platform_probe: NativeVideoTextureImportProbeResult::missing("dxgi import missing"),
             renderer_support: renderer_support(),
@@ -403,6 +417,21 @@ mod tests {
     }
 
     #[test]
+    fn native_video_import_readiness_requires_video_sampling_contract() {
+        let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+            source_video_sampling: None,
+            ..ready_input()
+        });
+
+        assert_eq!(
+            report.status,
+            AppUiNativeVideoImportReadinessStatus::SourceVideoSamplingUnknown
+        );
+        assert!(!report.zero_copy_ready);
+        assert!(report.reason.contains("video sampling"));
+    }
+
+    #[test]
     fn native_video_import_readiness_rejects_rgba8_working_texture() {
         let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
             working_texture_format: GpuColorFrameTextureFormat::Rgba8Unorm,
@@ -462,6 +491,7 @@ mod tests {
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             source_texture_format: None,
+            source_video_sampling: None,
             working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             platform_probe: NativeVideoTextureImportProbeResult::unsupported("not probed"),
             renderer_support: GpuNativeDecodedFrameImportSupport::unavailable(),
@@ -473,6 +503,7 @@ mod tests {
             decoder_residency: DecodedFrameResidency::GpuTexture,
             decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
             source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
+            source_video_sampling: Some(native_video_sampling()),
             working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             platform_probe: NativeVideoTextureImportProbeResult::found(
                 vec![NativeVideoTextureHandleKind::D3D11Texture2D],
@@ -487,6 +518,15 @@ mod tests {
         GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        )
+    }
+
+    fn native_video_sampling() -> GpuNativeDecodedFrameVideoSampling {
+        GpuNativeDecodedFrameVideoSampling::from_source_color_space(
+            mondrian_core::ColorSpace::Rec709,
+            GpuVideoRange::Limited,
+            8,
+            GpuVideoChromaLocation::Left,
         )
     }
 }

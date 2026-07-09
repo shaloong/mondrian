@@ -52,7 +52,7 @@ pub enum DecodedVideoSurfaceFormat {
     Unknown,
     /// 8-bit NV12 two-plane YUV 4:2:0 surface.
     Nv12,
-    /// 10/12-bit P010 two-plane YUV 4:2:0 surface.
+    /// 10-bit P010 two-plane YUV 4:2:0 surface.
     P010,
     /// Planar 8-bit YUV 4:2:0.
     Yuv420p,

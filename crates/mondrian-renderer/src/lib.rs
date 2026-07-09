@@ -38,7 +38,8 @@ pub use color_frame::{
     GpuNativeDecodedFrameImportExecution, GpuNativeDecodedFrameImportPlan,
     GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSource,
     GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameSourceDescriptor,
-    GpuNativeDecodedFrameTextureFormat, LinearFloatSource,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
+    GpuVideoRange, LinearFloatSource,
 };
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,

@@ -54,11 +54,20 @@ into renderer resources.
 Native decoded surfaces are not modeled as `GpuColorFrameHandle` values because
 they may be multi-plane YCbCr surfaces such as NV12 or P010. The renderer import
 contract records the decoder handle family, source texture format, source color
-space, target working color space, and required float working texture format.
-When a concrete backend reports readiness and support for that handle/format,
-the plan allocates a renderer-owned linear `Working` frame handle; the imported
-decoder surface remains a backend object consumed by the native sampling/input
-transform pass.
+space, target working color space, required float working texture format, and a
+`GpuNativeDecodedFrameVideoSampling` contract. That sampling contract is the
+single place where the renderer learns limited/full range, YCbCr matrix,
+transfer characteristic, effective bit depth, and chroma siting. When a
+concrete backend reports readiness and support for that handle/format, the plan
+allocates a renderer-owned linear `Working` frame handle; the imported decoder
+surface remains a backend object consumed by the native sampling/input transform
+pass.
+NV12 must validate as 8-bit YCbCr and P010 must validate as 10-bit YCbCr.
+Future 12/16-bit paths must add an explicit renderer format such as P016; they
+must not reinterpret P010. RGB/BGRA native surfaces must validate with an RGB
+matrix. YCbCr surfaces must fail closed when matrix or chroma siting is
+unspecified, because silent platform defaults are not acceptable for HDR/PQ/HLG
+playback.
 
 The default support contract is fail-closed. Until D3D12, D3D11/DXGI,
 CVPixelBuffer / IOSurface, DMABUF/VA-API, or CUDA import is actually connected

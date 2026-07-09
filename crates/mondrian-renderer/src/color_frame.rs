@@ -1,4 +1,6 @@
-use mondrian_core::{types::ColorSpace, RgbaF32Frame};
+use mondrian_core::{
+    types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, RgbaF32Frame,
+};
 use mondrian_media::DecodedGpuFrameHandleKind;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -586,7 +588,7 @@ pub enum GpuColorFrameUploadError {
 pub enum GpuNativeDecodedFrameTextureFormat {
     /// 8-bit NV12 two-plane YCbCr surface.
     Nv12,
-    /// 10/12-bit P010 two-plane YCbCr surface.
+    /// 10-bit P010 two-plane YCbCr surface.
     P010,
     /// Single-plane 8-bit normalized RGBA surface.
     Rgba8Unorm,
@@ -603,6 +605,149 @@ impl GpuNativeDecodedFrameTextureFormat {
             Self::Rgba8Unorm => "Rgba8Unorm",
             Self::Bgra8Unorm => "Bgra8Unorm",
         }
+    }
+}
+
+/// Encoded video quantization range carried by a native decoder surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuVideoRange {
+    /// Studio/legal range YCbCr or RGB values.
+    Limited,
+    /// Full-range YCbCr or RGB values.
+    Full,
+}
+
+/// Chroma siting used by a subsampled native decoder surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuVideoChromaLocation {
+    /// Chroma location was not signaled. Native import must fail closed.
+    Unspecified,
+    /// MPEG-2 / H.264 / HEVC left chroma siting.
+    Left,
+    /// Centered chroma siting.
+    Center,
+    /// Top-left chroma siting.
+    TopLeft,
+}
+
+/// GPU shader sampling contract for a native decoded video surface.
+///
+/// Platform adapters import OS decoder surfaces, but the renderer owns the
+/// shader-visible interpretation: range expansion, YCbCr matrix conversion,
+/// transfer semantics, chroma siting, and effective bit depth. Keeping this in
+/// the renderer contract prevents D3D/VideoToolbox/VA-API adapters from baking
+/// in divergent color assumptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuNativeDecodedFrameVideoSampling {
+    /// Encoded quantization range.
+    pub range: GpuVideoRange,
+    /// Matrix used to convert sampled YCbCr into encoded RGB.
+    pub matrix: ColorMatrixCoefficients,
+    /// Transfer characteristic represented by the encoded RGB signal before
+    /// OCIO input conversion.
+    pub transfer: ColorTransferCharacteristic,
+    /// Effective coded bit depth. NV12 must be 8; P010 must be 10.
+    pub bit_depth: u8,
+    /// Chroma sample location for subsampled YCbCr surfaces.
+    pub chroma_location: GpuVideoChromaLocation,
+}
+
+impl GpuNativeDecodedFrameVideoSampling {
+    /// Build a sampling contract from the source color space and explicit video
+    /// container metadata.
+    pub fn from_source_color_space(
+        source_color_space: ColorSpace,
+        range: GpuVideoRange,
+        bit_depth: u8,
+        chroma_location: GpuVideoChromaLocation,
+    ) -> Self {
+        let encoding = source_color_space.encoding();
+        Self {
+            range,
+            matrix: encoding.matrix,
+            transfer: encoding.transfer,
+            bit_depth,
+            chroma_location,
+        }
+    }
+
+    fn validate_for(
+        self,
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    ) -> Result<(), GpuNativeDecodedFrameImportPlanError> {
+        match source_texture_format {
+            GpuNativeDecodedFrameTextureFormat::Nv12 => {
+                self.validate_ycbcr(source_texture_format, 8)
+            }
+            GpuNativeDecodedFrameTextureFormat::P010 => {
+                self.validate_ycbcr(source_texture_format, 10)
+            }
+            GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
+            | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => {
+                if self.bit_depth != 8 {
+                    return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                        source_texture_format,
+                        reason: format!(
+                            "{} requires 8-bit sampling metadata, got {}",
+                            source_texture_format.as_str(),
+                            self.bit_depth
+                        ),
+                    });
+                }
+                if self.matrix != ColorMatrixCoefficients::Rgb {
+                    return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                        source_texture_format,
+                        reason: format!(
+                            "{} is an RGB surface and requires an RGB matrix, got {:?}",
+                            source_texture_format.as_str(),
+                            self.matrix
+                        ),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn validate_ycbcr(
+        self,
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+        expected_bit_depth: u8,
+    ) -> Result<(), GpuNativeDecodedFrameImportPlanError> {
+        if self.bit_depth != expected_bit_depth {
+            return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                source_texture_format,
+                reason: format!(
+                    "{} requires {}-bit sampling metadata, got {}",
+                    source_texture_format.as_str(),
+                    expected_bit_depth,
+                    self.bit_depth
+                ),
+            });
+        }
+        if matches!(
+            self.matrix,
+            ColorMatrixCoefficients::Rgb | ColorMatrixCoefficients::Unspecified
+        ) {
+            return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                source_texture_format,
+                reason: format!(
+                    "{} requires a specified YCbCr matrix, got {:?}",
+                    source_texture_format.as_str(),
+                    self.matrix
+                ),
+            });
+        }
+        if self.chroma_location == GpuVideoChromaLocation::Unspecified {
+            return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                source_texture_format,
+                reason: format!(
+                    "{} requires explicit chroma location metadata",
+                    source_texture_format.as_str()
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -707,6 +852,9 @@ pub struct GpuNativeDecodedFrameImportContract {
     pub handle_kind: DecodedGpuFrameHandleKind,
     /// Decoder source texture layout.
     pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    /// Shader-visible sampling contract for converting the decoded source
+    /// surface into encoded RGB before OCIO input conversion.
+    pub video_sampling: GpuNativeDecodedFrameVideoSampling,
     /// Renderer-owned working texture format to produce.
     pub working_texture_format: GpuColorFrameTextureFormat,
     /// Human-readable label for diagnostics/profiling.
@@ -727,6 +875,8 @@ pub struct GpuNativeDecodedFrameImportPlan {
     pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
     /// Source color space represented by the decoder surface.
     pub source_color_space: ColorSpace,
+    /// Validated source video sampling contract.
+    pub video_sampling: GpuNativeDecodedFrameVideoSampling,
     /// Renderer-owned output working frame.
     pub working_frame: GpuColorFrameHandle,
 }
@@ -762,6 +912,7 @@ impl GpuNativeDecodedFrameImportPlan {
                 },
             );
         }
+        contract.video_sampling.validate_for(contract.source_texture_format)?;
         if !matches!(
             contract.working_texture_format,
             GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
@@ -793,6 +944,7 @@ impl GpuNativeDecodedFrameImportPlan {
             handle_kind: contract.handle_kind,
             source_texture_format: contract.source_texture_format,
             source_color_space: contract.source_color_space,
+            video_sampling: contract.video_sampling,
             working_frame,
         })
     }
@@ -829,6 +981,14 @@ pub enum GpuNativeDecodedFrameImportPlanError {
     UnsupportedWorkingTextureFormat {
         /// Unsupported working texture format.
         working_texture_format: GpuColorFrameTextureFormat,
+    },
+    /// The video sampling metadata cannot be used for this decoded surface.
+    #[error("invalid native decoded frame video sampling contract for {source_texture_format:?}: {reason}")]
+    InvalidVideoSampling {
+        /// Decoded source texture format being sampled.
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+        /// Stable validation reason.
+        reason: String,
     },
     /// The renderer-owned working frame handle could not be built.
     #[error("failed to create native decoded frame working handle: {0}")]
@@ -1725,6 +1885,16 @@ mod tests {
             GpuNativeDecodedFrameTextureFormat::Nv12
         );
         assert_eq!(plan.source_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(
+            plan.video_sampling,
+            GpuNativeDecodedFrameVideoSampling {
+                range: GpuVideoRange::Limited,
+                matrix: ColorMatrixCoefficients::Bt2020NonConstant,
+                transfer: ColorTransferCharacteristic::Pq,
+                bit_depth: 8,
+                chroma_location: GpuVideoChromaLocation::Left,
+            }
+        );
         assert_eq!(plan.working_frame.id().raw(), 500);
         assert_eq!(
             plan.working_frame.descriptor(),
@@ -1742,6 +1912,78 @@ mod tests {
             GpuColorFrameTextureFormat::Rgba16Float
         );
         assert_eq!(ids.next_raw(), 501);
+    }
+
+    #[test]
+    fn native_decoded_frame_import_rejects_p010_with_wrong_bit_depth() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::P010],
+        );
+        let mut contract = native_import_contract();
+        contract.source_texture_format = GpuNativeDecodedFrameTextureFormat::P010;
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect_err("P010 must not inherit NV12 8-bit sampling metadata");
+
+        match err {
+            GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                source_texture_format,
+                reason,
+            } => {
+                assert_eq!(
+                    source_texture_format,
+                    GpuNativeDecodedFrameTextureFormat::P010
+                );
+                assert!(reason.contains("10-bit"));
+                assert!(reason.contains("8"));
+            }
+            other => panic!("expected invalid video sampling, got {other:?}"),
+        }
+        assert_eq!(ids.next_raw(), 500);
+    }
+
+    #[test]
+    fn native_decoded_frame_import_rejects_ycbcr_without_chroma_location() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        );
+        let mut contract = native_import_contract();
+        contract.video_sampling.chroma_location = GpuVideoChromaLocation::Unspecified;
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect_err("native YCbCr sampling must fail closed without chroma siting");
+
+        match err {
+            GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling { reason, .. } => {
+                assert!(reason.contains("chroma location"));
+            }
+            other => panic!("expected invalid video sampling, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_decoded_frame_import_rejects_rgb_surface_with_ycbcr_matrix() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Rgba8Unorm],
+        );
+        let mut contract = native_import_contract();
+        contract.source_texture_format = GpuNativeDecodedFrameTextureFormat::Rgba8Unorm;
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect_err("RGB native surfaces must not use a YCbCr matrix");
+
+        match err {
+            GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling { reason, .. } => {
+                assert!(reason.contains("RGB matrix"));
+            }
+            other => panic!("expected invalid video sampling, got {other:?}"),
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2344,6 +2586,12 @@ mod tests {
             working_color_space: ColorSpace::Rec2020,
             handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
             source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,
+            video_sampling: GpuNativeDecodedFrameVideoSampling::from_source_color_space(
+                ColorSpace::Rec2100Pq,
+                GpuVideoRange::Limited,
+                8,
+                GpuVideoChromaLocation::Left,
+            ),
             working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             label: "native-decoded-working".to_owned(),
         }

@@ -235,18 +235,23 @@ texture/hardware frame instead of CPU RGBA bytes.
 Native hardware-decoded frames must enter through the separate renderer-owned
 `GpuNativeDecodedFrameImportPlan` contract. That contract does not model the
 decoder surface itself as a color-frame handle; it records the decoder handle
-family and source texture format, validates renderer backend support, and
-produces only the post-sampling/post-input-transform linear working
-`GpuColorFrameHandle`. This keeps media residency reporting, OS texture import
-probing, and renderer graph resource ownership decoupled.
+family, source texture format, and shader-visible video sampling contract
+before validating renderer backend support. The sampling contract includes
+range, YCbCr matrix, transfer characteristic, effective bit depth, and chroma
+siting. Backend adapters must not bake in their own BT.709/BT.2020,
+limited/full, PQ/HLG, or chroma-location guesses. A valid import produces only
+the post-sampling/post-input-transform linear working `GpuColorFrameHandle`.
+This keeps media residency reporting, OS texture import probing, and renderer
+graph resource ownership decoupled.
 The renderer import helper must also validate the incoming native payload before
 backend execution. `GpuNativeDecodedFrameImportSource` exposes a
 `GpuNativeDecodedFrameSourceDescriptor` (extent, decoder handle family, and
 source texture format), and `execute_native_decoded_frame_import(...)` rejects a
 payload whose descriptor does not match the import contract. Backend support
-validation and output working-resource validation are not enough: a renderer
-backend must never be asked to import a D3D11/NV12 contract while receiving a
-different native surface.
+validation, video sampling validation, and output working-resource validation
+are all required: a renderer backend must never be asked to import a
+D3D11/NV12 contract while receiving a different native surface, and it must not
+sample a YCbCr surface without explicit range/matrix/bit-depth/chroma metadata.
 The app viewer path now carries each decoded media layer's `CpuEncodedColorFrame`
 plus `RenderInputTransform` alongside its CPU working-frame fallback. During
 window recording it first tries `record_wgpu_input_stage_owned_backend(...)`

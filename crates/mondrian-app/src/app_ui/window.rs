@@ -3459,6 +3459,7 @@ fn preview_gpu_composite_native_video_import_readiness(
             decoder_residency: facts.decoder_residency,
             decoder_handle_kind: facts.decoder_handle_kind,
             source_texture_format: facts.source_texture_format,
+            source_video_sampling: None,
             working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             platform_probe: SystemPlatformService.native_video_texture_import(),
             renderer_support,

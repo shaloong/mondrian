@@ -255,6 +255,10 @@ generated clips. The ignored
 4K HEVC Main10, 4K H.264, HDR PQ/HLG, and Long-GOP camera samples through the
 same playback decode/render/color report contract. A sustained playback
 pressure root cause is a playback smoke failure, not merely advisory evidence.
+The external real-media variant also emits `real_media_gates` and fails on
+`PlaybackCursor` decode p95, queue-wait p95, or visible-frame-ratio regression;
+those gates must remain separate from broad timeout windows so slow-but-eventual
+4K playback is not mistaken for production readiness.
 When background preview completion changes the viewer waiting state, the app
 host may perform one preview-aware model refresh for the completed work, but
 the derived playback-buffering flag must be propagated with a transport/status
@@ -684,6 +688,15 @@ or renderer.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
 reinterpret a native decoder surface as RGBA or silently force a CPU transfer.
+When native payloads reach the renderer import contract, renderer-side video
+sampling metadata is mandatory. `Nv12` is 8-bit YCbCr and `P010` is 10-bit
+YCbCr; 12/16-bit hardware surfaces require a distinct future format such as
+P016 rather than overloading P010. The app/readiness layer must pass explicit
+limited/full range, YCbCr matrix, transfer characteristic, and chroma-location
+facts resolved from media metadata / user interpretation. Platform adapters for
+D3D12/D3D11, VideoToolbox/IOSurface, and VA-API/DMABUF must import handles
+only; they must not silently decide Rec.709 vs Rec.2020, SDR vs PQ/HLG, or
+left vs center chroma siting.
 Both payload kinds carry `PreviewDecodeDiagnostics`: concrete path
 (`InProcessFfmpegCpuRgba`, `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`),
 elapsed microseconds, cache-hit status, requested access mode, external-process
