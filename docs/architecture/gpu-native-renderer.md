@@ -117,6 +117,14 @@ frame. `AppUiFrameRenderer` derives the fail-closed support label from the
 actual `wgpu::AdapterInfo` so viewer telemetry can distinguish, for example,
 "Windows D3D11 platform probe succeeded" from "wgpu Dx12 renderer has no D3D11
 shared texture import bridge connected".
+Concrete import execution belongs behind
+`GpuNativeDecodedFrameImportBackend`. The shared
+`execute_native_decoded_frame_import(...)` helper owns support validation,
+working-frame plan creation, backend invocation, and returned-resource contract
+verification. Platform/window/app code must not fabricate
+`GpuColorFrameResource` entries directly from decoder handles; a real D3D11,
+VideoToolbox, VA-API, or CUDA adapter must return the exact planned float
+working frame or fail with a structured backend error.
 
 ## Effect Integration
 

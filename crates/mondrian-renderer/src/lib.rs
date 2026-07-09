@@ -26,15 +26,18 @@ pub mod timeline_composite;
 pub mod timeline_render_plan;
 
 pub use color_frame::{
-    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    CpuEncodedColorFrame, GpuColorFrameAllocationPlan, GpuColorFrameContract, GpuColorFrameHandle,
+    execute_native_decoded_frame_import, ColorFrameDescriptor, ColorFrameDomain,
+    ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
+    GpuColorFrameAllocationPlan, GpuColorFrameContract, GpuColorFrameHandle,
     GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadback,
     GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportContract,
-    GpuNativeDecodedFrameImportPlan, GpuNativeDecodedFrameImportPlanError,
-    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat, LinearFloatSource,
+    GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportBackend,
+    GpuNativeDecodedFrameImportContract, GpuNativeDecodedFrameImportError,
+    GpuNativeDecodedFrameImportExecution, GpuNativeDecodedFrameImportPlan,
+    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameTextureFormat, LinearFloatSource,
 };
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,

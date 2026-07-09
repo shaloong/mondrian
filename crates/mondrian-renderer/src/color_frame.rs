@@ -835,6 +835,82 @@ pub enum GpuNativeDecodedFrameImportPlanError {
     WorkingFrameHandle(GpuColorFrameHandleError),
 }
 
+/// Imported native decoded-frame output produced by a renderer backend.
+#[derive(Debug)]
+pub struct GpuNativeDecodedFrameImportExecution<R> {
+    /// Validated import plan used for this execution.
+    pub plan: GpuNativeDecodedFrameImportPlan,
+    /// Renderer-owned resource containing the linear working frame.
+    pub resource: GpuColorFrameResource<R>,
+}
+
+/// Backend hook that imports one native decoded frame into a renderer resource.
+///
+/// Platform-specific implementations own the concrete native-frame payload and
+/// backend resource type. The renderer-owned helper validates support,
+/// constructs the working-frame plan, asks the backend to import the native
+/// surface, then verifies the returned resource matches the planned working
+/// frame contract.
+pub trait GpuNativeDecodedFrameImportBackend {
+    /// Native decoded-frame payload consumed by this backend.
+    type NativeFrame;
+    /// Concrete renderer resource produced by this backend.
+    type Resource;
+
+    /// Advertised native decoded-frame import support.
+    fn support(&self) -> &GpuNativeDecodedFrameImportSupport;
+
+    /// Import the native decoded frame according to the validated plan.
+    fn import_native_decoded_frame(
+        &mut self,
+        plan: &GpuNativeDecodedFrameImportPlan,
+        native_frame: &Self::NativeFrame,
+    ) -> Result<GpuColorFrameResource<Self::Resource>, GpuNativeDecodedFrameImportError>;
+}
+
+/// Execute a native decoded-frame import through a renderer backend.
+pub fn execute_native_decoded_frame_import<B>(
+    backend: &mut B,
+    ids: &mut GpuColorFrameIdAllocator,
+    contract: GpuNativeDecodedFrameImportContract,
+    native_frame: &B::NativeFrame,
+) -> Result<GpuNativeDecodedFrameImportExecution<B::Resource>, GpuNativeDecodedFrameImportError>
+where
+    B: GpuNativeDecodedFrameImportBackend,
+{
+    let plan = GpuNativeDecodedFrameImportPlan::from_contract(ids, contract, backend.support())?;
+    let resource = backend.import_native_decoded_frame(&plan, native_frame)?;
+    if resource.handle().contract() != plan.working_frame.contract() {
+        return Err(GpuNativeDecodedFrameImportError::ResourceContractMismatch {
+            expected: plan.working_frame.contract(),
+            actual: resource.handle().contract(),
+        });
+    }
+    Ok(GpuNativeDecodedFrameImportExecution { plan, resource })
+}
+
+/// Error returned while executing native decoded-frame import.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum GpuNativeDecodedFrameImportError {
+    /// Planning failed before backend execution.
+    #[error(transparent)]
+    Plan(#[from] GpuNativeDecodedFrameImportPlanError),
+    /// Backend rejected the native decoded frame.
+    #[error("native decoded frame import backend rejected the frame: {reason}")]
+    BackendRejected {
+        /// Stable backend rejection reason.
+        reason: String,
+    },
+    /// Backend produced a resource that does not match the validated plan.
+    #[error("native decoded frame import backend returned mismatched working resource")]
+    ResourceContractMismatch {
+        /// Planned working-frame contract.
+        expected: GpuColorFrameContract,
+        /// Actual returned resource contract.
+        actual: GpuColorFrameContract,
+    },
+}
+
 /// GPU-to-CPU readback plan for one encoded color frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuColorFrameReadbackPlan {
@@ -1618,6 +1694,135 @@ mod tests {
             GpuColorFrameTextureFormat::Rgba16Float
         );
         assert_eq!(ids.next_raw(), 501);
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FakeNativeDecodedFrame;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FakeImportedResource;
+
+    struct FakeNativeImportBackend {
+        support: GpuNativeDecodedFrameImportSupport,
+        return_mismatched_resource: bool,
+    }
+
+    impl FakeNativeImportBackend {
+        fn ready() -> Self {
+            Self {
+                support: GpuNativeDecodedFrameImportSupport::ready(
+                    vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+                    vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+                ),
+                return_mismatched_resource: false,
+            }
+        }
+    }
+
+    impl GpuNativeDecodedFrameImportBackend for FakeNativeImportBackend {
+        type NativeFrame = FakeNativeDecodedFrame;
+        type Resource = FakeImportedResource;
+
+        fn support(&self) -> &GpuNativeDecodedFrameImportSupport {
+            &self.support
+        }
+
+        fn import_native_decoded_frame(
+            &mut self,
+            plan: &GpuNativeDecodedFrameImportPlan,
+            _native_frame: &Self::NativeFrame,
+        ) -> Result<GpuColorFrameResource<Self::Resource>, GpuNativeDecodedFrameImportError>
+        {
+            let handle = if self.return_mismatched_resource {
+                gpu_handle(
+                    999,
+                    ColorFrameDescriptor {
+                        width: 1280,
+                        height: 720,
+                        ..plan.working_frame.descriptor()
+                    },
+                    plan.working_frame.texture_format(),
+                )
+            } else {
+                plan.working_frame.clone()
+            };
+            Ok(GpuColorFrameResource::new(handle, FakeImportedResource))
+        }
+    }
+
+    #[test]
+    fn native_decoded_frame_import_execution_fails_closed_without_backend_support() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut backend = FakeNativeImportBackend {
+            support: GpuNativeDecodedFrameImportSupport::unavailable(),
+            return_mismatched_resource: false,
+        };
+
+        let err = execute_native_decoded_frame_import(
+            &mut backend,
+            &mut ids,
+            native_import_contract(),
+            &FakeNativeDecodedFrame,
+        )
+        .expect_err("unavailable backend must fail before execution");
+
+        assert_eq!(
+            err,
+            GpuNativeDecodedFrameImportError::Plan(
+                GpuNativeDecodedFrameImportPlanError::RendererBackendUnavailable
+            )
+        );
+        assert_eq!(ids.next_raw(), 500);
+    }
+
+    #[test]
+    fn native_decoded_frame_import_execution_returns_validated_working_resource() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut backend = FakeNativeImportBackend::ready();
+
+        let execution = execute_native_decoded_frame_import(
+            &mut backend,
+            &mut ids,
+            native_import_contract(),
+            &FakeNativeDecodedFrame,
+        )
+        .expect("ready backend can import a native frame");
+
+        assert_eq!(execution.plan.working_frame.id().raw(), 500);
+        assert_eq!(execution.resource.handle(), &execution.plan.working_frame);
+        assert_eq!(execution.resource.resource(), &FakeImportedResource);
+        assert_eq!(ids.next_raw(), 501);
+    }
+
+    #[test]
+    fn native_decoded_frame_import_execution_rejects_mismatched_backend_resource() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut backend = FakeNativeImportBackend::ready();
+        backend.return_mismatched_resource = true;
+
+        let err = execute_native_decoded_frame_import(
+            &mut backend,
+            &mut ids,
+            native_import_contract(),
+            &FakeNativeDecodedFrame,
+        )
+        .expect_err("backend must return the planned working resource");
+
+        match err {
+            GpuNativeDecodedFrameImportError::ResourceContractMismatch { expected, actual } => {
+                assert_eq!(expected.descriptor.width, 3840);
+                assert_eq!(actual.descriptor.width, 1280);
+                assert_eq!(
+                    expected.texture_format,
+                    GpuColorFrameTextureFormat::Rgba16Float
+                );
+                assert_eq!(
+                    actual.texture_format,
+                    GpuColorFrameTextureFormat::Rgba16Float
+                );
+            }
+            other => panic!("expected resource contract mismatch, got {other:?}"),
+        }
     }
 
     #[test]
