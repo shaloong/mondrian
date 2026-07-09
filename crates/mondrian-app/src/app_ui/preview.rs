@@ -2568,6 +2568,8 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub hardware_decode_access_mode_unsupported_frames: u64,
     /// Decode requests blocked at a backend that cannot return native GPU residency.
     pub hardware_decode_backend_unavailable_frames: u64,
+    /// Decode requests whose FFmpeg decoder has no matching hardware config.
+    pub hardware_decode_codec_unsupported_frames: u64,
     /// Decode requests blocked at a CPU RGBA backend boundary.
     pub hardware_decode_backend_boundary_frames: u64,
     /// Decode requests blocked because renderer import is unavailable.
@@ -2742,6 +2744,10 @@ impl AppUiPreviewDecodeAccessModeProfile {
             PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable => {
                 self.hardware_decode_backend_unavailable_frames =
                     self.hardware_decode_backend_unavailable_frames.saturating_add(1);
+            }
+            PreviewHardwareDecodeDecision::CpuRgbaCodecUnsupported => {
+                self.hardware_decode_codec_unsupported_frames =
+                    self.hardware_decode_codec_unsupported_frames.saturating_add(1);
             }
             PreviewHardwareDecodeDecision::CpuRgbaRendererImportUnavailable => {
                 self.hardware_decode_renderer_import_unavailable_frames =
@@ -4211,7 +4217,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_renderer_import_unavailable_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} renderer_import_ready_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_renderer_import_unavailable_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -4250,6 +4256,7 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.hardware_decode_cpu_unavailable_frames,
                 profile.hardware_decode_access_mode_unsupported_frames,
                 profile.hardware_decode_backend_unavailable_frames,
+                profile.hardware_decode_codec_unsupported_frames,
                 profile.hardware_decode_backend_boundary_frames,
                 profile.hardware_decode_renderer_import_unavailable_frames,
                 profile.hardware_decode_gpu_resident_native_frames,
@@ -8466,7 +8473,7 @@ mod tests {
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_media::info::{PixelFormat, VideoCodec};
     use mondrian_media::{
-        DetectedColorInterpretation, MediaInfo, VideoColorDetectionMethod,
+        DetectedColorInterpretation, HwAccelPixelFormat, MediaInfo, VideoColorDetectionMethod,
         VideoColorInterpretationConfidence, VideoColorSpaceSource, VideoStreamInfo,
     };
     use mondrian_renderer::{ColorFrameDomain, RenderColorStageGpuBlockerBreakdown};
@@ -9076,6 +9083,9 @@ mod tests {
                 hardware_decode_candidate_backend: None,
                 hardware_decode_candidate_handle_kind: None,
                 hardware_decode_adapter_available: false,
+                hardware_decode_ffmpeg_device_type_available: false,
+                hardware_decode_ffmpeg_codec_config_available: false,
+                hardware_decode_ffmpeg_hw_pixel_format: None,
                 session_reused: false,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9127,6 +9137,9 @@ mod tests {
                 hardware_decode_candidate_backend: None,
                 hardware_decode_candidate_handle_kind: None,
                 hardware_decode_adapter_available: false,
+                hardware_decode_ffmpeg_device_type_available: false,
+                hardware_decode_ffmpeg_codec_config_available: false,
+                hardware_decode_ffmpeg_hw_pixel_format: None,
                 session_reused: true,
                 forward_reused: false,
                 seek_index_available: false,
@@ -9178,6 +9191,9 @@ mod tests {
                 hardware_decode_candidate_backend: None,
                 hardware_decode_candidate_handle_kind: None,
                 hardware_decode_adapter_available: false,
+                hardware_decode_ffmpeg_device_type_available: false,
+                hardware_decode_ffmpeg_codec_config_available: false,
+                hardware_decode_ffmpeg_hw_pixel_format: None,
                 session_reused: false,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9231,6 +9247,9 @@ mod tests {
                     DecodedGpuFrameHandleKind::D3D11Texture2D,
                 ),
                 hardware_decode_adapter_available: false,
+                hardware_decode_ffmpeg_device_type_available: true,
+                hardware_decode_ffmpeg_codec_config_available: true,
+                hardware_decode_ffmpeg_hw_pixel_format: Some(HwAccelPixelFormat::D3D11),
                 session_reused: true,
                 forward_reused: false,
                 seek_index_available: true,
@@ -9416,6 +9435,7 @@ mod tests {
             playback_profile.hardware_decode_backend_unavailable_frames,
             1
         );
+        assert_eq!(playback_profile.hardware_decode_codec_unsupported_frames, 0);
         assert_eq!(playback_profile.hardware_decode_backend_boundary_frames, 1);
         assert_eq!(
             playback_profile.hardware_decode_gpu_resident_native_frames,
@@ -14124,6 +14144,9 @@ mod tests {
             hardware_decode_candidate_backend: None,
             hardware_decode_candidate_handle_kind: None,
             hardware_decode_adapter_available: false,
+            hardware_decode_ffmpeg_device_type_available: false,
+            hardware_decode_ffmpeg_codec_config_available: false,
+            hardware_decode_ffmpeg_hw_pixel_format: None,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,

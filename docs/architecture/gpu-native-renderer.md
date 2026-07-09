@@ -84,6 +84,10 @@ D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface formats, but a
 candidate is not renderer readiness. The renderer import support value remains
 `GpuNativeDecodedFrameImportSupport::unavailable()` until a concrete backend can
 sample the native surface and produce a renderer-owned float working frame.
+The media layer's FFmpeg hardware codec config probe is also only planning
+evidence. It can prove that the linked FFmpeg decoder advertises a backend
+config for H.264/HEVC/etc., but it does not create an OS device, expose a
+native surface handle, or satisfy renderer import support by itself.
 
 Viewer GPU output telemetry now preserves decoder residency facts through the
 CPU-upload GPU input path. `AppUiGpuPreviewMediaSource` carries

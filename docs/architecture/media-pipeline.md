@@ -535,6 +535,16 @@ exported/imported through the renderer native decoded-frame import contract,
 `zero_copy_active=false`, `DecodedFrameResidency::CpuRgba`, no active GPU
 handle kind, and `renderer_import_ready=false`. Platform preference alone is
 not a valid hardware decode signal.
+For a concrete video stream, media may also run a read-only FFmpeg hardware
+codec config probe with `avcodec_get_hw_config`. That probe records whether the
+linked FFmpeg build lists the candidate hardware device type, whether the
+stream codec has a decoder, whether that decoder advertises a matching hardware
+config, the advertised hardware pixel format, and the setup methods
+(`hw_device_ctx`, `hw_frames_ctx`, `internal`, or `ad_hoc`). This probe must not
+create an `AVHWDeviceContext`, change decoder format negotiation, allocate
+hardware frames, or report active hardware decode. Its purpose is to separate
+"FFmpeg/codec cannot use this backend" from "Mondrian has not connected the
+decoder adapter yet".
 
 Preview path resolution is proxy-aware but does not synchronously generate
 proxy media. `mondrian-media::ProxyGenerator` owns the shared proxy freshness
@@ -609,7 +619,10 @@ path.
 The same diagnostics carry the current hardware decode contract:
 `hardware_decode_request`, `hardware_decode_decision`, `hw_accel_backend`,
 `hardware_decode_candidate_backend`, `hardware_decode_candidate_handle_kind`,
-`hardware_decode_adapter_available`, `hardware_decode_active`,
+`hardware_decode_adapter_available`,
+`hardware_decode_ffmpeg_device_type_available`,
+`hardware_decode_ffmpeg_codec_config_available`,
+`hardware_decode_ffmpeg_hw_pixel_format`, `hardware_decode_active`,
 `zero_copy_active`, `decoded_frame_residency`, `gpu_frame_handle_kind`,
 `renderer_import_ready`, and
 `hardware_decode_blocker`, plus `decoded_surface_format` for the decoder output
@@ -618,10 +631,11 @@ YUV/P010 residency candidates; they are media facts, not renderer import claims.
 These fields are fail-closed; until a real hardware-frame decoder and renderer
 import path are connected they must report CPU RGBA residency with
 `TextureResidencyNotConnected` and a CPU RGBA `PreviewHardwareDecodeDecision`.
-When a platform candidate exists but no Mondrian decoder adapter is connected,
-the decision should be `CpuRgbaBackendUnavailable`; only after an adapter
-produces native GPU residency should later readiness failures move to renderer
-or platform import diagnostics.
+When FFmpeg has no matching codec/backend hardware config, the decision should
+be `CpuRgbaCodecUnsupported`. When FFmpeg advertises the config but no Mondrian
+decoder adapter is connected, the decision should be
+`CpuRgbaBackendUnavailable`; only after an adapter produces native GPU residency
+should later readiness failures move to renderer or platform import diagnostics.
 The app-window GPU preview path must preserve those media facts in its frame
 residency telemetry. Media decode diagnostics feed the
 `AppUiGpuPreviewMediaSource` contract, and window-side native video import

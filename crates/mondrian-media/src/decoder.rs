@@ -4,6 +4,8 @@
 //! `preview.rs` plus the app preview worker. This module intentionally does not
 //! expose a second preview decode pool.
 
+use ffmpeg_next as ffmpeg;
+
 /// GPU hardware acceleration backend family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum HwAccelBackend {
@@ -70,6 +72,108 @@ pub enum DecodedGpuFrameHandleKind {
     VaapiSurface,
     /// CUDA/NVDEC device allocation.
     CudaDeviceMemory,
+}
+
+/// FFmpeg hardware pixel format reported by `avcodec_get_hw_config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HwAccelPixelFormat {
+    /// FFmpeg D3D11 hardware surfaces (`AV_PIX_FMT_D3D11`).
+    D3D11,
+    /// Legacy FFmpeg D3D11VA VLD surfaces.
+    D3D11VA,
+    /// FFmpeg VideoToolbox hardware surfaces.
+    VideoToolbox,
+    /// FFmpeg VA-API hardware surfaces.
+    Vaapi,
+    /// FFmpeg CUDA/NVDEC hardware surfaces.
+    Cuda,
+    /// A hardware config exists, but Mondrian does not classify this pixel format yet.
+    Other(i32),
+}
+
+impl HwAccelPixelFormat {
+    /// Stable hardware pixel-format name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::D3D11 => "D3D11",
+            Self::D3D11VA => "D3D11VA",
+            Self::VideoToolbox => "VideoToolbox",
+            Self::Vaapi => "Vaapi",
+            Self::Cuda => "Cuda",
+            Self::Other(_) => "Other",
+        }
+    }
+
+    fn from_ffmpeg(format: ffmpeg::ffi::AVPixelFormat) -> Self {
+        match format {
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11 => Self::D3D11,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11VA_VLD => Self::D3D11VA,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX => Self::VideoToolbox,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI => Self::Vaapi,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA => Self::Cuda,
+            other => Self::Other(other as i32),
+        }
+    }
+}
+
+/// Setup methods advertised by one FFmpeg hardware codec config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct HwAccelCodecConfigMethods {
+    /// Config can be initialized from an `AVHWDeviceContext`.
+    pub hw_device_ctx: bool,
+    /// Config can be initialized from an `AVHWFramesContext`.
+    pub hw_frames_ctx: bool,
+    /// FFmpeg can initialize this internally.
+    pub internal: bool,
+    /// Config requires an ad-hoc legacy setup path.
+    pub ad_hoc: bool,
+}
+
+impl HwAccelCodecConfigMethods {
+    fn from_bits(bits: i32) -> Self {
+        Self {
+            hw_device_ctx: bits & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0,
+            hw_frames_ctx: bits & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX as i32 != 0,
+            internal: bits & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_INTERNAL as i32 != 0,
+            ad_hoc: bits & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_AD_HOC as i32 != 0,
+        }
+    }
+}
+
+/// Read-only FFmpeg codec/backend hardware decode capability probe.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HwAccelCodecConfigProbe {
+    /// Backend requested for this probe.
+    pub backend: HwAccelBackend,
+    /// Whether this backend maps to a known FFmpeg hardware device type.
+    pub backend_maps_to_ffmpeg_device: bool,
+    /// Whether the linked FFmpeg build lists this hardware device type.
+    pub ffmpeg_device_type_available: bool,
+    /// Whether FFmpeg has a decoder for the requested codec id.
+    pub ffmpeg_decoder_available: bool,
+    /// Whether that decoder advertises a hardware config for this backend.
+    pub ffmpeg_codec_config_available: bool,
+    /// Hardware pixel format advertised by FFmpeg for this config.
+    pub hw_pixel_format: Option<HwAccelPixelFormat>,
+    /// Setup methods advertised by FFmpeg for this config.
+    pub methods: HwAccelCodecConfigMethods,
+    /// Stable diagnostic reason for unavailable or partial support.
+    pub reason: String,
+}
+
+impl HwAccelCodecConfigProbe {
+    fn unavailable(backend: HwAccelBackend, reason: impl Into<String>) -> Self {
+        Self {
+            backend,
+            backend_maps_to_ffmpeg_device: backend.to_ffmpeg_device_type().is_some(),
+            ffmpeg_device_type_available: false,
+            ffmpeg_decoder_available: false,
+            ffmpeg_codec_config_available: false,
+            hw_pixel_format: None,
+            methods: HwAccelCodecConfigMethods::default(),
+            reason: reason.into(),
+        }
+    }
 }
 
 impl DecodedGpuFrameHandleKind {
@@ -146,6 +250,73 @@ impl HwAccelBackend {
         }
     }
 
+    /// Probe whether the linked FFmpeg decoder advertises a hardware config for
+    /// this backend and codec. This is read-only; it does not create a hardware
+    /// device or modify the preview decode session.
+    pub fn probe_ffmpeg_codec_config(self, codec_id: ffmpeg::codec::Id) -> HwAccelCodecConfigProbe {
+        let Some(device_type) = self.to_ffmpeg_device_type() else {
+            return HwAccelCodecConfigProbe::unavailable(
+                self,
+                format!(
+                    "{} does not map to an FFmpeg hardware device",
+                    self.as_str()
+                ),
+            );
+        };
+        let _ = ffmpeg::init();
+        let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
+        let codec = unsafe { ffmpeg::ffi::avcodec_find_decoder(codec_id.into()) };
+        if codec.is_null() {
+            return HwAccelCodecConfigProbe {
+                backend: self,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                ffmpeg_decoder_available: false,
+                ffmpeg_codec_config_available: false,
+                hw_pixel_format: None,
+                methods: HwAccelCodecConfigMethods::default(),
+                reason: format!("FFmpeg decoder for {codec_id:?} is unavailable"),
+            };
+        }
+
+        let mut index = 0;
+        loop {
+            let config = unsafe { ffmpeg::ffi::avcodec_get_hw_config(codec, index) };
+            if config.is_null() {
+                break;
+            }
+            let config = unsafe { &*config };
+            if config.device_type == device_type {
+                return HwAccelCodecConfigProbe {
+                    backend: self,
+                    backend_maps_to_ffmpeg_device: true,
+                    ffmpeg_device_type_available,
+                    ffmpeg_decoder_available: true,
+                    ffmpeg_codec_config_available: true,
+                    hw_pixel_format: Some(HwAccelPixelFormat::from_ffmpeg(config.pix_fmt)),
+                    methods: HwAccelCodecConfigMethods::from_bits(config.methods),
+                    reason: "FFmpeg decoder advertises a hardware config for this backend"
+                        .to_owned(),
+                };
+            }
+            index += 1;
+        }
+
+        HwAccelCodecConfigProbe {
+            backend: self,
+            backend_maps_to_ffmpeg_device: true,
+            ffmpeg_device_type_available,
+            ffmpeg_decoder_available: true,
+            ffmpeg_codec_config_available: false,
+            hw_pixel_format: None,
+            methods: HwAccelCodecConfigMethods::default(),
+            reason: format!(
+                "FFmpeg decoder for {codec_id:?} does not advertise {} hardware config",
+                self.as_str()
+            ),
+        }
+    }
+
     /// Preferred hardware backend for the current platform before runtime
     /// adapter/device validation.
     pub fn platform_candidate() -> Option<Self> {
@@ -175,6 +346,16 @@ impl HwAccelBackend {
             Self::D3D11VA => Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
             Self::VideoToolbox => Some(DecodedGpuFrameHandleKind::CVPixelBuffer),
             Self::Vaapi => Some(DecodedGpuFrameHandleKind::VaapiSurface),
+        }
+    }
+
+    fn to_ffmpeg_device_type(self) -> Option<ffmpeg::ffi::AVHWDeviceType> {
+        match self {
+            Self::None => None,
+            Self::Cuda => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA),
+            Self::D3D11VA => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA),
+            Self::VideoToolbox => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX),
+            Self::Vaapi => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI),
         }
     }
 
@@ -248,6 +429,20 @@ fn hardware_decode_unavailable_reason() -> &'static str {
     }
 }
 
+fn ffmpeg_hwdevice_type_available(device_type: ffmpeg::ffi::AVHWDeviceType) -> bool {
+    let mut previous = ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE;
+    loop {
+        let next = unsafe { ffmpeg::ffi::av_hwdevice_iterate_types(previous) };
+        if next == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
+            return false;
+        }
+        if next == device_type {
+            return true;
+        }
+        previous = next;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +502,61 @@ mod tests {
                 DecodedVideoSurfaceFormat::Nv12
             ]
         );
+    }
+
+    #[test]
+    fn hardware_backends_map_to_ffmpeg_device_types() {
+        assert_eq!(HwAccelBackend::None.to_ffmpeg_device_type(), None);
+        assert_eq!(
+            HwAccelBackend::D3D11VA.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA)
+        );
+        assert_eq!(
+            HwAccelBackend::VideoToolbox.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX)
+        );
+        assert_eq!(
+            HwAccelBackend::Vaapi.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI)
+        );
+        assert_eq!(
+            HwAccelBackend::Cuda.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA)
+        );
+    }
+
+    #[test]
+    fn hw_accel_pixel_format_names_are_stable() {
+        assert_eq!(HwAccelPixelFormat::D3D11.as_str(), "D3D11");
+        assert_eq!(HwAccelPixelFormat::D3D11VA.as_str(), "D3D11VA");
+        assert_eq!(HwAccelPixelFormat::VideoToolbox.as_str(), "VideoToolbox");
+        assert_eq!(HwAccelPixelFormat::Vaapi.as_str(), "Vaapi");
+        assert_eq!(HwAccelPixelFormat::Cuda.as_str(), "Cuda");
+        assert_eq!(HwAccelPixelFormat::Other(123).as_str(), "Other");
+    }
+
+    #[test]
+    fn ffmpeg_hw_codec_config_probe_reports_structured_support_for_common_codecs() {
+        let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
+        let h264 = backend.probe_ffmpeg_codec_config(ffmpeg::codec::Id::H264);
+        let h265 = backend.probe_ffmpeg_codec_config(ffmpeg::codec::Id::HEVC);
+
+        assert_eq!(h264.backend, backend);
+        assert!(h264.backend_maps_to_ffmpeg_device);
+        assert!(h264.ffmpeg_decoder_available);
+        assert!(!h264.reason.is_empty());
+        assert_eq!(h265.backend, backend);
+        assert!(h265.ffmpeg_decoder_available);
+        assert!(!h265.reason.is_empty());
+        if h264.ffmpeg_codec_config_available {
+            assert!(h264.hw_pixel_format.is_some());
+            assert!(
+                h264.methods.hw_device_ctx
+                    || h264.methods.hw_frames_ctx
+                    || h264.methods.internal
+                    || h264.methods.ad_hoc
+            );
+        }
     }
 
     #[test]

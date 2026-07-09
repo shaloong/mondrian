@@ -5,7 +5,7 @@
 
 use crate::decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend,
-    HwAccelProbe,
+    HwAccelCodecConfigProbe, HwAccelPixelFormat, HwAccelProbe,
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
@@ -157,6 +157,8 @@ pub enum PreviewHardwareDecodeDecision {
     CpuRgbaAccessModeUnsupported,
     /// Hardware decode was requested but the selected backend cannot provide native residency.
     CpuRgbaBackendUnavailable,
+    /// Hardware decode was requested but FFmpeg has no matching codec/backend config.
+    CpuRgbaCodecUnsupported,
     /// Hardware decode was requested but renderer import for the native surface is unavailable.
     CpuRgbaRendererImportUnavailable,
     /// Hardware decode was requested, but this decode backend only returns CPU RGBA bytes.
@@ -695,6 +697,15 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether Mondrian has a decoder adapter for the candidate backend.
     #[serde(default)]
     pub hardware_decode_adapter_available: bool,
+    /// Whether the linked FFmpeg build lists the requested hardware device type.
+    #[serde(default)]
+    pub hardware_decode_ffmpeg_device_type_available: bool,
+    /// Whether the FFmpeg decoder advertises a hardware config for this backend.
+    #[serde(default)]
+    pub hardware_decode_ffmpeg_codec_config_available: bool,
+    /// Hardware pixel format advertised by FFmpeg for the selected codec/backend.
+    #[serde(default)]
+    pub hardware_decode_ffmpeg_hw_pixel_format: Option<HwAccelPixelFormat>,
     /// Whether an existing access-mode-local decode session was reused.
     #[serde(default)]
     pub session_reused: bool,
@@ -780,6 +791,9 @@ impl PreviewDecodeDiagnostics {
             hardware_decode_candidate_backend: None,
             hardware_decode_candidate_handle_kind: None,
             hardware_decode_adapter_available: false,
+            hardware_decode_ffmpeg_device_type_available: false,
+            hardware_decode_ffmpeg_codec_config_available: false,
+            hardware_decode_ffmpeg_hw_pixel_format: None,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,
@@ -965,6 +979,12 @@ impl RgbaFrame {
     fn with_hardware_decode_plan(mut self, plan: &PreviewHardwareDecodePlan) -> Self {
         self.diagnostics.hardware_decode_request = plan.request;
         self.diagnostics.hardware_decode_decision = plan.decision;
+        self.diagnostics.hardware_decode_ffmpeg_device_type_available =
+            plan.ffmpeg_codec_config.ffmpeg_device_type_available;
+        self.diagnostics.hardware_decode_ffmpeg_codec_config_available =
+            plan.ffmpeg_codec_config.ffmpeg_codec_config_available;
+        self.diagnostics.hardware_decode_ffmpeg_hw_pixel_format =
+            plan.ffmpeg_codec_config.hw_pixel_format;
         self.with_hw_accel_probe(&plan.probe)
     }
 
@@ -1084,6 +1104,7 @@ struct PreviewHardwareDecodePlan {
     request: PreviewHardwareDecodeRequest,
     decision: PreviewHardwareDecodeDecision,
     probe: HwAccelProbe,
+    ffmpeg_codec_config: HwAccelCodecConfigProbe,
 }
 
 impl PreviewHardwareDecodePlan {
@@ -1091,10 +1112,16 @@ impl PreviewHardwareDecodePlan {
         request: PreviewHardwareDecodeRequest,
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
+        codec_id: ffmpeg::codec::Id,
     ) -> Self {
         let probe = HwAccelBackend::probe();
-        let decision = Self::decision_for(request, access_mode, backend, &probe);
-        Self { request, decision, probe }
+        let ffmpeg_codec_config = probe
+            .candidate_backend
+            .unwrap_or(HwAccelBackend::None)
+            .probe_ffmpeg_codec_config(codec_id);
+        let decision =
+            Self::decision_for(request, access_mode, backend, &probe, &ffmpeg_codec_config);
+        Self { request, decision, probe, ffmpeg_codec_config }
     }
 
     fn decision_for(
@@ -1102,6 +1129,7 @@ impl PreviewHardwareDecodePlan {
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
         probe: &HwAccelProbe,
+        ffmpeg_codec_config: &HwAccelCodecConfigProbe,
     ) -> PreviewHardwareDecodeDecision {
         if request == PreviewHardwareDecodeRequest::Auto {
             return PreviewHardwareDecodeDecision::CpuRgbaNotRequested;
@@ -1111,6 +1139,17 @@ impl PreviewHardwareDecodePlan {
         }
         if backend == PreviewDecodeBackend::ExternalFfmpegCpuRgba {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendBoundary;
+        }
+        if probe.candidate_backend.is_none()
+            || !ffmpeg_codec_config.backend_maps_to_ffmpeg_device
+            || !ffmpeg_codec_config.ffmpeg_device_type_available
+        {
+            return PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable;
+        }
+        if !ffmpeg_codec_config.ffmpeg_decoder_available
+            || !ffmpeg_codec_config.ffmpeg_codec_config_available
+        {
+            return PreviewHardwareDecodeDecision::CpuRgbaCodecUnsupported;
         }
         if !probe.decoder_adapter_available {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable;
@@ -1138,6 +1177,7 @@ struct PreviewDecodeSession {
     max_height: Option<u32>,
     backend: PreviewDecodeBackend,
     hardware_decode_request: PreviewHardwareDecodeRequest,
+    codec_id: ffmpeg::codec::Id,
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
     scaler: ffmpeg::software::scaling::Context,
@@ -1514,6 +1554,7 @@ impl PreviewDecodeSession {
                 seek_index,
             )
         };
+        let codec_id = parameters.id();
 
         let mut context =
             ffmpeg::codec::context::Context::from_parameters(parameters).map_err(|e| {
@@ -1535,8 +1576,12 @@ impl PreviewDecodeSession {
         let active_threading = decoder.threading();
         let threading_kind = PreviewDecodeThreadingKind::from_ffmpeg(active_threading.kind);
         let threading_count = active_threading.count;
-        let hardware_decode_plan =
-            PreviewHardwareDecodePlan::resolve(hardware_decode_request, access_mode, backend);
+        let hardware_decode_plan = PreviewHardwareDecodePlan::resolve(
+            hardware_decode_request,
+            access_mode,
+            backend,
+            codec_id,
+        );
         let decoded_surface_format = decoded_surface_format_from_pixel(decoder.format());
 
         let (target_width, target_height) =
@@ -1567,6 +1612,7 @@ impl PreviewDecodeSession {
             max_height,
             backend,
             hardware_decode_request,
+            codec_id,
             input,
             decoder,
             scaler,
@@ -2113,6 +2159,7 @@ fn decode_preview_rgba_frame_outcome(
             hardware_decode_request,
             access_mode,
             PreviewDecodeBackend::ExternalFfmpegCpuRgba,
+            session.codec_id,
         );
 
         if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
@@ -2673,16 +2720,23 @@ mod tests {
             PreviewHardwareDecodeRequest::PreferGpuResident,
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Auto,
+            ffmpeg::codec::Id::H264,
         );
 
         assert_eq!(
             plan.request,
             PreviewHardwareDecodeRequest::PreferGpuResident
         );
-        assert_eq!(
-            plan.decision,
+        let expected_decision = if plan.probe.candidate_backend.is_none()
+            || !plan.ffmpeg_codec_config.ffmpeg_device_type_available
+        {
+            PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable
+        } else if plan.ffmpeg_codec_config.ffmpeg_codec_config_available {
             PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable
-        );
+        } else {
+            PreviewHardwareDecodeDecision::CpuRgbaCodecUnsupported
+        };
+        assert_eq!(plan.decision, expected_decision);
         assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
         assert!(!plan.probe.decoder_adapter_available);
     }
@@ -2693,6 +2747,7 @@ mod tests {
             PreviewHardwareDecodeRequest::PreferGpuResident,
             PreviewDecodeAccessMode::ScrubCursor,
             PreviewDecodeBackend::Auto,
+            ffmpeg::codec::Id::H264,
         );
 
         assert_eq!(
@@ -2707,6 +2762,7 @@ mod tests {
             PreviewHardwareDecodeRequest::PreferGpuResident,
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::ExternalFfmpegCpuRgba,
+            ffmpeg::codec::Id::H264,
         );
 
         assert_eq!(
