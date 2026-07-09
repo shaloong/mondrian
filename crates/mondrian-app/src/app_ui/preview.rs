@@ -1485,6 +1485,10 @@ impl AppUiPreviewService {
                 .get(),
             current_decode_decisions: self.metrics.playback_current_decode_decisions.get(),
             current_drop_late_decisions: self.metrics.playback_current_drop_late_decisions.get(),
+            current_sustained_pressure_skips: self
+                .metrics
+                .playback_current_sustained_pressure_skips
+                .get(),
             current_proxy_or_hardware_recommended_decisions: self
                 .metrics
                 .playback_current_proxy_or_hardware_recommended_decisions
@@ -1558,6 +1562,20 @@ impl AppUiPreviewService {
         {
             bump(&self.metrics.playback_sustained_pressure_events);
         }
+    }
+
+    fn record_playback_current_sustained_pressure_skip(&self) {
+        bump(&self.metrics.playback_current_sustained_pressure_skips);
+        bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
+    }
+
+    fn playback_realtime_work_pending(&self) -> bool {
+        let queue = self.jobs.diagnostics();
+        if queue.queued_current_jobs > 0 || queue.queued_playback_cursor_jobs > 0 {
+            return true;
+        }
+        let activity = self.worker_activity.snapshot();
+        activity.in_flight_current_jobs > 0 || activity.in_flight_playback_cursor_jobs > 0
     }
 
     fn record_playback_current_success(
@@ -1987,6 +2005,8 @@ pub struct AppUiPreviewPlaybackScheduleDiagnostics {
     pub current_decode_decisions: u64,
     /// Current playback frames dropped because their display deadline was missed.
     pub current_drop_late_decisions: u64,
+    /// Current playback frame requests skipped while another realtime decode was already pending.
+    pub current_sustained_pressure_skips: u64,
     /// Current playback frames that should drive proxy or hardware-decode work.
     pub current_proxy_or_hardware_recommended_decisions: u64,
     /// Current playback frames whose native GPU residency path was blocked at renderer import.
@@ -7263,6 +7283,18 @@ impl AppUiPreviewService {
         let generation = self.current_generation.get();
         let is_current_playback = priority == MediaPreviewRequestPriority::Current
             && access_mode == PreviewDecodeAccessMode::PlaybackCursor;
+        if is_current_playback
+            && self.playback_sustained_pressure_active()
+            && self.playback_realtime_work_pending()
+        {
+            self.record_playback_current_sustained_pressure_skip();
+            tracing::trace!(
+                asset_id = %key.asset_id,
+                source_frame = key.source_frame,
+                "viewer preview skipped current playback decode while sustained pressure recovery has realtime work pending"
+            );
+            return false;
+        }
         let should_enqueue_job = match self.scheduler.request(
             key.clone(),
             generation,
@@ -7641,6 +7673,7 @@ struct AppUiPreviewMetrics {
     playback_current_deadline_missing_frame_rate: Cell<u64>,
     playback_current_decode_decisions: Cell<u64>,
     playback_current_drop_late_decisions: Cell<u64>,
+    playback_current_sustained_pressure_skips: Cell<u64>,
     playback_current_proxy_or_hardware_recommended_decisions: Cell<u64>,
     playback_current_native_import_unavailable_decisions: Cell<u64>,
     playback_current_late_streak: Cell<u64>,
@@ -13705,6 +13738,75 @@ mod tests {
             diagnostics.playback_schedule.sustained_pressure_recoveries,
             0
         );
+    }
+
+    #[test]
+    fn playback_pressure_skips_new_current_decode_when_realtime_work_is_pending() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let key = test_media_key(200);
+        assert_eq!(
+            service.jobs.enqueue(MediaPreviewJob {
+                key,
+                source_secs: 1.0,
+                generation: service.current_generation.get(),
+                priority: MediaPreviewRequestPriority::Current,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                enqueued_at: Instant::now(),
+                deadline_at: None,
+            }),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        service.record_playback_current_late_drop(
+            MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD,
+        );
+
+        assert!(!service.request_media_preview(
+            test_media_key(201),
+            1.0,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(33_333),
+            PreviewDecodeAdaptiveHints::default(),
+        ));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.worker_queue.queued_jobs, 1);
+        assert_eq!(
+            diagnostics.playback_schedule.current_sustained_pressure_skips,
+            1
+        );
+        assert_eq!(diagnostics.playback_schedule.current_decode_decisions, 0);
+        assert_eq!(
+            diagnostics.playback_schedule.current_proxy_or_hardware_recommended_decisions,
+            MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD + 1
+        );
+    }
+
+    #[test]
+    fn playback_pressure_allows_recovery_decode_when_no_realtime_work_is_pending() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        service.record_playback_current_late_drop(
+            MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD,
+        );
+
+        assert!(service.request_media_preview(
+            test_media_key(202),
+            1.0,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(33_333),
+            PreviewDecodeAdaptiveHints::default(),
+        ));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(
+            diagnostics.playback_schedule.current_sustained_pressure_skips,
+            0
+        );
+        assert_eq!(diagnostics.playback_schedule.current_decode_decisions, 1);
+        assert_eq!(diagnostics.worker_queue.queued_playback_cursor_jobs, 1);
     }
 
     #[test]

@@ -764,6 +764,13 @@ an access-mode request and a cancellation predicate. Diagnostics must report
 playback-deadline cancellations separately from prefetch-deadline cancellations
 so late visible frames can drive drop/proxy/hardware-decode work instead of
 being hidden as generic obsolete work.
+Repeated playback-current deadline misses put the app scheduler into sustained
+pressure recovery. In that state, a fresh `Current + PlaybackCursor` request
+must not pile onto the decode queue while another current or playback decode is
+already queued or in flight; it is skipped as a clock-driven drop/proxy/hardware
+decision. When no realtime decode work is pending, the scheduler must admit one
+current playback request so the viewer has a chance to recover instead of
+staying permanently stale.
 User transport and close/quit actions are interactive escape paths. When they
 arrive while playback or buffering is active, the app host must cancel obsolete
 preview generations and queued jobs before dispatching the state mutation, and
