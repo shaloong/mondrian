@@ -2849,6 +2849,22 @@ impl AppUiPreviewDecodeAccessModeProfile {
         self.frames.saturating_sub(self.cache_hit_frames)
     }
 
+    fn hardware_decode_requested_frames(self) -> u64 {
+        self.hardware_decode_prefer_hardware_requested_frames
+            .saturating_add(self.hardware_decode_prefer_gpu_requested_frames)
+            .saturating_add(self.hardware_decode_require_gpu_requested_frames)
+    }
+
+    fn hardware_decode_effective_frames(self) -> u64 {
+        self.hardware_decode_cpu_transfer_observed_frames
+            .saturating_add(self.hardware_decode_gpu_resident_native_frames)
+    }
+
+    fn hardware_decode_fallback_not_engaged_frames(self) -> u64 {
+        self.hardware_decode_requested_frames()
+            .saturating_sub(self.hardware_decode_effective_frames())
+    }
+
     fn record(&mut self, diagnostics: PreviewDecodeDiagnostics, queue_wait_us: u64) {
         self.frames = self.frames.saturating_add(1);
         match diagnostics.path {
@@ -3924,6 +3940,16 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         );
         push_decode_warn_max_check(
             &mut checks,
+            AppUiPreviewDecodePerformanceArea::CodecDecode,
+            "preview_decode_playback_hardware_fallback_not_engaged",
+            summary
+                .access_mode_profiles
+                .playback_cursor
+                .hardware_decode_fallback_not_engaged_frames(),
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_native_import_unavailable_playback_frames",
             summary.playback_schedule.current_native_import_unavailable_decisions,
@@ -4667,6 +4693,50 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "diagnose_ffmpeg_hardware_decode_setup",
             "Inspect FFmpeg hardware device setup and decoder-open diagnostics before treating CPU soft decode as the only fallback path.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+    let hardware_fallback_not_engaged =
+        playback_profile.hardware_decode_fallback_not_engaged_frames();
+    if hardware_fallback_not_engaged > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::CodecDecode,
+            "preview_decode_playback_hardware_fallback_not_engaged",
+            format!(
+                "access_mode=PlaybackCursor requested_frames={} effective_frames={} not_engaged_frames={} prefer_hardware_requested_frames={} prefer_gpu_requested_frames={} require_gpu_requested_frames={} cpu_transfer_frames={} cpu_transfer_observed_frames={} gpu_resident_native_frames={} active_frames={} renderer_import_unavailable_frames={} backend_unavailable_frames={} codec_unsupported_frames={} device_context_attempted_frames={} device_context_created_frames={} device_context_unavailable_frames={} setup_failed_frames={} decoder_open_failed_frames={} awaiting_frame_frames={} backend_boundary_frames={} adapter_unavailable_frames={} candidate_d3d12va_frames={} candidate_d3d11va_frames={} candidate_dxva2_frames={} candidate_videotoolbox_frames={} candidate_vaapi_frames={} candidate_vdpau_frames={} candidate_cuda_frames={}",
+                playback_profile.hardware_decode_requested_frames(),
+                playback_profile.hardware_decode_effective_frames(),
+                hardware_fallback_not_engaged,
+                playback_profile.hardware_decode_prefer_hardware_requested_frames,
+                playback_profile.hardware_decode_prefer_gpu_requested_frames,
+                playback_profile.hardware_decode_require_gpu_requested_frames,
+                playback_profile.hardware_decode_cpu_transfer_frames,
+                playback_profile.hardware_decode_cpu_transfer_observed_frames,
+                playback_profile.hardware_decode_gpu_resident_native_frames,
+                playback_profile.hardware_decode_active_frames,
+                playback_profile.hardware_decode_renderer_import_unavailable_frames,
+                playback_profile.hardware_decode_backend_unavailable_frames,
+                playback_profile.hardware_decode_codec_unsupported_frames,
+                playback_profile.hardware_decode_device_context_attempted_frames,
+                playback_profile.hardware_decode_device_context_created_frames,
+                playback_profile.hardware_decode_device_context_unavailable_frames,
+                playback_profile.hardware_decode_cpu_transfer_setup_failed_frames,
+                playback_profile.hardware_decode_cpu_transfer_decoder_open_failed_frames,
+                playback_profile.hardware_decode_cpu_transfer_awaiting_frame_frames,
+                playback_profile.hardware_decode_backend_boundary_frames,
+                playback_profile.hardware_decode_adapter_unavailable_frames,
+                playback_profile.hardware_decode_candidate_d3d12va_frames,
+                playback_profile.hardware_decode_candidate_d3d11va_frames,
+                playback_profile.hardware_decode_candidate_dxva2_frames,
+                playback_profile.hardware_decode_candidate_videotoolbox_frames,
+                playback_profile.hardware_decode_candidate_vaapi_frames,
+                playback_profile.hardware_decode_candidate_vdpau_frames,
+                playback_profile.hardware_decode_candidate_cuda_frames
+            ),
+            "recover_playback_hardware_decode_fallback",
+            "Treat requested-but-unengaged playback hardware decode as a recovery event: fix decoder backend setup or switch to proxy/optimized media instead of continuing slow soft decode.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -10957,6 +11027,97 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "diagnose_ffmpeg_hardware_decode_setup"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_flags_unengaged_playback_hardware_fallback() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 3,
+            decode_playback_cursor_frames: 3,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 3,
+                    hardware_decode_prefer_hardware_requested_frames: 3,
+                    hardware_decode_backend_unavailable_frames: 1,
+                    hardware_decode_codec_unsupported_frames: 1,
+                    hardware_decode_device_context_attempted_frames: 1,
+                    hardware_decode_device_context_unavailable_frames: 1,
+                    hardware_decode_cpu_transfer_setup_failed_frames: 1,
+                    hardware_decode_cpu_transfer_observed_frames: 0,
+                    hardware_decode_gpu_resident_native_frames: 0,
+                    hardware_decode_candidate_d3d12va_frames: 1,
+                    hardware_decode_candidate_d3d11va_frames: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-hw-fallback-not-engaged-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_playback_hardware_fallback_not_engaged"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 3
+                && check.limit == Some(0)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_playback_hardware_fallback_not_engaged"
+                && root.area == AppUiPreviewDecodePerformanceArea::CodecDecode
+                && root.evidence.contains("requested_frames=3")
+                && root.evidence.contains("effective_frames=0")
+                && root.evidence.contains("not_engaged_frames=3")
+                && root.evidence.contains("backend_unavailable_frames=1")
+                && root.evidence.contains("codec_unsupported_frames=1")
+                && root.evidence.contains("device_context_unavailable_frames=1")
+                && root.evidence.contains("candidate_d3d12va_frames=1")
+                && root.evidence.contains("candidate_d3d11va_frames=1")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "recover_playback_hardware_decode_fallback"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_accepts_engaged_playback_hardware_fallback() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 2,
+            decode_playback_cursor_frames: 2,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 2,
+                    hardware_decode_prefer_hardware_requested_frames: 2,
+                    hardware_decode_cpu_transfer_observed_frames: 1,
+                    hardware_decode_gpu_resident_native_frames: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-hw-fallback-engaged-test",
+            50_000,
+        );
+
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_playback_hardware_fallback_not_engaged"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+                && check.observed == 0
+        }));
+        assert!(!report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "preview_decode_playback_hardware_fallback_not_engaged"));
     }
 
     #[test]

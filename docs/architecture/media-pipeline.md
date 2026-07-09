@@ -851,6 +851,14 @@ serialized in preview diagnostics and performance reports as separate renderer,
 platform, and final-admission facts; a known native-import blocker must produce
 a specific gated-admission root cause instead of disappearing as a generic
 media-layer software decode.
+Playback reports must also distinguish hardware-decode intent from effective
+hardware decode. If `PlaybackCursor` requests `PreferHardwareDecode`,
+`PreferGpuResident`, or `RequireGpuResident` but the observed result is neither
+GPU-resident native decode nor an observed FFmpeg hardware CPU-transfer frame,
+the report must surface a `preview_decode_playback_hardware_fallback_not_engaged`
+root cause with backend, codec, device-context, decoder-open, setup, and native
+import evidence. This is a recovery signal for proxy/optimized-media or backend
+repair, not proof that the hardware path is active.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
 through the shared app-layer proxy dispatcher. The request is deduplicated by
