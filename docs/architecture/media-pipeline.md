@@ -784,6 +784,8 @@ proxy/hardware recommendation counter must not be the only signal for recovery
 policy: current playback frames blocked specifically by renderer/native GPU
 import readiness are counted separately so automated fallback can distinguish a
 missing GPU-resident path from deadline pressure or proxy-generation pressure.
+Preview decode performance reports must surface that case with a specific check,
+root-cause evidence, and an action to connect renderer native video import.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
 through the shared app-layer proxy dispatcher. The request is deduplicated by

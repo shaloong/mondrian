@@ -3679,6 +3679,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         push_decode_warn_max_check(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_native_import_unavailable_playback_frames",
+            summary.playback_schedule.current_native_import_unavailable_decisions,
+            0,
+        );
+        push_decode_warn_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_deadline_cancellations",
             summary.canceled_prefetch_deadline_jobs,
             0,
@@ -4516,6 +4523,47 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "recover_playback_scheduler_pressure",
             "Suppress forward prefetch while sustained playback pressure is active, then resume only after a current playback frame succeeds; use proxy or hardware decode when late frames continue.",
+            AppUiPreviewDecodePerformanceSeverity::Warn,
+        );
+    }
+
+    if summary.playback_schedule.current_native_import_unavailable_decisions > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_native_import_unavailable_playback_frames",
+            format!(
+                "current_native_import_unavailable_decisions={} current_proxy_or_hardware_recommended_decisions={} playback_renderer_import_unavailable_frames={} playback_gpu_resident_native_frames={} playback_hardware_cpu_transfer_frames={} playback_zero_copy_active_frames={} playback_gpu_texture_resident_frames={}",
+                summary
+                    .playback_schedule
+                    .current_native_import_unavailable_decisions,
+                summary
+                    .playback_schedule
+                    .current_proxy_or_hardware_recommended_decisions,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_renderer_import_unavailable_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_gpu_resident_native_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .hardware_decode_cpu_transfer_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .zero_copy_active_frames,
+                summary
+                    .access_mode_profiles
+                    .playback_cursor
+                    .gpu_texture_resident_frames
+            ),
+            "enable_renderer_native_video_import",
+            "Connect the renderer native video import path for playback before treating hardware decode as GPU-resident; CPU transfer fallback is not the production playback path.",
             AppUiPreviewDecodePerformanceSeverity::Warn,
         );
     }
@@ -10863,6 +10911,54 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "recover_playback_scheduler_pressure"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_flags_native_import_unavailable_playback_frames() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            decode_playback_cursor_frames: 1,
+            decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+                playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    hardware_decode_prefer_gpu_requested_frames: 1,
+                    hardware_decode_renderer_import_unavailable_frames: 1,
+                    ..AppUiPreviewDecodeAccessModeProfile::default()
+                },
+                ..AppUiPreviewDecodeAccessModeProfiles::default()
+            },
+            playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+                current_native_import_unavailable_decisions: 1,
+                current_proxy_or_hardware_recommended_decisions: 1,
+                ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-native-import-unavailable-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_native_import_unavailable_playback_frames"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && check.observed == 1
+                && check.limit == Some(0)
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_native_import_unavailable_playback_frames"
+                && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+                && root.evidence.contains("current_native_import_unavailable_decisions=1")
+                && root.evidence.contains("playback_renderer_import_unavailable_frames=1")
+                && root.evidence.contains("playback_gpu_resident_native_frames=0")
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "enable_renderer_native_video_import"));
     }
 
     #[test]
