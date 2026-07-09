@@ -920,6 +920,49 @@ pub struct RgbaFrame {
     pub diagnostics: PreviewDecodeDiagnostics,
 }
 
+/// GPU-resident native decoded preview frame.
+///
+/// This is the media-layer payload contract for future hardware decoders. The
+/// concrete native handle stays behind backend-specific adapters; callers must
+/// not reinterpret this as CPU RGBA. Until a platform adapter attaches a real
+/// handle, production decode paths continue to return [`RgbaFrame`].
+#[derive(Debug, Clone)]
+pub struct PreviewNativeDecodedFrame {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Native decoder handle family that owns the frame.
+    pub handle_kind: DecodedGpuFrameHandleKind,
+    /// Decoder output surface format before renderer import.
+    pub surface_format: DecodedVideoSurfaceFormat,
+    /// Decode/cache diagnostics for this frame.
+    pub diagnostics: PreviewDecodeDiagnostics,
+}
+
+impl PreviewNativeDecodedFrame {
+    /// Create a GPU-resident native decoded frame payload.
+    pub fn new(
+        width: u32,
+        height: u32,
+        handle_kind: DecodedGpuFrameHandleKind,
+        surface_format: DecodedVideoSurfaceFormat,
+        mut diagnostics: PreviewDecodeDiagnostics,
+    ) -> Self {
+        diagnostics.cpu_resident = false;
+        diagnostics.decoded_frame_residency = DecodedFrameResidency::GpuTexture;
+        diagnostics.gpu_frame_handle_kind = Some(handle_kind);
+        diagnostics.decoded_surface_format = surface_format;
+        Self {
+            width,
+            height,
+            handle_kind,
+            surface_format,
+            diagnostics,
+        }
+    }
+}
+
 impl RgbaFrame {
     pub(crate) fn new(width: u32, height: u32, data: Vec<u8>, path: PreviewDecodePath) -> Self {
         Self {
@@ -1086,6 +1129,8 @@ pub fn decode_preview_rgba_scaled_cancellable(
 pub enum PreviewDecodeOutcome {
     /// Decode completed with a CPU RGBA preview frame.
     Frame(RgbaFrame),
+    /// Decode completed with a GPU-resident native frame.
+    NativeGpuFrame(PreviewNativeDecodedFrame),
     /// The caller marked this request obsolete before a frame was returned.
     Canceled,
 }
@@ -2538,6 +2583,20 @@ fn decode_preview_rgba_frame_outcome(
                     })
                     .with_elapsed(started_at.elapsed()),
             )),
+            PreviewDecodeOutcome::NativeGpuFrame(mut frame) => {
+                frame.diagnostics = frame
+                    .diagnostics
+                    .with_access_mode(access_mode)
+                    .with_access_policy(PreviewDecodeAccessPolicy::for_access_mode(access_mode))
+                    .with_elapsed(started_at.elapsed());
+                frame.diagnostics.session_reused = current_match;
+                frame.diagnostics.stage_durations.accumulate(PreviewDecodeStageDurations {
+                    session_open_us,
+                    external_process_us,
+                    ..PreviewDecodeStageDurations::default()
+                });
+                Ok(PreviewDecodeOutcome::NativeGpuFrame(frame))
+            }
             PreviewDecodeOutcome::Canceled => {
                 if !access_mode.preserves_session_on_cancel() {
                     *slot = None;
@@ -3047,10 +3106,11 @@ mod tests {
         preview_cache_get, preview_cache_put_with_fingerprint,
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
         preview_seek_index_cache_put, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
-        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
-        PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-        PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
-        PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
+        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
+        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRgbaRequest,
+        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+        PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeDecision,
+        PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
         PreviewPlaybackRing, PreviewScrubAdaptiveClass, PreviewSeekIndex,
         PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution, RgbaFrame,
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
@@ -3061,7 +3121,9 @@ mod tests {
         PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
     };
-    use crate::decoder::{DecodedFrameResidency, DecodedVideoSurfaceFormat, HwAccelBackend};
+    use crate::decoder::{
+        DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend,
+    };
     use ffmpeg_next as ffmpeg;
     use serde::Serialize;
     use std::path::{Path, PathBuf};
@@ -3882,6 +3944,35 @@ mod tests {
     }
 
     #[test]
+    fn native_decoded_frame_payload_forces_gpu_residency_diagnostics() {
+        let frame = PreviewNativeDecodedFrame::new(
+            1920,
+            1080,
+            DecodedGpuFrameHandleKind::D3D11Texture2D,
+            DecodedVideoSurfaceFormat::P010,
+            PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
+        );
+
+        assert_eq!(frame.width, 1920);
+        assert_eq!(frame.height, 1080);
+        assert_eq!(frame.handle_kind, DecodedGpuFrameHandleKind::D3D11Texture2D);
+        assert_eq!(frame.surface_format, DecodedVideoSurfaceFormat::P010);
+        assert!(!frame.diagnostics.cpu_resident);
+        assert_eq!(
+            frame.diagnostics.decoded_frame_residency,
+            DecodedFrameResidency::GpuTexture
+        );
+        assert_eq!(
+            frame.diagnostics.gpu_frame_handle_kind,
+            Some(DecodedGpuFrameHandleKind::D3D11Texture2D)
+        );
+        assert_eq!(
+            frame.diagnostics.decoded_surface_format,
+            DecodedVideoSurfaceFormat::P010
+        );
+    }
+
+    #[test]
     fn cancellable_preview_decode_returns_canceled_before_opening_missing_file() {
         let path = PathBuf::from("E:/definitely-missing/canceled-preview.mov");
         let request = PreviewDecodeRgbaRequest::new(
@@ -4005,6 +4096,9 @@ mod tests {
             PreviewDecodeOutcome::Canceled => {
                 panic!("still-frame perf decode canceled")
             }
+            PreviewDecodeOutcome::NativeGpuFrame(_) => {
+                panic!("still-frame perf decode requires CPU RGBA output")
+            }
         };
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let report = PreviewDecodePerfReport {
@@ -4093,6 +4187,9 @@ mod tests {
                 PreviewDecodeOutcome::Frame(frame) => frame,
                 PreviewDecodeOutcome::Canceled => {
                     panic!("playback sequence perf decode canceled")
+                }
+                PreviewDecodeOutcome::NativeGpuFrame(_) => {
+                    panic!("playback sequence perf decode requires CPU RGBA output")
                 }
             };
             let elapsed_us = duration_us(frame_started.elapsed());

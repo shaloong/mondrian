@@ -245,6 +245,10 @@ window recording it first tries `record_wgpu_input_stage_owned_backend(...)`
 for each eligible media layer, feeds successful outputs to
 `GpuFrameCompositor` as GPU-resident working frames, and records a structured
 CPU-working-upload fallback only for layers whose GPU input stage fails.
+This CPU source contract applies only to `PreviewDecodeOutcome::Frame(RgbaFrame)`.
+`PreviewDecodeOutcome::NativeGpuFrame` must flow through the renderer native
+decoded-frame import contract instead of being wrapped in `CpuEncodedColorFrame`
+or silently transferred to CPU.
 `CpuEncodedColorFrame` stores decoded RGBA8 payloads in shared immutable
 storage so preview media-cache hits, GPU source contracts, and queued preview
 frame clones do not deep-copy a full source frame. GPU upload plans keep shared

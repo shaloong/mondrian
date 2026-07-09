@@ -241,6 +241,17 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
             image: None,
             error: Some("thumbnail still-frame decode canceled unexpectedly".to_owned()),
         },
+        Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => ThumbnailResult {
+            asset_id: job.asset_id,
+            path: job.path,
+            fingerprint: job.fingerprint,
+            image: None,
+            error: Some(format!(
+                "thumbnail decode requires CPU RGBA, got native GPU {} {:?}",
+                frame.handle_kind.as_str(),
+                frame.surface_format
+            )),
+        },
         Err(err) => ThumbnailResult {
             asset_id: job.asset_id,
             path: job.path,

@@ -1454,6 +1454,7 @@ impl AppUiPreviewService {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
                 bump(&self.metrics.decode_budget_exhausted_failures);
             }
+            MediaPreviewFailureReason::NativeGpuImportUnavailable => {}
             MediaPreviewFailureReason::DecodeError => {}
         }
         let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
@@ -3029,6 +3030,7 @@ impl AppUiPreviewDecodeAccessModeProfile {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
                 self.budget_exhausted_failures = self.budget_exhausted_failures.saturating_add(1);
             }
+            MediaPreviewFailureReason::NativeGpuImportUnavailable => {}
             MediaPreviewFailureReason::DecodeError => {}
         }
     }
@@ -6716,6 +6718,7 @@ enum MediaPreviewFailureReason {
     Timeout,
     DecodeError,
     ForwardDecodeBudgetExhausted,
+    NativeGpuImportUnavailable,
 }
 
 #[derive(Debug)]
@@ -8690,6 +8693,27 @@ fn decode_media_preview(
                 color_stage_diagnostics: None,
             }
         }
+        Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => MediaPreviewResult {
+            key: job.key,
+            frame: None,
+            error: Some(format!(
+                "native GPU preview decode produced {} {:?} but app renderer import is not connected",
+                frame.handle_kind.as_str(),
+                frame.surface_format
+            )),
+            failure_reason: Some(MediaPreviewFailureReason::NativeGpuImportUnavailable),
+            generation: job.generation,
+            priority,
+            access_mode,
+            queue_wait_us,
+            decode_elapsed_us,
+            cancel_observed_elapsed_us: None,
+            canceled: false,
+            cancel_reason: None,
+            decode_diagnostics: Some(frame.diagnostics),
+            color_diagnostics: None,
+            color_stage_diagnostics: None,
+        },
         Ok(PreviewDecodeOutcome::Canceled) => MediaPreviewResult {
             key: job.key,
             frame: None,

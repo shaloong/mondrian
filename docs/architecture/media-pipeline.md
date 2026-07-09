@@ -631,16 +631,21 @@ limited to `RandomAccessStillFrame` requests. `PlaybackCursor` and `ScrubCursor`
 must stay on in-process decode/session paths where scheduler cancellation can be
 observed between open, seek, packet/decode, hardware-frame transfer, scale, and
 copy stages.
-Every `RgbaFrame` returned by the preview decode boundary carries
-`PreviewDecodeDiagnostics`: concrete path (`InProcessFfmpegCpuRgba`,
-`ExternalFfmpegCpuRgba`, or `PreviewCacheHit`), elapsed microseconds, cache-hit
-status, requested access mode, external-process status, CPU-residency evidence,
-seek status, requested seek strategy, session-local seek-index availability and
-source (`None`, `SessionObserved`, or `ProbeBacked`), anchor-use evidence,
-decoded frame count, in-process FFmpeg decoder threading mode/count, and
-stage-level wall-clock timings for session open, cache lookup, seek,
-packet/decode, FFmpeg hardware-frame transfer back to CPU, software scaling,
-RGBA copy, and the experimental external-process path.
+Every frame returned by the preview decode boundary is a
+`PreviewDecodeOutcome`: `Frame(RgbaFrame)` for CPU RGBA payloads or
+`NativeGpuFrame(PreviewNativeDecodedFrame)` for GPU-resident decoder payloads.
+CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
+match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
+reinterpret a native decoder surface as RGBA or silently force a CPU transfer.
+Both payload kinds carry `PreviewDecodeDiagnostics`: concrete path
+(`InProcessFfmpegCpuRgba`, `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`),
+elapsed microseconds, cache-hit status, requested access mode, external-process
+status, CPU-residency evidence, seek status, requested seek strategy,
+session-local seek-index availability and source (`None`, `SessionObserved`, or
+`ProbeBacked`), anchor-use evidence, decoded frame count, in-process FFmpeg
+decoder threading mode/count, and stage-level wall-clock timings for session
+open, cache lookup, seek, packet/decode, FFmpeg hardware-frame transfer back to
+CPU, software scaling, RGBA copy, and the experimental external-process path.
 The same diagnostics carry the current hardware decode contract:
 `hardware_decode_request`, `hardware_decode_decision`, `hw_accel_backend`,
 `hardware_decode_candidate_backend`, `hardware_decode_candidate_handle_kind`,
@@ -827,6 +832,8 @@ contract.
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
 renderer color-frame boundaries should prefer the shared payload constructor.
+`PreviewNativeDecodedFrame` is the separate GPU-resident payload contract and
+must flow toward renderer native decoded-frame import rather than the RGBA cache.
 Preview decode session reuse is isolated by `PreviewDecodeAccessMode`, and each
 session slot plus the process-global preview frame cache must be keyed by a
 media file fingerprint, not by path alone. Proxy regeneration finalizes fresh
