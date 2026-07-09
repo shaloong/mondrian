@@ -60,16 +60,18 @@ the plan allocates a renderer-owned linear `Working` frame handle; the imported
 decoder surface remains a backend object consumed by the native sampling/input
 transform pass.
 
-The default support contract is fail-closed. Until D3D11/DXGI, CVPixelBuffer /
-IOSurface, DMABUF/VA-API, or CUDA import is actually connected to the wgpu
-renderer backend, `GpuNativeDecodedFrameImportSupport::unavailable()` must be
-used and planning must return `RendererBackendUnavailable`. A decoder reporting
-a GPU handle kind, or a platform probe reporting a potentially importable OS
-family, is not enough to claim hardware decode playback, zero-copy, or low-copy
-frame residency. Diagnostics should report the specific missing layer: decoder
-GPU handle absent, platform import unsupported/missing, renderer backend not
-ready, unsupported handle kind, unsupported source format, or unsupported
-working texture format.
+The default support contract is fail-closed. Until D3D12, D3D11/DXGI,
+CVPixelBuffer / IOSurface, DMABUF/VA-API, or CUDA import is actually connected
+to the wgpu renderer backend,
+`GpuNativeDecodedFrameImportSupport::unavailable()` must be used and planning
+must return `RendererBackendUnavailable`. A decoder reporting a GPU handle kind,
+or a platform probe reporting a potentially importable OS family, is not enough
+to claim hardware decode playback, zero-copy, or low-copy frame residency.
+Diagnostics should report the specific missing layer: decoder GPU handle absent,
+platform import unsupported/missing, renderer backend not ready, unsupported
+handle kind, unsupported source format, or unsupported working texture format.
+Legacy DXVA2 and VDPAU can be FFmpeg CPU-transfer fallbacks, but they must not
+be presented as the modern GPU-native renderer import path.
 
 The app layer owns the combined readiness report because it is the first layer
 that can see media decode facts, platform probes, and renderer backend support
@@ -79,14 +81,19 @@ the renderer a platform dependency. Current media preview frames report
 `CpuDecodedMedia`; this is intentional and must remain distinct from
 `ReadyZeroCopy` / `ReadyLowCopy` until actual decoder GPU surfaces are handed to
 the renderer import path.
-On Windows, `mondrian-platform` performs a lightweight D3D11 device probe by
-loading `d3d11.dll` and calling `D3D11CreateDevice`. A successful result proves
-only that the OS/device layer can support the D3D11 texture handle family and a
-declared low-copy staging path; it still reports zero-copy as unsupported until
-the renderer backend can import and sample the decoder surface directly.
+On Windows, `mondrian-platform` performs lightweight D3D12 and D3D11 device
+probes by loading `d3d12.dll`/`d3d11.dll` and calling
+`D3D12CreateDevice`/`D3D11CreateDevice`. Successful results prove only that the
+OS/device layer can support the `ID3D12Resource` and/or `ID3D11Texture2D`
+handle families and a declared low-copy staging path; it still reports
+zero-copy as unsupported until the renderer backend can import and sample the
+decoder surface directly.
 Media may report a platform-preferred hardware decode candidate such as
-D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface formats, but a
-candidate is not renderer readiness. The renderer import support value remains
+D3D12VA, D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface
+formats, but a candidate is not renderer readiness. Windows candidates must be
+ordered D3D12VA, D3D11VA, then legacy DXVA2; Linux candidates must be ordered
+VA-API, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
+to the next backend. The renderer import support value remains
 `GpuNativeDecodedFrameImportSupport::unavailable()` until a concrete backend can
 sample the native surface and produce a renderer-owned float working frame.
 The media layer's FFmpeg hardware codec config probe is also only planning
@@ -109,21 +116,22 @@ CPU-upload GPU input path. `AppUiGpuPreviewMediaSource` carries
 facts into `GpuNativeDecodedFrameTextureFormat` only at the app readiness seam.
 Frame residency diagnostics can therefore distinguish CPU-decoded media,
 native GPU-decoded media, mixed CPU/native stacks, and procedural GPU-native
-content before the concrete D3D11/VideoToolbox/VA-API import adapters exist.
+content before the concrete D3D12/D3D11/VideoToolbox/VA-API import adapters
+exist.
 The app window obtains renderer backend support from `AppUiFrameRenderer`, not
 from hard-coded window logic. That support remains fail-closed until a real
 import pass can sample the native surface and produce a float linear working
 frame. `AppUiFrameRenderer` derives the fail-closed support label from the
 actual `wgpu::AdapterInfo` so viewer telemetry can distinguish, for example,
-"Windows D3D11 platform probe succeeded" from "wgpu Dx12 renderer has no D3D11
-shared texture import bridge connected".
+"Windows D3D12/D3D11 platform probe succeeded" from "wgpu Dx12 renderer has no
+native decoder-surface import bridge connected".
 Concrete import execution belongs behind
 `GpuNativeDecodedFrameImportBackend`. The shared
 `execute_native_decoded_frame_import(...)` helper owns support validation,
 working-frame plan creation, backend invocation, and returned-resource contract
 verification. Platform/window/app code must not fabricate
-`GpuColorFrameResource` entries directly from decoder handles; a real D3D11,
-VideoToolbox, VA-API, or CUDA adapter must return the exact planned float
+`GpuColorFrameResource` entries directly from decoder handles; a real D3D12,
+D3D11, VideoToolbox, VA-API, or CUDA adapter must return the exact planned float
 working frame or fail with a structured backend error.
 
 ## Effect Integration

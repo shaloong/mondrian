@@ -17,12 +17,18 @@ pub enum HwAccelBackend {
     None,
     /// NVIDIA NVDEC.
     Cuda,
+    /// Windows Direct3D 12 Video Acceleration.
+    D3D12VA,
     /// Windows DirectX 11 Video Acceleration.
     D3D11VA,
+    /// Legacy Windows DirectX Video Acceleration 2.
+    Dxva2,
     /// macOS/iOS VideoToolbox.
     VideoToolbox,
     /// Linux VA-API.
     Vaapi,
+    /// Legacy Linux VDPAU.
+    Vdpau,
 }
 
 /// Residency of frames produced by the media decode boundary.
@@ -67,12 +73,18 @@ pub enum DecodedVideoSurfaceFormat {
 /// renderer/platform import probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DecodedGpuFrameHandleKind {
+    /// Windows D3D12 `ID3D12Resource` hardware decode surface.
+    D3D12Resource,
     /// Windows D3D11 `ID3D11Texture2D` hardware decode surface.
     D3D11Texture2D,
+    /// Legacy Windows DXVA2 `IDirect3DSurface9` hardware decode surface.
+    Dxva2Surface,
     /// macOS/iOS `CVPixelBuffer` backed by an IOSurface.
     CVPixelBuffer,
     /// Linux VA-API `VASurfaceID`/DMABUF-exportable surface.
     VaapiSurface,
+    /// Legacy Linux VDPAU `VdpVideoSurface`.
+    VdpauVideoSurface,
     /// CUDA/NVDEC device allocation.
     CudaDeviceMemory,
 }
@@ -80,14 +92,20 @@ pub enum DecodedGpuFrameHandleKind {
 /// FFmpeg hardware pixel format reported by `avcodec_get_hw_config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HwAccelPixelFormat {
+    /// FFmpeg D3D12 hardware surfaces (`AV_PIX_FMT_D3D12`).
+    D3D12,
     /// FFmpeg D3D11 hardware surfaces (`AV_PIX_FMT_D3D11`).
     D3D11,
     /// Legacy FFmpeg D3D11VA VLD surfaces.
     D3D11VA,
+    /// Legacy FFmpeg DXVA2 VLD surfaces.
+    Dxva2,
     /// FFmpeg VideoToolbox hardware surfaces.
     VideoToolbox,
     /// FFmpeg VA-API hardware surfaces.
     Vaapi,
+    /// FFmpeg VDPAU hardware surfaces.
+    Vdpau,
     /// FFmpeg CUDA/NVDEC hardware surfaces.
     Cuda,
     /// A hardware config exists, but Mondrian does not classify this pixel format yet.
@@ -98,10 +116,13 @@ impl HwAccelPixelFormat {
     /// Stable hardware pixel-format name for telemetry.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::D3D12 => "D3D12",
             Self::D3D11 => "D3D11",
             Self::D3D11VA => "D3D11VA",
+            Self::Dxva2 => "DXVA2",
             Self::VideoToolbox => "VideoToolbox",
             Self::Vaapi => "Vaapi",
+            Self::Vdpau => "VDPAU",
             Self::Cuda => "Cuda",
             Self::Other(_) => "Other",
         }
@@ -109,10 +130,13 @@ impl HwAccelPixelFormat {
 
     fn from_ffmpeg(format: ffmpeg::ffi::AVPixelFormat) -> Self {
         match format {
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12 => Self::D3D12,
             ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11 => Self::D3D11,
             ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11VA_VLD => Self::D3D11VA,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD => Self::Dxva2,
             ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX => Self::VideoToolbox,
             ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI => Self::Vaapi,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VDPAU => Self::Vdpau,
             ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA => Self::Cuda,
             other => Self::Other(other as i32),
         }
@@ -120,10 +144,13 @@ impl HwAccelPixelFormat {
 
     pub(crate) fn to_ffmpeg(self) -> Option<ffmpeg::ffi::AVPixelFormat> {
         match self {
+            Self::D3D12 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12),
             Self::D3D11 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11),
             Self::D3D11VA => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11VA_VLD),
+            Self::Dxva2 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD),
             Self::VideoToolbox => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX),
             Self::Vaapi => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI),
+            Self::Vdpau => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VDPAU),
             Self::Cuda => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA),
             Self::Other(_) => None,
         }
@@ -276,9 +303,12 @@ impl DecodedGpuFrameHandleKind {
     /// Stable handle-kind name for telemetry.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::D3D12Resource => "D3D12Resource",
             Self::D3D11Texture2D => "D3D11Texture2D",
+            Self::Dxva2Surface => "Dxva2Surface",
             Self::CVPixelBuffer => "CVPixelBuffer",
             Self::VaapiSurface => "VaapiSurface",
+            Self::VdpauVideoSurface => "VdpauVideoSurface",
             Self::CudaDeviceMemory => "CudaDeviceMemory",
         }
     }
@@ -287,6 +317,9 @@ impl DecodedGpuFrameHandleKind {
 /// Hardware decode / zero-copy probe result for the current process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HwAccelProbe {
+    /// Hardware backend families that should be tried on this platform in
+    /// priority order before runtime codec/device validation.
+    pub candidate_backends: Vec<HwAccelBackend>,
     /// Hardware backend family that would be preferred on this platform, if a
     /// real decoder adapter is connected.
     pub candidate_backend: Option<HwAccelBackend>,
@@ -328,8 +361,10 @@ impl HwAccelBackend {
 
     /// Probe the active hardware decode / zero-copy residency state.
     pub fn probe() -> HwAccelProbe {
-        let candidate_backend = Self::platform_candidate();
+        let candidate_backends = Self::platform_candidates();
+        let candidate_backend = candidate_backends.first().copied();
         HwAccelProbe {
+            candidate_backends,
             candidate_backend,
             candidate_handle_kind: candidate_backend.and_then(Self::native_handle_kind),
             candidate_surface_formats: candidate_backend
@@ -420,18 +455,24 @@ impl HwAccelBackend {
     /// variant instead of probing on every session open.
     pub fn cached_ffmpeg_device_context_probe(self) -> HwAccelDeviceContextProbe {
         static CUDA: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
+        static D3D12VA: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
         static D3D11VA: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
+        static DXVA2: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
         static VIDEOTOOLBOX: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
         static VAAPI: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
+        static VDPAU: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
 
         match self {
             Self::None => self.probe_ffmpeg_device_context(),
             Self::Cuda => CUDA.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
+            Self::D3D12VA => D3D12VA.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
             Self::D3D11VA => D3D11VA.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
+            Self::Dxva2 => DXVA2.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
             Self::VideoToolbox => {
                 VIDEOTOOLBOX.get_or_init(|| self.probe_ffmpeg_device_context()).clone()
             }
             Self::Vaapi => VAAPI.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
+            Self::Vdpau => VDPAU.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
         }
     }
 
@@ -591,21 +632,28 @@ impl HwAccelBackend {
     /// Preferred hardware backend for the current platform before runtime
     /// adapter/device validation.
     pub fn platform_candidate() -> Option<Self> {
+        Self::platform_candidates().first().copied()
+    }
+
+    /// Preferred hardware backends for the current platform in industrial
+    /// decode admission order. Runtime codec/device probes may skip an earlier
+    /// candidate and fall through to a later one.
+    pub fn platform_candidates() -> Vec<Self> {
         #[cfg(target_os = "windows")]
         {
-            Some(Self::D3D11VA)
+            vec![Self::D3D12VA, Self::D3D11VA, Self::Dxva2]
         }
         #[cfg(target_os = "macos")]
         {
-            Some(Self::VideoToolbox)
+            vec![Self::VideoToolbox]
         }
         #[cfg(target_os = "linux")]
         {
-            Some(Self::Vaapi)
+            vec![Self::Vaapi, Self::Vdpau]
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
-            None
+            Vec::new()
         }
     }
 
@@ -614,9 +662,12 @@ impl HwAccelBackend {
         match self {
             Self::None => None,
             Self::Cuda => Some(DecodedGpuFrameHandleKind::CudaDeviceMemory),
+            Self::D3D12VA => Some(DecodedGpuFrameHandleKind::D3D12Resource),
             Self::D3D11VA => Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
+            Self::Dxva2 => Some(DecodedGpuFrameHandleKind::Dxva2Surface),
             Self::VideoToolbox => Some(DecodedGpuFrameHandleKind::CVPixelBuffer),
             Self::Vaapi => Some(DecodedGpuFrameHandleKind::VaapiSurface),
+            Self::Vdpau => Some(DecodedGpuFrameHandleKind::VdpauVideoSurface),
         }
     }
 
@@ -624,9 +675,12 @@ impl HwAccelBackend {
         match self {
             Self::None => None,
             Self::Cuda => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA),
+            Self::D3D12VA => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA),
             Self::D3D11VA => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA),
+            Self::Dxva2 => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2),
             Self::VideoToolbox => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX),
             Self::Vaapi => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI),
+            Self::Vdpau => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU),
         }
     }
 
@@ -634,7 +688,8 @@ impl HwAccelBackend {
     pub fn preferred_surface_formats(self) -> Vec<DecodedVideoSurfaceFormat> {
         match self {
             Self::None => Vec::new(),
-            Self::Cuda | Self::D3D11VA | Self::VideoToolbox | Self::Vaapi => {
+            Self::Dxva2 | Self::Vdpau => Vec::new(),
+            Self::Cuda | Self::D3D12VA | Self::D3D11VA | Self::VideoToolbox | Self::Vaapi => {
                 vec![
                     DecodedVideoSurfaceFormat::P010,
                     DecodedVideoSurfaceFormat::Nv12,
@@ -648,9 +703,12 @@ impl HwAccelBackend {
         match self {
             Self::None => "None",
             Self::Cuda => "Cuda",
+            Self::D3D12VA => "D3D12VA",
             Self::D3D11VA => "D3D11VA",
+            Self::Dxva2 => "DXVA2",
             Self::VideoToolbox => "VideoToolbox",
             Self::Vaapi => "Vaapi",
+            Self::Vdpau => "VDPAU",
         }
     }
 }
@@ -689,7 +747,7 @@ impl DecodedVideoSurfaceFormat {
 fn hardware_decode_unavailable_reason() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        "D3D11VA/DXVA hardware decode adapter and texture residency are not connected; using CPU RGBA decode"
+        "D3D12VA/D3D11VA hardware decode adapter and texture residency are not connected; using CPU RGBA decode"
     }
     #[cfg(target_os = "macos")]
     {
@@ -728,6 +786,10 @@ mod tests {
         let probe = HwAccelBackend::probe();
 
         assert_eq!(
+            probe.candidate_backends,
+            HwAccelBackend::platform_candidates()
+        );
+        assert_eq!(
             probe.candidate_backend,
             HwAccelBackend::platform_candidate()
         );
@@ -755,8 +817,16 @@ mod tests {
     #[test]
     fn hardware_backend_candidates_map_to_native_handles_and_surface_formats() {
         assert_eq!(
+            HwAccelBackend::D3D12VA.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::D3D12Resource)
+        );
+        assert_eq!(
             HwAccelBackend::D3D11VA.native_handle_kind(),
             Some(DecodedGpuFrameHandleKind::D3D11Texture2D)
+        );
+        assert_eq!(
+            HwAccelBackend::Dxva2.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::Dxva2Surface)
         );
         assert_eq!(
             HwAccelBackend::VideoToolbox.native_handle_kind(),
@@ -767,10 +837,21 @@ mod tests {
             Some(DecodedGpuFrameHandleKind::VaapiSurface)
         );
         assert_eq!(
+            HwAccelBackend::Vdpau.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::VdpauVideoSurface)
+        );
+        assert_eq!(
             HwAccelBackend::Cuda.native_handle_kind(),
             Some(DecodedGpuFrameHandleKind::CudaDeviceMemory)
         );
         assert_eq!(HwAccelBackend::None.native_handle_kind(), None);
+        assert_eq!(
+            HwAccelBackend::D3D12VA.preferred_surface_formats(),
+            vec![
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12
+            ]
+        );
         assert_eq!(
             HwAccelBackend::D3D11VA.preferred_surface_formats(),
             vec![
@@ -778,14 +859,30 @@ mod tests {
                 DecodedVideoSurfaceFormat::Nv12
             ]
         );
+        assert_eq!(
+            HwAccelBackend::Dxva2.preferred_surface_formats(),
+            Vec::new()
+        );
+        assert_eq!(
+            HwAccelBackend::Vdpau.preferred_surface_formats(),
+            Vec::new()
+        );
     }
 
     #[test]
     fn hardware_backends_map_to_ffmpeg_device_types() {
         assert_eq!(HwAccelBackend::None.to_ffmpeg_device_type(), None);
         assert_eq!(
+            HwAccelBackend::D3D12VA.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA)
+        );
+        assert_eq!(
             HwAccelBackend::D3D11VA.to_ffmpeg_device_type(),
             Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA)
+        );
+        assert_eq!(
+            HwAccelBackend::Dxva2.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2)
         );
         assert_eq!(
             HwAccelBackend::VideoToolbox.to_ffmpeg_device_type(),
@@ -796,6 +893,10 @@ mod tests {
             Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI)
         );
         assert_eq!(
+            HwAccelBackend::Vdpau.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU)
+        );
+        assert_eq!(
             HwAccelBackend::Cuda.to_ffmpeg_device_type(),
             Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA)
         );
@@ -803,10 +904,13 @@ mod tests {
 
     #[test]
     fn hw_accel_pixel_format_names_are_stable() {
+        assert_eq!(HwAccelPixelFormat::D3D12.as_str(), "D3D12");
         assert_eq!(HwAccelPixelFormat::D3D11.as_str(), "D3D11");
         assert_eq!(HwAccelPixelFormat::D3D11VA.as_str(), "D3D11VA");
+        assert_eq!(HwAccelPixelFormat::Dxva2.as_str(), "DXVA2");
         assert_eq!(HwAccelPixelFormat::VideoToolbox.as_str(), "VideoToolbox");
         assert_eq!(HwAccelPixelFormat::Vaapi.as_str(), "Vaapi");
+        assert_eq!(HwAccelPixelFormat::Vdpau.as_str(), "VDPAU");
         assert_eq!(HwAccelPixelFormat::Cuda.as_str(), "Cuda");
         assert_eq!(HwAccelPixelFormat::Other(123).as_str(), "Other");
     }
@@ -858,8 +962,16 @@ mod tests {
     #[test]
     fn decoded_gpu_frame_handle_kind_has_stable_names() {
         assert_eq!(
+            DecodedGpuFrameHandleKind::D3D12Resource.as_str(),
+            "D3D12Resource"
+        );
+        assert_eq!(
             DecodedGpuFrameHandleKind::D3D11Texture2D.as_str(),
             "D3D11Texture2D"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::Dxva2Surface.as_str(),
+            "Dxva2Surface"
         );
         assert_eq!(
             DecodedGpuFrameHandleKind::CVPixelBuffer.as_str(),
@@ -868,6 +980,10 @@ mod tests {
         assert_eq!(
             DecodedGpuFrameHandleKind::VaapiSurface.as_str(),
             "VaapiSurface"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::VdpauVideoSurface.as_str(),
+            "VdpauVideoSurface"
         );
         assert_eq!(
             DecodedGpuFrameHandleKind::CudaDeviceMemory.as_str(),
@@ -912,8 +1028,34 @@ mod tests {
     fn hw_accel_backend_has_stable_names() {
         assert_eq!(HwAccelBackend::None.as_str(), "None");
         assert_eq!(HwAccelBackend::Cuda.as_str(), "Cuda");
+        assert_eq!(HwAccelBackend::D3D12VA.as_str(), "D3D12VA");
         assert_eq!(HwAccelBackend::D3D11VA.as_str(), "D3D11VA");
+        assert_eq!(HwAccelBackend::Dxva2.as_str(), "DXVA2");
         assert_eq!(HwAccelBackend::VideoToolbox.as_str(), "VideoToolbox");
         assert_eq!(HwAccelBackend::Vaapi.as_str(), "Vaapi");
+        assert_eq!(HwAccelBackend::Vdpau.as_str(), "VDPAU");
+    }
+
+    #[test]
+    fn platform_hardware_backend_candidates_are_ordered_by_expected_native_path() {
+        let candidates = HwAccelBackend::platform_candidates();
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            candidates,
+            vec![
+                HwAccelBackend::D3D12VA,
+                HwAccelBackend::D3D11VA,
+                HwAccelBackend::Dxva2
+            ]
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(candidates, vec![HwAccelBackend::VideoToolbox]);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            candidates,
+            vec![HwAccelBackend::Vaapi, HwAccelBackend::Vdpau]
+        );
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        assert!(candidates.is_empty());
     }
 }

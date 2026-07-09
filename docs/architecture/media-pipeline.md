@@ -527,12 +527,17 @@ is always a backend boundary, even if the CLI used platform hwaccel internally.
 `HwAccelProbe` reports the selected hardware backend, decoded frame residency,
 `hardware_decode_active`, `zero_copy_active`, optional
 `decoded_gpu_frame_handle_kind`, `renderer_import_ready`, and a stable reason
-string. It may also report a platform-preferred candidate backend, candidate
-native handle kind, and preferred native surface formats such as P010/NV12.
-Those candidate fields are planning evidence only: on Windows the candidate may
-be D3D11VA/D3D11Texture2D, on macOS VideoToolbox/CVPixelBuffer, and on Linux
-VA-API/DMABUF-style surfaces, but they are not active decode facts. Until
-DXVA/D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC hardware frames are actually
+string. It also reports the platform candidate backend list in priority order,
+the candidate backend selected for the current stream plan, the candidate native
+handle kind, and preferred native surface formats such as P010/NV12. Candidate
+fields are planning evidence only. On Windows the ordered list must prefer
+D3D12VA/ID3D12Resource before D3D11VA/ID3D11Texture2D, with legacy
+DXVA2/IDirect3DSurface9 only as a lower-priority CPU-transfer fallback. If
+FFmpeg, the codec, or the local device cannot use D3D12VA, playback admission
+may fall through to D3D11VA and then DXVA2. On macOS the candidate is
+VideoToolbox/CVPixelBuffer. On Linux the ordered list must prefer
+VA-API/DMABUF-style surfaces before legacy VDPAU. Until D3D12VA/D3D11VA,
+VideoToolbox, VA-API, VDPAU, DXVA2, or CUDA/NVDEC hardware frames are actually
 exported/imported through the renderer native decoded-frame import contract,
 `HwAccelBackend::probe()` must keep `selected_backend=None`,
 `decoder_adapter_available=false`, `hardware_decode_active=false`,
@@ -628,18 +633,20 @@ fresh proxy later appears so proxy generation can actually improve playback
 without requiring an app restart or manual cache clear.
 
 `DecodedGpuFrameHandleKind` belongs to media because it describes the decoder
-surface family that FFmpeg/hardware decode produced, such as D3D11 texture,
-CVPixelBuffer, VA-API surface, or CUDA device memory. It does not imply that
-the renderer can import or sample that handle. Platform capability discovery is
-reported separately by `mondrian-platform-core` as native texture import support,
-and renderer readiness is reported by `mondrian-renderer` through
+surface family that FFmpeg/hardware decode produced, such as D3D12 resource,
+D3D11 texture, legacy DXVA2 surface, CVPixelBuffer, VA-API surface, legacy
+VDPAU surface, or CUDA device memory. It does not imply that the renderer can
+import or sample that handle. Platform capability discovery is reported
+separately by `mondrian-platform-core` as native texture import support, and
+renderer readiness is reported by
+`mondrian-renderer` through
 `GpuNativeDecodedFrameImportSupport` / `GpuNativeDecodedFrameImportPlan`. App
 code must not infer zero-copy playback from the media handle kind alone.
-On Windows, platform capability discovery now performs a real D3D11 device
-probe and can report `D3D11Texture2D` with a low-copy staging fallback. That is
-OS/device evidence only: zero-copy remains false until the renderer exposes a
-native import backend, and CPU-transfer hardware decode must still report CPU
-RGBA residency.
+On Windows, platform capability discovery performs real D3D12 and D3D11 device
+probes and reports `D3D12Resource` and/or `D3D11Texture2D` with a low-copy
+staging fallback when those device probes succeed. That is OS/device evidence
+only: zero-copy remains false until the renderer exposes a native import
+backend, and CPU-transfer hardware decode must still report CPU RGBA residency.
 
 The preview decoder's experimental external-process path is named
 `PreviewDecodeBackend::ExternalFfmpegCpuRgba` and is enabled only by explicitly

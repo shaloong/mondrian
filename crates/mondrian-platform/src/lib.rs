@@ -150,6 +150,20 @@ mod windows_native_video_texture_import {
     const D3D_FEATURE_LEVEL_11_1: u32 = 0xb100;
     const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
     const D3D_FEATURE_LEVEL_10_1: u32 = 0xa100;
+    const IID_ID3D12_DEVICE: Guid = Guid {
+        data1: 0x189819f1,
+        data2: 0x1db6,
+        data3: 0x4b57,
+        data4: [0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7],
+    };
+
+    #[repr(C)]
+    struct Guid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
 
     type D3D11CreateDeviceFn = unsafe extern "system" fn(
         padapter: *mut c_void,
@@ -164,6 +178,13 @@ mod windows_native_video_texture_import {
         ppimmediatecontext: *mut *mut c_void,
     ) -> i32;
 
+    type D3D12CreateDeviceFn = unsafe extern "system" fn(
+        padapter: *mut c_void,
+        minimum_feature_level: u32,
+        riid: *const Guid,
+        ppdevice: *mut *mut c_void,
+    ) -> i32;
+
     #[repr(C)]
     struct IUnknownVtbl {
         query_interface:
@@ -172,19 +193,84 @@ mod windows_native_video_texture_import {
         release: unsafe extern "system" fn(*mut c_void) -> u32,
     }
 
-    /// Probe Windows D3D11 native video texture staging capability.
+    /// Probe Windows D3D12/D3D11 native video texture staging capability.
     pub fn probe() -> NativeVideoTextureImportProbeResult {
+        let mut supported_handle_kinds = Vec::new();
+        let mut reasons = Vec::new();
+
+        match probe_d3d12_device() {
+            Ok(feature_level) => {
+                supported_handle_kinds.push(NativeVideoTextureHandleKind::D3D12Resource);
+                reasons.push(format!(
+                    "D3D12 device probe succeeded at minimum feature level 0x{feature_level:x}"
+                ));
+            }
+            Err(reason) => reasons.push(reason),
+        }
         match probe_d3d11_device() {
-            Ok(feature_level) => NativeVideoTextureImportProbeResult::found_partial(
-                vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+            Ok(feature_level) => {
+                supported_handle_kinds.push(NativeVideoTextureHandleKind::D3D11Texture2D);
+                reasons.push(format!(
+                    "D3D11 device probe succeeded at feature level 0x{feature_level:x}"
+                ));
+            }
+            Err(reason) => reasons.push(reason),
+        }
+
+        if supported_handle_kinds.is_empty() {
+            NativeVideoTextureImportProbeResult::missing(reasons.join("; "))
+        } else {
+            reasons.push(
+                "native zero-copy renderer import is still gated by renderer backend support"
+                    .to_owned(),
+            );
+            NativeVideoTextureImportProbeResult::found_partial(
+                supported_handle_kinds,
                 false,
                 true,
-                format!(
-                "D3D11 device probe succeeded at feature level 0x{feature_level:x}; native zero-copy renderer import is still gated by renderer backend support"
-                ),
-            ),
-            Err(reason) => NativeVideoTextureImportProbeResult::missing(reason),
+                reasons.join("; "),
+            )
         }
+    }
+
+    fn probe_d3d12_device() -> Result<u32, String> {
+        let library = unsafe { LoadLibraryW(wide_null("d3d12.dll").as_ptr()) };
+        if library.is_null() {
+            return Err(
+                "d3d12.dll is unavailable; D3D12 native video texture probe failed".to_owned(),
+            );
+        }
+
+        let result = unsafe { probe_d3d12_device_with_library(library) };
+        unsafe {
+            FreeLibrary(library);
+        }
+        result
+    }
+
+    unsafe fn probe_d3d12_device_with_library(library: *mut c_void) -> Result<u32, String> {
+        let symbol = GetProcAddress(library, c"D3D12CreateDevice".as_ptr().cast::<u8>());
+        let Some(symbol) = symbol else {
+            return Err("d3d12.dll does not export D3D12CreateDevice".to_owned());
+        };
+        let create_device: D3D12CreateDeviceFn = std::mem::transmute(symbol);
+        let mut device: *mut c_void = ptr::null_mut();
+        let hr = create_device(
+            ptr::null_mut(),
+            D3D_FEATURE_LEVEL_11_0,
+            &IID_ID3D12_DEVICE,
+            &mut device,
+        );
+
+        release_unknown(device);
+
+        if hr < 0 {
+            return Err(format!(
+                "D3D12CreateDevice failed with HRESULT 0x{:08x}",
+                hr as u32
+            ));
+        }
+        Ok(D3D_FEATURE_LEVEL_11_0)
     }
 
     fn probe_d3d11_device() -> Result<u32, String> {
@@ -1068,14 +1154,16 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_native_video_texture_probe_reports_d3d11_without_zero_copy_claim() {
+    fn windows_native_video_texture_probe_reports_direct3d_without_zero_copy_claim() {
         let result = system_native_video_texture_import();
 
         assert!(result.discovery_available);
         assert!(!result.zero_copy_supported);
-        if result.supports(NativeVideoTextureHandleKind::D3D11Texture2D) {
+        if result.supports(NativeVideoTextureHandleKind::D3D12Resource)
+            || result.supports(NativeVideoTextureHandleKind::D3D11Texture2D)
+        {
             assert!(result.low_copy_fallback_supported);
-            assert!(result.error.as_deref().unwrap_or_default().contains("D3D11"));
+            assert!(result.error.as_deref().unwrap_or_default().contains("D3D"));
             assert!(result.error.as_deref().unwrap_or_default().contains("zero-copy"));
         } else {
             assert!(!result.low_copy_fallback_supported);

@@ -273,9 +273,14 @@ pub(crate) fn platform_handle_kind_for_decoder(
     handle_kind: DecodedGpuFrameHandleKind,
 ) -> NativeVideoTextureHandleKind {
     match handle_kind {
+        DecodedGpuFrameHandleKind::D3D12Resource => NativeVideoTextureHandleKind::D3D12Resource,
         DecodedGpuFrameHandleKind::D3D11Texture2D => NativeVideoTextureHandleKind::D3D11Texture2D,
+        DecodedGpuFrameHandleKind::Dxva2Surface => NativeVideoTextureHandleKind::Dxva2Surface,
         DecodedGpuFrameHandleKind::CVPixelBuffer => NativeVideoTextureHandleKind::CVPixelBuffer,
         DecodedGpuFrameHandleKind::VaapiSurface => NativeVideoTextureHandleKind::DmaBuf,
+        DecodedGpuFrameHandleKind::VdpauVideoSurface => {
+            NativeVideoTextureHandleKind::VdpauVideoSurface
+        }
         DecodedGpuFrameHandleKind::CudaDeviceMemory => {
             NativeVideoTextureHandleKind::CudaDeviceMemory
         }

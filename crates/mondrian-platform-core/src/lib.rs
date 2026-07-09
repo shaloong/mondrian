@@ -94,12 +94,18 @@ pub struct DisplayHdrProbeResult {
 /// import into the renderer backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NativeVideoTextureHandleKind {
+    /// Windows D3D12 `ID3D12Resource` decode surface.
+    D3D12Resource,
     /// Windows D3D11 `ID3D11Texture2D` decode surface.
     D3D11Texture2D,
+    /// Legacy Windows DXVA2 `IDirect3DSurface9` decode surface.
+    Dxva2Surface,
     /// macOS/iOS `CVPixelBuffer`/IOSurface-backed decode surface.
     CVPixelBuffer,
     /// Linux DMABUF-exportable VA-API surface.
     DmaBuf,
+    /// Legacy Linux VDPAU `VdpVideoSurface`.
+    VdpauVideoSurface,
     /// CUDA/NVDEC device allocation.
     CudaDeviceMemory,
 }
@@ -108,9 +114,12 @@ impl NativeVideoTextureHandleKind {
     /// Stable handle-kind name for diagnostics.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::D3D12Resource => "D3D12Resource",
             Self::D3D11Texture2D => "D3D11Texture2D",
+            Self::Dxva2Surface => "Dxva2Surface",
             Self::CVPixelBuffer => "CVPixelBuffer",
             Self::DmaBuf => "DmaBuf",
+            Self::VdpauVideoSurface => "VdpauVideoSurface",
             Self::CudaDeviceMemory => "CudaDeviceMemory",
         }
     }
@@ -521,6 +530,7 @@ mod tests {
     fn native_video_texture_import_probe_supports_handle_kinds() {
         let result = NativeVideoTextureImportProbeResult::found(
             vec![
+                NativeVideoTextureHandleKind::D3D12Resource,
                 NativeVideoTextureHandleKind::D3D11Texture2D,
                 NativeVideoTextureHandleKind::CVPixelBuffer,
             ],
@@ -529,9 +539,11 @@ mod tests {
         );
 
         assert!(result.discovery_available);
+        assert!(result.supports(NativeVideoTextureHandleKind::D3D12Resource));
         assert!(result.supports(NativeVideoTextureHandleKind::D3D11Texture2D));
         assert!(result.supports(NativeVideoTextureHandleKind::CVPixelBuffer));
         assert!(!result.supports(NativeVideoTextureHandleKind::DmaBuf));
+        assert!(!result.supports(NativeVideoTextureHandleKind::VdpauVideoSurface));
         assert!(result.zero_copy_supported);
         assert!(!result.low_copy_fallback_supported);
         assert_eq!(result.error, None);
@@ -559,14 +571,26 @@ mod tests {
     #[test]
     fn native_video_texture_handle_kind_names_are_stable() {
         assert_eq!(
+            NativeVideoTextureHandleKind::D3D12Resource.as_str(),
+            "D3D12Resource"
+        );
+        assert_eq!(
             NativeVideoTextureHandleKind::D3D11Texture2D.as_str(),
             "D3D11Texture2D"
+        );
+        assert_eq!(
+            NativeVideoTextureHandleKind::Dxva2Surface.as_str(),
+            "Dxva2Surface"
         );
         assert_eq!(
             NativeVideoTextureHandleKind::CVPixelBuffer.as_str(),
             "CVPixelBuffer"
         );
         assert_eq!(NativeVideoTextureHandleKind::DmaBuf.as_str(), "DmaBuf");
+        assert_eq!(
+            NativeVideoTextureHandleKind::VdpauVideoSurface.as_str(),
+            "VdpauVideoSurface"
+        );
         assert_eq!(
             NativeVideoTextureHandleKind::CudaDeviceMemory.as_str(),
             "CudaDeviceMemory"
