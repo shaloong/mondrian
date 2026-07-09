@@ -311,6 +311,7 @@ impl AppUiRenderDiagnosticReporter {
 pub struct AppUiFrameRenderer {
     ui_renderer: UiRenderer,
     text_renderer: TextRenderer,
+    native_decoded_frame_import_support: GpuNativeDecodedFrameImportSupport,
 }
 
 impl AppUiFrameRenderer {
@@ -319,7 +320,20 @@ impl AppUiFrameRenderer {
         Self {
             ui_renderer: UiRenderer::new(device, surface_format),
             text_renderer: TextRenderer::new(),
+            native_decoded_frame_import_support: GpuNativeDecodedFrameImportSupport::unavailable(),
         }
+    }
+
+    /// Create a renderer and attach adapter-specific native import diagnostics.
+    pub fn new_with_adapter_info(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        adapter_info: &wgpu::AdapterInfo,
+    ) -> Self {
+        let mut renderer = Self::new(device, surface_format);
+        renderer.native_decoded_frame_import_support =
+            native_decoded_frame_import_support_from_adapter(adapter_info);
+        renderer
     }
 
     /// Register or replace a GPU texture view for viewer/UI external texture draws.
@@ -350,7 +364,7 @@ impl AppUiFrameRenderer {
     /// This remains fail-closed until the concrete wgpu backend can import and
     /// sample an OS decoder surface into a renderer-owned float working frame.
     pub fn native_decoded_frame_import_support(&self) -> GpuNativeDecodedFrameImportSupport {
-        GpuNativeDecodedFrameImportSupport::unavailable()
+        self.native_decoded_frame_import_support.clone()
     }
 
     /// Resolve text draw commands, upload pending glyphs, and present a frame.
@@ -433,6 +447,31 @@ impl AppUiFrameRenderer {
             },
         }
     }
+}
+
+fn native_decoded_frame_import_support_from_adapter(
+    adapter_info: &wgpu::AdapterInfo,
+) -> GpuNativeDecodedFrameImportSupport {
+    let backend_label = format!("{:?}", adapter_info.backend);
+    let reason = match adapter_info.backend {
+        wgpu::Backend::Dx12 => {
+            "wgpu Dx12 renderer has no D3D11 shared texture native video import bridge connected"
+        }
+        wgpu::Backend::Vulkan => {
+            "wgpu Vulkan renderer has no external-memory native video import bridge connected"
+        }
+        wgpu::Backend::Metal => {
+            "wgpu Metal renderer has no CVPixelBuffer/IOSurface native video import bridge connected"
+        }
+        wgpu::Backend::Gl => {
+            "wgpu GL renderer has no native video texture import bridge connected"
+        }
+        wgpu::Backend::BrowserWebGpu => {
+            "browser WebGPU renderer cannot import desktop native decoder surfaces"
+        }
+        wgpu::Backend::Noop => "noop renderer cannot import native decoder surfaces",
+    };
+    GpuNativeDecodedFrameImportSupport::unavailable_with_reason(backend_label, reason)
 }
 
 fn presented_result(
@@ -585,6 +624,21 @@ mod tests {
             reporter.changed_backend_event(timeout),
             Some(AppUiBackendEvent::SurfaceTimeout)
         );
+    }
+
+    #[test]
+    fn native_decoded_frame_import_support_reports_wgpu_backend_blocker() {
+        let adapter_info =
+            wgpu::AdapterInfo::new(wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Dx12);
+        let support = native_decoded_frame_import_support_from_adapter(&adapter_info);
+
+        assert!(!support.renderer_backend_ready);
+        assert_eq!(support.renderer_backend_label.as_deref(), Some("Dx12"));
+        assert!(support
+            .unavailable_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("D3D11 shared texture"));
     }
 
     #[test]

@@ -113,7 +113,10 @@ content before the concrete D3D11/VideoToolbox/VA-API import adapters exist.
 The app window obtains renderer backend support from `AppUiFrameRenderer`, not
 from hard-coded window logic. That support remains fail-closed until a real
 import pass can sample the native surface and produce a float linear working
-frame.
+frame. `AppUiFrameRenderer` derives the fail-closed support label from the
+actual `wgpu::AdapterInfo` so viewer telemetry can distinguish, for example,
+"Windows D3D11 platform probe succeeded" from "wgpu Dx12 renderer has no D3D11
+shared texture import bridge connected".
 
 ## Effect Integration
 

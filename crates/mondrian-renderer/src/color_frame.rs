@@ -611,6 +611,10 @@ impl GpuNativeDecodedFrameTextureFormat {
 pub struct GpuNativeDecodedFrameImportSupport {
     /// Whether the concrete renderer backend has connected native import code.
     pub renderer_backend_ready: bool,
+    /// Renderer backend label observed by the app/runtime, when available.
+    pub renderer_backend_label: Option<String>,
+    /// Structured reason the backend is not ready or is only partially ready.
+    pub unavailable_reason: Option<String>,
     /// Decoder handle families accepted by the backend.
     pub supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
     /// Decoder source texture formats accepted by the backend.
@@ -622,6 +626,24 @@ impl GpuNativeDecodedFrameImportSupport {
     pub fn unavailable() -> Self {
         Self {
             renderer_backend_ready: false,
+            renderer_backend_label: None,
+            unavailable_reason: Some(
+                "renderer backend native decoded-frame import is not connected".to_owned(),
+            ),
+            supported_handle_kinds: Vec::new(),
+            supported_source_texture_formats: Vec::new(),
+        }
+    }
+
+    /// Build a fail-closed support value with concrete backend diagnostics.
+    pub fn unavailable_with_reason(
+        renderer_backend_label: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            renderer_backend_ready: false,
+            renderer_backend_label: Some(renderer_backend_label.into()),
+            unavailable_reason: Some(reason.into()),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
         }
@@ -634,9 +656,20 @@ impl GpuNativeDecodedFrameImportSupport {
     ) -> Self {
         Self {
             renderer_backend_ready: true,
+            renderer_backend_label: None,
+            unavailable_reason: None,
             supported_handle_kinds,
             supported_source_texture_formats,
         }
+    }
+
+    /// Attach a renderer backend label to this support contract.
+    pub fn with_renderer_backend_label(
+        mut self,
+        renderer_backend_label: impl Into<String>,
+    ) -> Self {
+        self.renderer_backend_label = Some(renderer_backend_label.into());
+        self
     }
 
     /// Whether the backend reports support for a decoder handle family.
@@ -1462,6 +1495,22 @@ mod tests {
             GpuNativeDecodedFrameImportPlanError::RendererBackendUnavailable
         );
         assert_eq!(ids.next_raw(), 500);
+    }
+
+    #[test]
+    fn native_decoded_frame_import_unavailable_support_preserves_backend_reason() {
+        let support = GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
+            "Dx12",
+            "D3D11 shared texture import bridge is not connected",
+        );
+
+        assert!(!support.renderer_backend_ready);
+        assert_eq!(support.renderer_backend_label.as_deref(), Some("Dx12"));
+        assert_eq!(
+            support.unavailable_reason.as_deref(),
+            Some("D3D11 shared texture import bridge is not connected")
+        );
+        assert!(!support.supports_handle_kind(DecodedGpuFrameHandleKind::D3D11Texture2D));
     }
 
     #[test]

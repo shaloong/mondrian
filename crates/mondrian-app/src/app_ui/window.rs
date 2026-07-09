@@ -3895,7 +3895,9 @@ fn refresh_display_output_contract(
     session.config.color_space = session.display_output_contract.surface_color.color_space;
     if renderer_rebuilt {
         session.surface.configure(device, &session.config);
-        session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
+        let adapter_info = adapter.get_info();
+        session.frame_renderer =
+            AppUiFrameRenderer::new_with_adapter_info(device, session.config.format, &adapter_info);
     }
 
     let generation_changed = previous_generation != Some(new_generation);
@@ -3991,7 +3993,11 @@ impl AppUiWindowSession {
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
             display_management_policy,
-            frame_renderer: AppUiFrameRenderer::new(device, config.format),
+            frame_renderer: AppUiFrameRenderer::new_with_adapter_info(
+                device,
+                config.format,
+                &adapter.get_info(),
+            ),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),

@@ -84,6 +84,12 @@ pub(crate) struct AppUiNativeVideoImportReadiness {
     pub platform_error: Option<String>,
     /// Whether the renderer backend reports native import readiness.
     pub renderer_backend_ready: bool,
+    /// Renderer backend label observed by the app/runtime, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer_backend_label: Option<String>,
+    /// Renderer-side reason native decoded-frame import is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer_unavailable_reason: Option<String>,
     /// Whether the renderer backend accepts this decoder handle family.
     pub renderer_supports_handle_kind: bool,
     /// Whether the renderer backend accepts this decoded source texture format.
@@ -123,6 +129,8 @@ pub(crate) fn evaluate_native_video_import_readiness(
         platform_low_copy_fallback_supported: input.platform_probe.low_copy_fallback_supported,
         platform_error: input.platform_probe.error.clone(),
         renderer_backend_ready: input.renderer_support.renderer_backend_ready,
+        renderer_backend_label: input.renderer_support.renderer_backend_label.clone(),
+        renderer_unavailable_reason: input.renderer_support.unavailable_reason.clone(),
         renderer_supports_handle_kind,
         renderer_supports_source_texture_format,
         reason: String::new(),
@@ -170,7 +178,11 @@ pub(crate) fn evaluate_native_video_import_readiness(
     if !input.renderer_support.renderer_backend_ready {
         return base.with_status(
             AppUiNativeVideoImportReadinessStatus::RendererBackendUnavailable,
-            "renderer backend does not support native decoded-frame import",
+            input
+                .renderer_support
+                .unavailable_reason
+                .as_deref()
+                .unwrap_or("renderer backend does not support native decoded-frame import"),
         );
     }
     if !renderer_supports_handle_kind {
@@ -329,7 +341,10 @@ mod tests {
     #[test]
     fn native_video_import_readiness_reports_renderer_unavailable() {
         let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
-            renderer_support: GpuNativeDecodedFrameImportSupport::unavailable(),
+            renderer_support: GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
+                "Dx12",
+                "D3D11 shared texture import bridge is not connected",
+            ),
             ..ready_input()
         });
 
@@ -338,6 +353,12 @@ mod tests {
             AppUiNativeVideoImportReadinessStatus::RendererBackendUnavailable
         );
         assert!(!report.renderer_backend_ready);
+        assert_eq!(report.renderer_backend_label.as_deref(), Some("Dx12"));
+        assert_eq!(
+            report.renderer_unavailable_reason.as_deref(),
+            Some("D3D11 shared texture import bridge is not connected")
+        );
+        assert!(report.reason.contains("D3D11 shared texture import bridge"));
     }
 
     #[test]
