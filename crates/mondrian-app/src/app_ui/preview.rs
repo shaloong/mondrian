@@ -115,6 +115,7 @@ pub struct AppUiPreviewService {
     last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
     last_generation_key: RefCell<Option<ViewerPreviewGenerationKey>>,
+    playback_hardware_decode_request: Cell<PreviewHardwareDecodeRequest>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
     metrics: AppUiPreviewMetrics,
@@ -198,9 +199,39 @@ impl AppUiPreviewService {
             last_color_rejection: RefCell::new(None),
             display_snapshot: RefCell::new(None),
             last_generation_key: RefCell::new(None),
+            playback_hardware_decode_request: Cell::new(PreviewHardwareDecodeRequest::Auto),
             decode_cpu_budget,
             decode_worker_count,
             metrics: AppUiPreviewMetrics::default(),
+        }
+    }
+
+    /// Set the playback hardware decode admission selected by the app runtime.
+    ///
+    /// The default is `Auto` so preview does not pay hardware-frame CPU transfer
+    /// cost when renderer-native import is not connected. A window/renderer
+    /// runtime may raise this to `PreferGpuResident` once native video import
+    /// support is actually ready.
+    pub(crate) fn set_playback_hardware_decode_request(
+        &self,
+        request: PreviewHardwareDecodeRequest,
+    ) {
+        self.playback_hardware_decode_request.set(request);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn playback_hardware_decode_request_for_test(&self) -> PreviewHardwareDecodeRequest {
+        self.playback_hardware_decode_request.get()
+    }
+
+    fn hardware_decode_request_for_access_mode(
+        &self,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> PreviewHardwareDecodeRequest {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => self.playback_hardware_decode_request.get(),
+            PreviewDecodeAccessMode::ScrubCursor
+            | PreviewDecodeAccessMode::RandomAccessStillFrame => PreviewHardwareDecodeRequest::Auto,
         }
     }
 
@@ -250,6 +281,7 @@ impl AppUiPreviewService {
             priority: MediaPreviewRequestPriority::Current,
             access_mode,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+            hardware_decode_request: self.hardware_decode_request_for_access_mode(access_mode),
             enqueued_at: Instant::now(),
             deadline_at: None,
         });
@@ -7180,6 +7212,8 @@ impl AppUiPreviewService {
             }
             MediaPreviewRequestStatus::AlreadyPending { access_mode_changed } => {
                 let enqueued_at = Instant::now();
+                let hardware_decode_request =
+                    self.hardware_decode_request_for_access_mode(access_mode);
                 let queued_update = self.jobs.promote(
                     &key,
                     priority,
@@ -7194,6 +7228,7 @@ impl AppUiPreviewService {
                         playback_current_deadline_budget_us,
                     ),
                     adaptive_hints,
+                    hardware_decode_request,
                 );
                 if queued_update.priority_promoted {
                     bump(&self.metrics.queue_promoted_current_jobs);
@@ -7228,6 +7263,7 @@ impl AppUiPreviewService {
             return false;
         }
         let enqueued_at = Instant::now();
+        let hardware_decode_request = self.hardware_decode_request_for_access_mode(access_mode);
         let job = MediaPreviewJob {
             key: key.clone(),
             source_secs,
@@ -7235,6 +7271,7 @@ impl AppUiPreviewService {
             priority,
             access_mode,
             adaptive_hints,
+            hardware_decode_request,
             enqueued_at,
             deadline_at: media_preview_job_deadline_at(
                 priority,
@@ -8476,6 +8513,7 @@ fn decode_media_preview(
         access_mode,
         job.key.fingerprint,
         job.adaptive_hints,
+        job.hardware_decode_request,
         should_cancel,
     );
     let decode_elapsed_us = app_duration_us(decode_started_at.elapsed());
@@ -8574,17 +8612,6 @@ fn media_preview_failure_reason(err: &MondrianError) -> MediaPreviewFailureReaso
     }
 }
 
-fn preview_hardware_decode_request_for_access_mode(
-    access_mode: PreviewDecodeAccessMode,
-) -> PreviewHardwareDecodeRequest {
-    match access_mode {
-        PreviewDecodeAccessMode::PlaybackCursor => PreviewHardwareDecodeRequest::PreferGpuResident,
-        PreviewDecodeAccessMode::ScrubCursor | PreviewDecodeAccessMode::RandomAccessStillFrame => {
-            PreviewHardwareDecodeRequest::Auto
-        }
-    }
-}
-
 fn decode_media_preview_for_access_mode(
     path: &Path,
     source_secs: f64,
@@ -8593,12 +8620,13 @@ fn decode_media_preview_for_access_mode(
     access_mode: PreviewDecodeAccessMode,
     fingerprint: Option<PreviewFileFingerprint>,
     adaptive_hints: PreviewDecodeAdaptiveHints,
+    hardware_decode_request: PreviewHardwareDecodeRequest,
     should_cancel: impl Fn() -> bool,
 ) -> mondrian_core::Result<PreviewDecodeOutcome> {
     let mut request = PreviewDecodeRgbaRequest::new(path, source_secs, access_mode)
         .with_max_size(max_width, max_height)
         .with_adaptive_hints(adaptive_hints)
-        .with_hardware_decode_request(preview_hardware_decode_request_for_access_mode(access_mode));
+        .with_hardware_decode_request(hardware_decode_request);
     if let Some(fingerprint) = fingerprint {
         request = request.with_fingerprint(fingerprint);
     }
@@ -13615,6 +13643,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),
@@ -13675,6 +13704,7 @@ mod tests {
                     priority: MediaPreviewRequestPriority::Prefetch,
                     access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                     adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                    hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                     enqueued_at: Instant::now(),
                     deadline_at: None,
                 }),
@@ -13751,6 +13781,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Prefetch,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),
@@ -13822,6 +13853,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Prefetch,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),
@@ -13868,6 +13900,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             },
@@ -13911,6 +13944,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Prefetch,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             },
@@ -13955,6 +13989,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
             }),
@@ -14022,6 +14057,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
             },
@@ -14081,6 +14117,7 @@ mod tests {
                         priority: MediaPreviewRequestPriority::Current,
                         access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                         adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                        hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                         enqueued_at: Instant::now(),
                         deadline_at: Some(Instant::now() - Duration::from_millis(1)),
                     },
@@ -14489,19 +14526,27 @@ mod tests {
     }
 
     #[test]
-    fn hardware_decode_request_is_playback_only_until_native_backend_supports_other_modes() {
+    fn hardware_decode_request_is_runtime_gated_to_playback_access_mode() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+
         assert_eq!(
-            preview_hardware_decode_request_for_access_mode(
-                PreviewDecodeAccessMode::PlaybackCursor
-            ),
+            service
+                .hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::PlaybackCursor),
+            PreviewHardwareDecodeRequest::Auto
+        );
+        service
+            .set_playback_hardware_decode_request(PreviewHardwareDecodeRequest::PreferGpuResident);
+        assert_eq!(
+            service
+                .hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::PlaybackCursor),
             PreviewHardwareDecodeRequest::PreferGpuResident
         );
         assert_eq!(
-            preview_hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::ScrubCursor),
+            service.hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::ScrubCursor),
             PreviewHardwareDecodeRequest::Auto
         );
         assert_eq!(
-            preview_hardware_decode_request_for_access_mode(
+            service.hardware_decode_request_for_access_mode(
                 PreviewDecodeAccessMode::RandomAccessStillFrame
             ),
             PreviewHardwareDecodeRequest::Auto
@@ -14728,6 +14773,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),

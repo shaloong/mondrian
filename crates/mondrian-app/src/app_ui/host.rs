@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mondrian_editor_state::state::WorkspacePreset;
+use mondrian_media::PreviewHardwareDecodeRequest;
 use mondrian_platform::PlatformService;
+use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::{set_theme_preset, ThemePreset};
@@ -220,6 +222,19 @@ impl AppUiHost {
         snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
     ) {
         self.preview_service.set_display_output_snapshot(snapshot);
+    }
+
+    /// Synchronize renderer native video import readiness into preview decode admission.
+    pub(crate) fn set_native_decoded_frame_import_support(
+        &self,
+        support: GpuNativeDecodedFrameImportSupport,
+    ) {
+        let request = if support.renderer_backend_ready {
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        } else {
+            PreviewHardwareDecodeRequest::Auto
+        };
+        self.preview_service.set_playback_hardware_decode_request(request);
     }
 
     /// Advertise a registered GPU preview texture as the viewer frame for its resolved plan.
@@ -1296,6 +1311,28 @@ mod tests {
     use crate::app_ui::preferences_store::{load_app_ui_preferences_from, AppUiPreferences};
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
+
+    #[test]
+    fn host_gates_playback_hardware_decode_on_renderer_native_import_support() {
+        let host = AppUiHost::new(AppState::new());
+
+        host.set_native_decoded_frame_import_support(
+            GpuNativeDecodedFrameImportSupport::unavailable(),
+        );
+        assert_eq!(
+            host.preview_service.playback_hardware_decode_request_for_test(),
+            PreviewHardwareDecodeRequest::Auto
+        );
+
+        host.set_native_decoded_frame_import_support(GpuNativeDecodedFrameImportSupport::ready(
+            vec![mondrian_media::DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
+        ));
+        assert_eq!(
+            host.preview_service.playback_hardware_decode_request_for_test(),
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+    }
 
     #[derive(Default)]
     struct CountingPlatform {

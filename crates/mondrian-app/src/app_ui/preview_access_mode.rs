@@ -13,7 +13,7 @@ use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_media::{
     preview_decode_cpu_budget, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
-    PreviewFileFingerprint,
+    PreviewFileFingerprint, PreviewHardwareDecodeRequest,
 };
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
@@ -220,6 +220,7 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) priority: MediaPreviewRequestPriority,
     pub(crate) access_mode: PreviewDecodeAccessMode,
     pub(crate) adaptive_hints: PreviewDecodeAdaptiveHints,
+    pub(crate) hardware_decode_request: PreviewHardwareDecodeRequest,
     pub(crate) enqueued_at: Instant,
     pub(crate) deadline_at: Option<Instant>,
 }
@@ -429,6 +430,7 @@ impl MediaPreviewJobQueueSender {
         enqueued_at: Instant,
         deadline_at: Option<Instant>,
         adaptive_hints: PreviewDecodeAdaptiveHints,
+        hardware_decode_request: PreviewHardwareDecodeRequest,
     ) -> MediaPreviewJobPromoteStatus {
         if priority != MediaPreviewRequestPriority::Current {
             return MediaPreviewJobPromoteStatus::default();
@@ -447,6 +449,7 @@ impl MediaPreviewJobQueueSender {
         queued.job.generation = generation;
         queued.job.source_secs = source_secs;
         queued.job.adaptive_hints = adaptive_hints;
+        queued.job.hardware_decode_request = hardware_decode_request;
         queued.job.enqueued_at = enqueued_at;
         queued.job.deadline_at = deadline_at;
         let priority_promoted = previous != queued.priority;
@@ -1106,6 +1109,7 @@ mod tests {
             priority,
             access_mode: test_access_mode_for_priority(priority),
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             enqueued_at: Instant::now(),
             deadline_at: None,
         }
@@ -2301,6 +2305,7 @@ mod tests {
             promoted_at,
             None,
             PreviewDecodeAdaptiveHints::default(),
+            PreviewHardwareDecodeRequest::PreferGpuResident,
         );
         assert_eq!(
             status,
@@ -2321,6 +2326,10 @@ mod tests {
         assert_eq!(
             promoted_job.access_mode,
             PreviewDecodeAccessMode::ScrubCursor
+        );
+        assert_eq!(
+            promoted_job.hardware_decode_request,
+            PreviewHardwareDecodeRequest::PreferGpuResident
         );
         assert_eq!(
             receiver.recv().expect("remaining prefetch").key,
@@ -2354,6 +2363,7 @@ mod tests {
             refreshed_at,
             refreshed_deadline,
             PreviewDecodeAdaptiveHints::default(),
+            PreviewHardwareDecodeRequest::Auto,
         );
 
         assert_eq!(
@@ -2522,6 +2532,7 @@ mod tests {
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
             }),
@@ -2573,6 +2584,7 @@ mod tests {
                 Instant::now(),
                 None,
                 PreviewDecodeAdaptiveHints::default(),
+                PreviewHardwareDecodeRequest::Auto,
             ),
             MediaPreviewJobPromoteStatus::default()
         );
@@ -2586,6 +2598,7 @@ mod tests {
                 Instant::now(),
                 None,
                 PreviewDecodeAdaptiveHints::default(),
+                PreviewHardwareDecodeRequest::Auto,
             ),
             MediaPreviewJobPromoteStatus::default()
         );

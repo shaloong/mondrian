@@ -786,6 +786,12 @@ import readiness are counted separately so automated fallback can distinguish a
 missing GPU-resident path from deadline pressure or proxy-generation pressure.
 Preview decode performance reports must surface that case with a specific check,
 root-cause evidence, and an action to connect renderer native video import.
+Playback hardware-decode admission is also runtime-gated by the app preview
+service. The product default remains `PreviewHardwareDecodeRequest::Auto`;
+window/renderer code may raise playback jobs to `PreferGpuResident` only after
+the renderer native decoded-frame import contract reports ready. This prevents
+hardware decode with CPU transfer from becoming the default playback path when
+native GPU residency is not actually connected.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
 through the shared app-layer proxy dispatcher. The request is deduplicated by

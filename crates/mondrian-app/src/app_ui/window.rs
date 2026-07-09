@@ -3898,6 +3898,9 @@ fn refresh_display_output_contract(
         let adapter_info = adapter.get_info();
         session.frame_renderer =
             AppUiFrameRenderer::new_with_adapter_info(device, session.config.format, &adapter_info);
+        host.set_native_decoded_frame_import_support(
+            session.frame_renderer.native_decoded_frame_import_support(),
+        );
     }
 
     let generation_changed = previous_generation != Some(new_generation);
@@ -3985,6 +3988,12 @@ impl AppUiWindowSession {
         );
         host.set_display_output_snapshot(Some(&initial_snapshot));
 
+        let frame_renderer =
+            AppUiFrameRenderer::new_with_adapter_info(device, config.format, &adapter.get_info());
+        host.set_native_decoded_frame_import_support(
+            frame_renderer.native_decoded_frame_import_support(),
+        );
+
         Ok(Self {
             role,
             window,
@@ -3993,11 +4002,7 @@ impl AppUiWindowSession {
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
             display_management_policy,
-            frame_renderer: AppUiFrameRenderer::new_with_adapter_info(
-                device,
-                config.format,
-                &adapter.get_info(),
-            ),
+            frame_renderer,
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
