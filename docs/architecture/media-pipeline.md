@@ -360,9 +360,11 @@ jobs even when the still-frame request arrived first. A newly admitted
 still-frame current work before the pending window or worker transport queue is
 full; the app must cancel matching queued jobs immediately so deterministic
 still extraction cannot occupy decode capacity while realtime interaction is
-waiting. If still-frame work is already running in a worker and a different
-realtime current-frame request is pending, the still-frame decode must
-cooperatively yield and report a structured
+waiting. If still-frame work is already running in a worker, the app must keep
+its scheduler pending entry until the worker observes cancellation; otherwise
+the decode would be mislabeled as obsolete instead of a realtime preemption. If
+that running still-frame work sees a different realtime current-frame request
+pending, the still-frame decode must cooperatively yield and report a structured
 still-preempted-by-realtime-current cancellation. Another still-frame request
 alone must not trigger that preemption.
 If an existing queued prefetch for the same media key becomes current-frame

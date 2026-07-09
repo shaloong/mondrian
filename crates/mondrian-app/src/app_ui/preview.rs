@@ -7838,10 +7838,16 @@ impl AppUiPreviewService {
         {
             return;
         }
-        let evicted = self.scheduler.preempt_still_for_realtime_current(key);
+        let evicted = self.scheduler.pending_still_for_realtime_current(key);
         let mut canceled = 0u64;
         for evicted_key in evicted {
-            canceled = canceled.saturating_add(self.jobs.cancel_key(&evicted_key) as u64);
+            let queued_canceled = self.jobs.cancel_key(&evicted_key) as u64;
+            if queued_canceled == 0 {
+                continue;
+            }
+            if self.scheduler.cancel_preempted_still_for_realtime_current(&evicted_key) {
+                canceled = canceled.saturating_add(queued_canceled);
+            }
         }
         add_cell(&self.metrics.queue_canceled_jobs, canceled);
     }
@@ -14525,6 +14531,58 @@ mod tests {
         assert_eq!(diagnostics.worker_queue.queued_jobs, 1);
         assert!(!service.scheduler.has_pending_key(&still_key));
         assert!(service.scheduler.has_pending_key(&scrub_key));
+    }
+
+    #[test]
+    fn realtime_current_keeps_in_flight_still_pending_for_structured_preemption() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let still_key = test_media_key(205);
+        let scrub_key = test_media_key(206);
+        let generation = service.current_generation.get();
+
+        assert_eq!(
+            service.scheduler.request(
+                still_key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ),
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+        );
+        assert!(service.request_media_preview(
+            scrub_key.clone(),
+            1.0,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+            Some(33_333),
+            PreviewDecodeAdaptiveHints::default(),
+        ));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.scheduler.pending_requests, 2);
+        assert_eq!(diagnostics.scheduler.evicted_still_requests, 0);
+        assert_eq!(diagnostics.queue_canceled_jobs, 0);
+        assert_eq!(diagnostics.worker_queue.queued_scrub_cursor_jobs, 1);
+        assert_eq!(diagnostics.worker_queue.queued_random_access_still_jobs, 0);
+        assert!(service.scheduler.has_pending_key(&still_key));
+        assert!(service.scheduler.has_pending_key(&scrub_key));
+        assert_eq!(
+            media_preview_cancel_reason(
+                false,
+                service.scheduler.is_decode_current(
+                    &still_key,
+                    generation,
+                    PreviewDecodeAccessMode::RandomAccessStillFrame,
+                ),
+                service.scheduler.has_pending_current_request_other_than(&still_key),
+                service.scheduler.has_pending_realtime_current_request_other_than(&still_key),
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                Duration::ZERO,
+                false,
+            ),
+            Some(MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent)
+        );
     }
 
     #[test]

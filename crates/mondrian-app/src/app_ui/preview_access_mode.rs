@@ -981,13 +981,13 @@ impl MediaPreviewScheduler {
         expired
     }
 
-    pub(crate) fn preempt_still_for_realtime_current(
+    pub(crate) fn pending_still_for_realtime_current(
         &self,
         protected_key: &MediaPreviewKey,
     ) -> Vec<MediaPreviewKey> {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let state = self.state.lock().expect("media preview scheduler poisoned");
         let latest_generation = state.latest_generation;
-        let evicted = state
+        state
             .pending
             .iter()
             .filter_map(|(key, pending)| {
@@ -996,16 +996,27 @@ impl MediaPreviewScheduler {
                     && pending.generation >= latest_generation;
                 (still_current && key != protected_key).then(|| key.clone())
             })
-            .collect::<Vec<_>>();
-        if evicted.is_empty() {
-            return evicted;
+            .collect()
+    }
+
+    pub(crate) fn cancel_preempted_still_for_realtime_current(
+        &self,
+        key: &MediaPreviewKey,
+    ) -> bool {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let latest_generation = state.latest_generation;
+        let Some(pending) = state.pending.get(key).copied() else {
+            return false;
+        };
+        let still_current = pending.priority == MediaPreviewRequestPriority::Current
+            && pending.access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
+            && pending.generation >= latest_generation;
+        if !still_current {
+            return false;
         }
-        for key in &evicted {
-            state.pending.remove(key);
-        }
-        state.metrics.evicted_still_requests =
-            state.metrics.evicted_still_requests.saturating_add(evicted.len() as u64);
-        evicted
+        state.pending.remove(key);
+        bump_value(&mut state.metrics.evicted_still_requests);
+        true
     }
 
     pub(crate) fn cancel_all(&self) -> u64 {
@@ -1956,9 +1967,10 @@ mod tests {
         );
 
         assert_eq!(
-            scheduler.preempt_still_for_realtime_current(&scrub),
+            scheduler.pending_still_for_realtime_current(&scrub),
             vec![still.clone()]
         );
+        assert!(scheduler.cancel_preempted_still_for_realtime_current(&still));
         assert_eq!(scheduler.pending_len(), 1);
         assert!(!scheduler.should_decode(&still, PreviewDecodeAccessMode::RandomAccessStillFrame));
         assert!(scheduler.should_decode(&scrub, PreviewDecodeAccessMode::ScrubCursor));
