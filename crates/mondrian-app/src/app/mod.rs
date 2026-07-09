@@ -41,6 +41,7 @@ mod animation_state;
 mod audio_rendering;
 mod clip_clipboard;
 pub(crate) mod exporting;
+mod media_import;
 mod playback;
 mod project_lifecycle;
 pub(crate) mod proxy_generation;
@@ -52,6 +53,7 @@ pub mod ui_actions;
 use self::ui_actions::TimelineSeekSource;
 use audio_rendering::*;
 use exporting::TimelineExportDraft;
+use media_import::*;
 pub use selection::{SelectedClipRef, SelectedEffectRef, SelectedTrackRef};
 use timeline_editing::*;
 
@@ -290,6 +292,11 @@ pub struct AppState {
     audio_render_generation: u64,
     audio_render_in_flight: usize,
     audio_render_next_start_secs: f64,
+
+    media_import_tx: mpsc::Sender<MediaImportResult>,
+    media_import_rx: mpsc::Receiver<MediaImportResult>,
+    next_media_import_batch_id: u64,
+    media_import_batches: HashMap<u64, PendingMediaImportBatch>,
 }
 
 struct AudioRenderRequest {
@@ -312,6 +319,7 @@ impl AppState {
         let audio_source_cache = Arc::new(AudioSourceCache::new(audio_sample_rate, audio_channels));
         let (audio_render_tx, audio_render_rx) = mpsc::channel::<AudioRenderRequest>();
         let (audio_done_tx, audio_done_rx) = mpsc::channel::<AudioRenderResponse>();
+        let (media_import_tx, media_import_rx) = mpsc::channel::<MediaImportResult>();
 
         let worker_cache = Arc::clone(&audio_source_cache);
         thread::spawn(move || {
@@ -377,6 +385,10 @@ impl AppState {
             audio_render_generation: 1,
             audio_render_in_flight: 0,
             audio_render_next_start_secs: 0.0,
+            media_import_tx,
+            media_import_rx,
+            next_media_import_batch_id: 1,
+            media_import_batches: HashMap::new(),
         }
     }
 

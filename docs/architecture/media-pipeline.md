@@ -20,6 +20,18 @@ UI and performance harnesses from blocking on synchronous metadata analysis
 when they need to isolate decode/access-mode latency, while preserving one
 canonical asset-record write path.
 
+Product media import is an app-level background batch, not a synchronous UI
+action. `ImportMedia` and asset-panel import actions validate only cheap
+preconditions on the event thread (library availability, target folder
+existence), enqueue a `mondrian-media-import` worker, and return immediately.
+The worker may call `AssetLibrary::import_media_file(...)`, which performs the
+FFmpeg probe and asset-library write off the UI thread. `AppState` then polls
+import completions during the normal background-task tick, publishes
+`AssetImported`, applies proxy policy, updates status, and saves the project
+once per completed batch. UI panels must not call `MediaInfo::probe` or
+`AssetLibrary::import_media_file` directly from action handling, drag/drop, or
+paint/layout code.
+
 ## Decode and Cache
 
 Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state.

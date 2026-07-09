@@ -360,63 +360,8 @@ impl AppState {
             }
         }
 
-        self.clear_status_hint();
-        let mut imported_count = 0usize;
-        let mut proxy_count = 0usize;
-        let mut failures = Vec::new();
-
-        for path in paths {
-            match library.import_media_file(&path) {
-                Ok(asset_id) => {
-                    if let Err(err) = library.move_asset_to_folder(asset_id, folder_id) {
-                        failures.push(format!("{}: {err}", path.display()));
-                        continue;
-                    }
-                    imported_count += 1;
-                    let mut proxy_started = false;
-                    if self.should_auto_generate_proxy_for_import() {
-                        if let Ok(Some(asset)) = library.get_asset(asset_id) {
-                            if matches!(asset.kind, AssetKind::Video) {
-                                self.set_asset_proxy_mode(asset_id, true);
-                                request_proxy_generation(asset_id, asset.path, self.proxy_config());
-                                proxy_started = true;
-                            } else {
-                                self.set_asset_proxy_mode(asset_id, false);
-                            }
-                        }
-                    } else {
-                        self.set_asset_proxy_mode(asset_id, false);
-                    }
-                    if proxy_started {
-                        proxy_count += 1;
-                    }
-                    self.event_bus.publish(AppEvent::AssetImported { asset_id });
-                }
-                Err(err) => failures.push(format!("{}: {err}", path.display())),
-            }
-        }
-
-        if imported_count > 0 {
-            let mut message = format!("已导入 {imported_count} 个媒体文件");
-            if proxy_count > 0 {
-                message.push_str(&format!("，{proxy_count} 个后台生成代理"));
-            }
-            if !failures.is_empty() {
-                message.push_str(&format!("，{} 个失败", failures.len()));
-                tracing::warn!(
-                    target: "mondrian::action",
-                    "media import completed with failures: {}",
-                    failures.join("; ")
-                );
-            }
-            self.set_status_hint(message, !failures.is_empty());
-            let _ = self.save_project_file();
-            return Ok(());
-        }
-
-        let reason = failures.first().cloned().unwrap_or_else(|| "未导入任何媒体文件".to_string());
-        self.set_status_hint(format!("导入失败：{reason}"), true);
-        Err(MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason })
+        drop(library);
+        self.start_media_import_batch(paths, folder_id.map(str::to_owned))
     }
 
     fn delete_asset_from_ui(&mut self, payload: AssetsDeleteAssetPayload) -> Result<()> {
@@ -2358,6 +2303,22 @@ fn write_minimal_wav(path: &std::path::Path) {
     std::fs::write(path, bytes).expect("write wav fixture");
 }
 
+#[cfg(test)]
+fn poll_media_imports_until_idle(state: &mut AppState) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while state.pending_media_import_batches() > 0 {
+        state.poll_media_imports();
+        if state.pending_media_import_batches() == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for background media import"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn parse_ui_payload<T: serde::de::DeserializeOwned>(
     step_prefix: &str,
     name: &str,
@@ -3587,13 +3548,18 @@ mod tests {
         state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
         let missing_path = library_root.join("missing.mov");
 
-        let err = state
+        state
             .dispatch_action(mondrian_editor_state::Action::ImportMedia(vec![
                 missing_path,
             ]))
-            .expect_err("invalid media path should fail");
+            .expect("invalid media path is reported by background import completion");
 
-        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+        assert_eq!(state.pending_media_import_batches(), 1);
+        assert!(state
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| !*is_error && message.contains("正在导入")));
+        poll_media_imports_until_idle(&mut state);
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
         let assets = state
             .asset_library
@@ -3655,7 +3621,11 @@ mod tests {
                 paths: vec![media_path.clone()],
                 folder_id: Some(folder_id.clone()),
             }))
-            .expect("import media into folder");
+            .expect("schedule media import into folder");
+
+        assert_eq!(state.pending_media_import_batches(), 1);
+
+        poll_media_imports_until_idle(&mut state);
 
         let library = state.asset_library.as_ref().expect("library");
         let assets = library.list_assets().expect("list assets");

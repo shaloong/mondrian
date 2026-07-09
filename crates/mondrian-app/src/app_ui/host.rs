@@ -332,11 +332,14 @@ impl AppUiHost {
         if let Some(ref library) = self.app_state.borrow().asset_library {
             self.waveform_cache.set_library(Arc::clone(library));
         }
+        let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_outcome = self.preview_service.poll_finished_outcome();
         let waveform_changed = self.waveform_cache.poll_finished();
-        let visible_model_changed =
-            thumbnails_changed || preview_outcome.visible_change || waveform_changed;
+        let visible_model_changed = media_imports_changed
+            || thumbnails_changed
+            || preview_outcome.visible_change
+            || waveform_changed;
         if !visible_model_changed {
             return preview_outcome.needs_follow_up_poll;
         }
@@ -1430,6 +1433,21 @@ mod tests {
         host.preview_service.shutdown();
         host.preview_service = AppUiPreviewService::new_without_workers_for_test();
         host
+    }
+
+    fn poll_host_background_tasks_until_imports_idle(host: &mut AppUiHost) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while host.app_state().pending_media_import_batches() > 0 {
+            host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            if host.app_state().pending_media_import_batches() == 0 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for host background media import"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -2776,6 +2794,15 @@ mod tests {
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
         assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.app_state().pending_media_import_batches(), 1);
+        assert!(host
+            .app_state()
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| !*is_error && message.contains("正在导入")));
+
+        poll_host_background_tasks_until_imports_idle(&mut host);
+
         let assets = host
             .app_state()
             .asset_library
