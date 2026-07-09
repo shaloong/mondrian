@@ -103,6 +103,14 @@ OCIO execution also follows source -> working -> output. The Standard mode UI
 can hide OCIO details from normal users, but the backend still routes through
 the Mondrian default OCIO source and fails closed when that source is missing.
 
+GPU-native decoded video follows the same source -> working contract. Native
+NV12/P010 sampling expands range and converts YCbCr into the resolved encoded
+source RGB signal; it does not choose independent color science. The renderer
+import plan then carries the complete `RenderInputTransform` (engine, tone-map
+policy, working space, and GPU backend) into OCIO execution. Sampling
+matrix/transfer facts that conflict with the resolved source color space, or a
+CPU transform backend on the native path, fail closed before frame allocation.
+
 Renderer stages must carry typed color-frame metadata. `CpuColorFrame` is the
 CPU-resident linear working-frame contract; future GPU frames must expose the
 same domain/encoding/residency/color-space descriptor. RGBA8 is a boundary

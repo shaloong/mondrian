@@ -243,6 +243,13 @@ limited/full, PQ/HLG, or chroma-location guesses. A valid import produces only
 the post-sampling/post-input-transform linear working `GpuColorFrameHandle`.
 This keeps media residency reporting, OS texture import probing, and renderer
 graph resource ownership decoupled.
+The import plan carries the complete `RenderInputTransform`: OCIO engine
+selection, tone-map policy, working space, and the required GPU backend. The
+video sampling matrix and transfer must exactly match the resolved source color
+space. A CPU OCIO backend or conflicting source/sampling contract fails before
+GPU frame allocation. Backend adapters therefore cannot bake in their own
+source-to-working transform or silently reinterpret PQ/HLG and
+BT.709/BT.2020.
 The renderer import helper must also validate the incoming native payload before
 backend execution. `GpuNativeDecodedFrameImportSource` exposes a
 `GpuNativeDecodedFrameSourceDescriptor` (extent, decoder handle family, and

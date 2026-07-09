@@ -174,6 +174,21 @@ impl RenderInputTransform {
             backend: RenderColorTransformBackend::CpuOcioRgba8Boundary,
         }
     }
+
+    /// Build a source/import -> timeline working-space transform that must be
+    /// planned and executed by the native OCIO GPU path.
+    pub fn to_working_gpu(
+        working_color_space: ColorSpace,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            working_color_space,
+            tone_map,
+            engine,
+            backend: RenderColorTransformBackend::OcioGpuShaderPlan,
+        }
+    }
 }
 
 impl RenderColorTransform {

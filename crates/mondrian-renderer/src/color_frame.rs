@@ -1,3 +1,4 @@
+use crate::color_transform::{RenderColorTransformBackend, RenderInputTransform};
 use mondrian_core::{
     types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, RgbaF32Frame,
 };
@@ -674,7 +675,28 @@ impl GpuNativeDecodedFrameVideoSampling {
     fn validate_for(
         self,
         source_texture_format: GpuNativeDecodedFrameTextureFormat,
+        source_color_space: ColorSpace,
     ) -> Result<(), GpuNativeDecodedFrameImportPlanError> {
+        let source_encoding = source_color_space.encoding();
+        if self.matrix != source_encoding.matrix {
+            return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                source_texture_format,
+                reason: format!(
+                    "sampling matrix {:?} does not match source color space {:?} matrix {:?}",
+                    self.matrix, source_color_space, source_encoding.matrix
+                ),
+            });
+        }
+        if self.transfer != source_encoding.transfer {
+            return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                source_texture_format,
+                reason: format!(
+                    "sampling transfer {:?} does not match source color space {:?} transfer {:?}",
+                    self.transfer, source_color_space, source_encoding.transfer
+                ),
+            });
+        }
+
         match source_texture_format {
             GpuNativeDecodedFrameTextureFormat::Nv12 => {
                 self.validate_ycbcr(source_texture_format, 8)
@@ -846,8 +868,8 @@ pub struct GpuNativeDecodedFrameImportContract {
     pub height: u32,
     /// Color space represented by the decoded source surface.
     pub source_color_space: ColorSpace,
-    /// Timeline working color space to produce after input conversion.
-    pub working_color_space: ColorSpace,
+    /// Complete OCIO input-transform contract for source -> working conversion.
+    pub input_transform: RenderInputTransform,
     /// Decoder handle family.
     pub handle_kind: DecodedGpuFrameHandleKind,
     /// Decoder source texture layout.
@@ -875,6 +897,8 @@ pub struct GpuNativeDecodedFrameImportPlan {
     pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
     /// Source color space represented by the decoder surface.
     pub source_color_space: ColorSpace,
+    /// Validated OCIO GPU input transform applied after native surface sampling.
+    pub input_transform: RenderInputTransform,
     /// Validated source video sampling contract.
     pub video_sampling: GpuNativeDecodedFrameVideoSampling,
     /// Renderer-owned output working frame.
@@ -912,7 +936,16 @@ impl GpuNativeDecodedFrameImportPlan {
                 },
             );
         }
-        contract.video_sampling.validate_for(contract.source_texture_format)?;
+        contract
+            .video_sampling
+            .validate_for(contract.source_texture_format, contract.source_color_space)?;
+        if contract.input_transform.backend != RenderColorTransformBackend::OcioGpuShaderPlan {
+            return Err(
+                GpuNativeDecodedFrameImportPlanError::UnsupportedInputTransformBackend {
+                    backend: contract.input_transform.backend,
+                },
+            );
+        }
         if !matches!(
             contract.working_texture_format,
             GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
@@ -927,7 +960,7 @@ impl GpuNativeDecodedFrameImportPlan {
         let working_descriptor = ColorFrameDescriptor {
             width: contract.width,
             height: contract.height,
-            color_space: contract.working_color_space,
+            color_space: contract.input_transform.working_color_space,
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
@@ -944,6 +977,7 @@ impl GpuNativeDecodedFrameImportPlan {
             handle_kind: contract.handle_kind,
             source_texture_format: contract.source_texture_format,
             source_color_space: contract.source_color_space,
+            input_transform: contract.input_transform,
             video_sampling: contract.video_sampling,
             working_frame,
         })
@@ -981,6 +1015,12 @@ pub enum GpuNativeDecodedFrameImportPlanError {
     UnsupportedWorkingTextureFormat {
         /// Unsupported working texture format.
         working_texture_format: GpuColorFrameTextureFormat,
+    },
+    /// Native decoded frames must use the renderer OCIO GPU input path.
+    #[error("unsupported native decoded frame input transform backend {backend:?}")]
+    UnsupportedInputTransformBackend {
+        /// Backend that would violate native GPU residency or OCIO execution.
+        backend: RenderColorTransformBackend,
     },
     /// The video sampling metadata cannot be used for this decoded surface.
     #[error("invalid native decoded frame video sampling contract for {source_texture_format:?}: {reason}")]
@@ -1865,6 +1905,32 @@ mod tests {
     }
 
     #[test]
+    fn native_decoded_frame_import_requires_gpu_ocio_input_transform() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        );
+        let mut contract = native_import_contract();
+        contract.input_transform = RenderInputTransform::to_working(
+            ColorSpace::Rec2020,
+            true,
+            mondrian_core::types::ColorEngine::MondrianSmart,
+        );
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect_err("native input must not route through a CPU OCIO boundary");
+
+        assert_eq!(
+            err,
+            GpuNativeDecodedFrameImportPlanError::UnsupportedInputTransformBackend {
+                backend: RenderColorTransformBackend::CpuOcioRgba8Boundary,
+            }
+        );
+        assert_eq!(ids.next_raw(), 500);
+    }
+
+    #[test]
     fn native_decoded_frame_import_plan_produces_renderer_owned_working_frame() {
         let mut ids = GpuColorFrameIdAllocator::new(500);
         let support = GpuNativeDecodedFrameImportSupport::ready(
@@ -1885,6 +1951,14 @@ mod tests {
             GpuNativeDecodedFrameTextureFormat::Nv12
         );
         assert_eq!(plan.source_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(
+            plan.input_transform,
+            RenderInputTransform::to_working_gpu(
+                ColorSpace::Rec2020,
+                true,
+                mondrian_core::types::ColorEngine::MondrianSmart,
+            )
+        );
         assert_eq!(
             plan.video_sampling,
             GpuNativeDecodedFrameVideoSampling {
@@ -1912,6 +1986,54 @@ mod tests {
             GpuColorFrameTextureFormat::Rgba16Float
         );
         assert_eq!(ids.next_raw(), 501);
+    }
+
+    #[test]
+    fn native_decoded_frame_import_rejects_sampling_matrix_color_space_mismatch() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        );
+        let mut contract = native_import_contract();
+        contract.video_sampling.matrix = ColorMatrixCoefficients::Bt709;
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect_err("native sampling matrix must match the source color space");
+
+        match err {
+            GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling { reason, .. } => {
+                assert!(reason.contains("sampling matrix"));
+                assert!(reason.contains("Rec2100Pq"));
+                assert!(reason.contains("Bt2020NonConstant"));
+            }
+            other => panic!("expected invalid video sampling, got {other:?}"),
+        }
+        assert_eq!(ids.next_raw(), 500);
+    }
+
+    #[test]
+    fn native_decoded_frame_import_rejects_sampling_transfer_color_space_mismatch() {
+        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+        );
+        let mut contract = native_import_contract();
+        contract.video_sampling.transfer = ColorTransferCharacteristic::Hlg;
+
+        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect_err("native sampling transfer must match the source color space");
+
+        match err {
+            GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling { reason, .. } => {
+                assert!(reason.contains("sampling transfer"));
+                assert!(reason.contains("Rec2100Pq"));
+                assert!(reason.contains("Pq"));
+            }
+            other => panic!("expected invalid video sampling, got {other:?}"),
+        }
+        assert_eq!(ids.next_raw(), 500);
     }
 
     #[test]
@@ -2583,7 +2705,11 @@ mod tests {
             width: 3840,
             height: 2160,
             source_color_space: ColorSpace::Rec2100Pq,
-            working_color_space: ColorSpace::Rec2020,
+            input_transform: RenderInputTransform::to_working_gpu(
+                ColorSpace::Rec2020,
+                true,
+                mondrian_core::types::ColorEngine::MondrianSmart,
+            ),
             handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
             source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,
             video_sampling: GpuNativeDecodedFrameVideoSampling::from_source_color_space(

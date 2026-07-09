@@ -62,12 +62,20 @@ concrete backend reports readiness and support for that handle/format, the plan
 allocates a renderer-owned linear `Working` frame handle; the imported decoder
 surface remains a backend object consumed by the native sampling/input transform
 pass.
+The contract carries the complete `RenderInputTransform`, not only the target
+working color space. OCIO engine selection, tone-map policy, working space, and
+the required GPU backend therefore remain explicit through import planning.
+Native import rejects CPU OCIO backends so platform adapters cannot substitute
+an independent source-to-working transform.
 NV12 must validate as 8-bit YCbCr and P010 must validate as 10-bit YCbCr.
 Future 12/16-bit paths must add an explicit renderer format such as P016; they
 must not reinterpret P010. RGB/BGRA native surfaces must validate with an RGB
 matrix. YCbCr surfaces must fail closed when matrix or chroma siting is
 unspecified, because silent platform defaults are not acceptable for HDR/PQ/HLG
 playback.
+The sampling matrix and transfer must also exactly match the resolved source
+color space encoding; conflicting source labels and sampling facts are rejected
+before backend execution or GPU frame allocation.
 
 The default support contract is fail-closed. Until D3D12, D3D11/DXGI,
 CVPixelBuffer / IOSurface, DMABUF/VA-API, or CUDA import is actually connected
