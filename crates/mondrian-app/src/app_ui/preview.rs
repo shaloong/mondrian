@@ -78,6 +78,7 @@ const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US: u64 = 8_000;
 const MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US: u64 = 50_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
+const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
@@ -354,6 +355,23 @@ impl AppUiPreviewService {
             render_last_duration_us: self.metrics.render_last_duration_us.get(),
             render_stage_durations: self.metrics.render_stage_durations.get(),
             render_max_frame_stage_durations: self.metrics.render_max_frame_stage_durations.get(),
+            completion_poll_calls: self.metrics.completion_poll_calls.get(),
+            completion_poll_results: self.metrics.completion_poll_results.get(),
+            completion_poll_total_duration_us: self.metrics.completion_poll_total_duration_us.get(),
+            completion_poll_max_duration_us: self.metrics.completion_poll_max_duration_us.get(),
+            completion_poll_last_duration_us: self.metrics.completion_poll_last_duration_us.get(),
+            completion_poll_max_results_per_poll: self
+                .metrics
+                .completion_poll_max_results_per_poll
+                .get(),
+            completion_poll_count_budget_exhaustions: self
+                .metrics
+                .completion_poll_count_budget_exhaustions
+                .get(),
+            completion_poll_time_budget_exhaustions: self
+                .metrics
+                .completion_poll_time_budget_exhaustions
+                .get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             prefetch_skipped_current_pending: self.metrics.prefetch_skipped_current_pending.get(),
             prefetch_skipped_worker_busy: self.metrics.prefetch_skipped_worker_busy.get(),
@@ -513,9 +531,26 @@ impl AppUiPreviewService {
 
     /// Poll completed background media preview decodes.
     pub fn poll_finished(&self) -> bool {
+        self.poll_finished_with_budget(
+            MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL,
+            Duration::from_micros(MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US),
+        )
+    }
+
+    fn poll_finished_with_budget(&self, max_results: usize, time_budget: Duration) -> bool {
+        let poll_started = Instant::now();
+        bump(&self.metrics.completion_poll_calls);
+        self.metrics
+            .completion_poll_max_results_per_poll
+            .set(self.metrics.completion_poll_max_results_per_poll.get().max(max_results as u64));
         let mut changed = false;
         let mut drained = 0usize;
-        while drained < MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL {
+        while drained < max_results {
+            if drained > 0 && poll_started.elapsed() >= time_budget {
+                bump(&self.metrics.completion_poll_time_budget_exhaustions);
+                changed = true;
+                break;
+            }
             let result = match self.results.borrow().try_recv() {
                 Ok(result) => result,
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -574,10 +609,24 @@ impl AppUiPreviewService {
                 }
             }
         }
-        if drained == MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL {
+        if max_results > 0 && drained == max_results {
+            bump(&self.metrics.completion_poll_count_budget_exhaustions);
             changed = true;
         }
+        if drained > 0 {
+            add_cell(&self.metrics.completion_poll_results, drained as u64);
+        }
+        self.record_completion_poll_duration(poll_started.elapsed());
         changed
+    }
+
+    fn record_completion_poll_duration(&self, duration: Duration) {
+        let duration_us = app_duration_us(duration);
+        add_cell(&self.metrics.completion_poll_total_duration_us, duration_us);
+        self.metrics
+            .completion_poll_max_duration_us
+            .set(self.metrics.completion_poll_max_duration_us.get().max(duration_us));
+        self.metrics.completion_poll_last_duration_us.set(duration_us);
     }
 
     fn render_preview(&self, state: &AppState) -> ViewerPreviewState {
@@ -1890,6 +1939,22 @@ pub struct AppUiPreviewDiagnostics {
     pub render_stage_durations: AppUiPreviewRenderStageDurations,
     /// CPU-side viewer render stage timings from the slowest post-decode frame.
     pub render_max_frame_stage_durations: AppUiPreviewRenderStageDurations,
+    /// UI-thread completion polling passes for decoded preview results.
+    pub completion_poll_calls: u64,
+    /// Decoded preview results processed by UI-thread completion polling.
+    pub completion_poll_results: u64,
+    /// Total UI-thread completion polling duration in microseconds.
+    pub completion_poll_total_duration_us: u64,
+    /// Slowest UI-thread completion polling pass in microseconds.
+    pub completion_poll_max_duration_us: u64,
+    /// Most recent UI-thread completion polling pass in microseconds.
+    pub completion_poll_last_duration_us: u64,
+    /// Largest configured completion-result count budget observed by diagnostics.
+    pub completion_poll_max_results_per_poll: u64,
+    /// Completion polling passes that stopped at the result-count budget.
+    pub completion_poll_count_budget_exhaustions: u64,
+    /// Completion polling passes that yielded after the UI-thread time budget.
+    pub completion_poll_time_budget_exhaustions: u64,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
     /// Playback prefetch passes skipped because visible current-frame media was pending.
@@ -6811,6 +6876,14 @@ struct AppUiPreviewMetrics {
     render_last_duration_us: Cell<u64>,
     render_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
     render_max_frame_stage_durations: Cell<AppUiPreviewRenderStageDurations>,
+    completion_poll_calls: Cell<u64>,
+    completion_poll_results: Cell<u64>,
+    completion_poll_total_duration_us: Cell<u64>,
+    completion_poll_max_duration_us: Cell<u64>,
+    completion_poll_last_duration_us: Cell<u64>,
+    completion_poll_max_results_per_poll: Cell<u64>,
+    completion_poll_count_budget_exhaustions: Cell<u64>,
+    completion_poll_time_budget_exhaustions: Cell<u64>,
     enqueued_jobs: Cell<u64>,
     prefetch_skipped_current_pending: Cell<u64>,
     prefetch_skipped_worker_busy: Cell<u64>,
@@ -12665,6 +12738,38 @@ mod tests {
         }
     }
 
+    fn install_preview_result_channel_for_test(
+        service: &AppUiPreviewService,
+    ) -> mpsc::Sender<MediaPreviewResult> {
+        let (result_tx, result_rx) = mpsc::channel();
+        service.results.replace(result_rx);
+        result_tx
+    }
+
+    fn test_successful_media_preview_result(
+        key: MediaPreviewKey,
+        generation: u64,
+        seed: u8,
+    ) -> MediaPreviewResult {
+        MediaPreviewResult {
+            key,
+            frame: Some(test_media_frame(seed)),
+            error: None,
+            failure_reason: None,
+            generation,
+            priority: MediaPreviewRequestPriority::Current,
+            access_mode: PreviewDecodeAccessMode::ScrubCursor,
+            queue_wait_us: 0,
+            decode_elapsed_us: 0,
+            cancel_observed_elapsed_us: None,
+            canceled: false,
+            cancel_reason: None,
+            decode_diagnostics: None,
+            color_diagnostics: None,
+            color_stage_diagnostics: None,
+        }
+    }
+
     fn test_media_frame(seed: u8) -> MediaPreviewFrame {
         test_media_frame_rgba(vec![seed, 0, 0, 255], 1, 1, seed as u64)
     }
@@ -13140,6 +13245,94 @@ mod tests {
         ));
         assert_eq!(service.media_cache.borrow().len(), 0);
         assert_eq!(service.media_failures.borrow().len(), 0);
+        service.shutdown();
+    }
+
+    #[test]
+    fn preview_service_completion_poll_respects_result_count_budget() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let results = install_preview_result_channel_for_test(&service);
+        let generation = service.scheduler.begin_generation();
+        for index in 0..3 {
+            let key = test_media_key(index);
+            assert_eq!(
+                service.scheduler.request(
+                    key.clone(),
+                    generation,
+                    MediaPreviewRequestPriority::Current,
+                    PreviewDecodeAccessMode::ScrubCursor,
+                ),
+                MediaPreviewRequestStatus::Scheduled {
+                    evicted_prefetch: None,
+                    evicted_still: None
+                }
+            );
+            results
+                .send(test_successful_media_preview_result(
+                    key,
+                    generation,
+                    index as u8,
+                ))
+                .expect("send test preview result");
+        }
+
+        assert!(service.poll_finished_with_budget(2, Duration::from_secs(1)));
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.decode_successes, 2);
+        assert_eq!(diagnostics.completion_poll_calls, 1);
+        assert_eq!(diagnostics.completion_poll_results, 2);
+        assert_eq!(diagnostics.completion_poll_max_results_per_poll, 2);
+        assert_eq!(diagnostics.completion_poll_count_budget_exhaustions, 1);
+        assert_eq!(diagnostics.completion_poll_time_budget_exhaustions, 0);
+        assert_eq!(service.scheduler.pending_len(), 1);
+
+        assert!(service.poll_finished_with_budget(2, Duration::from_secs(1)));
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.decode_successes, 3);
+        assert_eq!(diagnostics.completion_poll_calls, 2);
+        assert_eq!(diagnostics.completion_poll_results, 3);
+        assert_eq!(diagnostics.completion_poll_count_budget_exhaustions, 1);
+        assert_eq!(service.scheduler.pending_len(), 0);
+        service.shutdown();
+    }
+
+    #[test]
+    fn preview_service_completion_poll_respects_time_budget() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let results = install_preview_result_channel_for_test(&service);
+        let generation = service.scheduler.begin_generation();
+        for index in 0..2 {
+            let key = test_media_key(index);
+            assert_eq!(
+                service.scheduler.request(
+                    key.clone(),
+                    generation,
+                    MediaPreviewRequestPriority::Current,
+                    PreviewDecodeAccessMode::ScrubCursor,
+                ),
+                MediaPreviewRequestStatus::Scheduled {
+                    evicted_prefetch: None,
+                    evicted_still: None
+                }
+            );
+            results
+                .send(test_successful_media_preview_result(
+                    key,
+                    generation,
+                    index as u8,
+                ))
+                .expect("send test preview result");
+        }
+
+        assert!(service.poll_finished_with_budget(8, Duration::ZERO));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.decode_successes, 1);
+        assert_eq!(diagnostics.completion_poll_calls, 1);
+        assert_eq!(diagnostics.completion_poll_results, 1);
+        assert_eq!(diagnostics.completion_poll_count_budget_exhaustions, 0);
+        assert_eq!(diagnostics.completion_poll_time_budget_exhaustions, 1);
+        assert_eq!(service.scheduler.pending_len(), 1);
         service.shutdown();
     }
 

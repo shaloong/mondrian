@@ -197,6 +197,14 @@ measures host scheduling and UI-thread residency, not media decode semantics;
 media/render changes must preserve it so a future buffering report can identify
 whether the stall is decode backlog, GPU preview preparation, redraw/render, or
 control dispatch.
+Completed preview decode results are also consumed under an explicit UI-thread
+budget. The preview service may process only a bounded number of completions per
+poll and must yield once the completion-drain time budget is reached, requesting
+a follow-up tick instead of monopolizing the event loop. Diagnostics must expose
+completion poll calls, drained results, count-budget exhaustions, time-budget
+exhaustions, and poll durations. This keeps worker bursts, cache insertion, and
+decode diagnostic aggregation from delaying transport controls or close/quit
+events during buffering.
 App preview decode timeout is access-mode-specific, not a single global
 playback policy. `ScrubCursor` has the shortest caller-release budget because
 interactive latest-wins work must not leave the UI waiting behind pathological
