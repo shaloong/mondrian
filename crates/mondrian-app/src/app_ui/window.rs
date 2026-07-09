@@ -17,7 +17,8 @@ use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
 use crate::app_ui::native_video_import::{
     evaluate_native_video_import_readiness, native_source_texture_format_from_decoded,
-    AppUiNativeVideoImportReadiness, AppUiNativeVideoImportReadinessInput,
+    native_video_sampling_from_decoded, AppUiNativeVideoImportReadiness,
+    AppUiNativeVideoImportReadinessInput,
 };
 use crate::app_ui::preview::{
     AppUiGpuPreviewCompositeLayer, AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState,
@@ -42,7 +43,8 @@ use mondrian_renderer::{
     CpuColorFrame, GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuCompositeLayer,
     GpuCompositeLayerSource, GpuCompositeRequest, GpuFrameCompositor,
     GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
-    RenderColorStageDiagnostics, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    GpuNativeDecodedFrameVideoSampling, RenderColorStageDiagnostics,
+    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
     RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
@@ -3351,6 +3353,7 @@ struct PreviewGpuCompositeNativeVideoImportFacts {
     decoder_residency: DecodedFrameResidency,
     decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
     source_texture_format: Option<GpuNativeDecodedFrameTextureFormat>,
+    source_video_sampling: Option<GpuNativeDecodedFrameVideoSampling>,
 }
 
 impl Default for PreviewGpuCompositeNativeVideoImportFacts {
@@ -3359,6 +3362,7 @@ impl Default for PreviewGpuCompositeNativeVideoImportFacts {
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             source_texture_format: None,
+            source_video_sampling: None,
         }
     }
 }
@@ -3440,10 +3444,18 @@ impl PreviewGpuCompositeNativeVideoImportFacts {
         let source_texture_format = (source.decoder_residency == DecodedFrameResidency::GpuTexture)
             .then(|| native_source_texture_format_from_decoded(source.decoded_surface_format))
             .flatten();
+        let source_video_sampling = source_texture_format.and_then(|format| {
+            native_video_sampling_from_decoded(
+                source.source.descriptor().color_space,
+                format,
+                source.decoded_video_sampling,
+            )
+        });
         Self {
             decoder_residency: source.decoder_residency,
             decoder_handle_kind: source.decoder_handle_kind,
             source_texture_format,
+            source_video_sampling,
         }
     }
 }
@@ -3459,7 +3471,7 @@ fn preview_gpu_composite_native_video_import_readiness(
             decoder_residency: facts.decoder_residency,
             decoder_handle_kind: facts.decoder_handle_kind,
             source_texture_format: facts.source_texture_format,
-            source_video_sampling: None,
+            source_video_sampling: facts.source_video_sampling,
             working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             platform_probe: SystemPlatformService.native_video_texture_import(),
             renderer_support,
@@ -4378,6 +4390,7 @@ mod platform_window_chrome {
 mod tests {
     use super::*;
     use mondrian_editor_state::Action;
+    use mondrian_renderer::{GpuVideoChromaLocation, GpuVideoRange};
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
 
@@ -4404,6 +4417,15 @@ mod tests {
 
     fn native_import_support_unavailable() -> GpuNativeDecodedFrameImportSupport {
         GpuNativeDecodedFrameImportSupport::unavailable()
+    }
+
+    fn native_video_sampling() -> GpuNativeDecodedFrameVideoSampling {
+        GpuNativeDecodedFrameVideoSampling::from_source_color_space(
+            ColorSpace::Rec709,
+            GpuVideoRange::Limited,
+            8,
+            GpuVideoChromaLocation::Left,
+        )
     }
 
     #[test]
@@ -5636,6 +5658,7 @@ mod tests {
                 decoder_residency: DecodedFrameResidency::GpuTexture,
                 decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
                 source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
+                source_video_sampling: Some(native_video_sampling()),
             }),
             ..PreviewGpuCompositeResidencySummary::default()
         }
@@ -5671,6 +5694,7 @@ mod tests {
                 decoder_residency: DecodedFrameResidency::CpuRgba,
                 decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
                 source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
+                source_video_sampling: Some(native_video_sampling()),
             }),
             ..PreviewGpuCompositeResidencySummary::default()
         }

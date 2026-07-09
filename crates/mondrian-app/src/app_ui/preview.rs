@@ -23,11 +23,11 @@ use mondrian_core::MondrianError;
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
-    DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend, PreviewDecodeAccessMode,
-    PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
-    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+    DecodedGpuFrameHandleKind, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
+    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget,
+    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+    PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+    PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewScrubAdaptiveClass,
     PreviewSeekIndexSource, VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
@@ -6671,6 +6671,8 @@ pub(crate) struct AppUiGpuPreviewMediaSource {
     pub decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
     /// Decoder output surface format before any CPU RGBA conversion.
     pub decoded_surface_format: DecodedVideoSurfaceFormat,
+    /// Decoder-reported sampling facts before any CPU RGBA conversion.
+    pub decoded_video_sampling: DecodedVideoSampling,
 }
 
 impl AppUiGpuPreviewFrame {
@@ -6790,6 +6792,7 @@ impl MediaPreviewFrame {
             decoder_residency: source.decoder_residency,
             decoder_handle_kind: source.decoder_handle_kind,
             decoded_surface_format: source.decoded_surface_format,
+            decoded_video_sampling: source.decoded_video_sampling,
         })
     }
 
@@ -6845,6 +6848,7 @@ struct MediaPreviewGpuSourceFrame {
     decoder_residency: DecodedFrameResidency,
     decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
     decoded_surface_format: DecodedVideoSurfaceFormat,
+    decoded_video_sampling: DecodedVideoSampling,
     working_cache: Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, String>>>,
 }
 
@@ -6857,6 +6861,7 @@ impl MediaPreviewGpuSourceFrame {
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
+            decoded_video_sampling: DecodedVideoSampling::default(),
             working_cache: Arc::new(OnceLock::new()),
         }
     }
@@ -6872,6 +6877,7 @@ impl MediaPreviewGpuSourceFrame {
             decoder_residency: diagnostics.decoded_frame_residency,
             decoder_handle_kind: diagnostics.gpu_frame_handle_kind,
             decoded_surface_format: diagnostics.decoded_surface_format,
+            decoded_video_sampling: diagnostics.decoded_video_sampling,
             working_cache: Arc::new(OnceLock::new()),
         }
     }
@@ -9834,6 +9840,7 @@ mod tests {
             renderer_import_ready: false,
             hardware_decode_blocker,
             decoded_surface_format: DecodedVideoSurfaceFormat::P010,
+            decoded_video_sampling: DecodedVideoSampling::default(),
         }
     }
 
@@ -9899,6 +9906,7 @@ mod tests {
                 renderer_import_ready: false,
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
                 decoded_surface_format: DecodedVideoSurfaceFormat::P010,
+                decoded_video_sampling: DecodedVideoSampling::default(),
             },
             MediaPreviewRequestPriority::Current,
             1_200,
@@ -9962,6 +9970,7 @@ mod tests {
                 renderer_import_ready: false,
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
+                decoded_video_sampling: DecodedVideoSampling::default(),
             },
             MediaPreviewRequestPriority::Current,
             400,
@@ -10025,6 +10034,7 @@ mod tests {
                 renderer_import_ready: false,
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Nv12,
+                decoded_video_sampling: DecodedVideoSampling::default(),
             },
             MediaPreviewRequestPriority::Current,
             20,
@@ -10090,6 +10100,7 @@ mod tests {
                 renderer_import_ready: false,
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Nv12,
+                decoded_video_sampling: DecodedVideoSampling::default(),
             },
             MediaPreviewRequestPriority::Current,
             0,
@@ -15671,6 +15682,7 @@ mod tests {
             renderer_import_ready: false,
             hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
+            decoded_video_sampling: DecodedVideoSampling::default(),
         };
         adaptation.observe_decode(slow_decode);
         adaptation.observe_decode(slow_decode);

@@ -5,11 +5,16 @@
 //! each other just to explain why preview playback is still using CPU RGBA
 //! uploads.
 
-use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat};
+use mondrian_core::{ColorMatrixCoefficients, ColorSpace};
+use mondrian_media::{
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
+    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+};
 use mondrian_platform::{NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult};
 use mondrian_renderer::{
     GpuColorFrameTextureFormat, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
+    GpuVideoRange,
 };
 
 /// Stable readiness category for native decoded-frame import.
@@ -315,10 +320,74 @@ pub(crate) fn native_source_texture_format_from_decoded(
     }
 }
 
+/// Combine media decoder sampling facts with the resolved source color space.
+///
+/// This is app-layer admission logic: media does not depend on renderer types,
+/// and renderer backends do not guess platform defaults. Unknown or unsupported
+/// payload facts fail closed so viewer diagnostics can explain why native video
+/// import stayed on the CPU/low-copy path.
+pub(crate) fn native_video_sampling_from_decoded(
+    source_color_space: ColorSpace,
+    source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    decoded: DecodedVideoSampling,
+) -> Option<GpuNativeDecodedFrameVideoSampling> {
+    let range = match decoded.range {
+        DecodedVideoRange::Limited => GpuVideoRange::Limited,
+        DecodedVideoRange::Full => GpuVideoRange::Full,
+        DecodedVideoRange::Unknown => return None,
+    };
+    let expected_bit_depth = expected_native_source_bit_depth(source_texture_format);
+    if decoded.bit_depth != expected_bit_depth {
+        return None;
+    }
+
+    let chroma_location = match source_texture_format {
+        GpuNativeDecodedFrameTextureFormat::Nv12 | GpuNativeDecodedFrameTextureFormat::P010 => {
+            decoded_chroma_location_to_gpu(decoded.chroma_location)?
+        }
+        GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
+        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => {
+            if source_color_space.encoding().matrix != ColorMatrixCoefficients::Rgb {
+                return None;
+            }
+            GpuVideoChromaLocation::Unspecified
+        }
+    };
+
+    Some(GpuNativeDecodedFrameVideoSampling::from_source_color_space(
+        source_color_space,
+        range,
+        decoded.bit_depth,
+        chroma_location,
+    ))
+}
+
+fn expected_native_source_bit_depth(format: GpuNativeDecodedFrameTextureFormat) -> u8 {
+    match format {
+        GpuNativeDecodedFrameTextureFormat::Nv12
+        | GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
+        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => 8,
+        GpuNativeDecodedFrameTextureFormat::P010 => 10,
+    }
+}
+
+fn decoded_chroma_location_to_gpu(
+    location: DecodedVideoChromaLocation,
+) -> Option<GpuVideoChromaLocation> {
+    match location {
+        DecodedVideoChromaLocation::Left => Some(GpuVideoChromaLocation::Left),
+        DecodedVideoChromaLocation::Center => Some(GpuVideoChromaLocation::Center),
+        DecodedVideoChromaLocation::TopLeft => Some(GpuVideoChromaLocation::TopLeft),
+        DecodedVideoChromaLocation::Unknown
+        | DecodedVideoChromaLocation::Top
+        | DecodedVideoChromaLocation::BottomLeft
+        | DecodedVideoChromaLocation::Bottom => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_renderer::{GpuVideoChromaLocation, GpuVideoRange};
 
     #[test]
     fn native_video_import_readiness_reports_cpu_decoded_media() {
@@ -482,6 +551,106 @@ mod tests {
         );
         assert_eq!(
             native_source_texture_format_from_decoded(DecodedVideoSurfaceFormat::Unknown),
+            None
+        );
+    }
+
+    #[test]
+    fn native_video_sampling_maps_nv12_decoder_facts() {
+        let sampling = native_video_sampling_from_decoded(
+            mondrian_core::ColorSpace::Rec709,
+            GpuNativeDecodedFrameTextureFormat::Nv12,
+            DecodedVideoSampling {
+                range: DecodedVideoRange::Limited,
+                chroma_location: DecodedVideoChromaLocation::Left,
+                bit_depth: 8,
+            },
+        )
+        .expect("complete NV12 facts should build renderer sampling");
+
+        assert_eq!(sampling.range, GpuVideoRange::Limited);
+        assert_eq!(sampling.bit_depth, 8);
+        assert_eq!(sampling.chroma_location, GpuVideoChromaLocation::Left);
+    }
+
+    #[test]
+    fn native_video_sampling_maps_p010_decoder_facts() {
+        let sampling = native_video_sampling_from_decoded(
+            mondrian_core::ColorSpace::Rec2100Pq,
+            GpuNativeDecodedFrameTextureFormat::P010,
+            DecodedVideoSampling {
+                range: DecodedVideoRange::Limited,
+                chroma_location: DecodedVideoChromaLocation::TopLeft,
+                bit_depth: 10,
+            },
+        )
+        .expect("complete P010 facts should build renderer sampling");
+
+        assert_eq!(sampling.range, GpuVideoRange::Limited);
+        assert_eq!(sampling.bit_depth, 10);
+        assert_eq!(sampling.chroma_location, GpuVideoChromaLocation::TopLeft);
+    }
+
+    #[test]
+    fn native_video_sampling_rejects_unknown_range() {
+        assert_eq!(
+            native_video_sampling_from_decoded(
+                mondrian_core::ColorSpace::Rec709,
+                GpuNativeDecodedFrameTextureFormat::Nv12,
+                DecodedVideoSampling {
+                    range: DecodedVideoRange::Unknown,
+                    chroma_location: DecodedVideoChromaLocation::Left,
+                    bit_depth: 8,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn native_video_sampling_rejects_unsupported_chroma_location() {
+        assert_eq!(
+            native_video_sampling_from_decoded(
+                mondrian_core::ColorSpace::Rec709,
+                GpuNativeDecodedFrameTextureFormat::Nv12,
+                DecodedVideoSampling {
+                    range: DecodedVideoRange::Limited,
+                    chroma_location: DecodedVideoChromaLocation::Bottom,
+                    bit_depth: 8,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn native_video_sampling_rejects_bit_depth_mismatch() {
+        assert_eq!(
+            native_video_sampling_from_decoded(
+                mondrian_core::ColorSpace::Rec709,
+                GpuNativeDecodedFrameTextureFormat::P010,
+                DecodedVideoSampling {
+                    range: DecodedVideoRange::Limited,
+                    chroma_location: DecodedVideoChromaLocation::Left,
+                    bit_depth: 8,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn native_video_sampling_rejects_rgb_surface_with_ycbcr_source_matrix() {
+        assert_eq!(
+            native_video_sampling_from_decoded(
+                mondrian_core::ColorSpace::Rec709,
+                GpuNativeDecodedFrameTextureFormat::Bgra8Unorm,
+                DecodedVideoSampling {
+                    range: DecodedVideoRange::Full,
+                    chroma_location: DecodedVideoChromaLocation::Unknown,
+                    bit_depth: 8,
+                },
+            ),
             None
         );
     }

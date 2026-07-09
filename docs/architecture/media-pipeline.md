@@ -189,6 +189,15 @@ not ready, then upgrade to `PreferGpuResident` only after renderer/platform
 native decoded-frame import admission succeeds. Scrub and still-frame work
 should remain `Auto` unless a future backend explicitly supports those access
 patterns.
+Preview decode diagnostics also carry decoder payload sampling facts:
+`DecodedVideoSampling` records encoded range, chroma location, and effective
+bit depth observed on the decoded FFmpeg frame. These values are media facts,
+not color-management interpretation. `mondrian-media` must not translate them
+into renderer sampling contracts or infer missing values from platform defaults.
+The app layer combines them with the resolved source color space when evaluating
+native decoded-frame import readiness; missing or unsupported sampling remains a
+structured blocker instead of silently falling back to guessed NV12/P010 shader
+constants.
 App preview decode execution must run synchronous FFmpeg preview decode on
 dedicated preview worker threads, not on the UI/event thread. Current-frame and
 prefetch workers pass a cooperative cancellation predicate into

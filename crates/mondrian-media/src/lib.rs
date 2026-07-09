@@ -21,7 +21,8 @@ pub use audio::{
     RealtimeAudioOutput,
 };
 pub use decoder::{
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend,
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
+    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
     HwAccelCodecConfigMethods, HwAccelCodecConfigProbe, HwAccelDeviceContextProbe,
     HwAccelPixelFormat, HwAccelProbe,
 };

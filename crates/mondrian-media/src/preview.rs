@@ -4,7 +4,8 @@
 //! flush 解码器后向前解码到目标 PTS，保证返回精确帧。
 
 use crate::decoder::{
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend,
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
+    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
     HwAccelCodecConfigProbe, HwAccelDeviceContext, HwAccelDeviceContextProbe, HwAccelPixelFormat,
     HwAccelProbe,
 };
@@ -813,6 +814,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Decoder output surface format before preview conversion to CPU RGBA.
     #[serde(default)]
     pub decoded_surface_format: DecodedVideoSurfaceFormat,
+    /// Decoder-reported sampling facts before preview conversion to CPU RGBA.
+    #[serde(default)]
+    pub decoded_video_sampling: DecodedVideoSampling,
 }
 
 impl PreviewDecodeDiagnostics {
@@ -868,6 +872,7 @@ impl PreviewDecodeDiagnostics {
             renderer_import_ready: false,
             hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
+            decoded_video_sampling: DecodedVideoSampling::default(),
         }
     }
 
@@ -1151,7 +1156,14 @@ impl RgbaFrame {
     }
 
     fn with_decoded_surface_format(mut self, format: DecodedVideoSurfaceFormat) -> Self {
-        self.diagnostics.decoded_surface_format = format;
+        if self.diagnostics.decoded_surface_format == DecodedVideoSurfaceFormat::Unknown {
+            self.diagnostics.decoded_surface_format = format;
+        }
+        self
+    }
+
+    fn with_decoded_video_sampling(mut self, sampling: DecodedVideoSampling) -> Self {
+        self.diagnostics.decoded_video_sampling = sampling;
         self
     }
 
@@ -1171,12 +1183,20 @@ impl RgbaFrame {
     }
 
     fn into_cache_hit(mut self, elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
+        let decoded_surface_format = self.diagnostics.decoded_surface_format;
+        let decoded_video_sampling = self.diagnostics.decoded_video_sampling;
         self.diagnostics = PreviewDecodeDiagnostics::cache_hit_for_mode(elapsed, access_mode);
+        self.diagnostics.decoded_surface_format = decoded_surface_format;
+        self.diagnostics.decoded_video_sampling = decoded_video_sampling;
         self
     }
 
     fn into_playback_ring_hit(mut self, elapsed: Duration) -> Self {
+        let decoded_surface_format = self.diagnostics.decoded_surface_format;
+        let decoded_video_sampling = self.diagnostics.decoded_video_sampling;
         self.diagnostics = PreviewDecodeDiagnostics::playback_ring_hit(elapsed);
+        self.diagnostics.decoded_surface_format = decoded_surface_format;
+        self.diagnostics.decoded_video_sampling = decoded_video_sampling;
         self
     }
 }
@@ -3079,6 +3099,39 @@ fn decoded_surface_format_from_pixel(
     }
 }
 
+fn decoded_video_sampling_from_frame(
+    frame: &ffmpeg::util::frame::video::Video,
+) -> DecodedVideoSampling {
+    let surface_format = decoded_surface_format_from_pixel(frame.format());
+    DecodedVideoSampling {
+        range: decoded_video_range_from_ffmpeg(frame.color_range()),
+        chroma_location: decoded_chroma_location_from_ffmpeg(frame.chroma_location()),
+        bit_depth: surface_format.fixed_bit_depth().unwrap_or(0),
+    }
+}
+
+fn decoded_video_range_from_ffmpeg(range: ffmpeg::util::color::Range) -> DecodedVideoRange {
+    match range {
+        ffmpeg::util::color::Range::MPEG => DecodedVideoRange::Limited,
+        ffmpeg::util::color::Range::JPEG => DecodedVideoRange::Full,
+        ffmpeg::util::color::Range::Unspecified => DecodedVideoRange::Unknown,
+    }
+}
+
+fn decoded_chroma_location_from_ffmpeg(
+    location: ffmpeg::util::chroma::Location,
+) -> DecodedVideoChromaLocation {
+    match location {
+        ffmpeg::util::chroma::Location::Left => DecodedVideoChromaLocation::Left,
+        ffmpeg::util::chroma::Location::Center => DecodedVideoChromaLocation::Center,
+        ffmpeg::util::chroma::Location::TopLeft => DecodedVideoChromaLocation::TopLeft,
+        ffmpeg::util::chroma::Location::Top => DecodedVideoChromaLocation::Top,
+        ffmpeg::util::chroma::Location::BottomLeft => DecodedVideoChromaLocation::BottomLeft,
+        ffmpeg::util::chroma::Location::Bottom => DecodedVideoChromaLocation::Bottom,
+        ffmpeg::util::chroma::Location::Unspecified => DecodedVideoChromaLocation::Unknown,
+    }
+}
+
 fn timestamp_to_stream_pts(timestamp_secs: f64, stream_tb: ffmpeg::Rational) -> i64 {
     if stream_tb.denominator() == 0 {
         return 0;
@@ -3126,6 +3179,8 @@ fn convert_decoded_to_rgba(
     scaler: &mut ffmpeg::software::scaling::Context,
     path: &Path,
 ) -> Result<RgbaFrame> {
+    let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
+    let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
     let mut rgba = ffmpeg::util::frame::video::Video::empty();
     let swscale_started_at = Instant::now();
     scaler.run(decoded, &mut rgba).map_err(|e| MondrianError::DecodeFailed {
@@ -3161,6 +3216,8 @@ fn convert_decoded_to_rgba(
         out,
         PreviewDecodePath::InProcessFfmpegCpuRgba,
     )
+    .with_decoded_surface_format(decoded_surface_format)
+    .with_decoded_video_sampling(decoded_video_sampling)
     .with_stage_durations(PreviewDecodeStageDurations {
         swscale_us,
         rgba_copy_us,
@@ -3261,8 +3318,9 @@ fn ensure_preview_rgba_scaler<'a>(
 mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        decode_preview_frame_cancellable, decoded_surface_format_from_pixel, duration_us,
-        preview_cache_get, preview_cache_put_with_fingerprint,
+        decode_preview_frame_cancellable, decoded_surface_format_from_pixel,
+        decoded_video_sampling_from_frame, duration_us, preview_cache_get,
+        preview_cache_put_with_fingerprint,
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
         preview_seek_index_cache_put, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
@@ -3282,7 +3340,8 @@ mod tests {
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
     };
     use crate::decoder::{
-        DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, HwAccelBackend,
+        DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
+        DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
     };
     use ffmpeg_next as ffmpeg;
     use serde::Serialize;
@@ -3999,6 +4058,28 @@ mod tests {
         assert_eq!(
             decoded_surface_format_from_pixel(ffmpeg::util::format::pixel::Pixel::RGBA),
             DecodedVideoSurfaceFormat::Rgba8
+        );
+    }
+
+    #[test]
+    fn decoded_video_sampling_reads_frame_range_chroma_and_bit_depth() {
+        let mut frame = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::util::format::pixel::Pixel::P010LE,
+            16,
+            16,
+        );
+        frame.set_color_range(ffmpeg::util::color::Range::MPEG);
+        unsafe {
+            (*frame.as_mut_ptr()).chroma_location = ffmpeg::util::chroma::Location::Left.into();
+        }
+
+        assert_eq!(
+            decoded_video_sampling_from_frame(&frame),
+            DecodedVideoSampling {
+                range: DecodedVideoRange::Limited,
+                chroma_location: DecodedVideoChromaLocation::Left,
+                bit_depth: 10,
+            }
         );
     }
 

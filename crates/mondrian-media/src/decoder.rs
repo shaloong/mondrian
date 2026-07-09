@@ -66,6 +66,53 @@ pub enum DecodedVideoSurfaceFormat {
     Other,
 }
 
+/// Encoded quantization range reported by the decoder for a video frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum DecodedVideoRange {
+    /// No reliable range metadata was reported.
+    #[default]
+    Unknown,
+    /// Studio/legal range, reported by FFmpeg as MPEG range.
+    Limited,
+    /// Full range, reported by FFmpeg as JPEG range.
+    Full,
+}
+
+/// Chroma sample location reported by the decoder for a video frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum DecodedVideoChromaLocation {
+    /// No reliable chroma-location metadata was reported.
+    #[default]
+    Unknown,
+    /// Left chroma siting.
+    Left,
+    /// Center chroma siting.
+    Center,
+    /// Top-left chroma siting.
+    TopLeft,
+    /// Top chroma siting.
+    Top,
+    /// Bottom-left chroma siting.
+    BottomLeft,
+    /// Bottom chroma siting.
+    Bottom,
+}
+
+/// Decoder-reported sampling facts for a decoded video frame.
+///
+/// These are media payload facts, not color-interpretation decisions. The app
+/// combines them with the resolved source color space before asking the renderer
+/// to import a native video surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct DecodedVideoSampling {
+    /// Encoded quantization range.
+    pub range: DecodedVideoRange,
+    /// Chroma sample location.
+    pub chroma_location: DecodedVideoChromaLocation,
+    /// Effective coded bit depth. Zero means unknown.
+    pub bit_depth: u8,
+}
+
 /// Native hardware-frame handle family produced by a decoder.
 ///
 /// This enum names the cross-crate contract only. It does not claim that
@@ -741,6 +788,15 @@ impl DecodedVideoSurfaceFormat {
     /// Whether this decoded surface format can be carried as a native GPU payload.
     pub fn supports_native_gpu_payload(self) -> bool {
         matches!(self, Self::Nv12 | Self::P010 | Self::Rgba8 | Self::Bgra8)
+    }
+
+    /// Effective bit depth for formats with a fixed Mondrian contract.
+    pub fn fixed_bit_depth(self) -> Option<u8> {
+        match self {
+            Self::Nv12 | Self::Yuv420p | Self::Rgba8 | Self::Bgra8 => Some(8),
+            Self::P010 | Self::Yuv420p10le => Some(10),
+            Self::Unknown | Self::Other => None,
+        }
     }
 }
 

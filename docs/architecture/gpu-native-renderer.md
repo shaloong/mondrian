@@ -118,15 +118,20 @@ hardware decode can be configured and hardware frames can be transferred back to
 CPU RGBA, but the compositor still receives CPU-uploaded RGBA rather than a
 native decoder surface.
 
-Viewer GPU output telemetry now preserves decoder residency facts through the
-CPU-upload GPU input path. `AppUiGpuPreviewMediaSource` carries
-`DecodedFrameResidency`, optional `DecodedGpuFrameHandleKind`, and
-`DecodedVideoSurfaceFormat`; the window layer maps GPU-resident NV12/P010/RGBA
-facts into `GpuNativeDecodedFrameTextureFormat` only at the app readiness seam.
-Frame residency diagnostics can therefore distinguish CPU-decoded media,
-native GPU-decoded media, mixed CPU/native stacks, and procedural GPU-native
-content before the concrete D3D12/D3D11/VideoToolbox/VA-API import adapters
-exist.
+Viewer GPU output telemetry now preserves decoder residency and payload
+sampling facts through the CPU-upload GPU input path. `AppUiGpuPreviewMediaSource`
+carries `DecodedFrameResidency`, optional `DecodedGpuFrameHandleKind`,
+`DecodedVideoSurfaceFormat`, and `DecodedVideoSampling` (range, chroma location,
+and effective bit depth). The window layer maps GPU-resident NV12/P010/RGBA
+facts into `GpuNativeDecodedFrameTextureFormat` and combines decoder sampling
+with the resolved source color space into `GpuNativeDecodedFrameVideoSampling`
+only at the app readiness seam. Unknown range, unsupported chroma siting, bit
+depth mismatches, or RGB surfaces whose resolved source color space does not
+have an RGB matrix fail closed before readiness can report zero-copy. Frame
+residency diagnostics can therefore distinguish CPU-decoded media, native
+GPU-decoded media, native media blocked by missing sampling facts, mixed
+CPU/native stacks, and procedural GPU-native content before the concrete
+D3D12/D3D11/VideoToolbox/VA-API import adapters exist.
 The app window obtains renderer backend support from `AppUiFrameRenderer`, not
 from hard-coded window logic. That support remains fail-closed until a real
 import pass can sample the native surface and produce a float linear working
