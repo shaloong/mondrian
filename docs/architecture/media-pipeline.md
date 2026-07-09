@@ -693,7 +693,12 @@ native decoder resource. A handle-kind-only payload is invalid because it can
 masquerade as GPU residency without an importable resource. Native payloads are
 limited to renderer-importable surface families such as NV12, P010, RGBA8, and
 BGRA8; unknown or planar CPU formats must fail closed before reaching the app
-or renderer.
+or renderer. They must also carry `DecodedVideoSampling` at construction time:
+range must be explicit, bit depth must match the native surface contract, and
+subsampled NV12/P010 payloads must have explicit chroma location. This remains
+media payload evidence, not color interpretation; unsupported-but-explicit
+chroma siting can be rejected later by the app/renderer admission boundary, but
+missing sampling facts must not escape the media native-frame constructor.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
 reinterpret a native decoder surface as RGBA or silently force a CPU transfer.

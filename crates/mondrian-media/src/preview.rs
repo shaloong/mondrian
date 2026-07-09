@@ -977,6 +977,7 @@ impl PreviewNativeDecodedFrame {
         height: u32,
         handle: PreviewNativeDecodedFrameHandle,
         surface_format: DecodedVideoSurfaceFormat,
+        decoded_video_sampling: DecodedVideoSampling,
         mut diagnostics: PreviewDecodeDiagnostics,
     ) -> std::result::Result<Self, PreviewNativeDecodedFrameError> {
         if width == 0 || height == 0 {
@@ -987,10 +988,12 @@ impl PreviewNativeDecodedFrame {
                 surface_format,
             });
         }
+        validate_native_decoded_video_sampling(surface_format, decoded_video_sampling)?;
         diagnostics.cpu_resident = false;
         diagnostics.decoded_frame_residency = DecodedFrameResidency::GpuTexture;
         diagnostics.gpu_frame_handle_kind = Some(handle.kind());
         diagnostics.decoded_surface_format = surface_format;
+        diagnostics.decoded_video_sampling = decoded_video_sampling;
         Ok(Self { width, height, handle, surface_format, diagnostics })
     }
 
@@ -1028,6 +1031,33 @@ impl PreviewNativeDecodedFrameHandle {
     }
 }
 
+fn validate_native_decoded_video_sampling(
+    surface_format: DecodedVideoSurfaceFormat,
+    sampling: DecodedVideoSampling,
+) -> std::result::Result<(), PreviewNativeDecodedFrameError> {
+    if sampling.range == DecodedVideoRange::Unknown {
+        return Err(PreviewNativeDecodedFrameError::MissingVideoRange { surface_format });
+    }
+    let expected_bit_depth = surface_format
+        .fixed_bit_depth()
+        .ok_or(PreviewNativeDecodedFrameError::UnsupportedSurfaceFormat { surface_format })?;
+    if sampling.bit_depth != expected_bit_depth {
+        return Err(PreviewNativeDecodedFrameError::BitDepthMismatch {
+            surface_format,
+            expected: expected_bit_depth,
+            actual: sampling.bit_depth,
+        });
+    }
+    if matches!(
+        surface_format,
+        DecodedVideoSurfaceFormat::Nv12 | DecodedVideoSurfaceFormat::P010
+    ) && sampling.chroma_location == DecodedVideoChromaLocation::Unknown
+    {
+        return Err(PreviewNativeDecodedFrameError::MissingVideoChromaLocation { surface_format });
+    }
+    Ok(())
+}
+
 /// Error returned when constructing a native decoded preview frame payload.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum PreviewNativeDecodedFrameError {
@@ -1044,6 +1074,30 @@ pub enum PreviewNativeDecodedFrameError {
     UnsupportedSurfaceFormat {
         /// Unsupported decoded surface format.
         surface_format: DecodedVideoSurfaceFormat,
+    },
+    /// Native GPU preview payloads require explicit video range metadata.
+    #[error(
+        "native decoded preview frame {surface_format:?} requires explicit video range metadata"
+    )]
+    MissingVideoRange {
+        /// Decoded surface format whose range metadata was missing.
+        surface_format: DecodedVideoSurfaceFormat,
+    },
+    /// Subsampled native GPU preview payloads require explicit chroma siting.
+    #[error("native decoded preview frame {surface_format:?} requires explicit chroma location metadata")]
+    MissingVideoChromaLocation {
+        /// Decoded surface format whose chroma metadata was missing.
+        surface_format: DecodedVideoSurfaceFormat,
+    },
+    /// Native GPU preview payload bit depth must match its surface format.
+    #[error("native decoded preview frame {surface_format:?} requires {expected}-bit sampling metadata, got {actual}")]
+    BitDepthMismatch {
+        /// Decoded surface format whose bit-depth metadata mismatched.
+        surface_format: DecodedVideoSurfaceFormat,
+        /// Required bit depth for the surface format.
+        expected: u8,
+        /// Reported bit depth.
+        actual: u8,
     },
 }
 
@@ -4279,6 +4333,7 @@ mod tests {
             1080,
             handle,
             DecodedVideoSurfaceFormat::P010,
+            p010_native_sampling(),
             PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
         )
         .expect("valid native frame");
@@ -4304,6 +4359,10 @@ mod tests {
             frame.diagnostics.decoded_surface_format,
             DecodedVideoSurfaceFormat::P010
         );
+        assert_eq!(
+            frame.diagnostics.decoded_video_sampling,
+            p010_native_sampling()
+        );
     }
 
     #[test]
@@ -4322,6 +4381,7 @@ mod tests {
             1080,
             handle,
             DecodedVideoSurfaceFormat::P010,
+            p010_native_sampling(),
             PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
         )
         .expect_err("empty native payload extent must fail closed");
@@ -4335,6 +4395,11 @@ mod tests {
             1080,
             handle,
             DecodedVideoSurfaceFormat::Yuv420p,
+            DecodedVideoSampling {
+                range: DecodedVideoRange::Limited,
+                chroma_location: DecodedVideoChromaLocation::Left,
+                bit_depth: 8,
+            },
             PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
         )
         .expect_err("planar CPU surface must not masquerade as a native GPU payload");
@@ -4344,6 +4409,83 @@ mod tests {
                 surface_format: DecodedVideoSurfaceFormat::Yuv420p
             }
         );
+    }
+
+    #[test]
+    fn native_decoded_frame_payload_requires_complete_video_sampling() {
+        let handle =
+            PreviewNativeDecodedFrameHandle::from_raw(DecodedGpuFrameHandleKind::D3D11Texture2D, 7)
+                .expect("non-zero native handle id");
+
+        let missing_range = PreviewNativeDecodedFrame::new(
+            1920,
+            1080,
+            handle,
+            DecodedVideoSurfaceFormat::P010,
+            DecodedVideoSampling {
+                range: DecodedVideoRange::Unknown,
+                chroma_location: DecodedVideoChromaLocation::Left,
+                bit_depth: 10,
+            },
+            PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
+        )
+        .expect_err("native payload must not guess range");
+        assert_eq!(
+            missing_range,
+            PreviewNativeDecodedFrameError::MissingVideoRange {
+                surface_format: DecodedVideoSurfaceFormat::P010
+            }
+        );
+
+        let missing_chroma = PreviewNativeDecodedFrame::new(
+            1920,
+            1080,
+            handle,
+            DecodedVideoSurfaceFormat::P010,
+            DecodedVideoSampling {
+                range: DecodedVideoRange::Limited,
+                chroma_location: DecodedVideoChromaLocation::Unknown,
+                bit_depth: 10,
+            },
+            PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
+        )
+        .expect_err("native YCbCr payload must not guess chroma siting");
+        assert_eq!(
+            missing_chroma,
+            PreviewNativeDecodedFrameError::MissingVideoChromaLocation {
+                surface_format: DecodedVideoSurfaceFormat::P010
+            }
+        );
+
+        let bit_depth_mismatch = PreviewNativeDecodedFrame::new(
+            1920,
+            1080,
+            handle,
+            DecodedVideoSurfaceFormat::P010,
+            DecodedVideoSampling {
+                range: DecodedVideoRange::Limited,
+                chroma_location: DecodedVideoChromaLocation::Left,
+                bit_depth: 8,
+            },
+            PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
+        )
+        .expect_err("P010 native payload must require 10-bit sampling");
+        assert_eq!(
+            bit_depth_mismatch,
+            PreviewNativeDecodedFrameError::BitDepthMismatch {
+                surface_format: DecodedVideoSurfaceFormat::P010,
+                expected: 10,
+                actual: 8,
+            }
+        );
+    }
+
+    fn p010_native_sampling() -> DecodedVideoSampling {
+        DecodedVideoSampling {
+            range: DecodedVideoRange::Limited,
+            chroma_location: DecodedVideoChromaLocation::TopLeft,
+            bit_depth: 10,
+        }
     }
 
     #[test]
