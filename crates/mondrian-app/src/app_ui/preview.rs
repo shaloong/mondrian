@@ -1243,6 +1243,7 @@ impl AppUiPreviewService {
         queue_wait_us: u64,
     ) {
         self.record_playback_current_success(priority, diagnostics.access_mode);
+        self.record_playback_current_native_import_unavailable(priority, &diagnostics);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba => {
                 bump(&self.metrics.decode_in_process_cpu_rgba_frames);
@@ -1435,6 +1436,10 @@ impl AppUiPreviewService {
                 .metrics
                 .playback_current_proxy_or_hardware_recommended_decisions
                 .get(),
+            current_native_import_unavailable_decisions: self
+                .metrics
+                .playback_current_native_import_unavailable_decisions
+                .get(),
             current_proxy_generation_requests: self.metrics.media_proxy_generation_requests.get(),
             current_proxy_generation_request_dedupes: self
                 .metrics
@@ -1516,6 +1521,27 @@ impl AppUiPreviewService {
         if previous >= MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD {
             bump(&self.metrics.playback_sustained_pressure_recoveries);
         }
+    }
+
+    fn record_playback_current_native_import_unavailable(
+        &self,
+        priority: MediaPreviewRequestPriority,
+        diagnostics: &PreviewDecodeDiagnostics,
+    ) {
+        if priority != MediaPreviewRequestPriority::Current
+            || diagnostics.access_mode != PreviewDecodeAccessMode::PlaybackCursor
+        {
+            return;
+        }
+        if diagnostics.hardware_decode_decision
+            != PreviewHardwareDecodeDecision::CpuRgbaRendererImportUnavailable
+            && diagnostics.hardware_decode_blocker
+                != PreviewHardwareDecodeBlocker::RendererImportNotReady
+        {
+            return;
+        }
+        bump(&self.metrics.playback_current_native_import_unavailable_decisions);
+        bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
     }
 
     fn playback_sustained_pressure_active(&self) -> bool {
@@ -1910,6 +1936,8 @@ pub struct AppUiPreviewPlaybackScheduleDiagnostics {
     pub current_drop_late_decisions: u64,
     /// Current playback frames that should drive proxy or hardware-decode work.
     pub current_proxy_or_hardware_recommended_decisions: u64,
+    /// Current playback frames whose native GPU residency path was blocked at renderer import.
+    pub current_native_import_unavailable_decisions: u64,
     /// Current playback path resolutions that requested app-layer proxy generation.
     pub current_proxy_generation_requests: u64,
     /// Current playback proxy generation candidates already queued for the same source revision.
@@ -7454,6 +7482,7 @@ struct AppUiPreviewMetrics {
     playback_current_decode_decisions: Cell<u64>,
     playback_current_drop_late_decisions: Cell<u64>,
     playback_current_proxy_or_hardware_recommended_decisions: Cell<u64>,
+    playback_current_native_import_unavailable_decisions: Cell<u64>,
     playback_current_late_streak: Cell<u64>,
     playback_sustained_pressure_events: Cell<u64>,
     playback_sustained_pressure_recoveries: Cell<u64>,
@@ -9125,6 +9154,60 @@ mod tests {
         assert_eq!(diagnostics.color_stage_gpu_render_pipeline_blockers, 1);
     }
 
+    fn test_preview_decode_diagnostics(
+        access_mode: PreviewDecodeAccessMode,
+        hardware_decode_decision: PreviewHardwareDecodeDecision,
+        hardware_decode_blocker: PreviewHardwareDecodeBlocker,
+    ) -> PreviewDecodeDiagnostics {
+        PreviewDecodeDiagnostics {
+            path: PreviewDecodePath::InProcessFfmpegCpuRgba,
+            elapsed_us: 1_000,
+            cache_hit: false,
+            access_mode,
+            external_process: false,
+            cpu_resident: true,
+            seek_performed: false,
+            seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
+            forward_reuse_frame_window: 0,
+            forward_decode_budget_frames: 0,
+            any_seek_window_ms: 0,
+            scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
+            hardware_decode_request: PreviewHardwareDecodeRequest::PreferGpuResident,
+            hardware_decode_decision,
+            hardware_decode_candidate_backend: Some(HwAccelBackend::D3D11VA),
+            hardware_decode_candidate_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
+            hardware_decode_adapter_available: true,
+            hardware_decode_ffmpeg_device_type_available: true,
+            hardware_decode_ffmpeg_codec_config_available: true,
+            hardware_decode_ffmpeg_hw_pixel_format: Some(HwAccelPixelFormat::D3D11),
+            hardware_decode_ffmpeg_device_context_attempted: true,
+            hardware_decode_ffmpeg_device_context_created: true,
+            hardware_decode_ffmpeg_device_context_error_code: None,
+            hardware_decode_cpu_transfer_configured: false,
+            hardware_decode_cpu_transfer_observed: false,
+            session_reused: false,
+            forward_reused: false,
+            seek_index_available: false,
+            seek_index_keyframes: 0,
+            seek_index_observed_packets: 0,
+            seek_index_source: PreviewSeekIndexSource::None,
+            seek_index_used: false,
+            seek_index_anchor_pts: None,
+            decoded_frame_count: 1,
+            threading_kind: PreviewDecodeThreadingKind::Frame,
+            threading_count: 4,
+            stage_durations: PreviewDecodeStageDurations::default(),
+            hw_accel_backend: HwAccelBackend::D3D11VA,
+            hardware_decode_active: false,
+            zero_copy_active: false,
+            decoded_frame_residency: DecodedFrameResidency::CpuRgba,
+            gpu_frame_handle_kind: None,
+            renderer_import_ready: false,
+            hardware_decode_blocker,
+            decoded_surface_format: DecodedVideoSurfaceFormat::P010,
+        }
+    }
+
     #[test]
     fn preview_diagnostics_count_decode_paths_and_duration() {
         let service = AppUiPreviewService::new();
@@ -9926,6 +10009,47 @@ mod tests {
         );
         assert_eq!(diagnostics.forward_prefetch_window_evaluations, 1);
         assert_eq!(diagnostics.forward_prefetch_invalid_frame_rate, 0);
+        service.shutdown();
+    }
+
+    #[test]
+    fn preview_playback_schedule_counts_native_import_unavailable_current_frames() {
+        let service = AppUiPreviewService::new();
+
+        service.record_preview_decode(
+            test_preview_decode_diagnostics(
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewHardwareDecodeDecision::CpuRgbaRendererImportUnavailable,
+                PreviewHardwareDecodeBlocker::RendererImportNotReady,
+            ),
+            MediaPreviewRequestPriority::Current,
+            0,
+        );
+        service.record_preview_decode(
+            test_preview_decode_diagnostics(
+                PreviewDecodeAccessMode::ScrubCursor,
+                PreviewHardwareDecodeDecision::CpuRgbaRendererImportUnavailable,
+                PreviewHardwareDecodeBlocker::RendererImportNotReady,
+            ),
+            MediaPreviewRequestPriority::Current,
+            0,
+        );
+        service.record_preview_decode(
+            test_preview_decode_diagnostics(
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer,
+                PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+            ),
+            MediaPreviewRequestPriority::Current,
+            0,
+        );
+
+        let diagnostics = service.diagnostics().playback_schedule;
+        assert_eq!(diagnostics.current_native_import_unavailable_decisions, 1);
+        assert_eq!(
+            diagnostics.current_proxy_or_hardware_recommended_decisions,
+            1
+        );
         service.shutdown();
     }
 

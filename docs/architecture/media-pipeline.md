@@ -779,7 +779,11 @@ rescheduling.
 Schedule diagnostics also count current playback decode decisions, late-frame
 drop decisions, and proxy/hardware recommendations. Those are app scheduler
 facts, not media decoder facts, and they are how perf tooling distinguishes
-clock-driven playback from best-effort frame extraction.
+clock-driven playback from best-effort frame extraction. The broad
+proxy/hardware recommendation counter must not be the only signal for recovery
+policy: current playback frames blocked specifically by renderer/native GPU
+import readiness are counted separately so automated fallback can distinguish a
+missing GPU-resident path from deadline pressure or proxy-generation pressure.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
 through the shared app-layer proxy dispatcher. The request is deduplicated by
