@@ -624,7 +624,8 @@ delivery. The previous "GPU assist" terminology is intentionally not used.
 Because the CLI process boundary is not cooperatively cancellable, this path is
 limited to `RandomAccessStillFrame` requests. `PlaybackCursor` and `ScrubCursor`
 must stay on in-process decode/session paths where scheduler cancellation can be
-observed between open, seek, packet/decode, scale, and copy stages.
+observed between open, seek, packet/decode, hardware-frame transfer, scale, and
+copy stages.
 Every `RgbaFrame` returned by the preview decode boundary carries
 `PreviewDecodeDiagnostics`: concrete path (`InProcessFfmpegCpuRgba`,
 `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`), elapsed microseconds, cache-hit
@@ -633,8 +634,8 @@ seek status, requested seek strategy, session-local seek-index availability and
 source (`None`, `SessionObserved`, or `ProbeBacked`), anchor-use evidence,
 decoded frame count, in-process FFmpeg decoder threading mode/count, and
 stage-level wall-clock timings for session open, cache lookup, seek,
-packet/decode, software scaling, RGBA copy, and the experimental external-process
-path.
+packet/decode, FFmpeg hardware-frame transfer back to CPU, software scaling,
+RGBA copy, and the experimental external-process path.
 The same diagnostics carry the current hardware decode contract:
 `hardware_decode_request`, `hardware_decode_decision`, `hw_accel_backend`,
 `hardware_decode_candidate_backend`, `hardware_decode_candidate_handle_kind`,

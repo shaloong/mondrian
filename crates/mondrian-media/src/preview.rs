@@ -628,6 +628,9 @@ pub struct PreviewDecodeStageDurations {
     /// Time spent demuxing packets and receiving decoded frames.
     #[serde(default)]
     pub packet_decode_us: u64,
+    /// Time spent transferring FFmpeg hardware frames back to CPU memory.
+    #[serde(default)]
+    pub hardware_transfer_us: u64,
     /// Time spent in FFmpeg software scaling / pixel-format conversion.
     #[serde(default)]
     pub swscale_us: u64,
@@ -646,6 +649,8 @@ impl PreviewDecodeStageDurations {
         self.cache_lookup_us = self.cache_lookup_us.saturating_add(other.cache_lookup_us);
         self.seek_us = self.seek_us.saturating_add(other.seek_us);
         self.packet_decode_us = self.packet_decode_us.saturating_add(other.packet_decode_us);
+        self.hardware_transfer_us =
+            self.hardware_transfer_us.saturating_add(other.hardware_transfer_us);
         self.swscale_us = self.swscale_us.saturating_add(other.swscale_us);
         self.rgba_copy_us = self.rgba_copy_us.saturating_add(other.rgba_copy_us);
         self.external_process_us =
@@ -2035,7 +2040,8 @@ impl PreviewDecodeSession {
             let conversion_us = frame
                 .diagnostics
                 .stage_durations
-                .swscale_us
+                .hardware_transfer_us
+                .saturating_add(frame.diagnostics.stage_durations.swscale_us)
                 .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
             let packet_decode_us =
                 duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
@@ -2968,9 +2974,11 @@ fn materialize_decoded_to_rgba(
     }
 
     let mut transferred = ffmpeg::util::frame::video::Video::empty();
+    let transfer_started_at = Instant::now();
     let ret = unsafe {
         ffmpeg::ffi::av_hwframe_transfer_data(transferred.as_mut_ptr(), decoded.as_ptr(), 0)
     };
+    let hardware_transfer_us = duration_us(transfer_started_at.elapsed());
     if ret < 0 {
         return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
@@ -2994,7 +3002,14 @@ fn materialize_decoded_to_rgba(
         target_height,
         path,
     )?;
-    convert_decoded_to_rgba(&transferred, scaler, path)
+    Ok(
+        convert_decoded_to_rgba(&transferred, scaler, path)?.with_stage_durations(
+            PreviewDecodeStageDurations {
+                hardware_transfer_us,
+                ..PreviewDecodeStageDurations::default()
+            },
+        ),
+    )
 }
 
 fn ensure_preview_rgba_scaler<'a>(
@@ -3694,9 +3709,10 @@ mod tests {
             cache_lookup_us: 2,
             seek_us: 3,
             packet_decode_us: 4,
-            swscale_us: 5,
-            rgba_copy_us: 6,
-            external_process_us: 7,
+            hardware_transfer_us: 5,
+            swscale_us: 6,
+            rgba_copy_us: 7,
+            external_process_us: 8,
         };
 
         durations.accumulate(PreviewDecodeStageDurations {
@@ -3704,18 +3720,20 @@ mod tests {
             cache_lookup_us: 20,
             seek_us: 30,
             packet_decode_us: 40,
-            swscale_us: 50,
-            rgba_copy_us: 60,
-            external_process_us: 70,
+            hardware_transfer_us: 50,
+            swscale_us: 60,
+            rgba_copy_us: 70,
+            external_process_us: 80,
         });
 
         assert_eq!(durations.session_open_us, u64::MAX);
         assert_eq!(durations.cache_lookup_us, 22);
         assert_eq!(durations.seek_us, 33);
         assert_eq!(durations.packet_decode_us, 44);
-        assert_eq!(durations.swscale_us, 55);
-        assert_eq!(durations.rgba_copy_us, 66);
-        assert_eq!(durations.external_process_us, 77);
+        assert_eq!(durations.hardware_transfer_us, 55);
+        assert_eq!(durations.swscale_us, 66);
+        assert_eq!(durations.rgba_copy_us, 77);
+        assert_eq!(durations.external_process_us, 88);
     }
 
     #[test]
@@ -4132,7 +4150,7 @@ mod tests {
         };
         let json = serde_json::to_string(&report).expect("serialize sequence decode perf report");
         eprintln!(
-            "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" access_mode={} frames={} avg_us={} p95_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_p95_us={} uncached_max_us={} p95_budget_us={:?} packet_decode_us={} swscale_us={} rgba_copy_us={}",
+            "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" access_mode={} frames={} avg_us={} p95_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_p95_us={} uncached_max_us={} p95_budget_us={:?} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={}",
             report.path,
             report.access_mode,
             report.frame_count,
@@ -4145,6 +4163,7 @@ mod tests {
             report.uncached_max_us,
             report.p95_budget_us,
             report.total_stage_durations.packet_decode_us,
+            report.total_stage_durations.hardware_transfer_us,
             report.total_stage_durations.swscale_us,
             report.total_stage_durations.rgba_copy_us,
         );
@@ -4176,6 +4195,7 @@ mod tests {
             cache_lookup_us: lhs.cache_lookup_us.max(rhs.cache_lookup_us),
             seek_us: lhs.seek_us.max(rhs.seek_us),
             packet_decode_us: lhs.packet_decode_us.max(rhs.packet_decode_us),
+            hardware_transfer_us: lhs.hardware_transfer_us.max(rhs.hardware_transfer_us),
             swscale_us: lhs.swscale_us.max(rhs.swscale_us),
             rgba_copy_us: lhs.rgba_copy_us.max(rhs.rgba_copy_us),
             external_process_us: lhs.external_process_us.max(rhs.external_process_us),
