@@ -62,8 +62,8 @@ use crate::app_ui::preview_access_mode::{
     media_preview_access_mode_for_intent, media_preview_job_queue,
     media_preview_viewer_access_intent, media_preview_worker_count, media_preview_worker_lane,
     MediaPreviewJob, MediaPreviewJobEnqueueStatus, MediaPreviewJobQueueDiagnostics,
-    MediaPreviewJobQueueReceiver, MediaPreviewJobQueueSender, MediaPreviewKey,
-    MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
+    MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver, MediaPreviewJobQueueSender,
+    MediaPreviewKey, MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
     MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
@@ -3349,7 +3349,8 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_expired_playback_current_queue",
-            summary.worker_queue.queued_expired_playback_current_jobs as u64,
+            (summary.worker_queue.queued_expired_playback_current_jobs as u64)
+                .saturating_add(summary.worker_queue.dropped_expired_playback_current_jobs),
             0,
         );
         push_decode_warn_max_check(
@@ -4082,15 +4083,18 @@ fn push_preview_decode_root_causes_and_actions(
         );
     }
 
-    if summary.worker_queue.queued_expired_playback_current_jobs > 0 {
+    if summary.worker_queue.queued_expired_playback_current_jobs > 0
+        || summary.worker_queue.dropped_expired_playback_current_jobs > 0
+    {
         push_decode_root_cause_with_action(
             root_causes,
             actions,
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_expired_playback_current_queue",
             format!(
-                "queued_expired_playback_current_jobs={} queued_jobs={} queued_current_jobs={} queued_playback_cursor_jobs={} queued_prefetch_jobs={} in_flight_jobs={} in_flight_playback_cursor_jobs={} canceled_playback_deadline_jobs={} current_deadline_assignments={} current_decode_decisions={} current_drop_late_decisions={} current_proxy_or_hardware_recommended_decisions={}",
+                "queued_expired_playback_current_jobs={} dropped_expired_playback_current_jobs={} queued_jobs={} queued_current_jobs={} queued_playback_cursor_jobs={} queued_prefetch_jobs={} in_flight_jobs={} in_flight_playback_cursor_jobs={} canceled_playback_deadline_jobs={} current_deadline_assignments={} current_decode_decisions={} current_drop_late_decisions={} current_proxy_or_hardware_recommended_decisions={}",
                 summary.worker_queue.queued_expired_playback_current_jobs,
+                summary.worker_queue.dropped_expired_playback_current_jobs,
                 summary.worker_queue.queued_jobs,
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_playback_cursor_jobs,
@@ -7777,7 +7781,30 @@ fn media_preview_worker(
     worker_activity: Arc<PreviewWorkerActivity>,
     shutdown: Arc<AtomicBool>,
 ) {
-    while let Some(job) = jobs.recv_for_worker(lane) {
+    while let Some(outcome) = jobs.recv_for_worker_outcome(lane) {
+        let job = match outcome {
+            MediaPreviewJobQueueReceive::Job(job) => job,
+            MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(job) => {
+                if shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                let queue_wait_us = app_duration_us(job.enqueued_at.elapsed());
+                if !scheduler.should_decode(&job.key, job.access_mode) {
+                    continue;
+                }
+                let result = media_preview_canceled_result(
+                    job,
+                    queue_wait_us,
+                    MediaPreviewCancelReason::PlaybackDeadline,
+                    0,
+                    Some(0),
+                );
+                if results.send(result).is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
         if shutdown.load(Ordering::Acquire) {
             break;
         }
@@ -9720,6 +9747,7 @@ mod tests {
                 queued_prefetch_jobs: 1,
                 queued_playback_cursor_jobs: 1,
                 queued_expired_playback_current_jobs: 1,
+                dropped_expired_playback_current_jobs: 0,
                 queued_scrub_cursor_jobs: 1,
                 queued_random_access_still_jobs: 1,
                 queued_any_lane_eligible_jobs: 3,
@@ -9904,6 +9932,7 @@ mod tests {
                 queued_prefetch_jobs: 1,
                 queued_playback_cursor_jobs: 2,
                 queued_expired_playback_current_jobs: 2,
+                dropped_expired_playback_current_jobs: 1,
                 queued_any_lane_eligible_jobs: 3,
                 queued_playback_lane_eligible_jobs: 2,
                 queued_interactive_lane_eligible_jobs: 2,
@@ -9934,16 +9963,21 @@ mod tests {
         assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
         let summary = report.summary.expect("decode summary");
         assert_eq!(summary.worker_queue.queued_expired_playback_current_jobs, 2);
+        assert_eq!(
+            summary.worker_queue.dropped_expired_playback_current_jobs,
+            1
+        );
         assert!(report.checks.iter().any(|check| {
             check.code == "preview_decode_expired_playback_current_queue"
                 && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
-                && check.observed == 2
+                && check.observed == 3
                 && check.limit == Some(0)
         }));
         assert!(report.root_causes.iter().any(|root| {
             root.code == "preview_decode_expired_playback_current_queue"
                 && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
                 && root.evidence.contains("queued_expired_playback_current_jobs=2")
+                && root.evidence.contains("dropped_expired_playback_current_jobs=1")
                 && root.evidence.contains("queued_playback_cursor_jobs=2")
                 && root.evidence.contains("current_deadline_assignments=4")
                 && root.evidence.contains("current_decode_decisions=3")
@@ -12836,6 +12870,74 @@ mod tests {
         assert_eq!(result.priority, MediaPreviewRequestPriority::Prefetch);
         assert_eq!(result.queue_wait_us, 456);
         assert!(result.decode_diagnostics.is_none());
+    }
+
+    #[test]
+    fn media_preview_worker_reports_queue_dropped_expired_playback_current() {
+        let (job_tx, job_rx) = media_preview_job_queue(2);
+        let (result_tx, result_rx) = mpsc::channel();
+        let scheduler = MediaPreviewScheduler::default();
+        let worker_activity = Arc::new(PreviewWorkerActivity::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let key = test_media_key(42);
+        let generation = scheduler.begin_generation();
+        assert_eq!(
+            scheduler.request(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+            ),
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+        );
+        assert_eq!(
+            job_tx.enqueue(MediaPreviewJob {
+                key: key.clone(),
+                source_secs: 42.0,
+                generation,
+                priority: MediaPreviewRequestPriority::Current,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                enqueued_at: Instant::now(),
+                deadline_at: Some(Instant::now() - Duration::from_millis(1)),
+            }),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+
+        let worker_scheduler = scheduler.clone();
+        let worker_activity_for_thread = Arc::clone(&worker_activity);
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker = thread::spawn(move || {
+            media_preview_worker(
+                MediaPreviewWorkerLane::Playback,
+                job_rx,
+                result_tx,
+                worker_scheduler,
+                worker_activity_for_thread,
+                worker_shutdown,
+            );
+        });
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("expired playback current should produce a canceled result");
+        job_tx.close();
+        worker.join().expect("preview worker should stop after queue close");
+
+        assert_eq!(result.key, key);
+        assert!(result.canceled);
+        assert_eq!(
+            result.cancel_reason,
+            Some(MediaPreviewCancelReason::PlaybackDeadline)
+        );
+        assert_eq!(result.access_mode, PreviewDecodeAccessMode::PlaybackCursor);
+        assert_eq!(result.priority, MediaPreviewRequestPriority::Current);
+        assert_eq!(result.decode_elapsed_us, 0);
+        assert_eq!(result.cancel_observed_elapsed_us, Some(0));
+        assert_eq!(
+            job_tx.diagnostics().dropped_expired_playback_current_jobs,
+            1
+        );
+        assert_eq!(worker_activity.snapshot().in_flight_jobs, 0);
     }
 
     #[test]

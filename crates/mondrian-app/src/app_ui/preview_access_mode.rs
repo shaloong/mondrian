@@ -241,6 +241,7 @@ struct MediaPreviewJobQueueShared {
 struct MediaPreviewJobQueueState {
     queue: VecDeque<QueuedMediaPreviewJob>,
     closed: bool,
+    dropped_expired_playback_current_jobs: u64,
 }
 
 /// Point-in-time worker transport queue depth grouped by scheduling contract.
@@ -256,6 +257,8 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub queued_playback_cursor_jobs: usize,
     /// Current playback jobs whose display deadline expired while queued.
     pub queued_expired_playback_current_jobs: usize,
+    /// Current playback jobs dropped at dequeue because their display deadline expired.
+    pub dropped_expired_playback_current_jobs: u64,
     /// Scrub cursor jobs waiting in the worker transport queue.
     pub queued_scrub_cursor_jobs: usize,
     /// Random-access still-frame jobs waiting in the worker transport queue.
@@ -298,11 +301,21 @@ pub(crate) struct MediaPreviewJobPromoteStatus {
     pub(crate) generation_changed: bool,
 }
 
+#[derive(Debug)]
+pub(crate) enum MediaPreviewJobQueueReceive {
+    Job(MediaPreviewJob),
+    DroppedExpiredPlaybackCurrent(MediaPreviewJob),
+}
+
 pub(crate) fn media_preview_job_queue(
     capacity: usize,
 ) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
     let shared = Arc::new(MediaPreviewJobQueueShared {
-        state: Mutex::new(MediaPreviewJobQueueState { queue: VecDeque::new(), closed: false }),
+        state: Mutex::new(MediaPreviewJobQueueState {
+            queue: VecDeque::new(),
+            closed: false,
+            dropped_expired_playback_current_jobs: 0,
+        }),
         changed: Condvar::new(),
         capacity: capacity.max(1),
     });
@@ -463,11 +476,32 @@ impl MediaPreviewJobQueueReceiver {
         self.recv_for_worker(MediaPreviewWorkerLane::Any)
     }
 
+    #[cfg(test)]
     pub(crate) fn recv_for_worker(&self, lane: MediaPreviewWorkerLane) -> Option<MediaPreviewJob> {
+        match self.recv_for_worker_outcome(lane)? {
+            MediaPreviewJobQueueReceive::Job(job) => Some(job),
+            MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(_) => None,
+        }
+    }
+
+    pub(crate) fn recv_for_worker_outcome(
+        &self,
+        lane: MediaPreviewWorkerLane,
+    ) -> Option<MediaPreviewJobQueueReceive> {
         let mut state = lock_media_preview_job_queue_state(&self.shared.state);
         loop {
             if let Some(index) = next_media_preview_job_index(&state.queue, lane) {
-                return state.queue.remove(index).map(|queued| queued.job);
+                let Some(queued) = state.queue.remove(index) else {
+                    continue;
+                };
+                if media_preview_job_is_expired_playback_current(&queued, Instant::now()) {
+                    state.dropped_expired_playback_current_jobs =
+                        state.dropped_expired_playback_current_jobs.saturating_add(1);
+                    return Some(MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(
+                        queued.job,
+                    ));
+                }
+                return Some(MediaPreviewJobQueueReceive::Job(queued.job));
             }
             if state.closed {
                 return None;
@@ -485,6 +519,7 @@ fn media_preview_job_queue_diagnostics_locked(
 ) -> MediaPreviewJobQueueDiagnostics {
     let mut diagnostics = MediaPreviewJobQueueDiagnostics {
         queued_jobs: state.queue.len(),
+        dropped_expired_playback_current_jobs: state.dropped_expired_playback_current_jobs,
         closed: state.closed,
         ..MediaPreviewJobQueueDiagnostics::default()
     };
@@ -513,9 +548,7 @@ fn media_preview_job_queue_diagnostics_locked(
         match queued.priority {
             MediaPreviewRequestPriority::Current => {
                 diagnostics.queued_current_jobs = diagnostics.queued_current_jobs.saturating_add(1);
-                if queued.job.access_mode == PreviewDecodeAccessMode::PlaybackCursor
-                    && media_preview_job_deadline_expired_at(queued.job.deadline_at, now)
-                {
+                if media_preview_job_is_expired_playback_current(queued, now) {
                     diagnostics.queued_expired_playback_current_jobs =
                         diagnostics.queued_expired_playback_current_jobs.saturating_add(1);
                 }
@@ -574,6 +607,15 @@ fn media_preview_current_job_selection_key(
 
 fn media_preview_job_deadline_expired_at(deadline_at: Option<Instant>, now: Instant) -> bool {
     deadline_at.is_some_and(|deadline| now >= deadline)
+}
+
+fn media_preview_job_is_expired_playback_current(
+    queued: &QueuedMediaPreviewJob,
+    now: Instant,
+) -> bool {
+    queued.priority == MediaPreviewRequestPriority::Current
+        && queued.job.access_mode == PreviewDecodeAccessMode::PlaybackCursor
+        && media_preview_job_deadline_expired_at(queued.job.deadline_at, now)
 }
 
 fn media_preview_current_job_rank(access_mode: PreviewDecodeAccessMode) -> u8 {
@@ -2002,7 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn media_preview_job_queue_prefers_fresh_current_over_expired_lane_match() {
+    fn media_preview_job_queue_drops_expired_playback_current_at_dequeue() {
         let (sender, receiver) = media_preview_job_queue(2);
         let expired_playback = test_media_key(1);
         let fresh_scrub = test_media_key(2);
@@ -2036,14 +2078,24 @@ mod tests {
         assert_eq!(scrub_job.key, fresh_scrub);
         assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
 
-        let expired_job = receiver
-            .recv_for_worker(MediaPreviewWorkerLane::Playback)
-            .expect("expired playback job remains available for structured deadline cancellation");
-        assert_eq!(expired_job.key, expired_playback);
-        assert_eq!(
-            expired_job.access_mode,
-            PreviewDecodeAccessMode::PlaybackCursor
-        );
+        match receiver
+            .recv_for_worker_outcome(MediaPreviewWorkerLane::Playback)
+            .expect("expired playback job should produce a structured queue outcome")
+        {
+            MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(expired_job) => {
+                assert_eq!(expired_job.key, expired_playback);
+                assert_eq!(
+                    expired_job.access_mode,
+                    PreviewDecodeAccessMode::PlaybackCursor
+                );
+            }
+            MediaPreviewJobQueueReceive::Job(job) => {
+                panic!("expired playback job must not be dispatched for decode: {job:?}");
+            }
+        }
+        let diagnostics = sender.diagnostics();
+        assert_eq!(diagnostics.queued_expired_playback_current_jobs, 0);
+        assert_eq!(diagnostics.dropped_expired_playback_current_jobs, 1);
     }
 
     #[test]
@@ -2386,6 +2438,7 @@ mod tests {
                 queued_prefetch_jobs: 1,
                 queued_playback_cursor_jobs: 1,
                 queued_expired_playback_current_jobs: 0,
+                dropped_expired_playback_current_jobs: 0,
                 queued_scrub_cursor_jobs: 1,
                 queued_random_access_still_jobs: 1,
                 queued_any_lane_eligible_jobs: 3,
