@@ -133,6 +133,38 @@ pub struct PreviewDecodeAdaptiveHints {
     pub scrub_class: PreviewScrubAdaptiveClass,
 }
 
+/// Caller preference for preview hardware decode / native frame residency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewHardwareDecodeRequest {
+    /// Use the current media default; do not require a hardware-resident path.
+    #[default]
+    Auto,
+    /// Prefer a hardware decoder that can produce GPU-resident native frames.
+    PreferGpuResident,
+    /// Require a hardware-resident decode path; fail closed when unavailable.
+    RequireGpuResident,
+}
+
+/// Media-layer hardware decode selection outcome for one preview request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewHardwareDecodeDecision {
+    /// Hardware decode was not requested and CPU RGBA is the selected path.
+    #[default]
+    CpuRgbaNotRequested,
+    /// Hardware decode was requested but no active GPU-resident adapter exists.
+    CpuRgbaHardwareUnavailable,
+    /// Hardware decode was requested for an access mode that is not allowed to use it.
+    CpuRgbaAccessModeUnsupported,
+    /// Hardware decode was requested but the selected backend cannot provide native residency.
+    CpuRgbaBackendUnavailable,
+    /// Hardware decode was requested but renderer import for the native surface is unavailable.
+    CpuRgbaRendererImportUnavailable,
+    /// Hardware decode was requested, but this decode backend only returns CPU RGBA bytes.
+    CpuRgbaBackendBoundary,
+    /// A hardware decoder produced a GPU-resident native frame.
+    GpuResidentNative,
+}
+
 /// Structured hardware-decode blocker observed by the preview decode boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewHardwareDecodeBlocker {
@@ -216,6 +248,8 @@ pub struct PreviewDecodeRgbaRequest<'a> {
     pub fingerprint: Option<PreviewFileFingerprint>,
     /// Adaptive scheduling hints selected by the caller.
     pub adaptive_hints: PreviewDecodeAdaptiveHints,
+    /// Hardware decode/native-residency preference selected by the caller.
+    pub hardware_decode_request: PreviewHardwareDecodeRequest,
 }
 
 impl<'a> PreviewDecodeRgbaRequest<'a> {
@@ -229,6 +263,7 @@ impl<'a> PreviewDecodeRgbaRequest<'a> {
             access_mode,
             fingerprint: None,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
         }
     }
 
@@ -248,6 +283,15 @@ impl<'a> PreviewDecodeRgbaRequest<'a> {
     /// Attach decode tuning hints that preserve the requested frame semantics.
     pub fn with_adaptive_hints(mut self, adaptive_hints: PreviewDecodeAdaptiveHints) -> Self {
         self.adaptive_hints = adaptive_hints;
+        self
+    }
+
+    /// Attach a hardware decode/native-residency preference.
+    pub fn with_hardware_decode_request(
+        mut self,
+        hardware_decode_request: PreviewHardwareDecodeRequest,
+    ) -> Self {
+        self.hardware_decode_request = hardware_decode_request;
         self
     }
 }
@@ -636,6 +680,12 @@ pub struct PreviewDecodeDiagnostics {
     /// Adaptive scrub pressure applied by the caller.
     #[serde(default)]
     pub scrub_adaptive_class: PreviewScrubAdaptiveClass,
+    /// Hardware decode/native-residency preference selected by the caller.
+    #[serde(default)]
+    pub hardware_decode_request: PreviewHardwareDecodeRequest,
+    /// Hardware decode/native-residency selection outcome for this frame.
+    #[serde(default)]
+    pub hardware_decode_decision: PreviewHardwareDecodeDecision,
     /// Whether an existing access-mode-local decode session was reused.
     #[serde(default)]
     pub session_reused: bool,
@@ -716,6 +766,8 @@ impl PreviewDecodeDiagnostics {
             forward_decode_budget_frames: 0,
             any_seek_window_ms: 0,
             scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
+            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+            hardware_decode_decision: PreviewHardwareDecodeDecision::CpuRgbaNotRequested,
             session_reused: false,
             forward_reused: false,
             seek_index_available: false,
@@ -895,6 +947,12 @@ impl RgbaFrame {
         self
     }
 
+    fn with_hardware_decode_plan(mut self, plan: &PreviewHardwareDecodePlan) -> Self {
+        self.diagnostics.hardware_decode_request = plan.request;
+        self.diagnostics.hardware_decode_decision = plan.decision;
+        self.with_hw_accel_probe(&plan.probe)
+    }
+
     fn with_decoded_surface_format(mut self, format: DecodedVideoSurfaceFormat) -> Self {
         self.diagnostics.decoded_surface_format = format;
         self
@@ -944,6 +1002,7 @@ pub fn decode_preview_rgba_scaled_cancellable(
         request.access_mode,
         request.fingerprint,
         request.adaptive_hints,
+        request.hardware_decode_request,
         should_cancel,
     )
 }
@@ -1005,12 +1064,62 @@ impl PreviewDecodeSessions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewHardwareDecodePlan {
+    request: PreviewHardwareDecodeRequest,
+    decision: PreviewHardwareDecodeDecision,
+    probe: HwAccelProbe,
+}
+
+impl PreviewHardwareDecodePlan {
+    fn resolve(
+        request: PreviewHardwareDecodeRequest,
+        access_mode: PreviewDecodeAccessMode,
+        backend: PreviewDecodeBackend,
+    ) -> Self {
+        let probe = HwAccelBackend::probe();
+        let decision = Self::decision_for(request, access_mode, backend, &probe);
+        Self { request, decision, probe }
+    }
+
+    fn decision_for(
+        request: PreviewHardwareDecodeRequest,
+        access_mode: PreviewDecodeAccessMode,
+        backend: PreviewDecodeBackend,
+        probe: &HwAccelProbe,
+    ) -> PreviewHardwareDecodeDecision {
+        if request == PreviewHardwareDecodeRequest::Auto {
+            return PreviewHardwareDecodeDecision::CpuRgbaNotRequested;
+        }
+        if access_mode != PreviewDecodeAccessMode::PlaybackCursor {
+            return PreviewHardwareDecodeDecision::CpuRgbaAccessModeUnsupported;
+        }
+        if backend == PreviewDecodeBackend::ExternalFfmpegCpuRgba {
+            return PreviewHardwareDecodeDecision::CpuRgbaBackendBoundary;
+        }
+        if !probe.hardware_decode_active
+            || !probe.zero_copy_active
+            || probe.frame_residency != DecodedFrameResidency::GpuTexture
+        {
+            return PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable;
+        }
+        if probe.gpu_frame_handle_kind.is_none() {
+            return PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable;
+        }
+        if !probe.renderer_import_ready {
+            return PreviewHardwareDecodeDecision::CpuRgbaRendererImportUnavailable;
+        }
+        PreviewHardwareDecodeDecision::GpuResidentNative
+    }
+}
+
 struct PreviewDecodeSession {
     path: PathBuf,
     fingerprint: PreviewFileFingerprint,
     max_width: Option<u32>,
     max_height: Option<u32>,
     backend: PreviewDecodeBackend,
+    hardware_decode_request: PreviewHardwareDecodeRequest,
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
     scaler: ffmpeg::software::scaling::Context,
@@ -1022,7 +1131,7 @@ struct PreviewDecodeSession {
     target_height: u32,
     threading_kind: PreviewDecodeThreadingKind,
     threading_count: usize,
-    hw_accel_probe: HwAccelProbe,
+    hardware_decode_plan: PreviewHardwareDecodePlan,
     decoded_surface_format: DecodedVideoSurfaceFormat,
     last_pts: Option<i64>,
     reached_eof: bool,
@@ -1331,13 +1440,24 @@ impl PreviewDecodeSession {
         fingerprint: PreviewFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
+        access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
+        hardware_decode_request: PreviewHardwareDecodeRequest,
     ) -> Result<Self> {
         let input = ffmpeg::format::input(path).map_err(|e| MondrianError::MediaOpen {
             path: path.display().to_string(),
             reason: e.to_string(),
         })?;
-        Self::from_input(input, path, fingerprint, max_width, max_height, backend)
+        Self::from_input(
+            input,
+            path,
+            fingerprint,
+            max_width,
+            max_height,
+            access_mode,
+            backend,
+            hardware_decode_request,
+        )
     }
 
     fn from_input(
@@ -1346,7 +1466,9 @@ impl PreviewDecodeSession {
         fingerprint: PreviewFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
+        access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
+        hardware_decode_request: PreviewHardwareDecodeRequest,
     ) -> Result<Self> {
         let (stream_index, parameters, stream_tb, stream_rate, seek_index) = {
             let stream = input.streams().best(ffmpeg::media::Type::Video).ok_or_else(|| {
@@ -1395,7 +1517,8 @@ impl PreviewDecodeSession {
         let active_threading = decoder.threading();
         let threading_kind = PreviewDecodeThreadingKind::from_ffmpeg(active_threading.kind);
         let threading_count = active_threading.count;
-        let hw_accel_probe = HwAccelBackend::probe();
+        let hardware_decode_plan =
+            PreviewHardwareDecodePlan::resolve(hardware_decode_request, access_mode, backend);
         let decoded_surface_format = decoded_surface_format_from_pixel(decoder.format());
 
         let (target_width, target_height) =
@@ -1425,6 +1548,7 @@ impl PreviewDecodeSession {
             max_width,
             max_height,
             backend,
+            hardware_decode_request,
             input,
             decoder,
             scaler,
@@ -1436,7 +1560,7 @@ impl PreviewDecodeSession {
             target_height,
             threading_kind,
             threading_count,
-            hw_accel_probe,
+            hardware_decode_plan,
             decoded_surface_format,
             last_pts: None,
             reached_eof: false,
@@ -1452,12 +1576,14 @@ impl PreviewDecodeSession {
         max_width: Option<u32>,
         max_height: Option<u32>,
         backend: PreviewDecodeBackend,
+        hardware_decode_request: PreviewHardwareDecodeRequest,
     ) -> bool {
         self.path == path
             && self.fingerprint == fingerprint
             && self.max_width == max_width
             && self.max_height == max_height
             && self.backend == backend
+            && self.hardware_decode_request == hardware_decode_request
     }
 
     fn decode_at(
@@ -1495,7 +1621,7 @@ impl PreviewDecodeSession {
                             cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                             ..PreviewDecodeStageDurations::default()
                         })
-                        .with_hw_accel_probe(&self.hw_accel_probe)
+                        .with_hardware_decode_plan(&self.hardware_decode_plan)
                         .with_decoded_surface_format(self.decoded_surface_format),
                 ));
             }
@@ -1526,7 +1652,7 @@ impl PreviewDecodeSession {
                         cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
                         ..PreviewDecodeStageDurations::default()
                     })
-                    .with_hw_accel_probe(&self.hw_accel_probe)
+                    .with_hardware_decode_plan(&self.hardware_decode_plan)
                     .with_decoded_surface_format(self.decoded_surface_format),
             ));
         }
@@ -1591,7 +1717,7 @@ impl PreviewDecodeSession {
                     .with_forward_reused(should_continue_forward)
                     .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
                     .with_threading(self.threading_kind, self.threading_count)
-                    .with_hw_accel_probe(&self.hw_accel_probe)
+                    .with_hardware_decode_plan(&self.hardware_decode_plan)
                     .with_decoded_surface_format(self.decoded_surface_format),
             ));
         }
@@ -1906,6 +2032,7 @@ fn decode_preview_rgba_frame_outcome(
     access_mode: PreviewDecodeAccessMode,
     fingerprint: Option<PreviewFileFingerprint>,
     adaptive_hints: PreviewDecodeAdaptiveHints,
+    hardware_decode_request: PreviewHardwareDecodeRequest,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
@@ -1925,7 +2052,16 @@ fn decode_preview_rgba_frame_outcome(
         }
         let current_match = slot
             .as_ref()
-            .map(|session| session.matches(path, fingerprint, max_width, max_height, backend))
+            .map(|session| {
+                session.matches(
+                    path,
+                    fingerprint,
+                    max_width,
+                    max_height,
+                    backend,
+                    hardware_decode_request,
+                )
+            })
             .unwrap_or(false);
 
         if !current_match {
@@ -1935,13 +2071,31 @@ fn decode_preview_rgba_frame_outcome(
                 fingerprint,
                 max_width,
                 max_height,
+                access_mode,
                 backend,
+                hardware_decode_request,
             )?);
             session_open_us = duration_us(open_started_at.elapsed());
         }
 
         let session = slot.as_mut().expect("preview decode session must exist");
+        if hardware_decode_request == PreviewHardwareDecodeRequest::RequireGpuResident
+            && session.hardware_decode_plan.decision != PreviewHardwareDecodeDecision::GpuResidentNative
+        {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "required GPU-resident preview decode is unavailable: {:?}",
+                    session.hardware_decode_plan.decision
+                ),
+            });
+        }
         let mut external_process_us = 0;
+        let external_hardware_decode_plan = PreviewHardwareDecodePlan::resolve(
+            hardware_decode_request,
+            access_mode,
+            PreviewDecodeBackend::ExternalFfmpegCpuRgba,
+        );
 
         if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
             if should_cancel() {
@@ -1975,6 +2129,7 @@ fn decode_preview_rgba_frame_outcome(
                                 external_process_us,
                                 ..PreviewDecodeStageDurations::default()
                             })
+                            .with_hardware_decode_plan(&external_hardware_decode_plan)
                             .with_elapsed(started_at.elapsed())));
                     }
                     Err(err) => {
@@ -2424,6 +2579,7 @@ mod tests {
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeOutcome, PreviewDecodePath,
         PreviewDecodeRgbaRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
         PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+        PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
         PreviewPlaybackRing, PreviewScrubAdaptiveClass, PreviewSeekIndex,
         PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution, RgbaFrame,
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
@@ -2471,6 +2627,73 @@ mod tests {
         assert!(preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode(
             PreviewDecodeAccessMode::RandomAccessStillFrame
         ));
+    }
+
+    #[test]
+    fn preview_decode_request_defaults_to_auto_hardware_decode() {
+        let request = PreviewDecodeRgbaRequest::new(
+            Path::new("clip.mov"),
+            0.0,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        );
+
+        assert_eq!(
+            request.hardware_decode_request,
+            PreviewHardwareDecodeRequest::Auto
+        );
+        assert_eq!(
+            request
+                .with_hardware_decode_request(PreviewHardwareDecodeRequest::PreferGpuResident)
+                .hardware_decode_request,
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+    }
+
+    #[test]
+    fn hardware_decode_plan_fails_closed_for_playback_prefer_gpu_until_adapter_exists() {
+        let plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Auto,
+        );
+
+        assert_eq!(
+            plan.request,
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+        assert_eq!(
+            plan.decision,
+            PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable
+        );
+        assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
+    }
+
+    #[test]
+    fn hardware_decode_plan_rejects_non_playback_access_modes() {
+        let plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            PreviewDecodeAccessMode::ScrubCursor,
+            PreviewDecodeBackend::Auto,
+        );
+
+        assert_eq!(
+            plan.decision,
+            PreviewHardwareDecodeDecision::CpuRgbaAccessModeUnsupported
+        );
+    }
+
+    #[test]
+    fn hardware_decode_plan_marks_external_cpu_rgba_backend_boundary() {
+        let plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::ExternalFfmpegCpuRgba,
+        );
+
+        assert_eq!(
+            plan.decision,
+            PreviewHardwareDecodeDecision::CpuRgbaBackendBoundary
+        );
     }
 
     #[test]

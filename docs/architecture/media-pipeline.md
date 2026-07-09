@@ -178,6 +178,13 @@ media preview decode boundary instead of matching on `PreviewDecodeAccessMode`
 or calling mode-specific FFmpeg helpers. Access-mode routing, session
 retention, cache lookup, playback-ring use, and future hardware/low-copy
 backend selection must stay behind the request boundary in `mondrian-media`.
+The request may carry a `PreviewHardwareDecodeRequest`, but this is only caller
+intent: `Auto` means use the media default, `PreferGpuResident` means prefer a
+native GPU-resident decoded surface when the access mode/backend can provide
+one, and `RequireGpuResident` means fail closed instead of silently returning a
+CPU RGBA frame. The app playback scheduler may use `PreferGpuResident` for
+`PlaybackCursor`; scrub and still-frame work should remain `Auto` unless a
+future backend explicitly supports those access patterns.
 App preview decode execution must run synchronous FFmpeg preview decode on
 dedicated preview worker threads, not on the UI/event thread. Current-frame and
 prefetch workers pass a cooperative cancellation predicate into
@@ -504,6 +511,15 @@ Current decode residency is intentionally explicit and fail-closed. The active
 preview/media decode path produces CPU RGBA frames. Legacy YUV preview
 surfaces were removed before release so access-mode decode has one media
 payload contract until a real hardware-resident adapter replaces it.
+`PreviewHardwareDecodeDecision` records the media-layer selection for each
+request. A GPU preference must resolve to a structured CPU RGBA reason such as
+`CpuRgbaHardwareUnavailable`, `CpuRgbaAccessModeUnsupported`,
+`CpuRgbaBackendUnavailable`, `CpuRgbaRendererImportUnavailable`, or
+`CpuRgbaBackendBoundary` until the selected decoder actually produces a
+renderer-importable native surface. `GpuResidentNative` is valid only when the
+decoder probe reports active hardware decode, zero-copy/GPU texture residency,
+a native handle kind, and renderer import readiness. External FFmpeg CPU RGBA
+is always a backend boundary, even if the CLI used platform hwaccel internally.
 `HwAccelProbe` reports the selected hardware backend, decoded frame residency,
 `hardware_decode_active`, `zero_copy_active`, optional
 `decoded_gpu_frame_handle_kind`, `renderer_import_ready`, and a stable reason
@@ -586,15 +602,16 @@ stage-level wall-clock timings for session open, cache lookup, seek,
 packet/decode, software scaling, RGBA copy, and the experimental external-process
 path.
 The same diagnostics carry the current hardware decode contract:
-`hw_accel_backend`, `hardware_decode_active`, `zero_copy_active`,
-`decoded_frame_residency`, `gpu_frame_handle_kind`, `renderer_import_ready`, and
+`hardware_decode_request`, `hardware_decode_decision`, `hw_accel_backend`,
+`hardware_decode_active`, `zero_copy_active`, `decoded_frame_residency`,
+`gpu_frame_handle_kind`, `renderer_import_ready`, and
 `hardware_decode_blocker`, plus `decoded_surface_format` for the decoder output
 format before CPU RGBA conversion. `Nv12` and `P010` are the primary GPU-native
 YUV/P010 residency candidates; they are media facts, not renderer import claims.
-These fields are fail-closed; until a real
-hardware-frame decoder and renderer import path are connected they must report
-CPU RGBA residency with `TextureResidencyNotConnected` rather than implying
-platform hwaccel is active.
+These fields are fail-closed; until a real hardware-frame decoder and renderer
+import path are connected they must report CPU RGBA residency with
+`TextureResidencyNotConnected` and a CPU RGBA `PreviewHardwareDecodeDecision`
+rather than implying platform hwaccel is active.
 The app-window GPU preview path must preserve those media facts in its frame
 residency telemetry. Media decode diagnostics feed the
 `AppUiGpuPreviewMediaSource` contract, and window-side native video import
