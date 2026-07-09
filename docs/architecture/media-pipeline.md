@@ -188,6 +188,15 @@ state without synchronously requesting viewer preview/composite work; preview
 catch-up is driven by worker completion, cache state, and later render ticks.
 This keeps pause, close, and other shell input responsive even when a 4K
 Long-GOP decode or GPU-preview blocker is still unresolved.
+The native app event loop also records stage-level responsiveness telemetry for
+action draining, redraw, GPU preview preparation, UI refresh, paint/render,
+background-task polling, and playback-clock advancement. Any stage that exceeds
+the UI responsiveness budget is logged with the stable stage name and elapsed
+time. This diagnostic boundary is intentionally in the app layer because it
+measures host scheduling and UI-thread residency, not media decode semantics;
+media/render changes must preserve it so a future buffering report can identify
+whether the stall is decode backlog, GPU preview preparation, redraw/render, or
+control dispatch.
 App preview decode timeout is access-mode-specific, not a single global
 playback policy. `ScrubCursor` has the shortest caller-release budget because
 interactive latest-wins work must not leave the UI waiting behind pathological

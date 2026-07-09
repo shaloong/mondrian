@@ -71,6 +71,7 @@ const WORKSPACE_WINDOW_HEIGHT: f32 = 900.0;
 const WORKSPACE_MIN_WIDTH: f32 = 1024.0;
 const WORKSPACE_MIN_HEIGHT: f32 = 600.0;
 const APP_UI_DISPLAY_CONTRACT_REFRESH_HISTORY_LIMIT: usize = 8;
+const APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US: u64 = 50_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppUiWindowRole {
@@ -1155,6 +1156,89 @@ struct SurfaceLifecycleUpdate {
     bounds: Option<Rect>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppUiEventLoopStage {
+    DrainActions,
+    RedrawRequested,
+    PrepareViewerGpuPreview,
+    RefreshIfDirty,
+    PaintAndRender,
+    PollBackgroundTasks,
+    AdvancePlaybackClock,
+}
+
+impl AppUiEventLoopStage {
+    const COUNT: usize = 7;
+
+    const fn index(self) -> usize {
+        match self {
+            Self::DrainActions => 0,
+            Self::RedrawRequested => 1,
+            Self::PrepareViewerGpuPreview => 2,
+            Self::RefreshIfDirty => 3,
+            Self::PaintAndRender => 4,
+            Self::PollBackgroundTasks => 5,
+            Self::AdvancePlaybackClock => 6,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::DrainActions => "drain_actions",
+            Self::RedrawRequested => "redraw_requested",
+            Self::PrepareViewerGpuPreview => "prepare_viewer_gpu_preview",
+            Self::RefreshIfDirty => "refresh_if_dirty",
+            Self::PaintAndRender => "paint_and_render",
+            Self::PollBackgroundTasks => "poll_background_tasks",
+            Self::AdvancePlaybackClock => "advance_playback_clock",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AppUiEventLoopStageStats {
+    calls: u64,
+    slow_calls: u64,
+    accumulated_duration_us: u64,
+    max_duration_us: u64,
+    last_duration_us: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AppUiEventLoopTelemetry {
+    stages: [AppUiEventLoopStageStats; AppUiEventLoopStage::COUNT],
+}
+
+impl AppUiEventLoopTelemetry {
+    fn record_stage_duration(&mut self, stage: AppUiEventLoopStage, duration: Duration) {
+        let duration_us = duration.as_micros().min(u128::from(u64::MAX)) as u64;
+        let stats = &mut self.stages[stage.index()];
+        let previous_max = stats.max_duration_us;
+        stats.calls = stats.calls.saturating_add(1);
+        stats.accumulated_duration_us = stats.accumulated_duration_us.saturating_add(duration_us);
+        stats.max_duration_us = stats.max_duration_us.max(duration_us);
+        stats.last_duration_us = Some(duration_us);
+        if duration_us >= APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US {
+            stats.slow_calls = stats.slow_calls.saturating_add(1);
+            if duration_us >= previous_max {
+                tracing::warn!(
+                    stage = stage.as_str(),
+                    duration_us,
+                    max_duration_us = stats.max_duration_us,
+                    slow_calls = stats.slow_calls,
+                    budget_us = APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US,
+                    "app UI event loop stage exceeded responsiveness budget"
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn stage_stats(&self, stage: AppUiEventLoopStage) -> AppUiEventLoopStageStats {
+        self.stages[stage.index()]
+    }
+}
+
 struct AppUiWindowSession {
     role: AppUiWindowRole,
     window: Arc<winit::window::Window>,
@@ -1177,6 +1261,7 @@ struct AppUiWindowSession {
     modifiers_state: Modifiers,
     pending_initial_redraw: bool,
     last_playback_tick: Instant,
+    event_loop_telemetry: AppUiEventLoopTelemetry,
 }
 
 /// Run the app UI Mondrian editor window.
@@ -1362,6 +1447,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::RedrawRequested => {
+                        let redraw_started = Instant::now();
                         sync_window_session_role(
                             &mut host,
                             elwt,
@@ -1370,8 +1456,19 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
+                        let prepare_started = Instant::now();
                         prepare_viewer_gpu_preview(&device, &queue, &mut session, &host);
+                        session.event_loop_telemetry.record_stage_duration(
+                            AppUiEventLoopStage::PrepareViewerGpuPreview,
+                            prepare_started.elapsed(),
+                        );
+                        let refresh_started = Instant::now();
                         host.refresh_if_dirty(session.current_bounds.get());
+                        session.event_loop_telemetry.record_stage_duration(
+                            AppUiEventLoopStage::RefreshIfDirty,
+                            refresh_started.elapsed(),
+                        );
+                        let paint_started = Instant::now();
                         let mut encoder = DrawEncoder::new();
                         let theme = mondrian_ui_theme::current_theme();
                         let b = session.current_bounds.get();
@@ -1432,6 +1529,14 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.window.request_redraw();
                         }
                         session.pending_initial_redraw = false;
+                        session.event_loop_telemetry.record_stage_duration(
+                            AppUiEventLoopStage::PaintAndRender,
+                            paint_started.elapsed(),
+                        );
+                        session.event_loop_telemetry.record_stage_duration(
+                            AppUiEventLoopStage::RedrawRequested,
+                            redraw_started.elapsed(),
+                        );
                     }
 
                     WindowEvent::Resized(new_size) => {
@@ -1659,7 +1764,14 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                 session
                     .ui_runtime
                     .drive_timers(&session.window, &mut session.router, elwt);
-                if host.poll_background_tasks(session.current_bounds.get()) {
+                let poll_started = Instant::now();
+                let background_tasks_changed =
+                    host.poll_background_tasks(session.current_bounds.get());
+                session.event_loop_telemetry.record_stage_duration(
+                    AppUiEventLoopStage::PollBackgroundTasks,
+                    poll_started.elapsed(),
+                );
+                if background_tasks_changed {
                     sync_window_session_role(
                         &mut host,
                         elwt,
@@ -1675,7 +1787,14 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                 let playback_elapsed =
                     playback_now.saturating_duration_since(session.last_playback_tick);
                 session.last_playback_tick = playback_now;
-                if host.advance_playback_clock(playback_elapsed, session.current_bounds.get()) {
+                let playback_clock_started = Instant::now();
+                let playback_changed =
+                    host.advance_playback_clock(playback_elapsed, session.current_bounds.get());
+                session.event_loop_telemetry.record_stage_duration(
+                    AppUiEventLoopStage::AdvancePlaybackClock,
+                    playback_clock_started.elapsed(),
+                );
+                if playback_changed {
                     sync_window_session_role(
                         &mut host,
                         elwt,
@@ -3763,6 +3882,7 @@ impl AppUiWindowSession {
             modifiers_state: Modifiers::none(),
             pending_initial_redraw: true,
             last_playback_tick: Instant::now(),
+            event_loop_telemetry: AppUiEventLoopTelemetry::default(),
         })
     }
 }
@@ -3790,28 +3910,31 @@ fn drain_actions_and_sync_window_session(
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
 ) {
+    let stage_started = Instant::now();
     let previous_display_policy = session.display_management_policy.clone();
     let commands =
         host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
     rebuild_global_shortcuts(&mut session.router, &host.preferences().shortcut_overrides);
     let should_sync_window = shell_commands_should_sync_window_session(commands);
     apply_shell_commands(commands, &session.window, elwt);
-    if !should_sync_window {
-        return;
-    }
-    sync_window_session_role(host, elwt, instance, adapter, device, session);
-    if session.role == AppUiWindowRole::Workspace {
-        let next_display_policy = host.resolved_display_management_policy();
-        if previous_display_policy != next_display_policy {
-            refresh_display_output_contract(
-                DisplayOutputContractRefreshReason::DisplayPolicyChanged,
-                adapter,
-                device,
-                session,
-                host,
-            );
+    if should_sync_window {
+        sync_window_session_role(host, elwt, instance, adapter, device, session);
+        if session.role == AppUiWindowRole::Workspace {
+            let next_display_policy = host.resolved_display_management_policy();
+            if previous_display_policy != next_display_policy {
+                refresh_display_output_contract(
+                    DisplayOutputContractRefreshReason::DisplayPolicyChanged,
+                    adapter,
+                    device,
+                    session,
+                    host,
+                );
+            }
         }
     }
+    session
+        .event_loop_telemetry
+        .record_stage_duration(AppUiEventLoopStage::DrainActions, stage_started.elapsed());
 }
 
 fn shell_commands_should_sync_window_session(commands: AppUiShellCommands) -> bool {
@@ -4702,6 +4825,65 @@ mod tests {
                 wgpu::SurfaceColorSpace::Bt2100Pq,
                 wgpu::SurfaceColorSpace::Bt2100Hlg,
             ]
+        );
+    }
+
+    #[test]
+    fn app_ui_event_loop_telemetry_records_slow_stage_stats() {
+        let mut telemetry = AppUiEventLoopTelemetry::default();
+
+        telemetry.record_stage_duration(
+            AppUiEventLoopStage::PollBackgroundTasks,
+            Duration::from_micros(APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US - 1),
+        );
+        telemetry.record_stage_duration(
+            AppUiEventLoopStage::PollBackgroundTasks,
+            Duration::from_micros(APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US),
+        );
+
+        let stats = telemetry.stage_stats(AppUiEventLoopStage::PollBackgroundTasks);
+        assert_eq!(stats.calls, 2);
+        assert_eq!(stats.slow_calls, 1);
+        assert_eq!(
+            stats.accumulated_duration_us,
+            APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US.saturating_mul(2).saturating_sub(1)
+        );
+        assert_eq!(
+            stats.max_duration_us,
+            APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US
+        );
+        assert_eq!(
+            stats.last_duration_us,
+            Some(APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US)
+        );
+    }
+
+    #[test]
+    fn app_ui_event_loop_stage_names_are_stable() {
+        assert_eq!(AppUiEventLoopStage::DrainActions.as_str(), "drain_actions");
+        assert_eq!(
+            AppUiEventLoopStage::RedrawRequested.as_str(),
+            "redraw_requested"
+        );
+        assert_eq!(
+            AppUiEventLoopStage::PrepareViewerGpuPreview.as_str(),
+            "prepare_viewer_gpu_preview"
+        );
+        assert_eq!(
+            AppUiEventLoopStage::RefreshIfDirty.as_str(),
+            "refresh_if_dirty"
+        );
+        assert_eq!(
+            AppUiEventLoopStage::PaintAndRender.as_str(),
+            "paint_and_render"
+        );
+        assert_eq!(
+            AppUiEventLoopStage::PollBackgroundTasks.as_str(),
+            "poll_background_tasks"
+        );
+        assert_eq!(
+            AppUiEventLoopStage::AdvancePlaybackClock.as_str(),
+            "advance_playback_clock"
         );
     }
 
