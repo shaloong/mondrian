@@ -791,7 +791,10 @@ service. The product default remains `PreviewHardwareDecodeRequest::Auto`;
 window/renderer code may raise playback jobs to `PreferGpuResident` only after
 the renderer native decoded-frame import contract reports ready. This prevents
 hardware decode with CPU transfer from becoming the default playback path when
-native GPU residency is not actually connected.
+native GPU residency is not actually connected. The same admission state must
+be serialized in preview diagnostics and performance reports; a known
+renderer-import blocker must produce a specific gated-admission root cause
+instead of disappearing as a generic media-layer `Auto` decode.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
 through the shared app-layer proxy dispatcher. The request is deduplicated by

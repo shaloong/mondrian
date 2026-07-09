@@ -234,7 +234,8 @@ impl AppUiHost {
         } else {
             PreviewHardwareDecodeRequest::Auto
         };
-        self.preview_service.set_playback_hardware_decode_request(request);
+        self.preview_service
+            .set_playback_hardware_decode_admission(request, support.renderer_backend_ready);
     }
 
     /// Advertise a registered GPU preview texture as the viewer frame for its resolved plan.
@@ -1323,6 +1324,19 @@ mod tests {
             host.preview_service.playback_hardware_decode_request_for_test(),
             PreviewHardwareDecodeRequest::Auto
         );
+        assert!(
+            host.preview_service
+                .diagnostics()
+                .hardware_decode_admission
+                .renderer_native_import_support_known
+        );
+        assert!(
+            !host
+                .preview_service
+                .diagnostics()
+                .hardware_decode_admission
+                .renderer_native_import_ready
+        );
 
         host.set_native_decoded_frame_import_support(GpuNativeDecodedFrameImportSupport::ready(
             vec![mondrian_media::DecodedGpuFrameHandleKind::D3D11Texture2D],
@@ -1331,6 +1345,12 @@ mod tests {
         assert_eq!(
             host.preview_service.playback_hardware_decode_request_for_test(),
             PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+        assert!(
+            host.preview_service
+                .diagnostics()
+                .hardware_decode_admission
+                .renderer_native_import_ready
         );
     }
 
