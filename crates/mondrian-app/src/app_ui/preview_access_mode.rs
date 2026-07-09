@@ -981,6 +981,33 @@ impl MediaPreviewScheduler {
         expired
     }
 
+    pub(crate) fn preempt_still_for_realtime_current(
+        &self,
+        protected_key: &MediaPreviewKey,
+    ) -> Vec<MediaPreviewKey> {
+        let mut state = self.state.lock().expect("media preview scheduler poisoned");
+        let latest_generation = state.latest_generation;
+        let evicted = state
+            .pending
+            .iter()
+            .filter_map(|(key, pending)| {
+                let still_current = pending.priority == MediaPreviewRequestPriority::Current
+                    && pending.access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
+                    && pending.generation >= latest_generation;
+                (still_current && key != protected_key).then(|| key.clone())
+            })
+            .collect::<Vec<_>>();
+        if evicted.is_empty() {
+            return evicted;
+        }
+        for key in &evicted {
+            state.pending.remove(key);
+        }
+        state.metrics.evicted_still_requests =
+            state.metrics.evicted_still_requests.saturating_add(evicted.len() as u64);
+        evicted
+    }
+
     pub(crate) fn cancel_all(&self) -> u64 {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         let canceled = state.pending.len() as u64;
@@ -1894,6 +1921,44 @@ mod tests {
             }
         );
 
+        assert_eq!(scheduler.pending_len(), 1);
+        assert!(!scheduler.should_decode(&still, PreviewDecodeAccessMode::RandomAccessStillFrame));
+        assert!(scheduler.should_decode(&scrub, PreviewDecodeAccessMode::ScrubCursor));
+        let diagnostics = scheduler.diagnostics();
+        assert_eq!(diagnostics.evicted_still_requests, 1);
+        assert_eq!(diagnostics.dropped_backpressure_requests, 0);
+    }
+
+    #[test]
+    fn media_preview_scheduler_realtime_current_preempts_pending_still_before_window_is_full() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(4);
+        let generation = scheduler.begin_generation();
+        let still = test_media_key(1);
+        let scrub = test_media_key(2);
+
+        assert_eq!(
+            scheduler.request(
+                still.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            ),
+            scheduled_request()
+        );
+        assert_eq!(
+            scheduler.request(
+                scrub.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            ),
+            scheduled_request()
+        );
+
+        assert_eq!(
+            scheduler.preempt_still_for_realtime_current(&scrub),
+            vec![still.clone()]
+        );
         assert_eq!(scheduler.pending_len(), 1);
         assert!(!scheduler.should_decode(&still, PreviewDecodeAccessMode::RandomAccessStillFrame));
         assert!(scheduler.should_decode(&scrub, PreviewDecodeAccessMode::ScrubCursor));

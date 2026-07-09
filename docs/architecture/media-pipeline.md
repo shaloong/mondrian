@@ -355,9 +355,14 @@ transport queue is full. Scheduler admission and the job queue may evict queued
 still-frame current work for `PlaybackCursor` or `ScrubCursor` current work;
 they must not let still-frame work evict those real-time modes. On a shared
 interactive worker lane, `ScrubCursor` jobs are selected ahead of still-frame
-jobs even when the still-frame request arrived first. If still-frame work is
-already running in a worker and a different realtime current-frame request is
-pending, the still-frame decode must cooperatively yield and report a structured
+jobs even when the still-frame request arrived first. A newly admitted
+`PlaybackCursor` or `ScrubCursor` current request also preempts already-pending
+still-frame current work before the pending window or worker transport queue is
+full; the app must cancel matching queued jobs immediately so deterministic
+still extraction cannot occupy decode capacity while realtime interaction is
+waiting. If still-frame work is already running in a worker and a different
+realtime current-frame request is pending, the still-frame decode must
+cooperatively yield and report a structured
 still-preempted-by-realtime-current cancellation. Another still-frame request
 alone must not trigger that preemption.
 If an existing queued prefetch for the same media key becomes current-frame

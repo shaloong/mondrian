@@ -7697,6 +7697,7 @@ impl AppUiPreviewService {
                     let canceled = self.jobs.cancel_key(&evicted_key) as u64;
                     add_cell(&self.metrics.queue_canceled_jobs, canceled);
                 }
+                self.cancel_queued_still_for_realtime_current(&key, priority, access_mode);
                 true
             }
             MediaPreviewRequestStatus::AlreadyPending { access_mode_changed } => {
@@ -7727,6 +7728,7 @@ impl AppUiPreviewService {
                         playback_current_deadline_budget_us,
                     );
                 }
+                self.cancel_queued_still_for_realtime_current(&key, priority, access_mode);
                 access_mode_changed && !queued_update.updated
             }
             MediaPreviewRequestStatus::DroppedBackpressure => {
@@ -7823,6 +7825,25 @@ impl AppUiPreviewService {
                 false
             }
         }
+    }
+
+    fn cancel_queued_still_for_realtime_current(
+        &self,
+        key: &MediaPreviewKey,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+    ) {
+        if priority != MediaPreviewRequestPriority::Current
+            || access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
+        {
+            return;
+        }
+        let evicted = self.scheduler.preempt_still_for_realtime_current(key);
+        let mut canceled = 0u64;
+        for evicted_key in evicted {
+            canceled = canceled.saturating_add(self.jobs.cancel_key(&evicted_key) as u64);
+        }
+        add_cell(&self.metrics.queue_canceled_jobs, canceled);
     }
 
     fn record_color_rejection(&self, rejection: AppUiPreviewColorRejection) {
@@ -14470,6 +14491,40 @@ mod tests {
         );
         assert_eq!(diagnostics.playback_schedule.current_decode_decisions, 1);
         assert_eq!(diagnostics.worker_queue.queued_playback_cursor_jobs, 1);
+    }
+
+    #[test]
+    fn realtime_current_preempts_queued_still_work_before_queue_is_full() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let still_key = test_media_key(203);
+        let scrub_key = test_media_key(204);
+
+        assert!(service.request_media_preview(
+            still_key.clone(),
+            1.0,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        ));
+        assert!(service.request_media_preview(
+            scrub_key.clone(),
+            1.0,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+            Some(33_333),
+            PreviewDecodeAdaptiveHints::default(),
+        ));
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.scheduler.pending_requests, 1);
+        assert_eq!(diagnostics.scheduler.evicted_still_requests, 1);
+        assert_eq!(diagnostics.queue_canceled_jobs, 1);
+        assert_eq!(diagnostics.worker_queue.queued_random_access_still_jobs, 0);
+        assert_eq!(diagnostics.worker_queue.queued_scrub_cursor_jobs, 1);
+        assert_eq!(diagnostics.worker_queue.queued_jobs, 1);
+        assert!(!service.scheduler.has_pending_key(&still_key));
+        assert!(service.scheduler.has_pending_key(&scrub_key));
     }
 
     #[test]
