@@ -684,11 +684,20 @@ and DNxHR HQX preserve a 10-bit proxy boundary, while standardized source
 spaces emit canonical FFmpeg primaries/transfer/matrix tags. Camera-log spaces
 do not receive guessed delivery tags: their sidecar contract remains
 authoritative. Unknown source range remains an explicit `Unknown` contract
-with a diagnostic; FFmpeg auto behavior is not reported as a known range.
+at ingest, but it is not a valid proxy-generation contract. `ProxyColorContract`
+is valid by construction only for explicit `Limited` or `Full` range and a
+supported 8-16 bit source precision; deserialized contracts are revalidated at
+every generator entry point. Proxy generation therefore fails closed instead
+of allowing FFmpeg to infer range.
 Ingest persists decoder `color_range()` on `VideoStreamInfo`, so ordinary
 probed assets propagate `Limited` or `Full` into the proxy contract. `Unknown`
 is reserved for genuinely unspecified metadata, decoder-unavailable records,
 and older serialized asset records loaded through the explicit serde default.
+The FFmpeg proxy filter graph declares frame metadata with `setparams`, then
+uses matching `scale` `in_range`/`out_range` values. The encoded output also
+carries an explicit `color_range` plus canonical CICP tags when the source
+identity has trustworthy standardized tags. Contract/manifest v2 invalidates
+older artifacts generated under implicit range behavior.
 Generation must also use `ProxyStatus`: a `Fresh` proxy is reused, while a
 `Stale` proxy is regenerated in the background. Failed regeneration must not
 delete the previous proxy file, because preview can keep falling back to source

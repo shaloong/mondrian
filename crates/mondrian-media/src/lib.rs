@@ -51,7 +51,8 @@ pub use preview::{
     PreviewSourceColorContract, RgbaFrame,
 };
 pub use proxy::{
-    ProxyArtifactManifest, ProxyArtifactSettings, ProxyCodec, ProxyColorContract, ProxyConfig,
-    ProxyEncodingProfile, ProxyGenerator, ProxyResolution, ProxySourceFingerprint, ProxyStatus,
+    ProxyArtifactManifest, ProxyArtifactSettings, ProxyCodec, ProxyColorContract,
+    ProxyColorContractError, ProxyConfig, ProxyEncodingProfile, ProxyGenerator, ProxyResolution,
+    ProxySourceFingerprint, ProxyStatus,
 };
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

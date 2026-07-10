@@ -407,7 +407,10 @@ their transforms still occur in renderer input and final output boundaries.
 HDR, camera-log, and high-bit-depth sources select a 10-bit proxy profile under
 automatic policy, while an explicitly incompatible 8-bit H.264 request fails
 instead of quantizing silently. Camera-log proxies carry no invented FFmpeg
-delivery tags and rely on their explicit sidecar interpretation.
+delivery tags and rely on their explicit sidecar interpretation. Proxy
+generation also requires an explicit full/limited source range: its FFmpeg
+filter graph declares source frame metadata and matching scale input/output
+range, so an `Unknown` ingest range cannot fall through to FFmpeg heuristics.
 Asset thumbnails are presentation artifacts, not source frames. The app-owned
 thumbnail worker resolves `AssetMediaInterpretation`, detected input color,
 encoded source range, working space, engine, display/view, output space,

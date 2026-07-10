@@ -242,7 +242,8 @@ mod tests {
     }
 
     fn proxy_color() -> ProxyColorContract {
-        ProxyColorContract::new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
+        ProxyColorContract::try_new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
+            .expect("valid proxy color contract")
     }
 
     fn write_fresh_proxy(

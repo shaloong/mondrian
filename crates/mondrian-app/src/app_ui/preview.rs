@@ -16004,7 +16004,12 @@ mod tests {
     }
 
     fn test_proxy_color() -> mondrian_media::ProxyColorContract {
-        mondrian_media::ProxyColorContract::new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
+        mondrian_media::ProxyColorContract::try_new(
+            ColorSpace::Rec709,
+            8,
+            DecodedVideoRange::Limited,
+        )
+        .expect("valid proxy color contract")
     }
 
     fn install_test_proxy_manifest(

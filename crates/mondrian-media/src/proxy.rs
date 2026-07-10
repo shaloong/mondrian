@@ -70,8 +70,19 @@ impl Default for ProxyConfig {
     }
 }
 
-const PROXY_COLOR_CONTRACT_VERSION: u16 = 1;
-const PROXY_MANIFEST_VERSION: u16 = 1;
+const PROXY_COLOR_CONTRACT_VERSION: u16 = 2;
+const PROXY_MANIFEST_VERSION: u16 = 2;
+
+/// Invalid source sampling metadata for proxy generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ProxyColorContractError {
+    /// Ingest did not resolve the encoded video range.
+    #[error("proxy generation requires an explicit source video range")]
+    UnknownSourceRange,
+    /// The reported component precision cannot be represented by supported proxy encoders.
+    #[error("unsupported proxy source bit depth: {0}")]
+    UnsupportedSourceBitDepth(u8),
+}
 
 /// Color identity that a generated proxy must preserve.
 ///
@@ -81,28 +92,57 @@ const PROXY_MANIFEST_VERSION: u16 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProxyColorContract {
     /// Contract schema version used in persistent proxy identity.
-    pub version: u16,
+    version: u16,
     /// Effective source/input color space resolved by the application.
-    pub source_color_space: ColorSpace,
+    source_color_space: ColorSpace,
     /// Nominal source component precision reported by ingest.
-    pub source_bit_depth: u8,
+    source_bit_depth: u8,
     /// Encoded video range when the decoder reported it reliably.
-    pub source_range: DecodedVideoRange,
+    source_range: DecodedVideoRange,
 }
 
 impl ProxyColorContract {
     /// Build the current proxy color contract for an ingested video stream.
-    pub fn new(
+    pub fn try_new(
         source_color_space: ColorSpace,
         source_bit_depth: u8,
         source_range: DecodedVideoRange,
-    ) -> Self {
-        Self {
+    ) -> std::result::Result<Self, ProxyColorContractError> {
+        let contract = Self {
             version: PROXY_COLOR_CONTRACT_VERSION,
             source_color_space,
             source_bit_depth,
             source_range,
+        };
+        contract.validate()?;
+        Ok(contract)
+    }
+
+    /// Effective encoded source color space preserved by the artifact.
+    pub fn source_color_space(self) -> ColorSpace {
+        self.source_color_space
+    }
+
+    /// Nominal source component precision resolved by ingest.
+    pub fn source_bit_depth(self) -> u8 {
+        self.source_bit_depth
+    }
+
+    /// Explicit encoded source range preserved by the artifact.
+    pub fn source_range(self) -> DecodedVideoRange {
+        self.source_range
+    }
+
+    fn validate(self) -> std::result::Result<(), ProxyColorContractError> {
+        if self.source_range == DecodedVideoRange::Unknown {
+            return Err(ProxyColorContractError::UnknownSourceRange);
         }
+        if !(8..=16).contains(&self.source_bit_depth) {
+            return Err(ProxyColorContractError::UnsupportedSourceBitDepth(
+                self.source_bit_depth,
+            ));
+        }
+        Ok(())
     }
 
     fn needs_high_precision(self) -> bool {
@@ -270,6 +310,7 @@ impl ProxyGenerator {
 
     /// Resolve the concrete encoding profile for a source color contract.
     pub fn encoding_profile(&self, color: ProxyColorContract) -> Result<ProxyEncodingProfile> {
+        color.validate().map_err(proxy_color_contract_error)?;
         let high_precision = color.needs_high_precision();
         match (self.config.codec, high_precision) {
             (ProxyCodec::Auto, false) => Ok(ProxyEncodingProfile::H264High8),
@@ -601,7 +642,7 @@ fn run_ffmpeg_proxy_transcode(
     source_path: &Path,
     output_path: &Path,
 ) -> Result<()> {
-    let mut cmd = ffmpeg_proxy_command(encoding, crf, height, color, source_path, output_path);
+    let mut cmd = ffmpeg_proxy_command(encoding, crf, height, color, source_path, output_path)?;
     let output = cmd.output().map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
         reason: format!("failed to invoke ffmpeg (is ffmpeg in PATH?): {}", e),
     })?;
@@ -629,12 +670,28 @@ fn ffmpeg_proxy_command(
     color: ProxyColorContract,
     source_path: &Path,
     output_path: &Path,
-) -> Command {
-    let scale_arg = match color.source_range {
-        DecodedVideoRange::Limited => format!("scale=-2:{height}:flags=lanczos:out_range=tv"),
-        DecodedVideoRange::Full => format!("scale=-2:{height}:flags=lanczos:out_range=pc"),
-        DecodedVideoRange::Unknown => format!("scale=-2:{height}:flags=lanczos"),
+) -> Result<Command> {
+    color.validate().map_err(proxy_color_contract_error)?;
+    let (frame_range, scale_range, output_range) = match color.source_range {
+        DecodedVideoRange::Limited => ("limited", "tv", "tv"),
+        DecodedVideoRange::Full => ("full", "pc", "pc"),
+        DecodedVideoRange::Unknown => {
+            return Err(proxy_color_contract_error(
+                ProxyColorContractError::UnknownSourceRange,
+            ));
+        }
     };
+    let tags = color.source_color_space.ffmpeg_tags();
+    let mut setparams = format!("setparams=range={frame_range}");
+    if let Some(tags) = tags {
+        setparams.push_str(&format!(
+            ":color_primaries={}:color_trc={}:colorspace={}",
+            tags.color_primaries, tags.color_trc, tags.colorspace
+        ));
+    }
+    let filter_graph = format!(
+        "{setparams},scale=-2:{height}:flags=lanczos:in_range={scale_range}:out_range={scale_range}"
+    );
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-y")
         .arg("-hide_banner")
@@ -647,13 +704,13 @@ fn ffmpeg_proxy_command(
         .arg("-map")
         .arg("0:a?")
         .arg("-vf")
-        .arg(scale_arg)
+        .arg(filter_graph)
         .arg("-c:a")
         .arg("aac")
         .arg("-b:a")
         .arg("128k");
 
-    if let Some(tags) = color.source_color_space.ffmpeg_tags() {
+    if let Some(tags) = tags {
         cmd.arg("-color_primaries")
             .arg(tags.color_primaries)
             .arg("-color_trc")
@@ -666,20 +723,7 @@ fn ffmpeg_proxy_command(
             "proxy source has no trustworthy standardized FFmpeg tags; sidecar color contract remains authoritative"
         );
     }
-    match color.source_range {
-        DecodedVideoRange::Limited => {
-            cmd.arg("-color_range").arg("tv");
-        }
-        DecodedVideoRange::Full => {
-            cmd.arg("-color_range").arg("pc");
-        }
-        DecodedVideoRange::Unknown => {
-            tracing::warn!(
-                source_color_space = ?color.source_color_space,
-                "proxy source range is unknown; FFmpeg auto range is retained and recorded in the sidecar contract"
-            );
-        }
-    }
+    cmd.arg("-color_range").arg(output_range);
 
     match encoding {
         ProxyEncodingProfile::H264High8 => {
@@ -733,7 +777,11 @@ fn ffmpeg_proxy_command(
     }
 
     cmd.arg(output_path);
-    cmd
+    Ok(cmd)
+}
+
+fn proxy_color_contract_error(error: ProxyColorContractError) -> MondrianError {
+    MondrianError::ProxyGenerationFailed { reason: error.to_string() }
 }
 
 fn finalize_proxy_output(tmp_output_path: &Path, output_path: &Path) -> Result<()> {
@@ -808,7 +856,8 @@ fn finalize_proxy_output(tmp_output_path: &Path, output_path: &Path) -> Result<(
 mod tests {
     use super::{
         ffmpeg_proxy_command, finalize_proxy_output, ProxyCodec, ProxyColorContract,
-        ProxyConcurrencyLimiter, ProxyConfig, ProxyEncodingProfile, ProxyGenerator, ProxyStatus,
+        ProxyColorContractError, ProxyConcurrencyLimiter, ProxyConfig, ProxyEncodingProfile,
+        ProxyGenerator, ProxyStatus, PROXY_COLOR_CONTRACT_VERSION,
     };
     use crate::DecodedVideoRange;
     use mondrian_core::types::ColorSpace;
@@ -820,7 +869,41 @@ mod tests {
     }
 
     fn rec709_contract() -> ProxyColorContract {
-        ProxyColorContract::new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
+        ProxyColorContract::try_new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
+            .expect("valid Rec.709 proxy contract")
+    }
+
+    #[test]
+    fn proxy_color_contract_rejects_implicit_range_and_invalid_precision() {
+        assert_eq!(
+            ProxyColorContract::try_new(ColorSpace::Rec709, 8, DecodedVideoRange::Unknown),
+            Err(ProxyColorContractError::UnknownSourceRange)
+        );
+        assert_eq!(
+            ProxyColorContract::try_new(ColorSpace::Rec709, 0, DecodedVideoRange::Limited),
+            Err(ProxyColorContractError::UnsupportedSourceBitDepth(0))
+        );
+        assert_eq!(
+            ProxyColorContract::try_new(ColorSpace::Rec709, 17, DecodedVideoRange::Limited),
+            Err(ProxyColorContractError::UnsupportedSourceBitDepth(17))
+        );
+    }
+
+    #[test]
+    fn generator_revalidates_deserialized_proxy_contracts() {
+        let invalid = serde_json::from_value::<ProxyColorContract>(serde_json::json!({
+            "version": PROXY_COLOR_CONTRACT_VERSION,
+            "source_color_space": "Rec709",
+            "source_bit_depth": 8,
+            "source_range": "Unknown"
+        }))
+        .expect("schema-valid proxy contract");
+
+        let error = ProxyGenerator::new(ProxyConfig::default())
+            .encoding_profile(invalid)
+            .expect_err("unknown range must fail after deserialization");
+
+        assert!(error.to_string().contains("explicit source video range"));
     }
 
     #[test]
@@ -874,8 +957,10 @@ mod tests {
     #[test]
     fn automatic_profile_preserves_hdr_and_log_precision() {
         let generator = ProxyGenerator::new(ProxyConfig::default());
-        let pq = ProxyColorContract::new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited);
-        let log = ProxyColorContract::new(ColorSpace::SLog3, 10, DecodedVideoRange::Full);
+        let pq = ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
+            .expect("valid PQ contract");
+        let log = ProxyColorContract::try_new(ColorSpace::SLog3, 10, DecodedVideoRange::Full)
+            .expect("valid log contract");
 
         assert_eq!(
             generator.encoding_profile(pq).expect("PQ profile"),
@@ -891,7 +976,8 @@ mod tests {
     fn forced_h264_rejects_high_precision_source() {
         let config = ProxyConfig { codec: ProxyCodec::H264, ..ProxyConfig::default() };
         let generator = ProxyGenerator::new(config);
-        let pq = ProxyColorContract::new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited);
+        let pq = ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
+            .expect("valid PQ contract");
 
         let error = generator.encoding_profile(pq).expect_err("H.264 must reject PQ");
 
@@ -903,7 +989,8 @@ mod tests {
         let generator = ProxyGenerator::new(ProxyConfig::default());
         let source = std::path::Path::new("E:/media/source.mov");
         let rec709 = rec709_contract();
-        let pq = ProxyColorContract::new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited);
+        let pq = ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
+            .expect("valid PQ contract");
 
         assert_ne!(
             generator.proxy_path(source, rec709).expect("Rec.709 path"),
@@ -913,7 +1000,9 @@ mod tests {
 
     #[test]
     fn hdr_proxy_command_declares_main10_and_cicp_tags() {
-        let color = ProxyColorContract::new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited);
+        let color =
+            ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
+                .expect("valid PQ contract");
         let command = ffmpeg_proxy_command(
             ProxyEncodingProfile::H265Main10,
             20,
@@ -921,7 +1010,8 @@ mod tests {
             color,
             std::path::Path::new("source.mov"),
             std::path::Path::new("proxy.mp4.part"),
-        );
+        )
+        .expect("valid FFmpeg proxy command");
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -931,11 +1021,21 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-profile:v", "main10"]));
         assert!(args.windows(2).any(|pair| pair == ["-color_trc", "smpte2084"]));
         assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
+        let filter = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-vf").then_some(pair[1].as_str()))
+            .expect("video filter graph");
+        assert!(filter.contains("setparams=range=limited"));
+        assert!(filter.contains("color_primaries=bt2020"));
+        assert!(filter.contains("color_trc=smpte2084"));
+        assert!(filter.contains("colorspace=bt2020nc"));
+        assert!(filter.contains("in_range=tv:out_range=tv"));
     }
 
     #[test]
     fn log_proxy_command_does_not_emit_false_standardized_tags() {
-        let color = ProxyColorContract::new(ColorSpace::SLog3, 10, DecodedVideoRange::Full);
+        let color = ProxyColorContract::try_new(ColorSpace::SLog3, 10, DecodedVideoRange::Full)
+            .expect("valid log contract");
         let command = ffmpeg_proxy_command(
             ProxyEncodingProfile::H265Main10,
             20,
@@ -943,7 +1043,8 @@ mod tests {
             color,
             std::path::Path::new("source.mov"),
             std::path::Path::new("proxy.mp4.part"),
-        );
+        )
+        .expect("valid FFmpeg proxy command");
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -953,6 +1054,14 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "-color_trc"));
         assert!(!args.iter().any(|arg| arg == "-colorspace"));
         assert!(args.windows(2).any(|pair| pair == ["-color_range", "pc"]));
+        let filter = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-vf").then_some(pair[1].as_str()))
+            .expect("video filter graph");
+        assert_eq!(
+            filter,
+            "setparams=range=full,scale=-2:720:flags=lanczos:in_range=pc:out_range=pc"
+        );
     }
 
     #[test]

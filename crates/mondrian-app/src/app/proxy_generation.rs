@@ -38,11 +38,8 @@ pub(crate) fn resolve_asset_proxy_color_contract(
         .media_info
         .primary_video()
         .ok_or_else(|| "proxy generation requires a probed primary video stream".to_owned())?;
-    Ok(ProxyColorContract::new(
-        source_color_space,
-        video.bit_depth,
-        video.color_range,
-    ))
+    ProxyColorContract::try_new(source_color_space, video.bit_depth, video.color_range)
+        .map_err(|error| error.to_string())
 }
 
 /// Resolve a proxy contract from the active sequence and project color policy.
