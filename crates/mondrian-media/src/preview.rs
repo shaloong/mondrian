@@ -182,8 +182,6 @@ pub enum PreviewHardwareDecodeDecision {
     CpuRgbaBackendUnavailable,
     /// Hardware decode was requested but FFmpeg has no matching codec/backend config.
     CpuRgbaCodecUnsupported,
-    /// Hardware decode was requested but renderer import for the native surface is unavailable.
-    CpuRgbaRendererImportUnavailable,
     /// Hardware decode was requested, but this decode backend only returns CPU RGBA bytes.
     CpuRgbaBackendBoundary,
     /// FFmpeg hardware decode is active, but frames are transferred back to CPU RGBA.
@@ -211,15 +209,13 @@ pub enum PreviewHardwareDecodeCpuTransferStatus {
 /// Structured hardware-decode blocker observed by the preview decode boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewHardwareDecodeBlocker {
-    /// Hardware decode and renderer import are not blocked by the media probe.
+    /// Native decoded-frame residency is not blocked by the media probe.
     #[default]
     None,
     /// The active media boundary still returns CPU RGBA frames.
     TextureResidencyNotConnected,
     /// A GPU-resident decoder did not report a native handle family.
     GpuHandleMissing,
-    /// Decoder GPU residency exists, but renderer import is not ready.
-    RendererImportNotReady,
 }
 
 /// Structured reason a GPU-preferred decode returned a CPU payload.
@@ -241,7 +237,6 @@ impl PreviewHardwareDecodeBlocker {
     fn from_probe(probe: &HwAccelProbe) -> Self {
         if probe.hardware_decode_active
             && probe.zero_copy_active
-            && probe.renderer_import_ready
             && probe.gpu_frame_handle_kind.is_some()
         {
             return Self::None;
@@ -251,9 +246,6 @@ impl PreviewHardwareDecodeBlocker {
         }
         if probe.gpu_frame_handle_kind.is_none() {
             return Self::GpuHandleMissing;
-        }
-        if !probe.renderer_import_ready {
-            return Self::RendererImportNotReady;
         }
         Self::None
     }
@@ -837,9 +829,6 @@ pub struct PreviewDecodeDiagnostics {
     /// Native GPU frame handle family reported by hardware decode, if any.
     #[serde(default)]
     pub gpu_frame_handle_kind: Option<DecodedGpuFrameHandleKind>,
-    /// Whether renderer import for the native decoded frame is ready.
-    #[serde(default)]
-    pub renderer_import_ready: bool,
     /// Structured reason hardware decode / zero-copy is not active.
     #[serde(default)]
     pub hardware_decode_blocker: PreviewHardwareDecodeBlocker,
@@ -904,7 +893,6 @@ impl PreviewDecodeDiagnostics {
             zero_copy_active: false,
             decoded_frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
-            renderer_import_ready: false,
             hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
             native_decode_fallback: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
@@ -954,7 +942,6 @@ impl PreviewDecodeDiagnostics {
         self.zero_copy_active = probe.zero_copy_active;
         self.decoded_frame_residency = probe.frame_residency;
         self.gpu_frame_handle_kind = probe.gpu_frame_handle_kind;
-        self.renderer_import_ready = probe.renderer_import_ready;
         self.hardware_decode_blocker = PreviewHardwareDecodeBlocker::from_probe(probe);
         self
     }
@@ -1696,7 +1683,6 @@ impl PreviewHardwareDecodePlan {
             probe.candidate_surface_formats = candidate.preferred_surface_formats();
             probe.decoder_adapter_available =
                 ffmpeg_native_resource_adapter_available(&codec_config);
-            probe.renderer_import_ready = request.prefers_gpu_residency();
             return (probe, codec_config, device_context);
         }
 
@@ -1780,9 +1766,8 @@ impl PreviewHardwareDecodePlan {
             self.probe.zero_copy_active = false;
             self.probe.frame_residency = DecodedFrameResidency::CpuRgba;
             self.probe.gpu_frame_handle_kind = None;
-            self.probe.renderer_import_ready = false;
             self.probe.reason = format!(
-                "{} FFmpeg hardware decode is active; decoded frames transfer to CPU RGBA until native renderer import is connected",
+                "{} FFmpeg hardware decode is active; this request permits transfer to the CPU RGBA boundary",
                 backend.as_str()
             );
         }
@@ -1805,7 +1790,6 @@ impl PreviewHardwareDecodePlan {
         self.probe.zero_copy_active = true;
         self.probe.frame_residency = DecodedFrameResidency::GpuTexture;
         self.probe.gpu_frame_handle_kind = Some(kind);
-        self.probe.renderer_import_ready = true;
         self.probe.reason = format!(
             "{} FFmpeg hardware decode produced a retained native decoder surface",
             backend.as_str()
@@ -1872,9 +1856,6 @@ impl PreviewHardwareDecodePlan {
         }
         if probe.gpu_frame_handle_kind.is_none() {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable;
-        }
-        if !probe.renderer_import_ready {
-            return PreviewHardwareDecodeDecision::CpuRgbaRendererImportUnavailable;
         }
         PreviewHardwareDecodeDecision::GpuResidentNative
     }
@@ -4758,7 +4739,6 @@ mod tests {
             DecodedFrameResidency::CpuRgba
         );
         assert_eq!(frame.diagnostics.gpu_frame_handle_kind, None);
-        assert!(!frame.diagnostics.renderer_import_ready);
         assert_eq!(
             frame.diagnostics.hardware_decode_blocker,
             PreviewHardwareDecodeBlocker::TextureResidencyNotConnected

@@ -154,6 +154,13 @@ frame. `AppUiFrameRenderer` derives the fail-closed support label from the
 actual `wgpu::AdapterInfo` so viewer telemetry can distinguish, for example,
 "Windows D3D12/D3D11 platform probe succeeded" from "wgpu Dx12 renderer has no
 native decoder-surface import bridge connected".
+Renderer/platform readiness must remain in
+`AppUiPreviewHardwareDecodeAdmissionDiagnostics`. It must not be copied into
+media `HwAccelProbe`, `PreviewDecodeDiagnostics`, hardware-decode decisions, or
+media blocker enums. Media reports whether decode produced a retained native
+surface; the app separately reports whether renderer and platform capabilities
+allowed requesting that surface. Only the app admission boundary combines
+those facts.
 Concrete import execution belongs behind
 `GpuNativeDecodedFrameImportBackend`. The shared
 `PreviewNativeDecodedFrame` payload implements the renderer-owned

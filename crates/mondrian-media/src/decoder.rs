@@ -389,8 +389,6 @@ pub struct HwAccelProbe {
     pub frame_residency: DecodedFrameResidency,
     /// Native handle family produced by the active decoder, if GPU-resident.
     pub gpu_frame_handle_kind: Option<DecodedGpuFrameHandleKind>,
-    /// Whether the active decode path has a renderer texture-import contract.
-    pub renderer_import_ready: bool,
     /// Stable diagnostic reason for the selected path.
     pub reason: String,
 }
@@ -423,7 +421,6 @@ impl HwAccelBackend {
             zero_copy_active: false,
             frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
-            renderer_import_ready: false,
             reason: hardware_decode_unavailable_reason().to_owned(),
         }
     }
@@ -866,7 +863,6 @@ mod tests {
         assert!(!probe.zero_copy_active);
         assert_eq!(probe.frame_residency, DecodedFrameResidency::CpuRgba);
         assert_eq!(probe.gpu_frame_handle_kind, None);
-        assert!(!probe.renderer_import_ready);
         assert!(probe.reason.contains("CPU RGBA decode"));
     }
 

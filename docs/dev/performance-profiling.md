@@ -150,8 +150,10 @@ worker counts.
 Access-mode profiles also aggregate the hardware decode contract:
 `hardware_decode_active_frames`, `zero_copy_active_frames`,
 `gpu_texture_resident_frames`, `decoded_nv12_surface_frames`,
-`decoded_p010_surface_frames`, `renderer_import_ready_frames`, and
-`hardware_decode_texture_residency_blocker_frames`. For current alpha builds, a
+`decoded_p010_surface_frames`, and
+`hardware_decode_texture_residency_blocker_frames`. Renderer/platform native
+import readiness is reported by app playback admission diagnostics, not by
+media access-mode profiles. For current alpha builds, a
 healthy honest CPU fallback will usually show zero hardware/zero-copy frames,
 non-zero texture-residency blocker frames, and possibly NV12/P010 surface
 candidate counts. Do not interpret NV12/P010 candidates as hardware playback;

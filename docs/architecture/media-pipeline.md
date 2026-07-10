@@ -539,7 +539,7 @@ container or a handle-kind diagnostic.
 `PreviewHardwareDecodeDecision` records the media-layer selection for each
 request. A GPU preference must resolve to a structured CPU RGBA reason such as
 `CpuRgbaHardwareUnavailable`, `CpuRgbaAccessModeUnsupported`,
-`CpuRgbaBackendUnavailable`, `CpuRgbaRendererImportUnavailable`,
+`CpuRgbaBackendUnavailable`, `CpuRgbaCodecUnsupported`,
 `CpuRgbaBackendBoundary`, or `HardwareDecodeCpuTransfer` until the selected
 decoder actually produces a native surface admitted by the caller's combined
 renderer/platform capability check.
@@ -548,12 +548,13 @@ configured and hardware frames are transferred back to CPU before RGBA preview;
 it is active hardware decode, but it is not zero-copy, GPU texture residency, or
 a native renderer import contract. `GpuResidentNative` is valid only when the
 decoder probe reports active hardware decode, zero-copy/GPU texture residency,
-a native handle kind, and renderer import readiness. External FFmpeg CPU RGBA
+and a native handle kind. Renderer/platform readiness is a separate app
+admission fact. External FFmpeg CPU RGBA
 is always a backend boundary, even if the CLI used platform hwaccel internally.
 `HwAccelProbe` reports the selected hardware backend, decoded frame residency,
 `hardware_decode_active`, `zero_copy_active`, optional
-`decoded_gpu_frame_handle_kind`, `renderer_import_ready`, and a stable reason
-string. It also reports the platform candidate backend list in priority order,
+`decoded_gpu_frame_handle_kind`, and a stable reason string. It also reports the
+platform candidate backend list in priority order,
 the candidate backend selected for the current stream plan, the candidate native
 handle kind, and preferred native surface formats such as P010/NV12. Candidate
 fields are planning evidence only. On Windows the ordered list must prefer
@@ -568,7 +569,7 @@ exported/imported through the renderer native decoded-frame import contract,
 `HwAccelBackend::probe()` must keep `selected_backend=None`,
 `decoder_adapter_available=false`, `hardware_decode_active=false`,
 `zero_copy_active=false`, `DecodedFrameResidency::CpuRgba`, no active GPU
-handle kind, and `renderer_import_ready=false`. Platform preference alone is
+handle kind. Platform preference alone is
 not a valid hardware decode signal. The first concrete media adapter supports
 FFmpeg's preferred `AV_PIX_FMT_D3D11` frame ABI. It does not make D3D12VA,
 legacy `AV_PIX_FMT_D3D11VA_VLD`, DXVA2, VideoToolbox, VA-API, VDPAU, or CUDA
@@ -794,8 +795,8 @@ The same diagnostics carry the current hardware decode contract:
 `hardware_decode_cpu_transfer_configured`,
 `hardware_decode_cpu_transfer_observed`, `hardware_decode_active`,
 `zero_copy_active`, `decoded_frame_residency`, `gpu_frame_handle_kind`,
-`renderer_import_ready`, and
-`hardware_decode_blocker`, plus `decoded_surface_format` for the decoder output
+`hardware_decode_blocker`, and `native_decode_fallback`, plus
+`decoded_surface_format` for the decoder output
 format before CPU RGBA conversion. `Nv12` and `P010` are the primary GPU-native
 YUV/P010 residency candidates; they are media facts, not renderer import claims.
 These fields are fail-closed; until a real hardware-frame decoder and renderer
