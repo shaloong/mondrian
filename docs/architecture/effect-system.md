@@ -58,13 +58,20 @@ compiled-effect-graph LRU mutex every frame just to represent the identity path.
 
 ## Float/Linear Execution
 
-`mondrian-effects` exposes a typed float/linear execution boundary for the
-subset of effect graphs that can operate directly on working-space `f32` RGBA
-pixels. `compiled_effect_graph_supports_rgba_f32(...)` and
-`apply_compiled_effect_graph_rgba_f32(...)` use the same validation rules:
-currently `Source` plus unary `ColorAdjust` and `WhiteBalance` nodes are
-supported. The float path must preserve extended scene-linear values and must
-not clamp RGB to 0..1 as the legacy RGBA8 path does.
+`mondrian-effects` exposes a typed float/linear execution boundary for effect
+graphs that can operate directly on working-space `f32` RGBA pixels.
+`compiled_effect_graph_supports_rgba_f32(...)` and
+`apply_compiled_effect_graph_rgba_f32(...)` use the same validation rules. All
+existing built-in unary render operations (`ColorAdjust`, `WhiteBalance`,
+`GaussianBlur`, `Sharpen`, `Vignette`, `ChromaticAberration`, `Grain`, and
+`Lut3D`) execute in this domain. The float path preserves extended scene-linear
+values and does not clamp RGB to 0..1 as the legacy RGBA8 path does.
+
+Spatial operations sample straight-alpha input through premultiplied-alpha
+intermediates so transparent pixels cannot contaminate visible colors. Grain
+uses the graph frame seed, and LUT intensity blends back to the unbounded float
+source after normalized LUT sampling. These rules are shared by media, solid,
+and adjustment-layer execution.
 
 Adjustment-layer passes use `apply_compiled_effect_graph_pass_rgba_f32(...)`
 when the graph is float-capable. This keeps ordinary color-correction layers in
@@ -83,9 +90,10 @@ during preview scrubbing or export retries.
 
 Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
-callers can make an explicit legacy fallback decision. Blur, sharpen, vignette,
-chromatic aberration, grain, LUT, custom/plugin processors, masks, and
-multi-input nodes remain legacy-only until they gain their own float contract.
+callers can make an explicit legacy fallback decision. Custom/plugin processors
+remain unsupported until their ABI declares a float implementation. Blend,
+mask, mask-source, and multi-input graph nodes likewise remain legacy-only until
+the float executor defines their multi-input ownership and alpha contracts.
 
 File-backed LUT caches key existing files by canonical path and invalidate on
 file fingerprint changes. Tests that validate cache behavior should use local

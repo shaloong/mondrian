@@ -14229,6 +14229,15 @@ mod tests {
             TimeCode::new(10, tb),
         );
         solid.transform.set_scale(glam::Vec2::new(0.75, 0.75));
+        let mut blur: mondrian_effects::EffectNode = mondrian_effects::EffectNodeExt::with_defaults(
+            mondrian_effects::EffectType::GaussianBlur,
+        );
+        blur.set_static_value_by_suffix(
+            "radius",
+            mondrian_core::automation::PropertyValue::Float(1.0),
+        )
+        .expect("set test blur radius");
+        solid.add_effect_node(blur);
         sequence.video_tracks[0]
             .add_clip(solid)
             .expect("add transformed solid color clip");
@@ -14277,6 +14286,8 @@ mod tests {
             preview_summary.legacy_breakdown.solid_transform,
             export_summary.legacy_breakdown.solid_transform
         );
+        assert_eq!(preview_summary.legacy_breakdown.solid_effect, 0);
+        assert_eq!(export_summary.legacy_breakdown.solid_effect, 0);
         assert_eq!(
             preview_summary.legacy_breakdown.total(),
             export_summary.legacy_breakdown.total()

@@ -888,10 +888,10 @@ pub fn effect_graph_gpu_blockers(compiled: &CompiledEffectGraph) -> Vec<EffectGp
 
 /// Execute a compiled graph over linear `f32` RGBA pixels.
 ///
-/// This path is intentionally narrower than the legacy RGBA8 effect executor.
-/// It currently supports source nodes plus unary `ColorAdjust` and
-/// `WhiteBalance` render ops. Unsupported nodes return structured errors so
-/// callers can make an explicit legacy fallback decision.
+/// All built-in unary effects execute in the linear float working domain.
+/// Custom processors and non-unary graph nodes require an explicit float ABI;
+/// unsupported nodes return structured errors so callers can make a diagnosed
+/// fallback decision.
 pub fn apply_compiled_effect_graph_rgba_f32(
     input: &[[f32; 4]],
     width: u32,
@@ -930,7 +930,7 @@ pub fn apply_compiled_effect_graph_rgba_f32(
                 let Some(mut source) = outputs.get(input_id).cloned() else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *input_id });
                 };
-                if !apply_render_op_f32(&mut source, op) {
+                if !apply_render_op_f32(&mut source, width, height, op, frame_seed) {
                     return Err(EffectFloatExecutionError::UnsupportedNode {
                         node_id: node.id,
                         reason: EffectFloatUnsupportedReason::UnsupportedRenderOp {
@@ -1194,10 +1194,7 @@ fn validate_float_effect_graph(
 }
 
 fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
-    matches!(
-        op,
-        EffectRenderOp::ColorAdjust { .. } | EffectRenderOp::WhiteBalance { .. }
-    )
+    !matches!(op, EffectRenderOp::Custom { .. })
 }
 
 fn unsupported_float_graph_node(
@@ -1550,24 +1547,99 @@ mod tests {
     }
 
     #[test]
-    fn float_effect_graph_reports_legacy_only_ops() {
+    fn float_effect_graph_reports_custom_ops_without_float_abi() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
-            ops: vec![EffectRenderOp::GaussianBlur { radius: 2.0 }],
+            ops: vec![EffectRenderOp::Custom {
+                key: "test.custom.rgba8-only".to_owned(),
+                params: serde_json::json!({}),
+                cache_key: None,
+                cache_policy: crate::EffectCachePolicy::Deterministic,
+            }],
         })
-        .expect("compile blur graph");
+        .expect("compile custom graph");
 
         let err =
             apply_compiled_effect_graph_rgba_f32(&[[0.25, 0.5, 0.75, 1.0]], 1, 1, &compiled, 0)
-                .expect_err("blur is legacy-only on float path");
+                .expect_err("custom effect without float ABI must fail closed");
 
         assert!(!compiled_effect_graph_supports_rgba_f32(&compiled));
         assert!(matches!(
             err,
             EffectFloatExecutionError::UnsupportedNode {
-                reason: EffectFloatUnsupportedReason::UnsupportedRenderOp { op: "gaussian_blur" },
+                reason: EffectFloatUnsupportedReason::UnsupportedRenderOp { op: "custom" },
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn float_gaussian_blur_uses_premultiplied_alpha_and_preserves_hdr_color() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::GaussianBlur { radius: 1.0 }],
+        })
+        .expect("compile blur graph");
+        let input = [
+            [0.0, 8.0, 0.0, 0.0],
+            [2.0, 0.25, 0.125, 1.0],
+            [0.0, 8.0, 0.0, 0.0],
+        ];
+
+        let output =
+            apply_compiled_effect_graph_rgba_f32(&input, 3, 1, &compiled, 0).expect("float blur");
+
+        assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert!(output[0][3] > 0.0 && output[0][3] < 1.0);
+        assert!((output[0][0] - 2.0).abs() <= 1.0e-5);
+        assert!((output[0][1] - 0.25).abs() <= 1.0e-5);
+        assert!((output[1][0] - 2.0).abs() <= 1.0e-5);
+        assert!(output[1][3] < 1.0);
+    }
+
+    #[test]
+    fn all_builtin_unary_effects_execute_without_rgba8_quantization() {
+        let lut = crate::Lut3D::identity(2).expect("identity LUT");
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![
+                EffectRenderOp::GaussianBlur { radius: 0.5 },
+                EffectRenderOp::Sharpen { amount: 0.5 },
+                EffectRenderOp::Vignette { intensity: 0.25, feather: 0.8 },
+                EffectRenderOp::ChromaticAberration { amount: 0.25 },
+                EffectRenderOp::Grain { amount: 0.2 },
+                EffectRenderOp::Lut3D { lut, intensity: 0.5 },
+            ],
+        })
+        .expect("compile built-in graph");
+        let input = vec![[1.5, 0.5, 0.25, 1.0]; 9];
+
+        let first = apply_compiled_effect_graph_rgba_f32(&input, 3, 3, &compiled, 17)
+            .expect("built-in float graph");
+        let second = apply_compiled_effect_graph_rgba_f32(&input, 3, 3, &compiled, 17)
+            .expect("deterministic built-in float graph");
+
+        assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert_eq!(first, second);
+        assert!(first.iter().all(|pixel| pixel.iter().all(|channel| channel.is_finite())));
+        assert!(first.iter().all(|pixel| (pixel[3] - 1.0).abs() <= 1.0e-5));
+        assert!(first.iter().any(|pixel| pixel[0] > 1.0));
+    }
+
+    #[test]
+    fn float_grain_is_frame_dependent_without_clamping_extended_range() {
+        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::Grain { amount: 1.0 }],
+        })
+        .expect("compile grain graph");
+        let input = vec![[1.25, -0.1, 0.5, 0.75]; 4];
+
+        let first = apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &compiled, 1)
+            .expect("grain frame one");
+        let second = apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &compiled, 2)
+            .expect("grain frame two");
+
+        assert_ne!(first, second);
+        assert!(first.iter().all(|pixel| (pixel[3] - 0.75).abs() <= f32::EPSILON));
+        assert!(first.iter().any(|pixel| pixel[0] > 1.0));
+        assert!(first.iter().any(|pixel| pixel[1] < 0.0));
     }
 
     #[test]

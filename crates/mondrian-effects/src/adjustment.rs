@@ -244,11 +244,17 @@ pub(crate) fn apply_render_op(
     }
 }
 
-pub(crate) fn apply_render_op_f32(working: &mut [[f32; 4]], op: &EffectRenderOp) -> bool {
+pub(crate) fn apply_render_op_f32(
+    working: &mut Vec<[f32; 4]>,
+    width: u32,
+    height: u32,
+    op: &EffectRenderOp,
+    frame_seed: i64,
+) -> bool {
     match op {
         EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
             apply_primary_color_adjustments_f32(
-                working,
+                working.as_mut_slice(),
                 AdjustmentLayerParams {
                     exposure: *exposure,
                     contrast: *contrast,
@@ -260,7 +266,7 @@ pub(crate) fn apply_render_op_f32(working: &mut [[f32; 4]], op: &EffectRenderOp)
         }
         EffectRenderOp::WhiteBalance { temperature, tint } => {
             apply_primary_color_adjustments_f32(
-                working,
+                working.as_mut_slice(),
                 AdjustmentLayerParams {
                     temperature: *temperature,
                     tint: *tint,
@@ -269,13 +275,58 @@ pub(crate) fn apply_render_op_f32(working: &mut [[f32; 4]], op: &EffectRenderOp)
             );
             true
         }
-        EffectRenderOp::GaussianBlur { .. }
-        | EffectRenderOp::Sharpen { .. }
-        | EffectRenderOp::Vignette { .. }
-        | EffectRenderOp::ChromaticAberration { .. }
-        | EffectRenderOp::Grain { .. }
-        | EffectRenderOp::Lut3D { .. }
-        | EffectRenderOp::Custom { .. } => false,
+        EffectRenderOp::GaussianBlur { radius } => {
+            let radius = radius.clamp(0.0, 24.0);
+            if radius > 1.0e-4 {
+                *working = gaussian_blur_rgba_f32(working, width as usize, height as usize, radius);
+            }
+            true
+        }
+        EffectRenderOp::Sharpen { amount } => {
+            let amount = amount.clamp(0.0, 2.0);
+            if amount > 1.0e-4 {
+                let blurred = gaussian_blur_rgba_f32(working, width as usize, height as usize, 1.0);
+                apply_unsharp_mask_f32(working, &blurred, amount);
+            }
+            true
+        }
+        EffectRenderOp::Vignette { intensity, feather } => {
+            let intensity = intensity.clamp(0.0, 1.0);
+            if intensity > 1.0e-4 {
+                apply_vignette_f32(
+                    working,
+                    width as usize,
+                    height as usize,
+                    intensity,
+                    *feather,
+                );
+            }
+            true
+        }
+        EffectRenderOp::ChromaticAberration { amount } => {
+            let amount = amount.clamp(0.0, 1.0);
+            if amount > 1.0e-4 {
+                *working = apply_chromatic_aberration_f32(
+                    working,
+                    width as usize,
+                    height as usize,
+                    amount,
+                );
+            }
+            true
+        }
+        EffectRenderOp::Grain { amount } => {
+            let amount = amount.clamp(0.0, 1.0);
+            if amount > 1.0e-4 {
+                apply_grain_f32(working, width as usize, height as usize, amount, frame_seed);
+            }
+            true
+        }
+        EffectRenderOp::Lut3D { lut, intensity } => {
+            lut.apply_rgba_f32_in_place(working, *intensity);
+            true
+        }
+        EffectRenderOp::Custom { .. } => false,
     }
 }
 
@@ -550,6 +601,233 @@ fn apply_primary_color_adjustments_f32(buffer: &mut [[f32; 4]], params: Adjustme
         px[0] = luma + (rgb[0] - luma) * saturation;
         px[1] = luma + (rgb[1] - luma) * saturation;
         px[2] = luma + (rgb[2] - luma) * saturation;
+    }
+}
+
+fn gaussian_blur_rgba_f32(
+    input: &[[f32; 4]],
+    width: usize,
+    height: usize,
+    radius: f32,
+) -> Vec<[f32; 4]> {
+    if radius <= 1.0e-4 || width == 0 || height == 0 || input.len() != width * height {
+        return input.to_vec();
+    }
+
+    let kernel_radius = radius.ceil().clamp(1.0, 24.0) as isize;
+    let sigma = (radius / 3.0).max(0.5);
+    let mut kernel = (-kernel_radius..=kernel_radius)
+        .map(|offset| {
+            let distance = offset as f32;
+            (-distance * distance / (2.0 * sigma * sigma)).exp()
+        })
+        .collect::<Vec<_>>();
+    let weight_sum = kernel.iter().sum::<f32>().max(f32::EPSILON);
+    for weight in &mut kernel {
+        *weight /= weight_sum;
+    }
+
+    let mut premultiplied = input
+        .iter()
+        .map(|pixel| {
+            let alpha = pixel[3].clamp(0.0, 1.0);
+            [pixel[0] * alpha, pixel[1] * alpha, pixel[2] * alpha, alpha]
+        })
+        .collect::<Vec<_>>();
+    let mut horizontal = vec![[0.0; 4]; input.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let mut output = [0.0; 4];
+            for (kernel_index, weight) in kernel.iter().enumerate() {
+                let offset = kernel_index as isize - kernel_radius;
+                let sample_x = (x as isize + offset).clamp(0, width as isize - 1) as usize;
+                let sample = premultiplied[y * width + sample_x];
+                for channel in 0..4 {
+                    output[channel] += sample[channel] * weight;
+                }
+            }
+            horizontal[y * width + x] = output;
+        }
+    }
+
+    premultiplied.fill([0.0; 4]);
+    for y in 0..height {
+        for x in 0..width {
+            let mut output = [0.0; 4];
+            for (kernel_index, weight) in kernel.iter().enumerate() {
+                let offset = kernel_index as isize - kernel_radius;
+                let sample_y = (y as isize + offset).clamp(0, height as isize - 1) as usize;
+                let sample = horizontal[sample_y * width + x];
+                for channel in 0..4 {
+                    output[channel] += sample[channel] * weight;
+                }
+            }
+            premultiplied[y * width + x] = output;
+        }
+    }
+
+    for pixel in &mut premultiplied {
+        let alpha = pixel[3].clamp(0.0, 1.0);
+        if alpha > 1.0e-6 {
+            pixel[0] /= alpha;
+            pixel[1] /= alpha;
+            pixel[2] /= alpha;
+        } else {
+            pixel[0] = 0.0;
+            pixel[1] = 0.0;
+            pixel[2] = 0.0;
+        }
+        pixel[3] = alpha;
+    }
+    premultiplied
+}
+
+fn apply_unsharp_mask_f32(buffer: &mut [[f32; 4]], blurred: &[[f32; 4]], amount: f32) {
+    for (pixel, softened) in buffer.iter_mut().zip(blurred) {
+        if pixel[3] <= 1.0e-6 {
+            continue;
+        }
+        for channel in 0..3 {
+            pixel[channel] += (pixel[channel] - softened[channel]) * amount;
+        }
+    }
+}
+
+fn apply_vignette_f32(
+    buffer: &mut [[f32; 4]],
+    width: usize,
+    height: usize,
+    intensity: f32,
+    feather: f32,
+) {
+    let center_x = width.saturating_sub(1) as f32 * 0.5;
+    let center_y = height.saturating_sub(1) as f32 * 0.5;
+    let feather = feather.clamp(0.05, 1.0);
+    let inner = 1.0 - feather * 0.85;
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = &mut buffer[y * width + x];
+            if pixel[3] <= 1.0e-6 {
+                continue;
+            }
+            let normalized_x = (x as f32 - center_x) / center_x.max(1.0);
+            let normalized_y = (y as f32 - center_y) / center_y.max(1.0);
+            let distance =
+                (normalized_x * normalized_x + normalized_y * normalized_y).sqrt().min(1.0);
+            let gain = 1.0 - smoothstep(inner, 1.0, distance) * intensity;
+            pixel[0] *= gain;
+            pixel[1] *= gain;
+            pixel[2] *= gain;
+        }
+    }
+}
+
+fn apply_chromatic_aberration_f32(
+    input: &[[f32; 4]],
+    width: usize,
+    height: usize,
+    amount: f32,
+) -> Vec<[f32; 4]> {
+    let mut output = input.to_vec();
+    let center_x = width.saturating_sub(1) as f32 * 0.5;
+    let center_y = height.saturating_sub(1) as f32 * 0.5;
+    let maximum_shift = amount * 5.0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            if input[index][3] <= 1.0e-6 {
+                continue;
+            }
+            let dx = x as f32 - center_x;
+            let dy = y as f32 - center_y;
+            let distance = ((dx * dx + dy * dy).sqrt() / center_x.max(center_y).max(1.0)).min(1.0);
+            let shift = maximum_shift * distance;
+            output[index][0] = sample_premultiplied_channel_f32(
+                input,
+                width,
+                height,
+                x as f32 + shift,
+                y as f32,
+                0,
+            );
+            output[index][1] =
+                sample_premultiplied_channel_f32(input, width, height, x as f32, y as f32, 1);
+            output[index][2] = sample_premultiplied_channel_f32(
+                input,
+                width,
+                height,
+                x as f32 - shift,
+                y as f32,
+                2,
+            );
+        }
+    }
+    output
+}
+
+fn sample_premultiplied_channel_f32(
+    input: &[[f32; 4]],
+    width: usize,
+    height: usize,
+    x: f32,
+    y: f32,
+    channel: usize,
+) -> f32 {
+    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(width.saturating_sub(1));
+    let y1 = (y0 + 1).min(height.saturating_sub(1));
+    let fraction_x = x - x0 as f32;
+    let fraction_y = y - y0 as f32;
+    let sample = |sample_x: usize, sample_y: usize| {
+        let pixel = input[sample_y * width + sample_x];
+        let alpha = pixel[3].clamp(0.0, 1.0);
+        (pixel[channel] * alpha, alpha)
+    };
+    let (top_left, alpha_top_left) = sample(x0, y0);
+    let (top_right, alpha_top_right) = sample(x1, y0);
+    let (bottom_left, alpha_bottom_left) = sample(x0, y1);
+    let (bottom_right, alpha_bottom_right) = sample(x1, y1);
+    let interpolate = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let premultiplied = interpolate(
+        interpolate(top_left, top_right, fraction_x),
+        interpolate(bottom_left, bottom_right, fraction_x),
+        fraction_y,
+    );
+    let alpha = interpolate(
+        interpolate(alpha_top_left, alpha_top_right, fraction_x),
+        interpolate(alpha_bottom_left, alpha_bottom_right, fraction_x),
+        fraction_y,
+    );
+    if alpha > 1.0e-6 {
+        premultiplied / alpha
+    } else {
+        0.0
+    }
+}
+
+fn apply_grain_f32(
+    buffer: &mut [[f32; 4]],
+    width: usize,
+    height: usize,
+    amount: f32,
+    frame_seed: i64,
+) {
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = &mut buffer[y * width + x];
+            if pixel[3] <= 1.0e-6 {
+                continue;
+            }
+            let noise = grain_noise(x as u32, y as u32, frame_seed) * amount * 0.18;
+            pixel[0] += noise;
+            pixel[1] += noise;
+            pixel[2] += noise;
+        }
     }
 }
 

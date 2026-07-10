@@ -65,13 +65,17 @@ and float-capable adjustment layers in the typed float/linear working frame.
 Timeline blend modes, including seeded Dissolve, are implemented by
 `mondrian-effects`' float pixel blend contract and must not round-trip through
 RGBA8 scratch buffers. Extended working values therefore remain available to the
-final output boundary. Float-capable unary effects such as color adjustment and
-white balance also run in this path through the same `mondrian-effects` float
-contract. Affine geometric transforms (scale, rotate, translate) are implemented
+final output boundary. Every existing built-in unary render operation, including
+color adjustment, white balance, blur, sharpen, vignette, chromatic aberration,
+grain, and LUT, runs in this path through the same `mondrian-effects` float
+contract. Spatial effects use premultiplied-alpha sampling internally while the
+typed frame remains straight-alpha. Affine geometric transforms (scale, rotate,
+translate) are implemented
 in the float/linear path using inverse-affine mapping with bilinear sampling,
 so media and solid layers with non-identity transforms no longer require legacy
-RGBA8 fallback. Legacy-only effects still use the RGBA8 compositor path until
-their own float/linear execution contracts are implemented.
+RGBA8 fallback. Custom processors without a float ABI and non-unary effect graph
+nodes still use the RGBA8 compositor path until their float execution contracts
+are implemented.
 `TimelineCompositeDiagnostics` makes that fallback explicit: preview/export
 callers can see whether a composite stayed on the float/linear path or fell back
 to legacy RGBA8 because of transform or effect support. Blend-mode counters stay

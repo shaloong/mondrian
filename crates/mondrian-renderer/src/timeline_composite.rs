@@ -441,7 +441,7 @@ pub fn composite_path_diagnostics(
                     diagnostics.effect_gpu_blockers.saturating_add(gpu_blockers.len() as u64);
             }
             TimelineCompositeElement::SolidColor(layer) => {
-                if !layer.effect_graph.graph.is_identity() {
+                if !compiled_effect_graph_supports_rgba_f32(&layer.effect_graph) {
                     diagnostics.legacy_solid_effect =
                         diagnostics.legacy_solid_effect.saturating_add(1);
                 }
@@ -1274,9 +1274,50 @@ mod tests {
     }
 
     #[test]
-    fn float_linear_compositor_falls_back_for_legacy_media_effects() {
+    fn float_linear_compositor_runs_builtin_spatial_effects_without_rgba8_fallback() {
         let mut float_scratch = TimelineCompositeScratch::default();
-        let mut legacy_scratch = TimelineCompositeScratch::default();
+        let media = working_frame(&[120, 80, 40, 255], 1, 1);
+        let builtin_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+            ops: vec![mondrian_effects::EffectRenderOp::GaussianBlur { radius: 1.0 }],
+        })
+        .expect("compile built-in effect");
+        let elements = [
+            TimelineCompositeElement::Media(TimelineMediaLayer {
+                frame: &media,
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: builtin_graph.clone(),
+                frame_seed: 0,
+            }),
+            TimelineCompositeElement::SolidColor(TimelineSolidColorLayer {
+                color: Color { r: 1.5, g: 0.25, b: 0.125, a: 1.0 },
+                opacity: 0.5,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: builtin_graph,
+                frame_seed: 0,
+            }),
+        ];
+
+        let output = composite_timeline_elements_color_frame_with_diagnostics(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut float_scratch,
+        );
+
+        assert_eq!(output.diagnostics.float_linear_composites, 1);
+        assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
+        assert_eq!(output.diagnostics.legacy_media_effect, 0);
+        assert_eq!(output.diagnostics.legacy_solid_effect, 0);
+        assert!(output.frame.rgba_f32().data[0][0] > 0.8);
+    }
+
+    #[test]
+    fn float_linear_compositor_falls_back_for_custom_effect_without_float_abi() {
         let media = working_frame(&[120, 80, 40, 255], 1, 1);
         let elements = [TimelineCompositeElement::Media(TimelineMediaLayer {
             frame: &media,
@@ -1284,30 +1325,17 @@ mod tests {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
-                ops: vec![mondrian_effects::EffectRenderOp::GaussianBlur { radius: 1.0 }],
+                ops: vec![mondrian_effects::EffectRenderOp::Custom {
+                    key: "test.custom.rgba8-only".to_owned(),
+                    params: serde_json::json!({}),
+                    cache_key: None,
+                    cache_policy: mondrian_effects::EffectCachePolicy::Deterministic,
+                }],
             })
-            .expect("compile media effect"),
+            .expect("compile custom media effect"),
             frame_seed: 0,
         })];
 
-        let float_output = composite_timeline_elements_color_frame(
-            1,
-            1,
-            &elements,
-            TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
-            &mut float_scratch,
-        )
-        .to_output_rgba8(mondrian_core::types::ColorSpace::Rec709, false);
-        let legacy_output = composite_timeline_elements(
-            1,
-            1,
-            &elements,
-            TimelineCompositeOptions::default(),
-            &mut legacy_scratch,
-        );
-
-        assert_eq!(float_output, legacy_output);
         let diagnostics = composite_path_diagnostics(&elements);
         assert_eq!(diagnostics.legacy_rgba8_composites, 1);
         assert_eq!(diagnostics.legacy_media_effect, 1);

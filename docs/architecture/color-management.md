@@ -138,6 +138,13 @@ effects, including media, solid, and adjustment blend modes that have a seeded
 float pixel blend contract; any temporary RGBA8 path inside legacy effects or
 transforms must remain explicit and visible in tests until that subsystem has
 its own float/linear contract.
+All existing built-in unary render operations execute after the OCIO input
+transform in the sequence working space and before any display or export output
+transform. Their float implementation preserves extended RGB values; spatial
+sampling uses premultiplied alpha internally, and LUT sampling does not turn its
+normalized lookup domain into an implicit clamp of the working frame. Custom
+processors without a declared float ABI and non-unary effect graph nodes must
+remain diagnosed legacy boundaries rather than silently changing color domain.
 
 The app UI presentation surface is also part of the color contract. Mondrian
 targets wgpu 30 or newer for presentation because surface color space selection

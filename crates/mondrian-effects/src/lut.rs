@@ -248,6 +248,29 @@ impl Lut3D {
         }
     }
 
+    /// Apply the LUT to straight-alpha linear float RGBA pixels.
+    ///
+    /// LUT sampling uses the LUT's normalized 0..1 domain. The blend back to
+    /// the source remains in float so partial intensity preserves extended
+    /// working-range values instead of introducing an RGBA8 boundary.
+    pub fn apply_rgba_f32_in_place(&self, rgba: &mut [[f32; 4]], intensity: f32) {
+        let intensity = intensity.clamp(0.0, 1.0);
+        if intensity <= 1.0e-4 {
+            return;
+        }
+        for pixel in rgba {
+            if pixel[3] <= 1.0e-6 {
+                continue;
+            }
+            let source = [pixel[0], pixel[1], pixel[2]];
+            let graded = self.sample(source);
+            let output = lerp3(source, graded, intensity);
+            pixel[0] = output[0];
+            pixel[1] = output[1];
+            pixel[2] = output[2];
+        }
+    }
+
     fn at(&self, r: u32, g: u32, b: u32) -> [f32; 3] {
         let idx = (b * self.size * self.size + g * self.size + r) as usize;
         self.data.get(idx).copied().unwrap_or([0.0, 0.0, 0.0])
@@ -367,6 +390,19 @@ mod tests {
         assert!((sampled[0] - 0.25).abs() < 1.0e-6);
         assert!((sampled[1] - 0.5).abs() < 1.0e-6);
         assert!((sampled[2] - 0.75).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn float_lut_blends_in_float_and_preserves_alpha_and_extended_source() {
+        let lut = Lut3D::identity(2).expect("identity lut");
+        let mut pixels = [[1.5, -0.25, 0.5, 0.75]];
+
+        lut.apply_rgba_f32_in_place(&mut pixels, 0.5);
+
+        assert!((pixels[0][0] - 1.25).abs() <= 1.0e-6);
+        assert!((pixels[0][1] + 0.125).abs() <= 1.0e-6);
+        assert!((pixels[0][2] - 0.5).abs() <= 1.0e-6);
+        assert!((pixels[0][3] - 0.75).abs() <= f32::EPSILON);
     }
 
     #[test]
