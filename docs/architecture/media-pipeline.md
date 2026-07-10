@@ -687,10 +687,17 @@ copy stages.
 Every frame returned by the preview decode boundary is a
 `PreviewDecodeOutcome`: `Frame(RgbaFrame)` for CPU RGBA payloads or
 `NativeGpuFrame(PreviewNativeDecodedFrame)` for GPU-resident decoder payloads.
-`PreviewNativeDecodedFrame` must carry a non-zero
+`PreviewNativeDecodedFrame` must carry a
 `PreviewNativeDecodedFrameHandle` minted by the media backend that owns the
-native decoder resource. A handle-kind-only payload is invalid because it can
-masquerade as GPU residency without an importable resource. Native payloads are
+native decoder resource. The handle is a shared lease over an
+`Arc<dyn PreviewNativeDecodedFrameResource>`; cloning a frame retains the
+backend resource, and dropping the final clone releases it through the concrete
+resource implementation. Handles are neither `Copy` nor serializable. Their
+process-local kind/id values are diagnostics and backend-routing evidence, not
+OS handles or resource ownership by themselves. Equality and hashing use the
+lease object identity so recycled diagnostic ids cannot alias live resources.
+A handle-kind-only payload is invalid because it can masquerade as GPU
+residency without an importable resource. Native payloads are
 limited to renderer-importable surface families such as NV12, P010, RGBA8, and
 BGRA8; unknown or planar CPU formats must fail closed before reaching the app
 or renderer. They must also carry `DecodedVideoSampling` at construction time:

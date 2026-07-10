@@ -12,9 +12,12 @@ use crate::decoder::{
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
@@ -1003,31 +1006,78 @@ impl PreviewNativeDecodedFrame {
     }
 }
 
-/// Process-local token for a native decoder frame handle.
+/// Backend-owned native decoder resource retained by a preview frame.
 ///
-/// The numeric id is not an OS handle and must not be interpreted outside the
-/// media/backend adapter that minted it. It exists so GPU-resident preview
-/// payloads cannot be constructed without a concrete backend-owned resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Implementations own the concrete decoder surface or registry lease. Dropping
+/// the final handle clone must release that ownership according to the backend's
+/// normal resource lifetime rules.
+pub trait PreviewNativeDecodedFrameResource: fmt::Debug + Any + Send + Sync {
+    /// Native decoder handle family exposed by this resource.
+    fn handle_kind(&self) -> DecodedGpuFrameHandleKind;
+
+    /// Process-local backend identity. This is never an OS handle.
+    fn handle_id(&self) -> NonZeroU64;
+
+    /// Type-erased access for the matching renderer import backend.
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// Shared lease for one backend-owned native decoder resource.
+#[derive(Clone)]
 pub struct PreviewNativeDecodedFrameHandle {
-    kind: DecodedGpuFrameHandleKind,
-    id: NonZeroU64,
+    resource: Arc<dyn PreviewNativeDecodedFrameResource>,
 }
 
 impl PreviewNativeDecodedFrameHandle {
-    /// Create a native handle token from a backend-owned process-local id.
-    pub fn from_raw(kind: DecodedGpuFrameHandleKind, id: u64) -> Option<Self> {
-        Some(Self { kind, id: NonZeroU64::new(id)? })
+    /// Retain a backend-owned native decoder resource.
+    pub fn new<R>(resource: R) -> Self
+    where
+        R: PreviewNativeDecodedFrameResource,
+    {
+        Self { resource: Arc::new(resource) }
     }
 
     /// Native decoder handle family for this token.
-    pub fn kind(self) -> DecodedGpuFrameHandleKind {
-        self.kind
+    pub fn kind(&self) -> DecodedGpuFrameHandleKind {
+        self.resource.handle_kind()
     }
 
     /// Process-local backend handle id.
-    pub fn id(self) -> NonZeroU64 {
-        self.id
+    pub fn id(&self) -> NonZeroU64 {
+        self.resource.handle_id()
+    }
+
+    /// Access the concrete resource only from its matching import backend.
+    pub fn resource<R>(&self) -> Option<&R>
+    where
+        R: PreviewNativeDecodedFrameResource,
+    {
+        self.resource.as_any().downcast_ref()
+    }
+}
+
+impl fmt::Debug for PreviewNativeDecodedFrameHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreviewNativeDecodedFrameHandle")
+            .field("kind", &self.kind())
+            .field("id", &self.id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for PreviewNativeDecodedFrameHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.resource, &other.resource)
+    }
+}
+
+impl Eq for PreviewNativeDecodedFrameHandle {}
+
+impl Hash for PreviewNativeDecodedFrameHandle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let resource_identity = Arc::as_ptr(&self.resource) as *const ();
+        resource_identity.hash(state);
     }
 }
 
@@ -3383,12 +3433,12 @@ mod tests {
         PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
         PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
         PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-        PreviewPlaybackRing, PreviewScrubAdaptiveClass, PreviewSeekIndex,
-        PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution, RgbaFrame,
-        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
-        PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+        PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
+        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
+        PreviewSeekResolution, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS,
         PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
@@ -3399,8 +3449,52 @@ mod tests {
     };
     use ffmpeg_next as ffmpeg;
     use serde::Serialize;
+    use std::any::Any;
+    use std::num::NonZeroU64;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[derive(Debug)]
+    struct TestNativeDecodedFrameResource {
+        kind: DecodedGpuFrameHandleKind,
+        id: NonZeroU64,
+        drops: Option<Arc<AtomicUsize>>,
+    }
+
+    impl PreviewNativeDecodedFrameResource for TestNativeDecodedFrameResource {
+        fn handle_kind(&self) -> DecodedGpuFrameHandleKind {
+            self.kind
+        }
+
+        fn handle_id(&self) -> NonZeroU64 {
+            self.id
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    impl Drop for TestNativeDecodedFrameResource {
+        fn drop(&mut self) {
+            if let Some(drops) = &self.drops {
+                drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn test_native_handle(
+        kind: DecodedGpuFrameHandleKind,
+        id: u64,
+    ) -> PreviewNativeDecodedFrameHandle {
+        PreviewNativeDecodedFrameHandle::new(TestNativeDecodedFrameResource {
+            kind,
+            id: NonZeroU64::new(id).expect("test native handle id must be non-zero"),
+            drops: None,
+        })
+    }
 
     #[test]
     fn preview_decode_backend_codes_are_explicit_and_cpu_resident() {
@@ -4325,13 +4419,11 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_payload_forces_gpu_residency_diagnostics() {
-        let handle =
-            PreviewNativeDecodedFrameHandle::from_raw(DecodedGpuFrameHandleKind::D3D11Texture2D, 7)
-                .expect("non-zero native handle id");
+        let handle = test_native_handle(DecodedGpuFrameHandleKind::D3D11Texture2D, 7);
         let frame = PreviewNativeDecodedFrame::new(
             1920,
             1080,
-            handle,
+            handle.clone(),
             DecodedVideoSurfaceFormat::P010,
             p010_native_sampling(),
             PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
@@ -4366,20 +4458,40 @@ mod tests {
     }
 
     #[test]
-    fn native_decoded_frame_payload_requires_real_handle_and_native_surface() {
-        assert!(PreviewNativeDecodedFrameHandle::from_raw(
-            DecodedGpuFrameHandleKind::D3D11Texture2D,
-            0
-        )
-        .is_none());
+    fn native_decoded_frame_handle_retains_resource_until_last_clone_drops() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let handle = PreviewNativeDecodedFrameHandle::new(TestNativeDecodedFrameResource {
+            kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+            id: NonZeroU64::new(17).expect("non-zero test id"),
+            drops: Some(Arc::clone(&drops)),
+        });
+        let cloned = handle.clone();
+        let separate_same_id =
+            PreviewNativeDecodedFrameHandle::new(TestNativeDecodedFrameResource {
+                kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+                id: NonZeroU64::new(17).expect("non-zero test id"),
+                drops: None,
+            });
 
-        let handle =
-            PreviewNativeDecodedFrameHandle::from_raw(DecodedGpuFrameHandleKind::D3D11Texture2D, 7)
-                .expect("non-zero native handle id");
+        assert_eq!(handle.kind(), DecodedGpuFrameHandleKind::D3D11Texture2D);
+        assert_eq!(handle.id().get(), 17);
+        assert_eq!(handle, cloned);
+        assert_ne!(handle, separate_same_id);
+        assert!(handle.resource::<TestNativeDecodedFrameResource>().is_some());
+
+        drop(handle);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(cloned);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn native_decoded_frame_payload_requires_real_handle_and_native_surface() {
+        let handle = test_native_handle(DecodedGpuFrameHandleKind::D3D11Texture2D, 7);
         let empty = PreviewNativeDecodedFrame::new(
             0,
             1080,
-            handle,
+            handle.clone(),
             DecodedVideoSurfaceFormat::P010,
             p010_native_sampling(),
             PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba),
@@ -4413,14 +4525,12 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_payload_requires_complete_video_sampling() {
-        let handle =
-            PreviewNativeDecodedFrameHandle::from_raw(DecodedGpuFrameHandleKind::D3D11Texture2D, 7)
-                .expect("non-zero native handle id");
+        let handle = test_native_handle(DecodedGpuFrameHandleKind::D3D11Texture2D, 7);
 
         let missing_range = PreviewNativeDecodedFrame::new(
             1920,
             1080,
-            handle,
+            handle.clone(),
             DecodedVideoSurfaceFormat::P010,
             DecodedVideoSampling {
                 range: DecodedVideoRange::Unknown,
@@ -4440,7 +4550,7 @@ mod tests {
         let missing_chroma = PreviewNativeDecodedFrame::new(
             1920,
             1080,
-            handle,
+            handle.clone(),
             DecodedVideoSurfaceFormat::P010,
             DecodedVideoSampling {
                 range: DecodedVideoRange::Limited,

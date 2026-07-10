@@ -162,6 +162,12 @@ Concrete import execution belongs behind
 renderer-owned and returns `GpuNativeDecodedFrameSourceFormatError` for
 non-native media formats. App code may consume that conversion for readiness
 diagnostics, but it must not maintain a parallel renderer-format mapping.
+The media payload's `PreviewNativeDecodedFrameHandle` retains an opaque
+backend-owned resource lease. A matching import backend may downcast that lease
+to its concrete resource type while the frame is borrowed; app/platform
+schedulers may inspect kind/id diagnostics but must not reinterpret them as OS
+handles. This keeps native resource release tied to the last frame/handle clone
+instead of cache or window timing.
 The shared
 `execute_native_decoded_frame_import(...)` helper owns support validation,
 working-frame plan creation, backend invocation, and returned-resource contract

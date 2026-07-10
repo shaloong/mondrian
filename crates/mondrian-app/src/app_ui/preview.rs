@@ -15538,10 +15538,31 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct TestNativeDecodedFrameResource {
+        kind: DecodedGpuFrameHandleKind,
+        id: std::num::NonZeroU64,
+    }
+
+    impl mondrian_media::PreviewNativeDecodedFrameResource for TestNativeDecodedFrameResource {
+        fn handle_kind(&self) -> DecodedGpuFrameHandleKind {
+            self.kind
+        }
+
+        fn handle_id(&self) -> std::num::NonZeroU64 {
+            self.id
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
     fn test_native_source_frame(width: u32, height: u32) -> MediaPreviewNativeSourceFrame {
-        let handle =
-            PreviewNativeDecodedFrameHandle::from_raw(DecodedGpuFrameHandleKind::D3D11Texture2D, 7)
-                .expect("non-zero native frame handle");
+        let handle = PreviewNativeDecodedFrameHandle::new(TestNativeDecodedFrameResource {
+            kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+            id: std::num::NonZeroU64::new(7).expect("non-zero native frame handle"),
+        });
         let native_frame = PreviewNativeDecodedFrame::new(
             width,
             height,
