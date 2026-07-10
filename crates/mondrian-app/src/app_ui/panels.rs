@@ -6853,8 +6853,14 @@ mod tests {
         impl ViewerPreviewSource for TestPreview {
             fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
                 ViewerPreviewState::Ready(ViewerFrameContent::Raster(
-                    ViewerFrameImage::new("test-preview", 320, 180, vec![128; 320 * 180 * 4])
-                        .expect("preview frame"),
+                    ViewerFrameImage::new(
+                        "test-preview",
+                        320,
+                        180,
+                        mondrian_ui_core::RasterImageColorSpace::Srgb,
+                        vec![128; 320 * 180 * 4],
+                    )
+                    .expect("preview frame"),
                 ))
             }
         }
@@ -6985,8 +6991,14 @@ mod tests {
         impl ViewerPreviewSource for StalePreview {
             fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
                 ViewerPreviewState::Stale(ViewerFrameContent::Raster(
-                    ViewerFrameImage::new("stale-preview", 320, 180, vec![96; 320 * 180 * 4])
-                        .expect("stale preview frame"),
+                    ViewerFrameImage::new(
+                        "stale-preview",
+                        320,
+                        180,
+                        mondrian_ui_core::RasterImageColorSpace::Srgb,
+                        vec![96; 320 * 180 * 4],
+                    )
+                    .expect("stale preview frame"),
                 ))
             }
         }
@@ -7020,8 +7032,14 @@ mod tests {
         impl ViewerPreviewSource for UnexpectedPreview {
             fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
                 ViewerPreviewState::Ready(ViewerFrameContent::Raster(
-                    ViewerFrameImage::new("unexpected-preview", 320, 180, vec![128; 320 * 180 * 4])
-                        .expect("preview frame"),
+                    ViewerFrameImage::new(
+                        "unexpected-preview",
+                        320,
+                        180,
+                        mondrian_ui_core::RasterImageColorSpace::Srgb,
+                        vec![128; 320 * 180 * 4],
+                    )
+                    .expect("preview frame"),
                 ))
             }
         }
@@ -7218,6 +7236,7 @@ mod tests {
                         format!("test-thumb:{}", asset.id),
                         2,
                         2,
+                        mondrian_ui_core::RasterImageColorSpace::Srgb,
                         vec![0, 0, 0, 255, 80, 0, 0, 255, 0, 80, 0, 255, 0, 0, 80, 255],
                     )
                     .expect("valid test thumbnail"),

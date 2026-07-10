@@ -982,12 +982,23 @@ impl AppUiPreviewService {
                 } else {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
+                    let raster_contract =
+                        match cpu_raster_presentation_contract(&resolved.color_context) {
+                            Ok(contract) => contract,
+                            Err(output_color_space) => {
+                                tracing::warn!(
+                                    output_color_space = ?output_color_space,
+                                    "CPU raster viewer has no compatible presentation contract"
+                                );
+                                return ViewerPreviewState::Unavailable;
+                            }
+                        };
                     let output = match composite_resolved_preview(
                         self,
                         width,
                         height,
                         &resolved.elements,
-                        &resolved.color_context,
+                        &raster_contract.color_context,
                         &mut self.scratch.borrow_mut(),
                     ) {
                         Ok(rgba) => rgba,
@@ -1006,7 +1017,13 @@ impl AppUiPreviewService {
                         resolved.cache_key.as_ref().map(viewer_raster_frame_key).unwrap_or_else(
                             || uncached_viewer_raster_frame_key(sequence.id, frame, width, height),
                         );
-                    match ViewerFrameImage::new(key, width, height, rgba) {
+                    match ViewerFrameImage::new(
+                        key,
+                        width,
+                        height,
+                        raster_contract.raster_color_space,
+                        rgba,
+                    ) {
                         Some(frame) => {
                             if let Some(cache_key) = resolved.cache_key {
                                 self.viewer_frame_cache
@@ -8549,6 +8566,28 @@ fn composite_resolved_preview_working(
     })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CpuRasterPresentationContract {
+    color_context: ColorContext,
+    raster_color_space: mondrian_ui_core::RasterImageColorSpace,
+}
+
+fn cpu_raster_presentation_contract(
+    requested: &ColorContext,
+) -> Result<CpuRasterPresentationContract, ColorSpace> {
+    match requested.output_color_space {
+        ColorSpace::Rec709 | ColorSpace::Srgb => {
+            let mut color_context = requested.clone();
+            color_context.output_color_space = ColorSpace::Srgb;
+            Ok(CpuRasterPresentationContract {
+                color_context,
+                raster_color_space: mondrian_ui_core::RasterImageColorSpace::Srgb,
+            })
+        }
+        unsupported => Err(unsupported),
+    }
+}
+
 fn output_boundary_from_color_context(color_context: &ColorContext) -> RenderOutputColorBoundary {
     match (&color_context.ocio_display, &color_context.ocio_view) {
         (Some(display), Some(view)) => RenderOutputColorBoundary::display_view(
@@ -9516,6 +9555,37 @@ mod tests {
         Sequence::new("color-context")
             .settings
             .root_preview_color_context(&ProjectColorManagement::default(), output_color_space)
+    }
+
+    #[test]
+    fn cpu_raster_presentation_contract_encodes_sdr_video_for_srgb_atlas() {
+        let requested = test_color_context(ColorSpace::Rec709);
+
+        let contract = cpu_raster_presentation_contract(&requested)
+            .expect("Rec.709 viewer output has an sRGB raster presentation contract");
+
+        assert_eq!(
+            contract.color_context.working_color_space,
+            requested.working_color_space
+        );
+        assert_eq!(contract.color_context.output_color_space, ColorSpace::Srgb);
+        assert_eq!(contract.color_context.tone_map, requested.tone_map);
+        assert_eq!(
+            contract.raster_color_space,
+            mondrian_ui_core::RasterImageColorSpace::Srgb
+        );
+    }
+
+    #[test]
+    fn cpu_raster_presentation_contract_rejects_hdr_and_wide_gamut_outputs() {
+        for output in [
+            ColorSpace::DciP3,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec2100Hlg,
+        ] {
+            let requested = test_color_context(output);
+            assert_eq!(cpu_raster_presentation_contract(&requested), Err(output));
+        }
     }
 
     #[test]

@@ -351,13 +351,31 @@ instead of quantizing silently. Camera-log proxies carry no invented FFmpeg
 delivery tags and rely on their explicit sidecar interpretation.
 Asset thumbnails are presentation artifacts, not source frames. The app-owned
 thumbnail worker resolves `AssetMediaInterpretation`, detected input color,
-encoded source range, working space, engine, display/view, tone-map intent, fixed sRGB output, and
-current OCIO config generation into one contract. It executes the same renderer
-CPU input and output boundary APIs used by preview, then uploads only the
-resulting sRGB RGBA8 bytes into the UI's `Rgba8UnormSrgb` atlas. Cache, failure,
-pending-request, and raster-atlas identities all include the full color
-contract, so interpretation, project color, display/view, or OCIO config
-changes cannot reuse an implicit-sRGB thumbnail.
+encoded source range, working space, engine, display/view, output space,
+tone-map intent, and current OCIO config generation into one contract. Output
+space and tone mapping come from the resolved `ColorContext`; the worker must
+not replace them with thumbnail-local defaults. The product thumbnail host
+currently requests an explicit sRGB presentation context, executes the same
+renderer CPU input and output boundary APIs used by preview, and submits the
+result as `RasterImageColorSpace::Srgb` to the UI atlas. Cache, failure,
+pending-request, active-request, and raster-atlas identities include the full
+color contract. A color-context change clears visible thumbnail state and
+invalidates in-flight request ownership, so an older OCIO generation or
+tone-map result cannot overwrite a newer completion.
+
+`RasterImage` and `DrawCommand::RasterImage` always carry an explicit
+`RasterImageColorSpace`; bare RGBA8 has no UI presentation meaning. The current
+atlas is `Rgba8UnormSrgb` and accepts only `Srgb`. Any other declared space is
+replaced by the renderer's visible failure placeholder and increments both the
+general raster failure count and `unsupported_raster_color_spaces`. It is not
+reinterpreted as sRGB. Supporting Display P3 raster assets requires a matching
+atlas/pipeline/presentation contract rather than relaxing this guard.
+The CPU Viewer raster path resolves its own presentation payload contract at
+this boundary: Rec.709 and sRGB SDR viewer requests are encoded through the
+renderer output boundary into sRGB bytes before `RasterImage` construction.
+The source/working frame is not relabeled. Display P3, PQ, and HLG requests do
+not enter the SDR raster atlas and remain blocked for the native GPU/surface
+presentation path.
 Acquisition/log identification is represented as structured
 `VideoColorMetadataHint` values captured from container and stream metadata.
 Hints currently recognize explicit Apple Log, S-Log3/S-Gamut3.Cine, and ARRI

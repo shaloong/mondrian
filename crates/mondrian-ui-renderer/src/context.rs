@@ -4,6 +4,7 @@
 
 use bytemuck::Pod;
 use mondrian_core::Color;
+use mondrian_ui_core::types::RasterImageColorSpace;
 use std::collections::HashMap;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
@@ -51,6 +52,7 @@ enum RasterImageResolve {
         upload_bytes: u64,
     },
     Failed,
+    UnsupportedColorSpace,
     PageReset,
 }
 
@@ -130,6 +132,9 @@ pub struct UiRenderFrameStats {
     /// of disappearing silently, so the app can surface resource pressure while
     /// the frame remains visibly debuggable.
     pub failed_raster_images: u32,
+    /// Raster images rejected because their declared color space is not
+    /// supported by the current atlas texture contract.
+    pub unsupported_raster_color_spaces: u32,
     /// Entries currently cached in the renderer-owned raster image atlas.
     pub image_atlas_entries: usize,
     /// Pixels currently occupied by raster image atlas allocations, including padding.
@@ -503,12 +508,21 @@ impl UiRenderer {
 
             for command in commands {
                 match command {
-                    DrawCommand::RasterImage { key, bounds, width, height, rgba, tint } => {
+                    DrawCommand::RasterImage {
+                        key,
+                        bounds,
+                        width,
+                        height,
+                        color_space,
+                        rgba,
+                        tint,
+                    } => {
                         match self.resolve_raster_image(
                             queue,
                             key,
                             *width,
                             *height,
+                            *color_space,
                             rgba,
                             allow_page_reset,
                         ) {
@@ -534,6 +548,13 @@ impl UiRenderer {
                                     pass_stats.failed_raster_images.saturating_add(1);
                                 resolved.push(raster_image_failure_fallback(*bounds, *tint));
                             }
+                            RasterImageResolve::UnsupportedColorSpace => {
+                                pass_stats.failed_raster_images =
+                                    pass_stats.failed_raster_images.saturating_add(1);
+                                pass_stats.unsupported_raster_color_spaces =
+                                    pass_stats.unsupported_raster_color_spaces.saturating_add(1);
+                                resolved.push(raster_image_failure_fallback(*bounds, *tint));
+                            }
                         }
                     }
                     other => resolved.push(other.clone()),
@@ -554,6 +575,8 @@ impl UiRenderer {
             }
 
             aggregate_stats.failed_raster_images = pass_stats.failed_raster_images;
+            aggregate_stats.unsupported_raster_color_spaces =
+                pass_stats.unsupported_raster_color_spaces;
             return (resolved, aggregate_stats);
         }
     }
@@ -564,9 +587,13 @@ impl UiRenderer {
         key: &str,
         width: u32,
         height: u32,
+        color_space: RasterImageColorSpace,
         rgba: &[u8],
         allow_page_reset: bool,
     ) -> RasterImageResolve {
+        if color_space != RasterImageColorSpace::Srgb {
+            return RasterImageResolve::UnsupportedColorSpace;
+        }
         let Some(expected_len) = raster_image_payload_len(width, height) else {
             return RasterImageResolve::Failed;
         };
@@ -574,7 +601,7 @@ impl UiRenderer {
             return RasterImageResolve::Failed;
         }
 
-        let cache_key = format!("{key}@{width}x{height}");
+        let cache_key = format!("{key}@{width}x{height}@{color_space:?}");
         if let Some(entry) = self.image_cache.get(&cache_key) {
             return RasterImageResolve::Resolved {
                 uv_rect: entry.uv_rect,
@@ -1418,6 +1445,7 @@ mod tests {
             Rect::new(8.0, 8.0, 16.0, 16.0),
             4,
             4,
+            RasterImageColorSpace::Srgb,
             std::sync::Arc::from(rgba),
             Color::WHITE,
         );
@@ -1454,6 +1482,32 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_renderer_rejects_unsupported_raster_color_space_with_diagnostics() {
+        let Some(mut harness) = OffscreenHarness::new(16, 16) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_raster_image(
+            "test.raster.display-p3",
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            1,
+            1,
+            RasterImageColorSpace::DisplayP3,
+            std::sync::Arc::from(vec![255, 0, 0, 255]),
+            Color::WHITE,
+        );
+
+        let _ = harness.render(encoder.finish());
+        let stats = harness.last_stats.expect("render should record stats");
+
+        assert_eq!(stats.unsupported_raster_color_spaces, 1);
+        assert_eq!(stats.failed_raster_images, 1);
+        assert_eq!(stats.raster_image_upload_bytes, 0);
+        assert!(!stats.uploaded_raster_images);
+        assert_eq!(stats.image_atlas_entries, 0);
+    }
+
+    #[test]
     fn offscreen_renderer_resets_stale_raster_image_page_and_retries_frame() {
         let Some(mut harness) = OffscreenHarness::new(32, 32) else {
             return;
@@ -1464,7 +1518,7 @@ mod tests {
             .allocate_pixels("test.stale.full.page", ATLAS_SIZE, ATLAS_SIZE)
             .expect("stale allocation should fill the atlas");
         harness.renderer.image_cache.insert(
-            "test.stale.full.page@1x1".to_string(),
+            "test.stale.full.page@1x1@Srgb".to_string(),
             ImageCacheEntry { uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0) },
         );
 
@@ -1477,6 +1531,7 @@ mod tests {
             Rect::new(8.0, 8.0, 16.0, 16.0),
             2,
             2,
+            RasterImageColorSpace::Srgb,
             std::sync::Arc::from(rgba),
             Color::WHITE,
         );

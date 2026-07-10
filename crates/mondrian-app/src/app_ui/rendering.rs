@@ -22,6 +22,8 @@ pub struct AppUiFrameDiagnostics {
     pub text_missing_glyphs: u32,
     /// Raster images that failed upload or image-atlas allocation.
     pub raster_image_failures: u32,
+    /// Raster images rejected because their declared color space is unsupported.
+    pub unsupported_raster_color_spaces: u32,
     /// External texture draw commands whose key was missing from the renderer registry.
     pub external_texture_failures: u32,
 }
@@ -31,6 +33,7 @@ impl AppUiFrameDiagnostics {
     pub fn has_failures(self) -> bool {
         self.text_missing_glyphs > 0
             || self.raster_image_failures > 0
+            || self.unsupported_raster_color_spaces > 0
             || self.external_texture_failures > 0
     }
 }
@@ -489,6 +492,7 @@ fn presented_result(
         diagnostics: AppUiFrameDiagnostics {
             text_missing_glyphs,
             raster_image_failures: render_stats.failed_raster_images,
+            unsupported_raster_color_spaces: render_stats.unsupported_raster_color_spaces,
             external_texture_failures: render_stats.failed_external_textures,
         },
         metrics: AppUiFrameMetrics::from_stats(
@@ -535,6 +539,7 @@ mod tests {
         AppUiFrameDiagnostics {
             text_missing_glyphs,
             raster_image_failures,
+            unsupported_raster_color_spaces: 0,
             external_texture_failures: 0,
         }
     }
@@ -571,6 +576,7 @@ mod tests {
             AppUiFrameDiagnostics {
                 text_missing_glyphs: 3,
                 raster_image_failures: 1,
+                unsupported_raster_color_spaces: 1,
                 external_texture_failures: 1,
             },
             AppUiFrameMetrics::default(),
@@ -590,6 +596,7 @@ mod tests {
             Some(AppUiFrameDiagnostics {
                 text_missing_glyphs: 3,
                 raster_image_failures: 1,
+                unsupported_raster_color_spaces: 1,
                 external_texture_failures: 1,
             })
         );

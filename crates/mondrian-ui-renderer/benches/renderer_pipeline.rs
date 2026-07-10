@@ -172,6 +172,7 @@ fn benchmark_raster_commands(c: &mut Criterion) {
                     black_box(*bounds),
                     black_box(*width),
                     black_box(*height),
+                    black_box(mondrian_ui_core::RasterImageColorSpace::Srgb),
                     Arc::clone(rgba),
                     black_box(Color::WHITE),
                 );

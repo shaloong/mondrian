@@ -1043,7 +1043,14 @@ fn demo_asset_thumbnail(key: &str, primary: Color, secondary: Color) -> RasterIm
             rgba.push(255);
         }
     }
-    RasterImage::new(key, WIDTH, HEIGHT, rgba).expect("demo thumbnail dimensions are fixed")
+    RasterImage::new(
+        key,
+        WIDTH,
+        HEIGHT,
+        mondrian_ui_core::RasterImageColorSpace::Srgb,
+        rgba,
+    )
+    .expect("demo thumbnail dimensions are fixed")
 }
 
 fn demo_library_panel() -> PanelList {

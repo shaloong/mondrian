@@ -1282,6 +1282,7 @@ impl AssetGrid {
                 image_rect,
                 thumbnail.width,
                 thumbnail.height,
+                thumbnail.color_space,
                 Arc::clone(&thumbnail.rgba),
                 if item.disabled {
                     colors.muted_foreground
@@ -1961,6 +1962,7 @@ mod tests {
             bounds: Rect,
             width: u32,
             height: u32,
+            _color_space: mondrian_ui_core::RasterImageColorSpace,
             _rgba: Arc<[u8]>,
             _tint: Color,
         ) {
@@ -2075,14 +2077,34 @@ mod tests {
 
     #[test]
     fn thumbnail_model_rejects_invalid_rgba_payloads() {
-        assert!(RasterImage::new("asset:bad", 2, 2, vec![255; 15]).is_none());
-        assert!(RasterImage::new("asset:empty", 0, 2, Vec::<u8>::new()).is_none());
+        assert!(RasterImage::new(
+            "asset:bad",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 15],
+        )
+        .is_none());
+        assert!(RasterImage::new(
+            "asset:empty",
+            0,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            Vec::<u8>::new(),
+        )
+        .is_none());
     }
 
     #[test]
     fn thumbnail_status_builders_clear_ready_thumbnail_payloads() {
-        let thumbnail =
-            RasterImage::new("asset-thumb:clip-a", 2, 2, vec![255; 16]).expect("valid thumbnail");
+        let thumbnail = RasterImage::new(
+            "asset-thumb:clip-a",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 16],
+        )
+        .expect("valid thumbnail");
 
         let loading = item("clip-a", "Clip A")
             .with_thumbnail(thumbnail.clone())
@@ -2423,8 +2445,14 @@ mod tests {
 
     #[test]
     fn paint_card_draws_thumbnail_inside_preview_clip() {
-        let thumbnail =
-            RasterImage::new("asset-thumb:clip-a", 2, 2, vec![255; 16]).expect("valid thumbnail");
+        let thumbnail = RasterImage::new(
+            "asset-thumb:clip-a",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 16],
+        )
+        .expect("valid thumbnail");
         let grid = AssetGrid::new(
             "Assets",
             vec![item("clip-a", "Clip A").with_thumbnail(thumbnail)],

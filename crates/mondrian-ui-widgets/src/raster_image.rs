@@ -3,6 +3,7 @@
 //! Widgets use this type to describe already-decoded RGBA images without
 //! owning decoding, file access, or GPU texture lifetime.
 
+use mondrian_ui_core::RasterImageColorSpace;
 use std::sync::Arc;
 
 /// RGBA image payload presented through the renderer-owned raster atlas.
@@ -14,7 +15,9 @@ pub struct RasterImage {
     pub width: u32,
     /// Source image height in pixels.
     pub height: u32,
-    /// RGBA8 pixels, row-major, `width * height * 4` bytes.
+    /// Color space in which the RGBA8 bytes are encoded.
+    pub color_space: RasterImageColorSpace,
+    /// Encoded RGBA8 pixels, row-major, `width * height * 4` bytes.
     pub rgba: Arc<[u8]>,
 }
 
@@ -25,6 +28,7 @@ impl RasterImage {
         key: impl Into<String>,
         width: u32,
         height: u32,
+        color_space: RasterImageColorSpace,
         rgba: impl Into<Arc<[u8]>>,
     ) -> Option<Self> {
         let rgba = rgba.into();
@@ -33,6 +37,7 @@ impl RasterImage {
             key: key.into(),
             width,
             height,
+            color_space,
             rgba,
         })
     }

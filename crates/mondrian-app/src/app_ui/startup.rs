@@ -688,6 +688,7 @@ fn paint_startup_banner(ctx: &mut PaintContext, rect: Rect) {
             image_rect,
             image.width,
             image.height,
+            image.color_space,
             image.rgba.clone(),
             Color::WHITE,
         );
@@ -766,7 +767,13 @@ fn startup_banner_image() -> Option<&'static RasterImage> {
 
 fn decode_startup_png(key: &str, bytes: &[u8]) -> Option<RasterImage> {
     let image = image::load_from_memory(bytes).ok()?.into_rgba8();
-    RasterImage::new(key, image.width(), image.height(), image.into_raw())
+    RasterImage::new(
+        key,
+        image.width(),
+        image.height(),
+        mondrian_ui_core::RasterImageColorSpace::Srgb,
+        image.into_raw(),
+    )
 }
 
 fn startup_alpha(mut color: Color, alpha: f32) -> Color {
@@ -925,6 +932,7 @@ mod tests {
             bounds: Rect,
             width: u32,
             height: u32,
+            _color_space: mondrian_ui_core::RasterImageColorSpace,
             _rgba: Arc<[u8]>,
             _tint: Color,
         ) {

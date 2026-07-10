@@ -3,6 +3,7 @@
 //! These helpers keep Mondrian-branded bundled resources in the app layer
 //! instead of leaking product assets into reusable widget crates.
 
+use mondrian_ui_core::RasterImageColorSpace;
 use mondrian_ui_widgets::RasterImage;
 
 /// Rasterize an SVG asset into a renderer-ready RGBA image.
@@ -12,7 +13,13 @@ pub(crate) fn rasterize_svg_asset(
     width: u32,
     height: u32,
 ) -> Option<RasterImage> {
-    RasterImage::new(key, width, height, rasterize_svg_rgba(svg, width, height)?)
+    RasterImage::new(
+        key,
+        width,
+        height,
+        RasterImageColorSpace::Srgb,
+        rasterize_svg_rgba(svg, width, height)?,
+    )
 }
 
 /// Rasterize an SVG into straight-alpha RGBA pixels.

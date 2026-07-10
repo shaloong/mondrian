@@ -171,6 +171,7 @@ impl VectorIcon {
                 fitted,
                 raster.width,
                 raster.height,
+                mondrian_ui_core::RasterImageColorSpace::Srgb,
                 raster.rgba.clone(),
                 color,
             );
@@ -586,6 +587,7 @@ mod tests {
             bounds: Rect,
             width: u32,
             height: u32,
+            _color_space: mondrian_ui_core::RasterImageColorSpace,
             _rgba: std::sync::Arc<[u8]>,
             _tint: Color,
         ) {

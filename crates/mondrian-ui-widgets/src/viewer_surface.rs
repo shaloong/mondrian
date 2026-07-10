@@ -825,6 +825,7 @@ impl Widget for ViewerSurface {
                             canvas,
                             frame.width,
                             frame.height,
+                            frame.color_space,
                             Arc::clone(&frame.rgba),
                             Color::WHITE,
                         );
@@ -1308,6 +1309,7 @@ mod tests {
             bounds: Rect,
             width: u32,
             height: u32,
+            _color_space: mondrian_ui_core::RasterImageColorSpace,
             _rgba: Arc<[u8]>,
             _tint: Color,
         ) {
@@ -1516,8 +1518,14 @@ mod tests {
 
     #[test]
     fn viewer_accessibility_exposes_canvas_state_and_source_metadata() {
-        let image =
-            ViewerFrameImage::new("frame:a11y", 1, 1, vec![255, 0, 0, 255]).expect("valid frame");
+        let image = ViewerFrameImage::new(
+            "frame:a11y",
+            1,
+            1,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255, 0, 0, 255],
+        )
+        .expect("valid frame");
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
             .with_frame_image(image)
             .with_zoom_scale(Some(0.5));
@@ -2302,8 +2310,22 @@ mod tests {
 
     #[test]
     fn frame_image_rejects_invalid_rgba_payloads() {
-        assert!(ViewerFrameImage::new("bad", 2, 2, vec![255; 15]).is_none());
-        assert!(ViewerFrameImage::new("empty", 0, 2, Vec::<u8>::new()).is_none());
+        assert!(ViewerFrameImage::new(
+            "bad",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 15],
+        )
+        .is_none());
+        assert!(ViewerFrameImage::new(
+            "empty",
+            0,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            Vec::<u8>::new(),
+        )
+        .is_none());
     }
 
     #[test]
@@ -2315,8 +2337,14 @@ mod tests {
 
     #[test]
     fn paint_draws_preview_frame_inside_canvas_clip() {
-        let image =
-            ViewerFrameImage::new("preview:42", 2, 2, vec![255; 16]).expect("valid preview image");
+        let image = ViewerFrameImage::new(
+            "preview:42",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 16],
+        )
+        .expect("valid preview image");
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_frame_image(image);
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let canvas = viewer.canvas_rect();
@@ -2399,8 +2427,14 @@ mod tests {
 
     #[test]
     fn disabled_viewer_does_not_draw_preview_frame() {
-        let image = ViewerFrameImage::new("preview:disabled", 2, 2, vec![255; 16])
-            .expect("valid preview image");
+        let image = ViewerFrameImage::new(
+            "preview:disabled",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 16],
+        )
+        .expect("valid preview image");
         let mut viewer =
             ViewerSurface::new("Scene 01", 1920, 1080).with_frame_image(image).disabled();
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));

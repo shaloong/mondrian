@@ -241,11 +241,28 @@ work. Final raster viewer keys must be derived from the resolved render-plan
 identity, not by hashing full RGBA payloads; large preview frames should not pay
 an extra O(width * height) CPU scan just to name an atlas entry.
 Asset thumbnail raster keys follow the same identity rule without weakening
-color correctness: they hash the resolved source/working/fixed-sRGB display
-contract and OCIO generation alongside asset path and file fingerprint. The
-app-owned worker performs color transforms before `RasterImage` construction;
-panels and the UI renderer consume presentation-ready sRGB bytes and never
-interpret decoded source RGBA as display pixels.
+color correctness: they hash the resolved source, working, output, display/view,
+tone-map, engine, and OCIO-generation contract alongside asset path and file
+fingerprint. The app-owned worker performs color transforms before
+`RasterImage` construction and only the latest active request for an asset may
+publish a completion. Color-context changes clear visible cache state and
+invalidate request ownership so stale asynchronous results cannot overwrite a
+new display contract.
+
+UI raster images are typed presentation payloads. `RasterImage`,
+`DrawCommandEncoder::draw_raster_image`, and `DrawCommand::RasterImage` carry
+`RasterImageColorSpace` end to end. The current renderer-owned image atlas is
+`Rgba8UnormSrgb`, so it accepts only explicitly sRGB bytes. Unsupported spaces
+fail visibly and are reported through `unsupported_raster_color_spaces`, which
+the app promotes into frame diagnostics and resource-failure logs. Adding a P3
+atlas later requires a separate compatible texture/pipeline path; it must not
+silently reinterpret P3 bytes through the sRGB atlas.
+The CPU Viewer adapter owns a `CpuRasterPresentationContract`: Rec.709 and sRGB
+SDR requests are output-transformed to an sRGB atlas payload and labeled
+`RasterImageColorSpace::Srgb`; P3/PQ/HLG requests fail closed instead of being
+tone-mapped or relabeled by the widget layer. GPU viewer candidates retain the
+original monitor/output contract and continue through the native output/surface
+validation path.
 
 GPU preview candidate counters are intentionally scoped to the headless service
 boundary: they prove that a working-space frame was produced for the app-window

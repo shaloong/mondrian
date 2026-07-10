@@ -1540,9 +1540,10 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.render_diagnostic_reporter.changed_failure(frame_result)
                         {
                             tracing::warn!(
-                                "app UI render resource failures: missing_glyphs={}, raster_image_failures={}, external_texture_failures={}",
+                                "app UI render resource failures: missing_glyphs={}, raster_image_failures={}, unsupported_raster_color_spaces={}, external_texture_failures={}",
                                 diagnostics.text_missing_glyphs,
                                 diagnostics.raster_image_failures,
+                                diagnostics.unsupported_raster_color_spaces,
                                 diagnostics.external_texture_failures
                             );
                             host.mark_dirty();

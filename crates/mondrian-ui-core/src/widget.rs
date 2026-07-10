@@ -418,6 +418,7 @@ pub trait DrawCommandEncoder {
         _bounds: Rect,
         _width: u32,
         _height: u32,
+        _color_space: crate::types::RasterImageColorSpace,
         _rgba: Arc<[u8]>,
         _tint: mondrian_core::Color,
     ) {

@@ -211,6 +211,7 @@ impl Widget for TitleBar {
                 self.brand_icon_rect(),
                 image.width,
                 image.height,
+                image.color_space,
                 image.rgba.clone(),
                 mondrian_core::Color::WHITE,
             );
@@ -366,6 +367,7 @@ mod tests {
             bounds: Rect,
             width: u32,
             height: u32,
+            _color_space: mondrian_ui_core::RasterImageColorSpace,
             _rgba: std::sync::Arc<[u8]>,
             _tint: mondrian_core::Color,
         ) {

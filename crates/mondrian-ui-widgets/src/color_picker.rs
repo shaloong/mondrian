@@ -1470,6 +1470,7 @@ mod tests {
             _bounds: Rect,
             _width: u32,
             _height: u32,
+            _color_space: mondrian_ui_core::RasterImageColorSpace,
             _rgba: std::sync::Arc<[u8]>,
             _tint: Color,
         ) {

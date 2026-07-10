@@ -5,7 +5,7 @@
 
 use glam::Vec2;
 use mondrian_core::Color;
-use mondrian_ui_core::types::{Point, Rect};
+use mondrian_ui_core::types::{Point, RasterImageColorSpace, Rect};
 use mondrian_ui_core::widget::DrawCommandEncoder;
 use mondrian_ui_theme::typography::TextStyle;
 use std::sync::Arc;
@@ -135,6 +135,7 @@ pub enum DrawCommand {
         bounds: Rect,
         width: u32,
         height: u32,
+        color_space: RasterImageColorSpace,
         rgba: Arc<[u8]>,
         tint: Color,
     },
@@ -522,6 +523,7 @@ impl DrawEncoder {
         bounds: Rect,
         width: u32,
         height: u32,
+        color_space: RasterImageColorSpace,
         rgba: Arc<[u8]>,
         tint: Color,
     ) {
@@ -537,6 +539,7 @@ impl DrawEncoder {
             bounds,
             width,
             height,
+            color_space,
             rgba,
             tint,
         });
@@ -672,10 +675,11 @@ impl DrawCommandEncoder for DrawEncoder {
         bounds: Rect,
         width: u32,
         height: u32,
+        color_space: RasterImageColorSpace,
         rgba: Arc<[u8]>,
         tint: Color,
     ) {
-        DrawEncoder::draw_raster_image(self, key, bounds, width, height, rgba, tint);
+        DrawEncoder::draw_raster_image(self, key, bounds, width, height, color_space, rgba, tint);
     }
 
     fn draw_external_texture(&mut self, key: &str, bounds: Rect, uv_rect: Rect, tint: Color) {
@@ -1007,6 +1011,7 @@ mod tests {
                 bounds: rect(),
                 width: 1,
                 height: 1,
+                color_space: RasterImageColorSpace::Srgb,
                 rgba: Arc::from(vec![255u8; 4]),
                 tint: color(),
             },
@@ -1111,6 +1116,7 @@ mod tests {
             rect(),
             2,
             1,
+            RasterImageColorSpace::Srgb,
             Arc::from(vec![255u8; 8]),
             color(),
         );
@@ -1119,9 +1125,10 @@ mod tests {
 
         assert_eq!(commands.len(), 1);
         match &commands[0] {
-            DrawCommand::RasterImage { key, width, height, rgba, .. } => {
+            DrawCommand::RasterImage { key, width, height, color_space, rgba, .. } => {
                 assert_eq!(key, "icon.copy.16");
                 assert_eq!((*width, *height), (2, 1));
+                assert_eq!(*color_space, RasterImageColorSpace::Srgb);
                 assert_eq!(rgba.len(), 8);
             }
             other => panic!("expected raster image command, got {other:?}"),
@@ -1131,7 +1138,15 @@ mod tests {
     #[test]
     fn encoder_draw_raster_image_rejects_mismatched_payload_size() {
         let mut enc = DrawEncoder::new();
-        enc.draw_raster_image("bad", rect(), 2, 2, Arc::from(vec![255u8; 8]), color());
+        enc.draw_raster_image(
+            "bad",
+            rect(),
+            2,
+            2,
+            RasterImageColorSpace::Srgb,
+            Arc::from(vec![255u8; 8]),
+            color(),
+        );
 
         assert!(enc.is_empty());
     }
@@ -1144,6 +1159,7 @@ mod tests {
             rect(),
             u32::MAX,
             u32::MAX,
+            RasterImageColorSpace::Srgb,
             Arc::from(vec![255u8; 4]),
             color(),
         );

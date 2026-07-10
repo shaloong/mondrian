@@ -9,6 +9,19 @@ use uuid::Uuid;
 
 pub use crate::corner_radii::CornerRadii;
 
+/// Color space of an encoded RGBA8 raster image submitted to the UI renderer.
+///
+/// This contract is deliberately separate from timeline working spaces: UI
+/// raster images are presentation-boundary assets and must declare the color
+/// space in which their bytes are encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RasterImageColorSpace {
+    /// IEC 61966-2-1 sRGB transfer and BT.709/sRGB primaries.
+    Srgb,
+    /// Display P3 primaries with the sRGB transfer function.
+    DisplayP3,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════
 // Widget ID（手动实现，不依赖 define_id! 宏）
 // ═══════════════════════════════════════════════════════════════════════════════════
