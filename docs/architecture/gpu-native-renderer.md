@@ -251,15 +251,22 @@ working frame or fail with a structured backend error.
 a graphics-API-neutral contract. The preview scheduler carries that plan and
 the timeline frame seed across the app/window boundary; it does not interpret
 effect math or own wgpu resources. `GpuFrameCompositor` consumes the plan in its
-`Rgba32Float` working-space pass, applying the fused point operations before
-straight-alpha composition. The retired RGBA8 global executor/upload/readback
-path must not be reintroduced.
+`Rgba32Float` working-space pass. Media and solid plans apply before
+straight-alpha source composition; adjustment plans apply to the lower
+accumulator and blend the processed result back. The retired RGBA8 global
+executor/upload/readback path must not be reintroduced.
 
 The first native subset is a bounded single-source chain of ColorAdjust,
 WhiteBalance, Vignette, and deterministic Grain. Unsupported topology, spatial
 sampling, LUT resources, and custom operations remain explicit lowering
 blockers until dedicated renderer graph passes provide their resource and alpha
 contracts.
+
+A real-wgpu readback test compares the fused media and adjustment outputs
+against `apply_compiled_effect_graph_rgba_f32(...)` and
+`apply_compiled_effect_graph_pass_rgba_f32(...)` per channel. This is the
+numerical contract for extending the GPU subset; shader parsing or successful
+command recording alone is not sufficient evidence of effect correctness.
 
 ## OCIO GPU Integration
 

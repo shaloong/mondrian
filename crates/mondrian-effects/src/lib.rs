@@ -34,8 +34,8 @@ pub use execution::{
     EffectFloatUnsupportedReason,
 };
 pub use gpu_plan::{
-    lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan, EffectGpuPlanBlocker, EffectGpuPointOp,
-    MAX_FUSED_GPU_EFFECT_OPS,
+    get_or_lower_effect_graph_to_gpu_plan, lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan,
+    EffectGpuPlanBlocker, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS,
 };
 pub use graph::{
     compile_effect_render_graph, compile_scheduled_effect_graph,

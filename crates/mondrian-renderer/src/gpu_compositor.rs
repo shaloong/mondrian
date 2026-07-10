@@ -88,11 +88,12 @@ fn over_straight_alpha(base_px: vec4<f32>, blend_px: vec4<f32>, opacity: f32) ->
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base_px = textureSample(accum_tex, linear_sampler, in.uv);
     let source_position = source_coordinate(in.uv);
-    var layer_px = select(
-        sample_layer(source_position),
-        uniforms.solid_color,
-        uniforms.source_kind == 1u,
-    );
+    var layer_px = sample_layer(source_position);
+    if (uniforms.source_kind == 1u) {
+        layer_px = uniforms.solid_color;
+    } else if (uniforms.source_kind == 2u) {
+        layer_px = base_px;
+    }
     let effect_position = select(
         source_position - vec2<f32>(0.5),
         in.uv * uniforms.geometry.zw - vec2<f32>(0.5),
@@ -321,6 +322,8 @@ pub enum GpuCompositeLayerSource<'a> {
     GpuFrame(&'a GpuColorFrameHandle),
     /// Solid working-space color drawn directly by shader uniform.
     SolidColor(Color),
+    /// Adjustment layer that processes the current working-space accumulator.
+    Adjustment,
 }
 
 /// One layer in a GPU working-space composite request.
@@ -385,6 +388,9 @@ pub enum GpuCompositeError {
         /// Actual descriptor.
         actual: ColorFrameDescriptor,
     },
+    /// An adjustment layer did not provide a non-identity GPU effect plan.
+    #[error("GPU adjustment layer requires a non-identity effect plan")]
+    AdjustmentMissingEffectPlan,
     /// A renderer frame handle could not be created.
     #[error("GPU composite output handle error: {0}")]
     OutputHandle(#[from] crate::GpuColorFrameHandleError),
@@ -588,6 +594,12 @@ impl GpuFrameCompositor {
                     [color.r, color.g, color.b, color.a],
                     [width as f32, height as f32],
                 ),
+                GpuCompositeLayerSource::Adjustment => (
+                    &accum.resource().texture_view,
+                    2,
+                    [0.0, 0.0, 0.0, 0.0],
+                    [width as f32, height as f32],
+                ),
             };
             let inv_transform = invert_affine(layer.transform)
                 .expect("validate_request rejects unsupported transforms");
@@ -750,11 +762,18 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
         return Err(GpuCompositeError::Blocked { reason });
     }
     for layer in request.layers {
+        if matches!(layer.source, GpuCompositeLayerSource::Adjustment)
+            && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
+        {
+            return Err(GpuCompositeError::AdjustmentMissingEffectPlan);
+        }
         if let Some(actual) = layer_source_descriptor(layer.source) {
             let expected_residency = match layer.source {
                 GpuCompositeLayerSource::CpuFrame(_) => ColorFrameResidency::Cpu,
                 GpuCompositeLayerSource::GpuFrame(_) => ColorFrameResidency::Gpu,
-                GpuCompositeLayerSource::SolidColor(_) => unreachable!("solid has no descriptor"),
+                GpuCompositeLayerSource::SolidColor(_) | GpuCompositeLayerSource::Adjustment => {
+                    unreachable!("procedural layers have no descriptor")
+                }
             };
             let expected = ColorFrameDescriptor {
                 width: actual.width,
@@ -777,7 +796,9 @@ fn gpu_transform_supported(layer: &GpuCompositeLayer<'_>) -> bool {
         GpuCompositeLayerSource::CpuFrame(_) | GpuCompositeLayerSource::GpuFrame(_) => {
             invert_affine(layer.transform).is_some()
         }
-        GpuCompositeLayerSource::SolidColor(_) => is_identity_transform(layer.transform),
+        GpuCompositeLayerSource::SolidColor(_) | GpuCompositeLayerSource::Adjustment => {
+            is_identity_transform(layer.transform)
+        }
     }
 }
 
@@ -785,7 +806,7 @@ fn layer_source_descriptor(source: GpuCompositeLayerSource<'_>) -> Option<ColorF
     match source {
         GpuCompositeLayerSource::CpuFrame(frame) => Some(frame.descriptor()),
         GpuCompositeLayerSource::GpuFrame(handle) => Some(handle.descriptor()),
-        GpuCompositeLayerSource::SolidColor(_) => None,
+        GpuCompositeLayerSource::SolidColor(_) | GpuCompositeLayerSource::Adjustment => None,
     }
 }
 
@@ -993,6 +1014,198 @@ mod tests {
         assert_eq!(uniforms[1].header[0], 3);
         assert_eq!(uniforms[1].params, [0.7, 0.4, 0.0, 0.0]);
         assert!(uniforms[2..].iter().all(|uniform| uniform.header[0] == 0));
+    }
+
+    #[test]
+    fn gpu_composite_request_rejects_adjustment_without_effect_plan() {
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::Adjustment,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let request = GpuCompositeRequest {
+            width: 4,
+            height: 4,
+            working_color_space: ColorSpace::Rec709,
+            layers: &[layer],
+        };
+
+        assert_eq!(
+            validate_request(&request),
+            Err(GpuCompositeError::AdjustmentMissingEffectPlan)
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_point_effects_match_cpu_float_reference_on_real_wgpu_device() {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
+            get_or_compile_scheduled_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU point-effect parity test: no GPU adapter available");
+            return;
+        };
+        let data = (0..16)
+            .map(|index| {
+                let value = index as f32 / 15.0;
+                [0.1 + value * 0.7, 0.8 - value * 0.4, 0.2 + value * 0.5, 1.0]
+            })
+            .collect::<Vec<_>>();
+        let frame = CpuColorFrame::working(RgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: ColorSpace::Rec709,
+            data,
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ColorAdjust {
+            exposure: 0.35,
+            contrast: 1.15,
+            saturation: 0.8,
+        });
+        builder.append_unary(EffectRenderOp::WhiteBalance { temperature: 0.2, tint: -0.15 });
+        builder.append_unary(EffectRenderOp::Vignette { intensity: 0.45, feather: 0.7 });
+        builder.append_unary(EffectRenderOp::Grain { amount: 0.1 });
+        let graph = get_or_compile_scheduled_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effects");
+        let expected =
+            apply_compiled_effect_graph_rgba_f32(&frame.rgba_f32().data, 4, 4, &graph, 23)
+                .expect("CPU float reference");
+
+        let media_layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 23,
+        };
+        let actual = readback_test_composite(&context, &[media_layer]);
+        assert_test_pixels_close(&expected, &actual);
+
+        let adjustment_opacity = 0.55;
+        let expected_adjustment = apply_compiled_effect_graph_pass_rgba_f32(
+            &frame.rgba_f32().data,
+            4,
+            4,
+            &graph,
+            adjustment_opacity,
+            None,
+            23,
+        )
+        .expect("CPU float adjustment reference");
+        let base_layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let adjustment_layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::Adjustment,
+            opacity: adjustment_opacity,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 23,
+        };
+        let actual_adjustment = readback_test_composite(&context, &[base_layer, adjustment_layer]);
+        assert_test_pixels_close(&expected_adjustment, &actual_adjustment);
+    }
+
+    fn readback_test_composite(
+        context: &crate::GpuContext,
+        layers: &[GpuCompositeLayer<'_>],
+    ) -> Vec<[f32; 4]> {
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut ids = GpuColorFrameIdAllocator::default();
+        let mut table = GpuColorFrameResourceTable::new();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-point-effect-parity"),
+        });
+        let record = compositor
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: ColorSpace::Rec709,
+                    layers,
+                },
+            )
+            .expect("record GPU effect composite");
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mondrian-test-gpu-point-effect-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let output = table.get(&record.output).expect("composite output resource");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_test_readback(&context.device, &readback);
+        let mut actual = Vec::with_capacity(16);
+        for row in mapped.chunks_exact(256).take(4) {
+            actual.extend(
+                bytemuck::cast_slice::<u8, f32>(&row[..64])
+                    .chunks_exact(4)
+                    .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]]),
+            );
+        }
+        readback.unmap();
+        actual
+    }
+
+    fn assert_test_pixels_close(expected: &[[f32; 4]], actual: &[[f32; 4]]) {
+        assert_eq!(expected.len(), actual.len());
+        for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+            for channel in 0..4 {
+                assert!(
+                    (expected[channel] - actual[channel]).abs() <= 2.0e-5,
+                    "pixel {index} channel {channel}: expected {}, actual {}",
+                    expected[channel],
+                    actual[channel]
+                );
+            }
+        }
+    }
+
+    fn map_test_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        rx.recv().expect("readback callback").expect("readback mapping");
+        slice.get_mapped_range().expect("mapped readback range").to_vec()
     }
 
     #[test]

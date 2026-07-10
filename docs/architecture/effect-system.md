@@ -110,6 +110,10 @@ are supported in source order with a bounded eight-op pass; spatial operations,
 LUT resources, custom processors, and branching graph nodes return typed
 `EffectGpuPlanBlocker` values. This makes capability checks deterministic and
 keeps renderer ownership separate from effect graph semantics.
+`get_or_lower_effect_graph_to_gpu_plan(...)` stores successful plans and
+deterministic blockers in a bounded 256-entry LRU keyed by compiled graph
+signature. Playback and diagnostics share the returned `Arc` instead of
+re-traversing and reallocating an unchanged graph every frame.
 
 File-backed LUT caches key existing files by canonical path and invalidate on
 file fingerprint changes. Tests that validate cache behavior should use local

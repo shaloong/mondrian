@@ -658,9 +658,10 @@ the renderer contract is covered by `from_gpu_working_frame()`.
 
 ### Capability Classification
 
-- **`GpuNative`** — All layers are GPU-resident, use Normal blend mode,
-  have no effect graphs, and ≤5 layers. Native D3D11 media enters through the
-  bounded low-copy import backend; procedural layers require no import.
+- **`GpuNative`** — All media sources are GPU-resident, every executed layer
+  uses Normal blend mode and a supported working-linear effect plan, and the
+  executed stack has ≤5 layers. Native D3D11 media enters through the bounded
+  low-copy import backend; procedural and adjustment layers require no import.
 - **`GpuWithUpload`** — Layer structure supports GPU compositing, but at least
   one layer enters from CPU memory. The preferred media path uploads decoded
   source RGBA8 once and runs GPU OCIO input before compositing. If that input
@@ -673,7 +674,7 @@ the renderer contract is covered by `from_gpu_working_frame()`.
   - `UnsupportedBlendMode` — Only Normal is GPU-supported
   - `UnsupportedTransform` — Transform cannot be represented by the GPU compositor
   - `FrameNotGpuResident` — Frame must be uploaded
-  - `TooManyLayers` — Exceeds 5-layer fused shader limit
+  - `TooManyLayers` — Exceeds the bounded 5-layer GPU composite stack
   - `GpuUnavailable` — No GPU device/queue
 
 ### Texture Pool
@@ -683,18 +684,22 @@ formats with size-class-based LRU reuse (8 per key, 64 total default).
 
 ### Integration Status
 
-The production preview path uses GPU compositing when `ResolvedPreviewElement`
-contains only supported media/solid layers:
+The production preview path uses GPU compositing for supported media, solid,
+and adjustment elements:
 
 - media frames must either already be in the sequence working color space or
   carry a source/input contract whose target working color space matches the
   sequence; differing source/preview extents are supported through
   inverse-affine GPU sampling;
-- solid layers must have identity effect graphs;
+- media and solid sources may carry a lowered ColorAdjust, WhiteBalance,
+  Vignette, or Grain chain; effects run before source-over composition;
+- adjustment layers process the lower accumulated working pixels and blend the
+  result back with their opacity, matching the CPU float reference semantics;
 - media layers may use invertible affine transforms; solid layers currently
   require identity transforms to match the float reference compositor;
-- all layers must use `BlendMode::Normal`;
-- layer count must be ≤5.
+- all executed layers must use `BlendMode::Normal`;
+- skipped leading/identity/zero-opacity adjustments do not consume capacity;
+  the remaining executed layer count must be ≤5.
 
 If any condition is not met, the GPU-preview candidate path records
 `GpuCompositingDiagnostics { cpu_fallback_composites, first_blocker }` and

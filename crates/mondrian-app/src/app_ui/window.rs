@@ -3371,6 +3371,7 @@ enum PreparedPreviewGpuCompositeLayerSource<'a> {
     CpuFrame(&'a CpuColorFrame),
     GpuFrame(usize),
     SolidColor(Color),
+    Adjustment,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3743,7 +3744,7 @@ fn prepare_preview_gpu_composite<'a>(
                     frame_seed: *frame_seed,
                 });
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { layer } => {
+            AppUiGpuPreviewCompositeLayer::SolidColor { layer, effect_plan } => {
                 prepared.residency.procedural_layers =
                     prepared.residency.procedural_layers.saturating_add(1);
                 prepared.layers.push(PreparedPreviewGpuCompositeLayer {
@@ -3751,8 +3752,23 @@ fn prepare_preview_gpu_composite<'a>(
                     opacity: layer.opacity,
                     blend_mode: layer.blend_mode,
                     transform: layer.transform,
-                    effect_plan: None,
-                    frame_seed: 0,
+                    effect_plan: Some(effect_plan),
+                    frame_seed: layer.frame_seed,
+                });
+            }
+            AppUiGpuPreviewCompositeLayer::Adjustment {
+                effect_plan,
+                opacity,
+                blend_mode,
+                frame_seed,
+            } => {
+                prepared.layers.push(PreparedPreviewGpuCompositeLayer {
+                    source: PreparedPreviewGpuCompositeLayerSource::Adjustment,
+                    opacity: *opacity,
+                    blend_mode: *blend_mode,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: Some(effect_plan),
+                    frame_seed: *frame_seed,
                 });
             }
         }
@@ -3825,6 +3841,9 @@ fn preview_gpu_composite_layers<'a>(
                 }
                 PreparedPreviewGpuCompositeLayerSource::SolidColor(color) => {
                     GpuCompositeLayerSource::SolidColor(color)
+                }
+                PreparedPreviewGpuCompositeLayerSource::Adjustment => {
+                    GpuCompositeLayerSource::Adjustment
                 }
             },
             opacity: layer.opacity,

@@ -471,8 +471,10 @@ pub fn composite_path_diagnostics(
                 }
                 diagnostics.effect_gpu_blockers =
                     diagnostics.effect_gpu_blockers.saturating_add(u64::from(
-                        mondrian_effects::lower_effect_graph_to_gpu_plan(&layer.effect_graph)
-                            .is_err(),
+                        mondrian_effects::get_or_lower_effect_graph_to_gpu_plan(
+                            &layer.effect_graph,
+                        )
+                        .is_err(),
                     ));
             }
             TimelineCompositeElement::SolidColor(layer) => {
@@ -482,8 +484,10 @@ pub fn composite_path_diagnostics(
                 }
                 diagnostics.effect_gpu_blockers =
                     diagnostics.effect_gpu_blockers.saturating_add(u64::from(
-                        mondrian_effects::lower_effect_graph_to_gpu_plan(&layer.effect_graph)
-                            .is_err(),
+                        mondrian_effects::get_or_lower_effect_graph_to_gpu_plan(
+                            &layer.effect_graph,
+                        )
+                        .is_err(),
                     ));
             }
             TimelineCompositeElement::Adjustment(layer) => {
@@ -493,8 +497,10 @@ pub fn composite_path_diagnostics(
                 }
                 diagnostics.effect_gpu_blockers =
                     diagnostics.effect_gpu_blockers.saturating_add(u64::from(
-                        mondrian_effects::lower_effect_graph_to_gpu_plan(&layer.effect_graph)
-                            .is_err(),
+                        mondrian_effects::get_or_lower_effect_graph_to_gpu_plan(
+                            &layer.effect_graph,
+                        )
+                        .is_err(),
                     ));
             }
         }

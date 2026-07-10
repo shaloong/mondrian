@@ -733,11 +733,14 @@ and `document_unsupported_feature` action code.
 - **GPU compositing** — The `gpu_compositor.rs` module is wired into the
   preview/viewer GPU path for the safe production subset: media-layer affine
   transforms, identity solid transforms, Normal blend mode, supported fused
-  working-linear media effect chains, and at most five media/solid layers.
+  working-linear media/solid effect chains, working-linear adjustment layers,
+  and at most five executed layers.
   It composites into an `Rgba32Float` working-space GPU texture, then feeds the
   same renderer-owned OCIO GPU output boundary used by the rest of preview.
   GPU effect lowering supports ColorAdjust, WhiteBalance, Vignette, and Grain
-  without an encoded/RGBA8 intermediate. Unsupported layer stacks fail back to the CPU reference compositor with
+  without an encoded/RGBA8 intermediate. Adjustment plans sample the current
+  accumulator, process it in the same working space, and blend the result back.
+  Unsupported layer stacks fail back to the CPU reference compositor with
   structured `GpuCompositingDiagnostics` blocker reasons (`EffectRequiresCpu`,
   `UnsupportedBlendMode`, `UnsupportedTransform`, `TooManyLayers`,
   `GpuUnavailable`).

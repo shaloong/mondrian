@@ -21,7 +21,8 @@ use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
 use mondrian_core::MondrianError;
 use mondrian_effects::{
-    lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan, CompiledEffectGraph, EffectCachePolicy,
+    get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan, CompiledEffectGraph,
+    EffectCachePolicy,
 };
 use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
@@ -6652,6 +6653,19 @@ pub(crate) enum AppUiGpuPreviewCompositeLayer {
     SolidColor {
         /// Solid layer.
         layer: TimelineSolidColorLayer,
+        /// Renderer-neutral working-space GPU effect plan.
+        effect_plan: Arc<CompiledEffectGpuPlan>,
+    },
+    /// Full-frame adjustment over the current working composite.
+    Adjustment {
+        /// Renderer-neutral working-space GPU effect plan.
+        effect_plan: Arc<CompiledEffectGpuPlan>,
+        /// Adjustment opacity.
+        opacity: f32,
+        /// Adjustment blend mode. The GPU path currently accepts Normal.
+        blend_mode: BlendMode,
+        /// Timeline frame seed for temporal effects.
+        frame_seed: i64,
     },
 }
 
@@ -8558,10 +8572,8 @@ fn gpu_composite_layers_for_resolved(
     resolved: &[ResolvedPreviewElement],
     working_color_space: ColorSpace,
 ) -> Result<Vec<AppUiGpuPreviewCompositeLayer>, GpuCompositingBlockerReason> {
-    if resolved.len() > 5 {
-        return Err(GpuCompositingBlockerReason::TooManyLayers);
-    }
     let mut layers = Vec::with_capacity(resolved.len());
+    let mut has_composited_layer = false;
     for element in resolved {
         match element {
             ResolvedPreviewElement::Media {
@@ -8572,7 +8584,7 @@ fn gpu_composite_layers_for_resolved(
                 effect_graph,
                 frame_seed,
             } => {
-                let effect_plan = lower_effect_graph_to_gpu_plan(effect_graph)
+                let effect_plan = get_or_lower_effect_graph_to_gpu_plan(effect_graph)
                     .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
                 if *blend_mode != BlendMode::Normal {
                     return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
@@ -8606,26 +8618,50 @@ fn gpu_composite_layers_for_resolved(
                     native_source: frame.native_source(),
                     opacity: *opacity,
                     transform: *transform,
-                    effect_plan: Arc::new(effect_plan),
+                    effect_plan,
                     frame_seed: *frame_seed,
                 });
+                has_composited_layer = true;
             }
             ResolvedPreviewElement::SolidColor(layer) => {
-                if !layer.effect_graph.graph.is_identity() {
-                    return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
-                }
+                let effect_plan = get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
+                    .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
                 if layer.blend_mode != BlendMode::Normal {
                     return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
                 }
                 if !is_preview_identity_transform(layer.transform) {
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
-                layers.push(AppUiGpuPreviewCompositeLayer::SolidColor { layer: layer.clone() });
+                layers.push(AppUiGpuPreviewCompositeLayer::SolidColor {
+                    layer: layer.clone(),
+                    effect_plan,
+                });
+                has_composited_layer = true;
             }
-            ResolvedPreviewElement::Adjustment(_) => {
-                return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+            ResolvedPreviewElement::Adjustment(layer) => {
+                if !has_composited_layer
+                    || layer.opacity <= 1.0e-4
+                    || layer.effect_graph.graph.is_identity()
+                {
+                    continue;
+                }
+                let blend_mode = layer.blend_mode.unwrap_or(BlendMode::Normal);
+                if blend_mode != BlendMode::Normal {
+                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
+                }
+                let effect_plan = get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
+                    .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+                layers.push(AppUiGpuPreviewCompositeLayer::Adjustment {
+                    effect_plan,
+                    opacity: layer.opacity,
+                    blend_mode,
+                    frame_seed: layer.frame_seed,
+                });
             }
         }
+    }
+    if layers.len() > 5 {
+        return Err(GpuCompositingBlockerReason::TooManyLayers);
     }
     Ok(layers)
 }
@@ -9687,7 +9723,8 @@ mod tests {
                 assert_eq!(*opacity, 0.85);
                 assert_eq!(*actual_transform, transform);
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. } => {
+            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
+            | AppUiGpuPreviewCompositeLayer::Adjustment { .. } => {
                 panic!("expected media layer")
             }
         }
@@ -9724,8 +9761,102 @@ mod tests {
                 assert_eq!(effect_plan.operations().len(), 2);
                 assert_eq!(*frame_seed, 19);
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. } => panic!("expected media layer"),
+            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
+            | AppUiGpuPreviewCompositeLayer::Adjustment { .. } => {
+                panic!("expected media layer")
+            }
         }
+    }
+
+    #[test]
+    fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
+        let mut graph = mondrian_effects::EffectGraphBuilderState::new();
+        graph.append_unary(mondrian_effects::EffectRenderOp::ColorAdjust {
+            exposure: 0.2,
+            contrast: 1.1,
+            saturation: 0.9,
+        });
+        let effect_graph = mondrian_effects::get_or_compile_scheduled_render_graph(graph.finish())
+            .expect("compile supported effect graph");
+        let elements = vec![
+            ResolvedPreviewElement::SolidColor(TimelineSolidColorLayer {
+                color: Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 },
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: Arc::clone(&effect_graph),
+                frame_seed: 11,
+            }),
+            ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
+                effect_graph,
+                opacity: 0.6,
+                blend_mode: None,
+                frame_seed: 13,
+            }),
+        ];
+
+        let layers = gpu_composite_layers_for_resolved(320, 180, &elements, ColorSpace::Rec709)
+            .expect("solid and adjustment point effects should remain GPU-native");
+
+        assert_eq!(layers.len(), 2);
+        match &layers[0] {
+            AppUiGpuPreviewCompositeLayer::SolidColor { effect_plan, .. } => {
+                assert_eq!(effect_plan.operations().len(), 1);
+            }
+            _ => panic!("expected solid layer"),
+        }
+        match &layers[1] {
+            AppUiGpuPreviewCompositeLayer::Adjustment {
+                effect_plan,
+                opacity,
+                blend_mode,
+                frame_seed,
+            } => {
+                assert_eq!(effect_plan.operations().len(), 1);
+                assert_eq!(*opacity, 0.6);
+                assert_eq!(*blend_mode, BlendMode::Normal);
+                assert_eq!(*frame_seed, 13);
+            }
+            _ => panic!("expected adjustment layer"),
+        }
+    }
+
+    #[test]
+    fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
+        let mut graph = mondrian_effects::EffectGraphBuilderState::new();
+        graph.append_unary(mondrian_effects::EffectRenderOp::Grain { amount: 0.1 });
+        let effect_graph = mondrian_effects::get_or_compile_scheduled_render_graph(graph.finish())
+            .expect("compile supported effect graph");
+        let mut elements = (0..5)
+            .map(|seed| {
+                ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
+                    effect_graph: Arc::clone(&effect_graph),
+                    opacity: 1.0,
+                    blend_mode: None,
+                    frame_seed: seed,
+                })
+            })
+            .collect::<Vec<_>>();
+        elements.push(ResolvedPreviewElement::SolidColor(
+            TimelineSolidColorLayer {
+                color: Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 },
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: mondrian_effects::identity_compiled_effect_graph()
+                    .expect("identity compiled graph"),
+                frame_seed: 0,
+            },
+        ));
+
+        let layers = gpu_composite_layers_for_resolved(320, 180, &elements, ColorSpace::Rec709)
+            .expect("non-rendering leading adjustments should not consume GPU layer capacity");
+
+        assert_eq!(layers.len(), 1);
+        assert!(matches!(
+            layers[0],
+            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
+        ));
     }
 
     #[test]
@@ -9768,7 +9899,8 @@ mod tests {
                 assert!(gpu_source.is_some());
                 assert!(native_source.is_none());
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. } => {
+            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
+            | AppUiGpuPreviewCompositeLayer::Adjustment { .. } => {
                 panic!("expected media layer")
             }
         }
@@ -9840,7 +9972,8 @@ mod tests {
                     GpuNativeDecodedFrameTextureFormat::P010
                 );
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. } => {
+            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
+            | AppUiGpuPreviewCompositeLayer::Adjustment { .. } => {
                 panic!("expected media layer")
             }
         }

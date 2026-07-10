@@ -5,9 +5,14 @@
 //! point operations over linear floating-point working-space pixels.
 
 use crate::{CompiledEffectGraph, EffectGraphNodeId, EffectGraphNodeKind, EffectRenderOp};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 /// Maximum number of point operations fused into one GPU pass.
 pub const MAX_FUSED_GPU_EFFECT_OPS: usize = 8;
+const GPU_PLAN_CACHE_CAPACITY: usize = 256;
 
 /// One pointwise operation executable by a working-space GPU backend.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,6 +143,74 @@ pub fn lower_effect_graph_to_gpu_plan(
     })
 }
 
+/// Return a shared cached GPU plan for a compiled effect graph.
+///
+/// Both successful plans and deterministic lowering blockers are cached by the
+/// compiled graph signature, preventing repeated plan allocation and repeated
+/// blocker traversal during playback.
+pub fn get_or_lower_effect_graph_to_gpu_plan(
+    compiled: &CompiledEffectGraph,
+) -> Result<Arc<CompiledEffectGpuPlan>, EffectGpuPlanBlocker> {
+    let signature = compiled.signature_hash;
+    if let Ok(mut cache) = gpu_plan_cache().lock() {
+        if let Some(result) = cache.get(signature) {
+            return result;
+        }
+    }
+
+    let lowered = lower_effect_graph_to_gpu_plan(compiled).map(Arc::new);
+    if let Ok(mut cache) = gpu_plan_cache().lock() {
+        cache.insert(signature, lowered.clone());
+    }
+    lowered
+}
+
+struct EffectGpuPlanCache {
+    entries: HashMap<u64, Result<Arc<CompiledEffectGpuPlan>, EffectGpuPlanBlocker>>,
+    lru: VecDeque<u64>,
+}
+
+impl EffectGpuPlanCache {
+    fn new() -> Self {
+        Self { entries: HashMap::new(), lru: VecDeque::new() }
+    }
+
+    fn get(
+        &mut self,
+        signature: u64,
+    ) -> Option<Result<Arc<CompiledEffectGpuPlan>, EffectGpuPlanBlocker>> {
+        let result = self.entries.get(&signature)?.clone();
+        self.touch(signature);
+        Some(result)
+    }
+
+    fn insert(
+        &mut self,
+        signature: u64,
+        result: Result<Arc<CompiledEffectGpuPlan>, EffectGpuPlanBlocker>,
+    ) {
+        self.entries.insert(signature, result);
+        self.touch(signature);
+        while self.entries.len() > GPU_PLAN_CACHE_CAPACITY {
+            if let Some(evicted) = self.lru.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+    }
+
+    fn touch(&mut self, signature: u64) {
+        if let Some(index) = self.lru.iter().position(|entry| *entry == signature) {
+            self.lru.remove(index);
+        }
+        self.lru.push_back(signature);
+    }
+}
+
+fn gpu_plan_cache() -> &'static Mutex<EffectGpuPlanCache> {
+    static CACHE: OnceLock<Mutex<EffectGpuPlanCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(EffectGpuPlanCache::new()))
+}
+
 fn lower_point_op(
     node_id: EffectGraphNodeId,
     op: &EffectRenderOp,
@@ -245,5 +318,18 @@ mod tests {
                 maximum: MAX_FUSED_GPU_EFFECT_OPS,
             })
         );
+    }
+
+    #[test]
+    fn cached_lowering_reuses_shared_plan() {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Grain { amount: 0.2 });
+        let compiled =
+            get_or_compile_scheduled_render_graph(builder.finish()).expect("valid graph");
+
+        let first = get_or_lower_effect_graph_to_gpu_plan(&compiled).expect("supported graph");
+        let second = get_or_lower_effect_graph_to_gpu_plan(&compiled).expect("cached graph");
+
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }
