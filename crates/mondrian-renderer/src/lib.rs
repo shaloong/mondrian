@@ -9,6 +9,7 @@
 //! - `ShaderRegistry`：可扩展效果 Shader 注册
 
 pub mod batched_pipeline;
+pub mod color_accuracy;
 pub mod color_frame;
 pub mod color_report_vocab;
 pub mod color_stage;
@@ -25,6 +26,11 @@ pub mod texture_pool;
 pub mod timeline_composite;
 pub mod timeline_render_plan;
 
+pub use color_accuracy::{
+    compare_linear_rgba, LinearAccuracyBudget, LinearAccuracyChannelGroup, LinearAccuracyError,
+    LinearAccuracyGroupReport, LinearAccuracyStatistics, LinearRgbaAccuracyBudget,
+    LinearRgbaAccuracyReport,
+};
 pub use color_frame::{
     execute_native_decoded_frame_import, ColorFrameDescriptor, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,

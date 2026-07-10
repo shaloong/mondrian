@@ -494,6 +494,17 @@ The app preview suite also pins a stable Rec.2020-working to sRGB-output
 multilayer preview/export RGBA hash, so preview and export cannot drift together
 without an explicit golden update.
 
+Scene-linear CPU/GPU validation uses the renderer-owned
+`LinearRgbaAccuracyBudget` and `LinearRgbaAccuracyReport` contract. RGB and
+alpha are evaluated independently: RGB reports maximum absolute error, mean
+absolute error, RMSE, nearest-rank P99 error, and non-finite sample count, while
+alpha uses its own coverage budget. A single peak-delta assertion is not an
+adequate color gate because it cannot detect broad low-amplitude drift or
+distinguish color arithmetic from alpha corruption. Real-wgpu point-effect
+tests include negative and above-one working values and fail closed on NaN or
+infinity. Display-referred perceptual metrics must be added as a separate
+contract rather than applying Delta E to scene-linear values.
+
 ## Export Delivery View Transform
 
 Export tone mapping is delivered through an explicit OCIO delivery view

@@ -1041,6 +1041,9 @@ mod tests {
 
     #[tokio::test]
     async fn gpu_point_effects_match_cpu_float_reference_on_real_wgpu_device() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
         use mondrian_effects::{
             apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
             get_or_compile_scheduled_render_graph, lower_effect_graph_to_gpu_plan,
@@ -1054,7 +1057,12 @@ mod tests {
         let data = (0..16)
             .map(|index| {
                 let value = index as f32 / 15.0;
-                [0.1 + value * 0.7, 0.8 - value * 0.4, 0.2 + value * 0.5, 1.0]
+                [
+                    -0.15 + value * 1.6,
+                    1.3 - value * 1.4,
+                    0.05 + value * 1.2,
+                    1.0,
+                ]
             })
             .collect::<Vec<_>>();
         let frame = CpuColorFrame::working(RgbaF32Frame {
@@ -1087,7 +1095,7 @@ mod tests {
             frame_seed: 23,
         };
         let actual = readback_test_composite(&context, &[media_layer]);
-        assert_test_pixels_close(&expected, &actual);
+        assert_test_pixels_accurate(&expected, &actual);
 
         let adjustment_opacity = 0.55;
         let expected_adjustment = apply_compiled_effect_graph_pass_rgba_f32(
@@ -1117,7 +1125,23 @@ mod tests {
             frame_seed: 23,
         };
         let actual_adjustment = readback_test_composite(&context, &[base_layer, adjustment_layer]);
-        assert_test_pixels_close(&expected_adjustment, &actual_adjustment);
+        assert_test_pixels_accurate(&expected_adjustment, &actual_adjustment);
+
+        fn assert_test_pixels_accurate(expected: &[[f32; 4]], actual: &[[f32; 4]]) {
+            let report = compare_linear_rgba(
+                expected,
+                actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(3.0e-5, 1.0e-5, 2.0e-5),
+                    alpha: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-6),
+                },
+            )
+            .expect("matching GPU and CPU frame shapes");
+            assert!(
+                report.within_budget,
+                "GPU point-effect accuracy budget exceeded: {report:#?}"
+            );
+        }
     }
 
     fn readback_test_composite(
@@ -1181,20 +1205,6 @@ mod tests {
         }
         readback.unmap();
         actual
-    }
-
-    fn assert_test_pixels_close(expected: &[[f32; 4]], actual: &[[f32; 4]]) {
-        assert_eq!(expected.len(), actual.len());
-        for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
-            for channel in 0..4 {
-                assert!(
-                    (expected[channel] - actual[channel]).abs() <= 2.0e-5,
-                    "pixel {index} channel {channel}: expected {}, actual {}",
-                    expected[channel],
-                    actual[channel]
-                );
-            }
-        }
     }
 
     fn map_test_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
