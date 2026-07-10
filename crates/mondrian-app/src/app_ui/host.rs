@@ -120,6 +120,7 @@ impl AppUiHost {
         let system_theme_preset = ThemePreset::Dark;
         set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
         let asset_thumbnails = AssetThumbnailCache::new();
+        asset_thumbnails.set_color_context(thumbnail_color_context(&app_state));
         let waveform_cache = AudioWaveformCache::new();
         if let Some(ref library) = app_state.asset_library {
             waveform_cache.set_library(Arc::clone(library));
@@ -344,6 +345,8 @@ impl AppUiHost {
             return;
         }
         self.normalize_asset_folder_selection();
+        self.asset_thumbnails
+            .set_color_context(thumbnail_color_context(&self.app_state.borrow()));
         self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
             &self.app_state.borrow(),
             &self.preferences,
@@ -974,6 +977,15 @@ impl AppUiHost {
             }
         }
     }
+}
+
+fn thumbnail_color_context(state: &AppState) -> Option<mondrian_timeline::sequence::ColorContext> {
+    state.sequence.as_ref().map(|sequence| {
+        sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            mondrian_core::types::ColorSpace::Srgb,
+        )
+    })
 }
 
 fn action_prefers_transport_refresh_without_preview(action: &Action) -> bool {

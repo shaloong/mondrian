@@ -329,6 +329,15 @@ HDR, camera-log, and high-bit-depth sources select a 10-bit proxy profile under
 automatic policy, while an explicitly incompatible 8-bit H.264 request fails
 instead of quantizing silently. Camera-log proxies carry no invented FFmpeg
 delivery tags and rely on their explicit sidecar interpretation.
+Asset thumbnails are presentation artifacts, not source frames. The app-owned
+thumbnail worker resolves `AssetMediaInterpretation`, detected input color,
+working space, engine, display/view, tone-map intent, fixed sRGB output, and
+current OCIO config generation into one contract. It executes the same renderer
+CPU input and output boundary APIs used by preview, then uploads only the
+resulting sRGB RGBA8 bytes into the UI's `Rgba8UnormSrgb` atlas. Cache, failure,
+pending-request, and raster-atlas identities all include the full color
+contract, so interpretation, project color, display/view, or OCIO config
+changes cannot reuse an implicit-sRGB thumbnail.
 Acquisition/log identification is represented as structured
 `VideoColorMetadataHint` values captured from container and stream metadata.
 Hints currently recognize explicit Apple Log, S-Log3/S-Gamut3.Cine, and ARRI

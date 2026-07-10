@@ -240,6 +240,12 @@ assigning a slow frame to codec, cache, color, composite, or viewer packaging
 work. Final raster viewer keys must be derived from the resolved render-plan
 identity, not by hashing full RGBA payloads; large preview frames should not pay
 an extra O(width * height) CPU scan just to name an atlas entry.
+Asset thumbnail raster keys follow the same identity rule without weakening
+color correctness: they hash the resolved source/working/fixed-sRGB display
+contract and OCIO generation alongside asset path and file fingerprint. The
+app-owned worker performs color transforms before `RasterImage` construction;
+panels and the UI renderer consume presentation-ready sRGB bytes and never
+interpret decoded source RGBA as display pixels.
 
 GPU preview candidate counters are intentionally scoped to the headless service
 boundary: they prove that a working-space frame was produced for the app-window

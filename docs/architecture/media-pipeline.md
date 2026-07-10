@@ -52,7 +52,10 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   App thumbnail workers must pass the already-probed `PreviewFileFingerprint`
   into the still-frame request and use the same fingerprint for thumbnail cache and
   failure invalidation, so replaced files cannot reuse stale still-frame UI
-  rasters.
+  rasters. Decoded RGBA remains source-encoded: the app thumbnail adapter must
+  resolve asset input color through the active sequence/project policy, execute
+  the renderer source-to-working CPU reference stage, and cross an explicit
+  working-to-sRGB display boundary before constructing a UI raster.
 
 These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app

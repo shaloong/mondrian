@@ -10,14 +10,20 @@ use crate::app_ui::preview_access_mode::{
     media_preview_access_mode_for_intent, MediaPreviewAccessIntent,
 };
 use mondrian_assets::{AssetKind, AssetRecord};
-use mondrian_core::types::AssetId;
+use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_media::{
     decode_preview_frame_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
     PreviewDecodeRequest, PreviewFileFingerprint,
 };
+use mondrian_renderer::{
+    execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuEncodedColorFrame,
+    RenderInputTransform, RenderOutputColorBoundary,
+};
+use mondrian_timeline::sequence::ColorContext;
 use mondrian_ui_widgets::RasterImage;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -27,10 +33,66 @@ const THUMBNAIL_MAX_HEIGHT: u32 = 180;
 const THUMBNAIL_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 const THUMBNAIL_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ThumbnailColorContract {
+    source_color_space: ColorSpace,
+    working_color_space: ColorSpace,
+    output_color_space: ColorSpace,
+    tone_map: bool,
+    engine: ColorEngine,
+    display: Option<String>,
+    view: Option<String>,
+    ocio_generation: u64,
+}
+
+impl ThumbnailColorContract {
+    fn resolve(asset: &AssetRecord, context: &ColorContext) -> Option<Self> {
+        let detected =
+            asset.media_info.primary_video().and_then(|video| video.detected_color_space);
+        let source_color_space = context
+            .missing_metadata_policy
+            .resolve_asset_input_decision(
+                None,
+                asset.interpretation,
+                detected,
+                context.working_color_space,
+            )
+            .color_space?;
+        Some(Self {
+            source_color_space,
+            working_color_space: context.working_color_space,
+            output_color_space: ColorSpace::Srgb,
+            tone_map: true,
+            engine: context.engine.clone(),
+            display: context.ocio_display.clone(),
+            view: context.ocio_view.clone(),
+            ocio_generation: mondrian_core::ocio_config_generation(),
+        })
+    }
+
+    fn output_boundary(&self) -> RenderOutputColorBoundary {
+        match (&self.display, &self.view) {
+            (Some(display), Some(view)) => RenderOutputColorBoundary::display_view(
+                self.output_color_space,
+                display.clone(),
+                view.clone(),
+                self.tone_map,
+                self.engine.clone(),
+            ),
+            _ => RenderOutputColorBoundary::display(
+                self.output_color_space,
+                self.tone_map,
+                self.engine.clone(),
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ThumbnailCacheEntry {
     path: PathBuf,
     fingerprint: PreviewFileFingerprint,
+    color: ThumbnailColorContract,
     image: RasterImage,
 }
 
@@ -38,6 +100,7 @@ struct ThumbnailCacheEntry {
 struct ThumbnailFailureEntry {
     path: PathBuf,
     fingerprint: PreviewFileFingerprint,
+    color: ThumbnailColorContract,
 }
 
 #[derive(Debug)]
@@ -45,6 +108,7 @@ struct ThumbnailJob {
     asset_id: AssetId,
     path: PathBuf,
     fingerprint: PreviewFileFingerprint,
+    color: ThumbnailColorContract,
 }
 
 #[derive(Debug)]
@@ -52,8 +116,28 @@ struct ThumbnailResult {
     asset_id: AssetId,
     path: PathBuf,
     fingerprint: PreviewFileFingerprint,
+    color: ThumbnailColorContract,
     image: Option<RasterImage>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ThumbnailRequestKey {
+    asset_id: AssetId,
+    path: PathBuf,
+    fingerprint: PreviewFileFingerprint,
+    color: ThumbnailColorContract,
+}
+
+impl ThumbnailRequestKey {
+    fn new(
+        asset_id: AssetId,
+        path: PathBuf,
+        fingerprint: PreviewFileFingerprint,
+        color: ThumbnailColorContract,
+    ) -> Self {
+        Self { asset_id, path, fingerprint, color }
+    }
 }
 
 /// Background thumbnail cache for project media assets.
@@ -62,7 +146,8 @@ pub struct AssetThumbnailCache {
     results: RefCell<mpsc::Receiver<ThumbnailResult>>,
     cache: RefCell<HashMap<AssetId, ThumbnailCacheEntry>>,
     failures: RefCell<HashMap<AssetId, ThumbnailFailureEntry>>,
-    pending: RefCell<HashSet<AssetId>>,
+    pending: RefCell<HashSet<ThumbnailRequestKey>>,
+    color_context: RefCell<Option<ColorContext>>,
 }
 
 impl AssetThumbnailCache {
@@ -83,7 +168,16 @@ impl AssetThumbnailCache {
             cache: RefCell::new(HashMap::new()),
             failures: RefCell::new(HashMap::new()),
             pending: RefCell::new(HashSet::new()),
+            color_context: RefCell::new(None),
         }
+    }
+
+    /// Update the sequence/project color context used for new thumbnail requests.
+    pub fn set_color_context(&self, context: Option<ColorContext>) {
+        if *self.color_context.borrow() == context {
+            return;
+        }
+        self.color_context.replace(context);
     }
 
     /// Poll completed background decodes. Returns true when visible model data
@@ -109,13 +203,19 @@ impl AssetThumbnailCache {
                 Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
             };
             drained += 1;
-            self.pending.borrow_mut().remove(&result.asset_id);
+            self.pending.borrow_mut().remove(&ThumbnailRequestKey::new(
+                result.asset_id,
+                result.path.clone(),
+                result.fingerprint,
+                result.color.clone(),
+            ));
             if let Some(image) = result.image {
                 self.cache.borrow_mut().insert(
                     result.asset_id,
                     ThumbnailCacheEntry {
                         path: result.path,
                         fingerprint: result.fingerprint,
+                        color: result.color,
                         image,
                     },
                 );
@@ -131,8 +231,13 @@ impl AssetThumbnailCache {
                 }
                 self.failures.borrow_mut().insert(
                     result.asset_id,
-                    ThumbnailFailureEntry { path: result.path, fingerprint: result.fingerprint },
+                    ThumbnailFailureEntry {
+                        path: result.path,
+                        fingerprint: result.fingerprint,
+                        color: result.color,
+                    },
                 );
+                changed = true;
             }
         }
         if max_results > 0 && drained == max_results {
@@ -141,18 +246,26 @@ impl AssetThumbnailCache {
         changed
     }
 
-    fn request_thumbnail(&self, asset: &AssetRecord, fingerprint: PreviewFileFingerprint) {
-        if self.pending.borrow().contains(&asset.id) {
+    fn request_thumbnail(
+        &self,
+        asset: &AssetRecord,
+        fingerprint: PreviewFileFingerprint,
+        color: ThumbnailColorContract,
+    ) {
+        let request_key =
+            ThumbnailRequestKey::new(asset.id, asset.path.clone(), fingerprint, color.clone());
+        if self.pending.borrow().contains(&request_key) {
             return;
         }
         let job = ThumbnailJob {
             asset_id: asset.id,
             path: asset.path.clone(),
             fingerprint,
+            color,
         };
         match self.jobs.send(job) {
             Ok(()) => {
-                self.pending.borrow_mut().insert(asset.id);
+                self.pending.borrow_mut().insert(request_key);
             }
             Err(err) => {
                 tracing::debug!(asset_id = %asset.id, "asset thumbnail worker unavailable: {err}");
@@ -181,20 +294,32 @@ impl AssetThumbnailSource for AssetThumbnailCache {
             return AssetThumbnailState::Failed;
         };
         let fingerprint = PreviewFileFingerprint::from_metadata(&metadata);
+        let Some(color_context) = self.color_context.borrow().clone() else {
+            return AssetThumbnailState::Unavailable;
+        };
+        let Some(color) = ThumbnailColorContract::resolve(asset, &color_context) else {
+            return AssetThumbnailState::Failed;
+        };
         if let Some(entry) = self.cache.borrow().get(&asset.id) {
-            if entry.path == asset.path && entry.fingerprint == fingerprint {
+            if entry.path == asset.path && entry.fingerprint == fingerprint && entry.color == color
+            {
                 return AssetThumbnailState::Ready(entry.image.clone());
             }
         }
         if let Some(failure) = self.failures.borrow().get(&asset.id) {
-            if failure.path == asset.path && failure.fingerprint == fingerprint {
+            if failure.path == asset.path
+                && failure.fingerprint == fingerprint
+                && failure.color == color
+            {
                 return AssetThumbnailState::Failed;
             }
         }
-        if self.pending.borrow().contains(&asset.id) {
+        let request_key =
+            ThumbnailRequestKey::new(asset.id, asset.path.clone(), fingerprint, color.clone());
+        if self.pending.borrow().contains(&request_key) {
             return AssetThumbnailState::Loading;
         }
-        self.request_thumbnail(asset, fingerprint);
+        self.request_thumbnail(asset, fingerprint, color);
         AssetThumbnailState::Loading
     }
 }
@@ -224,20 +349,30 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let width = frame.width;
             let height = frame.height;
-            let key = thumbnail_key(job.asset_id, width, height, job.fingerprint);
-            let image = RasterImage::new(key, width, height, frame.into_data());
+            let rgba = color_manage_thumbnail_rgba(width, height, frame.into_data(), &job.color);
+            let key = thumbnail_key(job.asset_id, width, height, job.fingerprint, &job.color);
+            let image = rgba.and_then(|rgba| {
+                RasterImage::new(key, width, height, rgba)
+                    .ok_or_else(|| "thumbnail raster payload is invalid".to_owned())
+            });
+            let (image, error) = match image {
+                Ok(image) => (Some(image), None),
+                Err(error) => (None, Some(error)),
+            };
             ThumbnailResult {
                 asset_id: job.asset_id,
                 path: job.path,
                 fingerprint: job.fingerprint,
+                color: job.color,
                 image,
-                error: None,
+                error,
             }
         }
         Ok(PreviewDecodeOutcome::Canceled) => ThumbnailResult {
             asset_id: job.asset_id,
             path: job.path,
             fingerprint: job.fingerprint,
+            color: job.color,
             image: None,
             error: Some("thumbnail still-frame decode canceled unexpectedly".to_owned()),
         },
@@ -245,6 +380,7 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
             asset_id: job.asset_id,
             path: job.path,
             fingerprint: job.fingerprint,
+            color: job.color,
             image: None,
             error: Some(format!(
                 "thumbnail decode requires CPU RGBA, got native GPU {} {:?}",
@@ -256,10 +392,27 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
             asset_id: job.asset_id,
             path: job.path,
             fingerprint: job.fingerprint,
+            color: job.color,
             image: None,
             error: Some(err.to_string()),
         },
     }
+}
+
+fn color_manage_thumbnail_rgba(
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    color: &ThumbnailColorContract,
+) -> Result<Vec<u8>, String> {
+    let source = CpuEncodedColorFrame::source_rgba8(width, height, color.source_color_space, rgba);
+    let input =
+        RenderInputTransform::to_working(color.working_color_space, false, color.engine.clone());
+    let working = execute_cpu_input_stage(&source, &input)
+        .map_err(|err| format!("thumbnail input color transform failed: {err}"))?;
+    execute_cpu_output_boundary_rgba8(&working.result.frame, &color.output_boundary())
+        .map(|output| output.rgba)
+        .map_err(|err| format!("thumbnail display color transform failed: {err}"))
 }
 
 fn thumbnail_key(
@@ -267,13 +420,23 @@ fn thumbnail_key(
     width: u32,
     height: u32,
     fingerprint: PreviewFileFingerprint,
+    color: &ThumbnailColorContract,
 ) -> String {
+    let mut color_hasher = std::collections::hash_map::DefaultHasher::new();
+    color.hash(&mut color_hasher);
+    let color_signature = color_hasher.finish();
     let len = fingerprint.len.map_or_else(|| "unknown".to_owned(), |len| len.to_string());
     let modified = match (fingerprint.modified_secs, fingerprint.modified_nanos) {
         (Some(secs), Some(nanos)) => format!("{secs}-{nanos}"),
         _ => "unknown".to_owned(),
     };
-    format!("asset-thumb:{asset_id}:{width}x{height}:len{len}:mtime{modified}")
+    format!(
+        "asset-thumb:{asset_id}:{width}x{height}:len{len}:mtime{modified}:src{:?}:work{:?}:out{:?}:ocio{}:sig{color_signature:016x}",
+        color.source_color_space,
+        color.working_color_space,
+        color.output_color_space,
+        color.ocio_generation
+    )
 }
 
 #[cfg(test)]
@@ -305,6 +468,30 @@ mod tests {
         }
     }
 
+    fn thumbnail_color_contract() -> ThumbnailColorContract {
+        ThumbnailColorContract {
+            source_color_space: ColorSpace::Rec709,
+            working_color_space: ColorSpace::Rec709,
+            output_color_space: ColorSpace::Srgb,
+            tone_map: true,
+            engine: ColorEngine::MondrianSmart,
+            display: None,
+            view: None,
+            ocio_generation: mondrian_core::ocio_config_generation(),
+        }
+    }
+
+    fn configured_cache() -> AssetThumbnailCache {
+        let cache = AssetThumbnailCache::new();
+        let context = mondrian_timeline::sequence::SequenceSettings::default()
+            .root_preview_color_context(
+                &mondrian_core::ProjectColorManagement::default(),
+                ColorSpace::Srgb,
+            );
+        cache.set_color_context(Some(context));
+        cache
+    }
+
     fn install_thumbnail_result_channel_for_test(
         cache: &AssetThumbnailCache,
     ) -> mpsc::Sender<ThumbnailResult> {
@@ -315,26 +502,28 @@ mod tests {
 
     fn thumbnail_result(asset_id: AssetId, seed: u64) -> ThumbnailResult {
         let fingerprint = fingerprint(seed);
+        let color = thumbnail_color_contract();
         ThumbnailResult {
             asset_id,
             path: PathBuf::from(format!("E:/media/thumb-{seed}.mov")),
             fingerprint,
             image: Some(
                 RasterImage::new(
-                    thumbnail_key(asset_id, 1, 1, fingerprint),
+                    thumbnail_key(asset_id, 1, 1, fingerprint, &color),
                     1,
                     1,
                     vec![seed as u8, 0, 0, 255],
                 )
                 .expect("test thumbnail image should be valid"),
             ),
+            color,
             error: None,
         }
     }
 
     #[test]
     fn non_video_assets_do_not_schedule_thumbnail_decodes() {
-        let cache = AssetThumbnailCache::new();
+        let cache = configured_cache();
         let asset = asset(
             AssetKind::SolidColor,
             PathBuf::from("mondrian://solid-color"),
@@ -349,7 +538,7 @@ mod tests {
 
     #[test]
     fn missing_video_files_fail_without_scheduling_thumbnail_decodes() {
-        let cache = AssetThumbnailCache::new();
+        let cache = configured_cache();
         let asset = asset(AssetKind::Video, PathBuf::from("E:/missing/video.mov"));
 
         assert!(matches!(
@@ -361,7 +550,7 @@ mod tests {
 
     #[test]
     fn existing_video_files_return_loading_while_decode_is_pending() {
-        let cache = AssetThumbnailCache::new();
+        let cache = configured_cache();
         let path = std::env::temp_dir().join(format!("mondrian-thumb-test-{}.mov", AssetId::new()));
         std::fs::write(&path, b"not actually a video").expect("write test file");
         let asset = asset(AssetKind::Video, path.clone());
@@ -384,24 +573,60 @@ mod tests {
             modified_nanos: Some(42_000_000),
         };
 
-        let key = thumbnail_key(asset_id, 320, 180, fingerprint);
+        let color = thumbnail_color_contract();
+        let key = thumbnail_key(asset_id, 320, 180, fingerprint, &color);
 
-        assert_eq!(
-            key,
-            format!("asset-thumb:{asset_id}:320x180:len1234:mtime0-42000000")
+        assert!(key.starts_with(&format!(
+            "asset-thumb:{asset_id}:320x180:len1234:mtime0-42000000"
+        )));
+        assert!(key.contains("srcRec709:workRec709:outSrgb:ocio"));
+    }
+
+    #[test]
+    fn thumbnail_color_contract_changes_raster_identity() {
+        let asset_id = AssetId::new();
+        let fingerprint = fingerprint(42);
+        let rec709 = thumbnail_color_contract();
+        let mut pq = rec709.clone();
+        pq.source_color_space = ColorSpace::Rec2100Pq;
+
+        assert_ne!(
+            thumbnail_key(asset_id, 320, 180, fingerprint, &rec709),
+            thumbnail_key(asset_id, 320, 180, fingerprint, &pq)
         );
     }
 
     #[test]
+    fn thumbnail_pixels_cross_explicit_srgb_display_boundary() {
+        let rec709 = thumbnail_color_contract();
+        let mut pq = rec709.clone();
+        pq.source_color_space = ColorSpace::Rec2100Pq;
+        let source = vec![128, 96, 64, 255];
+
+        let rec709_output = color_manage_thumbnail_rgba(1, 1, source.clone(), &rec709)
+            .expect("Rec.709 thumbnail transform");
+        let pq_output =
+            color_manage_thumbnail_rgba(1, 1, source, &pq).expect("PQ thumbnail transform");
+
+        assert_eq!(rec709_output.len(), 4);
+        assert_eq!(pq_output.len(), 4);
+        assert_ne!(rec709_output, pq_output);
+    }
+
+    #[test]
     fn thumbnail_completion_poll_respects_result_count_budget() {
-        let cache = AssetThumbnailCache::new();
+        let cache = configured_cache();
         let results = install_thumbnail_result_channel_for_test(&cache);
         let ids = [AssetId::new(), AssetId::new(), AssetId::new()];
         for (index, id) in ids.iter().copied().enumerate() {
-            cache.pending.borrow_mut().insert(id);
-            results
-                .send(thumbnail_result(id, index as u64 + 1))
-                .expect("send thumbnail result");
+            let result = thumbnail_result(id, index as u64 + 1);
+            cache.pending.borrow_mut().insert(ThumbnailRequestKey::new(
+                result.asset_id,
+                result.path.clone(),
+                result.fingerprint,
+                result.color.clone(),
+            ));
+            results.send(result).expect("send thumbnail result");
         }
 
         assert!(cache.poll_finished_with_budget(2, Duration::from_secs(1)));
@@ -415,18 +640,52 @@ mod tests {
 
     #[test]
     fn thumbnail_completion_poll_respects_time_budget() {
-        let cache = AssetThumbnailCache::new();
+        let cache = configured_cache();
         let results = install_thumbnail_result_channel_for_test(&cache);
         let ids = [AssetId::new(), AssetId::new()];
         for (index, id) in ids.iter().copied().enumerate() {
-            cache.pending.borrow_mut().insert(id);
-            results
-                .send(thumbnail_result(id, index as u64 + 1))
-                .expect("send thumbnail result");
+            let result = thumbnail_result(id, index as u64 + 1);
+            cache.pending.borrow_mut().insert(ThumbnailRequestKey::new(
+                result.asset_id,
+                result.path.clone(),
+                result.fingerprint,
+                result.color.clone(),
+            ));
+            results.send(result).expect("send thumbnail result");
         }
 
         assert!(cache.poll_finished_with_budget(8, Duration::ZERO));
         assert_eq!(cache.cache.borrow().len(), 1);
         assert_eq!(cache.pending.borrow().len(), 1);
+    }
+
+    #[test]
+    fn thumbnail_failure_completion_requests_visible_refresh() {
+        let cache = configured_cache();
+        let results = install_thumbnail_result_channel_for_test(&cache);
+        let asset_id = AssetId::new();
+        let fingerprint = fingerprint(9);
+        let color = thumbnail_color_contract();
+        let path = PathBuf::from("E:/media/failed.mov");
+        cache.pending.borrow_mut().insert(ThumbnailRequestKey::new(
+            asset_id,
+            path.clone(),
+            fingerprint,
+            color.clone(),
+        ));
+        results
+            .send(ThumbnailResult {
+                asset_id,
+                path,
+                fingerprint,
+                color,
+                image: None,
+                error: Some("color transform failed".to_owned()),
+            })
+            .expect("send failed thumbnail result");
+
+        assert!(cache.poll_finished_with_budget(1, Duration::from_secs(1)));
+        assert!(cache.pending.borrow().is_empty());
+        assert!(cache.failures.borrow().contains_key(&asset_id));
     }
 }
