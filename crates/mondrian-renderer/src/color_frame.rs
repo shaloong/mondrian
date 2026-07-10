@@ -26,6 +26,12 @@ pub enum ColorFrameDomain {
 pub enum ColorFrameEncoding {
     /// Linear-light floating-point RGBA.
     LinearFloat,
+    /// Non-linear source-encoded RGBA stored in a floating-point texture.
+    ///
+    /// Native YCbCr decoding produces this representation before the OCIO
+    /// input transform. It preserves source precision without falsely
+    /// labeling encoded signal values as linear light.
+    EncodedFloat,
     /// Non-linear, destination-encoded RGBA bytes.
     EncodedRgba8,
 }
@@ -933,6 +939,9 @@ pub struct GpuNativeDecodedFrameImportPlan {
     pub input_transform: RenderInputTransform,
     /// Validated source video sampling contract.
     pub video_sampling: GpuNativeDecodedFrameVideoSampling,
+    /// Renderer-owned encoded RGB frame produced by native surface sampling
+    /// before the OCIO source-to-working transform.
+    pub encoded_source_frame: GpuColorFrameHandle,
     /// Renderer-owned output working frame.
     pub working_frame: GpuColorFrameHandle,
 }
@@ -989,6 +998,21 @@ impl GpuNativeDecodedFrameImportPlan {
             );
         }
 
+        let encoded_source_descriptor = ColorFrameDescriptor {
+            width: contract.width,
+            height: contract.height,
+            color_space: contract.source_color_space,
+            domain: ColorFrameDomain::Source,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let encoded_source_frame = GpuColorFrameHandle::new(
+            ids.allocate(),
+            encoded_source_descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            format!("{}.encoded-source", contract.label),
+        )
+        .map_err(GpuNativeDecodedFrameImportPlanError::EncodedSourceFrameHandle)?;
         let working_descriptor = ColorFrameDescriptor {
             width: contract.width,
             height: contract.height,
@@ -1011,6 +1035,7 @@ impl GpuNativeDecodedFrameImportPlan {
             source_color_space: contract.source_color_space,
             input_transform: contract.input_transform,
             video_sampling: contract.video_sampling,
+            encoded_source_frame,
             working_frame,
         })
     }
@@ -1062,6 +1087,9 @@ pub enum GpuNativeDecodedFrameImportPlanError {
         /// Stable validation reason.
         reason: String,
     },
+    /// The renderer-owned encoded source frame handle could not be built.
+    #[error("failed to create native decoded frame encoded source handle: {0}")]
+    EncodedSourceFrameHandle(GpuColorFrameHandleError),
     /// The renderer-owned working frame handle could not be built.
     #[error("failed to create native decoded frame working handle: {0}")]
     WorkingFrameHandle(GpuColorFrameHandleError),
@@ -2045,7 +2073,23 @@ mod tests {
                 chroma_location: GpuVideoChromaLocation::Left,
             }
         );
-        assert_eq!(plan.working_frame.id().raw(), 500);
+        assert_eq!(plan.encoded_source_frame.id().raw(), 500);
+        assert_eq!(
+            plan.encoded_source_frame.descriptor(),
+            ColorFrameDescriptor {
+                width: 3840,
+                height: 2160,
+                color_space: ColorSpace::Rec2100Pq,
+                domain: ColorFrameDomain::Source,
+                encoding: ColorFrameEncoding::EncodedFloat,
+                residency: ColorFrameResidency::Gpu,
+            }
+        );
+        assert_eq!(
+            plan.encoded_source_frame.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float
+        );
+        assert_eq!(plan.working_frame.id().raw(), 501);
         assert_eq!(
             plan.working_frame.descriptor(),
             ColorFrameDescriptor {
@@ -2061,7 +2105,7 @@ mod tests {
             plan.working_frame.texture_format(),
             GpuColorFrameTextureFormat::Rgba16Float
         );
-        assert_eq!(ids.next_raw(), 501);
+        assert_eq!(ids.next_raw(), 502);
     }
 
     #[test]
@@ -2310,10 +2354,11 @@ mod tests {
         )
         .expect("ready backend can import a native frame");
 
-        assert_eq!(execution.plan.working_frame.id().raw(), 500);
+        assert_eq!(execution.plan.encoded_source_frame.id().raw(), 500);
+        assert_eq!(execution.plan.working_frame.id().raw(), 501);
         assert_eq!(execution.resource.handle(), &execution.plan.working_frame);
         assert_eq!(execution.resource.resource(), &FakeImportedResource);
-        assert_eq!(ids.next_raw(), 501);
+        assert_eq!(ids.next_raw(), 502);
     }
 
     #[test]

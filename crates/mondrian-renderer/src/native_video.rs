@@ -1,5 +1,13 @@
 //! Platform renderer admission for hardware-decoded native video resources.
 
+mod yuv_decode;
+
+pub use yuv_decode::{
+    GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
+    GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
+    GpuNativeYuvPreparedPass,
+};
+
 #[cfg(target_os = "windows")]
 mod sync_timeline;
 

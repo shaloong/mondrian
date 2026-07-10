@@ -62,6 +62,26 @@ concrete backend reports readiness and support for that handle/format, the plan
 allocates a renderer-owned linear `Working` frame handle; the imported decoder
 surface remains a backend object consumed by the native sampling/input transform
 pass.
+Native YCbCr conversion and OCIO input conversion remain two explicit renderer
+passes with one color contract. `GpuNativeYuvDecoder` samples the native luma
+and chroma plane views into a renderer-owned `Rgba16Float` source frame whose
+descriptor is `Source + EncodedFloat`; this frame is encoded RGB in the resolved
+source color space, not linear working data. `RenderGpuInputStageResourcePlan`
+then consumes that already GPU-resident frame without an upload and executes the
+same OCIO source-to-working processor used by CPU-uploaded source frames. The
+native import plan owns distinct encoded-source and linear-working handles so a
+backend cannot skip, reorder, or mislabel either pass.
+
+The YUV shader uses unfiltered `textureLoad` operations because NV12/P010 plane
+formats are not assumed filterable. It performs renderer-defined bilinear 4:2:0
+chroma reconstruction using explicit Left, Center, or TopLeft sample origins,
+expands full or limited range in coded-value space, and applies BT.709 or
+BT.2020 non-constant-luminance matrix coefficients. P010 samples are first
+converted from normalized 16-bit storage (`code10 << 6`) back to exact 10-bit
+code values; treating `R16Unorm` directly as normalized 10-bit data is invalid.
+RGB values are not clipped before OCIO, preserving undershoot, overshoot, and
+HDR signal precision. A real-wgpu accuracy test covers shader compilation,
+plane bindings, range expansion, neutral chroma, and `Rgba16Float` readback.
 The contract carries the complete `RenderInputTransform`, not only the target
 working color space. OCIO engine selection, tone-map policy, working space, and
 the required GPU backend therefore remain explicit through import planning.

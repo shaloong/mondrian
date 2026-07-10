@@ -1678,8 +1678,9 @@ pub struct RenderGpuInputStageResourcePlan {
     pub input: GpuColorFrameHandle,
     /// GPU working frame produced by the input color pass.
     pub output: GpuColorFrameHandle,
-    /// Upload plan that moves the decoded CPU source frame into the input GPU frame.
-    pub input_upload: GpuColorFrameUploadPlan,
+    /// Optional upload plan for CPU-decoded sources. Native GPU sources are
+    /// already present in the shared resource table.
+    pub input_upload: Option<GpuColorFrameUploadPlan>,
     /// Allocation plan for the output GPU working frame.
     pub output_allocation: GpuColorFrameAllocationPlan,
     /// GPU transform plan that these resources satisfy.
@@ -1763,12 +1764,9 @@ impl RenderGpuOutputStageResourcePlan {
             total_stages: 1 + u64::from(self.input_upload.is_some()),
             upload_stages: u64::from(self.input_upload.is_some()),
             gpu_color_stages: 1,
-            stage_pixels: self
-                .input
-                .descriptor()
-                .pixel_count()
-                .saturating_add(self.output.descriptor().pixel_count())
-                as u64,
+            stage_pixels: self.output.descriptor().pixel_count().saturating_add(
+                self.input_upload.as_ref().map_or(0, |_| self.input.descriptor().pixel_count()),
+            ) as u64,
             ..RenderColorStageDiagnostics::default()
         };
         if let Some(readback) = &self.readback {
@@ -2066,15 +2064,12 @@ impl RenderGpuInputStageResourcePlan {
     /// Return the stage diagnostics represented by this executable GPU input resource plan.
     pub fn stage_diagnostics(&self) -> RenderColorStageDiagnostics {
         RenderColorStageDiagnostics {
-            total_stages: 2,
-            upload_stages: 1,
+            total_stages: 1 + u64::from(self.input_upload.is_some()),
+            upload_stages: u64::from(self.input_upload.is_some()),
             gpu_color_stages: 1,
-            stage_pixels: self
-                .input
-                .descriptor()
-                .pixel_count()
-                .saturating_add(self.output.descriptor().pixel_count())
-                as u64,
+            stage_pixels: self.output.descriptor().pixel_count().saturating_add(
+                self.input_upload.as_ref().map_or(0, |_| self.input.descriptor().pixel_count()),
+            ) as u64,
             ..RenderColorStageDiagnostics::default()
         }
     }
@@ -2149,7 +2144,78 @@ impl RenderGpuInputStageResourcePlan {
         Ok(Self {
             input: input_upload.handle.clone(),
             output,
-            input_upload,
+            input_upload: Some(input_upload),
+            output_allocation,
+            transform,
+        })
+    }
+
+    /// Build resource plans for an already GPU-resident encoded source frame
+    /// entering the OCIO input transform.
+    pub fn from_gpu_encoded_source_frame(
+        input: &GpuColorFrameHandle,
+        output: &GpuColorFrameHandle,
+        stage_plan: &RenderColorStagePlan,
+    ) -> Result<Self, RenderGpuInputStageResourcePlanError> {
+        let planned = planned_gpu_source_transform(stage_plan)?;
+        if !planned.transform.wgpu.can_execute() {
+            let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+            for blocker in &planned.transform.wgpu.blockers {
+                breakdown.record(blocker);
+            }
+            return Err(
+                RenderGpuInputStageResourcePlanError::NativeBlockersRemaining {
+                    blockers: planned.transform.wgpu.blockers.len(),
+                    breakdown,
+                },
+            );
+        }
+        if planned.gpu_input != input.descriptor() {
+            return Err(
+                RenderGpuInputStageResourcePlanError::InputDescriptorMismatch {
+                    expected: planned.gpu_input,
+                    actual: input.descriptor(),
+                },
+            );
+        }
+        if input.descriptor().encoding != ColorFrameEncoding::EncodedFloat {
+            return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "native GPU input transform requires an encoded-float source frame",
+            });
+        }
+        if input.texture_format() != GpuColorFrameTextureFormat::Rgba16Float {
+            return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "native encoded-float source must use Rgba16Float",
+            });
+        }
+        if planned.gpu_output != output.descriptor() {
+            return Err(
+                RenderGpuInputStageResourcePlanError::OutputDescriptorMismatch {
+                    expected: planned.gpu_output,
+                    actual: output.descriptor(),
+                },
+            );
+        }
+        if !matches!(
+            output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
+        ) {
+            return Err(
+                RenderGpuInputStageResourcePlanError::UnsupportedOutputTextureFormat {
+                    texture_format: output.texture_format(),
+                },
+            );
+        }
+        let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+        let mut transform = (*planned.transform).clone();
+        transform.diagnostics.input = planned.gpu_input;
+        transform.diagnostics.output = planned.gpu_output;
+        transform.requires_source_upload = false;
+        transform.requires_output_readback = false;
+        Ok(Self {
+            input: input.clone(),
+            output: output.clone(),
+            input_upload: None,
             output_allocation,
             transform,
         })
@@ -2165,9 +2231,22 @@ impl RenderGpuInputStageResourcePlan {
     {
         validate_materialization_table_slot(table, &self.input)?;
         validate_materialization_table_slot(table, &self.output)?;
-        let input = GpuColorFrameUploader::upload(device, queue, &self.input_upload);
         let output = GpuColorFrameUploader::allocate(device, &self.output_allocation);
-        self.insert_resources(table, input, output)
+        if let Some(input_upload) = &self.input_upload {
+            let input = GpuColorFrameUploader::upload(device, queue, input_upload);
+            self.insert_resources(table, input, output)
+        } else {
+            table
+                .get(&self.input)
+                .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+            table
+                .insert(output)
+                .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+            Ok(RenderGpuOutputStageMaterializedResources {
+                input: self.input.clone(),
+                output: self.output.clone(),
+            })
+        }
     }
 
     /// Insert already-materialized resources into a GPU color frame resource table.
@@ -2307,6 +2386,13 @@ pub enum RenderGpuInputStageResourcePlanError {
         /// Expected transform input descriptor.
         expected: ColorFrameDescriptor,
         /// Actual CPU frame descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The planned GPU working output does not match the supplied output handle.
+    OutputDescriptorMismatch {
+        /// Descriptor required by the OCIO stage plan.
+        expected: ColorFrameDescriptor,
+        /// Descriptor carried by the supplied output handle.
         actual: ColorFrameDescriptor,
     },
     /// The input upload did not produce the GPU descriptor consumed by the transform.
@@ -3094,6 +3180,12 @@ struct PlannedGpuSourceUploadTransform<'a> {
     transform: &'a RenderColorTransformGpuPlan,
 }
 
+struct PlannedGpuSourceTransform<'a> {
+    gpu_input: ColorFrameDescriptor,
+    gpu_output: ColorFrameDescriptor,
+    transform: &'a RenderColorTransformGpuPlan,
+}
+
 struct PlannedGpuTransform<'a> {
     gpu_input: ColorFrameDescriptor,
     gpu_output: ColorFrameDescriptor,
@@ -3159,6 +3251,47 @@ fn planned_gpu_source_upload_transform(
     }
     Ok(PlannedGpuSourceUploadTransform {
         upload_input: *upload_input,
+        gpu_input: *gpu_input,
+        gpu_output: *gpu_output,
+        transform,
+    })
+}
+
+fn planned_gpu_source_transform(
+    stage_plan: &RenderColorStagePlan,
+) -> Result<PlannedGpuSourceTransform<'_>, RenderGpuInputStageResourcePlanError> {
+    let [RenderColorStage::GpuColorTransform {
+        input: gpu_input,
+        output: gpu_output,
+        plan: transform,
+    }] = stage_plan.stages.as_slice()
+    else {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU-resident input resources require one GpuColorTransform stage",
+        });
+    };
+    if gpu_input.residency != ColorFrameResidency::Gpu
+        || gpu_input.domain != ColorFrameDomain::Source
+        || gpu_input.encoding != ColorFrameEncoding::EncodedFloat
+    {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input transform must consume a GPU encoded-float source frame",
+        });
+    }
+    if gpu_output.residency != ColorFrameResidency::Gpu
+        || gpu_output.domain != ColorFrameDomain::Working
+        || gpu_output.encoding != ColorFrameEncoding::LinearFloat
+    {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input transform must produce a GPU linear working frame",
+        });
+    }
+    if stage_plan.final_descriptor != *gpu_output {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input final descriptor must be the GPU working output descriptor",
+        });
+    }
+    Ok(PlannedGpuSourceTransform {
         gpu_input: *gpu_input,
         gpu_output: *gpu_output,
         transform,
@@ -4904,9 +5037,10 @@ mod tests {
         assert_eq!(resources.input.id().raw(), 700);
         assert_eq!(resources.output.id().raw(), 701);
         assert_eq!(ids.next_raw(), 702);
-        assert_eq!(resources.input_upload.handle, resources.input);
+        let input_upload = resources.input_upload.as_ref().expect("CPU source upload");
+        assert_eq!(input_upload.handle, resources.input);
         assert_eq!(
-            resources.input_upload.texture_format,
+            input_upload.texture_format,
             GpuColorFrameTextureFormat::Rgba8Unorm
         );
         assert_eq!(resources.output_allocation.handle, resources.output);
@@ -4938,6 +5072,66 @@ mod tests {
             pass_node,
         )
         .expect("resource-planned GPU input transform should schedule");
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_accepts_encoded_float_gpu_source_without_upload() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let input_descriptor = ColorFrameDescriptor {
+            width: 1920,
+            height: 1080,
+            color_space: ColorSpace::Rec2100Pq,
+            domain: ColorFrameDomain::Source,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let input = gpu_handle_with_format(
+            710,
+            input_descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "native-yuv-encoded-source",
+        );
+        let transform = RenderInputTransform::to_working_gpu(
+            ColorSpace::Rec2020,
+            true,
+            ColorEngine::MondrianSmart,
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let stage_plan = planner
+            .plan_input_to_working(input_descriptor, &transform)
+            .expect("GPU-resident encoded source input plan");
+        assert!(!stage_plan.contains_transfer());
+        let output = gpu_handle_with_format(
+            711,
+            stage_plan.final_descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "native-yuv-working-output",
+        );
+
+        let resources = RenderGpuInputStageResourcePlan::from_gpu_encoded_source_frame(
+            &input,
+            &output,
+            &stage_plan,
+        )
+        .expect("GPU-resident encoded source resources");
+
+        assert_eq!(resources.input, input);
+        assert!(resources.input_upload.is_none());
+        assert_eq!(resources.output, output);
+        assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
+        assert_eq!(resources.stage_diagnostics().upload_stages, 0);
+        assert_eq!(
+            resources.output.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            resources.output.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
     }
 
     #[test]

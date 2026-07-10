@@ -93,6 +93,11 @@ pub use native_video::{
     D3D11Dx12SharedVideoTextureError, D3D11Dx12VideoPlaneViews, D3D11NativeDecodedFrameInspection,
     D3D11NativeDecodedFrameInspectionError, NativeVideoAdapterLuid,
 };
+pub use native_video::{
+    GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
+    GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
+    GpuNativeYuvPreparedPass,
+};
 pub use ocio_gpu::{
     OcioGpuBindingContract, OcioGpuBindingContractValidationError,
     OcioGpuFullscreenWrapperContract, OcioGpuGeneratedProgramContract,

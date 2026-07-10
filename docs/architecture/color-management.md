@@ -111,6 +111,14 @@ policy, working space, and GPU backend) into OCIO execution. Sampling
 matrix/transfer facts that conflict with the resolved source color space, or a
 CPU transform backend on the native path, fail closed before frame allocation.
 
+The typed frame graph distinguishes `EncodedFloat` from `LinearFloat`.
+`EncodedFloat` is the precision-preserving source-domain result of native
+NV12/P010 sampling and may contain values outside 0..1; it must still pass
+through the resolved OCIO input processor. `LinearFloat` is reserved for the
+working-space result after that processor. This distinction prevents a native
+shader or platform bridge from implicitly declaring nonlinear PQ/HLG/BT.709
+signal values to be scene-linear pixels.
+
 Renderer stages must carry typed color-frame metadata. `CpuColorFrame` is the
 CPU-resident linear working-frame contract; future GPU frames must expose the
 same domain/encoding/residency/color-space descriptor. RGBA8 is a boundary
