@@ -38,7 +38,8 @@ pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
     clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
     decode_preview_frame_cancellable, preview_decode_backend, preview_decode_cpu_budget,
-    set_preview_decode_backend, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    set_preview_decode_backend, FfmpegD3D11TextureView, FfmpegNativeDecodedFrameResource,
+    FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
     PreviewDecodeBackend, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
     PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
     PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,

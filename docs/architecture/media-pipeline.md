@@ -696,6 +696,23 @@ resource implementation. Handles are neither `Copy` nor serializable. Their
 process-local kind/id values are diagnostics and backend-routing evidence, not
 OS handles or resource ownership by themselves. Equality and hashing use the
 lease object identity so recycled diagnostic ids cannot alias live resources.
+The in-process FFmpeg lease is `FfmpegNativeDecodedFrameResource`. It retains
+the decoder frame with `av_frame_clone`, thereby retaining the frame's
+`AVBufferRef`-owned hardware surface, and releases that reference with
+`av_frame_free` when the final lease drops. Preferred D3D11 import reads only
+FFmpeg's documented `AV_PIX_FMT_D3D11` ABI: `AVFrame::data[0]` is the borrowed
+`ID3D11Texture2D` pointer and `data[1]` is the array-texture slice. Legacy
+`AV_PIX_FMT_D3D11VA_VLD`, missing texture pointers, and slice-width overflow
+must fail with structured resource errors rather than being reinterpreted as
+the preferred layout. Establishing this resource ownership contract does not
+by itself report active hardware decode, native output, or zero-copy; those
+states remain observed-result facts.
+Forward frame selection must retain before/after FFmpeg candidates with
+`av_frame_clone` as well. Do not use `ffmpeg-next::Video::clone()` for decoder
+candidates: that wrapper allocates an image frame and invokes pixel-copy APIs,
+which is neither the correct hardware-surface lifetime operation nor a checked
+failure boundary. The media-internal retained candidate type owns the cloned
+`AVFrame` until selection/conversion finishes.
 A handle-kind-only payload is invalid because it can masquerade as GPU
 residency without an importable resource. Native payloads are
 limited to renderer-importable surface families such as NV12, P010, RGBA8, and

@@ -22,7 +22,8 @@ use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -1022,6 +1023,190 @@ pub trait PreviewNativeDecodedFrameResource: fmt::Debug + Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
 }
 
+static NEXT_FFMPEG_NATIVE_FRAME_ID: AtomicU64 = AtomicU64::new(1);
+
+/// FFmpeg-owned reference to one native hardware-decoded frame.
+///
+/// Construction retains the source frame with `av_frame_clone`, which in turn
+/// retains its `AVBufferRef`-backed decoder surface. The final resource drop
+/// releases that reference with `av_frame_free`.
+pub struct FfmpegNativeDecodedFrameResource {
+    frame: NonNull<ffmpeg::ffi::AVFrame>,
+    pixel_format: ffmpeg::util::format::pixel::Pixel,
+    kind: DecodedGpuFrameHandleKind,
+    id: NonZeroU64,
+}
+
+// SAFETY: This resource has the same ownership and synchronization contract as
+// ffmpeg-next's Frame, which explicitly implements Send and Sync. The AVFrame
+// is immutable after retention and is released only when the final Arc drops.
+unsafe impl Send for FfmpegNativeDecodedFrameResource {}
+// SAFETY: See the Send implementation. Accessors expose immutable metadata and
+// borrowed native handles; mutation remains owned by the decoder/backend.
+unsafe impl Sync for FfmpegNativeDecodedFrameResource {}
+
+impl FfmpegNativeDecodedFrameResource {
+    /// Retain a hardware-decoded FFmpeg frame without copying its surface.
+    pub fn retain(
+        frame: &ffmpeg::util::frame::video::Video,
+    ) -> std::result::Result<Self, FfmpegNativeDecodedFrameResourceError> {
+        let pixel_format = frame.format();
+        let kind = decoded_handle_kind_from_hardware_pixel(pixel_format).ok_or(
+            FfmpegNativeDecodedFrameResourceError::UnsupportedPixelFormat { pixel_format },
+        )?;
+        let id = next_ffmpeg_native_frame_id()?;
+        // SAFETY: frame.as_ptr() is valid for this borrow. av_frame_clone creates
+        // an independently owned AVFrame whose buffer references are retained.
+        let retained = unsafe { ffmpeg::ffi::av_frame_clone(frame.as_ptr()) };
+        let frame = NonNull::new(retained)
+            .ok_or(FfmpegNativeDecodedFrameResourceError::FrameReferenceAllocationFailed)?;
+        Ok(Self { frame, pixel_format, kind, id })
+    }
+
+    /// Borrow the preferred FFmpeg D3D11 texture ABI view.
+    pub fn d3d11_texture(
+        &self,
+    ) -> std::result::Result<FfmpegD3D11TextureView, FfmpegNativeDecodedFrameResourceError> {
+        parse_ffmpeg_d3d11_texture(self.frame, self.pixel_format)
+    }
+
+    /// Hardware pixel format retained by this frame.
+    pub fn pixel_format(&self) -> ffmpeg::util::format::pixel::Pixel {
+        self.pixel_format
+    }
+}
+
+impl fmt::Debug for FfmpegNativeDecodedFrameResource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FfmpegNativeDecodedFrameResource")
+            .field("pixel_format", &self.pixel_format())
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for FfmpegNativeDecodedFrameResource {
+    fn drop(&mut self) {
+        let mut frame = self.frame.as_ptr();
+        // SAFETY: retain obtained sole ownership of this AVFrame allocation from
+        // av_frame_clone. Drop runs exactly once and av_frame_free accepts &mut.
+        unsafe { ffmpeg::ffi::av_frame_free(&mut frame) };
+    }
+}
+
+impl PreviewNativeDecodedFrameResource for FfmpegNativeDecodedFrameResource {
+    fn handle_kind(&self) -> DecodedGpuFrameHandleKind {
+        self.kind
+    }
+
+    fn handle_id(&self) -> NonZeroU64 {
+        self.id
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Borrowed view of FFmpeg's preferred D3D11 hardware-frame ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfmpegD3D11TextureView {
+    texture: NonNull<c_void>,
+    array_slice: u32,
+}
+
+impl FfmpegD3D11TextureView {
+    /// Borrowed `ID3D11Texture2D` pointer stored in `AVFrame::data[0]`.
+    pub fn texture_ptr(self) -> *mut c_void {
+        self.texture.as_ptr()
+    }
+
+    /// Array-texture slice stored as `intptr_t` in `AVFrame::data[1]`.
+    pub fn array_slice(self) -> u32 {
+        self.array_slice
+    }
+}
+
+/// Error retaining or interpreting an FFmpeg native decoded frame.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum FfmpegNativeDecodedFrameResourceError {
+    /// The frame is not backed by a supported FFmpeg hardware pixel format.
+    #[error("FFmpeg pixel format {pixel_format:?} is not a supported native decode surface")]
+    UnsupportedPixelFormat {
+        /// Unsupported source pixel format.
+        pixel_format: ffmpeg::util::format::pixel::Pixel,
+    },
+    /// FFmpeg could not allocate a retained AVFrame reference.
+    #[error("FFmpeg could not retain the native decoded frame reference")]
+    FrameReferenceAllocationFailed,
+    /// Process-local diagnostic handle identifiers were exhausted.
+    #[error("process-local FFmpeg native frame identifiers are exhausted")]
+    HandleIdExhausted,
+    /// Only AV_PIX_FMT_D3D11 uses the preferred texture-plus-slice ABI.
+    #[error("FFmpeg frame format {pixel_format:?} does not use the preferred D3D11 texture ABI")]
+    NotPreferredD3D11Frame {
+        /// Actual retained hardware pixel format.
+        pixel_format: ffmpeg::util::format::pixel::Pixel,
+    },
+    /// A preferred D3D11 frame did not carry an ID3D11Texture2D pointer.
+    #[error("FFmpeg D3D11 frame is missing its ID3D11Texture2D pointer")]
+    MissingD3D11Texture,
+    /// FFmpeg reported a D3D11 array slice that cannot fit Mondrian's contract.
+    #[error("FFmpeg D3D11 array slice {array_slice} exceeds u32")]
+    D3D11ArraySliceOverflow {
+        /// FFmpeg `intptr_t` value interpreted as an unsigned index.
+        array_slice: usize,
+    },
+}
+
+fn next_ffmpeg_native_frame_id(
+) -> std::result::Result<NonZeroU64, FfmpegNativeDecodedFrameResourceError> {
+    let raw = NEXT_FFMPEG_NATIVE_FRAME_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| FfmpegNativeDecodedFrameResourceError::HandleIdExhausted)?;
+    NonZeroU64::new(raw).ok_or(FfmpegNativeDecodedFrameResourceError::HandleIdExhausted)
+}
+
+fn decoded_handle_kind_from_hardware_pixel(
+    pixel_format: ffmpeg::util::format::pixel::Pixel,
+) -> Option<DecodedGpuFrameHandleKind> {
+    use ffmpeg::util::format::pixel::Pixel;
+
+    match pixel_format {
+        Pixel::D3D12 => Some(DecodedGpuFrameHandleKind::D3D12Resource),
+        Pixel::D3D11 | Pixel::D3D11VA_VLD => Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
+        Pixel::DXVA2_VLD => Some(DecodedGpuFrameHandleKind::Dxva2Surface),
+        Pixel::VIDEOTOOLBOX => Some(DecodedGpuFrameHandleKind::CVPixelBuffer),
+        Pixel::VAAPI => Some(DecodedGpuFrameHandleKind::VaapiSurface),
+        Pixel::VDPAU => Some(DecodedGpuFrameHandleKind::VdpauVideoSurface),
+        Pixel::CUDA => Some(DecodedGpuFrameHandleKind::CudaDeviceMemory),
+        _ => None,
+    }
+}
+
+fn parse_ffmpeg_d3d11_texture(
+    frame: NonNull<ffmpeg::ffi::AVFrame>,
+    pixel_format: ffmpeg::util::format::pixel::Pixel,
+) -> std::result::Result<FfmpegD3D11TextureView, FfmpegNativeDecodedFrameResourceError> {
+    // SAFETY: callers retain ownership of the AVFrame for the duration of this
+    // function. FFmpeg documents data[0]/data[1] for AV_PIX_FMT_D3D11.
+    let frame = unsafe { frame.as_ref() };
+    if pixel_format != ffmpeg::util::format::pixel::Pixel::D3D11 {
+        return Err(FfmpegNativeDecodedFrameResourceError::NotPreferredD3D11Frame { pixel_format });
+    }
+    let texture = NonNull::new(frame.data[0].cast::<c_void>())
+        .ok_or(FfmpegNativeDecodedFrameResourceError::MissingD3D11Texture)?;
+    let array_slice = frame.data[1] as usize;
+    let array_slice = u32::try_from(array_slice).map_err(|_| {
+        FfmpegNativeDecodedFrameResourceError::D3D11ArraySliceOverflow { array_slice }
+    })?;
+    Ok(FfmpegD3D11TextureView { texture, array_slice })
+}
+
 /// Shared lease for one backend-owned native decoder resource.
 #[derive(Clone)]
 pub struct PreviewNativeDecodedFrameHandle {
@@ -1702,6 +1887,32 @@ struct PreviewDecodeForwardResult {
     selected_pts: Option<i64>,
     decoded_frame_count: usize,
     canceled: bool,
+}
+
+struct RetainedDecodedFrame(ffmpeg::util::frame::video::Video);
+
+impl RetainedDecodedFrame {
+    fn retain(frame: &ffmpeg::util::frame::video::Video, path: &Path) -> Result<Self> {
+        // SAFETY: frame.as_ptr() is valid for this borrow. av_frame_clone
+        // creates an independently owned frame and retains every AVBufferRef,
+        // including hardware decoder surfaces.
+        let retained = unsafe { ffmpeg::ffi::av_frame_clone(frame.as_ptr()) };
+        if retained.is_null() {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "FFmpeg could not retain a decoded frame candidate".to_owned(),
+            });
+        }
+        // SAFETY: retained is a fresh av_frame_clone allocation. ffmpeg-next's
+        // Video drop calls av_frame_free exactly once for this pointer.
+        Ok(Self(unsafe {
+            ffmpeg::util::frame::video::Video::wrap(retained)
+        }))
+    }
+
+    fn frame(&self) -> &ffmpeg::util::frame::video::Video {
+        &self.0
+    }
 }
 
 impl PreviewDecodeForwardResult {
@@ -2484,8 +2695,8 @@ impl PreviewDecodeSession {
         policy: PreviewDecodeAccessPolicy,
         should_cancel: &impl Fn() -> bool,
     ) -> Result<PreviewDecodeForwardResult> {
-        let mut best_before: Option<(i64, ffmpeg::util::frame::video::Video)> = None;
-        let mut best_after: Option<(i64, ffmpeg::util::frame::video::Video)> = None;
+        let mut best_before: Option<(i64, RetainedDecodedFrame)> = None;
+        let mut best_after: Option<(i64, RetainedDecodedFrame)> = None;
         let mut frames_decoded: usize = 0;
         let max_select_distance_pts =
             self.frame_duration_pts.saturating_mul(2).max(1).min(
@@ -2499,8 +2710,8 @@ impl PreviewDecodeSession {
              target_width: u32,
              target_height: u32,
              path: &Path,
-             before: Option<&(i64, ffmpeg::util::frame::video::Video)>,
-             after: Option<&(i64, ffmpeg::util::frame::video::Video)>|
+             before: Option<&(i64, RetainedDecodedFrame)>,
+             after: Option<&(i64, RetainedDecodedFrame)>|
              -> Result<Option<(i64, RgbaFrame)>> {
                 if should_cancel() {
                     return Ok(None);
@@ -2510,13 +2721,13 @@ impl PreviewDecodeSession {
                         let before_dist = (target_pts - *b_pts).abs();
                         let after_dist = (*a_pts - target_pts).abs();
                         if before_dist <= after_dist {
-                            Some((*b_pts, b_frame))
+                            Some((*b_pts, b_frame.frame()))
                         } else {
-                            Some((*a_pts, a_frame))
+                            Some((*a_pts, a_frame.frame()))
                         }
                     }
-                    (Some((b_pts, b_frame)), None) => Some((*b_pts, b_frame)),
-                    (None, Some((a_pts, a_frame))) => Some((*a_pts, a_frame)),
+                    (Some((b_pts, b_frame)), None) => Some((*b_pts, b_frame.frame())),
+                    (None, Some((a_pts, a_frame))) => Some((*a_pts, a_frame.frame())),
                     (None, None) => None,
                 };
 
@@ -2570,7 +2781,10 @@ impl PreviewDecodeSession {
                 if frame_pts != i64::MIN {
                     self.last_pts = Some(frame_pts);
                     if frame_pts <= target_pts {
-                        best_before = Some((frame_pts, decoded.frame.clone()));
+                        best_before = Some((
+                            frame_pts,
+                            RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
+                        ));
                         if frame_pts >= target_pts.saturating_sub(self.hit_tolerance_pts) {
                             if should_cancel() {
                                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -2599,7 +2813,10 @@ impl PreviewDecodeSession {
                             ));
                         }
                     } else {
-                        best_after = Some((frame_pts, decoded.frame.clone()));
+                        best_after = Some((
+                            frame_pts,
+                            RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
+                        ));
                         if let Some((selected_pts, rgba)) = choose_and_convert(
                             &mut self.hardware_decode_plan,
                             &mut self.scaler,
@@ -2655,9 +2872,15 @@ impl PreviewDecodeSession {
                 if frame_pts != i64::MIN {
                     self.last_pts = Some(frame_pts);
                     if frame_pts <= target_pts {
-                        best_before = Some((frame_pts, decoded.frame.clone()));
+                        best_before = Some((
+                            frame_pts,
+                            RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
+                        ));
                     } else {
-                        best_after = Some((frame_pts, decoded.frame.clone()));
+                        best_after = Some((
+                            frame_pts,
+                            RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
+                        ));
                         if let Some((selected_pts, rgba)) = choose_and_convert(
                             &mut self.hardware_decode_plan,
                             &mut self.scaler,
@@ -3426,7 +3649,8 @@ mod tests {
         decoded_video_sampling_from_frame, duration_us, preview_cache_get,
         preview_cache_put_with_fingerprint,
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
-        preview_seek_index_cache_put, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
+        preview_seek_index_cache_put, FfmpegNativeDecodedFrameResource,
+        FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
         PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
         PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
@@ -4483,6 +4707,100 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         drop(cloned);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn ffmpeg_native_resource_retains_d3d11_surface_buffer_and_abi_view() {
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        frame.set_format(ffmpeg::util::format::pixel::Pixel::D3D11);
+        frame.set_width(1920);
+        frame.set_height(1080);
+        let texture = std::ptr::NonNull::<u8>::dangling().as_ptr();
+        // SAFETY: The test frame owns the AVBufferRef assigned to buf[0]. The
+        // synthetic data pointers are never dereferenced; they only exercise
+        // FFmpeg's documented D3D11 texture-plus-slice metadata ABI.
+        let source_buffer = unsafe {
+            let raw = frame.as_mut_ptr();
+            let buffer = ffmpeg::ffi::av_buffer_alloc(1);
+            assert!(
+                !buffer.is_null(),
+                "test AVBufferRef allocation must succeed"
+            );
+            (*raw).buf[0] = buffer;
+            (*raw).data[0] = texture;
+            (*raw).data[1] = 3usize as *mut u8;
+            buffer
+        };
+        // SAFETY: source_buffer remains owned by frame.
+        assert_eq!(
+            unsafe { ffmpeg::ffi::av_buffer_get_ref_count(source_buffer) },
+            1
+        );
+
+        let resource = FfmpegNativeDecodedFrameResource::retain(&frame)
+            .expect("D3D11 frame with a ref-counted surface must be retained");
+        // SAFETY: source_buffer remains owned by frame and the retained resource.
+        assert_eq!(
+            unsafe { ffmpeg::ffi::av_buffer_get_ref_count(source_buffer) },
+            2
+        );
+        let handle = PreviewNativeDecodedFrameHandle::new(resource);
+        drop(frame);
+
+        let retained = handle
+            .resource::<FfmpegNativeDecodedFrameResource>()
+            .expect("native handle must preserve its concrete FFmpeg resource");
+        // SAFETY: retained owns the cloned AVFrame and its buf[0] reference.
+        let retained_buffer = unsafe { (*retained.frame.as_ptr()).buf[0] };
+        assert!(!retained_buffer.is_null());
+        // SAFETY: retained_buffer remains owned by retained.
+        assert_eq!(
+            unsafe { ffmpeg::ffi::av_buffer_get_ref_count(retained_buffer) },
+            1
+        );
+        assert_eq!(
+            retained.pixel_format(),
+            ffmpeg::util::format::pixel::Pixel::D3D11
+        );
+        let view = retained
+            .d3d11_texture()
+            .expect("preferred D3D11 frame must expose its texture ABI view");
+        assert_eq!(view.texture_ptr(), texture.cast());
+        assert_eq!(view.array_slice(), 3);
+    }
+
+    #[test]
+    fn ffmpeg_native_resource_rejects_software_frames() {
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        frame.set_format(ffmpeg::util::format::pixel::Pixel::RGBA);
+
+        let error = FfmpegNativeDecodedFrameResource::retain(&frame)
+            .expect_err("software RGBA must not masquerade as a native decoder surface");
+        assert_eq!(
+            error,
+            FfmpegNativeDecodedFrameResourceError::UnsupportedPixelFormat {
+                pixel_format: ffmpeg::util::format::pixel::Pixel::RGBA,
+            }
+        );
+    }
+
+    #[test]
+    fn ffmpeg_legacy_d3d11va_frame_does_not_use_preferred_texture_abi() {
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        frame.set_format(ffmpeg::util::format::pixel::Pixel::D3D11VA_VLD);
+        // SAFETY: The frame allocation is alive for this parse call.
+        let raw = unsafe {
+            std::ptr::NonNull::new(frame.as_mut_ptr()).expect("AVFrame allocation must succeed")
+        };
+        let error =
+            super::parse_ffmpeg_d3d11_texture(raw, ffmpeg::util::format::pixel::Pixel::D3D11VA_VLD)
+                .expect_err("legacy D3D11VA layout must fail the preferred D3D11 ABI contract");
+        assert_eq!(
+            error,
+            FfmpegNativeDecodedFrameResourceError::NotPreferredD3D11Frame {
+                pixel_format: ffmpeg::util::format::pixel::Pixel::D3D11VA_VLD,
+            }
+        );
     }
 
     #[test]
