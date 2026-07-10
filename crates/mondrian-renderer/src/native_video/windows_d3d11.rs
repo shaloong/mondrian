@@ -183,6 +183,13 @@ pub(super) fn validated_d3d11_native_decoded_frame(
     adapter: &wgpu::Adapter,
     frame: &PreviewNativeDecodedFrame,
 ) -> Result<ValidatedD3D11NativeDecodedFrame, D3D11NativeDecodedFrameInspectionError> {
+    validated_d3d11_native_decoded_frame_for_luid(renderer_adapter_luid(adapter)?, frame)
+}
+
+pub(super) fn validated_d3d11_native_decoded_frame_for_luid(
+    renderer_adapter_luid: NativeVideoAdapterLuid,
+    frame: &PreviewNativeDecodedFrame,
+) -> Result<ValidatedD3D11NativeDecodedFrame, D3D11NativeDecodedFrameInspectionError> {
     if frame.handle_kind() != DecodedGpuFrameHandleKind::D3D11Texture2D {
         return Err(
             D3D11NativeDecodedFrameInspectionError::UnsupportedHandleKind {
@@ -216,7 +223,6 @@ pub(super) fn validated_d3d11_native_decoded_frame(
     let source_device = unsafe { texture.GetDevice() }
         .map_err(|error| windows_error("ID3D11Texture2D::GetDevice", error.code()))?;
     let source_adapter_luid = source_adapter_luid(&source_device)?;
-    let renderer_adapter_luid = renderer_adapter_luid(adapter)?;
     if source_adapter_luid != renderer_adapter_luid {
         return Err(D3D11NativeDecodedFrameInspectionError::AdapterMismatch {
             source_luid: source_adapter_luid.as_u64(),
@@ -356,7 +362,7 @@ fn source_adapter_luid(
     Ok(NativeVideoAdapterLuid::from_windows(descriptor.AdapterLuid))
 }
 
-fn renderer_adapter_luid(
+pub(super) fn renderer_adapter_luid(
     adapter: &wgpu::Adapter,
 ) -> Result<NativeVideoAdapterLuid, D3D11NativeDecodedFrameInspectionError> {
     // SAFETY: the guard is borrowed only for this metadata query and no HAL

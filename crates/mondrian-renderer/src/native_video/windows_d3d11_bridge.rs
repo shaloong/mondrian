@@ -194,7 +194,7 @@ impl D3D11Dx12SharedVideoTexture {
         Self::new_from_validated_source(device, queue, &source)
     }
 
-    fn new_from_validated_source(
+    pub(super) fn new_from_validated_source(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         source: &ValidatedD3D11NativeDecodedFrame,
@@ -266,7 +266,7 @@ impl D3D11Dx12SharedVideoTexture {
         self.begin_validated_frame(&source)
     }
 
-    fn begin_validated_frame(
+    pub(super) fn begin_validated_frame(
         &mut self,
         source: &ValidatedD3D11NativeDecodedFrame,
     ) -> Result<D3D11Dx12PreparedVideoFrame, D3D11Dx12SharedVideoTextureError> {

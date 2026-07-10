@@ -18,7 +18,7 @@ use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
 use crate::app_ui::native_video_import::{
     evaluate_native_video_import_readiness, native_source_texture_format_from_decoded,
     native_video_sampling_from_decoded, AppUiNativeVideoImportReadiness,
-    AppUiNativeVideoImportReadinessInput,
+    AppUiNativeVideoImportReadinessInput, AppUiNativeVideoImportRuntime,
 };
 use crate::app_ui::preview::{
     AppUiGpuPreviewCompositeLayer, AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState,
@@ -1285,6 +1285,8 @@ struct AppUiWindowSession {
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
     frame_renderer: AppUiFrameRenderer,
+    native_video_import_runtime: AppUiNativeVideoImportRuntime,
+    renderer_queue: wgpu::Queue,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
     working_compositor: GpuFrameCompositor,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
@@ -1357,6 +1359,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         startup_surface,
         &adapter,
         &device,
+        &queue,
         &mut host,
     )?;
     let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
@@ -3175,6 +3178,7 @@ fn prepare_viewer_gpu_preview(
                 &frame,
                 layers,
                 &mut session.color_output_runtime,
+                &mut session.native_video_import_runtime,
                 device,
                 queue,
                 &mut encoder,
@@ -3210,9 +3214,9 @@ fn prepare_viewer_gpu_preview(
                 }
             };
             session.viewer_gpu_output_telemetry.record_actual_frame_residency(
-                prepared_composite.residency.to_frame_residency(
-                    session.frame_renderer.native_decoded_frame_import_support(),
-                ),
+                prepared_composite
+                    .residency
+                    .to_frame_residency(session.native_video_import_runtime.support()),
             );
             let mut input_stage_diagnostics = prepared_composite.input_stage_diagnostics;
             let gpu_layers = preview_gpu_composite_layers(
@@ -3607,6 +3611,7 @@ fn prepare_preview_gpu_composite<'a>(
     preview_frame: &AppUiGpuPreviewFrame,
     layers: &'a [AppUiGpuPreviewCompositeLayer],
     runtime: &mut RenderGpuOutputBoundaryRuntime,
+    native_runtime: &mut AppUiNativeVideoImportRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
@@ -3632,61 +3637,98 @@ fn prepare_preview_gpu_composite<'a>(
                 prepared
                     .residency
                     .record_native_video_import_source(gpu_source.as_ref(), native_source.as_ref());
-                let source = match gpu_source.as_ref() {
-                    Some(source) => match record_preview_gpu_input_layer(
-                        source, runtime, device, queue, encoder,
+                let native_handle = match native_source.as_ref() {
+                    Some(native_source) => match record_preview_native_video_layer(
+                        native_source,
+                        native_runtime,
+                        runtime,
                     ) {
-                        Ok(record) => {
-                            prepared.input_stage_diagnostics.accumulate(record.stage_diagnostics);
-                            let handle_index = prepared.gpu_input_handles.len();
-                            prepared.gpu_input_handles.push(record.materialized.output);
-                            prepared.residency.gpu_input_layers =
-                                prepared.residency.gpu_input_layers.saturating_add(1);
-                            PreparedPreviewGpuCompositeLayerSource::GpuFrame(handle_index)
-                        }
-                        Err(err) => {
+                        Ok(handle) => Some(handle),
+                        Err(error) => {
                             prepared.residency.gpu_input_failures =
                                 prepared.residency.gpu_input_failures.saturating_add(1);
                             host.record_preview_gpu_output_blocker(
                                 &PreviewGpuOutputBlocker::CpuFallbackRequested {
-                                    reason: format!("viewer GPU input transform failed: {err:?}"),
+                                    reason: format!("viewer native video import failed: {error}"),
                                 },
                             );
-                            if let Some(frame) = frame.as_ref() {
-                                prepared.residency.cpu_upload_layers =
-                                    prepared.residency.cpu_upload_layers.saturating_add(1);
-                                tracing::warn!(
-                                    sequence_id = %preview_frame.sequence_id,
-                                    frame = preview_frame.frame,
-                                    width = preview_frame.width,
-                                    height = preview_frame.height,
-                                    "viewer GPU input transform failed; using CPU working layer upload: {err:?}"
-                                );
-                                PreparedPreviewGpuCompositeLayerSource::CpuFrame(frame)
-                            } else {
-                                return Err(format!(
-                                    "viewer GPU input transform failed and no CPU working fallback is materialized: {err:?}"
-                                ));
-                            }
+                            tracing::warn!(
+                                sequence_id = %preview_frame.sequence_id,
+                                frame = preview_frame.frame,
+                                width = preview_frame.width,
+                                height = preview_frame.height,
+                                "viewer native video import failed: {error}"
+                            );
+                            None
                         }
                     },
-                    None => {
-                        let Some(frame) = frame.as_ref() else {
-                            if let Some(native_source) = native_source.as_ref() {
-                                return Err(format!(
-                                    "media layer has native GPU decoded source ({} {:?}) but renderer native video import execution is not connected",
+                    None => None,
+                };
+                let source = if let Some(handle) = native_handle {
+                    let handle_index = prepared.gpu_input_handles.len();
+                    prepared.gpu_input_handles.push(handle);
+                    PreparedPreviewGpuCompositeLayerSource::GpuFrame(handle_index)
+                } else {
+                    match gpu_source.as_ref() {
+                        Some(source) => match record_preview_gpu_input_layer(
+                            source, runtime, device, queue, encoder,
+                        ) {
+                            Ok(record) => {
+                                prepared
+                                    .input_stage_diagnostics
+                                    .accumulate(record.stage_diagnostics);
+                                let handle_index = prepared.gpu_input_handles.len();
+                                prepared.gpu_input_handles.push(record.materialized.output);
+                                prepared.residency.gpu_input_layers =
+                                    prepared.residency.gpu_input_layers.saturating_add(1);
+                                PreparedPreviewGpuCompositeLayerSource::GpuFrame(handle_index)
+                            }
+                            Err(err) => {
+                                prepared.residency.gpu_input_failures =
+                                    prepared.residency.gpu_input_failures.saturating_add(1);
+                                host.record_preview_gpu_output_blocker(
+                                    &PreviewGpuOutputBlocker::CpuFallbackRequested {
+                                        reason: format!(
+                                            "viewer GPU input transform failed: {err:?}"
+                                        ),
+                                    },
+                                );
+                                if let Some(frame) = frame.as_ref() {
+                                    prepared.residency.cpu_upload_layers =
+                                        prepared.residency.cpu_upload_layers.saturating_add(1);
+                                    tracing::warn!(
+                                        sequence_id = %preview_frame.sequence_id,
+                                        frame = preview_frame.frame,
+                                        width = preview_frame.width,
+                                        height = preview_frame.height,
+                                        "viewer GPU input transform failed; using CPU working layer upload: {err:?}"
+                                    );
+                                    PreparedPreviewGpuCompositeLayerSource::CpuFrame(frame)
+                                } else {
+                                    return Err(format!(
+                                    "viewer GPU input transform failed and no CPU working fallback is materialized: {err:?}"
+                                ));
+                                }
+                            }
+                        },
+                        None => {
+                            let Some(frame) = frame.as_ref() else {
+                                if let Some(native_source) = native_source.as_ref() {
+                                    return Err(format!(
+                                    "media layer native GPU import failed for {} {:?} and no CPU working fallback is materialized",
                                     native_source.native_frame.handle_kind().as_str(),
                                     native_source.native_frame.surface_format
                                 ));
-                            }
-                            return Err(
-                                "media layer has no GPU source and no CPU working fallback"
-                                    .to_owned(),
-                            );
-                        };
-                        prepared.residency.cpu_upload_layers =
-                            prepared.residency.cpu_upload_layers.saturating_add(1);
-                        PreparedPreviewGpuCompositeLayerSource::CpuFrame(frame)
+                                }
+                                return Err(
+                                    "media layer has no GPU source and no CPU working fallback"
+                                        .to_owned(),
+                                );
+                            };
+                            prepared.residency.cpu_upload_layers =
+                                prepared.residency.cpu_upload_layers.saturating_add(1);
+                            PreparedPreviewGpuCompositeLayerSource::CpuFrame(frame)
+                        }
                     }
                 };
                 prepared.layers.push(PreparedPreviewGpuCompositeLayer {
@@ -3712,6 +3754,30 @@ fn prepare_preview_gpu_composite<'a>(
     }
 
     Ok(prepared)
+}
+
+fn record_preview_native_video_layer(
+    source: &AppUiGpuPreviewNativeSource,
+    native_runtime: &mut AppUiNativeVideoImportRuntime,
+    color_runtime: &mut RenderGpuOutputBoundaryRuntime,
+) -> Result<GpuColorFrameHandle, String> {
+    let resource = native_runtime.import(
+        color_runtime.frame_ids_mut(),
+        source.source_color_space,
+        &source.input_transform,
+        &source.native_frame,
+        GpuColorFrameTextureFormat::Rgba16Float,
+    )?;
+    let handle = resource.handle().clone();
+    if color_runtime
+        .frame_table_mut()
+        .insert(resource)
+        .map_err(|error| format!("native working resource insertion failed: {error:?}"))?
+        .is_some()
+    {
+        return Err("native working frame unexpectedly replaced a live resource".to_owned());
+    }
+    Ok(handle)
 }
 
 fn record_preview_gpu_input_layer(
@@ -3992,12 +4058,8 @@ fn refresh_display_output_contract(
     session.config.color_space = session.display_output_contract.surface_color.color_space;
     if renderer_rebuilt {
         session.surface.configure(device, &session.config);
-        let adapter_info = adapter.get_info();
-        session.frame_renderer =
-            AppUiFrameRenderer::new_with_adapter_info(device, session.config.format, &adapter_info);
-        host.set_native_decoded_frame_import_support(
-            session.frame_renderer.native_decoded_frame_import_support(),
-        );
+        session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
+        host.set_native_decoded_frame_import_support(session.native_video_import_runtime.support());
     }
 
     let generation_changed = previous_generation != Some(new_generation);
@@ -4036,6 +4098,7 @@ impl AppUiWindowSession {
         surface: wgpu::Surface<'static>,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         host: &mut AppUiHost,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         apply_window_corner_preference(&window, window_corner_preference_for_role(role));
@@ -4085,11 +4148,10 @@ impl AppUiWindowSession {
         );
         host.set_display_output_snapshot(Some(&initial_snapshot));
 
-        let frame_renderer =
-            AppUiFrameRenderer::new_with_adapter_info(device, config.format, &adapter.get_info());
-        host.set_native_decoded_frame_import_support(
-            frame_renderer.native_decoded_frame_import_support(),
-        );
+        let frame_renderer = AppUiFrameRenderer::new(device, config.format);
+        let native_video_import_runtime =
+            AppUiNativeVideoImportRuntime::new(adapter, device, queue);
+        host.set_native_decoded_frame_import_support(native_video_import_runtime.support());
 
         Ok(Self {
             role,
@@ -4100,6 +4162,8 @@ impl AppUiWindowSession {
             display_snapshot: Some(initial_snapshot),
             display_management_policy,
             frame_renderer,
+            native_video_import_runtime,
+            renderer_queue: queue.clone(),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
@@ -4217,8 +4281,10 @@ fn replace_window_session(
 
     let window = Arc::new(elwt.create_window(window_attributes_for_role(role))?);
     let surface = instance.create_surface(window.clone())?;
-    let next_session =
-        AppUiWindowSession::from_window_and_surface(role, window, surface, adapter, device, host)?;
+    let queue = session.renderer_queue.clone();
+    let next_session = AppUiWindowSession::from_window_and_surface(
+        role, window, surface, adapter, device, &queue, host,
+    )?;
     tracing::info!(?old_role, ?role, "app UI native window replaced");
     next_session.window.set_visible(true);
     next_session.window.request_redraw();

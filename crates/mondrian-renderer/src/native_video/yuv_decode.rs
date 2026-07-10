@@ -195,13 +195,12 @@ impl GpuNativeYuvDecodePlan {
         })
     }
 
-    fn contract(&self) -> GpuNativeYuvDecodeContract {
-        GpuNativeYuvDecodeContract {
+    fn sampling_contract(&self) -> GpuNativeYuvSamplingContract {
+        GpuNativeYuvSamplingContract {
             source_texture_format: self.source_texture_format,
             visible_extent: self.visible_extent,
             storage_extent: self.storage_extent,
             video_sampling: self.video_sampling,
-            output: self.output.contract(),
         }
     }
 }
@@ -272,12 +271,11 @@ pub enum GpuNativeYuvDecodePlanError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GpuNativeYuvDecodeContract {
+struct GpuNativeYuvSamplingContract {
     source_texture_format: GpuNativeDecodedFrameTextureFormat,
     visible_extent: GpuNativeVideoExtent,
     storage_extent: GpuNativeVideoExtent,
     video_sampling: GpuNativeDecodedFrameVideoSampling,
-    output: GpuColorFrameContract,
 }
 
 #[repr(C)]
@@ -353,7 +351,7 @@ impl GpuNativeYuvDecodeUniforms {
 
 /// Prepared immutable bindings for a reusable native YUV surface and plan.
 pub struct GpuNativeYuvPreparedPass {
-    contract: GpuNativeYuvDecodeContract,
+    contract: GpuNativeYuvSamplingContract,
     bind_group: wgpu::BindGroup,
     _uniform_buffer: wgpu::Buffer,
 }
@@ -471,7 +469,7 @@ impl GpuNativeYuvDecoder {
             ],
         });
         GpuNativeYuvPreparedPass {
-            contract: plan.contract(),
+            contract: plan.sampling_contract(),
             bind_group,
             _uniform_buffer: uniform_buffer,
         }
@@ -485,7 +483,7 @@ impl GpuNativeYuvDecoder {
         prepared: &GpuNativeYuvPreparedPass,
         output: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
     ) -> Result<(), GpuNativeYuvDecodeRecordError> {
-        if prepared.contract != plan.contract() {
+        if prepared.contract != plan.sampling_contract() {
             return Err(GpuNativeYuvDecodeRecordError::PreparedPassMismatch);
         }
         if output.handle().contract() != plan.output.contract() {
@@ -772,6 +770,132 @@ mod tests {
                 );
             }
             assert!((pixel[3] - 1.0).abs() < 0.001);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_yuv_output_feeds_ocio_input_stage_on_real_wgpu_device() {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping native YUV + OCIO test: no GPU adapter available");
+            return;
+        };
+        let luma = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mondrian-test-native-ocio-luma"),
+            size: wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let chroma = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mondrian-test-native-ocio-chroma"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        write_test_texture(&context.queue, &luma, 2, 2, 2, &[16, 235, 126, 71]);
+        write_test_texture(&context.queue, &chroma, 1, 1, 2, &[128, 128]);
+        let mut ids = GpuColorFrameIdAllocator::new(100);
+        let import = GpuNativeDecodedFrameImportPlan::from_contract(
+            &mut ids,
+            GpuNativeDecodedFrameImportContract {
+                width: 2,
+                height: 2,
+                source_color_space: ColorSpace::Rec709,
+                input_transform: crate::RenderInputTransform::to_working_gpu(
+                    ColorSpace::Rec709,
+                    false,
+                    ColorEngine::MondrianSmart,
+                ),
+                handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,
+                video_sampling: GpuNativeDecodedFrameVideoSampling::from_source_color_space(
+                    ColorSpace::Rec709,
+                    GpuVideoRange::Limited,
+                    8,
+                    GpuVideoChromaLocation::Left,
+                ),
+                working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
+                label: "native-ocio-working".to_owned(),
+            },
+            &GpuNativeDecodedFrameImportSupport::ready(
+                vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+                vec![GpuNativeDecodedFrameTextureFormat::Nv12],
+            ),
+        )
+        .expect("native import plan");
+        let decode_plan = GpuNativeYuvDecodePlan::from_import_plan(
+            &import,
+            GpuNativeVideoExtent { width: 2, height: 2 },
+        )
+        .expect("native decode plan");
+        let decoder = GpuNativeYuvDecoder::new(&context.device);
+        let encoded = GpuNativeYuvDecoder::allocate_output(&context.device, &decode_plan);
+        let luma_view = luma.create_view(&wgpu::TextureViewDescriptor::default());
+        let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
+        let prepared = decoder.prepare_pass(
+            &context.device,
+            &decode_plan,
+            GpuNativeYuvPlaneViews { luma: &luma_view, chroma: &chroma_view },
+        );
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-native-yuv-ocio"),
+        });
+        decoder
+            .record(&mut encoder, &decode_plan, &prepared, &encoded)
+            .expect("record YUV pass");
+        let mut runtime = crate::RenderGpuOutputBoundaryRuntime::new();
+        runtime.frame_table_mut().insert(encoded).expect("insert encoded source");
+        let record = runtime
+            .record_wgpu_input_stage_gpu_frame_owned_backend(
+                &import.input_transform,
+                &import.encoded_source_frame,
+                &import.working_frame,
+                crate::RenderColorTransformGpuOptions::default(),
+                crate::RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                },
+            )
+            .expect("record OCIO input stage");
+        assert_eq!(record.materialized.output, import.working_frame);
+        assert_eq!(record.stage_diagnostics.upload_stages, 0);
+        let readback_plan =
+            crate::GpuColorFrameReadbackPlan::encoded_rgba16float(import.working_frame.clone())
+                .expect("working readback plan");
+        let working = runtime
+            .frame_table()
+            .get(&import.working_frame)
+            .expect("materialized working frame");
+        let readback = crate::GpuColorFrameReadback::record_copy(
+            &context.device,
+            &mut encoder,
+            &readback_plan,
+            working.resource(),
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_readback_buffer(&context.device, &readback);
+        let actual =
+            readback_plan.unpack_mapped_rgba16float(&mapped).expect("unpack working output");
+        readback.unmap();
+
+        for channel in &actual[0..3] {
+            assert!(channel.abs() < 0.001, "black channel was {channel}");
+        }
+        for channel in &actual[4..7] {
+            assert!(
+                (*channel - 1.0).abs() < 0.002,
+                "white channel was {channel}"
+            );
         }
     }
 

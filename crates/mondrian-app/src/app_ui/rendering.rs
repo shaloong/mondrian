@@ -4,6 +4,7 @@
 //! upload and surface-present path so renderer behavior does not drift between
 //! test windows and the real app shell.
 
+#[cfg(any(not(target_os = "windows"), test))]
 use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_renderer::{DrawCommand, ExternalTextureKey, GlyphUpload, UiRenderer};
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
@@ -311,7 +312,6 @@ impl AppUiRenderDiagnosticReporter {
 pub struct AppUiFrameRenderer {
     ui_renderer: UiRenderer,
     text_renderer: TextRenderer,
-    native_decoded_frame_import_support: GpuNativeDecodedFrameImportSupport,
 }
 
 impl AppUiFrameRenderer {
@@ -320,20 +320,7 @@ impl AppUiFrameRenderer {
         Self {
             ui_renderer: UiRenderer::new(device, surface_format),
             text_renderer: TextRenderer::new(),
-            native_decoded_frame_import_support: GpuNativeDecodedFrameImportSupport::unavailable(),
         }
-    }
-
-    /// Create a renderer and attach adapter-specific native import diagnostics.
-    pub fn new_with_adapter_info(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
-        adapter_info: &wgpu::AdapterInfo,
-    ) -> Self {
-        let mut renderer = Self::new(device, surface_format);
-        renderer.native_decoded_frame_import_support =
-            native_decoded_frame_import_support_from_adapter(adapter_info, device.features());
-        renderer
     }
 
     /// Register or replace a GPU texture view for viewer/UI external texture draws.
@@ -357,14 +344,6 @@ impl AppUiFrameRenderer {
     /// Number of external GPU texture views currently registered with the UI renderer.
     pub fn external_texture_count(&self) -> usize {
         self.ui_renderer.external_texture_count()
-    }
-
-    /// Renderer backend support for importing native hardware-decoded video surfaces.
-    ///
-    /// This remains fail-closed until the concrete wgpu backend can import and
-    /// sample an OS decoder surface into a renderer-owned float working frame.
-    pub fn native_decoded_frame_import_support(&self) -> GpuNativeDecodedFrameImportSupport {
-        self.native_decoded_frame_import_support.clone()
     }
 
     /// Resolve text draw commands, upload pending glyphs, and present a frame.
@@ -449,7 +428,8 @@ impl AppUiFrameRenderer {
     }
 }
 
-fn native_decoded_frame_import_support_from_adapter(
+#[cfg(any(not(target_os = "windows"), test))]
+pub(crate) fn native_decoded_frame_import_support_from_adapter(
     adapter_info: &wgpu::AdapterInfo,
     device_features: wgpu::Features,
 ) -> GpuNativeDecodedFrameImportSupport {
@@ -464,7 +444,7 @@ fn native_decoded_frame_import_support_from_adapter(
                 .to_owned()
         }
         wgpu::Backend::Dx12 => format!(
-            "wgpu Dx12 device enabled native video texture formats {}, but no D3D11 shared texture/fence native video import bridge is connected",
+            "wgpu Dx12 device enabled native video texture formats {}, but the native video backend was not constructed for this renderer session",
             enabled_native_video_texture_formats(device_features)
         ),
         wgpu::Backend::Vulkan =>
@@ -482,6 +462,7 @@ fn native_decoded_frame_import_support_from_adapter(
     GpuNativeDecodedFrameImportSupport::unavailable_with_reason(backend_label, reason)
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn enabled_native_video_texture_formats(device_features: wgpu::Features) -> String {
     let mut formats = Vec::with_capacity(2);
     if device_features.contains(wgpu::Features::TEXTURE_FORMAT_NV12) {
@@ -660,7 +641,7 @@ mod tests {
             .unavailable_reason
             .as_deref()
             .unwrap_or_default()
-            .contains("D3D11 shared texture/fence"));
+            .contains("backend was not constructed"));
     }
 
     #[test]

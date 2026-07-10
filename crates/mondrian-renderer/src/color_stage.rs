@@ -630,6 +630,13 @@ impl RenderGpuOutputBoundaryRuntime {
         &mut self.frame_table
     }
 
+    /// Mutably borrow the allocator that owns frame identities for this
+    /// runtime's resource table. Native import plans must allocate from this
+    /// same namespace before their returned resources enter the table.
+    pub fn frame_ids_mut(&mut self) -> &mut GpuColorFrameIdAllocator {
+        &mut self.frame_ids
+    }
+
     /// Borrow the runtime-owned OCIO shader cache.
     pub fn shader_cache(&self) -> &OcioGpuShaderCache {
         &self.shader_cache
@@ -704,6 +711,67 @@ impl RenderGpuOutputBoundaryRuntime {
             frame,
             &stage_plan,
             output_texture_format,
+        )
+        .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let wrapper_color = resources.transform.wgpu.wrapper_color;
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, wrapper_color, output_format)
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_input_stage(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuInputStageRuntimeRecordError::Record)
+    }
+
+    /// Plan and record the OCIO input transform for an encoded-float source
+    /// frame that is already present in this runtime's GPU resource table.
+    ///
+    /// Native YUV backends use this after their sampling pass. Both handles
+    /// come from the native import plan, so this method validates and preserves
+    /// that plan rather than allocating replacement frame identities.
+    pub fn record_wgpu_input_stage_gpu_frame_owned_backend(
+        &mut self,
+        transform: &RenderInputTransform,
+        input: &GpuColorFrameHandle,
+        output: &GpuColorFrameHandle,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
+        let Self {
+            shader_cache,
+            backend_prep,
+            backend_objects,
+            frame_table,
+            ..
+        } = self;
+        let mut planner = RenderColorStagePlanner::prefer_gpu(shader_cache, gpu_options);
+        let stage_plan = planner
+            .plan_input_to_working(input.descriptor(), transform)
+            .map_err(RenderGpuInputStageRuntimeRecordError::Plan)?;
+        let resources = RenderGpuInputStageResourcePlan::from_gpu_encoded_source_frame(
+            input,
+            output,
+            &stage_plan,
         )
         .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
         let output_format = color_target_format_for_gpu_frame(&resources.output);

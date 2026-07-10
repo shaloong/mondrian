@@ -97,13 +97,14 @@ The sampling matrix and transfer must also exactly match the resolved source
 color space encoding; conflicting source labels and sampling facts are rejected
 before backend execution or GPU frame allocation.
 
-The default support contract is fail-closed. Until D3D12, D3D11/DXGI,
-CVPixelBuffer / IOSurface, DMABUF/VA-API, or CUDA import is actually connected
-to the wgpu renderer backend,
-`GpuNativeDecodedFrameImportSupport::unavailable()` must be used and planning
-must return `RendererBackendUnavailable`. A decoder reporting a GPU handle kind,
-or a platform probe reporting a potentially importable OS family, is not enough
-to claim hardware decode playback, zero-copy, or low-copy frame residency.
+The default support contract is fail-closed. A platform without a complete
+native-surface sampling and OCIO input backend must use
+`GpuNativeDecodedFrameImportSupport::unavailable()` and planning must return
+`RendererBackendUnavailable`. Windows DX12 is the first concrete backend: it
+advertises D3D11Texture2D plus only the NV12/P010 formats enabled on the actual
+wgpu device. A decoder reporting a GPU handle kind, or a platform probe reporting
+a potentially importable OS family, is not enough by itself to claim hardware
+decode playback, zero-copy, or low-copy frame residency.
 Diagnostics should report the specific missing layer: decoder GPU handle absent,
 platform import unsupported/missing, renderer backend not ready, unsupported
 handle kind, unsupported source format, or unsupported working texture format.
@@ -114,10 +115,10 @@ The app layer owns the combined readiness report because it is the first layer
 that can see media decode facts, platform probes, and renderer backend support
 together. `app_ui::native_video_import` evaluates those facts into a stable
 viewer telemetry payload without giving media a renderer dependency or giving
-the renderer a platform dependency. Current media preview frames report
-`CpuDecodedMedia`; this is intentional and must remain distinct from
-`ReadyZeroCopy` / `ReadyLowCopy` until actual decoder GPU surfaces are handed to
-the renderer import path.
+the renderer a platform dependency. CPU-decoded frames remain
+`CpuDecodedMedia`; retained D3D11 decoder surfaces can report `ReadyLowCopy`
+only when platform probing, renderer support, sampling metadata, and actual
+backend construction all agree.
 On Windows, `mondrian-platform` performs lightweight D3D12 and D3D11 device
 probes by loading `d3d12.dll`/`d3d11.dll` and calling
 `D3D12CreateDevice`/`D3D11CreateDevice`. Successful results prove only that the
@@ -130,17 +131,17 @@ D3D12VA, D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface
 formats, but a candidate is not renderer readiness. Windows candidates must be
 ordered D3D12VA, D3D11VA, then legacy DXVA2; Linux candidates must be ordered
 VA-API, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
-to the next backend. The renderer import support value remains
-`GpuNativeDecodedFrameImportSupport::unavailable()` until a concrete backend can
-sample the native surface and produce a renderer-owned float working frame.
+to the next backend. Windows support becomes ready only after
+`D3D11Dx12NativeVideoImportBackend` binds the active adapter/device/queue;
+unimplemented platform backends remain unavailable.
 Renderer and product-window device creation request the adapter-supported subset
 of wgpu `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010` through the shared
 `native_video_texture_device_features` contract. Enabling those features is only
 a texture-format prerequisite: it does not prove that a decoder resource can be
 shared, synchronized, adopted by the active wgpu device, sampled, or transformed.
-Readiness therefore remains fail-closed until the backend has connected and
-validated the complete platform import bridge. Diagnostics distinguish missing
-device format features from a missing D3D11 shared-texture/fence bridge.
+Readiness therefore remains fail-closed until backend construction validates
+the complete platform import bridge. Diagnostics distinguish missing device
+format features, non-DX12 adapters, and backend construction failures.
 The Windows renderer backend owns D3D11 source admission. Before any resource
 sharing, it verifies the retained FFmpeg texture ABI, actual DXGI NV12/P010
 format, visible-versus-storage extent, array-slice bounds, single mip/sample
@@ -158,7 +159,10 @@ RESOURCE`, and only then exposes plane views. The renderer submit is followed by
 `RESOURCE -> COMMON` and `renderer_complete`. Fence values are strictly
 monotonic, command allocators are reset only after completion, busy entries fail
 without a CPU wait, and any partially submitted failure permanently poisons the
-entry. The bridge never relies on `Flush`, implicit sRGB, or an undocumented
+entry. The complete import backend pools entries by source device, storage,
+color, and sampling contract; it grows the pool for bounded in-flight work,
+returns busy at the configured limit, and evicts poisoned entries before reuse.
+The bridge never relies on `Flush`, implicit sRGB, or an undocumented
 resource-state assumption. A real-GPU ignored smoke test exercises NT-handle
 creation/opening, both API devices on the same adapter, fence transfer, resource
 barriers, wgpu adoption, and completion.
@@ -194,15 +198,16 @@ resolved source color space does not have an RGB matrix fail closed before
 readiness can report zero-copy. Frame residency diagnostics can therefore
 distinguish CPU-decoded media, native GPU-decoded media, native media blocked
 by missing sampling facts, mixed CPU/native stacks, and procedural GPU-native
-content before the concrete D3D12/D3D11/VideoToolbox/VA-API import adapters
-exist.
-The app window obtains renderer backend support from `AppUiFrameRenderer`, not
-from hard-coded window logic. That support remains fail-closed until a real
-import pass can sample the native surface and produce a float linear working
-frame. `AppUiFrameRenderer` derives the fail-closed support label from the
-actual `wgpu::AdapterInfo` so viewer telemetry can distinguish, for example,
-"Windows D3D12/D3D11 platform probe succeeded" from "wgpu Dx12 renderer has no
-native decoder-surface import bridge connected".
+content across the concrete Windows backend and still-unimplemented
+VideoToolbox/VA-API import adapters.
+The app window owns `AppUiNativeVideoImportRuntime` alongside, but independently
+from, the swapchain UI renderer. On Windows it constructs the concrete renderer
+backend from the active adapter/device/queue and publishes that backend's support
+contract; construction failure remains unavailable with its exact reason. The
+runtime survives surface-format/UI-renderer rebuilds so display changes do not
+discard decoder bridge pools. It allocates native import frame ids from the same
+`RenderGpuOutputBoundaryRuntime` namespace that will receive the returned
+working resources, preventing resource-table id collisions.
 Renderer/platform readiness must remain in
 `AppUiPreviewHardwareDecodeAdmissionDiagnostics`. It must not be copied into
 media `HwAccelProbe`, `PreviewDecodeDiagnostics`, hardware-decode decisions, or

@@ -6636,7 +6636,7 @@ pub(crate) enum AppUiGpuPreviewCompositeLayer {
         frame: Option<CpuColorFrame>,
         /// Source/input contract for the preferred GPU color path.
         gpu_source: Option<AppUiGpuPreviewMediaSource>,
-        /// Native decoder surface contract for the future zero/low-copy path.
+        /// Native decoder surface contract for renderer low-copy import.
         native_source: Option<AppUiGpuPreviewNativeSource>,
         /// Layer opacity.
         opacity: f32,
@@ -6672,6 +6672,8 @@ pub(crate) struct AppUiGpuPreviewMediaSource {
 pub(crate) struct AppUiGpuPreviewNativeSource {
     /// Resolved source color space represented by the decoded surface.
     pub source_color_space: ColorSpace,
+    /// Complete source-to-working OCIO input transform.
+    pub input_transform: RenderInputTransform,
     /// Complete media-owned native frame payload consumed by renderer import.
     pub native_frame: Arc<PreviewNativeDecodedFrame>,
 }
@@ -6801,6 +6803,7 @@ impl MediaPreviewFrame {
     fn native_source(&self) -> Option<AppUiGpuPreviewNativeSource> {
         self.native_source.as_ref().map(|source| AppUiGpuPreviewNativeSource {
             source_color_space: source.source_color_space,
+            input_transform: source.input_transform.clone(),
             native_frame: source.native_frame.clone(),
         })
     }
@@ -6816,7 +6819,7 @@ impl MediaPreviewFrame {
         let Some(source) = self.gpu_source.as_ref() else {
             if let Some(native) = self.native_source.as_ref() {
                 return Err(format!(
-                    "media preview frame is native GPU decoded ({} {:?}) but renderer native import is not connected",
+                    "media preview frame is native GPU decoded ({} {:?}) and requires renderer native import; no CPU working fallback exists",
                     native.native_frame.handle_kind().as_str(),
                     native.native_frame.surface_format
                 ));
@@ -9143,7 +9146,7 @@ fn decode_media_preview(
             let decode_diagnostics = frame.diagnostics;
             let width = frame.width;
             let height = frame.height;
-            let input_transform = RenderInputTransform::to_working(
+            let input_transform = RenderInputTransform::to_working_gpu(
                 job.key.working_color_space,
                 job.key.tone_map,
                 job.key.engine.clone(),
@@ -9731,6 +9734,10 @@ mod tests {
                 assert!(gpu_source.is_none());
                 let native_source = native_source.as_ref().expect("native source");
                 assert_eq!(
+                    native_source.input_transform.backend,
+                    mondrian_renderer::RenderColorTransformBackend::OcioGpuShaderPlan
+                );
+                assert_eq!(
                     native_source.native_frame.handle_kind(),
                     DecodedGpuFrameHandleKind::D3D11Texture2D
                 );
@@ -9784,7 +9791,7 @@ mod tests {
         };
 
         assert!(err.contains("native GPU decoded"));
-        assert!(err.contains("renderer native import is not connected"));
+        assert!(err.contains("requires renderer native import"));
     }
 
     #[test]
@@ -15575,7 +15582,11 @@ mod tests {
         MediaPreviewNativeSourceFrame::from_native_frame(
             native_frame,
             ColorSpace::Rec709,
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+            RenderInputTransform::to_working_gpu(
+                ColorSpace::Rec709,
+                false,
+                ColorEngine::MondrianSmart,
+            ),
         )
     }
 

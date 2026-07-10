@@ -6,15 +6,23 @@
 //! uploads.
 
 use mondrian_core::{ColorMatrixCoefficients, ColorSpace};
+use mondrian_media::PreviewNativeDecodedFrame;
 use mondrian_media::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
 };
 use mondrian_platform::{NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult};
+#[cfg(target_os = "windows")]
 use mondrian_renderer::{
-    GpuColorFrameTextureFormat, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
-    GpuVideoRange,
+    execute_native_decoded_frame_import, D3D11Dx12NativeVideoImportBackend,
+    GpuNativeDecodedFrameImportBackend,
+};
+use mondrian_renderer::{
+    GpuColorFrameIdAllocator, GpuColorFrameResource, GpuColorFrameTextureFormat,
+    GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportContract,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
+    GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange,
+    RenderInputTransform,
 };
 
 /// Stable readiness category for native decoded-frame import.
@@ -47,6 +55,111 @@ pub(crate) enum AppUiNativeVideoImportReadinessStatus {
     ReadyZeroCopy,
     /// The path cannot stay zero-copy but can use a declared low-copy fallback.
     ReadyLowCopy,
+}
+
+/// App-owned native video backend lifetime and renderer support contract.
+///
+/// This runtime is independent of swapchain/UI renderer rebuilds. Imported
+/// working resources use frame ids allocated by the destination color runtime
+/// before entering its shared frame table.
+pub(crate) struct AppUiNativeVideoImportRuntime {
+    support: GpuNativeDecodedFrameImportSupport,
+    #[cfg(target_os = "windows")]
+    backend: Option<D3D11Dx12NativeVideoImportBackend>,
+}
+
+impl AppUiNativeVideoImportRuntime {
+    pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            match D3D11Dx12NativeVideoImportBackend::new(adapter, device, queue) {
+                Ok(backend) => Self {
+                    support: backend.support().clone(),
+                    backend: Some(backend),
+                },
+                Err(error) => Self {
+                    support: GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
+                        format!("{:?}", adapter.get_info().backend),
+                        format!("native D3D11/DX12 YUV + OCIO backend unavailable: {error}"),
+                    ),
+                    backend: None,
+                },
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (device, queue);
+            Self {
+                support: super::rendering::native_decoded_frame_import_support_from_adapter(
+                    &adapter.get_info(),
+                    device.features(),
+                ),
+            }
+        }
+    }
+
+    pub fn support(&self) -> GpuNativeDecodedFrameImportSupport {
+        self.support.clone()
+    }
+
+    pub fn import(
+        &mut self,
+        ids: &mut GpuColorFrameIdAllocator,
+        source_color_space: ColorSpace,
+        input_transform: &RenderInputTransform,
+        native_frame: &PreviewNativeDecodedFrame,
+        working_texture_format: GpuColorFrameTextureFormat,
+    ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, String> {
+        let source_texture_format = native_source_texture_format_from_decoded(
+            native_frame.surface_format,
+        )
+        .ok_or_else(|| {
+            format!(
+                "decoded native surface format {:?} has no renderer import contract",
+                native_frame.surface_format
+            )
+        })?;
+        let video_sampling = native_video_sampling_from_decoded(
+            source_color_space,
+            source_texture_format,
+            native_frame.diagnostics.decoded_video_sampling,
+        )
+        .ok_or_else(|| {
+            "decoded native surface has incomplete video sampling metadata".to_owned()
+        })?;
+        let contract = GpuNativeDecodedFrameImportContract {
+            width: native_frame.width,
+            height: native_frame.height,
+            source_color_space,
+            input_transform: input_transform.clone(),
+            handle_kind: native_frame.handle_kind(),
+            source_texture_format,
+            video_sampling,
+            working_texture_format,
+            label: format!("viewer-native-working-{}", native_frame.handle.id().get()),
+        };
+        #[cfg(target_os = "windows")]
+        {
+            let backend = self.backend.as_mut().ok_or_else(|| {
+                self.support
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "native video backend is unavailable".to_owned())
+            })?;
+            execute_native_decoded_frame_import(backend, ids, contract, native_frame)
+                .map(|execution| execution.resource)
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (ids, contract, native_frame);
+            Err(self
+                .support
+                .unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "native video backend is unavailable".to_owned()))
+        }
+    }
 }
 
 /// Input facts for native decoded-frame import readiness evaluation.

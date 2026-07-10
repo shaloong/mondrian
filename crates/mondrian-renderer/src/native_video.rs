@@ -14,12 +14,19 @@ mod sync_timeline;
 #[cfg(target_os = "windows")]
 mod windows_d3d11;
 #[cfg(target_os = "windows")]
+mod windows_d3d11_backend;
+#[cfg(target_os = "windows")]
 mod windows_d3d11_bridge;
 
 #[cfg(target_os = "windows")]
 pub use windows_d3d11::{
     inspect_d3d11_native_decoded_frame, D3D11NativeDecodedFrameInspection,
     D3D11NativeDecodedFrameInspectionError, NativeVideoAdapterLuid,
+};
+#[cfg(target_os = "windows")]
+pub use windows_d3d11_backend::{
+    D3D11Dx12NativeVideoImportBackend, D3D11Dx12NativeVideoImportBackendCreateError,
+    D3D11Dx12NativeVideoImportBackendOptions,
 };
 #[cfg(target_os = "windows")]
 pub use windows_d3d11_bridge::{

@@ -615,6 +615,12 @@ through `gpu_compositor.rs`. For supported layer stacks, the app window records:
 
 ```
 Resolved preview layers
+  -> for each retained Windows D3D11 NV12/P010 media layer:
+       AppUiNativeVideoImportRuntime
+       -> bounded D3D11/DX12 shared-texture bridge entry
+       -> native YUV shader into encoded-float Rgba16Float source texture
+       -> OCIO GPU input transform into Rgba16Float working texture
+       -> insert returned working resource into the composite frame table
   -> for each media layer with a source/input contract:
        RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend()
        -> upload CPU decoded source RGBA8 once as Rgba8Unorm
@@ -629,11 +635,12 @@ Resolved preview layers
   -> frame_renderer.register_external_texture_view()
 ```
 
-This keeps preview playback GPU-resident from working composite through output
-transform for the supported subset. For ordinary decoded media it is a low-copy
-path, not zero-copy: FFmpeg currently produces CPU RGBA8, so the source upload
-still exists, but the input OCIO transform, working composite, and output
-boundary stay on GPU. The app media preview cache stores the decoded source
+This keeps preview playback GPU-resident from input conversion through output
+transform for the supported subset. Retained Windows D3D11 decoder surfaces use
+a low-copy path, not zero-copy: the decoder array slice is copied once into a
+shareable single-slice NV12/P010 texture, while YUV conversion, OCIO input,
+working composite, and output remain GPU-resident. CPU-decoded media still uses
+one RGBA8 source upload. The app media preview cache stores the decoded source
 frame plus the `RenderInputTransform` contract without eagerly materializing a
 CPU working frame. CPU working frames are generated lazily only when the CPU
 reference compositor or a runtime fallback actually needs them. It also removes
@@ -643,7 +650,8 @@ the renderer contract is covered by `from_gpu_working_frame()`.
 ### Capability Classification
 
 - **`GpuNative`** — All layers are GPU-resident, use Normal blend mode,
-  have no effect graphs, and ≤5 layers. No CPU round-trip needed.
+  have no effect graphs, and ≤5 layers. Native D3D11 media enters through the
+  bounded low-copy import backend; procedural layers require no import.
 - **`GpuWithUpload`** — Layer structure supports GPU compositing, but at least
   one layer enters from CPU memory. The preferred media path uploads decoded
   source RGBA8 once and runs GPU OCIO input before compositing. If that input
