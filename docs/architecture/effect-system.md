@@ -101,9 +101,15 @@ Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
 callers can make an explicit legacy fallback decision. Custom/plugin processors
 remain unsupported until their ABI declares a float implementation. CPU float
-support does not imply GPU execution support: non-unary nodes remain explicit
-GPU blockers until renderer-native graph passes implement the same ownership,
-blend, matte, and alpha contracts.
+support does not imply GPU execution support.
+
+`lower_effect_graph_to_gpu_plan(...)` is the backend-neutral GPU boundary. It
+accepts only a compiled single-source unary chain and emits an immutable fused
+point plan without wgpu objects. ColorAdjust, WhiteBalance, Vignette, and Grain
+are supported in source order with a bounded eight-op pass; spatial operations,
+LUT resources, custom processors, and branching graph nodes return typed
+`EffectGpuPlanBlocker` values. This makes capability checks deterministic and
+keeps renderer ownership separate from effect graph semantics.
 
 File-backed LUT caches key existing files by canonical path and invalidate on
 file fingerprint changes. Tests that validate cache behavior should use local

@@ -5,6 +5,7 @@
 pub mod adjustment;
 pub mod effect;
 pub mod execution;
+pub mod gpu_plan;
 pub mod graph;
 pub mod lut;
 pub mod mask;
@@ -27,12 +28,14 @@ pub use effect::{
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
     apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
-    apply_compiled_effect_graph_with_gpu, apply_effect_render_graph,
-    apply_effect_render_graph_pass, apply_effect_render_plan, apply_effect_render_plan_pass,
-    check_effect_gpu_capability, compiled_effect_graph_supports_rgba_f32,
-    effect_graph_gpu_blockers, register_custom_render_processor, set_global_gpu_executor,
-    CustomEffectRenderProcessor, EffectFloatExecutionError, EffectFloatUnsupportedReason,
-    EffectGpuBlocker, EffectGpuExecutionResult, EffectGpuExecutor,
+    apply_effect_render_graph, apply_effect_render_graph_pass, apply_effect_render_plan,
+    apply_effect_render_plan_pass, compiled_effect_graph_supports_rgba_f32,
+    register_custom_render_processor, CustomEffectRenderProcessor, EffectFloatExecutionError,
+    EffectFloatUnsupportedReason,
+};
+pub use gpu_plan::{
+    lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan, EffectGpuPlanBlocker, EffectGpuPointOp,
+    MAX_FUSED_GPU_EFFECT_OPS,
 };
 pub use graph::{
     compile_effect_render_graph, compile_scheduled_effect_graph,

@@ -15,7 +15,6 @@ pub mod color_stage;
 pub mod color_transform;
 pub mod compositor;
 pub mod context;
-pub mod gpu_backend;
 pub mod gpu_compositor;
 pub mod native_video;
 pub mod ocio_gpu;
@@ -79,9 +78,6 @@ pub use color_transform::{
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::native_video_texture_device_features;
 pub use context::GpuContext;
-pub use gpu_backend::{
-    gpu_enabled, set_gpu_enabled, GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason,
-};
 pub use gpu_compositor::{
     evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,
     GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositingBlockerReason,

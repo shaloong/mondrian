@@ -17,21 +17,6 @@ use std::{
 pub type CustomEffectRenderProcessor =
     Arc<dyn Fn(&mut Vec<u8>, u32, u32, &serde_json::Value, i64) -> Result<()> + Send + Sync>;
 
-/// Optional GPU acceleration hook for effect render ops.
-///
-/// Implementations (e.g., `GpuBackend` in `mondrian-renderer`) can intercept
-/// supported render ops and execute them on the GPU. Return `None` to fall
-/// back to the CPU path.
-pub trait EffectGpuExecutor: Send + Sync {
-    fn try_execute_op(
-        &self,
-        op: &EffectRenderOp,
-        input: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Option<Vec<u8>>;
-}
-
 /// Error returned when an effect graph cannot execute on the float/linear CPU path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectFloatExecutionError {
@@ -74,46 +59,6 @@ pub enum EffectFloatUnsupportedReason {
         /// Blend mode that is still legacy-only on the float path.
         mode: BlendMode,
     },
-}
-
-/// Structured reason an effect node cannot execute on the GPU.
-///
-/// Unlike [`EffectFloatUnsupportedReason`] which tracks CPU float limitations,
-/// this type tracks GPU-specific blockers that prevent a render op from being
-/// dispatched to the GPU executor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EffectGpuBlocker {
-    /// The render op has no GPU implementation.
-    UnsupportedRenderOp {
-        /// Stable render-op label for diagnostics.
-        op: &'static str,
-    },
-    /// The GPU executor rejected the op (returned `None`).
-    ExecutorRejected {
-        /// Stable render-op label for diagnostics.
-        op: &'static str,
-    },
-    /// The GPU executor panicked or returned malformed data.
-    ExecutorFailed {
-        /// Stable render-op label for diagnostics.
-        op: &'static str,
-        /// Reason the executor failed.
-        reason: String,
-    },
-    /// The effect node kind does not support GPU execution.
-    UnsupportedNodeKind {
-        /// Stable node kind label for diagnostics.
-        kind: &'static str,
-    },
-}
-
-/// Result of GPU execution attempt for a single effect render op.
-#[derive(Debug, Clone)]
-pub enum EffectGpuExecutionResult {
-    /// GPU executed successfully.
-    GpuExecuted,
-    /// GPU was not available; fell back to CPU.
-    CpuFallback { blocker: EffectGpuBlocker },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -442,7 +387,6 @@ pub fn apply_effect_render_graph(
         &node_use_counts,
         None, // compiled: Option<&CompiledEffectGraph>
         frame_seed,
-        None, // gpu: Option<&dyn EffectGpuExecutor>
     )
 }
 
@@ -455,7 +399,6 @@ fn execute_effect_graph(
     node_use_counts: &HashMap<EffectGraphNodeId, usize>,
     compiled: Option<&CompiledEffectGraph>,
     frame_seed: i64,
-    gpu: Option<&dyn EffectGpuExecutor>,
 ) -> Vec<u8> {
     let required_len = width as usize * height as usize * 4;
     let source_input_signature = compiled.map(|_| frame_buffer_signature(input));
@@ -504,25 +447,7 @@ fn execute_effect_graph(
                     return input.to_vec();
                 };
 
-                // Try GPU acceleration for supported ops.
-                let gpu_applied = if let Some(gpu_exec) = gpu {
-                    if let Some(gpu_result) = gpu_exec.try_execute_op(op, &source, width, height) {
-                        // GPU succeeded — replace source with GPU output.
-                        let mut out_buf = take_execution_buffer(&mut buffer_pool, required_len);
-                        out_buf.copy_from_slice(&gpu_result);
-                        release_execution_buffer(&mut buffer_pool, source);
-                        source = out_buf;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !gpu_applied {
-                    apply_render_op(&mut source, width, height, op, frame_seed);
-                }
+                apply_render_op(&mut source, width, height, op, frame_seed);
                 if let (Some(compiled), Some(input_signature)) = (compiled, source_input_signature)
                 {
                     put_cached_node_output(
@@ -711,41 +636,12 @@ fn execute_effect_graph(
         .unwrap_or_else(|| input.to_vec())
 }
 
-/// Thread-safe global GPU executor, set once at app startup.
-static GPU_EXECUTOR: OnceLock<Option<Arc<dyn EffectGpuExecutor>>> = OnceLock::new();
-
-/// Register a global GPU executor. Call once at app startup.
-pub fn set_global_gpu_executor(executor: Option<Arc<dyn EffectGpuExecutor>>) {
-    if GPU_EXECUTOR.get().is_some() {
-        tracing::warn!("set_global_gpu_executor called more than once — ignored");
-        return;
-    }
-    let _ = GPU_EXECUTOR.set(executor);
-}
-
 pub fn apply_compiled_effect_graph(
     input: &[u8],
     width: u32,
     height: u32,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
-) -> Vec<u8> {
-    let gpu = GPU_EXECUTOR
-        .get()
-        .and_then(|opt| opt.as_ref())
-        .map(|arc| arc.as_ref() as &dyn EffectGpuExecutor);
-    apply_compiled_effect_graph_with_gpu(input, width, height, compiled, frame_seed, gpu)
-}
-
-/// Like `apply_compiled_effect_graph`, but with an optional GPU executor for
-/// accelerating supported render ops.
-pub fn apply_compiled_effect_graph_with_gpu(
-    input: &[u8],
-    width: u32,
-    height: u32,
-    compiled: &CompiledEffectGraph,
-    frame_seed: i64,
-    gpu: Option<&dyn EffectGpuExecutor>,
 ) -> Vec<u8> {
     if let Some(cached) = get_cached_effect_output(input, width, height, compiled, frame_seed) {
         return cached;
@@ -760,7 +656,6 @@ pub fn apply_compiled_effect_graph_with_gpu(
         &compiled.node_use_counts,
         Some(compiled),
         frame_seed,
-        gpu,
     );
 
     put_cached_effect_output(input, width, height, compiled, frame_seed, &output);
@@ -770,57 +665,6 @@ pub fn apply_compiled_effect_graph_with_gpu(
 /// Return whether a compiled graph can execute entirely on the float/linear CPU path.
 pub fn compiled_effect_graph_supports_rgba_f32(compiled: &CompiledEffectGraph) -> bool {
     validate_float_effect_graph(compiled).is_ok()
-}
-
-/// Check whether a render op can be executed on the GPU.
-///
-/// This queries the global GPU executor to determine if the op is supported.
-/// Returns `None` if no GPU executor is registered or if the op is not supported.
-pub fn check_effect_gpu_capability(op: &EffectRenderOp) -> Option<EffectGpuBlocker> {
-    let gpu = GPU_EXECUTOR
-        .get()
-        .and_then(|opt| opt.as_ref())
-        .map(|arc| arc.as_ref() as &dyn EffectGpuExecutor);
-    if gpu.is_none() {
-        return Some(EffectGpuBlocker::UnsupportedRenderOp { op: effect_render_op_name(op) });
-    }
-    // The executor exists; the op is potentially supported.
-    // Actual GPU execution success is determined at runtime.
-    None
-}
-
-/// Return the list of render ops in a compiled graph that would require CPU
-/// fallback if GPU execution is attempted. This is useful for diagnostics
-/// and reporting which effects block GPU acceleration.
-pub fn effect_graph_gpu_blockers(compiled: &CompiledEffectGraph) -> Vec<EffectGpuBlocker> {
-    let mut blockers = Vec::new();
-    for node_id in &compiled.schedule.ordered_nodes {
-        if let Some(node) = compiled.graph.node(*node_id) {
-            match &node.kind {
-                EffectGraphNodeKind::UnaryEffect { op, .. } => {
-                    if let Some(blocker) = check_effect_gpu_capability(op) {
-                        blockers.push(blocker);
-                    }
-                }
-                EffectGraphNodeKind::Blend { .. }
-                | EffectGraphNodeKind::Mask { .. }
-                | EffectGraphNodeKind::MaskSource { .. }
-                | EffectGraphNodeKind::MultiInput { .. } => {
-                    blockers.push(EffectGpuBlocker::UnsupportedNodeKind {
-                        kind: match &node.kind {
-                            EffectGraphNodeKind::Blend { .. } => "blend",
-                            EffectGraphNodeKind::Mask { .. } => "mask",
-                            EffectGraphNodeKind::MaskSource { .. } => "mask_source",
-                            EffectGraphNodeKind::MultiInput { .. } => "multi_input",
-                            _ => "unknown",
-                        },
-                    });
-                }
-                EffectGraphNodeKind::Source => {}
-            }
-        }
-    }
-    blockers
 }
 
 /// Execute a compiled graph over linear `f32` RGBA pixels.

@@ -1,10 +1,10 @@
 //! GPU-resident working-space compositing.
 //!
 //! This module owns the native wgpu path for preview/playback compositing when
-//! a layer stack is simple enough to stay on GPU: affine transforms, Normal
-//! blend mode, no effect graphs, and a bounded layer count. Unsupported layer
-//! shapes are rejected with typed blockers so callers can fall back to the CPU
-//! reference compositor without losing diagnostic evidence.
+//! a layer stack is simple enough to stay on GPU: affine transforms, fused
+//! pointwise effect graphs, Normal blend mode, and a bounded layer count.
+//! Unsupported layer shapes are rejected with typed blockers so callers can
+//! fall back to the CPU reference compositor without losing diagnostic evidence.
 
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
@@ -14,6 +14,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use mondrian_core::types::{BlendMode, Color, ColorSpace};
+use mondrian_effects::{CompiledEffectGpuPlan, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS};
 use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
 
@@ -27,11 +28,18 @@ struct VsOut {
 struct CompositeUniforms {
     opacity: f32,
     source_kind: u32,
-    _pad0: vec2<u32>,
+    effect_count: u32,
+    frame_seed: u32,
     solid_color: vec4<f32>,
     inv_transform0: vec4<f32>,
     inv_transform1: vec4<f32>,
     geometry: vec4<f32>,
+    effects: array<EffectUniform, 8>,
+};
+
+struct EffectUniform {
+    header: vec4<u32>,
+    params: vec4<f32>,
 };
 
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
@@ -79,20 +87,27 @@ fn over_straight_alpha(base_px: vec4<f32>, blend_px: vec4<f32>, opacity: f32) ->
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base_px = textureSample(accum_tex, linear_sampler, in.uv);
-    let layer_px = select(
-        sample_layer(in.uv),
+    let source_position = source_coordinate(in.uv);
+    var layer_px = select(
+        sample_layer(source_position),
         uniforms.solid_color,
         uniforms.source_kind == 1u,
     );
+    let effect_position = select(
+        source_position - vec2<f32>(0.5),
+        in.uv * uniforms.geometry.zw - vec2<f32>(0.5),
+        uniforms.source_kind == 1u,
+    );
+    layer_px = apply_effects(layer_px, effect_position);
     return over_straight_alpha(base_px, layer_px, uniforms.opacity);
 }
 
-fn sample_layer(dst_uv: vec2<f32>) -> vec4<f32> {
+fn source_coordinate(dst_uv: vec2<f32>) -> vec2<f32> {
     let dst_center = vec2<f32>(
         dst_uv.x * uniforms.geometry.x,
         dst_uv.y * uniforms.geometry.y,
     );
-    let src_center = vec2<f32>(
+    return vec2<f32>(
         uniforms.inv_transform0.x * dst_center.x +
             uniforms.inv_transform0.y * dst_center.y +
             uniforms.inv_transform0.z,
@@ -100,6 +115,9 @@ fn sample_layer(dst_uv: vec2<f32>) -> vec4<f32> {
             uniforms.inv_transform1.x * dst_center.y +
             uniforms.inv_transform1.y,
     );
+}
+
+fn sample_layer(src_center: vec2<f32>) -> vec4<f32> {
     let src_size = uniforms.geometry.zw;
     if (src_center.x < 0.5 ||
         src_center.y < 0.5 ||
@@ -108,6 +126,49 @@ fn sample_layer(dst_uv: vec2<f32>) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     return textureSample(layer_tex, linear_sampler, src_center / src_size);
+}
+
+fn grain_noise(position: vec2<f32>) -> f32 {
+    var value = u32(position.x) * 1973u + u32(position.y) * 9277u +
+        uniforms.frame_seed * 26699u + 0x68bc21ebu;
+    value = value ^ (value << 13u);
+    value = value ^ (value >> 17u);
+    value = value ^ (value << 5u);
+    return f32(value) / 4294967295.0 * 2.0 - 1.0;
+}
+
+fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
+    if (input.a <= 0.000001) { return input; }
+    var pixel = input;
+    for (var index = 0u; index < 8u; index = index + 1u) {
+        if (index >= uniforms.effect_count) { break; }
+        let effect = uniforms.effects[index];
+        if (effect.header.x == 1u) {
+            let exposure = exp2(clamp(effect.params.x, -4.0, 4.0));
+            let contrast = clamp(effect.params.y, 0.0, 3.0);
+            let saturation = clamp(effect.params.z, 0.0, 3.0);
+            var rgb = (pixel.rgb * exposure - vec3<f32>(0.5)) * contrast + vec3<f32>(0.5);
+            let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            pixel = vec4<f32>(vec3<f32>(luma) + (rgb - vec3<f32>(luma)) * saturation, pixel.a);
+        } else if (effect.header.x == 2u) {
+            let temperature = clamp(effect.params.x, -1.0, 1.0);
+            let tint = clamp(effect.params.y, -1.0, 1.0);
+            pixel.r = pixel.r + temperature * 0.12 - tint * 0.04;
+            pixel.g = pixel.g + tint * 0.05;
+            pixel.b = pixel.b - temperature * 0.12 - tint * 0.02;
+        } else if (effect.header.x == 3u) {
+            let center = max((uniforms.geometry.zw - vec2<f32>(1.0)) * 0.5, vec2<f32>(1.0));
+            let normalized = (position - center) / center;
+            let distance = min(length(normalized), 1.0);
+            let feather = clamp(effect.params.y, 0.05, 1.0);
+            let gain = 1.0 - smoothstep(1.0 - feather * 0.85, 1.0, distance) * effect.params.x;
+            pixel = vec4<f32>(pixel.rgb * gain, pixel.a);
+        } else if (effect.header.x == 4u) {
+            let noise = grain_noise(position) * clamp(effect.params.x, 0.0, 1.0) * 0.18;
+            pixel = vec4<f32>(pixel.rgb + vec3<f32>(noise), pixel.a);
+        }
+    }
+    return pixel;
 }
 "#;
 
@@ -225,7 +286,6 @@ impl GpuCompositingDiagnostics {
 /// why GPU compositing is or is not possible.
 pub fn evaluate_gpu_compositing_capability(
     layer_count: usize,
-    has_any_effect_graph: bool,
     has_any_unsupported_transform: bool,
     has_any_non_normal_blend_mode: bool,
     all_frames_gpu_resident: bool,
@@ -233,11 +293,6 @@ pub fn evaluate_gpu_compositing_capability(
     if layer_count > MAX_GPU_COMPOSITE_LAYERS {
         return GpuCompositingCapability::CpuFallback {
             reason: GpuCompositingBlockerReason::TooManyLayers,
-        };
-    }
-    if has_any_effect_graph {
-        return GpuCompositingCapability::CpuFallback {
-            reason: GpuCompositingBlockerReason::EffectRequiresCpu,
         };
     }
     if has_any_non_normal_blend_mode {
@@ -277,11 +332,12 @@ pub struct GpuCompositeLayer<'a> {
     pub opacity: f32,
     /// Timeline blend mode. Only `Normal` is accepted by the current GPU path.
     pub blend_mode: BlendMode,
-    /// Timeline affine transform. Only identity is accepted by the current GPU path.
+    /// Timeline affine transform. Media accepts invertible transforms; solids require identity.
     pub transform: [f32; 6],
-    /// Whether this layer has any effect graph work that is not already baked
-    /// into the source frame.
-    pub has_effect_graph: bool,
+    /// Lowered pointwise effect plan evaluated in working-linear space.
+    pub effect_plan: Option<&'a CompiledEffectGpuPlan>,
+    /// Stable timeline frame seed used by temporal effect operations.
+    pub frame_seed: i64,
 }
 
 /// Request for recording a GPU working-space composite.
@@ -353,11 +409,20 @@ pub struct GpuFrameCompositor {
 struct GpuCompositeUniforms {
     opacity: f32,
     source_kind: u32,
-    _pad0: [u32; 2],
+    effect_count: u32,
+    frame_seed: u32,
     solid_color: [f32; 4],
     inv_transform0: [f32; 4],
     inv_transform1: [f32; 4],
     geometry: [f32; 4],
+    effects: [GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuEffectUniform {
+    header: [u32; 4],
+    params: [f32; 4],
 }
 
 impl GpuFrameCompositor {
@@ -535,7 +600,10 @@ impl GpuFrameCompositor {
                 GpuCompositeUniforms {
                     opacity: layer.opacity.clamp(0.0, 1.0),
                     source_kind,
-                    _pad0: [0, 0],
+                    effect_count: layer
+                        .effect_plan
+                        .map_or(0, |plan| plan.operations().len() as u32),
+                    frame_seed: layer.frame_seed as u32,
                     solid_color,
                     inv_transform0: [
                         inv_transform[0],
@@ -545,6 +613,7 @@ impl GpuFrameCompositor {
                     ],
                     inv_transform1: [inv_transform[4], inv_transform[5], 0.0, 0.0],
                     geometry: [width as f32, height as f32, source_size[0], source_size[1]],
+                    effects: effect_uniforms(layer.effect_plan),
                 },
             );
             src_is_a = !src_is_a;
@@ -633,6 +702,34 @@ impl GpuFrameCompositor {
     }
 }
 
+fn effect_uniforms(
+    plan: Option<&CompiledEffectGpuPlan>,
+) -> [GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS] {
+    let mut uniforms = [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS];
+    let Some(plan) = plan else { return uniforms };
+    for (target, operation) in uniforms.iter_mut().zip(plan.operations()) {
+        *target = match *operation {
+            EffectGpuPointOp::ColorAdjust { exposure, contrast, saturation } => GpuEffectUniform {
+                header: [1, 0, 0, 0],
+                params: [exposure, contrast, saturation, 0.0],
+            },
+            EffectGpuPointOp::WhiteBalance { temperature, tint } => GpuEffectUniform {
+                header: [2, 0, 0, 0],
+                params: [temperature, tint, 0.0, 0.0],
+            },
+            EffectGpuPointOp::Vignette { intensity, feather } => GpuEffectUniform {
+                header: [3, 0, 0, 0],
+                params: [intensity, feather, 0.0, 0.0],
+            },
+            EffectGpuPointOp::Grain { amount } => GpuEffectUniform {
+                header: [4, 0, 0, 0],
+                params: [amount, 0.0, 0.0, 0.0],
+            },
+        };
+    }
+    uniforms
+}
+
 fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuCompositeError> {
     if request.width == 0 || request.height == 0 {
         return Err(GpuCompositeError::EmptyExtent {
@@ -642,7 +739,6 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
     }
     let capability = evaluate_gpu_compositing_capability(
         request.layers.len(),
-        request.layers.iter().any(|layer| layer.has_effect_graph),
         request.layers.iter().any(|layer| !gpu_transform_supported(layer)),
         request.layers.iter().any(|layer| layer.blend_mode != BlendMode::Normal),
         request
@@ -789,30 +885,19 @@ mod tests {
 
     #[test]
     fn gpu_compositing_capability_classifies_single_layer() {
-        let cap = evaluate_gpu_compositing_capability(1, false, false, false, true);
+        let cap = evaluate_gpu_compositing_capability(1, false, false, true);
         assert_eq!(cap, GpuCompositingCapability::GpuNative);
     }
 
     #[test]
     fn gpu_compositing_capability_classifies_upload_needed() {
-        let cap = evaluate_gpu_compositing_capability(1, false, false, false, false);
+        let cap = evaluate_gpu_compositing_capability(1, false, false, false);
         assert_eq!(cap, GpuCompositingCapability::GpuWithUpload);
     }
 
     #[test]
-    fn gpu_compositing_capability_rejects_effect_graph() {
-        let cap = evaluate_gpu_compositing_capability(1, true, false, false, true);
-        assert!(matches!(
-            cap,
-            GpuCompositingCapability::CpuFallback {
-                reason: GpuCompositingBlockerReason::EffectRequiresCpu
-            }
-        ));
-    }
-
-    #[test]
     fn gpu_compositing_capability_rejects_non_normal_blend() {
-        let cap = evaluate_gpu_compositing_capability(2, false, false, true, true);
+        let cap = evaluate_gpu_compositing_capability(2, false, true, true);
         assert!(matches!(
             cap,
             GpuCompositingCapability::CpuFallback {
@@ -823,7 +908,7 @@ mod tests {
 
     #[test]
     fn gpu_compositing_capability_rejects_unsupported_transform() {
-        let cap = evaluate_gpu_compositing_capability(1, false, true, false, true);
+        let cap = evaluate_gpu_compositing_capability(1, true, false, true);
         assert!(matches!(
             cap,
             GpuCompositingCapability::CpuFallback {
@@ -834,13 +919,8 @@ mod tests {
 
     #[test]
     fn gpu_compositing_capability_rejects_too_many_layers() {
-        let cap = evaluate_gpu_compositing_capability(
-            MAX_GPU_COMPOSITE_LAYERS + 1,
-            false,
-            false,
-            false,
-            true,
-        );
+        let cap =
+            evaluate_gpu_compositing_capability(MAX_GPU_COMPOSITE_LAYERS + 1, false, false, true);
         assert!(matches!(
             cap,
             GpuCompositingCapability::CpuFallback {
@@ -894,13 +974,36 @@ mod tests {
     }
 
     #[test]
+    fn gpu_effect_uniforms_preserve_plan_order_and_parameters() {
+        use mondrian_effects::{
+            get_or_compile_scheduled_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::WhiteBalance { temperature: 0.25, tint: -0.5 });
+        builder.append_unary(EffectRenderOp::Vignette { intensity: 0.7, feather: 0.4 });
+        let graph = get_or_compile_scheduled_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point chain");
+
+        let uniforms = effect_uniforms(Some(&plan));
+
+        assert_eq!(uniforms[0].header[0], 2);
+        assert_eq!(uniforms[0].params, [0.25, -0.5, 0.0, 0.0]);
+        assert_eq!(uniforms[1].header[0], 3);
+        assert_eq!(uniforms[1].params, [0.7, 0.4, 0.0, 0.0]);
+        assert!(uniforms[2..].iter().all(|uniform| uniform.header[0] == 0));
+    }
+
+    #[test]
     fn gpu_composite_request_rejects_unsupported_blend_mode() {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::SolidColor(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
             opacity: 1.0,
             blend_mode: BlendMode::Multiply,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            has_effect_graph: false,
+            effect_plan: None,
+            frame_seed: 0,
         };
         let request = GpuCompositeRequest {
             width: 16,
@@ -932,7 +1035,8 @@ mod tests {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [2.0, 0.0, 0.0, 0.0, 2.0, 0.0],
-            has_effect_graph: false,
+            effect_plan: None,
+            frame_seed: 0,
         };
         let request = GpuCompositeRequest {
             width: 16,
@@ -952,7 +1056,8 @@ mod tests {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [2.0, 0.0, 0.0, 0.0, 2.0, 0.0],
-            has_effect_graph: false,
+            effect_plan: None,
+            frame_seed: 0,
         };
         let request = GpuCompositeRequest {
             width: 16,
@@ -972,7 +1077,8 @@ mod tests {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            has_effect_graph: false,
+            effect_plan: None,
+            frame_seed: 0,
         };
         let request = GpuCompositeRequest {
             width: 8,
@@ -1003,7 +1109,8 @@ mod tests {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            has_effect_graph: false,
+            effect_plan: None,
+            frame_seed: 0,
         };
         let request = GpuCompositeRequest {
             width: 16,
@@ -1035,7 +1142,8 @@ mod tests {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            has_effect_graph: false,
+            effect_plan: None,
+            frame_seed: 0,
         };
         let request = GpuCompositeRequest {
             width: 8,

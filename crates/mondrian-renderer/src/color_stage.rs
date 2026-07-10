@@ -4208,6 +4208,18 @@ mod tests {
         let transform =
             RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
         let compositor = GpuFrameCompositor::new(&context.device);
+        let mut effect_graph = mondrian_effects::EffectGraphBuilderState::new();
+        effect_graph.append_unary(mondrian_effects::EffectRenderOp::ColorAdjust {
+            exposure: 0.25,
+            contrast: 1.1,
+            saturation: 0.9,
+        });
+        effect_graph.append_unary(mondrian_effects::EffectRenderOp::Grain { amount: 0.05 });
+        let compiled_effect_graph =
+            mondrian_effects::get_or_compile_scheduled_render_graph(effect_graph.finish())
+                .expect("valid GPU effect graph");
+        let effect_plan = mondrian_effects::lower_effect_graph_to_gpu_plan(&compiled_effect_graph)
+            .expect("supported GPU effect graph");
         let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_400);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-gpu-input-to-composite"),
@@ -4233,7 +4245,8 @@ mod tests {
             opacity: 1.0,
             blend_mode: mondrian_core::types::BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            has_effect_graph: false,
+            effect_plan: Some(&effect_plan),
+            frame_seed: 17,
         }];
 
         let composite = runtime

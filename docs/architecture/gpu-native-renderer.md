@@ -247,7 +247,19 @@ working frame or fail with a structured backend error.
 
 ## Effect Integration
 
-`mondrian-effects` already exposes `EffectGpuExecutor` as an acceleration hook. Long-term, effects should compile to graph nodes that the renderer can execute on GPU where supported, with CPU fallback only for unsupported ops/plugins.
+`mondrian-effects` lowers supported compiled graphs to `CompiledEffectGpuPlan`,
+a graphics-API-neutral contract. The preview scheduler carries that plan and
+the timeline frame seed across the app/window boundary; it does not interpret
+effect math or own wgpu resources. `GpuFrameCompositor` consumes the plan in its
+`Rgba32Float` working-space pass, applying the fused point operations before
+straight-alpha composition. The retired RGBA8 global executor/upload/readback
+path must not be reintroduced.
+
+The first native subset is a bounded single-source chain of ColorAdjust,
+WhiteBalance, Vignette, and deterministic Grain. Unsupported topology, spatial
+sampling, LUT resources, and custom operations remain explicit lowering
+blockers until dedicated renderer graph passes provide their resource and alpha
+contracts.
 
 ## OCIO GPU Integration
 

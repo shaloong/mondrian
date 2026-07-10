@@ -3363,7 +3363,8 @@ struct PreparedPreviewGpuCompositeLayer<'a> {
     opacity: f32,
     blend_mode: BlendMode,
     transform: [f32; 6],
-    has_effect_graph: bool,
+    effect_plan: Option<&'a mondrian_effects::CompiledEffectGpuPlan>,
+    frame_seed: i64,
 }
 
 enum PreparedPreviewGpuCompositeLayerSource<'a> {
@@ -3632,6 +3633,8 @@ fn prepare_preview_gpu_composite<'a>(
                 native_source,
                 opacity,
                 transform,
+                effect_plan,
+                frame_seed,
             } => {
                 prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
                 prepared
@@ -3736,7 +3739,8 @@ fn prepare_preview_gpu_composite<'a>(
                     opacity: *opacity,
                     blend_mode: BlendMode::Normal,
                     transform: *transform,
-                    has_effect_graph: false,
+                    effect_plan: Some(effect_plan),
+                    frame_seed: *frame_seed,
                 });
             }
             AppUiGpuPreviewCompositeLayer::SolidColor { layer } => {
@@ -3747,7 +3751,8 @@ fn prepare_preview_gpu_composite<'a>(
                     opacity: layer.opacity,
                     blend_mode: layer.blend_mode,
                     transform: layer.transform,
-                    has_effect_graph: !layer.effect_graph.graph.is_identity(),
+                    effect_plan: None,
+                    frame_seed: 0,
                 });
             }
         }
@@ -3825,7 +3830,8 @@ fn preview_gpu_composite_layers<'a>(
             opacity: layer.opacity,
             blend_mode: layer.blend_mode,
             transform: layer.transform,
-            has_effect_graph: layer.has_effect_graph,
+            effect_plan: layer.effect_plan,
+            frame_seed: layer.frame_seed,
         })
         .collect()
 }
