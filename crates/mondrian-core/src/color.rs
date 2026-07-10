@@ -1,7 +1,7 @@
 //! Color management primitives shared by preview, render and export.
 
 use crate::icc::parse_icc_display_profile;
-use crate::types::{ColorEngine, ColorSpace};
+use crate::types::{ColorEngine, ColorSpace, OcioColorSpaceIdentity};
 use moxcms::{
     CicpColorPrimaries, CicpProfile, ColorProfile as CmsColorProfile, Layout as CmsLayout,
     MatrixCoefficients, TransferCharacteristics, TransformOptions,
@@ -52,6 +52,35 @@ impl ColorPipeline {
 // ── ColorEngine: centralized dispatch ─────────────────────────────────────────
 
 impl ColorEngine {
+    /// Apply a float OCIO processor between explicit encoded/working identities.
+    pub fn convert_identity_float(
+        &self,
+        data: &mut [f32],
+        src: OcioColorSpaceIdentity,
+        dst: OcioColorSpaceIdentity,
+    ) -> Result<(), String> {
+        match self {
+            Self::MondrianSmart => crate::ocio::ensure_mondrian_default_ocio_loaded()?,
+            Self::Ocio { .. } => self.ensure_loaded()?,
+        }
+        crate::ocio::apply_ocio_identity_float(data, src, dst)
+    }
+
+    /// Apply an OCIO display/view processor from an explicit source identity.
+    pub fn display_transform_identity_float(
+        &self,
+        data: &mut [f32],
+        src: OcioColorSpaceIdentity,
+        display: &str,
+        view: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::MondrianSmart => crate::ocio::ensure_mondrian_default_ocio_loaded()?,
+            Self::Ocio { .. } => self.ensure_loaded()?,
+        }
+        crate::ocio::apply_ocio_display_identity_float(data, src, display, view)
+    }
+
     /// Apply a color space conversion to the given rgba8 data.
     ///
     /// This is the single dispatch point for all color space transforms.
@@ -1036,33 +1065,6 @@ pub fn convert_rgba8(data: &[u8], pipeline: ColorPipeline) -> Result<Vec<u8>, St
     let mut out = data.to_vec();
     convert_rgba8_in_place(&mut out, pipeline)?;
     Ok(out)
-}
-
-/// Encode linear-light RGB samples for an OCIO color-space processor input.
-///
-/// `data` must contain complete RGBA f32 pixels. RGB channels use the transfer
-/// characteristic attached to `color_space`; alpha remains unchanged.
-pub fn encode_linear_rgba_f32_in_place(
-    data: &mut [f32],
-    color_space: ColorSpace,
-) -> Result<(), String> {
-    if !data.len().is_multiple_of(4) {
-        return Err(format!(
-            "linear RGBA f32 buffer length {} is not divisible by four",
-            data.len()
-        ));
-    }
-    for (pixel_index, pixel) in data.chunks_exact_mut(4).enumerate() {
-        if pixel.iter().any(|value| !value.is_finite()) {
-            return Err(format!(
-                "linear RGBA f32 pixel {pixel_index} contains a non-finite component"
-            ));
-        }
-        for channel in &mut pixel[..3] {
-            *channel = encode_transfer(color_space, *channel);
-        }
-    }
-    Ok(())
 }
 
 fn decode_transfer(space: ColorSpace, v: f32) -> f32 {

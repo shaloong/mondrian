@@ -120,7 +120,16 @@ an explicit user override.
 
 ## Working Space
 
-`SequenceSettings.color_space` is the timeline working color space. Media input transforms resolve from clip/media interpretation into this working space. Output/display transforms convert from working/output context to the destination.
+`WorkingColorSpace` is the linear-light identity used by rendering, effects, and
+compositing. It is deliberately separate from `ColorSpace`, which identifies
+encoded acquisition and delivery spaces. `OcioColorSpaceIdentity` carries that
+role distinction into CPU/GPU processor requests and cache keys, so encoded
+`Camera Rec.709` cannot alias linear `Linear Rec.709 (sRGB)`. Camera log spaces
+are rejected when converted to a working identity. `SequenceSettings.color_space`
+is the remaining persisted legacy representation; renderer boundaries validate
+and convert it to `WorkingColorSpace` before requesting a processor. Migrating
+sequence persistence to store `WorkingColorSpace` directly is required before
+the legacy field can be removed.
 
 `ColorPipeline` execution is source -> working -> output. The management engine
 dispatch must preserve that full chain; it must not collapse a timeline pipeline
@@ -154,7 +163,9 @@ the resolved OCIO input processor; float PQ/HLG/display/export processors
 produce it after the final output boundary. `LinearFloat` is reserved for
 linear-light working-space pixels and may participate in compositing.
 `CpuEncodedFloatColorFrame` and `CpuColorFrame` are separate types so an encoded
-output cannot accidentally re-enter linear effects or blending.
+output cannot accidentally re-enter linear effects or blending. Their payloads
+are also distinct: `EncodedRgbaF32Frame` carries nonlinear boundary samples,
+while `RgbaF32Frame` is reserved for linear-light pixels.
 
 Renderer stages must carry typed color-frame metadata. `CpuColorFrame` is the
 CPU-resident linear working-frame contract; future GPU frames must expose the
@@ -220,17 +231,18 @@ blockers, `RenderGpuColorPassSchedule` binds the source `GpuColorFrameHandle`,
 target `GpuColorFrameHandle`, `RenderColorTransformGpuPlan`, and
 `OcioGpuWgpuRenderPassNodePlan` into a schedulable unit. It fails closed if the
 frame descriptors, residency, extents, or OCIO resource keys differ.
-GPU transforms that cross an encoded/linear boundary must declare wrapper-side
-transfer operations in `OcioGpuWgpuWrapperColorContract`. Source/import ->
-working passes decode OCIO output into `LinearFloat`; working -> output passes
-encode sampled linear values before invoking the OCIO program. The wrapper color
-contract participates in the wrapper link/source/render-pipeline hashes, so
-pipelines with different color-domain semantics cannot share the same shader.
+GPU transforms express encoded/linear boundaries in the OCIO processor endpoints.
+Source/import requests use `Encoded(source) -> Working(destination)` and output
+requests use `Working(source) -> Encoded(destination)` or an explicit display/view.
+The fullscreen wrapper only samples, invokes the generated OCIO function, and
+writes the result; it contains no independent transfer-function math. Processor
+request identity participates in shader cache keys, preventing pipelines with
+different color-domain semantics from sharing a shader.
 Output texture format and descriptor encoding are one contract: `Rgba8Unorm`
 requires `EncodedRgba8`, while `Rgba16Float`/`Rgba32Float` output targets require
 `EncodedFloat`. Resource planning rejects contradictory pairs. CPU float output
-encodes linear working samples into the OCIO processor's declared source space,
-matching the GPU wrapper before the same processor is executed.
+passes linear working samples directly to a processor whose source endpoint is
+the corresponding OCIO linear working identity, matching GPU execution.
 Display/view output boundaries carry an explicit `RenderOcioDisplayView` when
 the caller wants OCIO presentation semantics instead of a color-space delivery
 transform. CPU display/view boundaries execute through the OCIO display

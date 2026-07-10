@@ -1,13 +1,13 @@
+use crate::EncodedRgbaF32Frame;
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuEncodedColorFrame, CpuEncodedFloatColorFrame, LinearFloatSource, OcioGpuShaderCache,
     OcioGpuShaderError, OcioGpuShaderRequest, OcioGpuWgpuExecutionPlan,
-    OcioGpuWgpuWrapperColorContract,
 };
 use mondrian_core::{
-    convert_rgba8_in_place, encode_linear_rgba_f32_in_place,
+    convert_rgba8_in_place,
     types::{ColorEngine, ColorSpace},
-    ColorPipeline, GpuLanguage, RgbaF32Frame,
+    ColorPipeline, GpuLanguage, OcioColorSpaceIdentity, RgbaF32Frame, WorkingColorSpace,
 };
 
 /// Backend used to execute a render color transform.
@@ -501,20 +501,13 @@ impl CpuColorTransformExecutor {
 
         // Flatten borrowed typed pixels into the contiguous f32 buffer OCIO expects.
         let mut flat = flatten_rgba_f32_pixels(&frame.rgba_f32().data);
-        encode_linear_rgba_f32_in_place(&mut flat, descriptor.color_space).map_err(|reason| {
-            RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::WorkingToOutput,
-                input: descriptor,
-                output: output_descriptor,
-                reason,
-            }
-        })?;
+        let working = WorkingColorSpace::try_from(descriptor.color_space)?;
         if let Some(display_view) = &transform.display_view {
             transform
                 .engine
-                .display_transform_float(
+                .display_transform_identity_float(
                     &mut flat,
-                    descriptor.color_space,
+                    working.into(),
                     &display_view.display,
                     &display_view.view,
                 )
@@ -527,12 +520,10 @@ impl CpuColorTransformExecutor {
         } else {
             transform
                 .engine
-                .convert_pipeline_float(
+                .convert_identity_float(
                     &mut flat,
-                    descriptor.color_space,
-                    descriptor.color_space,
-                    transform.output_color_space,
-                    false,
+                    working.into(),
+                    transform.output_color_space.into(),
                 )
                 .map_err(|reason| RenderColorTransformError::ExecutionFailed {
                     direction: RenderColorTransformDirection::WorkingToOutput,
@@ -546,7 +537,7 @@ impl CpuColorTransformExecutor {
         let pixels: Vec<[f32; 4]> =
             flat.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
         let out_frame = CpuEncodedFloatColorFrame::new(
-            RgbaF32Frame {
+            EncodedRgbaF32Frame {
                 width: descriptor.width,
                 height: descriptor.height,
                 data: pixels,
@@ -604,24 +595,18 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             encoding: ColorFrameEncoding::LinearFloat,
             residency: self.options.output_residency,
         };
+        let working = WorkingColorSpace::try_from(transform.working_color_space)?;
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: input.color_space,
-            dst: transform.working_color_space,
+            src: OcioColorSpaceIdentity::Encoded(input.color_space),
+            dst: OcioColorSpaceIdentity::Working(working),
             language: self.options.language,
         };
-        let mut plan = self.plan(
+        self.plan(
             RenderColorTransformDirection::InputToWorking,
             input,
             output,
             request,
-        )?;
-        if output.encoding == ColorFrameEncoding::LinearFloat {
-            plan.wgpu.wrapper_color =
-                OcioGpuWgpuWrapperColorContract::encoded_input_to_linear_working(
-                    transform.working_color_space,
-                );
-        }
-        Ok(plan)
+        )
     }
 
     /// Plan timeline working-space -> display/export GPU execution.
@@ -652,33 +637,27 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             encoding: output_encoding,
             residency: self.options.output_residency,
         };
+        let working = WorkingColorSpace::try_from(input.color_space)?;
         let request = if let Some(display_view) = &transform.display_view {
             OcioGpuShaderRequest::DisplayView {
-                src: input.color_space,
+                src: OcioColorSpaceIdentity::Working(working),
                 display: display_view.display.clone(),
                 view: display_view.view.clone(),
                 language: self.options.language,
             }
         } else {
             OcioGpuShaderRequest::ColorSpace {
-                src: input.color_space,
-                dst: transform.output_color_space,
+                src: OcioColorSpaceIdentity::Working(working),
+                dst: OcioColorSpaceIdentity::Encoded(transform.output_color_space),
                 language: self.options.language,
             }
         };
-        let mut plan = self.plan(
+        self.plan(
             RenderColorTransformDirection::WorkingToOutput,
             input,
             output,
             request,
-        )?;
-        if input.encoding == ColorFrameEncoding::LinearFloat {
-            plan.wgpu.wrapper_color =
-                OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(
-                    input.color_space,
-                );
-        }
-        Ok(plan)
+        )
     }
 
     fn plan(
@@ -749,6 +728,9 @@ pub enum RenderColorTransformError {
         /// Actual descriptor.
         actual: ColorFrameDescriptor,
     },
+    /// A camera/display transfer space was selected as a linear working space.
+    #[error("invalid render working color space: {0}")]
+    InvalidWorkingColorSpace(#[from] mondrian_core::InvalidWorkingColorSpace),
 }
 
 #[cfg(test)]
@@ -943,8 +925,12 @@ mod tests {
         assert!(plan.wgpu.blockers.is_empty());
         assert!(plan.wgpu.can_execute());
         assert_eq!(
-            plan.wgpu.wrapper_color,
-            OcioGpuWgpuWrapperColorContract::encoded_input_to_linear_working(ColorSpace::Rec709)
+            plan.request,
+            OcioGpuShaderRequest::ColorSpace {
+                src: OcioColorSpaceIdentity::Encoded(ColorSpace::SLog3),
+                dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+                language: GpuLanguage::Glsl4_0,
+            }
         );
     }
 
@@ -981,8 +967,12 @@ mod tests {
         assert!(plan.requires_source_upload);
         assert!(!plan.requires_output_readback);
         assert_eq!(
-            plan.wgpu.wrapper_color,
-            OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
+            plan.request,
+            OcioGpuShaderRequest::ColorSpace {
+                src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+                dst: OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+                language: GpuLanguage::Glsl4_0,
+            }
         );
         assert!(plan.wgpu.blockers.is_empty());
         assert!(plan.wgpu.can_execute());
@@ -1018,15 +1008,11 @@ mod tests {
         assert_eq!(
             plan.request,
             OcioGpuShaderRequest::DisplayView {
-                src: ColorSpace::Rec709,
+                src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
                 display: display.clone(),
                 view: view.clone(),
                 language: GpuLanguage::Glsl4_0,
             }
-        );
-        assert_eq!(
-            plan.wgpu.wrapper_color,
-            OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
         );
         assert!(plan.wgpu.blockers.is_empty());
         assert!(plan.wgpu.can_execute());
@@ -1058,10 +1044,14 @@ mod tests {
 
         assert_eq!(plan.diagnostics.output.residency, ColorFrameResidency::Cpu);
         assert!(plan.requires_output_readback);
-        assert_eq!(
-            plan.wgpu.wrapper_color,
-            OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
-        );
+        assert!(matches!(
+            plan.request,
+            OcioGpuShaderRequest::ColorSpace {
+                src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+                dst: OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
+                ..
+            }
+        ));
         assert!(plan.wgpu.blockers.is_empty());
         assert!(plan.wgpu.can_execute());
     }

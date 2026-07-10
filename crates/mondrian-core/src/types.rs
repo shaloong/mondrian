@@ -348,6 +348,76 @@ pub enum ColorSpace {
     ArriLogC4,
 }
 
+/// Linear-light color space used for rendering, effects, and compositing.
+///
+/// Working spaces describe chromaticities only; they never imply a camera or
+/// display transfer function. This prevents encoded source/output identities
+/// such as PQ, HLG, or LogC from entering linear-light processing by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkingColorSpace {
+    /// Linear-light BT.709/sRGB primaries with a D65 white point.
+    #[default]
+    LinearRec709,
+    /// Linear-light BT.2020 primaries with a D65 white point.
+    LinearRec2020,
+    /// Linear-light P3-D65 primaries.
+    LinearP3D65,
+    /// ACEScg/AP1 scene-linear working space.
+    AcesCg,
+}
+
+/// Error returned when an encoded source/output space is not a valid working space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{color_space:?} cannot be used as a linear working color space")]
+pub struct InvalidWorkingColorSpace {
+    /// Encoded color space rejected by the conversion.
+    pub color_space: ColorSpace,
+}
+
+impl TryFrom<ColorSpace> for WorkingColorSpace {
+    type Error = InvalidWorkingColorSpace;
+
+    fn try_from(color_space: ColorSpace) -> Result<Self, Self::Error> {
+        match color_space {
+            ColorSpace::Rec709 | ColorSpace::Srgb => Ok(Self::LinearRec709),
+            ColorSpace::Rec2020 | ColorSpace::Rec2100Hlg | ColorSpace::Rec2100Pq => {
+                Ok(Self::LinearRec2020)
+            }
+            ColorSpace::DciP3 => Ok(Self::LinearP3D65),
+            ColorSpace::AppleLog | ColorSpace::SLog3 | ColorSpace::ArriLogC4 => {
+                Err(InvalidWorkingColorSpace { color_space })
+            }
+        }
+    }
+}
+
+/// Explicit OCIO processor endpoint identity.
+///
+/// Encoded identities resolve source/delivery color spaces. Working identities
+/// resolve linear scene/render spaces. Processor caches include this enum so
+/// equal primaries with different transfer semantics cannot alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "role", content = "space", rename_all = "snake_case")]
+pub enum OcioColorSpaceIdentity {
+    /// Encoded source, display, or delivery color space.
+    Encoded(ColorSpace),
+    /// Linear-light rendering color space.
+    Working(WorkingColorSpace),
+}
+
+impl From<ColorSpace> for OcioColorSpaceIdentity {
+    fn from(value: ColorSpace) -> Self {
+        Self::Encoded(value)
+    }
+}
+
+impl From<WorkingColorSpace> for OcioColorSpaceIdentity {
+    fn from(value: WorkingColorSpace) -> Self {
+        Self::Working(value)
+    }
+}
+
 /// 色彩引擎 —— 色彩空间转换的统一分发点。
 ///
 /// 所有色彩转换都通过此枚举的方法进行，编译器保证穷尽 match 分发，不会出现
@@ -420,6 +490,30 @@ mod tests {
         let tc = TimeCode::from_secs(1.5, Rational::FPS_25);
         let half_frame_secs = 1.0 / (2.0 * Rational::FPS_25.to_f64());
         assert!((tc.to_secs() - 1.5).abs() <= half_frame_secs + 1e-9);
+    }
+
+    #[test]
+    fn working_color_space_conversion_separates_gamut_from_transfer() {
+        assert_eq!(
+            WorkingColorSpace::try_from(ColorSpace::Rec2100Pq),
+            Ok(WorkingColorSpace::LinearRec2020)
+        );
+        assert_eq!(
+            WorkingColorSpace::try_from(ColorSpace::Srgb),
+            Ok(WorkingColorSpace::LinearRec709)
+        );
+        assert!(matches!(
+            WorkingColorSpace::try_from(ColorSpace::SLog3),
+            Err(InvalidWorkingColorSpace { color_space: ColorSpace::SLog3 })
+        ));
+    }
+
+    #[test]
+    fn ocio_identity_keeps_encoded_and_working_spaces_distinct() {
+        assert_ne!(
+            OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709)
+        );
     }
 
     #[test]

@@ -715,9 +715,8 @@ impl RenderGpuOutputBoundaryRuntime {
         .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
         let output_format = color_target_format_for_gpu_frame(&resources.output);
         let shader_plan = resources.transform.wgpu.shader_plan.clone();
-        let wrapper_color = resources.transform.wgpu.wrapper_color;
         let static_pipeline = backend_prep
-            .prepare_static_pipeline(&shader_plan, wrapper_color, output_format)
+            .prepare_static_pipeline(&shader_plan, output_format)
             .map_err(RenderGpuInputStageRuntimeRecordError::BackendPrep)?;
         let prepared_backend = backend_objects
             .prepare_backend_objects(
@@ -776,9 +775,8 @@ impl RenderGpuOutputBoundaryRuntime {
         .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
         let output_format = color_target_format_for_gpu_frame(&resources.output);
         let shader_plan = resources.transform.wgpu.shader_plan.clone();
-        let wrapper_color = resources.transform.wgpu.wrapper_color;
         let static_pipeline = backend_prep
-            .prepare_static_pipeline(&shader_plan, wrapper_color, output_format)
+            .prepare_static_pipeline(&shader_plan, output_format)
             .map_err(RenderGpuInputStageRuntimeRecordError::BackendPrep)?;
         let prepared_backend = backend_objects
             .prepare_backend_objects(
@@ -829,9 +827,8 @@ impl RenderGpuOutputBoundaryRuntime {
             .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan)?;
         let output_format = color_target_format_for_gpu_frame(&resources.output);
         let shader_plan = resources.transform.wgpu.shader_plan.clone();
-        let wrapper_color = resources.transform.wgpu.wrapper_color;
         let static_pipeline = backend_prep
-            .prepare_static_pipeline(&shader_plan, wrapper_color, output_format)
+            .prepare_static_pipeline(&shader_plan, output_format)
             .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendPrep)?;
         let prepared_backend = backend_objects
             .prepare_backend_objects(
@@ -887,9 +884,8 @@ impl RenderGpuOutputBoundaryRuntime {
         .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan)?;
         let output_format = color_target_format_for_gpu_frame(&resources.output);
         let shader_plan = resources.transform.wgpu.shader_plan.clone();
-        let wrapper_color = resources.transform.wgpu.wrapper_color;
         let static_pipeline = backend_prep
-            .prepare_static_pipeline(&shader_plan, wrapper_color, output_format)
+            .prepare_static_pipeline(&shader_plan, output_format)
             .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendPrep)?;
         let prepared_backend = backend_objects
             .prepare_backend_objects(
@@ -3691,7 +3687,7 @@ mod tests {
     use crate::{
         GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadbackPlan,
         GpuColorFrameTextureFormat, GpuContext, OcioGpuShaderRequest, OcioGpuWgpuBlocker,
-        OcioGpuWgpuWrapperColorContract, RenderColorTransformBackend,
+        RenderColorTransformBackend,
     };
     use mondrian_core::types::{ColorEngine, ColorSpace};
     use mondrian_core::RgbaF32Frame;
@@ -4129,8 +4125,8 @@ mod tests {
         runtime
             .shader_cache_mut()
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::SLog3,
-                dst: ColorSpace::Rec709,
+                src: ColorSpace::SLog3.into(),
+                dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
             .expect("shader extraction");
@@ -4148,7 +4144,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_output_boundary_plans_linear_aware_wrapper_for_working_output() {
+    fn gpu_output_boundary_plans_explicit_working_to_encoded_processor() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let frame = cpu_working_frame();
         let boundary =
@@ -4174,10 +4170,6 @@ mod tests {
         else {
             panic!("expected upload -> GPU transform -> readback stage shape");
         };
-        assert_eq!(
-            gpu_plan.wgpu.wrapper_color,
-            OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
-        );
         assert!(gpu_plan.wgpu.blockers.is_empty());
         assert!(gpu_plan.wgpu.can_execute());
 
@@ -4185,10 +4177,16 @@ mod tests {
         let resources = plan
             .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
             .expect("linear-aware GPU output resources should materialize");
-        assert_eq!(
-            resources.transform.wgpu.wrapper_color,
-            OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(ColorSpace::Rec709)
-        );
+        assert!(matches!(
+            resources.transform.wgpu.shader_plan.request,
+            crate::OcioGpuShaderRequest::ColorSpace {
+                src: mondrian_core::OcioColorSpaceIdentity::Working(
+                    mondrian_core::WorkingColorSpace::LinearRec709
+                ),
+                dst: mondrian_core::OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -6232,7 +6230,7 @@ mod tests {
         let mut cache = OcioGpuShaderCache::default();
         // Use a nonexistent display/view to trigger extraction failure.
         let result = cache.prepare_wgpu_execution(OcioGpuShaderRequest::DisplayView {
-            src: ColorSpace::Rec709,
+            src: ColorSpace::Rec709.into(),
             display: "nonexistent_display_for_structural_test".to_owned(),
             view: "nonexistent_view_for_structural_test".to_owned(),
             language: GpuLanguage::Glsl4_0,

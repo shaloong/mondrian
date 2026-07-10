@@ -12,7 +12,7 @@
 //! 3. **Path** — explicit `config.ocio` file path
 //! 4. **Environment** — explicit `$OCIO` env var
 
-use crate::types::{ColorSpace, OcioConfigSource};
+use crate::types::{ColorSpace, OcioColorSpaceIdentity, OcioConfigSource, WorkingColorSpace};
 pub use ocio_rs::GpuLanguage;
 use ocio_rs::{
     BuiltinConfigRegistry, CPUProcessor, Config, GpuShaderDesc,
@@ -786,6 +786,24 @@ pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
     }
 }
 
+/// Map a linear working space to its pinned OCIO color-space identity.
+pub fn ocio_working_color_space_name(space: WorkingColorSpace) -> &'static str {
+    match space {
+        WorkingColorSpace::LinearRec709 => "Linear Rec.709 (sRGB)",
+        WorkingColorSpace::LinearRec2020 => "Linear Rec.2020",
+        WorkingColorSpace::LinearP3D65 => "Linear P3-D65",
+        WorkingColorSpace::AcesCg => "ACEScg",
+    }
+}
+
+/// Resolve an explicit encoded/working OCIO endpoint without role inference.
+pub fn ocio_color_space_identity_name(identity: OcioColorSpaceIdentity) -> &'static str {
+    match identity {
+        OcioColorSpaceIdentity::Encoded(space) => ocio_color_space_name(space),
+        OcioColorSpaceIdentity::Working(space) => ocio_working_color_space_name(space),
+    }
+}
+
 /// GPU shader resources extracted from an OCIO processor.
 #[derive(Debug, Clone)]
 pub struct OcioGpuShaderBundle {
@@ -953,16 +971,16 @@ pub struct OcioGpuUniformBinding {
 
 impl OcioGpuShaderBundle {
     fn for_color_space(
-        src: ColorSpace,
-        dst: ColorSpace,
+        src: OcioColorSpaceIdentity,
+        dst: OcioColorSpaceIdentity,
         language: GpuLanguage,
         shader_text: String,
         desc: &GpuShaderDesc,
         cache_id: Option<String>,
     ) -> Self {
         Self {
-            src_color_space: ocio_color_space_name(src).to_string(),
-            dst_color_space: ocio_color_space_name(dst).to_string(),
+            src_color_space: ocio_color_space_identity_name(src).to_string(),
+            dst_color_space: ocio_color_space_identity_name(dst).to_string(),
             language,
             shader_text,
             descriptor_set_index: desc.descriptor_set_index(),
@@ -980,7 +998,7 @@ impl OcioGpuShaderBundle {
     }
 
     fn for_display(
-        src: ColorSpace,
+        src: OcioColorSpaceIdentity,
         display: &str,
         view: &str,
         language: GpuLanguage,
@@ -989,7 +1007,7 @@ impl OcioGpuShaderBundle {
         cache_id: Option<String>,
     ) -> Self {
         Self {
-            src_color_space: ocio_color_space_name(src).to_string(),
+            src_color_space: ocio_color_space_identity_name(src).to_string(),
             dst_color_space: format!("{display}/{view}"),
             language,
             shader_text,
@@ -1108,12 +1126,15 @@ fn ocio_uniform_value(value: OcioRsGpuUniformValue) -> OcioGpuUniformValue {
 // ── CPU transform helpers ──────────────────────────────────────────────────────
 
 /// Obtain a CPU processor for `src → dst` using the current global config.
-fn ocio_cpu_processor(src: ColorSpace, dst: ColorSpace) -> Result<CPUProcessor, String> {
+fn ocio_cpu_processor(
+    src: OcioColorSpaceIdentity,
+    dst: OcioColorSpaceIdentity,
+) -> Result<CPUProcessor, String> {
     let config = ocio_rs::current_config()
         .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
 
-    let src_name = ocio_color_space_name(src);
-    let dst_name = ocio_color_space_name(dst);
+    let src_name = ocio_color_space_identity_name(src);
+    let dst_name = ocio_color_space_identity_name(dst);
 
     let processor = config
         .processor(src_name, dst_name)
@@ -1124,12 +1145,15 @@ fn ocio_cpu_processor(src: ColorSpace, dst: ColorSpace) -> Result<CPUProcessor, 
         .map_err(|e| format!("OCIO CPU processor '{src_name}' → '{dst_name}': {e}"))
 }
 
-fn ocio_processor(src: ColorSpace, dst: ColorSpace) -> Result<ocio_rs::Processor, String> {
+fn ocio_processor(
+    src: OcioColorSpaceIdentity,
+    dst: OcioColorSpaceIdentity,
+) -> Result<ocio_rs::Processor, String> {
     let config = ocio_rs::current_config()
         .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
 
-    let src_name = ocio_color_space_name(src);
-    let dst_name = ocio_color_space_name(dst);
+    let src_name = ocio_color_space_identity_name(src);
+    let dst_name = ocio_color_space_identity_name(dst);
 
     config
         .processor(src_name, dst_name)
@@ -1137,14 +1161,14 @@ fn ocio_processor(src: ColorSpace, dst: ColorSpace) -> Result<ocio_rs::Processor
 }
 
 fn ocio_display_processor(
-    src: ColorSpace,
+    src: OcioColorSpaceIdentity,
     display: &str,
     view: &str,
 ) -> Result<ocio_rs::Processor, String> {
     let config = ocio_rs::current_config()
         .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
 
-    let src_name = ocio_color_space_name(src);
+    let src_name = ocio_color_space_identity_name(src);
 
     config
         .processor_display(
@@ -1158,14 +1182,14 @@ fn ocio_display_processor(
 
 /// Obtain a CPU processor for a display transform using the current global config.
 fn ocio_display_cpu_processor(
-    src: ColorSpace,
+    src: OcioColorSpaceIdentity,
     display: &str,
     view: &str,
 ) -> Result<CPUProcessor, String> {
     let config = ocio_rs::current_config()
         .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
 
-    let src_name = ocio_color_space_name(src);
+    let src_name = ocio_color_space_identity_name(src);
 
     let processor = config
         .processor_display(
@@ -1193,7 +1217,7 @@ pub fn apply_ocio_rgba8(data: &mut [u8], src: ColorSpace, dst: ColorSpace) -> Re
         return Ok(());
     }
 
-    let cpu = ocio_cpu_processor(src, dst)?;
+    let cpu = ocio_cpu_processor(src.into(), dst.into())?;
     apply_cpu_processor_rgba8(&cpu, data);
     Ok(())
 }
@@ -1233,7 +1257,7 @@ pub fn apply_ocio_display_rgba8(
         return Ok(());
     }
 
-    let cpu = ocio_display_cpu_processor(src, display, view)?;
+    let cpu = ocio_display_cpu_processor(src.into(), display, view)?;
     apply_cpu_processor_rgba8(&cpu, data);
     Ok(())
 }
@@ -1247,6 +1271,15 @@ pub fn apply_ocio_display_rgba8(
 ///
 /// This is the precision-preserving alternative to [`apply_ocio_rgba8`].
 pub fn apply_ocio_float(data: &mut [f32], src: ColorSpace, dst: ColorSpace) -> Result<(), String> {
+    apply_ocio_identity_float(data, src.into(), dst.into())
+}
+
+/// Apply an OCIO conversion between explicit encoded/working identities.
+pub fn apply_ocio_identity_float(
+    data: &mut [f32],
+    src: OcioColorSpaceIdentity,
+    dst: OcioColorSpaceIdentity,
+) -> Result<(), String> {
     if data.is_empty() || src == dst {
         return Ok(());
     }
@@ -1285,6 +1318,16 @@ pub fn apply_ocio_display_float(
     display: &str,
     view: &str,
 ) -> Result<(), String> {
+    apply_ocio_display_identity_float(data, src.into(), display, view)
+}
+
+/// Apply an OCIO display transform from an explicit encoded/working identity.
+pub fn apply_ocio_display_identity_float(
+    data: &mut [f32],
+    src: OcioColorSpaceIdentity,
+    display: &str,
+    view: &str,
+) -> Result<(), String> {
     if data.is_empty() {
         return Ok(());
     }
@@ -1304,13 +1347,22 @@ pub fn extract_ocio_gpu_shader_bundle(
     dst: ColorSpace,
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
+    extract_ocio_identity_gpu_shader_bundle(src.into(), dst.into(), language)
+}
+
+/// Extract a GPU shader bundle between explicit encoded/working identities.
+pub fn extract_ocio_identity_gpu_shader_bundle(
+    src: OcioColorSpaceIdentity,
+    dst: OcioColorSpaceIdentity,
+    language: GpuLanguage,
+) -> Result<OcioGpuShaderBundle, String> {
     let processor = ocio_processor(src, dst)?;
     let cache_id = processor.cache_id();
     let gpu = processor.default_gpu_processor().map_err(|e| {
         format!(
             "OCIO GPU processor '{}' -> '{}': {e}",
-            ocio_color_space_name(src),
-            ocio_color_space_name(dst)
+            ocio_color_space_identity_name(src),
+            ocio_color_space_identity_name(dst)
         )
     })?;
     let mut desc = configured_gpu_shader_desc(language)?;
@@ -1334,12 +1386,22 @@ pub fn extract_ocio_display_gpu_shader_bundle(
     view: &str,
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
+    extract_ocio_display_identity_gpu_shader_bundle(src.into(), display, view, language)
+}
+
+/// Extract a GPU display/view shader from an explicit encoded/working identity.
+pub fn extract_ocio_display_identity_gpu_shader_bundle(
+    src: OcioColorSpaceIdentity,
+    display: &str,
+    view: &str,
+    language: GpuLanguage,
+) -> Result<OcioGpuShaderBundle, String> {
     let processor = ocio_display_processor(src, display, view)?;
     let cache_id = processor.cache_id();
     let gpu = processor.default_gpu_processor().map_err(|e| {
         format!(
             "OCIO GPU display processor '{}' -> {display}/{view}: {e}",
-            ocio_color_space_name(src),
+            ocio_color_space_identity_name(src),
         )
     })?;
     let mut desc = configured_gpu_shader_desc(language)?;
@@ -1689,6 +1751,38 @@ mod tests {
             assert_eq!(texture.value_count, texture.values.len());
             assert!(texture.edge_len > 0);
         }
+    }
+
+    #[test]
+    fn standard_mode_extracts_explicit_working_identity_gpu_shader_bundle() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+
+        let bundle = extract_ocio_identity_gpu_shader_bundle(
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+            OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+            GpuLanguage::Glsl4_0,
+        )
+        .expect("linear working identity should produce a GPU shader bundle");
+
+        assert_eq!(bundle.src_color_space, "Linear Rec.709 (sRGB)");
+        assert_eq!(bundle.dst_color_space, "sRGB Encoded Rec.709 (sRGB)");
+        assert!(bundle.shader_text.contains("mondrian_ocio_main"));
+    }
+
+    #[test]
+    fn standard_mode_applies_explicit_working_identity_on_cpu() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+        let mut rgba = [0.18, 0.18, 0.18, 1.0];
+
+        apply_ocio_identity_float(
+            &mut rgba,
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+            OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+        )
+        .expect("linear working identity should produce a CPU processor");
+
+        assert!(rgba[..3].iter().all(|channel| *channel > 0.18));
+        assert_eq!(rgba[3], 1.0);
     }
 
     #[test]

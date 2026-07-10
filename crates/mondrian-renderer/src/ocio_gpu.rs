@@ -1,8 +1,10 @@
 use lru::LruCache;
+#[cfg(test)]
+use mondrian_core::ColorSpace;
 use mondrian_core::{
-    extract_ocio_display_gpu_shader_bundle, extract_ocio_gpu_shader_bundle, ColorSpace,
-    GpuLanguage, OcioGpuShaderBundle, OcioGpuTextureChannel, OcioGpuTextureDimensions,
-    OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
+    extract_ocio_display_identity_gpu_shader_bundle, extract_ocio_identity_gpu_shader_bundle,
+    GpuLanguage, OcioColorSpaceIdentity, OcioGpuShaderBundle, OcioGpuTextureChannel,
+    OcioGpuTextureDimensions, OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
     MONDRIAN_OCIO_GPU_FUNCTION_NAME, MONDRIAN_OCIO_GPU_PIXEL_NAME,
     MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
 };
@@ -47,13 +49,13 @@ pub enum OcioGpuShaderTargetLanguage {
 pub enum OcioGpuShaderRequest {
     /// Convert between two Mondrian color spaces.
     ColorSpace {
-        src: ColorSpace,
-        dst: ColorSpace,
+        src: OcioColorSpaceIdentity,
+        dst: OcioColorSpaceIdentity,
         language: GpuLanguage,
     },
     /// Convert a source color space through an OCIO display/view transform.
     DisplayView {
-        src: ColorSpace,
+        src: OcioColorSpaceIdentity,
         display: String,
         view: String,
         language: GpuLanguage,
@@ -270,8 +272,6 @@ pub struct OcioGpuWgpuWrapperLinkPlan {
     pub program_contract: OcioGpuGeneratedProgramContract,
     /// Fullscreen wrapper shader contract.
     pub shader_contract: OcioGpuWgpuFullscreenShaderContract,
-    /// Wrapper-side color-domain operations around the OCIO program.
-    pub wrapper_color: OcioGpuWgpuWrapperColorContract,
     /// Blockers that prevent wrapper shader generation.
     pub blockers: Vec<OcioGpuWgpuWrapperLinkBlocker>,
     /// Stable hash of the link plan.
@@ -283,7 +283,6 @@ impl OcioGpuWgpuWrapperLinkPlan {
     pub fn for_shader_plan(
         shader_plan: &OcioGpuShaderPlan,
         resources: &OcioGpuWgpuResourcePlan,
-        wrapper_color: OcioGpuWgpuWrapperColorContract,
     ) -> Self {
         let program_contract = OcioGpuGeneratedProgramContract::for_shader_plan(shader_plan);
         let shader_contract =
@@ -294,14 +293,12 @@ impl OcioGpuWgpuWrapperLinkPlan {
             shader_plan.shader_hash,
             &program_contract,
             &shader_contract,
-            &wrapper_color,
         );
         Self {
             resource_key: resources.resource_key,
             shader_hash: shader_plan.shader_hash,
             program_contract,
             shader_contract,
-            wrapper_color,
             blockers,
             link_hash,
         }
@@ -1226,8 +1223,6 @@ pub struct OcioGpuWgpuExecutionPlan {
     pub shader_plan: Arc<OcioGpuShaderPlan>,
     /// Renderer resource contract required before native wgpu execution.
     pub resources: OcioGpuWgpuResourcePlan,
-    /// Wrapper-side transfer operations around the OCIO generated program.
-    pub wrapper_color: OcioGpuWgpuWrapperColorContract,
     /// Native wgpu blockers that must be cleared before this plan can execute.
     pub blockers: Vec<OcioGpuWgpuBlocker>,
 }
@@ -1236,64 +1231,6 @@ impl OcioGpuWgpuExecutionPlan {
     /// Whether this plan can be executed by the current native wgpu backend.
     pub fn can_execute(&self) -> bool {
         self.blockers.is_empty()
-    }
-}
-
-/// Transfer operation applied by Mondrian's fullscreen wrapper around OCIO code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OcioGpuWgpuWrapperTransfer {
-    /// Sampled pixels already match the OCIO program domain.
-    None,
-    /// Encode linear-light sampled pixels into the OCIO source color space.
-    LinearToEncoded {
-        /// Color space whose transfer function should be applied.
-        color_space: ColorSpace,
-    },
-    /// Decode OCIO program output into linear-light working values.
-    EncodedToLinear {
-        /// Color space whose inverse transfer function should be applied.
-        color_space: ColorSpace,
-    },
-}
-
-/// Wrapper-side color contract for a native OCIO fullscreen pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OcioGpuWgpuWrapperColorContract {
-    /// Transfer to apply after sampling the input texture and before OCIO.
-    pub input: OcioGpuWgpuWrapperTransfer,
-    /// Transfer to apply after OCIO and before writing the render target.
-    pub output: OcioGpuWgpuWrapperTransfer,
-}
-
-impl OcioGpuWgpuWrapperColorContract {
-    /// No wrapper-side transfer operations.
-    pub const NONE: Self = Self {
-        input: OcioGpuWgpuWrapperTransfer::None,
-        output: OcioGpuWgpuWrapperTransfer::None,
-    };
-
-    /// Build the wrapper contract for an encoded source entering linear working space.
-    pub fn encoded_input_to_linear_working(working_color_space: ColorSpace) -> Self {
-        Self {
-            input: OcioGpuWgpuWrapperTransfer::None,
-            output: OcioGpuWgpuWrapperTransfer::EncodedToLinear {
-                color_space: working_color_space,
-            },
-        }
-    }
-
-    /// Build the wrapper contract for a linear working frame leaving to encoded output.
-    pub fn linear_working_to_encoded_output(working_color_space: ColorSpace) -> Self {
-        Self {
-            input: OcioGpuWgpuWrapperTransfer::LinearToEncoded { color_space: working_color_space },
-            output: OcioGpuWgpuWrapperTransfer::None,
-        }
-    }
-}
-
-impl Default for OcioGpuWgpuWrapperColorContract {
-    fn default() -> Self {
-        Self::NONE
     }
 }
 
@@ -3624,7 +3561,6 @@ impl OcioGpuWgpuBackendPrepRuntime {
     pub fn prepare_static_pipeline(
         &mut self,
         shader_plan: &OcioGpuShaderPlan,
-        wrapper_color: OcioGpuWgpuWrapperColorContract,
         output_format: OcioGpuWgpuColorTargetFormat,
     ) -> Result<OcioGpuWgpuPreparedStaticPipeline, OcioGpuWgpuBackendPrepError> {
         let resources = OcioGpuWgpuResourcePlan::for_shader_plan(shader_plan)
@@ -3640,11 +3576,8 @@ impl OcioGpuWgpuBackendPrepRuntime {
             &resources.binding_layout,
             &wrapper_binding,
         );
-        let wrapper_link = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            shader_plan,
-            &resources.resources,
-            wrapper_color,
-        );
+        let wrapper_link =
+            OcioGpuWgpuWrapperLinkPlan::for_shader_plan(shader_plan, &resources.resources);
         let wrapper_source =
             OcioGpuWgpuWrapperShaderSourceArtifact::generate(shader_plan, &wrapper_link)
                 .map_err(OcioGpuWgpuBackendPrepError::WrapperSource)?;
@@ -4598,12 +4531,7 @@ impl OcioGpuShaderCache {
                             reason: reason.to_string(),
                         }
                     })?;
-                Ok(OcioGpuWgpuExecutionPlan {
-                    shader_plan,
-                    resources,
-                    wrapper_color: OcioGpuWgpuWrapperColorContract::default(),
-                    blockers: Vec::new(),
-                })
+                Ok(OcioGpuWgpuExecutionPlan { shader_plan, resources, blockers: Vec::new() })
             }
             Err(err) => {
                 let blocker = classify_ocio_shader_error(&err.reason);
@@ -4626,12 +4554,7 @@ impl OcioGpuShaderCache {
                 });
                 let shader_plan = Arc::new(plan_from_bundle(err.request.clone(), dummy_bundle));
                 let resources = OcioGpuWgpuResourcePlan::empty();
-                Ok(OcioGpuWgpuExecutionPlan {
-                    shader_plan,
-                    resources,
-                    wrapper_color: OcioGpuWgpuWrapperColorContract::default(),
-                    blockers: vec![blocker],
-                })
+                Ok(OcioGpuWgpuExecutionPlan { shader_plan, resources, blockers: vec![blocker] })
             }
         }
     }
@@ -4707,10 +4630,10 @@ pub fn classify_ocio_shader_error(reason: &str) -> OcioGpuWgpuBlocker {
 fn extract_bundle(request: &OcioGpuShaderRequest) -> Result<OcioGpuShaderBundle, String> {
     match request {
         OcioGpuShaderRequest::ColorSpace { src, dst, language } => {
-            extract_ocio_gpu_shader_bundle(*src, *dst, *language)
+            extract_ocio_identity_gpu_shader_bundle(*src, *dst, *language)
         }
         OcioGpuShaderRequest::DisplayView { src, display, view, language } => {
-            extract_ocio_display_gpu_shader_bundle(*src, display, view, *language)
+            extract_ocio_display_identity_gpu_shader_bundle(*src, display, view, *language)
         }
     }
 }
@@ -5103,14 +5026,12 @@ fn hash_wrapper_link_plan(
     shader_hash: u64,
     program_contract: &OcioGpuGeneratedProgramContract,
     shader_contract: &OcioGpuWgpuFullscreenShaderContract,
-    wrapper_color: &OcioGpuWgpuWrapperColorContract,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     resource_key.hash(&mut hasher);
     shader_hash.hash(&mut hasher);
     program_contract.hash(&mut hasher);
     shader_contract.hash(&mut hasher);
-    wrapper_color.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -5156,11 +5077,6 @@ fn build_wrapper_shader_sources(
     let wrapper = &link_plan.shader_contract;
     let ocio_program = lower_ocio_program_source_for_wgpu(shader_plan)
         .map_err(|reason| OcioGpuWgpuWrapperShaderArtifactError::SourceLoweringFailed { reason })?;
-    let color_prelude = wrapper_color_transfer_glsl_prelude(&link_plan.wrapper_color);
-    let input_transform =
-        wrapper_color_transfer_glsl_call(link_plan.wrapper_color.input, "mondrian_ocio_pixel.rgb");
-    let output_transform =
-        wrapper_color_transfer_glsl_call(link_plan.wrapper_color.output, "mondrian_ocio_pixel.rgb");
     let ocio_program_call = wrapper_ocio_program_glsl_call(&link_plan.program_contract);
     let vertex_source = format!(
         r#"#version 450 core
@@ -5191,8 +5107,6 @@ void {vertex_entry}() {{
 
 {ocio_program}
 
-{color_prelude}
-
 layout(location = 0) in vec2 mondrian_fragment_uv;
 layout(location = {output_location}) out vec4 mondrian_fragment_color;
 
@@ -5201,23 +5115,18 @@ layout(set = {wrapper_set}, binding = {input_sampler_binding}) uniform sampler m
 
 void {fragment_entry}() {{
     vec4 {pixel_name} = texture(sampler2D(mondrian_wrapper_input_texture, mondrian_wrapper_input_sampler), mondrian_fragment_uv);
-    {input_transform}
     {ocio_program_call}
-    {output_transform}
     mondrian_fragment_color = {pixel_name};
 }}
 "#,
         ocio_program = ocio_program,
-        color_prelude = color_prelude,
         wrapper_set = wrapper.wrapper_bind_group,
         input_texture_binding = wrapper.input_texture_binding,
         input_sampler_binding = wrapper.input_sampler_binding,
         fragment_entry = wrapper.fragment_entry_point,
         output_location = wrapper.output_location,
         pixel_name = &link_plan.program_contract.pixel_name,
-        input_transform = input_transform,
         ocio_program_call = ocio_program_call,
-        output_transform = output_transform,
     );
     let debug_combined_source =
         format!("{vertex_source}\n/* ---- fragment ---- */\n{fragment_source}");
@@ -5488,157 +5397,6 @@ fn find_matching_texture_call_end(source: &str, call_start: usize) -> Option<usi
         }
     }
     None
-}
-
-fn wrapper_color_transfer_glsl_call(
-    transfer: OcioGpuWgpuWrapperTransfer,
-    value_expr: &str,
-) -> String {
-    match transfer {
-        OcioGpuWgpuWrapperTransfer::None => String::new(),
-        OcioGpuWgpuWrapperTransfer::LinearToEncoded { color_space } => format!(
-            "{value_expr} = {function_name}({value_expr});",
-            function_name = wrapper_encode_function_name(color_space),
-        ),
-        OcioGpuWgpuWrapperTransfer::EncodedToLinear { color_space } => format!(
-            "{value_expr} = {function_name}({value_expr});",
-            function_name = wrapper_decode_function_name(color_space),
-        ),
-    }
-}
-
-fn wrapper_color_transfer_glsl_prelude(contract: &OcioGpuWgpuWrapperColorContract) -> String {
-    let mut functions = Vec::new();
-    push_wrapper_transfer_function(contract.input, &mut functions);
-    push_wrapper_transfer_function(contract.output, &mut functions);
-    functions.dedup();
-    functions.join("\n\n")
-}
-
-fn push_wrapper_transfer_function(
-    transfer: OcioGpuWgpuWrapperTransfer,
-    functions: &mut Vec<String>,
-) {
-    match transfer {
-        OcioGpuWgpuWrapperTransfer::None => {}
-        OcioGpuWgpuWrapperTransfer::LinearToEncoded { color_space } => {
-            functions.push(wrapper_encode_function_source(color_space));
-        }
-        OcioGpuWgpuWrapperTransfer::EncodedToLinear { color_space } => {
-            functions.push(wrapper_decode_function_source(color_space));
-        }
-    }
-}
-
-fn wrapper_encode_function_name(color_space: ColorSpace) -> &'static str {
-    match color_space {
-        ColorSpace::Rec709 => "mondrian_wrapper_linear_to_rec709",
-        ColorSpace::Rec2100Hlg => "mondrian_wrapper_linear_to_hlg",
-        ColorSpace::Rec2100Pq => "mondrian_wrapper_linear_to_pq",
-        ColorSpace::Srgb => "mondrian_wrapper_linear_to_srgb",
-        ColorSpace::Rec2020 => "mondrian_wrapper_linear_to_rec709",
-        ColorSpace::DciP3 => "mondrian_wrapper_linear_to_rec709",
-        ColorSpace::AppleLog => "mondrian_wrapper_linear_to_apple_log",
-        ColorSpace::SLog3 => "mondrian_wrapper_linear_to_slog3",
-        ColorSpace::ArriLogC4 => "mondrian_wrapper_linear_to_logc4",
-    }
-}
-
-fn wrapper_decode_function_name(color_space: ColorSpace) -> &'static str {
-    match color_space {
-        ColorSpace::Rec709 => "mondrian_wrapper_rec709_to_linear",
-        ColorSpace::Rec2100Hlg => "mondrian_wrapper_hlg_to_linear",
-        ColorSpace::Rec2100Pq => "mondrian_wrapper_pq_to_linear",
-        ColorSpace::Srgb => "mondrian_wrapper_srgb_to_linear",
-        ColorSpace::Rec2020 => "mondrian_wrapper_rec709_to_linear",
-        ColorSpace::DciP3 => "mondrian_wrapper_rec709_to_linear",
-        ColorSpace::AppleLog => "mondrian_wrapper_apple_log_to_linear",
-        ColorSpace::SLog3 => "mondrian_wrapper_slog3_to_linear",
-        ColorSpace::ArriLogC4 => "mondrian_wrapper_logc4_to_linear",
-    }
-}
-
-fn wrapper_encode_function_source(color_space: ColorSpace) -> String {
-    match color_space {
-        ColorSpace::Srgb => r#"vec3 mondrian_wrapper_linear_to_srgb(vec3 v) {
-    v = max(v, vec3(0.0));
-    return mix(v * 12.92, 1.055 * pow(v, vec3(1.0 / 2.4)) - vec3(0.055), greaterThan(v, vec3(0.0031308)));
-}"#,
-        ColorSpace::Rec2100Pq => r#"vec3 mondrian_wrapper_linear_to_pq(vec3 v) {
-    const float M1 = 2610.0 / 16384.0;
-    const float M2 = 2523.0 / 32.0;
-    const float C1 = 3424.0 / 4096.0;
-    const float C2 = 2413.0 / 128.0;
-    const float C3 = 2392.0 / 128.0;
-    vec3 l = pow(max(v / 100.0, vec3(0.0)), vec3(M1));
-    return pow((vec3(C1) + vec3(C2) * l) / (vec3(1.0) + vec3(C3) * l), vec3(M2));
-}"#,
-        ColorSpace::Rec2100Hlg => r#"vec3 mondrian_wrapper_linear_to_hlg(vec3 v) {
-    const float A = 0.17883277;
-    const float B = 0.28466892;
-    const float C = 0.5599107;
-    vec3 scene = max(v / 12.0, vec3(0.0));
-    return mix(A * log(max(scene - vec3(B), vec3(1.0e-6))) + vec3(C), sqrt(vec3(3.0) * scene), lessThanEqual(scene, vec3(1.0 / 12.0)));
-}"#,
-        ColorSpace::AppleLog => r#"vec3 mondrian_wrapper_linear_to_apple_log(vec3 v) {
-    return (log2(max(v, vec3(1.0e-6)) / vec3(0.18)) * vec3(0.143894)) + vec3(0.385537);
-}"#,
-        ColorSpace::SLog3 => r#"vec3 mondrian_wrapper_linear_to_slog3(vec3 v) {
-    return (log(max(v, vec3(0.0)) * vec3(5.0) + vec3(0.01)) / log(10.0) * vec3(0.255)) + vec3(0.410557);
-}"#,
-        ColorSpace::ArriLogC4 => r#"vec3 mondrian_wrapper_linear_to_logc4(vec3 v) {
-    return (log2(max(v, vec3(1.0e-6)) / vec3(0.18)) * vec3(0.181311)) + vec3(0.391007);
-}"#,
-        ColorSpace::Rec709 | ColorSpace::Rec2020 | ColorSpace::DciP3 => {
-            r#"vec3 mondrian_wrapper_linear_to_rec709(vec3 v) {
-    v = max(v, vec3(0.0));
-    return mix(vec3(1.099) * pow(v, vec3(0.45)) - vec3(0.099), v * 4.5, lessThan(v, vec3(0.018)));
-}"#
-        }
-    }
-    .to_owned()
-}
-
-fn wrapper_decode_function_source(color_space: ColorSpace) -> String {
-    match color_space {
-        ColorSpace::Srgb => r#"vec3 mondrian_wrapper_srgb_to_linear(vec3 v) {
-    return mix(pow((v + vec3(0.055)) / vec3(1.055), vec3(2.4)), v / 12.92, lessThanEqual(v, vec3(0.04045)));
-}"#,
-        ColorSpace::Rec2100Pq => r#"vec3 mondrian_wrapper_pq_to_linear(vec3 v) {
-    const float M1 = 2610.0 / 16384.0;
-    const float M2 = 2523.0 / 32.0;
-    const float C1 = 3424.0 / 4096.0;
-    const float C2 = 2413.0 / 128.0;
-    const float C3 = 2392.0 / 128.0;
-    vec3 p = pow(v, vec3(1.0 / M2));
-    vec3 n = max(p - vec3(C1), vec3(0.0));
-    vec3 d = max(vec3(C2) - vec3(C3) * p, vec3(1.0e-6));
-    return vec3(100.0) * pow(n / d, vec3(1.0 / M1));
-}"#,
-        ColorSpace::Rec2100Hlg => r#"vec3 mondrian_wrapper_hlg_to_linear(vec3 v) {
-    const float A = 0.17883277;
-    const float B = 0.28466892;
-    const float C = 0.5599107;
-    vec3 scene = mix((exp((v - vec3(C)) / vec3(A)) + vec3(B)), (v * v) / vec3(3.0), lessThanEqual(v, vec3(0.5)));
-    return scene * vec3(12.0);
-}"#,
-        ColorSpace::AppleLog => r#"vec3 mondrian_wrapper_apple_log_to_linear(vec3 v) {
-    return max(exp2((v - vec3(0.385537)) / vec3(0.143894)), vec3(0.0)) * vec3(0.18);
-}"#,
-        ColorSpace::SLog3 => r#"vec3 mondrian_wrapper_slog3_to_linear(vec3 v) {
-    vec3 x = pow(vec3(10.0), (v - vec3(0.410557)) / vec3(0.255));
-    return max((x - vec3(0.01)) / vec3(5.0), vec3(0.0));
-}"#,
-        ColorSpace::ArriLogC4 => r#"vec3 mondrian_wrapper_logc4_to_linear(vec3 v) {
-    return max(exp2((v - vec3(0.391007)) / vec3(0.181311)), vec3(0.0)) * vec3(0.18);
-}"#,
-        ColorSpace::Rec709 | ColorSpace::Rec2020 | ColorSpace::DciP3 => {
-            r#"vec3 mondrian_wrapper_rec709_to_linear(vec3 v) {
-    return mix(pow((v + vec3(0.099)) / vec3(1.099), vec3(1.0 / 0.45)), v / 4.5, lessThan(v, vec3(0.081)));
-}"#
-        }
-    }
-    .to_owned()
 }
 
 fn strip_glsl_version_directives(shader_text: &str) -> String {
@@ -6744,8 +6502,8 @@ mod tests {
 
     fn shader_plan_with_text(shader_text: &str) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::Rec709,
-            dst: ColorSpace::Srgb,
+            src: ColorSpace::Rec709.into(),
+            dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
         };
         let bundle = Arc::new(OcioGpuShaderBundle {
@@ -6770,8 +6528,8 @@ mod tests {
 
     fn shader_plan_with_single_2d_texture_binding(binding_index: u32) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::Rec709,
-            dst: ColorSpace::Srgb,
+            src: ColorSpace::Rec709.into(),
+            dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
         };
         let values = vec![0.0, 0.5, 1.0];
@@ -6812,8 +6570,8 @@ mod tests {
         binding_index: u32,
     ) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::Rec709,
-            dst: ColorSpace::Srgb,
+            src: ColorSpace::Rec709.into(),
+            dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
         };
         let values = vec![0.0, 0.5, 1.0];
@@ -6851,8 +6609,8 @@ mod tests {
 
     fn shader_plan_with_single_uniform_buffer_size(buffer_size: usize) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::Rec709,
-            dst: ColorSpace::Srgb,
+            src: ColorSpace::Rec709.into(),
+            dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
         };
         let value = OcioGpuUniformValue::F32(vec![1.0]);
@@ -6990,11 +6748,7 @@ mod tests {
         let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
 
         let first = runtime
-            .prepare_static_pipeline(
-                &shader_plan,
-                OcioGpuWgpuWrapperColorContract::NONE,
-                OcioGpuWgpuColorTargetFormat::Rgba16Float,
-            )
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
             .expect("prepare static pipeline");
 
         assert_eq!(
@@ -7035,11 +6789,7 @@ mod tests {
         assert_eq!(diagnostics.wrapper_module_artifacts.hits, 0);
 
         let second = runtime
-            .prepare_static_pipeline(
-                &shader_plan,
-                OcioGpuWgpuWrapperColorContract::NONE,
-                OcioGpuWgpuColorTargetFormat::Rgba16Float,
-            )
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
             .expect("reuse static pipeline");
 
         assert!(Arc::ptr_eq(&first.resources, &second.resources));
@@ -7062,11 +6812,7 @@ mod tests {
         let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
 
         let err = runtime
-            .prepare_static_pipeline(
-                &shader_plan,
-                OcioGpuWgpuWrapperColorContract::NONE,
-                OcioGpuWgpuColorTargetFormat::Rgba16Float,
-            )
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
             .expect_err("unlinked wrapper should fail");
 
         assert!(matches!(
@@ -7085,25 +6831,13 @@ mod tests {
         let shader_plan = shader_plan_with_text(callable_ocio_program_text());
         let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
         let first = runtime
-            .prepare_static_pipeline(
-                &shader_plan,
-                OcioGpuWgpuWrapperColorContract::NONE,
-                OcioGpuWgpuColorTargetFormat::Rgba16Float,
-            )
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
             .expect("prepare first static pipeline");
         let second = runtime
-            .prepare_static_pipeline(
-                &shader_plan,
-                OcioGpuWgpuWrapperColorContract::NONE,
-                OcioGpuWgpuColorTargetFormat::Rgba16Float,
-            )
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
             .expect("prepare second static pipeline");
         let different_format = runtime
-            .prepare_static_pipeline(
-                &shader_plan,
-                OcioGpuWgpuWrapperColorContract::NONE,
-                OcioGpuWgpuColorTargetFormat::Rgba32Float,
-            )
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba32Float)
             .expect("prepare different static pipeline");
 
         assert_eq!(
@@ -7143,18 +6877,14 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let shader_plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::Rec709,
-                dst: ColorSpace::Srgb,
+                src: ColorSpace::Rec709.into(),
+                dst: ColorSpace::Srgb.into(),
                 language: GpuLanguage::Glsl4_0,
             })
             .expect("extract default OCIO shader");
         let mut prep_runtime = OcioGpuWgpuBackendPrepRuntime::default();
         let static_pipeline = prep_runtime
-            .prepare_static_pipeline(
-                &shader_plan,
-                OcioGpuWgpuWrapperColorContract::NONE,
-                OcioGpuWgpuColorTargetFormat::Rgba16Float,
-            )
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
             .expect("prepare static OCIO GPU pipeline");
         let mut object_runtime = OcioGpuWgpuBackendObjectRuntime::default();
 
@@ -7553,11 +7283,7 @@ mod tests {
         let resources = bind_resource_test_plan(42);
         let shader_plan = shader_plan_with_text(callable_ocio_program_text());
 
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         assert!(link_plan.can_link());
         assert_eq!(
@@ -7580,11 +7306,7 @@ mod tests {
         let resources = bind_resource_test_plan(42);
         let shader_plan = shader_plan_with_text(returning_ocio_program_text());
 
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         assert!(link_plan.can_link());
         assert_eq!(
@@ -7606,11 +7328,7 @@ mod tests {
             "#,
         );
 
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         assert!(!link_plan.can_link());
         assert_eq!(
@@ -7628,11 +7346,7 @@ mod tests {
         let shader_plan =
             shader_plan_with_text("vec4 unrelated_color(vec4 color) { return color; }");
 
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         assert!(!link_plan.can_link());
         assert_eq!(
@@ -7654,11 +7368,7 @@ mod tests {
     fn wrapper_shader_artifact_generates_stage_split_fullscreen_sources() {
         let resources = bind_resource_test_plan(45);
         let shader_plan = shader_plan_with_text(callable_ocio_program_text());
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         let artifact = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
             .expect("generate wrapper shader source");
@@ -7698,11 +7408,7 @@ mod tests {
     fn wrapper_shader_artifact_assigns_returning_ocio_program_result() {
         let resources = bind_resource_test_plan(45);
         let shader_plan = shader_plan_with_text(returning_ocio_program_text());
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         let artifact = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
             .expect("generate wrapper shader source");
@@ -7716,11 +7422,7 @@ mod tests {
     fn wrapper_shader_artifact_fragment_translation_is_structured_success_or_failure() {
         let resources = bind_resource_test_plan(46);
         let shader_plan = shader_plan_with_text(callable_ocio_program_text());
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
         let artifact = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
             .expect("generate wrapper shader source");
         let required_bindings = binding_contract_for_plan(&shader_plan);
@@ -7751,11 +7453,7 @@ mod tests {
     fn wrapper_shader_artifact_rejects_blocked_link_plan() {
         let resources = bind_resource_test_plan(47);
         let shader_plan = shader_plan_with_text("void main() {}");
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         let err = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
             .expect_err("blocked link plan should not generate wrapper source");
@@ -7773,11 +7471,7 @@ mod tests {
         let other_shader_plan = shader_plan_with_text(
             "void mondrian_ocio_main(inout vec4 mondrian_ocio_pixel) { mondrian_ocio_pixel *= 0.5; }",
         );
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         let err = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&other_shader_plan, &link_plan)
             .expect_err("shader hash mismatch should fail");
@@ -7800,11 +7494,7 @@ mod tests {
             OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_ocio_resources(&ocio_layout);
         let wrapper_descriptor =
             OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout);
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
 
         let pipeline_layout = OcioGpuWgpuPipelineLayoutPlan::for_bind_groups(
             &resources,
@@ -7872,11 +7562,7 @@ mod tests {
             &ocio_layout,
             &wrapper_layout,
         );
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
         let source = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
             .expect("generate wrapper shader source");
         let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
@@ -7947,11 +7633,7 @@ mod tests {
             &ocio_layout,
             &wrapper_layout,
         );
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
         let source = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
             .expect("generate wrapper shader source");
         let mut render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
@@ -7991,11 +7673,7 @@ mod tests {
             &ocio_layout,
             &wrapper_layout,
         );
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
         let source = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
             .expect("generate wrapper shader source");
         let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
@@ -8044,11 +7722,7 @@ mod tests {
             &ocio_layout,
             &wrapper_layout,
         );
-        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &shader_plan,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let link_plan = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&shader_plan, &resources);
         let source = OcioGpuWgpuWrapperShaderSourceArtifact::generate(&shader_plan, &link_plan)
             .expect("generate wrapper shader source");
         let render_descriptor = OcioGpuWgpuRenderPipelineDescriptorPlan::for_pipeline_layout(
@@ -8255,8 +7929,8 @@ mod tests {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let mut cache = OcioGpuShaderCache::default();
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::SLog3,
-            dst: ColorSpace::Rec709,
+            src: ColorSpace::SLog3.into(),
+            dst: ColorSpace::Rec709.into(),
             language: GpuLanguage::Glsl4_0,
         };
 
@@ -8315,11 +7989,7 @@ mod tests {
             program_contract.call_style,
             OcioGpuGeneratedProgramCallStyle::Unknown
         );
-        let wrapper_link = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(
-            &first,
-            &resources,
-            OcioGpuWgpuWrapperColorContract::NONE,
-        );
+        let wrapper_link = OcioGpuWgpuWrapperLinkPlan::for_shader_plan(&first, &resources);
         assert_eq!(wrapper_link.resource_key, resources.resource_key);
         assert_eq!(wrapper_link.shader_hash, first.shader_hash);
         assert_ne!(wrapper_link.link_hash, 0);
@@ -8437,7 +8107,7 @@ mod tests {
 
         let plan = cache
             .get_or_extract(OcioGpuShaderRequest::DisplayView {
-                src: ColorSpace::Rec709,
+                src: ColorSpace::Rec709.into(),
                 display: display.clone(),
                 view: view.clone(),
                 language: GpuLanguage::Glsl4_0,
@@ -8487,7 +8157,7 @@ mod tests {
         let mut cache = OcioGpuShaderCache::default();
         let shader_plan = cache
             .get_or_extract(OcioGpuShaderRequest::DisplayView {
-                src: ColorSpace::Rec709,
+                src: ColorSpace::Rec709.into(),
                 display,
                 view,
                 language: GpuLanguage::Glsl4_0,
@@ -8497,13 +8167,7 @@ mod tests {
         let mut prep = OcioGpuWgpuBackendPrepRuntime::default();
 
         let pipeline = prep
-            .prepare_static_pipeline(
-                &shader_plan,
-                OcioGpuWgpuWrapperColorContract::linear_working_to_encoded_output(
-                    ColorSpace::Rec709,
-                ),
-                OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
-            )
+            .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba8Unorm)
             .expect("prepare display/view static GPU pipeline");
 
         assert!(!pipeline.wrapper_source.fragment_source.contains("uniform sampler1D"));
@@ -8529,8 +8193,8 @@ mod tests {
 
         let prepared = cache
             .prepare_wgpu_execution(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::AppleLog,
-                dst: ColorSpace::Rec709,
+                src: ColorSpace::AppleLog.into(),
+                dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
             .expect("prepare wgpu execution");
@@ -8564,8 +8228,8 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let prepared = shader_cache
             .prepare_wgpu_execution(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::SLog3,
-                dst: ColorSpace::Rec709,
+                src: ColorSpace::SLog3.into(),
+                dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
             .expect("prepare shader execution");
@@ -8601,8 +8265,8 @@ mod tests {
     #[test]
     fn shader_translation_cache_reuses_valid_glsl_to_naga_ir_translation() {
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::Rec709,
-            dst: ColorSpace::Srgb,
+            src: ColorSpace::Rec709.into(),
+            dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
         };
         let bundle = Arc::new(OcioGpuShaderBundle {
@@ -8698,8 +8362,8 @@ mod tests {
     #[test]
     fn backend_shader_module_cache_key_rejects_contract_mismatch() {
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::Rec709,
-            dst: ColorSpace::Srgb,
+            src: ColorSpace::Rec709.into(),
+            dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
         };
         let bundle = Arc::new(OcioGpuShaderBundle {
@@ -8757,8 +8421,8 @@ mod tests {
     #[test]
     fn shader_translation_rejects_non_glsl_source_without_panic() {
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::Rec709,
-            dst: ColorSpace::Srgb,
+            src: ColorSpace::Rec709.into(),
+            dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::HlslSm5_0,
         };
         let bundle = Arc::new(OcioGpuShaderBundle {
@@ -8801,8 +8465,8 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::SLog3,
-                dst: ColorSpace::Rec709,
+                src: ColorSpace::SLog3.into(),
+                dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
             .expect("extract OCIO shader");
@@ -8851,8 +8515,8 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::SLog3,
-                dst: ColorSpace::Rec709,
+                src: ColorSpace::SLog3.into(),
+                dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::GlslVk4_6,
             })
             .expect("extract OCIO GLSL VK shader");

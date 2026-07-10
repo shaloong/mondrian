@@ -1539,12 +1539,28 @@ impl CpuColorFrame {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpuEncodedFloatColorFrame {
     descriptor: ColorFrameDescriptor,
-    frame: Arc<RgbaF32Frame>,
+    frame: Arc<EncodedRgbaF32Frame>,
+}
+
+/// Encoded RGBA f32 samples at a source, display, or export boundary.
+///
+/// Unlike [`RgbaF32Frame`], these RGB values are not linear light and cannot be
+/// consumed by effects or compositing APIs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EncodedRgbaF32Frame {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Transfer-encoded RGBA values. Alpha remains linear coverage.
+    pub data: Vec<[f32; 4]>,
+    /// Encoded source/display/delivery color-space identity.
+    pub color_space: ColorSpace,
 }
 
 impl CpuEncodedFloatColorFrame {
     /// Wrap encoded float pixels at an explicit source/display/export boundary.
-    pub fn new(frame: RgbaF32Frame, domain: ColorFrameDomain) -> Self {
+    pub fn new(frame: EncodedRgbaF32Frame, domain: ColorFrameDomain) -> Self {
         let descriptor = ColorFrameDescriptor {
             width: frame.width,
             height: frame.height,
@@ -1562,12 +1578,12 @@ impl CpuEncodedFloatColorFrame {
     }
 
     /// Borrow the underlying encoded floating-point samples.
-    pub fn rgba_f32(&self) -> &RgbaF32Frame {
+    pub fn rgba_f32(&self) -> &EncodedRgbaF32Frame {
         self.frame.as_ref()
     }
 
     /// Consume this wrapper and return the encoded floating-point samples.
-    pub fn into_rgba_f32(self) -> RgbaF32Frame {
+    pub fn into_rgba_f32(self) -> EncodedRgbaF32Frame {
         Arc::try_unwrap(self.frame).unwrap_or_else(|frame| frame.as_ref().clone())
     }
 }
@@ -2693,6 +2709,26 @@ mod tests {
         assert!(Arc::ptr_eq(&frame.frame, &cloned.frame));
         assert_eq!(cloned.rgba_f32().data, frame.rgba_f32().data);
         assert_eq!(cloned.descriptor(), frame.descriptor());
+    }
+
+    #[test]
+    fn encoded_float_frame_has_a_distinct_non_linear_payload_type() {
+        let frame = CpuEncodedFloatColorFrame::new(
+            EncodedRgbaF32Frame {
+                width: 1,
+                height: 1,
+                data: vec![[0.5, 0.25, 0.125, 1.0]],
+                color_space: ColorSpace::Srgb,
+            },
+            ColorFrameDomain::Export,
+        );
+
+        assert_eq!(
+            frame.descriptor().encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(frame.rgba_f32().color_space, ColorSpace::Srgb);
+        assert_eq!(frame.rgba_f32().data[0], [0.5, 0.25, 0.125, 1.0]);
     }
 
     #[test]
