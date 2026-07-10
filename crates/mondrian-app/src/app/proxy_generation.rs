@@ -3,18 +3,69 @@
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
-use mondrian_core::types::AssetId;
+use mondrian_assets::AssetRecord;
+use mondrian_core::types::{AssetId, ColorSpace};
+use mondrian_media::{DecodedVideoRange, ProxyColorContract};
+use mondrian_timeline::sequence::ColorContext;
+
+use super::AppState;
+
+/// Resolve the source-referred color identity used by proxy generation and lookup.
+pub(crate) fn resolve_asset_proxy_color_contract(
+    asset: &AssetRecord,
+    color_context: &ColorContext,
+) -> Result<ProxyColorContract, String> {
+    let detected = asset.media_info.primary_video().and_then(|video| video.detected_color_space);
+    let resolution = color_context.missing_metadata_policy.resolve_asset_input_decision(
+        None,
+        asset.interpretation,
+        detected,
+        color_context.working_color_space,
+    );
+    let source_color_space = resolution.color_space.ok_or_else(|| {
+        format!(
+            "proxy generation rejected source with unresolved color metadata (policy={:?})",
+            color_context.missing_metadata_policy
+        )
+    })?;
+    let video = asset
+        .media_info
+        .primary_video()
+        .ok_or_else(|| "proxy generation requires a probed primary video stream".to_owned())?;
+    Ok(ProxyColorContract::new(
+        source_color_space,
+        video.bit_depth,
+        DecodedVideoRange::Unknown,
+    ))
+}
+
+/// Resolve a proxy contract from the active sequence and project color policy.
+pub(crate) fn resolve_app_state_proxy_color_contract(
+    state: &AppState,
+    asset: &AssetRecord,
+) -> Result<ProxyColorContract, String> {
+    let sequence = state
+        .sequence
+        .as_ref()
+        .ok_or_else(|| "proxy generation requires an active sequence color context".to_owned())?;
+    let color_context = sequence
+        .settings
+        .root_preview_color_context(&state.project_settings.color_management, ColorSpace::Rec709);
+    resolve_asset_proxy_color_contract(asset, &color_context)
+}
 
 /// Queue proxy generation for a video asset on the app proxy worker pool.
 pub(crate) fn request_proxy_generation(
     asset_id: AssetId,
     source_path: PathBuf,
     proxy_config: mondrian_media::ProxyConfig,
+    color: ProxyColorContract,
 ) {
     proxy_generation_dispatcher().enqueue(ProxyGenerationJob {
         asset_id,
         source_path,
         proxy_config,
+        color,
     });
 }
 
@@ -22,6 +73,7 @@ struct ProxyGenerationJob {
     asset_id: AssetId,
     source_path: PathBuf,
     proxy_config: mondrian_media::ProxyConfig,
+    color: ProxyColorContract,
 }
 
 struct ProxyGenerationDispatcher {
@@ -92,8 +144,14 @@ fn proxy_generation_worker_loop(receiver: Arc<Mutex<mpsc::Receiver<ProxyGenerati
         runtime.block_on(async move {
             let generator = mondrian_media::ProxyGenerator::new(job.proxy_config);
             let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(8);
-            if let Err(err) =
-                generator.generate(job.asset_id, job.source_path.clone(), progress_tx).await
+            if let Err(err) = generator
+                .generate(
+                    job.asset_id,
+                    job.source_path.clone(),
+                    job.color,
+                    progress_tx,
+                )
+                .await
             {
                 tracing::warn!(
                     target: "mondrian::proxy",

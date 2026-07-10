@@ -67,7 +67,9 @@ pub enum DecodedVideoSurfaceFormat {
 }
 
 /// Encoded quantization range reported by the decoder for a video frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum DecodedVideoRange {
     /// No reliable range metadata was reported.
     #[default]

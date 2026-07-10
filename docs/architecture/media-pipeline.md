@@ -646,6 +646,27 @@ proxy height preset, and `ProjectSettings.cache_dir` places proxy media under
 that cache root's `proxy/` directory when configured. Callers must not use
 `ProxyConfig::default()` for project media scheduling because that would split
 generation and playback lookup across different cache roots or resolutions.
+They must also use the same versioned `ProxyColorContract`. The app resolves
+that contract from asset interpretation, ingest detection, and the active
+missing-metadata policy before it asks media code to locate or generate a
+proxy. A rejected input-color decision rejects proxy generation; it must not
+be replaced with an implicit sRGB or Rec.709 assumption.
+Proxy artifacts are source-referred optimized media. Their identity includes
+the effective source color space, source precision, encoded range, spatial
+settings, quality setting, and concrete encoding profile, but excludes
+timeline working space and monitor/display transforms. Every completed proxy
+has a versioned `.color.json` sidecar containing that contract and an exact
+source file fingerprint. `ProxyStatus::Fresh` requires both the proxy and an
+exactly matching, parseable sidecar; file modification ordering alone is not
+proof of color or source identity.
+`ProxyCodec::Auto` selects H.264 High 8-bit only for ordinary 8-bit SDR and
+selects H.265 Main10 for HDR, camera-log, or greater-than-8-bit sources.
+Explicit H.264 requests for high-precision sources fail closed. H.265 Main10
+and DNxHR HQX preserve a 10-bit proxy boundary, while standardized source
+spaces emit canonical FFmpeg primaries/transfer/matrix tags. Camera-log spaces
+do not receive guessed delivery tags: their sidecar contract remains
+authoritative. Unknown source range remains an explicit `Unknown` contract
+with a diagnostic; FFmpeg auto behavior is not reported as a known range.
 Generation must also use `ProxyStatus`: a `Fresh` proxy is reused, while a
 `Stale` proxy is regenerated in the background. Failed regeneration must not
 delete the previous proxy file, because preview can keep falling back to source

@@ -49,5 +49,8 @@ pub use preview::{
     PreviewNativeDecodedFrameResource, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
     RgbaFrame,
 };
-pub use proxy::{ProxyCodec, ProxyConfig, ProxyGenerator, ProxyResolution, ProxyStatus};
+pub use proxy::{
+    ProxyArtifactManifest, ProxyArtifactSettings, ProxyCodec, ProxyColorContract, ProxyConfig,
+    ProxyEncodingProfile, ProxyGenerator, ProxyResolution, ProxySourceFingerprint, ProxyStatus,
+};
 pub use waveform::{compute_waveform, WaveformCache, WaveformData};

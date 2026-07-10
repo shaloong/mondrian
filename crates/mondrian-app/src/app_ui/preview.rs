@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetKind;
 use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
@@ -59,7 +59,7 @@ use mondrian_timeline::sequence::{
 };
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
-use crate::app::proxy_generation::request_proxy_generation;
+use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
 use crate::app_ui::panels::{
     ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
@@ -7534,10 +7534,12 @@ impl AppUiPreviewService {
             }
         };
         let proxy_config = state.proxy_config();
+        let proxy_color = resolve_asset_proxy_color_contract(&asset, color_context).ok();
         let resolved_path = resolve_preview_media_decode_path(
             state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id),
             &asset.path,
             &proxy_config,
+            proxy_color,
         )?;
         match resolved_path.resolution {
             PreviewMediaDecodePathResolution::Proxy => bump(&self.metrics.media_proxy_path_hits),
@@ -7558,6 +7560,7 @@ impl AppUiPreviewService {
             &asset.path,
             &proxy_config,
             &resolved_path,
+            proxy_color,
         );
 
         let detected_color_space = asset
@@ -7648,6 +7651,7 @@ impl AppUiPreviewService {
         source_path: &Path,
         proxy_config: &mondrian_media::ProxyConfig,
         resolved_path: &PreviewMediaDecodePath,
+        proxy_color: Option<mondrian_media::ProxyColorContract>,
     ) {
         if !should_request_preview_proxy_generation(
             request_missing_proxy_generation,
@@ -7657,11 +7661,15 @@ impl AppUiPreviewService {
         ) {
             return;
         }
+        let Some(proxy_color) = proxy_color else {
+            return;
+        };
 
         let request_key = PreviewProxyGenerationRequestKey {
             asset_id,
             source_fingerprint: resolved_path.fingerprint,
             resolution: resolved_path.resolution,
+            color: proxy_color,
         };
         if !self.requested_proxy_generations.borrow_mut().insert(request_key) {
             bump(&self.metrics.media_proxy_generation_request_dedupes);
@@ -7669,7 +7677,12 @@ impl AppUiPreviewService {
         }
 
         bump(&self.metrics.media_proxy_generation_requests);
-        request_proxy_generation(asset_id, source_path.to_path_buf(), proxy_config.clone());
+        request_proxy_generation(
+            asset_id,
+            source_path.to_path_buf(),
+            proxy_config.clone(),
+            proxy_color,
+        );
     }
 
     fn preview_decode_adaptive_hints(
@@ -8706,6 +8719,7 @@ struct PreviewProxyGenerationRequestKey {
     asset_id: AssetId,
     source_fingerprint: PreviewFileFingerprint,
     resolution: PreviewMediaDecodePathResolution,
+    color: mondrian_media::ProxyColorContract,
 }
 
 fn should_request_preview_proxy_generation(
@@ -8728,6 +8742,7 @@ fn resolve_preview_media_decode_path(
     prefer_proxy: bool,
     source_path: &Path,
     proxy_config: &mondrian_media::ProxyConfig,
+    proxy_color: Option<mondrian_media::ProxyColorContract>,
 ) -> Option<PreviewMediaDecodePath> {
     let source_metadata = media_path_metadata(source_path)?;
     if !prefer_proxy {
@@ -8737,22 +8752,32 @@ fn resolve_preview_media_decode_path(
             fingerprint: source_metadata.fingerprint,
         });
     }
+    let Some(proxy_color) = proxy_color else {
+        return Some(PreviewMediaDecodePath {
+            path: source_path.to_path_buf(),
+            resolution: PreviewMediaDecodePathResolution::Source,
+            fingerprint: source_metadata.fingerprint,
+        });
+    };
     let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
-    let proxy_path = proxy_generator.proxy_path(source_path);
-    match media_path_metadata(&proxy_path) {
-        Some(proxy_metadata) if proxy_metadata.modified >= source_metadata.modified => {
+    let proxy_path = proxy_generator.proxy_path(source_path, proxy_color).ok()?;
+    match (
+        proxy_generator.proxy_status(source_path, proxy_color),
+        media_path_metadata(&proxy_path),
+    ) {
+        (mondrian_media::ProxyStatus::Fresh, Some(proxy_metadata)) => {
             Some(PreviewMediaDecodePath {
                 path: proxy_path,
                 resolution: PreviewMediaDecodePathResolution::Proxy,
                 fingerprint: proxy_metadata.fingerprint,
             })
         }
-        None => Some(PreviewMediaDecodePath {
+        (mondrian_media::ProxyStatus::Missing, _) => Some(PreviewMediaDecodePath {
             path: source_path.to_path_buf(),
             resolution: PreviewMediaDecodePathResolution::ProxyMissing,
             fingerprint: source_metadata.fingerprint,
         }),
-        Some(_) => Some(PreviewMediaDecodePath {
+        (mondrian_media::ProxyStatus::Stale, _) | (_, None) => Some(PreviewMediaDecodePath {
             path: source_path.to_path_buf(),
             resolution: PreviewMediaDecodePathResolution::ProxyStale,
             fingerprint: source_metadata.fingerprint,
@@ -8763,15 +8788,12 @@ fn resolve_preview_media_decode_path(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MediaPathMetadata {
     fingerprint: PreviewFileFingerprint,
-    modified: SystemTime,
 }
 
 fn media_path_metadata(path: &Path) -> Option<MediaPathMetadata> {
     let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata.modified().ok()?;
     Some(MediaPathMetadata {
         fingerprint: PreviewFileFingerprint::from_metadata(&metadata),
-        modified,
     })
 }
 
@@ -15654,6 +15676,23 @@ mod tests {
         }
     }
 
+    fn test_proxy_color() -> mondrian_media::ProxyColorContract {
+        mondrian_media::ProxyColorContract::new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
+    }
+
+    fn install_test_proxy_manifest(
+        generator: &mondrian_media::ProxyGenerator,
+        source: &Path,
+        proxy: &Path,
+    ) {
+        let manifest = generator
+            .expected_manifest(source, test_proxy_color())
+            .expect("expected proxy manifest");
+        let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize proxy manifest");
+        std::fs::write(mondrian_media::ProxyGenerator::manifest_path(proxy), bytes)
+            .expect("write proxy manifest");
+    }
+
     #[test]
     fn preview_media_decode_path_uses_existing_fresh_proxy() {
         let root = std::env::temp_dir().join(format!(
@@ -15667,13 +15706,19 @@ mod tests {
         std::fs::create_dir_all(&root).expect("test root");
         std::fs::write(&source, b"source").expect("source");
         let proxy_config = test_proxy_config(root.join("proxy"));
-        let proxy_path =
-            mondrian_media::ProxyGenerator::new(proxy_config.clone()).proxy_path(&source);
+        let generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
+        let proxy_path = generator.proxy_path(&source, test_proxy_color()).expect("proxy path");
         std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
         std::fs::write(&proxy_path, b"proxy").expect("proxy");
+        install_test_proxy_manifest(&generator, &source, &proxy_path);
 
-        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config)
-            .expect("fresh proxy path");
+        let resolved = resolve_preview_media_decode_path(
+            true,
+            &source,
+            &proxy_config,
+            Some(test_proxy_color()),
+        )
+        .expect("fresh proxy path");
 
         assert_eq!(resolved.path, proxy_path);
         assert_eq!(resolved.resolution, PreviewMediaDecodePathResolution::Proxy);
@@ -15695,8 +15740,13 @@ mod tests {
         std::fs::write(&source, b"source").expect("source");
         let proxy_config = test_proxy_config(root.join("proxy"));
 
-        let resolved =
-            resolve_preview_media_decode_path(true, &source, &proxy_config).expect("source path");
+        let resolved = resolve_preview_media_decode_path(
+            true,
+            &source,
+            &proxy_config,
+            Some(test_proxy_color()),
+        )
+        .expect("source path");
 
         assert_eq!(resolved.path, source);
         assert_eq!(
@@ -15719,15 +15769,21 @@ mod tests {
         let source = root.join("source.mp4");
         std::fs::create_dir_all(&root).expect("test root");
         let proxy_config = test_proxy_config(root.join("proxy"));
-        let proxy_path =
-            mondrian_media::ProxyGenerator::new(proxy_config.clone()).proxy_path(&source);
+        let proxy_path = mondrian_media::ProxyGenerator::new(proxy_config.clone())
+            .proxy_path(&source, test_proxy_color())
+            .expect("proxy path");
         std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
         std::fs::write(&proxy_path, b"proxy").expect("proxy");
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&source, b"newer source").expect("source");
 
-        let resolved = resolve_preview_media_decode_path(true, &source, &proxy_config)
-            .expect("stale proxy falls back to source");
+        let resolved = resolve_preview_media_decode_path(
+            true,
+            &source,
+            &proxy_config,
+            Some(test_proxy_color()),
+        )
+        .expect("stale proxy falls back to source");
 
         assert_eq!(resolved.path, source);
         assert_eq!(
@@ -15750,8 +15806,20 @@ mod tests {
         let source = root.join("source.mp4");
         let proxy_config = test_proxy_config(root.join("proxy"));
 
-        assert!(resolve_preview_media_decode_path(false, &source, &proxy_config).is_none());
-        assert!(resolve_preview_media_decode_path(true, &source, &proxy_config).is_none());
+        assert!(resolve_preview_media_decode_path(
+            false,
+            &source,
+            &proxy_config,
+            Some(test_proxy_color())
+        )
+        .is_none());
+        assert!(resolve_preview_media_decode_path(
+            true,
+            &source,
+            &proxy_config,
+            Some(test_proxy_color())
+        )
+        .is_none());
     }
 
     #[test]

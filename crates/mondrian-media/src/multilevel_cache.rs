@@ -4,7 +4,7 @@
 //! L2: 磁盘代理索引缓存（跨会话保留）
 //! L3: 原始素材路径回退
 
-use crate::proxy::{ProxyGenerator, ProxyStatus};
+use crate::proxy::{ProxyColorContract, ProxyGenerator, ProxyStatus};
 use lru::LruCache;
 use mondrian_core::types::AssetId;
 use parking_lot::Mutex;
@@ -66,26 +66,44 @@ impl MultiLevelCache {
         source_path: &Path,
         prefer_proxy: bool,
         proxy_generator: &ProxyGenerator,
+        proxy_color: ProxyColorContract,
     ) -> ResolvedMediaPath {
-        if let Some(hit) = self.fresh_l1_hit(asset_id, source_path, prefer_proxy, proxy_generator) {
+        if let Some(hit) = self.fresh_l1_hit(
+            asset_id,
+            source_path,
+            prefer_proxy,
+            proxy_generator,
+            proxy_color,
+        ) {
             return hit;
         }
 
         if prefer_proxy {
-            let proxy_from_generator = proxy_generator.proxy_path(source_path);
-            if proxy_generator.proxy_status(source_path) == ProxyStatus::Fresh {
+            let proxy_from_generator = proxy_generator.proxy_path(source_path, proxy_color).ok();
+            if let Some(proxy_from_generator) = proxy_from_generator.as_ref().filter(|_| {
+                proxy_generator.proxy_status(source_path, proxy_color) == ProxyStatus::Fresh
+            }) {
                 let resolved = ResolvedMediaPath {
                     path: proxy_from_generator.clone(),
                     tier: CacheTier::DiskProxyL2,
                     is_proxy: true,
                 };
                 self.put_l1(asset_id, resolved.clone());
-                self.upsert_l2(asset_id, source_path, &proxy_from_generator);
+                self.upsert_l2(asset_id, source_path, proxy_from_generator);
                 return resolved;
             }
 
-            if let Some(entry) = self.l2_proxy_index.lock().get(&asset_id).cloned() {
-                if self.l2_entry_is_fresh(&entry, source_path, &proxy_from_generator) {
+            if let (Some(entry), Some(proxy_from_generator)) = (
+                self.l2_proxy_index.lock().get(&asset_id).cloned(),
+                proxy_from_generator.as_ref(),
+            ) {
+                if self.l2_entry_is_fresh(
+                    &entry,
+                    source_path,
+                    proxy_from_generator,
+                    proxy_generator,
+                    proxy_color,
+                ) {
                     let resolved = ResolvedMediaPath {
                         path: entry.proxy_path,
                         tier: CacheTier::DiskProxyL2,
@@ -112,6 +130,7 @@ impl MultiLevelCache {
         source_path: &Path,
         prefer_proxy: bool,
         proxy_generator: &ProxyGenerator,
+        proxy_color: ProxyColorContract,
     ) -> Option<ResolvedMediaPath> {
         let hit = self.l1_path_cache.lock().get(&asset_id).cloned()?;
         if !prefer_proxy {
@@ -122,10 +141,10 @@ impl MultiLevelCache {
             return None;
         }
 
-        let expected_proxy_path = proxy_generator.proxy_path(source_path);
-        let expected_proxy_status = ProxyStatus::from_paths(source_path, &expected_proxy_path);
+        let expected_proxy_path = proxy_generator.proxy_path(source_path, proxy_color).ok();
+        let expected_proxy_status = proxy_generator.proxy_status(source_path, proxy_color);
         if hit.is_proxy
-            && hit.path == expected_proxy_path
+            && expected_proxy_path.as_ref().is_some_and(|path| hit.path == *path)
             && expected_proxy_status == ProxyStatus::Fresh
         {
             return Some(ResolvedMediaPath { tier: CacheTier::MemoryL1, ..hit });
@@ -142,6 +161,8 @@ impl MultiLevelCache {
         entry: &ProxyIndexEntry,
         source_path: &Path,
         expected_proxy_path: &Path,
+        proxy_generator: &ProxyGenerator,
+        proxy_color: ProxyColorContract,
     ) -> bool {
         if entry.source_path != source_path
             || entry.proxy_path != expected_proxy_path
@@ -150,7 +171,7 @@ impl MultiLevelCache {
             return false;
         }
 
-        ProxyStatus::from_paths(source_path, &entry.proxy_path) == ProxyStatus::Fresh
+        proxy_generator.proxy_status(source_path, proxy_color) == ProxyStatus::Fresh
     }
 
     pub fn invalidate_asset(&self, asset_id: AssetId) {
@@ -211,13 +232,17 @@ fn load_proxy_index(path: &Path) -> HashMap<AssetId, ProxyIndexEntry> {
 #[cfg(test)]
 mod tests {
     use super::{CacheTier, MultiLevelCache};
-    use crate::{ProxyConfig, ProxyGenerator};
-    use mondrian_core::types::AssetId;
+    use crate::{DecodedVideoRange, ProxyColorContract, ProxyConfig, ProxyGenerator};
+    use mondrian_core::types::{AssetId, ColorSpace};
     use std::path::PathBuf;
     use std::time::Duration;
 
     fn test_proxy_config(cache_dir: PathBuf) -> ProxyConfig {
         ProxyConfig { cache_dir, ..ProxyConfig::default() }
+    }
+
+    fn proxy_color() -> ProxyColorContract {
+        ProxyColorContract::new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
     }
 
     fn write_fresh_proxy(
@@ -228,9 +253,11 @@ mod tests {
         std::fs::write(&source, b"source").expect("source");
         std::thread::sleep(Duration::from_millis(20));
         let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
-        let proxy = generator.proxy_path(&source);
+        let color = proxy_color();
+        let proxy = generator.proxy_path(&source, color).expect("proxy path");
         std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
         std::fs::write(&proxy, b"proxy").expect("proxy");
+        generator.install_test_manifest(&source, color);
         (source, generator, proxy)
     }
 
@@ -241,7 +268,8 @@ mod tests {
         let asset_id = AssetId::new();
         let (source, generator, proxy) = write_fresh_proxy(&root, "source.mp4");
 
-        let resolved = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        let resolved =
+            cache.resolve_playback_path(asset_id, &source, true, &generator, proxy_color());
 
         assert_eq!(resolved.path, proxy);
         assert_eq!(resolved.tier, CacheTier::DiskProxyL2);
@@ -255,13 +283,14 @@ mod tests {
         let asset_id = AssetId::new();
         let source = root.path().join("source.mp4");
         let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
-        let proxy = generator.proxy_path(&source);
+        let proxy = generator.proxy_path(&source, proxy_color()).expect("proxy path");
         std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
         std::fs::write(&proxy, b"proxy").expect("proxy");
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(&source, b"newer source").expect("source");
 
-        let resolved = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        let resolved =
+            cache.resolve_playback_path(asset_id, &source, true, &generator, proxy_color());
 
         assert_eq!(resolved.path, source);
         assert_eq!(resolved.tier, CacheTier::SourceL3);
@@ -277,16 +306,19 @@ mod tests {
         std::fs::write(&source, b"source").expect("source");
         let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
 
-        let first = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        let first = cache.resolve_playback_path(asset_id, &source, true, &generator, proxy_color());
         assert_eq!(first.path, source);
         assert_eq!(first.tier, CacheTier::SourceL3);
 
         std::thread::sleep(Duration::from_millis(20));
-        let proxy = generator.proxy_path(&source);
+        let color = proxy_color();
+        let proxy = generator.proxy_path(&source, color).expect("proxy path");
         std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
         std::fs::write(&proxy, b"proxy").expect("proxy");
+        generator.install_test_manifest(&source, color);
 
-        let second = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        let second =
+            cache.resolve_playback_path(asset_id, &source, true, &generator, proxy_color());
 
         assert_eq!(second.path, proxy);
         assert_eq!(second.tier, CacheTier::DiskProxyL2);
@@ -300,14 +332,15 @@ mod tests {
         let asset_id = AssetId::new();
         let (source, generator, proxy) = write_fresh_proxy(&root, "source.mp4");
 
-        let first = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        let first = cache.resolve_playback_path(asset_id, &source, true, &generator, proxy_color());
         assert_eq!(first.path, proxy);
         assert!(first.is_proxy);
 
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(&source, b"newer source").expect("source");
 
-        let second = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        let second =
+            cache.resolve_playback_path(asset_id, &source, true, &generator, proxy_color());
 
         assert_eq!(second.path, source);
         assert_eq!(second.tier, CacheTier::SourceL3);
@@ -321,14 +354,15 @@ mod tests {
         let asset_id = AssetId::new();
         let (source, generator, proxy) = write_fresh_proxy(&root, "source.mp4");
 
-        let first = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        let first = cache.resolve_playback_path(asset_id, &source, true, &generator, proxy_color());
         assert_eq!(first.path, proxy);
         cache.clear_l1();
 
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(&source, b"newer source").expect("source");
 
-        let second = cache.resolve_playback_path(asset_id, &source, true, &generator);
+        let second =
+            cache.resolve_playback_path(asset_id, &source, true, &generator, proxy_color());
 
         assert_eq!(second.path, source);
         assert_eq!(second.tier, CacheTier::SourceL3);
@@ -342,13 +376,15 @@ mod tests {
         let asset_id = AssetId::new();
         let (source, first_generator, first_proxy) = write_fresh_proxy(&root, "source.mp4");
 
-        let first = cache.resolve_playback_path(asset_id, &source, true, &first_generator);
+        let first =
+            cache.resolve_playback_path(asset_id, &source, true, &first_generator, proxy_color());
         assert_eq!(first.path, first_proxy);
         cache.clear_l1();
 
         let second_generator =
             ProxyGenerator::new(test_proxy_config(root.path().join("other-proxy-config")));
-        let second = cache.resolve_playback_path(asset_id, &source, true, &second_generator);
+        let second =
+            cache.resolve_playback_path(asset_id, &source, true, &second_generator, proxy_color());
 
         assert_eq!(second.path, source);
         assert_eq!(second.tier, CacheTier::SourceL3);

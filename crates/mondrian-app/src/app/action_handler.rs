@@ -7,7 +7,9 @@
 //! 其余 Action 记录日志后忽略。每个 Stage 逐步增加映射。
 
 use crate::app::exporting::TimelineExportRequest;
-use crate::app::proxy_generation::request_proxy_generation;
+use crate::app::proxy_generation::{
+    request_proxy_generation, resolve_app_state_proxy_color_contract,
+};
 use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_editing::{
     find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
@@ -524,15 +526,33 @@ impl AppState {
         };
         if payload.enabled {
             let proxy_config = self.proxy_config();
+            let proxy_color =
+                resolve_app_state_proxy_color_contract(self, &asset).map_err(|reason| {
+                    self.set_status_hint(format!("无法启用代理：{reason}"), true);
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "set_asset_proxy_mode".to_owned(),
+                        reason,
+                    }
+                })?;
             let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
-            match proxy_generator.proxy_status(&asset.path) {
+            match proxy_generator.proxy_status(&asset.path, proxy_color) {
                 mondrian_media::ProxyStatus::Fresh => {}
                 mondrian_media::ProxyStatus::Missing => {
-                    request_proxy_generation(payload.asset_id, asset.path, proxy_config);
+                    request_proxy_generation(
+                        payload.asset_id,
+                        asset.path,
+                        proxy_config,
+                        proxy_color,
+                    );
                     status.push_str("（后台生成中）");
                 }
                 mondrian_media::ProxyStatus::Stale => {
-                    request_proxy_generation(payload.asset_id, asset.path, proxy_config);
+                    request_proxy_generation(
+                        payload.asset_id,
+                        asset.path,
+                        proxy_config,
+                        proxy_color,
+                    );
                     status.push_str("（代理过期，后台重新生成中）");
                 }
             }

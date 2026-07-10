@@ -317,6 +317,18 @@ Reverse media identification also lives on the same contract:
 interpretation rules used by media probing. `mondrian-media` must capture raw
 FFmpeg/CICP tags and call those core helpers rather than maintaining a separate
 color-space mapping table.
+Derived proxy media follows the same encoding contract. The app resolves one
+`ProxyColorContract` from asset interpretation plus ingest metadata before
+proxy lookup or generation. Media code persists that source color space,
+source bit depth, encoded range, and selected encoder/pixel-format profile in a
+versioned sidecar manifest. Proxy freshness requires an exact source
+fingerprint and exact contract match. Working/rendering and display/output
+spaces are deliberately absent from this source-referred artifact contract;
+their transforms still occur in renderer input and final output boundaries.
+HDR, camera-log, and high-bit-depth sources select a 10-bit proxy profile under
+automatic policy, while an explicitly incompatible 8-bit H.264 request fails
+instead of quantizing silently. Camera-log proxies carry no invented FFmpeg
+delivery tags and rely on their explicit sidecar interpretation.
 Acquisition/log identification is represented as structured
 `VideoColorMetadataHint` values captured from container and stream metadata.
 Hints currently recognize explicit Apple Log, S-Log3/S-Gamut3.Cine, and ARRI

@@ -3,7 +3,8 @@
 //! 后台将高码率原始素材转码为低码率代理文件，用于编辑时的流畅预览。
 //! 导出时自动切换回原始文件。
 
-use mondrian_core::{types::AssetId, Result};
+use crate::{DecodedVideoRange, PreviewFileFingerprint};
+use mondrian_core::{types::AssetId, types::ColorSpace, MondrianError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,8 +35,14 @@ impl ProxyResolution {
 /// 代理编码格式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProxyCodec {
-    H264,  // 低码率，兼容性最好
-    DnxHd, // 编辑友好，高质量
+    /// Select H.264 for ordinary 8-bit SDR and H.265 Main10 for HDR, Log, or high-bit sources.
+    Auto,
+    /// Force an 8-bit H.264 proxy. Incompatible source contracts are rejected.
+    H264,
+    /// Force a 10-bit H.265 Main10 proxy.
+    H265Main10,
+    /// Force an edit-friendly DNxHR proxy in a MOV container.
+    DnxHr,
 }
 
 /// 代理生成配置
@@ -55,12 +62,130 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             resolution: ProxyResolution::P720,
-            codec: ProxyCodec::H264,
+            codec: ProxyCodec::Auto,
             crf: 23,
             concurrent_jobs: 2,
             cache_dir: default_proxy_dir(),
         }
     }
+}
+
+const PROXY_COLOR_CONTRACT_VERSION: u16 = 1;
+const PROXY_MANIFEST_VERSION: u16 = 1;
+
+/// Color identity that a generated proxy must preserve.
+///
+/// Proxies remain source-referred optimized media. Working-space and display
+/// transforms are deliberately excluded because they belong to render and
+/// presentation boundaries, not derived source media.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProxyColorContract {
+    /// Contract schema version used in persistent proxy identity.
+    pub version: u16,
+    /// Effective source/input color space resolved by the application.
+    pub source_color_space: ColorSpace,
+    /// Nominal source component precision reported by ingest.
+    pub source_bit_depth: u8,
+    /// Encoded video range when the decoder reported it reliably.
+    pub source_range: DecodedVideoRange,
+}
+
+impl ProxyColorContract {
+    /// Build the current proxy color contract for an ingested video stream.
+    pub fn new(
+        source_color_space: ColorSpace,
+        source_bit_depth: u8,
+        source_range: DecodedVideoRange,
+    ) -> Self {
+        Self {
+            version: PROXY_COLOR_CONTRACT_VERSION,
+            source_color_space,
+            source_bit_depth,
+            source_range,
+        }
+    }
+
+    fn needs_high_precision(self) -> bool {
+        self.source_bit_depth > 8
+            || self.source_color_space.is_hdr()
+            || self.source_color_space.encoding().is_camera_log()
+    }
+}
+
+/// Concrete encoder/pixel-format contract selected for one proxy artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProxyEncodingProfile {
+    /// H.264 High, 8-bit 4:2:0.
+    H264High8,
+    /// H.265 Main10, 10-bit 4:2:0.
+    H265Main10,
+    /// DNxHR SQ, 8-bit 4:2:2.
+    DnxHrSq8,
+    /// DNxHR HQX, 10-bit 4:2:2.
+    DnxHrHqx10,
+}
+
+impl ProxyEncodingProfile {
+    fn output_extension(self) -> &'static str {
+        match self {
+            Self::H264High8 | Self::H265Main10 => "mp4",
+            Self::DnxHrSq8 | Self::DnxHrHqx10 => "mov",
+        }
+    }
+
+    fn identity_label(self) -> &'static str {
+        match self {
+            Self::H264High8 => "h264-high8",
+            Self::H265Main10 => "h265-main10",
+            Self::DnxHrSq8 => "dnxhr-sq8",
+            Self::DnxHrHqx10 => "dnxhr-hqx10",
+        }
+    }
+}
+
+/// Stable source file identity persisted in a proxy manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxySourceFingerprint {
+    /// Source file length in bytes.
+    pub len: Option<u64>,
+    /// Source modification time in Unix seconds.
+    pub modified_secs: Option<u64>,
+    /// Source modification time nanosecond fraction.
+    pub modified_nanos: Option<u32>,
+}
+
+impl From<PreviewFileFingerprint> for ProxySourceFingerprint {
+    fn from(value: PreviewFileFingerprint) -> Self {
+        Self {
+            len: value.len,
+            modified_secs: value.modified_secs,
+            modified_nanos: value.modified_nanos,
+        }
+    }
+}
+
+/// Artifact-affecting proxy configuration persisted in a manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyArtifactSettings {
+    /// Spatial proxy resolution preset.
+    pub resolution: ProxyResolution,
+    /// Effective bounded CRF used by inter-frame encoders.
+    pub crf: u8,
+}
+
+/// Versioned sidecar contract proving the identity of a proxy artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyArtifactManifest {
+    /// Manifest schema version.
+    pub version: u16,
+    /// Source file fingerprint held stable across generation.
+    pub source: ProxySourceFingerprint,
+    /// Source-referred color contract preserved by the proxy.
+    pub color: ProxyColorContract,
+    /// Artifact-affecting proxy settings.
+    pub settings: ProxyArtifactSettings,
+    /// Concrete encoder and pixel format used.
+    pub encoding: ProxyEncodingProfile,
 }
 
 fn default_proxy_dir() -> PathBuf {
@@ -86,34 +211,51 @@ pub struct ProxyProgress {
 pub enum ProxyStatus {
     /// No proxy file exists at the configured proxy path.
     Missing,
-    /// The proxy file exists and is at least as new as the source media.
+    /// Proxy media and sidecar exactly match the expected source and color contract.
     Fresh,
     /// The proxy file exists but should not be used for playback.
     Stale,
 }
 
 impl ProxyStatus {
-    /// Resolves freshness from an explicit source/proxy path pair.
-    pub fn from_paths(source_path: &Path, proxy_path: &Path) -> Self {
-        if !proxy_path.exists() {
-            return Self::Missing;
-        }
-
-        let source_modified =
-            std::fs::metadata(source_path).and_then(|metadata| metadata.modified());
-        let proxy_modified = std::fs::metadata(proxy_path).and_then(|metadata| metadata.modified());
-        match (source_modified, proxy_modified) {
-            (Ok(source), Ok(proxy)) if proxy >= source => Self::Fresh,
-            (Ok(_), Ok(_)) => Self::Stale,
-            (Err(_), Ok(_)) => Self::Fresh,
-            _ => Self::Stale,
-        }
-    }
-
     /// Returns true when preview playback may decode the proxy file.
     pub fn is_fresh(self) -> bool {
         self == Self::Fresh
     }
+}
+
+fn stable_proxy_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+fn proxy_manifest_path(proxy_path: &Path) -> PathBuf {
+    proxy_path.with_extension(format!(
+        "{}.color.json",
+        proxy_path.extension().and_then(|value| value.to_str()).unwrap_or("proxy")
+    ))
+}
+
+fn write_proxy_manifest(
+    manifest: &ProxyArtifactManifest,
+    tmp_path: &Path,
+    output_path: &Path,
+) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|err| {
+        MondrianError::ProxyGenerationFailed {
+            reason: format!("proxy manifest serialization failed: {err}"),
+        }
+    })?;
+    std::fs::write(tmp_path, bytes).map_err(|err| MondrianError::ProxyGenerationFailed {
+        reason: format!(
+            "proxy manifest write failed ({}): {err}",
+            tmp_path.display()
+        ),
+    })?;
+    finalize_proxy_output(tmp_path, output_path)
 }
 
 /// 代理文件生成器
@@ -126,47 +268,126 @@ impl ProxyGenerator {
         Self { config }
     }
 
-    fn output_extension(&self) -> &'static str {
-        match self.config.codec {
-            ProxyCodec::H264 => "mp4",
-            ProxyCodec::DnxHd => "mov",
+    /// Resolve the concrete encoding profile for a source color contract.
+    pub fn encoding_profile(&self, color: ProxyColorContract) -> Result<ProxyEncodingProfile> {
+        let high_precision = color.needs_high_precision();
+        match (self.config.codec, high_precision) {
+            (ProxyCodec::Auto, false) => Ok(ProxyEncodingProfile::H264High8),
+            (ProxyCodec::Auto, true) => Ok(ProxyEncodingProfile::H265Main10),
+            (ProxyCodec::H264, false) => Ok(ProxyEncodingProfile::H264High8),
+            (ProxyCodec::H264, true) => Err(MondrianError::ProxyGenerationFailed {
+                reason: format!(
+                    "H.264 8-bit proxy cannot preserve {:?} {}-bit source; select Auto, H.265 Main10, or DNxHR",
+                    color.source_color_space, color.source_bit_depth
+                ),
+            }),
+            (ProxyCodec::H265Main10, _) => Ok(ProxyEncodingProfile::H265Main10),
+            (ProxyCodec::DnxHr, false) => Ok(ProxyEncodingProfile::DnxHrSq8),
+            (ProxyCodec::DnxHr, true) => Ok(ProxyEncodingProfile::DnxHrHqx10),
         }
     }
 
     /// 计算指定素材的代理文件路径
-    pub fn proxy_path(&self, source_path: &Path) -> PathBuf {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        source_path.hash(&mut hasher);
-        let hash = hasher.finish();
-        let height = self.config.resolution.height();
-        let codec = match self.config.codec {
-            ProxyCodec::H264 => "h264",
-            ProxyCodec::DnxHd => "dnxhd",
+    pub fn proxy_path(&self, source_path: &Path, color: ProxyColorContract) -> Result<PathBuf> {
+        let encoding = self.encoding_profile(color)?;
+        let source_hash = stable_proxy_hash(source_path.to_string_lossy().as_bytes());
+        let identity = ProxyArtifactManifest {
+            version: PROXY_MANIFEST_VERSION,
+            source: ProxySourceFingerprint {
+                len: None,
+                modified_secs: None,
+                modified_nanos: None,
+            },
+            color,
+            settings: self.artifact_settings(),
+            encoding,
         };
-        self.config.cache_dir.join(format!(
-            "{hash:016x}_{height}p_{codec}.{}",
-            self.output_extension()
-        ))
+        let identity_bytes =
+            serde_json::to_vec(&identity).map_err(|err| MondrianError::ProxyGenerationFailed {
+                reason: format!("proxy identity serialization failed: {err}"),
+            })?;
+        let contract_hash = stable_proxy_hash(&identity_bytes);
+        let height = self.config.resolution.height();
+        Ok(self.config.cache_dir.join(format!(
+            "{source_hash:016x}_{contract_hash:016x}_{height}p_{}.{}",
+            encoding.identity_label(),
+            encoding.output_extension()
+        )))
+    }
+
+    fn artifact_settings(&self) -> ProxyArtifactSettings {
+        ProxyArtifactSettings {
+            resolution: self.config.resolution,
+            crf: self.config.crf.min(51),
+        }
+    }
+
+    /// Build the manifest expected for the current source and generator settings.
+    pub fn expected_manifest(
+        &self,
+        source_path: &Path,
+        color: ProxyColorContract,
+    ) -> Result<ProxyArtifactManifest> {
+        Ok(ProxyArtifactManifest {
+            version: PROXY_MANIFEST_VERSION,
+            source: PreviewFileFingerprint::capture(source_path).into(),
+            color,
+            settings: self.artifact_settings(),
+            encoding: self.encoding_profile(color)?,
+        })
+    }
+
+    /// Return the sidecar manifest path for a proxy media path.
+    pub fn manifest_path(proxy_path: &Path) -> PathBuf {
+        proxy_manifest_path(proxy_path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_test_manifest(
+        &self,
+        source_path: &Path,
+        color: ProxyColorContract,
+    ) -> PathBuf {
+        let proxy_path = self.proxy_path(source_path, color).expect("test proxy path");
+        let manifest = self.expected_manifest(source_path, color).expect("test manifest");
+        let manifest_path = proxy_manifest_path(&proxy_path);
+        let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize test manifest");
+        std::fs::write(manifest_path, bytes).expect("write test manifest");
+        proxy_path
     }
 
     /// 检查代理文件是否存在。
     ///
     /// This intentionally reports existence only. Use [`Self::proxy_status`]
     /// or [`Self::proxy_is_fresh`] for preview/playback scheduling.
-    pub fn proxy_exists(&self, source_path: &Path) -> bool {
-        self.proxy_path(source_path).exists()
+    pub fn proxy_exists(&self, source_path: &Path, color: ProxyColorContract) -> bool {
+        self.proxy_path(source_path, color).is_ok_and(|path| path.exists())
     }
 
     /// Returns the freshness state for the configured proxy of `source_path`.
-    pub fn proxy_status(&self, source_path: &Path) -> ProxyStatus {
-        let proxy_path = self.proxy_path(source_path);
-        ProxyStatus::from_paths(source_path, &proxy_path)
+    pub fn proxy_status(&self, source_path: &Path, color: ProxyColorContract) -> ProxyStatus {
+        let Ok(proxy_path) = self.proxy_path(source_path, color) else {
+            return ProxyStatus::Stale;
+        };
+        if !proxy_path.exists() {
+            return ProxyStatus::Missing;
+        }
+        let Ok(expected) = self.expected_manifest(source_path, color) else {
+            return ProxyStatus::Stale;
+        };
+        let manifest_path = proxy_manifest_path(&proxy_path);
+        let Ok(bytes) = std::fs::read(manifest_path) else {
+            return ProxyStatus::Stale;
+        };
+        match serde_json::from_slice::<ProxyArtifactManifest>(&bytes) {
+            Ok(actual) if actual == expected => ProxyStatus::Fresh,
+            _ => ProxyStatus::Stale,
+        }
     }
 
     /// Returns true when the configured proxy exists and is safe to decode.
-    pub fn proxy_is_fresh(&self, source_path: &Path) -> bool {
-        self.proxy_status(source_path).is_fresh()
+    pub fn proxy_is_fresh(&self, source_path: &Path, color: ProxyColorContract) -> bool {
+        self.proxy_status(source_path, color).is_fresh()
     }
 
     /// 异步生成代理文件（后台 FFmpeg 转码）
@@ -176,6 +397,7 @@ impl ProxyGenerator {
         &self,
         asset_id: AssetId,
         source_path: PathBuf,
+        color: ProxyColorContract,
         progress_tx: mpsc::Sender<ProxyProgress>,
     ) -> Result<PathBuf> {
         if !source_path.exists() {
@@ -185,16 +407,19 @@ impl ProxyGenerator {
             });
         }
 
-        let output_path = self.proxy_path(&source_path);
+        let encoding = self.encoding_profile(color)?;
+        let output_path = self.proxy_path(&source_path, color)?;
         let tmp_output_path =
-            output_path.with_extension(format!("{}.part", self.output_extension()));
+            output_path.with_extension(format!("{}.part", encoding.output_extension()));
+        let manifest_path = proxy_manifest_path(&output_path);
+        let tmp_manifest_path = manifest_path.with_extension("json.part");
 
         // 确保输出目录存在
         if let Some(parent) = output_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        if self.proxy_status(&source_path) == ProxyStatus::Fresh {
+        if self.proxy_status(&source_path, color) == ProxyStatus::Fresh {
             let _ = progress_tx
                 .send(ProxyProgress {
                     asset_id,
@@ -208,6 +433,9 @@ impl ProxyGenerator {
 
         if tmp_output_path.exists() {
             let _ = std::fs::remove_file(&tmp_output_path);
+        }
+        if tmp_manifest_path.exists() {
+            let _ = std::fs::remove_file(&tmp_manifest_path);
         }
 
         tracing::info!(
@@ -229,7 +457,7 @@ impl ProxyGenerator {
         let crf = self.config.crf.min(51);
         let source_for_cmd = source_path.clone();
         let output_for_cmd = tmp_output_path.clone();
-        let codec = self.config.codec;
+        let manifest = self.expected_manifest(&source_path, color)?;
         let concurrent_jobs = self.config.concurrent_jobs;
         let limiter = proxy_generation_limiter(self.config.cache_dir.clone());
         let permit = tokio::task::spawn_blocking(move || limiter.acquire(concurrent_jobs))
@@ -240,15 +468,33 @@ impl ProxyGenerator {
 
         let transcode_result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            run_ffmpeg_proxy_transcode(codec, crf, height, &source_for_cmd, &output_for_cmd)
+            run_ffmpeg_proxy_transcode(
+                encoding,
+                crf,
+                height,
+                color,
+                &source_for_cmd,
+                &output_for_cmd,
+            )
         })
         .await
         .map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
             reason: format!("proxy task join failed: {e}"),
         })?;
 
+        let transcode_result = transcode_result.and_then(|()| {
+            let completed_manifest = self.expected_manifest(&source_path, color)?;
+            if completed_manifest.source != manifest.source {
+                return Err(MondrianError::ProxyGenerationFailed {
+                    reason: "source file changed while proxy generation was in progress".to_owned(),
+                });
+            }
+            Ok(())
+        });
+
         if let Err(err) = transcode_result {
             let _ = std::fs::remove_file(&tmp_output_path);
+            let _ = std::fs::remove_file(&tmp_manifest_path);
             let _ = progress_tx
                 .send(ProxyProgress {
                     asset_id,
@@ -261,6 +507,7 @@ impl ProxyGenerator {
         }
 
         finalize_proxy_output(&tmp_output_path, &output_path)?;
+        write_proxy_manifest(&manifest, &tmp_manifest_path, &manifest_path)?;
 
         let _ = progress_tx
             .send(ProxyProgress {
@@ -347,47 +594,14 @@ fn proxy_generation_limiter(cache_dir: PathBuf) -> Arc<ProxyConcurrencyLimiter> 
 }
 
 fn run_ffmpeg_proxy_transcode(
-    codec: ProxyCodec,
+    encoding: ProxyEncodingProfile,
     crf: u8,
     height: u32,
+    color: ProxyColorContract,
     source_path: &Path,
     output_path: &Path,
 ) -> Result<()> {
-    let scale_arg = format!("scale=-2:{height}");
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-y")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-i")
-        .arg(source_path)
-        .arg("-vf")
-        .arg(scale_arg)
-        .arg("-pix_fmt")
-        .arg("yuv420p")
-        .arg("-c:a")
-        .arg("aac")
-        .arg("-b:a")
-        .arg("128k");
-
-    match codec {
-        ProxyCodec::H264 => {
-            cmd.arg("-c:v")
-                .arg("libx264")
-                .arg("-preset")
-                .arg("veryfast")
-                .arg("-crf")
-                .arg(crf.to_string())
-                .arg("-movflags")
-                .arg("+faststart");
-        }
-        ProxyCodec::DnxHd => {
-            cmd.arg("-c:v").arg("dnxhd").arg("-b:v").arg("90M").arg("-f").arg("mov");
-        }
-    }
-
-    cmd.arg(output_path);
-
+    let mut cmd = ffmpeg_proxy_command(encoding, crf, height, color, source_path, output_path);
     let output = cmd.output().map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
         reason: format!("failed to invoke ffmpeg (is ffmpeg in PATH?): {}", e),
     })?;
@@ -406,6 +620,120 @@ fn run_ffmpeg_proxy_transcode(
     }
 
     Ok(())
+}
+
+fn ffmpeg_proxy_command(
+    encoding: ProxyEncodingProfile,
+    crf: u8,
+    height: u32,
+    color: ProxyColorContract,
+    source_path: &Path,
+    output_path: &Path,
+) -> Command {
+    let scale_arg = match color.source_range {
+        DecodedVideoRange::Limited => format!("scale=-2:{height}:flags=lanczos:out_range=tv"),
+        DecodedVideoRange::Full => format!("scale=-2:{height}:flags=lanczos:out_range=pc"),
+        DecodedVideoRange::Unknown => format!("scale=-2:{height}:flags=lanczos"),
+    };
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(source_path)
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-map")
+        .arg("0:a?")
+        .arg("-vf")
+        .arg(scale_arg)
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("128k");
+
+    if let Some(tags) = color.source_color_space.ffmpeg_tags() {
+        cmd.arg("-color_primaries")
+            .arg(tags.color_primaries)
+            .arg("-color_trc")
+            .arg(tags.color_trc)
+            .arg("-colorspace")
+            .arg(tags.colorspace);
+    } else {
+        tracing::warn!(
+            source_color_space = ?color.source_color_space,
+            "proxy source has no trustworthy standardized FFmpeg tags; sidecar color contract remains authoritative"
+        );
+    }
+    match color.source_range {
+        DecodedVideoRange::Limited => {
+            cmd.arg("-color_range").arg("tv");
+        }
+        DecodedVideoRange::Full => {
+            cmd.arg("-color_range").arg("pc");
+        }
+        DecodedVideoRange::Unknown => {
+            tracing::warn!(
+                source_color_space = ?color.source_color_space,
+                "proxy source range is unknown; FFmpeg auto range is retained and recorded in the sidecar contract"
+            );
+        }
+    }
+
+    match encoding {
+        ProxyEncodingProfile::H264High8 => {
+            cmd.arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-profile:v")
+                .arg("high")
+                .arg("-preset")
+                .arg("veryfast")
+                .arg("-crf")
+                .arg(crf.to_string())
+                .arg("-movflags")
+                .arg("+faststart");
+        }
+        ProxyEncodingProfile::H265Main10 => {
+            cmd.arg("-pix_fmt")
+                .arg("yuv420p10le")
+                .arg("-c:v")
+                .arg("libx265")
+                .arg("-profile:v")
+                .arg("main10")
+                .arg("-preset")
+                .arg("veryfast")
+                .arg("-crf")
+                .arg(crf.to_string())
+                .arg("-movflags")
+                .arg("+faststart");
+        }
+        ProxyEncodingProfile::DnxHrSq8 => {
+            cmd.arg("-pix_fmt")
+                .arg("yuv422p")
+                .arg("-c:v")
+                .arg("dnxhd")
+                .arg("-profile:v")
+                .arg("dnxhr_sq")
+                .arg("-f")
+                .arg("mov");
+        }
+        ProxyEncodingProfile::DnxHrHqx10 => {
+            cmd.arg("-pix_fmt")
+                .arg("yuv422p10le")
+                .arg("-c:v")
+                .arg("dnxhd")
+                .arg("-profile:v")
+                .arg("dnxhr_hqx")
+                .arg("-f")
+                .arg("mov");
+        }
+    }
+
+    cmd.arg(output_path);
+    cmd
 }
 
 fn finalize_proxy_output(tmp_output_path: &Path, output_path: &Path) -> Result<()> {
@@ -479,13 +807,20 @@ fn finalize_proxy_output(tmp_output_path: &Path, output_path: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        finalize_proxy_output, ProxyConcurrencyLimiter, ProxyConfig, ProxyGenerator, ProxyStatus,
+        ffmpeg_proxy_command, finalize_proxy_output, ProxyCodec, ProxyColorContract,
+        ProxyConcurrencyLimiter, ProxyConfig, ProxyEncodingProfile, ProxyGenerator, ProxyStatus,
     };
+    use crate::DecodedVideoRange;
+    use mondrian_core::types::ColorSpace;
     use std::sync::Arc;
     use std::time::Duration;
 
     fn test_proxy_config(cache_dir: std::path::PathBuf) -> ProxyConfig {
         ProxyConfig { cache_dir, ..ProxyConfig::default() }
+    }
+
+    fn rec709_contract() -> ProxyColorContract {
+        ProxyColorContract::new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
     }
 
     #[test]
@@ -495,24 +830,28 @@ mod tests {
         std::fs::write(&source, b"source").expect("source");
         let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
 
-        assert_eq!(generator.proxy_status(&source), ProxyStatus::Missing);
-        assert!(!generator.proxy_is_fresh(&source));
+        let color = rec709_contract();
+        assert_eq!(generator.proxy_status(&source, color), ProxyStatus::Missing);
+        assert!(!generator.proxy_is_fresh(&source, color));
     }
 
     #[test]
-    fn proxy_status_reports_fresh_when_proxy_is_newer_than_source() {
+    fn proxy_status_requires_matching_manifest() {
         let root = tempfile::tempdir().expect("tempdir");
         let source = root.path().join("source.mp4");
         std::fs::write(&source, b"source").expect("source");
         std::thread::sleep(Duration::from_millis(20));
 
         let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
-        let proxy = generator.proxy_path(&source);
+        let color = rec709_contract();
+        let proxy = generator.proxy_path(&source, color).expect("proxy path");
         std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
         std::fs::write(&proxy, b"proxy").expect("proxy");
 
-        assert_eq!(generator.proxy_status(&source), ProxyStatus::Fresh);
-        assert!(generator.proxy_is_fresh(&source));
+        assert_eq!(generator.proxy_status(&source, color), ProxyStatus::Stale);
+        generator.install_test_manifest(&source, color);
+        assert_eq!(generator.proxy_status(&source, color), ProxyStatus::Fresh);
+        assert!(generator.proxy_is_fresh(&source, color));
     }
 
     #[test]
@@ -520,14 +859,100 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let source = root.path().join("source.mp4");
         let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
-        let proxy = generator.proxy_path(&source);
+        let color = rec709_contract();
+        let proxy = generator.proxy_path(&source, color).expect("proxy path");
         std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
         std::fs::write(&proxy, b"proxy").expect("proxy");
+        generator.install_test_manifest(&source, color);
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(&source, b"source").expect("source");
 
-        assert_eq!(generator.proxy_status(&source), ProxyStatus::Stale);
-        assert!(!generator.proxy_is_fresh(&source));
+        assert_eq!(generator.proxy_status(&source, color), ProxyStatus::Stale);
+        assert!(!generator.proxy_is_fresh(&source, color));
+    }
+
+    #[test]
+    fn automatic_profile_preserves_hdr_and_log_precision() {
+        let generator = ProxyGenerator::new(ProxyConfig::default());
+        let pq = ProxyColorContract::new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited);
+        let log = ProxyColorContract::new(ColorSpace::SLog3, 10, DecodedVideoRange::Full);
+
+        assert_eq!(
+            generator.encoding_profile(pq).expect("PQ profile"),
+            ProxyEncodingProfile::H265Main10
+        );
+        assert_eq!(
+            generator.encoding_profile(log).expect("Log profile"),
+            ProxyEncodingProfile::H265Main10
+        );
+    }
+
+    #[test]
+    fn forced_h264_rejects_high_precision_source() {
+        let config = ProxyConfig { codec: ProxyCodec::H264, ..ProxyConfig::default() };
+        let generator = ProxyGenerator::new(config);
+        let pq = ProxyColorContract::new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited);
+
+        let error = generator.encoding_profile(pq).expect_err("H.264 must reject PQ");
+
+        assert!(error.to_string().contains("cannot preserve"));
+    }
+
+    #[test]
+    fn proxy_identity_changes_with_color_contract() {
+        let generator = ProxyGenerator::new(ProxyConfig::default());
+        let source = std::path::Path::new("E:/media/source.mov");
+        let rec709 = rec709_contract();
+        let pq = ProxyColorContract::new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited);
+
+        assert_ne!(
+            generator.proxy_path(source, rec709).expect("Rec.709 path"),
+            generator.proxy_path(source, pq).expect("PQ path")
+        );
+    }
+
+    #[test]
+    fn hdr_proxy_command_declares_main10_and_cicp_tags() {
+        let color = ProxyColorContract::new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited);
+        let command = ffmpeg_proxy_command(
+            ProxyEncodingProfile::H265Main10,
+            20,
+            720,
+            color,
+            std::path::Path::new("source.mov"),
+            std::path::Path::new("proxy.mp4.part"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "yuv420p10le"]));
+        assert!(args.windows(2).any(|pair| pair == ["-profile:v", "main10"]));
+        assert!(args.windows(2).any(|pair| pair == ["-color_trc", "smpte2084"]));
+        assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
+    }
+
+    #[test]
+    fn log_proxy_command_does_not_emit_false_standardized_tags() {
+        let color = ProxyColorContract::new(ColorSpace::SLog3, 10, DecodedVideoRange::Full);
+        let command = ffmpeg_proxy_command(
+            ProxyEncodingProfile::H265Main10,
+            20,
+            720,
+            color,
+            std::path::Path::new("source.mov"),
+            std::path::Path::new("proxy.mp4.part"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(!args.iter().any(|arg| arg == "-color_primaries"));
+        assert!(!args.iter().any(|arg| arg == "-color_trc"));
+        assert!(!args.iter().any(|arg| arg == "-colorspace"));
+        assert!(args.windows(2).any(|pair| pair == ["-color_range", "pc"]));
     }
 
     #[test]
