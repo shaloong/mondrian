@@ -6,6 +6,7 @@
 pub mod automation;
 pub mod color;
 pub mod color_models;
+pub mod color_science;
 pub mod display_contract;
 pub mod display_labels;
 pub mod display_probe;
@@ -24,6 +25,7 @@ pub mod types;
 pub use automation::*;
 pub use color::*;
 pub use color_models::*;
+pub use color_science::*;
 pub use display_labels::*;
 pub use error::{MondrianError, Result};
 pub use events::{AppEvent, EventBus};

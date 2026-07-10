@@ -29,6 +29,27 @@ every Mondrian color-space mapping, builds CPU processors for the full contract
 color-space matrix, and extracts GPU shaders for every non-identity
 color-space transform plus every supported display/view transform.
 
+## Color-Science Validation Primitives
+
+Production transforms continue to execute through OCIO. Independent accuracy
+validation uses `mondrian-core::color_science`, which owns the finite
+`CieLabD50` value type, explicit normalized sRGB -> D50 CIELAB conversion, and
+CIEDE2000 implementation. These primitives are an oracle-facing measurement
+layer, not a second production transform engine.
+
+The sRGB conversion follows the W3C Color 4 sequence and uses one internally
+consistent white reference through linear sRGB -> XYZ D65 -> Bradford D50 ->
+CIELAB. Inputs outside the normalized encoded sRGB raster range fail instead of
+being clipped. CIEDE2000 branch behavior is tested against all 34 supplemental
+Sharma/Wu/Dalal 2005 reference pairs stored in the versioned
+`crates/mondrian-core/tests/reference/ciede2000_sharma_2005.json` corpus. The
+corpus records its source and citation, and intentional formula changes must
+continue to satisfy its `1e-4` published-value tolerance.
+
+The D50 CIELAB API is restricted to SDR display validation. It is not a valid
+quality metric for scene-linear working values or absolute-luminance PQ/HLG
+output; those domains require their own explicitly typed accuracy contracts.
+
 ## Engines
 
 - `ColorEngine::MondrianSmart`: productized Standard/Simple policy over the

@@ -502,8 +502,23 @@ alpha uses its own coverage budget. A single peak-delta assertion is not an
 adequate color gate because it cannot detect broad low-amplitude drift or
 distinguish color arithmetic from alpha corruption. Real-wgpu point-effect
 tests include negative and above-one working values and fail closed on NaN or
-infinity. Display-referred perceptual metrics must be added as a separate
-contract rather than applying Delta E to scene-linear values.
+infinity.
+
+Encoded SDR sRGB output validation uses a separate
+`SrgbDisplayAccuracyBudget`/`SrgbDisplayAccuracyReport` contract. It converts
+RGB code values through the explicit sRGB -> XYZ D65 -> Bradford-adapted XYZ
+D50 -> CIELAB chain, then reports CIEDE2000 maximum, mean, and nearest-rank P99
+error. Alpha remains coverage and has an independent code-value limit. The
+real-wgpu plain output and OCIO display/view tests both use this contract, so a
+small number of large errors and broad low-level drift are independently
+bounded. The exact P99 implementation uses linear-time selection rather than a
+full sort; this remains validation work and is not executed in the playback
+frame loop.
+
+This perceptual contract is deliberately named sRGB and rejects malformed
+RGBA8 buffers. It must not be applied to Rec.709, Display P3, PQ, HLG, or
+scene-linear data. HDR validation requires an absolute-luminance-aware model
+and target display contract rather than relabeling CIELAB thresholds.
 
 ## Export Delivery View Transform
 

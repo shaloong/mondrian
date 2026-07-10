@@ -4,6 +4,7 @@
 //! perceptual metrics. RGB and alpha have separate budgets because alpha is coverage,
 //! not color, and must not be folded into an RGB error distribution.
 
+use mondrian_core::{delta_e_2000_d50, srgb_to_cie_lab_d50, ColorScienceError};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -206,6 +207,205 @@ pub fn compare_linear_rgba(
     })
 }
 
+/// Perceptual CIEDE2000 limits for an SDR sRGB display boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SrgbDisplayAccuracyBudget {
+    /// Largest allowed CIEDE2000 difference for any pixel.
+    pub max_delta_e_2000: f64,
+    /// Largest allowed mean CIEDE2000 difference across the frame.
+    pub max_mean_delta_e_2000: f64,
+    /// Largest allowed nearest-rank 99th-percentile CIEDE2000 difference.
+    pub max_percentile_99_delta_e_2000: f64,
+    /// Largest allowed encoded alpha code-value difference.
+    pub max_alpha_code_value_delta: u8,
+}
+
+impl SrgbDisplayAccuracyBudget {
+    /// Construct an SDR sRGB display-accuracy budget.
+    pub const fn new(
+        max_delta_e_2000: f64,
+        max_mean_delta_e_2000: f64,
+        max_percentile_99_delta_e_2000: f64,
+        max_alpha_code_value_delta: u8,
+    ) -> Self {
+        Self {
+            max_delta_e_2000,
+            max_mean_delta_e_2000,
+            max_percentile_99_delta_e_2000,
+            max_alpha_code_value_delta,
+        }
+    }
+
+    fn validate(self) -> Result<(), SrgbDisplayAccuracyError> {
+        for (metric, limit) in [
+            ("max_delta_e_2000", self.max_delta_e_2000),
+            ("max_mean_delta_e_2000", self.max_mean_delta_e_2000),
+            (
+                "max_percentile_99_delta_e_2000",
+                self.max_percentile_99_delta_e_2000,
+            ),
+        ] {
+            if !limit.is_finite() || limit < 0.0 {
+                return Err(SrgbDisplayAccuracyError::InvalidBudget { metric, limit });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Perceptual color-error distribution for an SDR sRGB display boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SrgbDisplayAccuracyStatistics {
+    /// Number of compared pixels.
+    pub pixel_count: u64,
+    /// Largest observed CIEDE2000 difference.
+    pub max_delta_e_2000: f64,
+    /// Mean observed CIEDE2000 difference.
+    pub mean_delta_e_2000: f64,
+    /// Nearest-rank 99th-percentile CIEDE2000 difference.
+    pub percentile_99_delta_e_2000: f64,
+    /// Pixel index of the largest CIEDE2000 difference.
+    pub worst_pixel_index: u64,
+    /// Largest encoded alpha code-value difference.
+    pub max_alpha_code_value_delta: u8,
+    /// Pixel index of the largest alpha code-value difference.
+    pub worst_alpha_pixel_index: u64,
+}
+
+/// Complete SDR sRGB display-boundary accuracy report.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SrgbDisplayAccuracyReport {
+    /// Observed perceptual color and alpha statistics.
+    pub statistics: SrgbDisplayAccuracyStatistics,
+    /// Limits used to evaluate the boundary.
+    pub budget: SrgbDisplayAccuracyBudget,
+    /// True only when color distribution and alpha coverage satisfy the budget.
+    pub within_budget: bool,
+}
+
+/// Failure to construct an SDR sRGB display-accuracy report.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum SrgbDisplayAccuracyError {
+    /// Expected and observed buffers have different byte lengths.
+    #[error(
+        "sRGB RGBA8 length mismatch: expected {expected_bytes} bytes, observed {observed_bytes}"
+    )]
+    LengthMismatch {
+        /// Expected byte count.
+        expected_bytes: usize,
+        /// Observed byte count.
+        observed_bytes: usize,
+    },
+    /// RGBA8 buffers must contain complete four-channel pixels.
+    #[error("sRGB RGBA8 byte length {bytes} is not divisible by four")]
+    InvalidRgbaLength {
+        /// Invalid byte count.
+        bytes: usize,
+    },
+    /// Empty comparisons cannot establish an accuracy result.
+    #[error("sRGB display accuracy comparison requires at least one pixel")]
+    EmptyInput,
+    /// A perceptual budget must be finite and non-negative.
+    #[error("invalid sRGB display accuracy budget {metric}={limit}; limits must be finite and non-negative")]
+    InvalidBudget {
+        /// Stable metric name.
+        metric: &'static str,
+        /// Invalid limit.
+        limit: f64,
+    },
+    /// Device-independent conversion or CIEDE2000 evaluation failed.
+    #[error("sRGB display accuracy failed at pixel {pixel_index}: {source}")]
+    ColorScience {
+        /// Pixel containing the invalid sample.
+        pixel_index: usize,
+        /// Underlying color-science failure.
+        #[source]
+        source: ColorScienceError,
+    },
+}
+
+/// Compare two encoded sRGB RGBA8 display-boundary buffers perceptually.
+///
+/// RGB code values are converted explicitly to D50 CIELAB before CIEDE2000 is
+/// evaluated. Alpha remains a coverage channel and is compared independently in
+/// encoded code values. This function must not be used for Rec.709, Display P3,
+/// PQ, HLG, scene-linear, or working-space buffers.
+pub fn compare_srgb_display_rgba8(
+    expected: &[u8],
+    observed: &[u8],
+    budget: SrgbDisplayAccuracyBudget,
+) -> Result<SrgbDisplayAccuracyReport, SrgbDisplayAccuracyError> {
+    if expected.len() != observed.len() {
+        return Err(SrgbDisplayAccuracyError::LengthMismatch {
+            expected_bytes: expected.len(),
+            observed_bytes: observed.len(),
+        });
+    }
+    if !expected.len().is_multiple_of(4) {
+        return Err(SrgbDisplayAccuracyError::InvalidRgbaLength { bytes: expected.len() });
+    }
+    if expected.is_empty() {
+        return Err(SrgbDisplayAccuracyError::EmptyInput);
+    }
+    budget.validate()?;
+
+    let pixel_count = expected.len() / 4;
+    let mut delta_e_values = Vec::with_capacity(pixel_count);
+    let mut sum_delta_e = 0.0;
+    let mut max_delta_e = 0.0;
+    let mut worst_pixel_index = 0;
+    let mut max_alpha_delta = 0;
+    let mut worst_alpha_pixel_index = 0;
+    for (pixel_index, (expected, observed)) in
+        expected.chunks_exact(4).zip(observed.chunks_exact(4)).enumerate()
+    {
+        let expected_lab = srgb_to_cie_lab_d50(encoded_rgb(expected))
+            .map_err(|source| SrgbDisplayAccuracyError::ColorScience { pixel_index, source })?;
+        let observed_lab = srgb_to_cie_lab_d50(encoded_rgb(observed))
+            .map_err(|source| SrgbDisplayAccuracyError::ColorScience { pixel_index, source })?;
+        let delta_e = delta_e_2000_d50(expected_lab, observed_lab)
+            .map_err(|source| SrgbDisplayAccuracyError::ColorScience { pixel_index, source })?;
+        delta_e_values.push(delta_e);
+        sum_delta_e += delta_e;
+        if pixel_index == 0 || delta_e > max_delta_e {
+            max_delta_e = delta_e;
+            worst_pixel_index = pixel_index;
+        }
+
+        let alpha_delta = expected[3].abs_diff(observed[3]);
+        if pixel_index == 0 || alpha_delta > max_alpha_delta {
+            max_alpha_delta = alpha_delta;
+            worst_alpha_pixel_index = pixel_index;
+        }
+    }
+
+    let percentile_index = delta_e_values.len().saturating_mul(99).div_ceil(100).saturating_sub(1);
+    let percentile_99_delta_e_2000 =
+        *delta_e_values.select_nth_unstable_by(percentile_index, f64::total_cmp).1;
+    let statistics = SrgbDisplayAccuracyStatistics {
+        pixel_count: pixel_count as u64,
+        max_delta_e_2000: max_delta_e,
+        mean_delta_e_2000: sum_delta_e / pixel_count as f64,
+        percentile_99_delta_e_2000,
+        worst_pixel_index: worst_pixel_index as u64,
+        max_alpha_code_value_delta: max_alpha_delta,
+        worst_alpha_pixel_index: worst_alpha_pixel_index as u64,
+    };
+    let within_budget = statistics.max_delta_e_2000 <= budget.max_delta_e_2000
+        && statistics.mean_delta_e_2000 <= budget.max_mean_delta_e_2000
+        && statistics.percentile_99_delta_e_2000 <= budget.max_percentile_99_delta_e_2000
+        && statistics.max_alpha_code_value_delta <= budget.max_alpha_code_value_delta;
+    Ok(SrgbDisplayAccuracyReport { statistics, budget, within_budget })
+}
+
+fn encoded_rgb(pixel: &[u8]) -> [f64; 3] {
+    [
+        f64::from(pixel[0]) / 255.0,
+        f64::from(pixel[1]) / 255.0,
+        f64::from(pixel[2]) / 255.0,
+    ]
+}
+
 struct ErrorAccumulator {
     errors: Vec<f64>,
     sample_count: u64,
@@ -253,13 +453,14 @@ impl ErrorAccumulator {
             if self.errors.is_empty() {
                 (0.0, 0.0, 0.0)
             } else {
-                self.errors.sort_by(f64::total_cmp);
                 let percentile_index =
                     self.errors.len().saturating_mul(99).div_ceil(100).saturating_sub(1);
+                let percentile =
+                    *self.errors.select_nth_unstable_by(percentile_index, f64::total_cmp).1;
                 (
                     self.sum_absolute_error / finite_count,
                     (self.sum_squared_error / finite_count).sqrt(),
-                    self.errors[percentile_index],
+                    percentile,
                 )
             };
 
@@ -351,5 +552,70 @@ mod tests {
             compare_linear_rgba(&[], &[], STRICT),
             Err(LinearAccuracyError::EmptyInput)
         );
+    }
+
+    #[test]
+    fn srgb_display_report_separates_perceptual_color_from_alpha_coverage() {
+        let expected = [0, 0, 0, 255, 128, 128, 128, 128, 255, 255, 255, 0];
+        let observed = [1, 1, 1, 255, 128, 128, 128, 126, 254, 255, 255, 0];
+        let budget = SrgbDisplayAccuracyBudget::new(0.5, 0.25, 0.5, 1);
+
+        let report =
+            compare_srgb_display_rgba8(&expected, &observed, budget).expect("valid report");
+
+        assert_eq!(report.statistics.pixel_count, 3);
+        assert!(report.statistics.max_delta_e_2000 > 0.0);
+        assert_eq!(report.statistics.max_alpha_code_value_delta, 2);
+        assert!(!report.within_budget);
+    }
+
+    #[test]
+    fn srgb_display_distribution_budget_detects_broad_low_level_drift() {
+        let expected = vec![128; 4 * 100];
+        let mut observed = expected.clone();
+        for pixel in observed.chunks_exact_mut(4) {
+            pixel[0] = 129;
+        }
+        let permissive = SrgbDisplayAccuracyBudget::new(1.0, 1.0, 1.0, 0);
+        let baseline =
+            compare_srgb_display_rgba8(&expected, &observed, permissive).expect("baseline report");
+        let budget = SrgbDisplayAccuracyBudget::new(
+            baseline.statistics.max_delta_e_2000 + 0.01,
+            baseline.statistics.mean_delta_e_2000 - 0.01,
+            baseline.statistics.percentile_99_delta_e_2000 + 0.01,
+            0,
+        );
+
+        let report =
+            compare_srgb_display_rgba8(&expected, &observed, budget).expect("valid report");
+
+        assert!(!report.within_budget);
+        assert!(report.statistics.max_delta_e_2000 <= budget.max_delta_e_2000);
+        assert!(report.statistics.mean_delta_e_2000 > budget.max_mean_delta_e_2000);
+    }
+
+    #[test]
+    fn srgb_display_comparison_rejects_invalid_shapes_and_budgets() {
+        let valid_budget = SrgbDisplayAccuracyBudget::new(1.0, 1.0, 1.0, 0);
+        assert!(matches!(
+            compare_srgb_display_rgba8(&[0; 4], &[0; 8], valid_budget),
+            Err(SrgbDisplayAccuracyError::LengthMismatch { .. })
+        ));
+        assert!(matches!(
+            compare_srgb_display_rgba8(&[0; 3], &[0; 3], valid_budget),
+            Err(SrgbDisplayAccuracyError::InvalidRgbaLength { .. })
+        ));
+        assert!(matches!(
+            compare_srgb_display_rgba8(&[], &[], valid_budget),
+            Err(SrgbDisplayAccuracyError::EmptyInput)
+        ));
+        assert!(matches!(
+            compare_srgb_display_rgba8(
+                &[0; 4],
+                &[0; 4],
+                SrgbDisplayAccuracyBudget::new(f64::NAN, 1.0, 1.0, 0)
+            ),
+            Err(SrgbDisplayAccuracyError::InvalidBudget { metric: "max_delta_e_2000", .. })
+        ));
     }
 }

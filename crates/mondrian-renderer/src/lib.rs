@@ -27,9 +27,11 @@ pub mod timeline_composite;
 pub mod timeline_render_plan;
 
 pub use color_accuracy::{
-    compare_linear_rgba, LinearAccuracyBudget, LinearAccuracyChannelGroup, LinearAccuracyError,
-    LinearAccuracyGroupReport, LinearAccuracyStatistics, LinearRgbaAccuracyBudget,
-    LinearRgbaAccuracyReport,
+    compare_linear_rgba, compare_srgb_display_rgba8, LinearAccuracyBudget,
+    LinearAccuracyChannelGroup, LinearAccuracyError, LinearAccuracyGroupReport,
+    LinearAccuracyStatistics, LinearRgbaAccuracyBudget, LinearRgbaAccuracyReport,
+    SrgbDisplayAccuracyBudget, SrgbDisplayAccuracyError, SrgbDisplayAccuracyReport,
+    SrgbDisplayAccuracyStatistics,
 };
 pub use color_frame::{
     execute_native_decoded_frame_import, ColorFrameDescriptor, ColorFrameDomain,

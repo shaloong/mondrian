@@ -4133,7 +4133,7 @@ mod tests {
             .expect("readback should unpack into encoded frame");
         readback_buffer.unmap();
 
-        assert_rgba_close(&expected.rgba, actual.rgba(), 3);
+        assert_srgb_display_accurate(&expected.rgba, actual.rgba());
         assert_eq!(record.stage_diagnostics.total_stages, 3);
         assert_eq!(record.stage_diagnostics.upload_stages, 1);
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
@@ -4332,7 +4332,7 @@ mod tests {
             .expect("display/view readback should unpack into encoded frame");
         readback_buffer.unmap();
 
-        assert_rgba_close(&expected.rgba, actual.rgba(), 3);
+        assert_srgb_display_accurate(&expected.rgba, actual.rgba());
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
     }
@@ -5721,15 +5721,17 @@ mod tests {
             .unwrap_or(0)
     }
 
-    fn assert_rgba_close(expected: &[u8], actual: &[u8], tolerance: u8) {
-        assert_eq!(expected.len(), actual.len());
-        for (index, (&expected, &actual)) in expected.iter().zip(actual).enumerate() {
-            let delta = expected.abs_diff(actual);
-            assert!(
-                delta <= tolerance,
-                "rgba byte {index}: expected {expected}, got {actual}, tolerance {tolerance}"
-            );
-        }
+    fn assert_srgb_display_accurate(expected: &[u8], actual: &[u8]) {
+        let report = crate::compare_srgb_display_rgba8(
+            expected,
+            actual,
+            crate::SrgbDisplayAccuracyBudget::new(0.75, 0.20, 0.50, 0),
+        )
+        .expect("valid encoded sRGB output buffers");
+        assert!(
+            report.within_budget,
+            "sRGB display accuracy budget exceeded: {report:#?}"
+        );
     }
 
     #[test]
