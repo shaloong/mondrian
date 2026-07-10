@@ -2832,6 +2832,7 @@ dependencies = [
  "mondrian-timeline",
  "naga",
  "parking_lot",
+ "pollster",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

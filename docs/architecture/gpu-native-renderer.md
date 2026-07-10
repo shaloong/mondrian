@@ -128,6 +128,20 @@ layout, and exact adapter LUID equality with the active wgpu DX12 adapter.
 Codec-aligned storage dimensions may exceed the visible frame; smaller storage
 is invalid. App, core, and generic platform probes must not duplicate or weaken
 these renderer resource invariants.
+Validated D3D11 sources can enter a reusable low-copy bridge entry. Each entry
+owns a single-slice NV12/P010 texture created with the Windows NT-handle sharing
+contract, a D3D11/D3D12 shared timeline fence, two reusable DX12 barrier command
+lists, and one wgpu multi-plane texture with explicit luma/chroma views. D3D11
+waits for the prior renderer completion before overwriting, copies the decoder
+array slice, and signals `copy_ready`; DX12 waits, transitions `COMMON ->
+RESOURCE`, and only then exposes plane views. The renderer submit is followed by
+`RESOURCE -> COMMON` and `renderer_complete`. Fence values are strictly
+monotonic, command allocators are reset only after completion, busy entries fail
+without a CPU wait, and any partially submitted failure permanently poisons the
+entry. The bridge never relies on `Flush`, implicit sRGB, or an undocumented
+resource-state assumption. A real-GPU ignored smoke test exercises NT-handle
+creation/opening, both API devices on the same adapter, fence transfer, resource
+barriers, wgpu adoption, and completion.
 The media layer's FFmpeg hardware codec config probe is also only planning
 evidence. It can prove that the linked FFmpeg decoder advertises a backend
 config for H.264/HEVC/etc., but it does not create an OS device, expose a

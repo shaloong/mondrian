@@ -6,7 +6,7 @@ use mondrian_media::{
 };
 use windows::core::Interface;
 use windows::Win32::Foundation::{E_POINTER, LUID};
-use windows::Win32::Graphics::Direct3D11::{ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 
@@ -15,13 +15,18 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 pub struct NativeVideoAdapterLuid(u64);
 
 impl NativeVideoAdapterLuid {
-    fn from_windows(value: LUID) -> Self {
+    pub(super) fn from_windows(value: LUID) -> Self {
         Self((u64::from(value.HighPart as u32) << 32) | u64::from(value.LowPart))
     }
 
     /// Raw 64-bit Windows LUID representation for diagnostics and cache keys.
     pub fn as_u64(self) -> u64 {
         self.0
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_raw_for_test(value: u64) -> Self {
+        Self(value)
     }
 }
 
@@ -120,6 +125,16 @@ pub enum D3D11NativeDecodedFrameInspectionError {
         /// Actual sample quality.
         quality: u32,
     },
+    /// Native 4:2:0 textures require even storage dimensions.
+    #[error("D3D11 {format} decoder texture storage extent {width}x{height} is not even")]
+    InvalidSubsampledStorageExtent {
+        /// Stable format name.
+        format: &'static str,
+        /// Storage width.
+        width: u32,
+        /// Storage height.
+        height: u32,
+    },
     /// The decoder texture and wgpu renderer reside on different adapters.
     #[error(
         "D3D11 decoder adapter LUID {source_luid:#018x} does not match wgpu DX12 adapter LUID {renderer_luid:#018x}"
@@ -154,6 +169,20 @@ pub fn inspect_d3d11_native_decoded_frame(
     adapter: &wgpu::Adapter,
     frame: &PreviewNativeDecodedFrame,
 ) -> Result<D3D11NativeDecodedFrameInspection, D3D11NativeDecodedFrameInspectionError> {
+    Ok(validated_d3d11_native_decoded_frame(adapter, frame)?.inspection)
+}
+
+pub(super) struct ValidatedD3D11NativeDecodedFrame {
+    pub inspection: D3D11NativeDecodedFrameInspection,
+    pub texture: ID3D11Texture2D,
+    pub device: ID3D11Device,
+    pub dxgi_format: DXGI_FORMAT,
+}
+
+pub(super) fn validated_d3d11_native_decoded_frame(
+    adapter: &wgpu::Adapter,
+    frame: &PreviewNativeDecodedFrame,
+) -> Result<ValidatedD3D11NativeDecodedFrame, D3D11NativeDecodedFrameInspectionError> {
     if frame.handle_kind() != DecodedGpuFrameHandleKind::D3D11Texture2D {
         return Err(
             D3D11NativeDecodedFrameInspectionError::UnsupportedHandleKind {
@@ -183,7 +212,10 @@ pub fn inspect_d3d11_native_decoded_frame(
         expected,
         facts,
     )?;
-    let source_adapter_luid = source_adapter_luid(texture)?;
+    // SAFETY: texture is live for this call; GetDevice returns an owned COM reference.
+    let source_device = unsafe { texture.GetDevice() }
+        .map_err(|error| windows_error("ID3D11Texture2D::GetDevice", error.code()))?;
+    let source_adapter_luid = source_adapter_luid(&source_device)?;
     let renderer_adapter_luid = renderer_adapter_luid(adapter)?;
     if source_adapter_luid != renderer_adapter_luid {
         return Err(D3D11NativeDecodedFrameInspectionError::AdapterMismatch {
@@ -192,14 +224,19 @@ pub fn inspect_d3d11_native_decoded_frame(
         });
     }
 
-    Ok(D3D11NativeDecodedFrameInspection {
-        visible_width: frame.width,
-        visible_height: frame.height,
-        storage_width: facts.width,
-        storage_height: facts.height,
-        array_slice: view.array_slice(),
-        source_texture_format: expected.renderer_format,
-        adapter_luid: source_adapter_luid,
+    Ok(ValidatedD3D11NativeDecodedFrame {
+        inspection: D3D11NativeDecodedFrameInspection {
+            visible_width: frame.width,
+            visible_height: frame.height,
+            storage_width: facts.width,
+            storage_height: facts.height,
+            array_slice: view.array_slice(),
+            source_texture_format: expected.renderer_format,
+            adapter_luid: source_adapter_luid,
+        },
+        texture: texture.clone(),
+        device: source_device,
+        dxgi_format: expected.raw,
     })
 }
 
@@ -269,6 +306,15 @@ fn validate_texture_facts(
             },
         );
     }
+    if !facts.width.is_multiple_of(2) || !facts.height.is_multiple_of(2) {
+        return Err(
+            D3D11NativeDecodedFrameInspectionError::InvalidSubsampledStorageExtent {
+                format: expected.name,
+                width: facts.width,
+                height: facts.height,
+            },
+        );
+    }
     if array_slice >= facts.array_size {
         return Err(
             D3D11NativeDecodedFrameInspectionError::ArraySliceOutOfRange {
@@ -296,11 +342,8 @@ fn validate_texture_facts(
 }
 
 fn source_adapter_luid(
-    texture: &ID3D11Texture2D,
+    device: &ID3D11Device,
 ) -> Result<NativeVideoAdapterLuid, D3D11NativeDecodedFrameInspectionError> {
-    // SAFETY: texture is live for this call; GetDevice returns an owned COM reference.
-    let device = unsafe { texture.GetDevice() }
-        .map_err(|error| windows_error("ID3D11Texture2D::GetDevice", error.code()))?;
     let dxgi_device: IDXGIDevice = device.cast().map_err(|error| {
         windows_error("ID3D11Device::QueryInterface<IDXGIDevice>", error.code())
     })?;
@@ -450,6 +493,28 @@ mod tests {
             D3D11NativeDecodedFrameInspectionError::UnsupportedSampleDescriptor {
                 count: 2,
                 quality: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn texture_validation_rejects_odd_subsampled_storage_extent() {
+        let mut facts = valid_facts(DXGI_FORMAT_NV12);
+        facts.height = 1087;
+        assert_eq!(
+            validate_texture_facts(
+                1920,
+                1080,
+                0,
+                expected_dxgi_format(DecodedVideoSurfaceFormat::Nv12)
+                    .expect("NV12 must be supported"),
+                facts,
+            )
+            .expect_err("4:2:0 decoder storage must have even dimensions"),
+            D3D11NativeDecodedFrameInspectionError::InvalidSubsampledStorageExtent {
+                format: "DXGI_FORMAT_NV12",
+                width: 1920,
+                height: 1087,
             }
         );
     }

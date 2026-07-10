@@ -89,7 +89,8 @@ pub use gpu_compositor::{
 };
 #[cfg(target_os = "windows")]
 pub use native_video::{
-    inspect_d3d11_native_decoded_frame, D3D11NativeDecodedFrameInspection,
+    inspect_d3d11_native_decoded_frame, D3D11Dx12PreparedVideoFrame, D3D11Dx12SharedVideoTexture,
+    D3D11Dx12SharedVideoTextureError, D3D11Dx12VideoPlaneViews, D3D11NativeDecodedFrameInspection,
     D3D11NativeDecodedFrameInspectionError, NativeVideoAdapterLuid,
 };
 pub use ocio_gpu::{
