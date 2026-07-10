@@ -2,6 +2,15 @@
 
 use mondrian_core::Result;
 use std::sync::Arc;
+
+/// Optional wgpu features required to sample native NV12/P010 video textures.
+///
+/// Only features advertised by the selected adapter are returned, so callers
+/// can add the result to `DeviceDescriptor::required_features` without turning
+/// an unsupported native-video format into device creation failure.
+pub fn native_video_texture_device_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    adapter_features & (wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010)
+}
 use wgpu;
 
 pub struct GpuContext {
@@ -46,8 +55,12 @@ impl GpuContext {
 
         tracing::info!("GPU Adapter: {:?}", adapter.get_info());
 
+        let device_descriptor = wgpu::DeviceDescriptor {
+            required_features: native_video_texture_device_features(adapter.features()),
+            ..wgpu::DeviceDescriptor::default()
+        };
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&device_descriptor)
             .await
             .map_err(|e| mondrian_core::MondrianError::GpuInitFailed { reason: e.to_string() })?;
 
@@ -56,5 +69,27 @@ impl GpuContext {
             queue: Arc::new(queue),
             adapter,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_video_texture_device_features;
+
+    #[test]
+    fn native_video_device_features_request_only_supported_formats() {
+        let unrelated = wgpu::Features::TIMESTAMP_QUERY;
+        assert_eq!(
+            native_video_texture_device_features(unrelated),
+            wgpu::Features::empty()
+        );
+        assert_eq!(
+            native_video_texture_device_features(
+                unrelated
+                    | wgpu::Features::TEXTURE_FORMAT_NV12
+                    | wgpu::Features::TEXTURE_FORMAT_P010,
+            ),
+            wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010
+        );
     }
 }

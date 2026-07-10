@@ -76,6 +76,7 @@ pub use color_transform::{
     RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
 pub use compositor::{CompositorConfig, FrameCompositor};
+pub use context::native_video_texture_device_features;
 pub use context::GpuContext;
 pub use gpu_backend::{
     gpu_enabled, set_gpu_enabled, GpuBackend, GpuEffectKind, GpuExecResult, GpuFallbackReason,

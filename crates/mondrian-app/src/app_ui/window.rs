@@ -41,9 +41,9 @@ use mondrian_core::types::{BlendMode, Color, ColorSpace};
 use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::{
-    CpuColorFrame, GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuCompositeLayer,
-    GpuCompositeLayerSource, GpuCompositeRequest, GpuFrameCompositor,
-    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
+    native_video_texture_device_features, CpuColorFrame, GpuColorFrameHandle,
+    GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
+    GpuFrameCompositor, GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
     GpuNativeDecodedFrameVideoSampling, RenderColorStageDiagnostics,
     RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
@@ -1344,8 +1344,11 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         })
         .ok();
 
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+    let device_descriptor = wgpu::DeviceDescriptor {
+        required_features: native_video_texture_device_features(adapter.features()),
+        ..wgpu::DeviceDescriptor::default()
+    };
+    let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor))?;
 
     let mut host = AppUiHost::new(AppState::new());
     let mut session = AppUiWindowSession::from_window_and_surface(

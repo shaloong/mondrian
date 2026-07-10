@@ -113,6 +113,14 @@ VA-API, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
 to the next backend. The renderer import support value remains
 `GpuNativeDecodedFrameImportSupport::unavailable()` until a concrete backend can
 sample the native surface and produce a renderer-owned float working frame.
+Renderer and product-window device creation request the adapter-supported subset
+of wgpu `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010` through the shared
+`native_video_texture_device_features` contract. Enabling those features is only
+a texture-format prerequisite: it does not prove that a decoder resource can be
+shared, synchronized, adopted by the active wgpu device, sampled, or transformed.
+Readiness therefore remains fail-closed until the backend has connected and
+validated the complete platform import bridge. Diagnostics distinguish missing
+device format features from a missing D3D11 shared-texture/fence bridge.
 The media layer's FFmpeg hardware codec config probe is also only planning
 evidence. It can prove that the linked FFmpeg decoder advertises a backend
 config for H.264/HEVC/etc., but it does not create an OS device, expose a

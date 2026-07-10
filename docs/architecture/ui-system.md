@@ -128,6 +128,12 @@ dimensions, deterministic render-plan signature, and resolved media-frame
 identity. The final-frame key also includes the effective preview color context,
 so monitor/output changes invalidate previously rendered pixels. Unresolved
 media requests still bypass this cache until their source frame is available.
+The product window and renderer context use the same renderer-owned wgpu device
+feature contract for native NV12/P010 texture formats. Adapter-supported format
+features are requested during device creation, while app diagnostics continue to
+report native import as unavailable until the platform resource-sharing,
+synchronization, adoption, sampling, and input-transform bridge is connected.
+Device feature enablement alone must never promote hardware decode admission.
 The preview service resolves the requested display color space from the active
 display-management policy, but the app window owns real surface/display
 validation. The window records the final GPU output boundary only after checking
