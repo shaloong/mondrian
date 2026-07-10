@@ -18,13 +18,28 @@ pub fn rasterize_mask_shape(
     expansion: f32,
     opacity: f32,
 ) -> Vec<u8> {
+    rasterize_mask_shape_f32(shape, width, height, feather, expansion, opacity)
+        .into_iter()
+        .map(|alpha| (alpha * 255.0).round() as u8)
+        .collect()
+}
+
+/// Rasterize a mask shape directly into normalized float alpha coverage.
+pub(crate) fn rasterize_mask_shape_f32(
+    shape: &MaskShape,
+    width: u32,
+    height: u32,
+    feather: f32,
+    expansion: f32,
+    opacity: f32,
+) -> Vec<f32> {
     let w = width.max(1) as usize;
     let h = height.max(1) as usize;
     let total = w * h;
-    let mut alpha = vec![0u8; total];
+    let mut alpha = vec![0.0; total];
 
     let opacity = opacity.clamp(0.0, 1.0);
-    if opacity <= 1.0 / 255.0 {
+    if opacity <= 1.0e-6 {
         return alpha;
     }
 
@@ -53,8 +68,7 @@ pub fn rasterize_mask_shape(
                 1.0 - smoothstep(-feather_px, feather_px, expanded)
             };
 
-            let final_a = (a * opacity).clamp(0.0, 1.0);
-            alpha[y * w + x] = (final_a * 255.0).round() as u8;
+            alpha[y * w + x] = (a * opacity).clamp(0.0, 1.0);
         }
     }
 
@@ -315,6 +329,23 @@ mod tests {
         let full_avg = full.iter().map(|&a| a as f32).sum::<f32>() / full.len() as f32;
         let half_avg = half.iter().map(|&a| a as f32).sum::<f32>() / half.len() as f32;
         assert!((half_avg * 2.0 - full_avg).abs() < 10.0);
+    }
+
+    #[test]
+    fn float_raster_preserves_sub_byte_mask_coverage() {
+        let shape = MaskShape::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            corner_radius: 0.0,
+        };
+
+        let alpha = rasterize_mask_shape_f32(&shape, 1, 1, 0.0, 0.0, 0.123_456);
+
+        assert_eq!(alpha.len(), 1);
+        assert!((alpha[0] - 0.123_456).abs() <= f32::EPSILON);
+        assert!((alpha[0] * 255.0 - (alpha[0] * 255.0).round()).abs() > 1.0e-3);
     }
 
     #[test]

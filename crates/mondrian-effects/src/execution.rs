@@ -42,7 +42,7 @@ pub enum EffectFloatExecutionError {
         /// Actual number of RGBA pixels.
         actual: usize,
     },
-    /// The graph contains a node shape or render op that is still legacy-only.
+    /// The graph contains a node shape or render op that cannot execute in float.
     UnsupportedNode {
         /// Unsupported node id.
         node_id: EffectGraphNodeId,
@@ -59,7 +59,7 @@ pub enum EffectFloatExecutionError {
 /// Reason an effect graph cannot use the float/linear CPU path yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectFloatUnsupportedReason {
-    /// The graph node kind needs a float implementation before it can run here.
+    /// The graph node shape cannot execute on the float path.
     UnsupportedGraphNode {
         /// Stable node kind label for diagnostics.
         kind: &'static str,
@@ -559,41 +559,6 @@ fn execute_effect_graph(
                         continue;
                     }
                 }
-                if base == overlay {
-                    let Some(mut base_frame) = take_graph_input(
-                        &mut outputs,
-                        &mut remaining_uses,
-                        &mut buffer_pool,
-                        *base,
-                        required_len,
-                    ) else {
-                        return input.to_vec();
-                    };
-                    let mut overlay_frame = take_execution_buffer(&mut buffer_pool, required_len);
-                    overlay_frame.copy_from_slice(&base_frame);
-                    blend_graph_inputs_in_place(
-                        &mut base_frame,
-                        &overlay_frame,
-                        *opacity,
-                        *blend_mode,
-                    );
-                    release_execution_buffer(&mut buffer_pool, overlay_frame);
-                    if let (Some(compiled), Some(input_signature)) =
-                        (compiled, source_input_signature)
-                    {
-                        put_cached_node_output(
-                            compiled,
-                            *node_id,
-                            width,
-                            height,
-                            input_signature,
-                            frame_seed,
-                            &base_frame,
-                        );
-                    }
-                    outputs.insert(node.id, base_frame);
-                    continue;
-                }
                 let Some(mut base_frame) = take_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
@@ -612,7 +577,13 @@ fn execute_effect_graph(
                 ) else {
                     return input.to_vec();
                 };
-                blend_graph_inputs_in_place(&mut base_frame, &overlay_frame, *opacity, *blend_mode);
+                blend_graph_inputs_in_place(
+                    &mut base_frame,
+                    &overlay_frame,
+                    *opacity,
+                    *blend_mode,
+                    frame_seed,
+                );
                 release_execution_buffer(&mut buffer_pool, overlay_frame);
                 if let (Some(compiled), Some(input_signature)) = (compiled, source_input_signature)
                 {
@@ -664,36 +635,6 @@ fn execute_effect_graph(
                         continue;
                     }
                 }
-                if input_id == mask {
-                    let Some(mut source) = take_graph_input(
-                        &mut outputs,
-                        &mut remaining_uses,
-                        &mut buffer_pool,
-                        *input_id,
-                        required_len,
-                    ) else {
-                        return input.to_vec();
-                    };
-                    let mut mask_frame = take_execution_buffer(&mut buffer_pool, required_len);
-                    mask_frame.copy_from_slice(&source);
-                    apply_alpha_mask_in_place(&mut source, &mask_frame, *invert, *mask_op);
-                    release_execution_buffer(&mut buffer_pool, mask_frame);
-                    if let (Some(compiled), Some(input_signature)) =
-                        (compiled, source_input_signature)
-                    {
-                        put_cached_node_output(
-                            compiled,
-                            *node_id,
-                            width,
-                            height,
-                            input_signature,
-                            frame_seed,
-                            &source,
-                        );
-                    }
-                    outputs.insert(node.id, source);
-                    continue;
-                }
                 let Some(mut source) = take_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
@@ -729,11 +670,14 @@ fn execute_effect_graph(
                 outputs.insert(node.id, source);
             }
             EffectGraphNodeKind::MultiInput { ref inputs, blend_mode, opacity } => {
+                let Some(first_id) = inputs.first().copied() else {
+                    return input.to_vec();
+                };
                 let first = take_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
                     &mut buffer_pool,
-                    inputs[0],
+                    first_id,
                     required_len,
                 )
                 .unwrap_or_else(|| input.to_vec());
@@ -746,19 +690,12 @@ fn execute_effect_graph(
                         *overlay_id,
                         required_len,
                     ) {
-                        let mut out = take_execution_buffer(&mut buffer_pool, required_len);
-                        crate::adjustment::blend_adjustment_result(
-                            &result,
+                        blend_graph_inputs_in_place(
+                            &mut result,
                             &overlay,
-                            width,
-                            height,
                             *opacity,
-                            Some(*blend_mode),
-                            &mut out,
-                        );
-                        release_execution_buffer(
-                            &mut buffer_pool,
-                            std::mem::replace(&mut result, out),
+                            *blend_mode,
+                            frame_seed,
                         );
                         release_execution_buffer(&mut buffer_pool, overlay);
                     }
@@ -888,10 +825,10 @@ pub fn effect_graph_gpu_blockers(compiled: &CompiledEffectGraph) -> Vec<EffectGp
 
 /// Execute a compiled graph over linear `f32` RGBA pixels.
 ///
-/// All built-in unary effects execute in the linear float working domain.
-/// Custom processors and non-unary graph nodes require an explicit float ABI;
-/// unsupported nodes return structured errors so callers can make a diagnosed
-/// fallback decision.
+/// Built-in unary, blend, mask, mask-source, and multi-input nodes execute in
+/// the linear float working domain. Custom processors require an explicit float
+/// ABI; unsupported processors return structured errors so callers can make a
+/// diagnosed fallback decision.
 pub fn apply_compiled_effect_graph_rgba_f32(
     input: &[[f32; 4]],
     width: u32,
@@ -914,7 +851,10 @@ pub fn apply_compiled_effect_graph_rgba_f32(
         return Ok(cached);
     }
 
-    let mut outputs = HashMap::<EffectGraphNodeId, Vec<[f32; 4]>>::new();
+    let mut outputs =
+        HashMap::<EffectGraphNodeId, Vec<[f32; 4]>>::with_capacity(compiled.graph.nodes.len());
+    let mut remaining_uses = compiled.node_use_counts.clone();
+    let mut buffer_pool = Vec::<Vec<[f32; 4]>>::new();
     for node_id in &compiled.schedule.ordered_nodes {
         let Some(node) = compiled.graph.node(*node_id) else {
             return Err(EffectFloatExecutionError::UnsupportedNode {
@@ -924,10 +864,18 @@ pub fn apply_compiled_effect_graph_rgba_f32(
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {
-                outputs.insert(node.id, input.to_vec());
+                let mut frame = take_float_execution_buffer(&mut buffer_pool, required_len);
+                frame.copy_from_slice(input);
+                outputs.insert(node.id, frame);
             }
             EffectGraphNodeKind::UnaryEffect { input: input_id, op } => {
-                let Some(mut source) = outputs.get(input_id).cloned() else {
+                let Some(mut source) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *input_id,
+                    required_len,
+                ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *input_id });
                 };
                 if !apply_render_op_f32(&mut source, width, height, op, frame_seed) {
@@ -940,17 +888,103 @@ pub fn apply_compiled_effect_graph_rgba_f32(
                 }
                 outputs.insert(node.id, source);
             }
-            EffectGraphNodeKind::Blend { .. } => {
-                return Err(unsupported_float_graph_node(node.id, "blend"));
+            EffectGraphNodeKind::Blend { base, overlay, blend_mode, opacity } => {
+                let Some(mut base_frame) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *base,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *base });
+                };
+                let Some(overlay_frame) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *overlay,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *overlay });
+                };
+                blend_rgba_f32_in_place(
+                    &mut base_frame,
+                    &overlay_frame,
+                    *opacity,
+                    *blend_mode,
+                    frame_seed,
+                );
+                release_float_execution_buffer(&mut buffer_pool, overlay_frame);
+                outputs.insert(node.id, base_frame);
             }
-            EffectGraphNodeKind::Mask { .. } => {
-                return Err(unsupported_float_graph_node(node.id, "mask"));
+            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } => {
+                let alpha = crate::mask_raster::rasterize_mask_shape_f32(
+                    shape, width, height, *feather, *expansion, *opacity,
+                );
+                let mut rgba = take_float_execution_buffer(&mut buffer_pool, required_len);
+                for (pixel, alpha) in rgba.iter_mut().zip(alpha) {
+                    *pixel = [1.0, 1.0, 1.0, alpha];
+                }
+                outputs.insert(node.id, rgba);
             }
-            EffectGraphNodeKind::MaskSource { .. } => {
-                return Err(unsupported_float_graph_node(node.id, "mask_source"));
+            EffectGraphNodeKind::Mask { input: input_id, mask, invert, mask_op } => {
+                let Some(mut source) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *input_id,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *input_id });
+                };
+                let Some(mask_frame) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *mask,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *mask });
+                };
+                apply_alpha_mask_f32_in_place(&mut source, &mask_frame, *invert, *mask_op);
+                release_float_execution_buffer(&mut buffer_pool, mask_frame);
+                outputs.insert(node.id, source);
             }
-            EffectGraphNodeKind::MultiInput { .. } => {
-                return Err(unsupported_float_graph_node(node.id, "multi_input"));
+            EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
+                let Some(first_id) = inputs.first().copied() else {
+                    return Err(unsupported_float_graph_node(node.id, "multi_input_empty"));
+                };
+                let Some(mut result) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    first_id,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: first_id });
+                };
+                for overlay_id in &inputs[1..] {
+                    let Some(overlay) = take_float_graph_input(
+                        &mut outputs,
+                        &mut remaining_uses,
+                        &mut buffer_pool,
+                        *overlay_id,
+                        required_len,
+                    ) else {
+                        return Err(EffectFloatExecutionError::MissingOutput {
+                            node_id: *overlay_id,
+                        });
+                    };
+                    blend_rgba_f32_in_place(
+                        &mut result,
+                        &overlay,
+                        *opacity,
+                        *blend_mode,
+                        frame_seed,
+                    );
+                    release_float_execution_buffer(&mut buffer_pool, overlay);
+                }
+                outputs.insert(node.id, result);
             }
         }
     }
@@ -994,7 +1028,7 @@ pub fn apply_compiled_effect_graph_pass_rgba_f32(
     let processed =
         apply_compiled_effect_graph_rgba_f32(base, width, height, compiled, frame_seed)?;
     let mut out = base.to_vec();
-    blend_rgba_f32_in_place(&mut out, &processed, opacity, mode);
+    blend_rgba_f32_in_place(&mut out, &processed, opacity, mode, frame_seed);
     Ok(out)
 }
 
@@ -1176,18 +1210,10 @@ fn validate_float_effect_graph(
                     });
                 }
             }
-            EffectGraphNodeKind::Blend { .. } => {
-                return Err(unsupported_float_graph_node(node.id, "blend"));
-            }
-            EffectGraphNodeKind::Mask { .. } => {
-                return Err(unsupported_float_graph_node(node.id, "mask"));
-            }
-            EffectGraphNodeKind::MaskSource { .. } => {
-                return Err(unsupported_float_graph_node(node.id, "mask_source"));
-            }
-            EffectGraphNodeKind::MultiInput { .. } => {
-                return Err(unsupported_float_graph_node(node.id, "multi_input"));
-            }
+            EffectGraphNodeKind::Blend { .. }
+            | EffectGraphNodeKind::Mask { .. }
+            | EffectGraphNodeKind::MaskSource { .. }
+            | EffectGraphNodeKind::MultiInput { .. } => {}
         }
     }
     Ok(())
@@ -1356,6 +1382,46 @@ fn take_execution_buffer(buffer_pool: &mut Vec<Vec<u8>>, required_len: usize) ->
     vec![0u8; required_len]
 }
 
+fn take_float_graph_input(
+    outputs: &mut HashMap<EffectGraphNodeId, Vec<[f32; 4]>>,
+    remaining_uses: &mut HashMap<EffectGraphNodeId, usize>,
+    buffer_pool: &mut Vec<Vec<[f32; 4]>>,
+    node_id: EffectGraphNodeId,
+    required_len: usize,
+) -> Option<Vec<[f32; 4]>> {
+    let remaining = remaining_uses.get_mut(&node_id)?;
+    if *remaining == 0 {
+        return None;
+    }
+    *remaining -= 1;
+    if *remaining == 0 {
+        return outputs.remove(&node_id);
+    }
+
+    let source = outputs.get(&node_id)?;
+    let mut cloned = take_float_execution_buffer(buffer_pool, required_len);
+    cloned.copy_from_slice(source);
+    Some(cloned)
+}
+
+fn take_float_execution_buffer(
+    buffer_pool: &mut Vec<Vec<[f32; 4]>>,
+    required_len: usize,
+) -> Vec<[f32; 4]> {
+    if let Some(mut buffer) = buffer_pool.pop() {
+        if buffer.len() != required_len {
+            buffer.resize(required_len, [0.0; 4]);
+        }
+        return buffer;
+    }
+    vec![[0.0; 4]; required_len]
+}
+
+fn release_float_execution_buffer(buffer_pool: &mut Vec<Vec<[f32; 4]>>, mut buffer: Vec<[f32; 4]>) {
+    buffer.clear();
+    buffer_pool.push(buffer);
+}
+
 fn release_execution_buffer(buffer_pool: &mut Vec<Vec<u8>>, mut buffer: Vec<u8>) {
     buffer.clear();
     buffer_pool.push(buffer);
@@ -1366,6 +1432,7 @@ fn blend_graph_inputs_in_place(
     overlay: &[u8],
     opacity: f32,
     blend_mode: BlendMode,
+    frame_seed: i64,
 ) {
     for (i, (base_px, overlay_px)) in
         base.chunks_exact_mut(4).zip(overlay.chunks_exact(4)).enumerate()
@@ -1375,7 +1442,7 @@ fn blend_graph_inputs_in_place(
             [overlay_px[0], overlay_px[1], overlay_px[2], overlay_px[3]],
             opacity,
             blend_mode,
-            i as u32,
+            effect_graph_dither_seed(i as u32, frame_seed),
         );
         base_px.copy_from_slice(&blended);
     }
@@ -1386,6 +1453,7 @@ fn blend_rgba_f32_in_place(
     overlay: &[[f32; 4]],
     opacity: f32,
     blend_mode: BlendMode,
+    frame_seed: i64,
 ) {
     let opacity = opacity.clamp(0.0, 1.0);
     if opacity <= 1.0e-4 {
@@ -1393,9 +1461,18 @@ fn blend_rgba_f32_in_place(
     }
 
     for (index, (base_px, overlay_px)) in base.iter_mut().zip(overlay.iter()).enumerate() {
-        *base_px =
-            blend_rgba_f32_pixel_seeded(*base_px, *overlay_px, opacity, blend_mode, index as u32);
+        *base_px = blend_rgba_f32_pixel_seeded(
+            *base_px,
+            *overlay_px,
+            opacity,
+            blend_mode,
+            effect_graph_dither_seed(index as u32, frame_seed),
+        );
     }
+}
+
+fn effect_graph_dither_seed(pixel_index: u32, frame_seed: i64) -> u32 {
+    pixel_index ^ (frame_seed as u32).rotate_left(13) ^ ((frame_seed >> 32) as u32).rotate_right(7)
 }
 
 fn apply_alpha_mask_in_place(
@@ -1418,6 +1495,29 @@ fn apply_alpha_mask_in_place(
             MaskOp::Difference => (src_alpha - matte).abs(),
         };
         out_px[3] = unit_to_u8(result);
+    }
+}
+
+fn apply_alpha_mask_f32_in_place(
+    input: &mut [[f32; 4]],
+    mask: &[[f32; 4]],
+    invert: bool,
+    mask_op: crate::mask::MaskOp,
+) {
+    use crate::mask::MaskOp;
+    for (output, matte) in input.iter_mut().zip(mask) {
+        let matte = if invert {
+            1.0 - matte[3].clamp(0.0, 1.0)
+        } else {
+            matte[3].clamp(0.0, 1.0)
+        };
+        let source_alpha = output[3].clamp(0.0, 1.0);
+        output[3] = match mask_op {
+            MaskOp::Add => source_alpha * matte,
+            MaskOp::Subtract => source_alpha * (1.0 - matte),
+            MaskOp::Intersect => source_alpha.min(matte),
+            MaskOp::Difference => (source_alpha - matte).abs(),
+        };
     }
 }
 
@@ -1570,6 +1670,160 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn float_branching_blend_graph_preserves_hdr_and_straight_alpha() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::UnaryEffect {
+                        input: EffectGraphNodeId(0),
+                        op: EffectRenderOp::ColorAdjust {
+                            exposure: 1.0,
+                            contrast: 1.0,
+                            saturation: 1.0,
+                        },
+                    },
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::Blend {
+                        base: EffectGraphNodeId(0),
+                        overlay: EffectGraphNodeId(1),
+                        blend_mode: BlendMode::Normal,
+                        opacity: 0.5,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+        let compiled = crate::get_or_compile_scheduled_render_graph(graph)
+            .expect("compile branching float graph");
+        let input = [[1.5, 0.25, -0.125, 0.5]];
+
+        let output = apply_compiled_effect_graph_rgba_f32(&input, 1, 1, &compiled, 7)
+            .expect("execute branching float graph");
+        let expected = blend_rgba_f32_pixel_seeded(
+            input[0],
+            [3.0, 0.5, -0.25, 0.5],
+            0.5,
+            BlendMode::Normal,
+            effect_graph_dither_seed(0, 7),
+        );
+
+        assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
+        for (actual, expected) in output[0].iter().zip(expected) {
+            assert!((actual - expected).abs() <= 1.0e-6);
+        }
+        assert!(output[0][0] > 1.0);
+        assert!(output[0][2] < 0.0);
+        assert!((output[0][3] - 0.625).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn float_mask_graph_uses_unquantized_matte_and_preserves_rgb() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Rectangle {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 1.0,
+                            height: 1.0,
+                            corner_radius: 0.0,
+                        },
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 0.123_456,
+                    },
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::Mask {
+                        input: EffectGraphNodeId(0),
+                        mask: EffectGraphNodeId(1),
+                        invert: false,
+                        mask_op: crate::mask::MaskOp::Add,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+        let compiled =
+            crate::get_or_compile_scheduled_render_graph(graph).expect("compile float mask graph");
+        let input = [[2.0, -0.25, 0.5, 0.8]];
+
+        let output = apply_compiled_effect_graph_rgba_f32(&input, 1, 1, &compiled, 0)
+            .expect("execute float mask graph");
+
+        assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert_eq!(&output[0][..3], &input[0][..3]);
+        assert!((output[0][3] - 0.8 * 0.123_456).abs() <= 1.0e-6);
+        assert!((output[0][3] * 255.0 - (output[0][3] * 255.0).round()).abs() > 1.0e-3);
+    }
+
+    #[test]
+    fn float_multi_input_dissolve_is_frame_dependent_and_cache_safe() {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::UnaryEffect {
+                        input: EffectGraphNodeId(0),
+                        op: EffectRenderOp::ColorAdjust {
+                            exposure: 1.0,
+                            contrast: 1.0,
+                            saturation: 1.0,
+                        },
+                    },
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::MultiInput {
+                        inputs: vec![EffectGraphNodeId(0), EffectGraphNodeId(1)],
+                        blend_mode: BlendMode::Dissolve,
+                        opacity: 0.5,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(2)),
+        };
+        let compiled = crate::get_or_compile_scheduled_render_graph(graph)
+            .expect("compile float multi-input graph");
+        let input = vec![[0.75, 0.25, 0.125, 1.0]; 64];
+
+        let first = apply_compiled_effect_graph_rgba_f32(&input, 8, 8, &compiled, 1)
+            .expect("execute first dissolve frame");
+        let repeated = apply_compiled_effect_graph_rgba_f32(&input, 8, 8, &compiled, 1)
+            .expect("execute repeated dissolve frame");
+        let second = apply_compiled_effect_graph_rgba_f32(&input, 8, 8, &compiled, 2)
+            .expect("execute second dissolve frame");
+
+        assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert_eq!(
+            compiled.output_cache_policy,
+            crate::EffectCachePolicy::FrameDependent
+        );
+        assert_eq!(first, repeated);
+        assert_ne!(first, second);
+        assert!(first.iter().any(|pixel| pixel[0] > 1.0));
+        assert!(first.iter().any(|pixel| pixel[0] < 1.0));
     }
 
     #[test]

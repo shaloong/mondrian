@@ -394,25 +394,20 @@ pub fn blend_rgba_pixel_seeded(
         return base_px;
     }
 
+    if blend_mode == BlendMode::Dissolve {
+        let threshold = hash_u32(dither_seed) as f32 / u32::MAX as f32;
+        if threshold > opacity {
+            return base_px;
+        }
+        return blend_rgba_pixel_seeded(base_px, blend_px, 1.0, BlendMode::Normal, dither_seed);
+    }
+
     let base_alpha = base_px[3] as f32 / 255.0;
     let blend_alpha = (blend_px[3] as f32 / 255.0) * opacity;
     if blend_alpha <= 1.0e-4 {
         return base_px;
     }
     if base_alpha <= 1.0e-4 {
-        return [
-            blend_px[0],
-            blend_px[1],
-            blend_px[2],
-            unit_to_u8(blend_alpha),
-        ];
-    }
-
-    if blend_mode == BlendMode::Dissolve {
-        let threshold = hash_u32(dither_seed) as f32 / u32::MAX as f32;
-        if threshold > opacity {
-            return base_px;
-        }
         return [
             blend_px[0],
             blend_px[1],
@@ -469,20 +464,20 @@ pub fn blend_rgba_f32_pixel_seeded(
         return base_px;
     }
 
+    if blend_mode == BlendMode::Dissolve {
+        let threshold = hash_u32(dither_seed) as f32 / u32::MAX as f32;
+        if threshold > opacity {
+            return base_px;
+        }
+        return blend_rgba_f32_pixel_seeded(base_px, blend_px, 1.0, BlendMode::Normal, dither_seed);
+    }
+
     let base_alpha = base_px[3].clamp(0.0, 1.0);
     let blend_alpha = (blend_px[3] * opacity).clamp(0.0, 1.0);
     if blend_alpha <= 1.0e-4 {
         return base_px;
     }
     if base_alpha <= 1.0e-4 {
-        return [blend_px[0], blend_px[1], blend_px[2], blend_alpha];
-    }
-
-    if blend_mode == BlendMode::Dissolve {
-        let threshold = hash_u32(dither_seed) as f32 / u32::MAX as f32;
-        if threshold > opacity {
-            return base_px;
-        }
         return [blend_px[0], blend_px[1], blend_px[2], blend_alpha];
     }
 
@@ -1275,6 +1270,28 @@ mod tests {
             let actual = (f32[channel].clamp(0.0, 1.0) * 255.0).round() as u8;
             assert!((actual as i16 - rgba8[channel] as i16).abs() <= 1);
         }
+    }
+
+    #[test]
+    fn dissolve_gates_full_source_over_instead_of_squaring_opacity() {
+        let base_u8 = [0, 0, 0, 255];
+        let blend_u8 = [255, 0, 0, 128];
+        let expected_u8 = blend_rgba_pixel_seeded(base_u8, blend_u8, 1.0, BlendMode::Normal, 0);
+        let dissolved_u8 = blend_rgba_pixel_seeded(base_u8, blend_u8, 0.5, BlendMode::Dissolve, 0);
+
+        let base_f32 = [0.0, 0.0, 0.0, 1.0];
+        let blend_f32 = [2.0, -0.25, 0.5, 0.5];
+        let expected_f32 =
+            blend_rgba_f32_pixel_seeded(base_f32, blend_f32, 1.0, BlendMode::Normal, 0);
+        let dissolved_f32 =
+            blend_rgba_f32_pixel_seeded(base_f32, blend_f32, 0.5, BlendMode::Dissolve, 0);
+
+        assert_eq!(dissolved_u8, expected_u8);
+        assert_eq!(dissolved_f32, expected_f32);
+        assert_eq!(dissolved_u8[3], 255);
+        assert!((dissolved_f32[0] - 1.0).abs() <= f32::EPSILON);
+        assert!((dissolved_f32[1] + 0.125).abs() <= f32::EPSILON);
+        assert!((dissolved_f32[3] - 1.0).abs() <= f32::EPSILON);
     }
 
     #[test]

@@ -58,6 +58,8 @@ pub struct TimelineCompositeScratch {
     media_effect: Vec<u8>,
     adjustment: Vec<u8>,
     solid_fill: Vec<u8>,
+    solid_fill_f32: Vec<[f32; 4]>,
+    solid_effect_f32: Vec<[f32; 4]>,
 }
 
 /// A CPU composite result paired with color-path diagnostics for the plan.
@@ -329,7 +331,7 @@ fn composite_supported_elements_to_working_frame(
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
     working_color_space: ColorSpace,
-    _scratch: &mut TimelineCompositeScratch,
+    scratch: &mut TimelineCompositeScratch,
 ) -> RgbaF32Frame {
     let pixel_count = width as usize * height as usize;
     if pixel_count == 0 {
@@ -377,13 +379,45 @@ fn composite_supported_elements_to_working_frame(
                 has_composited_layer = true;
             }
             TimelineCompositeElement::SolidColor(layer) => {
-                alpha_blend_f32_solid(
-                    &mut canvas,
-                    [layer.color.r, layer.color.g, layer.color.b, layer.color.a],
-                    layer.opacity,
-                    layer.blend_mode,
-                    layer.frame_seed,
-                );
+                let color = [layer.color.r, layer.color.g, layer.color.b, layer.color.a];
+                if layer.effect_graph.graph.is_identity() && is_identity_transform(layer.transform)
+                {
+                    alpha_blend_f32_solid(
+                        &mut canvas,
+                        color,
+                        layer.opacity,
+                        layer.blend_mode,
+                        layer.frame_seed,
+                    );
+                } else {
+                    scratch.solid_fill_f32.resize(pixel_count, color);
+                    scratch.solid_fill_f32.fill(color);
+                    let source = if layer.effect_graph.graph.is_identity() {
+                        scratch.solid_fill_f32.as_slice()
+                    } else {
+                        scratch.solid_effect_f32 = apply_compiled_effect_graph_rgba_f32(
+                            &scratch.solid_fill_f32,
+                            width,
+                            height,
+                            &layer.effect_graph,
+                            layer.frame_seed,
+                        )
+                        .expect("float-compatible solid effect graph");
+                        scratch.solid_effect_f32.as_slice()
+                    };
+                    alpha_blend_f32_layer(
+                        &mut canvas,
+                        width as usize,
+                        height as usize,
+                        source,
+                        width as usize,
+                        height as usize,
+                        layer.opacity,
+                        layer.blend_mode,
+                        layer.transform,
+                        layer.frame_seed,
+                    );
+                }
                 has_composited_layer = true;
             }
             TimelineCompositeElement::Adjustment(layer) => {
@@ -1314,6 +1348,103 @@ mod tests {
         assert_eq!(output.diagnostics.legacy_media_effect, 0);
         assert_eq!(output.diagnostics.legacy_solid_effect, 0);
         assert!(output.frame.rgba_f32().data[0][0] > 0.8);
+    }
+
+    #[test]
+    fn float_linear_compositor_runs_clip_masks_without_rgba8_fallback() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let graph = mondrian_effects::EffectRenderGraph {
+            nodes: vec![
+                mondrian_effects::EffectGraphNode {
+                    id: mondrian_effects::EffectGraphNodeId(0),
+                    kind: mondrian_effects::EffectGraphNodeKind::Source,
+                },
+                mondrian_effects::EffectGraphNode {
+                    id: mondrian_effects::EffectGraphNodeId(1),
+                    kind: mondrian_effects::EffectGraphNodeKind::MaskSource {
+                        shape: mondrian_effects::MaskShape::Rectangle {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 1.0,
+                            height: 1.0,
+                            corner_radius: 0.0,
+                        },
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 0.25,
+                    },
+                },
+                mondrian_effects::EffectGraphNode {
+                    id: mondrian_effects::EffectGraphNodeId(2),
+                    kind: mondrian_effects::EffectGraphNodeKind::Mask {
+                        input: mondrian_effects::EffectGraphNodeId(0),
+                        mask: mondrian_effects::EffectGraphNodeId(1),
+                        invert: false,
+                        mask_op: mondrian_effects::MaskOp::Add,
+                    },
+                },
+            ],
+            output: Some(mondrian_effects::EffectGraphNodeId(2)),
+        };
+        let effect_graph = mondrian_effects::get_or_compile_scheduled_render_graph(graph)
+            .expect("compile mask graph");
+        let elements = [TimelineCompositeElement::SolidColor(
+            TimelineSolidColorLayer {
+                color: Color { r: 2.0, g: -0.25, b: 0.5, a: 1.0 },
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph,
+                frame_seed: 0,
+            },
+        )];
+
+        let output = composite_timeline_elements_color_frame_with_diagnostics(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions { empty_canvas_transparent: true },
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch,
+        );
+        let pixel = output.frame.rgba_f32().data[0];
+
+        assert_eq!(output.diagnostics.float_linear_composites, 1);
+        assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
+        assert_eq!(output.diagnostics.legacy_solid_effect, 0);
+        assert!((pixel[0] - 0.5).abs() <= 1.0e-6);
+        assert!((pixel[1] + 0.0625).abs() <= 1.0e-6);
+        assert!((pixel[3] - 1.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn float_linear_compositor_applies_solid_affine_transform() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("compile identity graph");
+        let elements = [TimelineCompositeElement::SolidColor(
+            TimelineSolidColorLayer {
+                color: Color { r: 2.0, g: 0.25, b: 0.125, a: 1.0 },
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+                effect_graph,
+                frame_seed: 0,
+            },
+        )];
+
+        let output = composite_timeline_elements_color_frame(
+            2,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            mondrian_core::types::ColorSpace::Rec709,
+            &mut scratch,
+        );
+        let pixels = &output.rgba_f32().data;
+
+        assert_eq!(pixels[0], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(pixels[1], [2.0, 0.25, 0.125, 1.0]);
     }
 
     #[test]

@@ -372,7 +372,7 @@ pub fn compile_scheduled_effect_graph(plan: &EffectRenderPlan) -> Option<Compile
     let schedule = schedule_effect_render_graph(&graph)?;
     let node_profiles = compile_effect_node_profiles(&graph, &schedule)?;
     let (output_cache_policy, estimated_cost, output_cache_enabled) =
-        effect_graph_cache_profile(&graph);
+        compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
     Some(CompiledEffectGraph {
         node_use_counts: effect_graph_node_use_counts(&graph),
         node_profiles,
@@ -430,7 +430,7 @@ pub fn get_or_compile_scheduled_render_graph(
     let node_use_counts = effect_graph_node_use_counts(&graph);
     let node_profiles = compile_effect_node_profiles(&graph, &schedule)?;
     let (output_cache_policy, estimated_cost, output_cache_enabled) =
-        effect_graph_cache_profile(&graph);
+        compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
     let compiled = Arc::new(CompiledEffectGraph {
         signature_hash: signature,
         graph,
@@ -447,6 +447,9 @@ pub fn get_or_compile_scheduled_render_graph(
 }
 
 pub fn schedule_effect_render_graph(graph: &EffectRenderGraph) -> Option<EffectExecutionSchedule> {
+    if !effect_render_graph_is_well_formed(graph) {
+        return None;
+    }
     let output = graph.output?;
     let mut reachable = HashSet::new();
     collect_reachable_nodes(graph, output, &mut reachable)?;
@@ -511,22 +514,29 @@ pub fn effect_graph_node_use_counts(
 }
 
 pub fn effect_graph_cache_profile(graph: &EffectRenderGraph) -> (EffectCachePolicy, u32, bool) {
-    let mut policy = EffectCachePolicy::Deterministic;
-    let mut estimated_cost = 0u32;
-    let mut op_count = 0u32;
+    let Some(schedule) = schedule_effect_render_graph(graph) else {
+        return (EffectCachePolicy::Deterministic, 0, false);
+    };
+    let Some(profiles) = compile_effect_node_profiles(graph, &schedule) else {
+        return (EffectCachePolicy::Deterministic, 0, false);
+    };
+    compiled_effect_graph_cache_profile(graph, &profiles).unwrap_or((
+        EffectCachePolicy::Deterministic,
+        0,
+        false,
+    ))
+}
 
-    for node in &graph.nodes {
-        if let EffectGraphNodeKind::UnaryEffect { op, .. } = &node.kind {
-            op_count += 1;
-            estimated_cost += op.estimated_cost();
-            if op.cache_policy() == EffectCachePolicy::FrameDependent {
-                policy = EffectCachePolicy::FrameDependent;
-            }
-        }
-    }
-
-    let output_cache_enabled = op_count > 1 && estimated_cost >= 4;
-    (policy, estimated_cost, output_cache_enabled)
+fn compiled_effect_graph_cache_profile(
+    graph: &EffectRenderGraph,
+    profiles: &HashMap<EffectGraphNodeId, CompiledEffectNodeProfile>,
+) -> Option<(EffectCachePolicy, u32, bool)> {
+    let profile = profiles.get(&graph.output?)?;
+    Some((
+        profile.cache_policy,
+        profile.estimated_cost,
+        profile.output_cache_enabled,
+    ))
 }
 
 pub fn compile_effect_node_profiles(
@@ -587,7 +597,8 @@ pub fn compile_effect_node_profiles(
                 overlay_profile.subtree_signature.hash(&mut hasher);
                 blend_mode.hash(&mut hasher);
                 opacity.to_bits().hash(&mut hasher);
-                let cache_policy = if base_profile.cache_policy == EffectCachePolicy::FrameDependent
+                let cache_policy = if *blend_mode == mondrian_core::types::BlendMode::Dissolve
+                    || base_profile.cache_policy == EffectCachePolicy::FrameDependent
                     || overlay_profile.cache_policy == EffectCachePolicy::FrameDependent
                 {
                     EffectCachePolicy::FrameDependent
@@ -650,16 +661,29 @@ pub fn compile_effect_node_profiles(
                     output_cache_enabled: false,
                 }
             }
-            EffectGraphNodeKind::MultiInput { ref inputs, .. } => {
+            EffectGraphNodeKind::MultiInput { ref inputs, blend_mode, opacity } => {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 7u8.hash(&mut hasher);
-                inputs.hash(&mut hasher);
-                let input_cost: u32 =
-                    inputs.iter().filter_map(|id| profiles.get(id)).map(|p| p.estimated_cost).sum();
+                let mut cache_policy = if *blend_mode == mondrian_core::types::BlendMode::Dissolve {
+                    EffectCachePolicy::FrameDependent
+                } else {
+                    EffectCachePolicy::Deterministic
+                };
+                let mut input_cost = 0u32;
+                for input in inputs {
+                    let profile = profiles.get(input)?;
+                    profile.subtree_signature.hash(&mut hasher);
+                    input_cost = input_cost.saturating_add(profile.estimated_cost);
+                    if profile.cache_policy == EffectCachePolicy::FrameDependent {
+                        cache_policy = EffectCachePolicy::FrameDependent;
+                    }
+                }
+                blend_mode.hash(&mut hasher);
+                opacity.to_bits().hash(&mut hasher);
                 let estimated_cost = input_cost + inputs.len() as u32;
                 CompiledEffectNodeProfile {
                     subtree_signature: hasher.finish(),
-                    cache_policy: EffectCachePolicy::Deterministic,
+                    cache_policy,
                     estimated_cost,
                     output_cache_enabled: estimated_cost >= 8,
                 }
@@ -669,6 +693,14 @@ pub fn compile_effect_node_profiles(
     }
 
     Some(profiles)
+}
+
+fn effect_render_graph_is_well_formed(graph: &EffectRenderGraph) -> bool {
+    let mut node_ids = HashSet::with_capacity(graph.nodes.len());
+    graph.nodes.iter().all(|node| {
+        node_ids.insert(node.id)
+            && !matches!(&node.kind, EffectGraphNodeKind::MultiInput { inputs, .. } if inputs.is_empty())
+    })
 }
 
 fn collect_reachable_nodes(
@@ -841,6 +873,39 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_rejects_duplicate_node_ids_and_empty_multi_input() {
+        let duplicate_ids = EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+            ],
+            output: Some(EffectGraphNodeId(0)),
+        };
+        let empty_multi_input = EffectRenderGraph {
+            nodes: vec![EffectGraphNode {
+                id: EffectGraphNodeId(0),
+                kind: EffectGraphNodeKind::MultiInput {
+                    inputs: Vec::new(),
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                },
+            }],
+            output: Some(EffectGraphNodeId(0)),
+        };
+
+        assert!(schedule_effect_render_graph(&duplicate_ids).is_none());
+        assert!(schedule_effect_render_graph(&empty_multi_input).is_none());
+        assert!(get_or_compile_scheduled_render_graph(duplicate_ids).is_none());
+        assert!(get_or_compile_scheduled_render_graph(empty_multi_input).is_none());
+    }
+
+    #[test]
     fn compiled_graph_tracks_branching_use_counts() {
         let graph = EffectRenderGraph {
             nodes: vec![
@@ -935,6 +1000,47 @@ mod tests {
         );
         assert!(compiled.output_cache_enabled);
         assert!(compiled.estimated_cost >= 6);
+    }
+
+    #[test]
+    fn multi_input_profile_hashes_compositing_contract_and_propagates_dissolve_policy() {
+        let graph = |blend_mode, opacity| EffectRenderGraph {
+            nodes: vec![
+                EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::MultiInput {
+                        inputs: vec![EffectGraphNodeId(0), EffectGraphNodeId(0)],
+                        blend_mode,
+                        opacity,
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(1)),
+        };
+        let normal = get_or_compile_scheduled_render_graph(graph(BlendMode::Normal, 0.5))
+            .expect("compile normal multi-input");
+        let dissolve = get_or_compile_scheduled_render_graph(graph(BlendMode::Dissolve, 0.5))
+            .expect("compile dissolve multi-input");
+        let opaque = get_or_compile_scheduled_render_graph(graph(BlendMode::Normal, 1.0))
+            .expect("compile opaque multi-input");
+
+        assert_eq!(normal.output_cache_policy, EffectCachePolicy::Deterministic);
+        assert_eq!(
+            dissolve.output_cache_policy,
+            EffectCachePolicy::FrameDependent
+        );
+        assert_ne!(
+            normal.node_profiles[&EffectGraphNodeId(1)].subtree_signature,
+            dissolve.node_profiles[&EffectGraphNodeId(1)].subtree_signature
+        );
+        assert_ne!(
+            normal.node_profiles[&EffectGraphNodeId(1)].subtree_signature,
+            opaque.node_profiles[&EffectGraphNodeId(1)].subtree_signature
+        );
     }
 
     #[test]

@@ -13459,7 +13459,7 @@ mod tests {
                 frame: test_media_frame_with_size(0, 2, 2, signature),
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
-                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_graph: Arc::clone(&effect_graph),
                 frame_seed: 12,
             }]
@@ -13493,7 +13493,7 @@ mod tests {
             frame: test_media_frame_with_size(0, 2, 2, 100),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
-            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 12,
         }];
@@ -13517,7 +13517,7 @@ mod tests {
             frame: test_media_frame_with_size(0, 2, 2, 100),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
-            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 12,
         }];
@@ -13553,7 +13553,7 @@ mod tests {
             frame: test_media_frame_with_size(0, 2, 2, 100),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
-            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 12,
         }];
@@ -14238,6 +14238,20 @@ mod tests {
         )
         .expect("set test blur radius");
         solid.add_effect_node(blur);
+        solid.masks.push(mondrian_core::mask_data::MaskComponent::new(
+            "float-path-mask".to_owned(),
+            mondrian_core::mask_data::MaskKeyframe {
+                shape: mondrian_core::mask_data::MaskShape::Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                    corner_radius: 0.0,
+                },
+                opacity: 0.5,
+                ..Default::default()
+            },
+        ));
         sequence.video_tracks[0]
             .add_clip(solid)
             .expect("add transformed solid color clip");
@@ -14304,7 +14318,7 @@ mod tests {
             frame: frame.clone(),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
-            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
             frame_seed: 0,
         }];
@@ -14332,7 +14346,7 @@ mod tests {
             frame: &export_working_frame.frame,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
-            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
             frame_seed: 0,
         })];
@@ -14349,15 +14363,23 @@ mod tests {
             expected_frame.descriptor().color_space,
             color_context.working_color_space
         );
-        let export = mondrian_renderer::execute_cpu_output_boundary(
-            &expected_frame,
-            &RenderOutputColorBoundary::export(
+        let export_boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
+            (Some(display), Some(view)) => RenderOutputColorBoundary::export_view(
+                color_context.output_color_space,
+                display.clone(),
+                view.clone(),
+                color_context.tone_map,
+                color_context.engine.clone(),
+            ),
+            _ => RenderOutputColorBoundary::export(
                 color_context.output_color_space,
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
-        )
-        .expect("export color transform");
+        };
+        let export =
+            mondrian_renderer::execute_cpu_output_boundary(&expected_frame, &export_boundary)
+                .expect("export color transform");
         assert_eq!(
             export.result.diagnostics.output.domain,
             ColorFrameDomain::Export
@@ -14408,7 +14430,7 @@ mod tests {
             color: Color::from_rgba8(32, 180, 220, 255),
             opacity: 0.35,
             blend_mode: BlendMode::Screen,
-            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
             frame_seed: 14,
         };
@@ -14422,7 +14444,7 @@ mod tests {
                 frame: media.clone(),
                 opacity: 0.85,
                 blend_mode: BlendMode::Multiply,
-                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_graph: Arc::clone(&effect_graph),
                 frame_seed: 7,
             },
@@ -14446,7 +14468,7 @@ mod tests {
                 frame: &export_media_working.frame,
                 opacity: 0.85,
                 blend_mode: BlendMode::Multiply,
-                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_graph,
                 frame_seed: 7,
             }),

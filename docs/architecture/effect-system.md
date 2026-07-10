@@ -29,7 +29,7 @@ When placed on a clip, property paths are prefixed as `effect.<effect_id>.<rest>
 - `Blend`
 - `Mask`
 - `MaskSource`
-- deferred `MultiInput`
+- ordered `MultiInput`
 
 `CompiledEffectGraph` stores schedule, node use counts, cache policies, estimated cost, subtree signatures, and output cache flags.
 
@@ -73,6 +73,15 @@ uses the graph frame seed, and LUT intensity blends back to the unbounded float
 source after normalized LUT sampling. These rules are shared by media, solid,
 and adjustment-layer execution.
 
+`Blend`, `Mask`, `MaskSource`, and ordered `MultiInput` nodes use the same float
+working-frame contract. Mask rasterization produces native float coverage rather
+than quantizing through an 8-bit matte. The DAG executor transfers owned buffers
+according to compiled node use counts, clones only for concurrently live branch
+consumers, and recycles consumed buffers. Dissolve combines the frame seed with
+the pixel index and is therefore compiled with a frame-dependent cache policy.
+Its opacity is a stochastic gate; accepted pixels perform a full source-over so
+opacity is not multiplied into alpha a second time.
+
 Adjustment-layer passes use `apply_compiled_effect_graph_pass_rgba_f32(...)`
 when the graph is float-capable. This keeps ordinary color-correction layers in
 the same linear working frame instead of forcing an RGBA8 scratch boundary.
@@ -91,9 +100,10 @@ during preview scrubbing or export retries.
 Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
 callers can make an explicit legacy fallback decision. Custom/plugin processors
-remain unsupported until their ABI declares a float implementation. Blend,
-mask, mask-source, and multi-input graph nodes likewise remain legacy-only until
-the float executor defines their multi-input ownership and alpha contracts.
+remain unsupported until their ABI declares a float implementation. CPU float
+support does not imply GPU execution support: non-unary nodes remain explicit
+GPU blockers until renderer-native graph passes implement the same ownership,
+blend, matte, and alpha contracts.
 
 File-backed LUT caches key existing files by canonical path and invalidate on
 file fingerprint changes. Tests that validate cache behavior should use local

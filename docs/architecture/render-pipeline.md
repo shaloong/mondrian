@@ -74,8 +74,13 @@ translate) are implemented
 in the float/linear path using inverse-affine mapping with bilinear sampling,
 so media and solid layers with non-identity transforms no longer require legacy
 RGBA8 fallback. Custom processors without a float ABI and non-unary effect graph
-nodes still use the RGBA8 compositor path until their float execution contracts
-are implemented.
+nodes are handled separately: custom processors still require the diagnosed
+RGBA8 fallback, while built-in Blend, Mask, MaskSource, and ordered MultiInput
+nodes execute in the CPU float DAG. Clip masks rasterize directly to float matte
+coverage. Solid layers must materialize their float source when they carry an
+effect graph or affine transform, execute that same compiled graph, and then use
+the shared layer sampler; diagnostics must never claim a solid effect is float
+while bypassing its pixel semantics.
 `TimelineCompositeDiagnostics` makes that fallback explicit: preview/export
 callers can see whether a composite stayed on the float/linear path or fell back
 to legacy RGBA8 because of transform or effect support. Blend-mode counters stay

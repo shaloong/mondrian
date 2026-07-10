@@ -143,8 +143,12 @@ transform in the sequence working space and before any display or export output
 transform. Their float implementation preserves extended RGB values; spatial
 sampling uses premultiplied alpha internally, and LUT sampling does not turn its
 normalized lookup domain into an implicit clamp of the working frame. Custom
-processors without a declared float ABI and non-unary effect graph nodes must
-remain diagnosed legacy boundaries rather than silently changing color domain.
+processors without a declared float ABI must remain diagnosed legacy boundaries
+rather than silently changing color domain. Built-in blend, mask, mask-source,
+and multi-input graph nodes stay in the same float working domain; mask coverage
+is generated as float alpha and never passes through an implicit 8-bit matte.
+These CPU contracts do not remove GPU residency blockers until equivalent GPU
+graph execution exists.
 
 The app UI presentation surface is also part of the color contract. Mondrian
 targets wgpu 30 or newer for presentation because surface color space selection
