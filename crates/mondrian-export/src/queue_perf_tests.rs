@@ -1,5 +1,6 @@
 use super::*;
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
+use mondrian_core::WorkingColorSpace;
 use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics, execute_cpu_input_stage,
@@ -130,7 +131,11 @@ fn generate_layer(
     let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, data);
     let frame = execute_cpu_input_stage(
         &source,
-        &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        ),
     )
     .expect("perf input transform");
     let diagnostics = frame.stage_diagnostics;
@@ -191,7 +196,7 @@ fn compose_frame_layers_with_diagnostics(
         height,
         &elements,
         TimelineCompositeOptions::default(),
-        ColorSpace::Rec709,
+        WorkingColorSpace::LinearRec709,
         &mut scratch,
     )
     .diagnostics

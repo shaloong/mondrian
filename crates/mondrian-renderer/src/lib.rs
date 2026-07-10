@@ -36,7 +36,7 @@ pub use color_accuracy::{
 };
 pub use color_frame::{
     execute_native_decoded_frame_import, ColorFrameDescriptor, ColorFrameDomain,
-    ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
+    ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace, CpuColorFrame, CpuEncodedColorFrame,
     CpuEncodedFloatColorFrame, EncodedRgbaF32Frame, GpuColorFrameAllocationPlan,
     GpuColorFrameContract, GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameId,
     GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackError,
@@ -54,10 +54,11 @@ pub use color_frame::{
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,
     execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8, execute_cpu_output_stage,
-    CpuRenderColorStageExecutor, RenderColorStage, RenderColorStageDiagnostics,
-    RenderColorStageExecution, RenderColorStageGpuBlockerBreakdown, RenderColorStageMode,
-    RenderColorStagePlan, RenderColorStagePlanner, RenderGpuColorPassExecutionError,
-    RenderGpuColorPassInputView, RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
+    execute_cpu_working_transform, CpuRenderColorStageExecutor, RenderColorStage,
+    RenderColorStageDiagnostics, RenderColorStageExecution, RenderColorStageGpuBlockerBreakdown,
+    RenderColorStageMode, RenderColorStagePlan, RenderColorStagePlanner,
+    RenderGpuColorPassExecutionError, RenderGpuColorPassInputView,
+    RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
     RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView, RenderGpuInputStageRecord,
     RenderGpuInputStageResourcePlan, RenderGpuInputStageResourcePlanError,
     RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryBackendContext,

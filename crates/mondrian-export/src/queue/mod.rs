@@ -10,6 +10,7 @@ use crate::validator::{
 };
 use chrono::{DateTime, Utc};
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, JobId, Rational, TimeCode};
+use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
 use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
@@ -21,19 +22,19 @@ use mondrian_media::{
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_float,
-    execute_cpu_output_boundary_rgba8, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
-    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext, RenderColorStageDiagnostics,
-    RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics, TimelineCompositeElement,
-    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    execute_cpu_output_boundary_rgba8, execute_cpu_working_transform, ColorFrameResidency,
+    CpuColorFrame, CpuEncodedColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
+    GpuContext, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
-    ColorContext, ExportBitDepth, InputColorResolutionSourceCounts, SequenceSettings, VideoRange,
-    MAX_NESTED_SEQUENCE_RENDER_DEPTH,
+    ColorContext, ExportBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
+    SequenceSettings, VideoRange, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
@@ -2157,24 +2158,29 @@ fn write_timeline_frames_to_writer<W: Write>(
 ///
 /// When `tone_map` is not requested, returns a plain export boundary
 /// without any view transform.
-fn export_output_boundary_from_context(color_context: &ColorContext) -> RenderOutputColorBoundary {
+fn export_output_boundary_from_context(
+    color_context: &ColorContext,
+) -> Result<RenderOutputColorBoundary, String> {
+    let output_color_space = color_context.output_color_space.encoded().ok_or_else(|| {
+        "deliverable output boundary requires an encoded output color space".to_owned()
+    })?;
     if color_context.tone_map {
         if let (Some(display), Some(view)) = (&color_context.ocio_display, &color_context.ocio_view)
         {
-            return RenderOutputColorBoundary::export_view(
-                color_context.output_color_space,
+            return Ok(RenderOutputColorBoundary::export_view(
+                output_color_space,
                 display.clone(),
                 view.clone(),
                 true,
                 color_context.engine.clone(),
-            );
+            ));
         }
     }
-    RenderOutputColorBoundary::export(
-        color_context.output_color_space,
+    Ok(RenderOutputColorBoundary::export(
+        output_color_space,
         color_context.tone_map,
         color_context.engine.clone(),
-    )
+    ))
 }
 
 fn render_timeline_frame_into(
@@ -2206,13 +2212,18 @@ fn render_timeline_frame_into(
         width,
         height,
         color_context,
-        canvas,
+        SequenceRenderTarget::Deliverable(canvas),
         0,
         input_color_counts,
         stage_diagnostics,
         composite_diagnostics,
         export_diagnostics,
     )
+}
+
+enum SequenceRenderTarget<'a> {
+    Working(&'a mut Option<CpuColorFrame>),
+    Deliverable(&'a mut Vec<u8>),
 }
 
 /// Collect input color-resolution source counts for one export timeline frame.
@@ -2405,7 +2416,7 @@ fn render_sequence_frame_into(
     width: u32,
     height: u32,
     color_context: ColorContext,
-    canvas: &mut Vec<u8>,
+    mut target: SequenceRenderTarget<'_>,
     depth: usize,
     mut input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     mut stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
@@ -2417,15 +2428,23 @@ fn render_sequence_frame_into(
     }
 
     let frame_contract = export_frame_contract(&sequence.settings);
-    let required_len = frame_contract.canvas_len(width, height);
-    if canvas.len() != required_len {
-        canvas.resize(required_len, 0);
+    if let SequenceRenderTarget::Deliverable(canvas) = &mut target {
+        let required_len = frame_contract.canvas_len(width, height);
+        if canvas.len() != required_len {
+            canvas.resize(required_len, 0);
+        }
     }
 
     let render_plan =
         evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame));
     if render_plan.is_empty() {
-        fill_canvas_black_opaque(canvas, frame_contract, width, height);
+        finish_empty_sequence_target(
+            &mut target,
+            frame_contract,
+            width,
+            height,
+            color_context.working_color_space,
+        );
         return Ok(());
     }
 
@@ -2458,13 +2477,16 @@ fn render_sequence_frame_into(
         if let Some(counts) = input_color_counts.as_deref_mut() {
             counts.record(input_color_resolution.source);
         }
-        let input_color_space = input_color_resolution.color_space.ok_or_else(|| {
-                let diagnostic = timeline
-                    .asset_color_diagnostics
-                    .get(&media.asset_id)
-                    .map(mondrian_media::VideoColorDiagnostic::summary)
-                    .unwrap_or_else(|| "unavailable".to_string());
-                format!(
+        let input_color_space = match input_color_resolution.resolved {
+            ResolvedInputColor::Color(color_space) => color_space,
+            ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
+                return Err({
+                    let diagnostic = timeline
+                        .asset_color_diagnostics
+                        .get(&media.asset_id)
+                        .map(mondrian_media::VideoColorDiagnostic::summary)
+                        .unwrap_or_else(|| "unavailable".to_string());
+                    format!(
                     "asset={} path={} missing color metadata rejected by sequence policy {:?}; resolution={:?} override={:?} detected={:?} working={:?}; {}",
                     media.asset_id,
                     path.display(),
@@ -2475,7 +2497,9 @@ fn render_sequence_frame_into(
                     input_color_resolution.working_color_space,
                     diagnostic
                 )
-            })?;
+                })
+            }
+        };
         let input_video_range = timeline
             .asset_color_diagnostics
             .get(&media.asset_id)
@@ -2546,11 +2570,9 @@ fn render_sequence_frame_into(
             TimeCode::from_secs(nested.source_secs, nested_sequence.settings.frame_rate)
                 .frame
                 .max(0);
-        let mut nested_canvas = vec![0u8; nested_width as usize * nested_height as usize * 4];
+        let mut nested_frame_output = None;
         let nested_context =
             nested_sequence.settings.nested_render_color_context(color_context.clone());
-        let nested_output_color_space = nested_context.output_color_space;
-        let nested_engine = nested_context.engine.clone();
         render_sequence_frame_into(
             timeline,
             nested_sequence,
@@ -2558,30 +2580,34 @@ fn render_sequence_frame_into(
             nested_width,
             nested_height,
             nested_context,
-            &mut nested_canvas,
+            SequenceRenderTarget::Working(&mut nested_frame_output),
             depth + 1,
             input_color_counts.as_deref_mut(),
             stage_diagnostics.as_deref_mut(),
             composite_diagnostics.as_deref_mut(),
             export_diagnostics.as_deref_mut(),
         )?;
-        let nested_canvas =
-            export_frame_contract(&nested_sequence.settings).to_rgba8_boundary(&nested_canvas);
-        let nested_source = CpuEncodedColorFrame::source_rgba8(
-            nested_width,
-            nested_height,
-            nested_output_color_space,
-            nested_canvas,
-        );
-        let nested_input = execute_cpu_input_stage(
-            &nested_source,
-            &RenderInputTransform::to_working(nested_output_color_space, false, nested_engine),
-        )
-        .map_err(|err| format!("nested sequence input color transform failed: {err}"))?;
-        if let Some(diagnostics) = stage_diagnostics.as_deref_mut() {
-            diagnostics.accumulate(nested_input.stage_diagnostics);
+        let mut nested_frame = nested_frame_output.ok_or_else(|| {
+            format!(
+                "nested sequence produced no working frame: {}",
+                nested.sequence_id
+            )
+        })?;
+        if nested_frame.descriptor().color_space.working()
+            != Some(color_context.working_color_space)
+        {
+            let converted = execute_cpu_working_transform(
+                &nested_frame,
+                color_context.working_color_space,
+                color_context.engine.clone(),
+            )
+            .map_err(|err| format!("nested working-space transform failed: {err}"))?;
+            if let Some(diagnostics) = stage_diagnostics.as_deref_mut() {
+                diagnostics.accumulate(converted.stage_diagnostics);
+            }
+            nested_frame = converted.result.frame;
         }
-        nested_media[index] = Some(nested_input.result.frame);
+        nested_media[index] = Some(nested_frame);
     }
 
     let mut composite_elements = Vec::with_capacity(render_plan.len());
@@ -2639,7 +2665,13 @@ fn render_sequence_frame_into(
     }
 
     if composite_elements.is_empty() {
-        fill_canvas_black_opaque(canvas, frame_contract, width, height);
+        finish_empty_sequence_target(
+            &mut target,
+            frame_contract,
+            width,
+            height,
+            color_context.working_color_space,
+        );
         return Ok(());
     }
 
@@ -2656,10 +2688,15 @@ fn render_sequence_frame_into(
         diagnostics.accumulate(rendered.diagnostics);
     }
 
+    if let SequenceRenderTarget::Working(output) = target {
+        *output = Some(rendered.frame);
+        return Ok(());
+    }
+
     let mut gpu_output_fallback_reasons = ExportGpuOutputFallbackBreakdown::default();
     let mut gpu_output_attempts = 0u64;
     let mut gpu_output_cpu_fallbacks = 0u64;
-    let boundary = export_output_boundary_from_context(&color_context);
+    let boundary = export_output_boundary_from_context(&color_context)?;
     if color_context.tone_map && boundary.display_view.is_none() {
         if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
             if color_context.export_delivery_view_error.is_some() {
@@ -2735,9 +2772,34 @@ fn render_sequence_frame_into(
             gpu_output_fallback_reasons,
         );
     }
+    let SequenceRenderTarget::Deliverable(canvas) = target else {
+        unreachable!("working target returned before output boundary");
+    };
     canvas.clear();
     canvas.extend_from_slice(&final_bytes);
     Ok(())
+}
+
+fn finish_empty_sequence_target(
+    target: &mut SequenceRenderTarget<'_>,
+    frame_contract: ExportFrameContract,
+    width: u32,
+    height: u32,
+    working_color_space: WorkingColorSpace,
+) {
+    match target {
+        SequenceRenderTarget::Working(output) => {
+            **output = Some(CpuColorFrame::working(WorkingRgbaF32Frame {
+                width,
+                height,
+                data: vec![[0.0, 0.0, 0.0, 1.0]; width as usize * height as usize],
+                color_space: working_color_space,
+            }));
+        }
+        SequenceRenderTarget::Deliverable(canvas) => {
+            fill_canvas_black_opaque(canvas, frame_contract, width, height);
+        }
+    }
 }
 
 fn decode_video_layer_scaled(
@@ -2745,7 +2807,7 @@ fn decode_video_layer_scaled(
     path: &Path,
     input_color_space: ColorSpace,
     input_video_range: DecodedVideoRange,
-    working_color_space: ColorSpace,
+    working_color_space: WorkingColorSpace,
     engine: &ColorEngine,
     tone_map: bool,
     source_secs: f64,
@@ -3099,7 +3161,7 @@ mod tests {
         mondrian_renderer::execute_cpu_input_stage(
             &source,
             &mondrian_renderer::RenderInputTransform::to_working(
-                ColorSpace::Rec709,
+                WorkingColorSpace::LinearRec709,
                 false,
                 ColorEngine::MondrianSmart,
             ),
@@ -3665,8 +3727,8 @@ mod tests {
     #[test]
     fn export_output_boundary_from_context_uses_export_view_when_view_present() {
         let ctx = ColorContext {
-            working_color_space: ColorSpace::Rec709,
-            output_color_space: ColorSpace::Srgb,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            output_color_space: ColorSpace::Srgb.into(),
             tone_map: true,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
@@ -3680,7 +3742,7 @@ mod tests {
             export_delivery_view_error: None,
         };
 
-        let boundary = export_output_boundary_from_context(&ctx);
+        let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
         assert!(boundary.display_view.is_some());
         assert!(boundary.tone_map);
@@ -3692,8 +3754,8 @@ mod tests {
     #[test]
     fn export_output_boundary_from_context_plain_export_when_no_view() {
         let ctx = ColorContext {
-            working_color_space: ColorSpace::Rec709,
-            output_color_space: ColorSpace::Srgb,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            output_color_space: ColorSpace::Srgb.into(),
             tone_map: true,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
@@ -3707,7 +3769,7 @@ mod tests {
             export_delivery_view_error: None,
         };
 
-        let boundary = export_output_boundary_from_context(&ctx);
+        let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
         assert!(boundary.display_view.is_none());
         assert!(boundary.tone_map);
@@ -3716,8 +3778,8 @@ mod tests {
     #[test]
     fn export_output_boundary_from_context_plain_export_when_no_tone_map() {
         let ctx = ColorContext {
-            working_color_space: ColorSpace::Rec709,
-            output_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            output_color_space: ColorSpace::Rec709.into(),
             tone_map: false,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
@@ -3731,7 +3793,7 @@ mod tests {
             export_delivery_view_error: None,
         };
 
-        let boundary = export_output_boundary_from_context(&ctx);
+        let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
         assert!(boundary.display_view.is_none());
         assert!(!boundary.tone_map);
@@ -3797,8 +3859,8 @@ mod tests {
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
         let ctx = ColorContext {
-            working_color_space: ColorSpace::Rec709,
-            output_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            output_color_space: ColorSpace::Rec709.into(),
             tone_map: true,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
@@ -3812,7 +3874,7 @@ mod tests {
             export_delivery_view_error: None,
         };
 
-        let boundary = export_output_boundary_from_context(&ctx);
+        let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         // The boundary has a view -> no issue should be recorded.
         assert!(boundary.display_view.is_some());
         assert!(boundary.tone_map);
@@ -3827,7 +3889,7 @@ mod tests {
             2,
             2,
             ctx,
-            &mut canvas,
+            SequenceRenderTarget::Deliverable(&mut canvas),
             0,
             None,
             None,
@@ -3865,8 +3927,8 @@ mod tests {
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
         let ctx = ColorContext {
-            working_color_space: ColorSpace::Rec709,
-            output_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            output_color_space: ColorSpace::Rec709.into(),
             tone_map: true,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
@@ -3889,7 +3951,7 @@ mod tests {
             2,
             2,
             ctx,
-            &mut canvas,
+            SequenceRenderTarget::Deliverable(&mut canvas),
             0,
             None,
             None,
@@ -4164,9 +4226,9 @@ mod tests {
     #[test]
     fn export_input_color_resolution_counts_for_frame_tracks_media_sources() {
         let mut seq = Sequence::new("export-input-color-counts");
-        seq.settings.color_space = ColorSpace::Rec2020;
+        seq.settings.working_color_space = WorkingColorSpace::LinearRec2020;
         seq.settings.color_management.missing_metadata_policy =
-            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+            MissingColorMetadataPolicy::AssumeRec709;
         let tb = seq.time_base();
         let detected_id = AssetId::new();
         let override_id = AssetId::new();
@@ -4232,7 +4294,7 @@ mod tests {
         );
         assert_eq!(counts.count(InputColorResolutionSource::Override), 1);
         assert_eq!(
-            counts.count(InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace),
+            counts.count(InputColorResolutionSource::MissingPolicyAssumeRec709),
             1
         );
         assert_eq!(counts.count(InputColorResolutionSource::DataTexture), 1);

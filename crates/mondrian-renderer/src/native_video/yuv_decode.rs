@@ -176,12 +176,17 @@ impl GpuNativeYuvDecodePlan {
                 actual: output.contract(),
             });
         }
-        let source_encoding = descriptor.color_space.encoding();
+        let Some(source_color_space) = descriptor.color_space.encoded() else {
+            return Err(GpuNativeYuvDecodePlanError::InvalidOutputContract {
+                actual: output.contract(),
+            });
+        };
+        let source_encoding = source_color_space.encoding();
         if video_sampling.matrix != source_encoding.matrix
             || video_sampling.transfer != source_encoding.transfer
         {
             return Err(GpuNativeYuvDecodePlanError::SamplingColorSpaceMismatch {
-                source_color_space: descriptor.color_space,
+                source_color_space,
                 sampling_matrix: video_sampling.matrix,
                 sampling_transfer: video_sampling.transfer,
             });
@@ -553,6 +558,7 @@ mod tests {
     };
     use mondrian_core::types::{ColorEngine, ColorSpace};
     use mondrian_core::ColorTransferCharacteristic;
+    use mondrian_core::WorkingColorSpace;
     use mondrian_media::DecodedGpuFrameHandleKind;
 
     #[test]
@@ -647,7 +653,7 @@ mod tests {
             ColorFrameDescriptor {
                 width: 1920,
                 height: 1080,
-                color_space: ColorSpace::Rec2100Pq,
+                color_space: ColorSpace::Rec2100Pq.into(),
                 domain: ColorFrameDomain::Source,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
@@ -708,7 +714,7 @@ mod tests {
             ColorFrameDescriptor {
                 width: 2,
                 height: 2,
-                color_space: ColorSpace::Rec709,
+                color_space: ColorSpace::Rec709.into(),
                 domain: ColorFrameDomain::Source,
                 encoding: ColorFrameEncoding::EncodedFloat,
                 residency: ColorFrameResidency::Gpu,
@@ -810,7 +816,7 @@ mod tests {
                 height: 2,
                 source_color_space: ColorSpace::Rec709,
                 input_transform: crate::RenderInputTransform::to_working_gpu(
-                    ColorSpace::Rec709,
+                    WorkingColorSpace::LinearRec709,
                     false,
                     ColorEngine::MondrianSmart,
                 ),
@@ -931,7 +937,7 @@ mod tests {
                 ColorFrameDescriptor {
                     width: 1920,
                     height: 1080,
-                    color_space,
+                    color_space: color_space.into(),
                     domain: ColorFrameDomain::Source,
                     encoding: ColorFrameEncoding::EncodedFloat,
                     residency: ColorFrameResidency::Gpu,
@@ -965,7 +971,7 @@ mod tests {
             height: 1080,
             source_color_space: ColorSpace::Rec2100Pq,
             input_transform: crate::RenderInputTransform::to_working_gpu(
-                ColorSpace::Rec2020,
+                WorkingColorSpace::LinearRec2020,
                 true,
                 ColorEngine::MondrianSmart,
             ),

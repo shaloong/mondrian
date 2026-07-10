@@ -3,7 +3,9 @@
 //! The dialog owns shell-local draft state. It emits a typed sequence update
 //! only on Apply, keeping editor mutations in `AppState`.
 
-use mondrian_core::{ColorSpace, ExportDeliveryViewPolicy, Rational, Resolution};
+use mondrian_core::{
+    ColorSpace, ExportDeliveryViewPolicy, Rational, Resolution, WorkingColorSpace,
+};
 use mondrian_timeline::{
     sequence::{
         ColorWorkflow, ExportBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
@@ -94,8 +96,8 @@ impl AppUiSequenceSettingsDraft {
             SequenceSettingsDraftUpdatePayload::StartTimecodeFrame(frame) => {
                 self.settings.start_timecode_frame = frame.max(0);
             }
-            SequenceSettingsDraftUpdatePayload::ColorSpace(color_space) => {
-                self.settings.color_space = color_space;
+            SequenceSettingsDraftUpdatePayload::WorkingColorSpace(color_space) => {
+                self.settings.working_color_space = color_space;
             }
             SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled) => {
                 self.settings.auto_tone_map_media = enabled;
@@ -253,15 +255,21 @@ const COLOR_SPACE_OPTIONS: [ColorSpace; 9] = [
     ColorSpace::ArriLogC4,
 ];
 
+const WORKING_COLOR_SPACE_OPTIONS: [WorkingColorSpace; 4] = [
+    WorkingColorSpace::LinearRec709,
+    WorkingColorSpace::LinearRec2020,
+    WorkingColorSpace::LinearP3D65,
+    WorkingColorSpace::AcesCg,
+];
+
 const COLOR_WORKFLOW_OPTIONS: [ColorWorkflow; 3] = [
     ColorWorkflow::DisplayReferred,
     ColorWorkflow::SceneReferred,
     ColorWorkflow::Aces,
 ];
 
-const MISSING_COLOR_METADATA_OPTIONS: [MissingColorMetadataPolicy; 3] = [
+const MISSING_COLOR_METADATA_OPTIONS: [MissingColorMetadataPolicy; 2] = [
     MissingColorMetadataPolicy::AssumeRec709,
-    MissingColorMetadataPolicy::AssumeSequenceWorkingSpace,
     MissingColorMetadataPolicy::RejectMedia,
 ];
 
@@ -393,6 +401,15 @@ fn color_space_label(value: ColorSpace) -> &'static str {
     }
 }
 
+fn working_color_space_label(value: WorkingColorSpace) -> &'static str {
+    match value {
+        WorkingColorSpace::LinearRec709 => "Linear Rec. 709",
+        WorkingColorSpace::LinearRec2020 => "Linear Rec. 2020",
+        WorkingColorSpace::LinearP3D65 => "Linear P3-D65",
+        WorkingColorSpace::AcesCg => "ACEScg",
+    }
+}
+
 fn color_workflow_label(value: ColorWorkflow) -> &'static str {
     match value {
         ColorWorkflow::DisplayReferred => "显示参考",
@@ -404,7 +421,6 @@ fn color_workflow_label(value: ColorWorkflow) -> &'static str {
 fn missing_color_metadata_policy_label(value: MissingColorMetadataPolicy) -> &'static str {
     match value {
         MissingColorMetadataPolicy::AssumeRec709 => "假定 Rec. 709",
-        MissingColorMetadataPolicy::AssumeSequenceWorkingSpace => "假定序列工作空间",
         MissingColorMetadataPolicy::RejectMedia => "拒绝媒体",
     }
 }
@@ -584,6 +600,20 @@ fn color_space_items(
         .map(|color_space| {
             MenuItem::new(
                 color_space_label(color_space),
+                app_shell_sequence_settings_draft_changed_action(update(color_space)),
+            )
+        })
+        .collect()
+}
+
+fn working_color_space_items(
+    update: fn(WorkingColorSpace) -> SequenceSettingsDraftUpdatePayload,
+) -> Vec<MenuItem> {
+    WORKING_COLOR_SPACE_OPTIONS
+        .into_iter()
+        .map(|color_space| {
+            MenuItem::new(
+                working_color_space_label(color_space),
                 app_shell_sequence_settings_draft_changed_action(update(color_space)),
             )
         })
@@ -832,8 +862,8 @@ fn video_display_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Drop
 fn color_space_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     maybe_disable_dropdown(
         Dropdown::new(
-            color_space_label(draft.settings.color_space),
-            color_space_items(SequenceSettingsDraftUpdatePayload::ColorSpace),
+            working_color_space_label(draft.settings.working_color_space),
+            working_color_space_items(SequenceSettingsDraftUpdatePayload::WorkingColorSpace),
         )
         .with_max_visible_items(6),
         draft.settings.color_management.inherit,

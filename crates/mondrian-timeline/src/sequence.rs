@@ -123,8 +123,6 @@ pub enum MissingColorMetadataPolicy {
     /// 无标签素材视为 Rec.709（行业默认）。
     #[default]
     AssumeRec709,
-    /// 无标签素材直接视为序列工作空间（跳过输入变换）。
-    AssumeSequenceWorkingSpace,
     /// 无标签素材拒绝导入 / 跳过渲染。
     RejectMedia,
 }
@@ -140,8 +138,6 @@ pub enum InputColorResolutionSource {
     DetectedMetadata,
     /// Missing metadata policy assumed Rec.709.
     MissingPolicyAssumeRec709,
-    /// Missing metadata policy assumed the sequence working color space.
-    MissingPolicyAssumeSequenceWorkingSpace,
     /// Missing metadata policy rejected the media.
     MissingPolicyRejectMedia,
 }
@@ -154,10 +150,7 @@ impl InputColorResolutionSource {
 
     /// Whether this branch kept rendering moving by assuming a color space from policy.
     pub fn is_policy_assumption(self) -> bool {
-        matches!(
-            self,
-            Self::MissingPolicyAssumeRec709 | Self::MissingPolicyAssumeSequenceWorkingSpace
-        )
+        matches!(self, Self::MissingPolicyAssumeRec709)
     }
 
     /// Whether this branch rejected media due to missing or unsupported metadata.
@@ -182,8 +175,6 @@ pub struct InputColorResolutionSourceCounts {
     pub detected_metadata: u64,
     /// Inputs assumed as Rec.709 by missing-metadata policy.
     pub missing_assume_rec709: u64,
-    /// Inputs assumed as sequence working space by missing-metadata policy.
-    pub missing_assume_working: u64,
     /// Inputs rejected by missing-metadata policy.
     pub missing_rejected: u64,
 }
@@ -204,9 +195,6 @@ impl InputColorResolutionSourceCounts {
             InputColorResolutionSource::MissingPolicyAssumeRec709 => {
                 self.missing_assume_rec709 = self.missing_assume_rec709.saturating_add(1);
             }
-            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace => {
-                self.missing_assume_working = self.missing_assume_working.saturating_add(1);
-            }
             InputColorResolutionSource::MissingPolicyRejectMedia => {
                 self.missing_rejected = self.missing_rejected.saturating_add(1);
             }
@@ -220,8 +208,6 @@ impl InputColorResolutionSourceCounts {
         self.detected_metadata = self.detected_metadata.saturating_add(other.detected_metadata);
         self.missing_assume_rec709 =
             self.missing_assume_rec709.saturating_add(other.missing_assume_rec709);
-        self.missing_assume_working =
-            self.missing_assume_working.saturating_add(other.missing_assume_working);
         self.missing_rejected = self.missing_rejected.saturating_add(other.missing_rejected);
     }
 
@@ -232,9 +218,6 @@ impl InputColorResolutionSourceCounts {
             InputColorResolutionSource::DataTexture => self.data_texture,
             InputColorResolutionSource::DetectedMetadata => self.detected_metadata,
             InputColorResolutionSource::MissingPolicyAssumeRec709 => self.missing_assume_rec709,
-            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace => {
-                self.missing_assume_working
-            }
             InputColorResolutionSource::MissingPolicyRejectMedia => self.missing_rejected,
         }
     }
@@ -265,7 +248,6 @@ impl InputColorResolutionSourceCounts {
             .saturating_add(self.data_texture)
             .saturating_add(self.detected_metadata)
             .saturating_add(self.missing_assume_rec709)
-            .saturating_add(self.missing_assume_working)
             .saturating_add(self.missing_rejected)
     }
 
@@ -278,20 +260,19 @@ impl InputColorResolutionSourceCounts {
     }
 }
 
-const INPUT_COLOR_RESOLUTION_SOURCES: [InputColorResolutionSource; 6] = [
+const INPUT_COLOR_RESOLUTION_SOURCES: [InputColorResolutionSource; 5] = [
     InputColorResolutionSource::Override,
     InputColorResolutionSource::DataTexture,
     InputColorResolutionSource::DetectedMetadata,
     InputColorResolutionSource::MissingPolicyAssumeRec709,
-    InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace,
     InputColorResolutionSource::MissingPolicyRejectMedia,
 ];
 
 /// Result of resolving clip override, detected media metadata, and missing-metadata policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputColorResolution {
-    /// Effective input color space, or `None` when policy rejects the media.
-    pub color_space: Option<ColorSpace>,
+    /// Typed result of resolving the input color contract.
+    pub resolved: ResolvedInputColor,
     /// Decision branch that produced the result.
     pub source: InputColorResolutionSource,
     /// Clip/media color-space override supplied by the user.
@@ -301,7 +282,18 @@ pub struct InputColorResolution {
     /// Missing metadata policy active during the decision.
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     /// Sequence working color space active during the decision.
-    pub working_color_space: ColorSpace,
+    pub working_color_space: WorkingColorSpace,
+}
+
+/// Effective interpretation of decoded source samples before the working transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedInputColor {
+    /// Encoded color samples that require an input transform.
+    Color(ColorSpace),
+    /// Non-color data samples; color transforms must be bypassed deliberately.
+    Data,
+    /// Missing metadata policy rejected the source.
+    Rejected,
 }
 
 impl MissingColorMetadataPolicy {
@@ -309,24 +301,16 @@ impl MissingColorMetadataPolicy {
     ///
     /// `detected` 来自媒体探测（FFmpeg 标签），`working` 是序列工作空间。
     /// 当素材无色彩标签时（`detected == None`），按策略行事。
-    pub fn resolve_input(
-        self,
-        detected: Option<ColorSpace>,
-        working: ColorSpace,
-    ) -> Option<ColorSpace> {
-        self.resolve_input_decision(None, detected, working).color_space
-    }
-
     /// Resolve the effective input color space and retain the decision branch for diagnostics.
     pub fn resolve_input_decision(
         self,
         override_color_space: Option<ColorSpace>,
         detected: Option<ColorSpace>,
-        working: ColorSpace,
+        working: WorkingColorSpace,
     ) -> InputColorResolution {
         if let Some(color_space) = override_color_space {
             return InputColorResolution {
-                color_space: Some(color_space),
+                resolved: ResolvedInputColor::Color(color_space),
                 source: InputColorResolutionSource::Override,
                 override_color_space,
                 detected_color_space: detected,
@@ -336,7 +320,7 @@ impl MissingColorMetadataPolicy {
         }
         if let Some(color_space) = detected {
             return InputColorResolution {
-                color_space: Some(color_space),
+                resolved: ResolvedInputColor::Color(color_space),
                 source: InputColorResolutionSource::DetectedMetadata,
                 override_color_space,
                 detected_color_space: detected,
@@ -344,19 +328,18 @@ impl MissingColorMetadataPolicy {
                 working_color_space: working,
             };
         }
-        let (color_space, source) = match self {
+        let (resolved, source) = match self {
             Self::AssumeRec709 => (
-                Some(ColorSpace::Rec709),
+                ResolvedInputColor::Color(ColorSpace::Rec709),
                 InputColorResolutionSource::MissingPolicyAssumeRec709,
             ),
-            Self::AssumeSequenceWorkingSpace => (
-                Some(working),
-                InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace,
+            Self::RejectMedia => (
+                ResolvedInputColor::Rejected,
+                InputColorResolutionSource::MissingPolicyRejectMedia,
             ),
-            Self::RejectMedia => (None, InputColorResolutionSource::MissingPolicyRejectMedia),
         };
         InputColorResolution {
-            color_space,
+            resolved,
             source,
             override_color_space,
             detected_color_space: detected,
@@ -372,11 +355,11 @@ impl MissingColorMetadataPolicy {
         clip_override_color_space: Option<ColorSpace>,
         asset_interpretation: AssetMediaInterpretation,
         detected: Option<ColorSpace>,
-        working: ColorSpace,
+        working: WorkingColorSpace,
     ) -> InputColorResolution {
         if asset_interpretation.payload.is_non_color_data() {
             return InputColorResolution {
-                color_space: Some(working),
+                resolved: ResolvedInputColor::Data,
                 source: InputColorResolutionSource::DataTexture,
                 override_color_space: None,
                 detected_color_space: detected,
@@ -453,8 +436,8 @@ pub struct SequenceColorManagement {
 /// 由序列设置 + 项目设置合并生成，贯穿整个渲染管线。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColorContext {
-    pub working_color_space: ColorSpace,
-    pub output_color_space: ColorSpace,
+    pub working_color_space: WorkingColorSpace,
+    pub output_color_space: OcioColorSpaceIdentity,
     pub tone_map: bool,
     pub workflow: ColorWorkflow,
     pub nested_processing: NestedColorProcessing,
@@ -646,7 +629,7 @@ pub struct SequenceSettings {
     pub start_timecode_frame: i64,
     #[serde(default)]
     pub preview: SequencePreviewSettings,
-    pub color_space: ColorSpace,
+    pub working_color_space: WorkingColorSpace,
     #[serde(default)]
     pub auto_tone_map_media: bool,
     /// Action-safe margin as fraction of frame (0.10 = 10% total, 5% per side).
@@ -681,7 +664,7 @@ impl Default for SequenceSettings {
             audio_channel_layout: AudioChannelLayout::Stereo,
             start_timecode_frame: 0,
             preview: SequencePreviewSettings::default(),
-            color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             auto_tone_map_media: true,
             action_safe_margin: default_action_safe_margin(),
             title_safe_margin: default_title_safe_margin(),
@@ -744,8 +727,10 @@ impl SequenceSettings {
         }
         if self.color_management.workflow == ColorWorkflow::Aces
             && !matches!(
-                self.color_space,
-                ColorSpace::Rec2020 | ColorSpace::Rec2100Hlg | ColorSpace::Rec2100Pq
+                self.working_color_space,
+                WorkingColorSpace::LinearRec2020
+                    | WorkingColorSpace::LinearP3D65
+                    | WorkingColorSpace::AcesCg
             )
         {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
@@ -858,7 +843,7 @@ impl SequenceSettings {
                 self.color_management.workflow,
                 ColorWorkflow::SceneReferred | ColorWorkflow::Aces
             ),
-            self.color_space,
+            self.working_color_space,
             output_color_space,
         );
 
@@ -891,8 +876,8 @@ impl SequenceSettings {
         };
 
         ColorContext {
-            working_color_space: self.color_space,
-            output_color_space,
+            working_color_space: self.working_color_space,
+            output_color_space: OcioColorSpaceIdentity::Encoded(output_color_space),
             tone_map,
             nested_processing: self.color_management.nested_processing,
             engine,
@@ -914,8 +899,8 @@ impl SequenceSettings {
                     self.color_management.engine.clone()
                 };
                 ColorContext {
-                    working_color_space: self.color_space,
-                    output_color_space: parent.working_color_space,
+                    working_color_space: self.working_color_space,
+                    output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
                     tone_map: self.auto_tone_map_media,
                     nested_processing: self.color_management.nested_processing,
                     engine,
@@ -929,7 +914,7 @@ impl SequenceSettings {
             }
             NestedColorProcessing::ForceParentWorkingSpace => ColorContext {
                 working_color_space: parent.working_color_space,
-                output_color_space: parent.working_color_space,
+                output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
                 tone_map: parent.tone_map,
                 nested_processing: self.color_management.nested_processing,
                 engine: parent.engine.clone(),
@@ -947,8 +932,8 @@ impl SequenceSettings {
                     self.color_management.engine.clone()
                 };
                 ColorContext {
-                    working_color_space: self.color_space,
-                    output_color_space: parent.working_color_space,
+                    working_color_space: self.working_color_space,
+                    output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
                     tone_map: self.auto_tone_map_media || parent.tone_map,
                     nested_processing: self.color_management.nested_processing,
                     engine,
@@ -993,7 +978,7 @@ impl SequenceSettings {
             EditingMode::DigitalCinema4k => {
                 settings.resolution = Resolution::DCI4K;
                 settings.frame_rate = Rational::FPS_24;
-                settings.color_space = ColorSpace::DciP3;
+                settings.working_color_space = WorkingColorSpace::LinearP3D65;
                 settings
             }
             EditingMode::SocialVertical1080p => {
@@ -1489,14 +1474,17 @@ mod tests {
 
     #[test]
     fn missing_color_metadata_policy_reports_input_resolution_source() {
-        let working = ColorSpace::Rec2020;
+        let working = WorkingColorSpace::LinearRec2020;
 
         let override_resolution = MissingColorMetadataPolicy::RejectMedia.resolve_input_decision(
             Some(ColorSpace::SLog3),
             Some(ColorSpace::Srgb),
             working,
         );
-        assert_eq!(override_resolution.color_space, Some(ColorSpace::SLog3));
+        assert_eq!(
+            override_resolution.resolved,
+            ResolvedInputColor::Color(ColorSpace::SLog3)
+        );
         assert_eq!(
             override_resolution.source,
             InputColorResolutionSource::Override
@@ -1511,23 +1499,18 @@ mod tests {
             Some(ColorSpace::DciP3),
             working,
         );
-        assert_eq!(detected_resolution.color_space, Some(ColorSpace::DciP3));
+        assert_eq!(
+            detected_resolution.resolved,
+            ResolvedInputColor::Color(ColorSpace::DciP3)
+        );
         assert_eq!(
             detected_resolution.source,
             InputColorResolutionSource::DetectedMetadata
         );
 
-        let assumed_resolution = MissingColorMetadataPolicy::AssumeSequenceWorkingSpace
-            .resolve_input_decision(None, None, working);
-        assert_eq!(assumed_resolution.color_space, Some(ColorSpace::Rec2020));
-        assert_eq!(
-            assumed_resolution.source,
-            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
-        );
-
         let rejected_resolution =
             MissingColorMetadataPolicy::RejectMedia.resolve_input_decision(None, None, working);
-        assert_eq!(rejected_resolution.color_space, None);
+        assert_eq!(rejected_resolution.resolved, ResolvedInputColor::Rejected);
         assert_eq!(
             rejected_resolution.source,
             InputColorResolutionSource::MissingPolicyRejectMedia
@@ -1536,7 +1519,7 @@ mod tests {
 
     #[test]
     fn asset_media_interpretation_participates_in_input_resolution() {
-        let working = ColorSpace::Rec2020;
+        let working = WorkingColorSpace::LinearRec2020;
 
         let asset_override = MissingColorMetadataPolicy::RejectMedia.resolve_asset_input_decision(
             None,
@@ -1547,7 +1530,10 @@ mod tests {
             Some(ColorSpace::Rec709),
             working,
         );
-        assert_eq!(asset_override.color_space, Some(ColorSpace::SLog3));
+        assert_eq!(
+            asset_override.resolved,
+            ResolvedInputColor::Color(ColorSpace::SLog3)
+        );
         assert_eq!(asset_override.source, InputColorResolutionSource::Override);
 
         let data = MissingColorMetadataPolicy::RejectMedia.resolve_asset_input_decision(
@@ -1559,7 +1545,7 @@ mod tests {
             None,
             working,
         );
-        assert_eq!(data.color_space, Some(working));
+        assert_eq!(data.resolved, ResolvedInputColor::Data);
         assert_eq!(data.source, InputColorResolutionSource::DataTexture);
 
         let clip_override = MissingColorMetadataPolicy::RejectMedia.resolve_asset_input_decision(
@@ -1571,7 +1557,10 @@ mod tests {
             Some(ColorSpace::Rec709),
             working,
         );
-        assert_eq!(clip_override.color_space, Some(ColorSpace::AppleLog));
+        assert_eq!(
+            clip_override.resolved,
+            ResolvedInputColor::Color(ColorSpace::AppleLog)
+        );
         assert_eq!(clip_override.source, InputColorResolutionSource::Override);
     }
 
@@ -1584,10 +1573,6 @@ mod tests {
             .is_explicit_metadata_or_override());
 
         assert!(InputColorResolutionSource::MissingPolicyAssumeRec709.is_policy_assumption());
-        assert!(
-            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
-                .is_policy_assumption()
-        );
         assert!(!InputColorResolutionSource::MissingPolicyRejectMedia.is_policy_assumption());
         assert!(!InputColorResolutionSource::DataTexture.is_policy_assumption());
 
@@ -1606,7 +1591,6 @@ mod tests {
         counts.record(InputColorResolutionSource::DetectedMetadata);
         counts.record(InputColorResolutionSource::DetectedMetadata);
         counts.record(InputColorResolutionSource::MissingPolicyAssumeRec709);
-        counts.record(InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace);
         counts.record(InputColorResolutionSource::MissingPolicyRejectMedia);
 
         assert_eq!(counts.count(InputColorResolutionSource::Override), 1);
@@ -1616,10 +1600,10 @@ mod tests {
             2
         );
         assert_eq!(counts.explicit_metadata_or_override(), 3);
-        assert_eq!(counts.policy_assumptions(), 2);
+        assert_eq!(counts.policy_assumptions(), 1);
         assert_eq!(counts.policy_rejections(), 1);
         assert_eq!(counts.data_textures(), 1);
-        assert_eq!(counts.total(), 7);
+        assert_eq!(counts.total(), 6);
 
         let mut accumulated = InputColorResolutionSourceCounts::default();
         accumulated.record(InputColorResolutionSource::Override);
@@ -1629,7 +1613,7 @@ mod tests {
             accumulated.count(InputColorResolutionSource::DetectedMetadata),
             2
         );
-        assert_eq!(accumulated.total(), 8);
+        assert_eq!(accumulated.total(), 7);
     }
 
     #[test]
@@ -1727,7 +1711,7 @@ mod tests {
             pixel_aspect_ratio: PixelAspectRatio::D1DvNtscWidescreen,
             field_order: FieldOrder::Progressive,
             video_display_format: VideoDisplayFormat::Timecode2997DropFrame,
-            color_space: ColorSpace::Rec2100Pq,
+            working_color_space: WorkingColorSpace::LinearRec2020,
             audio_sample_rate: 96_000,
             audio_display_format: AudioDisplayFormat::Milliseconds,
             audio_channel_layout: AudioChannelLayout::Surround51,
@@ -1757,7 +1741,7 @@ mod tests {
         let cinema = SequenceSettings::from_editing_mode(EditingMode::DigitalCinema4k);
         assert_eq!(cinema.resolution, Resolution::DCI4K);
         assert_eq!(cinema.frame_rate, Rational::FPS_24);
-        assert_eq!(cinema.color_space, ColorSpace::DciP3);
+        assert_eq!(cinema.working_color_space, WorkingColorSpace::LinearP3D65);
     }
 
     #[test]
@@ -1810,7 +1794,7 @@ mod tests {
     #[test]
     fn sequence_color_management_accepts_hdr_output_metadata_policy() {
         let settings = SequenceSettings {
-            color_space: ColorSpace::Rec2100Pq,
+            working_color_space: WorkingColorSpace::LinearRec2020,
             color_management: SequenceColorManagement {
                 output_color_space: ColorSpace::Rec2100Pq,
                 preserve_hdr_metadata: true,
@@ -1828,7 +1812,7 @@ mod tests {
     #[test]
     fn editing_mode_preserves_color_management_policy() {
         let mut settings = SequenceSettings {
-            color_space: ColorSpace::Rec2100Pq,
+            working_color_space: WorkingColorSpace::LinearRec2020,
             color_management: SequenceColorManagement {
                 workflow: ColorWorkflow::SceneReferred,
                 output_color_space: ColorSpace::Rec2100Pq,
@@ -2050,7 +2034,7 @@ mod tests {
     #[test]
     fn preview_and_export_root_color_contexts_separate_presentation_from_delivery() {
         let settings = SequenceSettings {
-            color_space: ColorSpace::Rec2020,
+            working_color_space: WorkingColorSpace::LinearRec2020,
             color_management: SequenceColorManagement {
                 output_color_space: ColorSpace::Rec2100Pq,
                 workflow: ColorWorkflow::SceneReferred,
@@ -2063,10 +2047,19 @@ mod tests {
         let preview = settings.root_preview_color_context(&project_cm, ColorSpace::Rec709);
         let export = settings.root_export_color_context(&project_cm);
 
-        assert_eq!(preview.working_color_space, ColorSpace::Rec2020);
-        assert_eq!(preview.output_color_space, ColorSpace::Rec709);
-        assert_eq!(export.working_color_space, ColorSpace::Rec2020);
-        assert_eq!(export.output_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(
+            preview.working_color_space,
+            WorkingColorSpace::LinearRec2020
+        );
+        assert_eq!(
+            preview.output_color_space,
+            OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709)
+        );
+        assert_eq!(export.working_color_space, WorkingColorSpace::LinearRec2020);
+        assert_eq!(
+            export.output_color_space,
+            OcioColorSpaceIdentity::Encoded(ColorSpace::Rec2100Pq)
+        );
         assert_eq!(preview.engine, export.engine);
         assert_eq!(preview.workflow, export.workflow);
         assert_eq!(
@@ -2104,7 +2097,9 @@ mod tests {
         assert_eq!(ctx.display_management, project_cm.display_management);
         assert!(ctx.tone_map);
         assert_eq!(
-            ctx.display_management.viewer_mode.resolve(ctx.output_color_space),
+            ctx.display_management
+                .viewer_mode
+                .resolve(ctx.output_color_space.encoded().expect("root preview output")),
             mondrian_core::ResolvedViewerDisplayMode::HdrPq
         );
     }
@@ -2119,7 +2114,7 @@ mod tests {
             },
         };
         let mut settings = SequenceSettings {
-            color_space: ColorSpace::Rec2100Pq,
+            working_color_space: WorkingColorSpace::LinearRec2020,
             auto_tone_map_media: true,
             ..Default::default()
         };
@@ -2142,12 +2137,12 @@ mod tests {
     }
 
     #[test]
-    fn automatic_display_policy_tone_maps_hdr_working_space_to_sdr_output() {
+    fn automatic_display_policy_tone_maps_scene_referred_workflow_to_sdr_output() {
         let settings = SequenceSettings {
-            color_space: ColorSpace::Rec2100Pq,
+            working_color_space: WorkingColorSpace::LinearRec2020,
             auto_tone_map_media: false,
             color_management: SequenceColorManagement {
-                workflow: ColorWorkflow::DisplayReferred,
+                workflow: ColorWorkflow::SceneReferred,
                 ..Default::default()
             },
             ..Default::default()
@@ -2158,7 +2153,9 @@ mod tests {
 
         assert!(ctx.tone_map);
         assert_eq!(
-            ctx.display_management.viewer_mode.resolve(ctx.output_color_space),
+            ctx.display_management
+                .viewer_mode
+                .resolve(ctx.output_color_space.encoded().expect("root preview output")),
             mondrian_core::ResolvedViewerDisplayMode::Sdr
         );
     }

@@ -6,7 +6,9 @@
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
-use mondrian_core::{ColorSpace, ExportDeliveryViewPolicy, ProjectSettings, Rational, Resolution};
+use mondrian_core::{
+    ColorSpace, ExportDeliveryViewPolicy, ProjectSettings, Rational, Resolution, WorkingColorSpace,
+};
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
@@ -963,7 +965,7 @@ pub enum SequenceSettingsDraftUpdatePayload {
     /// Sequence start timecode frame.
     StartTimecodeFrame(i64),
     /// Sequence working color space.
-    ColorSpace(ColorSpace),
+    WorkingColorSpace(WorkingColorSpace),
     /// Whether source media is auto tone-mapped into the sequence.
     AutoToneMapMedia(bool),
     /// Whether the sequence inherits project-level color-management settings.

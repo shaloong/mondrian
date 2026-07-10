@@ -16,7 +16,7 @@ use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
     AssetId, ClipId, ColorSpace, EffectId, JobId, Rational, SequenceId, TimeCode, TrackId,
 };
-use mondrian_core::Color;
+use mondrian_core::{Color, WorkingColorSpace};
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
@@ -171,7 +171,7 @@ pub struct ViewerPreviewColorRejectionModel {
     /// Explicitly detected media color space, if any.
     pub detected_color_space: Option<ColorSpace>,
     /// Sequence working color space active during the decision.
-    pub working_color_space: ColorSpace,
+    pub working_color_space: WorkingColorSpace,
     /// Compact media diagnostic summary.
     pub diagnostic_summary: String,
     /// Machine-readable media diagnostic issue summary.
@@ -6930,7 +6930,7 @@ mod tests {
                     source: InputColorResolutionSource::MissingPolicyRejectMedia,
                     override_color_space: None,
                     detected_color_space: None,
-                    working_color_space: ColorSpace::Rec2020,
+                    working_color_space: WorkingColorSpace::LinearRec2020,
                     diagnostic_summary:
                         "source=MissingMetadata,warnings=missing_or_unsupported_cicp".to_string(),
                     diagnostic_issue_summary: VideoColorDiagnosticIssueSummary {

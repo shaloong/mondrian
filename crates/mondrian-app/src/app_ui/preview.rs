@@ -19,7 +19,7 @@ use mondrian_core::timeline_data::AssetMediaInterpretation;
 #[cfg(test)]
 use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
-use mondrian_core::MondrianError;
+use mondrian_core::{MondrianError, WorkingColorSpace};
 use mondrian_effects::{
     get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan, CompiledEffectGraph,
     EffectCachePolicy,
@@ -40,13 +40,14 @@ use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_rgba8,
-    CpuColorFrame, CpuEncodedColorFrame, GpuCompositingBlockerReason, GpuCompositingDiagnostics,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    execute_cpu_working_transform, CpuColorFrame, CpuEncodedColorFrame,
+    GpuCompositingBlockerReason, GpuCompositingDiagnostics, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
+    RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
+    TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -55,7 +56,7 @@ use mondrian_renderer::{
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
-    InputColorResolutionSourceCounts, MissingColorMetadataPolicy, Sequence,
+    InputColorResolutionSourceCounts, MissingColorMetadataPolicy, ResolvedInputColor, Sequence,
     MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
@@ -353,7 +354,7 @@ impl AppUiPreviewService {
             target_height: 1080,
             input_color_space: ColorSpace::Srgb,
             input_video_range: DecodedVideoRange::Full,
-            working_color_space: ColorSpace::Srgb,
+            working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
         };
@@ -418,10 +419,6 @@ impl AppUiPreviewService {
             input_color_resolution_missing_assume_rec709: self
                 .metrics
                 .input_color_resolution_missing_assume_rec709
-                .get(),
-            input_color_resolution_missing_assume_working: self
-                .metrics
-                .input_color_resolution_missing_assume_working
                 .get(),
             input_color_resolution_missing_rejected: self
                 .metrics
@@ -1144,7 +1141,10 @@ impl AppUiPreviewService {
             bump(&self.metrics.gpu_preview_candidate_current);
             return AppUiGpuPreviewFrameState::Current;
         }
-        let boundary = output_boundary_from_color_context(&resolved.color_context);
+        let Ok(boundary) = output_boundary_from_color_context(&resolved.color_context) else {
+            bump(&self.metrics.gpu_preview_candidate_unavailable);
+            return AppUiGpuPreviewFrameState::Unavailable;
+        };
         let working_input = match gpu_composite_layers_for_resolved(
             width,
             height,
@@ -1299,9 +1299,6 @@ impl AppUiPreviewService {
             }
             InputColorResolutionSource::MissingPolicyAssumeRec709 => {
                 bump(&self.metrics.input_color_resolution_missing_assume_rec709);
-            }
-            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace => {
-                bump(&self.metrics.input_color_resolution_missing_assume_working);
             }
             InputColorResolutionSource::MissingPolicyRejectMedia => {
                 bump(&self.metrics.input_color_resolution_missing_rejected);
@@ -1872,6 +1869,7 @@ impl AppUiPreviewService {
             return None;
         }
         let (width, height) = preview_dimensions_for_sequence(sequence);
+        let parent_working_color_space = parent_color_context.working_color_space;
         let color_context = sequence.settings.nested_render_color_context(parent_color_context);
         let resolved = self
             .resolve_sequence_elements(
@@ -1885,8 +1883,7 @@ impl AppUiPreviewService {
             )?
             .elements;
         let mut scratch = TimelineCompositeScratch::default();
-        let output = composite_resolved_preview(
-            self,
+        let output = composite_resolved_preview_working(
             width,
             height,
             &resolved,
@@ -1897,36 +1894,36 @@ impl AppUiPreviewService {
         let render_stage_durations = output.render_stage_durations;
         let render_total_us = render_stage_durations
             .working_prepare_us
-            .saturating_add(render_stage_durations.cpu_composite_us)
-            .saturating_add(render_stage_durations.cpu_output_boundary_us);
+            .saturating_add(render_stage_durations.cpu_composite_us);
         self.record_composite(output.composite_diagnostics);
-        self.record_color_transform(output.color_diagnostics);
-        self.record_color_stage(output.color_stage_diagnostics);
+        for diagnostics in output.input_color_diagnostics {
+            self.record_color_transform(diagnostics);
+        }
+        self.record_color_stage(output.input_color_stage_diagnostics);
         self.record_render_stage_durations(render_total_us, render_stage_durations);
-        let rgba = output.rgba;
-        let signature =
-            nested_preview_frame_signature(sequence.id, frame.max(0), width, height, &rgba);
-        let source = CpuEncodedColorFrame::source_rgba8(
+        let mut working_frame = output.frame;
+        if working_frame.descriptor().color_space.working() != Some(parent_working_color_space) {
+            let converted = execute_cpu_working_transform(
+                &working_frame,
+                parent_working_color_space,
+                color_context.engine.clone(),
+            )
+            .ok()?;
+            self.record_color_transform(converted.result.diagnostics);
+            self.record_color_stage(converted.stage_diagnostics);
+            working_frame = converted.result.frame;
+        }
+        let signature = nested_preview_frame_signature(
+            sequence.id,
+            frame.max(0),
             width,
             height,
-            color_context.output_color_space,
-            rgba,
+            &working_frame,
         );
-        let frame = execute_cpu_input_stage(
-            &source,
-            &RenderInputTransform::to_working(
-                color_context.output_color_space,
-                false,
-                color_context.engine.clone(),
-            ),
-        )
-        .ok()?;
-        self.record_color_transform(frame.result.diagnostics);
-        self.record_color_stage(frame.stage_diagnostics);
         Some(MediaPreviewFrame {
             width,
             height,
-            frame: Some(frame.result.frame),
+            frame: Some(working_frame),
             gpu_source: None,
             native_source: None,
             signature,
@@ -2254,8 +2251,6 @@ pub struct AppUiPreviewDiagnostics {
     pub input_color_resolution_detected_metadata: u64,
     /// Media input color resolutions that assumed Rec.709 through missing-metadata policy.
     pub input_color_resolution_missing_assume_rec709: u64,
-    /// Media input color resolutions that assumed the sequence working space through policy.
-    pub input_color_resolution_missing_assume_working: u64,
     /// Media input color resolutions rejected by missing-metadata policy.
     pub input_color_resolution_missing_rejected: u64,
     /// Media input color resolutions that treated the asset as non-color data.
@@ -2594,7 +2589,7 @@ pub struct AppUiPreviewColorRejection {
     /// Explicitly detected media color space, if any.
     pub detected_color_space: Option<ColorSpace>,
     /// Sequence working color space active during the decision.
-    pub working_color_space: ColorSpace,
+    pub working_color_space: WorkingColorSpace,
     /// Compact media color diagnostic summary from `mondrian-media`.
     pub diagnostic_summary: String,
     /// Machine-readable media color diagnostic issue summary.
@@ -6509,7 +6504,6 @@ impl AppUiPreviewDiagnostics {
             data_texture: self.input_color_resolution_data_texture,
             detected_metadata: self.input_color_resolution_detected_metadata,
             missing_assume_rec709: self.input_color_resolution_missing_assume_rec709,
-            missing_assume_working: self.input_color_resolution_missing_assume_working,
             missing_rejected: self.input_color_resolution_missing_rejected,
         }
     }
@@ -6628,7 +6622,7 @@ pub(crate) struct AppUiGpuPreviewFrame {
     /// Preview frame height in pixels.
     pub height: u32,
     /// Timeline working color space represented by the working input.
-    pub working_color_space: ColorSpace,
+    pub working_color_space: WorkingColorSpace,
     /// Working-space input that enters the GPU output boundary.
     pub working_input: AppUiGpuPreviewWorkingInput,
     /// Display/output boundary to execute on the GPU.
@@ -7611,9 +7605,9 @@ impl AppUiPreviewService {
             color_context,
         );
         self.record_input_color_resolution(input_color_resolution.source);
-        let input_color_space = match input_color_resolution.color_space {
-            Some(color_space) => color_space,
-            None => {
+        let input_color_space = match input_color_resolution.resolved {
+            ResolvedInputColor::Color(color_space) => color_space,
+            ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
                 let diagnostic = asset
                     .media_info
                     .primary_video()
@@ -8081,7 +8075,6 @@ struct AppUiPreviewMetrics {
     input_color_resolution_override: Cell<u64>,
     input_color_resolution_detected_metadata: Cell<u64>,
     input_color_resolution_missing_assume_rec709: Cell<u64>,
-    input_color_resolution_missing_assume_working: Cell<u64>,
     input_color_resolution_missing_rejected: Cell<u64>,
     input_color_resolution_data_texture: Cell<u64>,
     media_proxy_path_hits: Cell<u64>,
@@ -8346,14 +8339,19 @@ fn nested_preview_frame_signature(
     frame: i64,
     width: u32,
     height: u32,
-    rgba: &[u8],
+    working: &CpuColorFrame,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     sequence_id.hash(&mut hasher);
     frame.hash(&mut hasher);
     width.hash(&mut hasher);
     height.hash(&mut hasher);
-    rgba.hash(&mut hasher);
+    working.descriptor().hash(&mut hasher);
+    for pixel in &working.rgba_f32().data {
+        for channel in pixel {
+            channel.to_bits().hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -8446,7 +8444,6 @@ struct PreviewCompositeOutput {
 
 struct PreviewWorkingCompositeOutput {
     frame: CpuColorFrame,
-    boundary: RenderOutputColorBoundary,
     composite_diagnostics: TimelineCompositeDiagnostics,
     input_color_diagnostics: Vec<RenderColorTransformDiagnostics>,
     input_color_stage_diagnostics: RenderColorStageDiagnostics,
@@ -8551,10 +8548,8 @@ fn composite_resolved_preview_working(
         scratch,
     );
     let cpu_composite_us = app_duration_us(cpu_composite_started_at.elapsed());
-    let boundary = output_boundary_from_color_context(color_context);
     Ok(PreviewWorkingCompositeOutput {
         frame: composite.frame,
-        boundary,
         composite_diagnostics: composite.diagnostics,
         input_color_diagnostics,
         input_color_stage_diagnostics,
@@ -8574,11 +8569,11 @@ struct CpuRasterPresentationContract {
 
 fn cpu_raster_presentation_contract(
     requested: &ColorContext,
-) -> Result<CpuRasterPresentationContract, ColorSpace> {
+) -> Result<CpuRasterPresentationContract, mondrian_core::OcioColorSpaceIdentity> {
     match requested.output_color_space {
-        ColorSpace::Rec709 | ColorSpace::Srgb => {
+        mondrian_core::OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709 | ColorSpace::Srgb) => {
             let mut color_context = requested.clone();
-            color_context.output_color_space = ColorSpace::Srgb;
+            color_context.output_color_space = ColorSpace::Srgb.into();
             Ok(CpuRasterPresentationContract {
                 color_context,
                 raster_color_space: mondrian_ui_core::RasterImageColorSpace::Srgb,
@@ -8588,20 +8583,26 @@ fn cpu_raster_presentation_contract(
     }
 }
 
-fn output_boundary_from_color_context(color_context: &ColorContext) -> RenderOutputColorBoundary {
+fn output_boundary_from_color_context(
+    color_context: &ColorContext,
+) -> Result<RenderOutputColorBoundary, mondrian_core::OcioColorSpaceIdentity> {
+    let output_color_space = color_context
+        .output_color_space
+        .encoded()
+        .ok_or(color_context.output_color_space)?;
     match (&color_context.ocio_display, &color_context.ocio_view) {
-        (Some(display), Some(view)) => RenderOutputColorBoundary::display_view(
-            color_context.output_color_space,
+        (Some(display), Some(view)) => Ok(RenderOutputColorBoundary::display_view(
+            output_color_space,
             display.clone(),
             view.clone(),
             color_context.tone_map,
             color_context.engine.clone(),
-        ),
-        _ => RenderOutputColorBoundary::display(
-            color_context.output_color_space,
+        )),
+        _ => Ok(RenderOutputColorBoundary::display(
+            output_color_space,
             color_context.tone_map,
             color_context.engine.clone(),
-        ),
+        )),
     }
 }
 
@@ -8609,7 +8610,7 @@ fn gpu_composite_layers_for_resolved(
     _width: u32,
     _height: u32,
     resolved: &[ResolvedPreviewElement],
-    working_color_space: ColorSpace,
+    working_color_space: WorkingColorSpace,
 ) -> Result<Vec<AppUiGpuPreviewCompositeLayer>, GpuCompositingBlockerReason> {
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
@@ -8631,7 +8632,7 @@ fn gpu_composite_layers_for_resolved(
                 let layer_working_color_space = frame
                     .frame
                     .as_ref()
-                    .map(|working| working.descriptor().color_space)
+                    .and_then(|working| working.descriptor().color_space.working())
                     .or_else(|| {
                         frame
                             .gpu_source
@@ -8752,7 +8753,9 @@ fn composite_resolved_preview(
     }
     let output_boundary_started_at = Instant::now();
     let mut render_stage_durations = composite.render_stage_durations;
-    execute_cpu_output_boundary_rgba8(&composite.frame, &composite.boundary)
+    let boundary = output_boundary_from_color_context(color_context)
+        .map_err(|space| format!("unsupported preview output identity: {space:?}"))?;
+    execute_cpu_output_boundary_rgba8(&composite.frame, &boundary)
         .map(|output| {
             render_stage_durations.cpu_output_boundary_us =
                 app_duration_us(output_boundary_started_at.elapsed());
@@ -9568,7 +9571,10 @@ mod tests {
             contract.color_context.working_color_space,
             requested.working_color_space
         );
-        assert_eq!(contract.color_context.output_color_space, ColorSpace::Srgb);
+        assert_eq!(
+            contract.color_context.output_color_space,
+            ColorSpace::Srgb.into()
+        );
         assert_eq!(contract.color_context.tone_map, requested.tone_map);
         assert_eq!(
             contract.raster_color_space,
@@ -9584,7 +9590,10 @@ mod tests {
             ColorSpace::Rec2100Hlg,
         ] {
             let requested = test_color_context(output);
-            assert_eq!(cpu_raster_presentation_contract(&requested), Err(output));
+            assert_eq!(
+                cpu_raster_presentation_contract(&requested),
+                Err(output.into())
+            );
         }
     }
 
@@ -9699,7 +9708,7 @@ mod tests {
         };
 
         assert_eq!(frame.boundary.output_color_space, ColorSpace::DciP3);
-        assert_eq!(frame.working_color_space, ColorSpace::Rec709);
+        assert_eq!(frame.working_color_space, WorkingColorSpace::LinearRec709);
     }
 
     fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {
@@ -9743,7 +9752,7 @@ mod tests {
 
         assert_eq!(frame.width, 960);
         assert_eq!(frame.height, 540);
-        assert_eq!(frame.working_color_space, ColorSpace::Rec709);
+        assert_eq!(frame.working_color_space, WorkingColorSpace::LinearRec709);
         match &frame.working_input {
             AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
                 assert_eq!(layers.len(), 1);
@@ -9782,8 +9791,9 @@ mod tests {
             frame_seed: 7,
         }];
 
-        let layers = gpu_composite_layers_for_resolved(960, 540, &elements, ColorSpace::Rec709)
-            .expect("affine transformed media should stay on GPU composite path");
+        let layers =
+            gpu_composite_layers_for_resolved(960, 540, &elements, WorkingColorSpace::LinearRec709)
+                .expect("affine transformed media should stay on GPU composite path");
 
         assert_eq!(layers.len(), 1);
         match &layers[0] {
@@ -9823,8 +9833,9 @@ mod tests {
             frame_seed: 19,
         }];
 
-        let layers = gpu_composite_layers_for_resolved(320, 180, &elements, ColorSpace::Rec709)
-            .expect("supported effects should stay on GPU composite path");
+        let layers =
+            gpu_composite_layers_for_resolved(320, 180, &elements, WorkingColorSpace::LinearRec709)
+                .expect("supported effects should stay on GPU composite path");
 
         match &layers[0] {
             AppUiGpuPreviewCompositeLayer::Media { effect_plan, frame_seed, .. } => {
@@ -9865,8 +9876,9 @@ mod tests {
             }),
         ];
 
-        let layers = gpu_composite_layers_for_resolved(320, 180, &elements, ColorSpace::Rec709)
-            .expect("solid and adjustment point effects should remain GPU-native");
+        let layers =
+            gpu_composite_layers_for_resolved(320, 180, &elements, WorkingColorSpace::LinearRec709)
+                .expect("solid and adjustment point effects should remain GPU-native");
 
         assert_eq!(layers.len(), 2);
         match &layers[0] {
@@ -9919,8 +9931,9 @@ mod tests {
             },
         ));
 
-        let layers = gpu_composite_layers_for_resolved(320, 180, &elements, ColorSpace::Rec709)
-            .expect("non-rendering leading adjustments should not consume GPU layer capacity");
+        let layers =
+            gpu_composite_layers_for_resolved(320, 180, &elements, WorkingColorSpace::LinearRec709)
+                .expect("non-rendering leading adjustments should not consume GPU layer capacity");
 
         assert_eq!(layers.len(), 1);
         assert!(matches!(
@@ -9937,8 +9950,11 @@ mod tests {
             ColorSpace::Rec709,
             vec![0; 320 * 180 * 4],
         );
-        let input_transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let input_transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let media = MediaPreviewFrame {
             width: 320,
             height: 180,
@@ -9960,8 +9976,9 @@ mod tests {
             frame_seed: 7,
         }];
 
-        let layers = gpu_composite_layers_for_resolved(960, 540, &elements, ColorSpace::Rec709)
-            .expect("source-only media should stay on GPU input/composite path");
+        let layers =
+            gpu_composite_layers_for_resolved(960, 540, &elements, WorkingColorSpace::LinearRec709)
+                .expect("source-only media should stay on GPU input/composite path");
 
         match &layers[0] {
             AppUiGpuPreviewCompositeLayer::Media { frame, gpu_source, native_source, .. } => {
@@ -9999,8 +10016,9 @@ mod tests {
             frame_seed: 7,
         }];
 
-        let layers = gpu_composite_layers_for_resolved(960, 540, &elements, ColorSpace::Rec709)
-            .expect("native source-only media should reach GPU composite admission");
+        let layers =
+            gpu_composite_layers_for_resolved(960, 540, &elements, WorkingColorSpace::LinearRec709)
+                .expect("native source-only media should reach GPU composite admission");
 
         match &layers[0] {
             AppUiGpuPreviewCompositeLayer::Media { frame, gpu_source, native_source, .. } => {
@@ -10085,7 +10103,12 @@ mod tests {
             frame_seed: 7,
         }];
 
-        let err = match gpu_composite_layers_for_resolved(960, 540, &elements, ColorSpace::Rec709) {
+        let err = match gpu_composite_layers_for_resolved(
+            960,
+            540,
+            &elements,
+            WorkingColorSpace::LinearRec709,
+        ) {
             Ok(_) => panic!("singular transform cannot stay on GPU composite path"),
             Err(err) => err,
         };
@@ -10163,7 +10186,7 @@ mod tests {
         assert_eq!(diagnostics.input_color_resolution_override, 0);
         assert_eq!(diagnostics.input_color_resolution_detected_metadata, 0);
         assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 0);
-        assert_eq!(diagnostics.input_color_resolution_missing_assume_working, 0);
+        assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 0);
         assert_eq!(diagnostics.input_color_resolution_missing_rejected, 0);
         assert_eq!(diagnostics.input_color_resolution_data_texture, 0);
         assert_eq!(diagnostics.viewer_frame_cache_hits, 0);
@@ -13132,9 +13155,8 @@ mod tests {
         service.record_input_color_resolution(InputColorResolutionSource::DetectedMetadata);
         service
             .record_input_color_resolution(InputColorResolutionSource::MissingPolicyAssumeRec709);
-        service.record_input_color_resolution(
-            InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace,
-        );
+        service
+            .record_input_color_resolution(InputColorResolutionSource::MissingPolicyAssumeRec709);
         service.record_input_color_resolution(InputColorResolutionSource::MissingPolicyRejectMedia);
         service.record_input_color_resolution(InputColorResolutionSource::DetectedMetadata);
 
@@ -13142,8 +13164,7 @@ mod tests {
         assert_eq!(diagnostics.input_color_resolution_override, 1);
         assert_eq!(diagnostics.input_color_resolution_data_texture, 1);
         assert_eq!(diagnostics.input_color_resolution_detected_metadata, 2);
-        assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 1);
-        assert_eq!(diagnostics.input_color_resolution_missing_assume_working, 1);
+        assert_eq!(diagnostics.input_color_resolution_missing_assume_rec709, 2);
         assert_eq!(diagnostics.input_color_resolution_missing_rejected, 1);
     }
 
@@ -13834,10 +13855,13 @@ mod tests {
         color_context.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
         let mut scratch = TimelineCompositeScratch::default();
 
-        let output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)
+        let _output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)
             .expect("empty preview composite");
 
-        let display_view = output.boundary.display_view.expect("resolved display/view");
+        let display_view = output_boundary_from_color_context(&color_context)
+            .expect("encoded preview output")
+            .display_view
+            .expect("resolved display/view");
         assert_eq!(display_view.display, "sRGB - Display");
         assert_eq!(display_view.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
     }
@@ -13845,9 +13869,8 @@ mod tests {
     #[test]
     fn preview_input_color_resolution_honors_override_metadata_and_missing_policy() {
         let mut color_context = test_color_context(ColorSpace::Rec709);
-        color_context.working_color_space = ColorSpace::Rec2020;
-        color_context.missing_metadata_policy =
-            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+        color_context.working_color_space = WorkingColorSpace::LinearRec2020;
+        color_context.missing_metadata_policy = MissingColorMetadataPolicy::AssumeRec709;
 
         assert_eq!(
             resolve_preview_input_color_space(
@@ -13856,8 +13879,8 @@ mod tests {
                 Some(ColorSpace::Srgb),
                 &color_context,
             )
-            .color_space,
-            Some(ColorSpace::SLog3)
+            .resolved,
+            ResolvedInputColor::Color(ColorSpace::SLog3)
         );
         assert_eq!(
             resolve_preview_input_color_space(
@@ -13877,7 +13900,7 @@ mod tests {
                 &color_context,
             ),
             mondrian_timeline::sequence::InputColorResolution {
-                color_space: Some(ColorSpace::Srgb),
+                resolved: ResolvedInputColor::Color(ColorSpace::Srgb),
                 source: mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata,
                 override_color_space: None,
                 detected_color_space: Some(ColorSpace::Srgb),
@@ -13892,8 +13915,8 @@ mod tests {
                 None,
                 &color_context,
             )
-            .color_space,
-            Some(ColorSpace::Rec2020)
+            .resolved,
+            ResolvedInputColor::Color(ColorSpace::Rec709)
         );
         assert_eq!(
             resolve_preview_input_color_space(
@@ -13903,7 +13926,7 @@ mod tests {
                 &color_context,
             )
             .source,
-            mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
+            mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeRec709
         );
 
         let asset_override = resolve_preview_input_color_space(
@@ -13917,7 +13940,10 @@ mod tests {
             Some(ColorSpace::Srgb),
             &color_context,
         );
-        assert_eq!(asset_override.color_space, Some(ColorSpace::AppleLog));
+        assert_eq!(
+            asset_override.resolved,
+            ResolvedInputColor::Color(ColorSpace::AppleLog)
+        );
         assert_eq!(
             asset_override.source,
             mondrian_timeline::sequence::InputColorResolutionSource::Override
@@ -13932,7 +13958,7 @@ mod tests {
             Some(ColorSpace::Srgb),
             &color_context,
         );
-        assert_eq!(data.color_space, Some(ColorSpace::Rec2020));
+        assert_eq!(data.resolved, ResolvedInputColor::Data);
         assert_eq!(
             data.source,
             mondrian_timeline::sequence::InputColorResolutionSource::DataTexture
@@ -13946,8 +13972,8 @@ mod tests {
                 None,
                 &color_context,
             )
-            .color_space,
-            None
+            .resolved,
+            ResolvedInputColor::Rejected
         );
         assert_eq!(
             resolve_preview_input_color_space(
@@ -13965,7 +13991,7 @@ mod tests {
     fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
         let service = AppUiPreviewService::new();
         let mut color_context = test_color_context(ColorSpace::Rec709);
-        color_context.working_color_space = ColorSpace::Rec2020;
+        color_context.working_color_space = WorkingColorSpace::LinearRec2020;
         color_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
         let resolution = resolve_preview_input_color_space(
             None,
@@ -14031,7 +14057,10 @@ mod tests {
         );
         assert_eq!(rejection.override_color_space, None);
         assert_eq!(rejection.detected_color_space, None);
-        assert_eq!(rejection.working_color_space, ColorSpace::Rec2020);
+        assert_eq!(
+            rejection.working_color_space,
+            WorkingColorSpace::LinearRec2020
+        );
         assert_eq!(rejection.diagnostic_summary, diagnostic);
         assert_eq!(rejection.diagnostic_issue_summary, issue_summary);
     }
@@ -14086,9 +14115,9 @@ mod tests {
     #[test]
     fn preview_and_export_input_color_resolution_counts_match_for_frame() {
         let mut sequence = Sequence::new("preview-export-color-resolution-parity");
-        sequence.settings.color_space = ColorSpace::Rec2020;
+        sequence.settings.working_color_space = WorkingColorSpace::LinearRec2020;
         sequence.settings.color_management.missing_metadata_policy =
-            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+            MissingColorMetadataPolicy::AssumeRec709;
         let tb = sequence.time_base();
         let detected_id = AssetId::new();
         let override_id = AssetId::new();
@@ -14177,7 +14206,7 @@ mod tests {
         );
         assert_eq!(
             preview_counts.count(
-                mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
+                mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeRec709
             ),
             1
         );
@@ -14191,13 +14220,13 @@ mod tests {
     #[test]
     fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
         let mut parent = Sequence::new("parent-color-resolution-parity");
-        parent.settings.color_space = ColorSpace::Rec2020;
+        parent.settings.working_color_space = WorkingColorSpace::LinearRec2020;
         parent.settings.color_management.missing_metadata_policy =
-            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+            MissingColorMetadataPolicy::AssumeRec709;
         let mut nested = Sequence::new("nested-color-resolution-parity");
-        nested.settings.color_space = ColorSpace::Rec2020;
+        nested.settings.working_color_space = WorkingColorSpace::LinearRec2020;
         nested.settings.color_management.missing_metadata_policy =
-            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace;
+            MissingColorMetadataPolicy::AssumeRec709;
 
         let parent_tb = parent.time_base();
         let nested_tb = nested.time_base();
@@ -14308,7 +14337,7 @@ mod tests {
         );
         assert_eq!(
             preview_counts.count(
-                mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeSequenceWorkingSpace
+                mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyAssumeRec709
             ),
             1
         );
@@ -14606,18 +14635,18 @@ mod tests {
         );
         assert_eq!(
             expected_frame.descriptor().color_space,
-            color_context.working_color_space
+            color_context.working_color_space.into()
         );
         let export_boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
             (Some(display), Some(view)) => RenderOutputColorBoundary::export_view(
-                color_context.output_color_space,
+                color_context.output_color_space.encoded().expect("encoded export output"),
                 display.clone(),
                 view.clone(),
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
             _ => RenderOutputColorBoundary::export(
-                color_context.output_color_space,
+                color_context.output_color_space.encoded().expect("encoded export output"),
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
@@ -14640,7 +14669,7 @@ mod tests {
 
     #[test]
     fn preview_multilayer_color_output_matches_export_frame_hash() {
-        const REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH: u64 = 6_377_061_385_888_487_029;
+        const REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH: u64 = 4_283_848_551_210_105_253;
 
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
@@ -14655,7 +14684,7 @@ mod tests {
         let frame = execute_cpu_input_stage(
             &source,
             &RenderInputTransform::to_working(
-                ColorSpace::Rec2020,
+                WorkingColorSpace::LinearRec2020,
                 false,
                 ColorEngine::MondrianSmart,
             ),
@@ -14680,7 +14709,7 @@ mod tests {
             frame_seed: 14,
         };
         let mut color_context = test_color_context(ColorSpace::Srgb);
-        color_context.working_color_space = ColorSpace::Rec2020;
+        color_context.working_color_space = WorkingColorSpace::LinearRec2020;
         assert!(color_context.ocio_display.is_some());
         assert!(color_context.ocio_view.is_some());
 
@@ -14731,14 +14760,14 @@ mod tests {
             );
         let export_boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
             (Some(display), Some(view)) => RenderOutputColorBoundary::export_view(
-                color_context.output_color_space,
+                color_context.output_color_space.encoded().expect("encoded export output"),
                 display.clone(),
                 view.clone(),
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
             _ => RenderOutputColorBoundary::export(
-                color_context.output_color_space,
+                color_context.output_color_space.encoded().expect("encoded export output"),
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
@@ -15374,7 +15403,7 @@ mod tests {
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
         };
@@ -15419,7 +15448,7 @@ mod tests {
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
         };
@@ -15770,7 +15799,7 @@ mod tests {
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
         }
@@ -15836,8 +15865,11 @@ mod tests {
         signature: u64,
     ) -> MediaPreviewFrame {
         let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, rgba);
-        let input_transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let input_transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let frame =
             execute_cpu_input_stage(&source, &input_transform).expect("test media input transform");
         let frame = frame.result.frame;
@@ -15897,7 +15929,7 @@ mod tests {
             native_frame,
             ColorSpace::Rec709,
             RenderInputTransform::to_working_gpu(
-                ColorSpace::Rec709,
+                WorkingColorSpace::LinearRec709,
                 false,
                 ColorEngine::MondrianSmart,
             ),
@@ -15933,8 +15965,11 @@ mod tests {
     fn media_preview_gpu_source_caches_lazy_cpu_working_transform() {
         let source =
             CpuEncodedColorFrame::source_rgba8(1, 1, ColorSpace::Rec709, vec![64, 128, 192, 255]);
-        let input_transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let input_transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let frame = MediaPreviewFrame {
             width: 1,
             height: 1,

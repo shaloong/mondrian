@@ -13,6 +13,11 @@ A `Sequence` contains:
 - optional in/out frame range
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
+The persisted `working_color_space` is a `WorkingColorSpace`, distinct from
+encoded input and output `ColorSpace` values. Root color contexts carry an
+encoded output identity, while nested contexts carry their parent working
+identity so render recursion cannot mistake an internal handoff for a delivery
+boundary.
 
 Root preview/export color contexts resolve the effective color engine from the
 sequence/project inheritance rules. When the effective engine is

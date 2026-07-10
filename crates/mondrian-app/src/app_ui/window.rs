@@ -3491,7 +3491,12 @@ impl PreviewGpuCompositeNativeVideoImportFacts {
             .flatten();
         let source_video_sampling = source_texture_format.and_then(|format| {
             native_video_sampling_from_decoded(
-                source.source.descriptor().color_space,
+                source
+                    .source
+                    .descriptor()
+                    .color_space
+                    .encoded()
+                    .expect("native decoded source must be encoded"),
                 format,
                 source.decoded_video_sampling,
             )
@@ -4565,6 +4570,7 @@ mod platform_window_chrome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::WorkingColorSpace;
     use mondrian_editor_state::Action;
     use mondrian_renderer::{GpuVideoChromaLocation, GpuVideoRange};
     use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -6170,7 +6176,7 @@ mod tests {
                 mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyRejectMedia,
             override_color_space: None,
             detected_color_space: None,
-            working_color_space: ColorSpace::Rec2020,
+            working_color_space: WorkingColorSpace::LinearRec2020,
             diagnostic_summary: "source=MissingMetadata,warnings=missing_or_unsupported_cicp"
                 .to_string(),
             diagnostic_issue_summary: mondrian_media::VideoColorDiagnosticIssueSummary {

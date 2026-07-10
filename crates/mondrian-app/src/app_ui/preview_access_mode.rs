@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
+use mondrian_core::WorkingColorSpace;
 use mondrian_media::{
     preview_decode_cpu_budget, DecodedVideoRange, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewFileFingerprint, PreviewHardwareDecodeRequest,
@@ -32,7 +33,7 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) target_height: u32,
     pub(crate) input_color_space: ColorSpace,
     pub(crate) input_video_range: DecodedVideoRange,
-    pub(crate) working_color_space: ColorSpace,
+    pub(crate) working_color_space: WorkingColorSpace,
     pub(crate) tone_map: bool,
     pub(crate) engine: ColorEngine,
 }
@@ -1122,7 +1123,7 @@ mod tests {
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
         }

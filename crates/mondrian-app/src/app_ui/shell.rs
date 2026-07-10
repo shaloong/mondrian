@@ -1849,7 +1849,7 @@ mod tests {
     use mondrian_core::types::AssetId;
     use mondrian_core::{
         ColorSpace, ExportDeliveryViewPolicy, Rational, Resolution, VideoContentLightMetadata,
-        VideoMasteringDisplayMetadata,
+        VideoMasteringDisplayMetadata, WorkingColorSpace,
     };
     use mondrian_platform::ClipboardError;
     use mondrian_timeline::sequence::{
@@ -2915,7 +2915,9 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::ColorSpace(ColorSpace::Rec2100Pq),
+                SequenceSettingsDraftUpdatePayload::WorkingColorSpace(
+                    WorkingColorSpace::LinearRec2020,
+                ),
             ),
             &platform,
             None,
@@ -2944,7 +2946,7 @@ mod tests {
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::MissingColorMetadataPolicy(
-                    MissingColorMetadataPolicy::AssumeSequenceWorkingSpace,
+                    MissingColorMetadataPolicy::AssumeRec709,
                 ),
             ),
             &platform,
@@ -3082,7 +3084,10 @@ mod tests {
             VideoDisplayFormat::Timecode2997DropFrame
         );
         assert_eq!(payload.settings.start_timecode_frame, 120);
-        assert_eq!(payload.settings.color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(
+            payload.settings.working_color_space,
+            WorkingColorSpace::LinearRec2020
+        );
         assert!(!payload.settings.auto_tone_map_media);
         assert!(!payload.settings.color_management.inherit);
         assert_eq!(
@@ -3091,7 +3096,7 @@ mod tests {
         );
         assert_eq!(
             payload.settings.color_management.missing_metadata_policy,
-            MissingColorMetadataPolicy::AssumeSequenceWorkingSpace
+            MissingColorMetadataPolicy::AssumeRec709
         );
         assert_eq!(
             payload.settings.color_management.nested_processing,

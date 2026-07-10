@@ -1903,7 +1903,6 @@ fn preview_color_report_summarizes_legacy_and_gpu_blockers() {
         input_color_resolution_data_texture: 13,
         input_color_resolution_detected_metadata: 3,
         input_color_resolution_missing_assume_rec709: 5,
-        input_color_resolution_missing_assume_working: 7,
         input_color_resolution_missing_rejected: 11,
         ..AppUiPreviewDiagnostics::default()
     };
@@ -1920,7 +1919,7 @@ fn preview_color_report_summarizes_legacy_and_gpu_blockers() {
     assert_eq!(summary.override_count, 2);
     assert_eq!(summary.data_textures, 13);
     assert_eq!(summary.detected_metadata, 3);
-    assert_eq!(summary.policy_assumptions, 12);
+    assert_eq!(summary.policy_assumptions, 5);
     assert_eq!(summary.explicit_metadata_or_override, 5);
     assert_eq!(summary.gpu_color_stages, 4);
     assert_eq!(summary.gpu_blockers, 1);

@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
+use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace, WorkingColorSpace};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, execute_cpu_input_stage,
     execute_cpu_output_boundary_rgba8, CpuColorFrame, CpuEncodedColorFrame, RenderInputTransform,
@@ -68,7 +68,11 @@ fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
     let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec709, rgba);
     execute_cpu_input_stage(
         &source,
-        &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        ),
     )
     .expect("input transform golden frame")
     .result
@@ -91,7 +95,7 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        ColorSpace::Rec709,
+        WorkingColorSpace::LinearRec709,
         &mut scratch,
     );
     encode_rec709(&frame)
@@ -162,7 +166,7 @@ fn golden_transparent_canvas() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        ColorSpace::Rec709,
+        WorkingColorSpace::LinearRec709,
         &mut scratch,
     );
     let result = encode_rec709(&frame);
@@ -228,7 +232,7 @@ fn golden_two_layers_normal() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        ColorSpace::Rec709,
+        WorkingColorSpace::LinearRec709,
         &mut scratch,
     );
     let result = encode_rec709(&frame);
@@ -265,7 +269,7 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        ColorSpace::Rec709,
+        WorkingColorSpace::LinearRec709,
         &mut scratch,
     );
 
@@ -302,7 +306,11 @@ fn golden_rec2020_working_to_srgb_output() {
     let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec2020, source_rgba);
     let frame = execute_cpu_input_stage(
         &source,
-        &RenderInputTransform::to_working(ColorSpace::Rec2020, false, ColorEngine::MondrianSmart),
+        &RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec2020,
+            false,
+            ColorEngine::MondrianSmart,
+        ),
     )
     .expect("input to Rec.2020 working")
     .result
@@ -359,7 +367,7 @@ fn golden_multilayer_float_linear_blend() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        ColorSpace::Rec709,
+        WorkingColorSpace::LinearRec709,
         &mut scratch,
     );
     let result = encode_rec709(&frame);
@@ -385,7 +393,7 @@ fn golden_non_identity_transform_float_path() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        ColorSpace::Rec709,
+        WorkingColorSpace::LinearRec709,
         &mut scratch,
     );
     let result = encode_rec709(&frame);
@@ -422,7 +430,7 @@ fn golden_preview_export_parity_across_color_spaces() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        ColorSpace::Rec709,
+        WorkingColorSpace::LinearRec709,
         &mut scratch,
     );
 

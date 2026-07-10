@@ -1,7 +1,7 @@
 use crate::CpuColorFrame;
 use mondrian_core::{
-    types::{BlendMode, Color, ColorSpace},
-    RgbaF32Frame,
+    types::{BlendMode, Color},
+    WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_effects::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
@@ -277,7 +277,7 @@ pub fn composite_timeline_elements_color_frame(
     height: u32,
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
-    working_color_space: ColorSpace,
+    working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
 ) -> CpuColorFrame {
     composite_timeline_elements_color_frame_with_diagnostics(
@@ -298,20 +298,13 @@ pub fn composite_timeline_elements_color_frame_with_diagnostics(
     height: u32,
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
-    working_color_space: ColorSpace,
+    working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
 ) -> TimelineCompositeFrame {
     let diagnostics = composite_path_diagnostics(elements);
     let frame = if diagnostics.uses_legacy_rgba8() {
         let rgba = composite_timeline_elements(width, height, elements, options, scratch);
-        RgbaF32Frame::from_rgba8(
-            width,
-            height,
-            &rgba,
-            working_color_space,
-            working_color_space,
-            false,
-        )
+        working_frame_from_normalized_rgba8(width, height, &rgba, working_color_space)
     } else {
         composite_supported_elements_to_working_frame(
             width,
@@ -330,12 +323,12 @@ fn composite_supported_elements_to_working_frame(
     height: u32,
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
-    working_color_space: ColorSpace,
+    working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
-) -> RgbaF32Frame {
+) -> WorkingRgbaF32Frame {
     let pixel_count = width as usize * height as usize;
     if pixel_count == 0 {
-        return RgbaF32Frame {
+        return WorkingRgbaF32Frame {
             width,
             height,
             data: Vec::new(),
@@ -445,7 +438,7 @@ fn composite_supported_elements_to_working_frame(
         canvas.fill([0.0, 0.0, 0.0, 0.0]);
     }
 
-    RgbaF32Frame {
+    WorkingRgbaF32Frame {
         width,
         height,
         data: canvas,
@@ -669,7 +662,15 @@ pub fn composite_timeline_elements_into(
         match element {
             TimelineCompositeElement::Media(layer) => {
                 let descriptor = layer.frame.descriptor();
-                scratch.media_source = layer.frame.to_output_rgba8(descriptor.color_space, false);
+                scratch.media_source = layer
+                    .frame
+                    .rgba_f32()
+                    .data
+                    .iter()
+                    .flat_map(|pixel| {
+                        pixel.iter().map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
+                    })
+                    .collect();
                 let src_rgba = if layer.effect_graph.graph.is_identity() {
                     scratch.media_source.as_slice()
                 } else {
@@ -752,6 +753,26 @@ pub fn composite_timeline_elements_into(
     if !has_composited_media && options.empty_canvas_transparent {
         out.fill(0);
     }
+}
+
+fn working_frame_from_normalized_rgba8(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    color_space: WorkingColorSpace,
+) -> WorkingRgbaF32Frame {
+    let data = rgba
+        .chunks_exact(4)
+        .map(|pixel| {
+            [
+                pixel[0] as f32 / 255.0,
+                pixel[1] as f32 / 255.0,
+                pixel[2] as f32 / 255.0,
+                pixel[3] as f32 / 255.0,
+            ]
+        })
+        .collect();
+    WorkingRgbaF32Frame { width, height, data, color_space }
 }
 
 fn fill_solid_rgba(buf: &mut Vec<u8>, width: usize, height: usize, color: Color) {
@@ -926,13 +947,11 @@ mod tests {
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 
     fn working_frame(rgba: &[u8], width: u32, height: u32) -> CpuColorFrame {
-        CpuColorFrame::working(RgbaF32Frame::from_rgba8(
+        CpuColorFrame::working(working_frame_from_normalized_rgba8(
             width,
             height,
             rgba,
-            mondrian_core::types::ColorSpace::Rec709,
-            mondrian_core::types::ColorSpace::Rec709,
-            false,
+            WorkingColorSpace::LinearRec709,
         ))
     }
 
@@ -1100,11 +1119,16 @@ mod tests {
                 frame_seed: 0,
             })],
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
         assert_eq!(frame.descriptor().domain, crate::ColorFrameDomain::Working);
-        let output = frame.to_output_rgba8(mondrian_core::types::ColorSpace::Rec709, false);
+        let output = frame
+            .rgba_f32()
+            .data
+            .iter()
+            .flat_map(|pixel| pixel.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8))
+            .collect::<Vec<_>>();
 
         assert_eq!(output[3], 255);
         assert!((output[0] as i16 - 64).abs() <= 1);
@@ -1134,7 +1158,7 @@ mod tests {
                 },
             )],
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
 
@@ -1154,11 +1178,11 @@ mod tests {
     #[test]
     fn float_linear_compositor_runs_color_adjust_effect_without_rgba8_scratch() {
         let mut scratch = TimelineCompositeScratch::default();
-        let media = CpuColorFrame::working(RgbaF32Frame {
+        let media = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 1,
             height: 1,
             data: vec![[1.25, 0.25, 0.125, 1.0]],
-            color_space: mondrian_core::types::ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
         });
         let frame = composite_timeline_elements_color_frame(
             1,
@@ -1179,7 +1203,7 @@ mod tests {
                 frame_seed: 0,
             })],
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
 
@@ -1195,11 +1219,11 @@ mod tests {
     #[test]
     fn float_linear_compositor_runs_normal_adjustment_without_rgba8_scratch() {
         let mut scratch = TimelineCompositeScratch::default();
-        let media = CpuColorFrame::working(RgbaF32Frame {
+        let media = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 1,
             height: 1,
             data: vec![[1.25, 0.25, 0.125, 1.0]],
-            color_space: mondrian_core::types::ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
         });
         let frame = composite_timeline_elements_color_frame(
             1,
@@ -1221,7 +1245,7 @@ mod tests {
                 }),
             ],
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
 
@@ -1267,7 +1291,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
 
@@ -1304,7 +1328,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut float_scratch,
         );
 
@@ -1350,7 +1374,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut float_scratch,
         );
 
@@ -1415,7 +1439,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions { empty_canvas_transparent: true },
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
         let pixel = output.frame.rgba_f32().data[0];
@@ -1449,7 +1473,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
         let pixels = &output.rgba_f32().data;
@@ -1494,7 +1518,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
 
@@ -1570,7 +1594,7 @@ mod tests {
             2,
             &elements,
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch,
         );
 
@@ -1618,7 +1642,7 @@ mod tests {
             2,
             &elements_a,
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch_a,
         );
         let out_b = composite_timeline_elements_color_frame_with_diagnostics(
@@ -1626,7 +1650,7 @@ mod tests {
             2,
             &elements_b,
             TimelineCompositeOptions::default(),
-            mondrian_core::types::ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             &mut scratch_b,
         );
 

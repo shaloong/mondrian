@@ -6,7 +6,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use mondrian_assets::AssetRecord;
 use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_media::ProxyColorContract;
-use mondrian_timeline::sequence::ColorContext;
+use mondrian_timeline::sequence::{ColorContext, ResolvedInputColor};
 
 use super::AppState;
 
@@ -22,12 +22,18 @@ pub(crate) fn resolve_asset_proxy_color_contract(
         detected,
         color_context.working_color_space,
     );
-    let source_color_space = resolution.color_space.ok_or_else(|| {
-        format!(
-            "proxy generation rejected source with unresolved color metadata (policy={:?})",
-            color_context.missing_metadata_policy
-        )
-    })?;
+    let source_color_space = match resolution.resolved {
+        ResolvedInputColor::Color(color_space) => color_space,
+        ResolvedInputColor::Data => {
+            return Err("proxy generation does not color-manage non-color data assets".to_owned());
+        }
+        ResolvedInputColor::Rejected => {
+            return Err(format!(
+                "proxy generation rejected source with unresolved color metadata (policy={:?})",
+                color_context.missing_metadata_policy
+            ));
+        }
+    };
     let video = asset
         .media_info
         .primary_video()

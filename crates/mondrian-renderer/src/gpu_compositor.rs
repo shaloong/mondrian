@@ -13,7 +13,7 @@ use crate::{
     GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
 };
 use bytemuck::{Pod, Zeroable};
-use mondrian_core::types::{BlendMode, Color, ColorSpace};
+use mondrian_core::types::{BlendMode, Color};
 use mondrian_effects::{CompiledEffectGpuPlan, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS};
 use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
@@ -350,7 +350,7 @@ pub struct GpuCompositeRequest<'a> {
     /// Output height.
     pub height: u32,
     /// Working color space of the composite output.
-    pub working_color_space: ColorSpace,
+    pub working_color_space: mondrian_core::WorkingColorSpace,
     /// Layers in bottom-to-top order.
     pub layers: &'a [GpuCompositeLayer<'a>],
 }
@@ -530,7 +530,7 @@ impl GpuFrameCompositor {
         let output_descriptor = ColorFrameDescriptor {
             width,
             height,
-            color_space: request.working_color_space,
+            color_space: request.working_color_space.into(),
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
@@ -778,7 +778,7 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
             let expected = ColorFrameDescriptor {
                 width: actual.width,
                 height: actual.height,
-                color_space: request.working_color_space,
+                color_space: request.working_color_space.into(),
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: expected_residency,
@@ -896,7 +896,7 @@ fn clear_working_texture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::RgbaF32Frame;
+    use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
 
     #[test]
     fn gpu_compositor_shader_parses_as_wgsl() {
@@ -1029,7 +1029,7 @@ mod tests {
         let request = GpuCompositeRequest {
             width: 4,
             height: 4,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             layers: &[layer],
         };
 
@@ -1065,10 +1065,10 @@ mod tests {
                 ]
             })
             .collect::<Vec<_>>();
-        let frame = CpuColorFrame::working(RgbaF32Frame {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 4,
             height: 4,
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
             data,
         });
         let mut builder = EffectGraphBuilderState::new();
@@ -1164,7 +1164,7 @@ mod tests {
                 GpuCompositeRequest {
                     width: 4,
                     height: 4,
-                    working_color_space: ColorSpace::Rec709,
+                    working_color_space: WorkingColorSpace::LinearRec709,
                     layers,
                 },
             )
@@ -1231,7 +1231,7 @@ mod tests {
         let request = GpuCompositeRequest {
             width: 16,
             height: 16,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             layers: &[layer],
         };
 
@@ -1247,10 +1247,10 @@ mod tests {
 
     #[test]
     fn gpu_composite_request_accepts_media_extent_mismatch_with_affine_transform() {
-        let frame = CpuColorFrame::working(RgbaF32Frame {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 8,
             height: 8,
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.0, 0.0, 0.0, 1.0]; 64],
         });
         let layer = GpuCompositeLayer {
@@ -1264,7 +1264,7 @@ mod tests {
         let request = GpuCompositeRequest {
             width: 16,
             height: 16,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             layers: &[layer],
         };
 
@@ -1273,7 +1273,7 @@ mod tests {
 
     #[test]
     fn gpu_composite_request_accepts_gpu_resident_media_frame() {
-        let handle = gpu_working_handle(10, ColorSpace::Rec709);
+        let handle = gpu_working_handle(10, WorkingColorSpace::LinearRec709);
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::GpuFrame(&handle),
             opacity: 1.0,
@@ -1285,7 +1285,7 @@ mod tests {
         let request = GpuCompositeRequest {
             width: 16,
             height: 16,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             layers: &[layer],
         };
 
@@ -1294,7 +1294,7 @@ mod tests {
 
     #[test]
     fn gpu_composite_request_rejects_gpu_frame_color_space_mismatch() {
-        let handle = gpu_working_handle(11, ColorSpace::DciP3);
+        let handle = gpu_working_handle(11, WorkingColorSpace::LinearP3D65);
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::GpuFrame(&handle),
             opacity: 1.0,
@@ -1306,7 +1306,7 @@ mod tests {
         let request = GpuCompositeRequest {
             width: 8,
             height: 8,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             layers: &[layer],
         };
 
@@ -1321,10 +1321,10 @@ mod tests {
 
     #[test]
     fn gpu_composite_request_rejects_singular_media_transform() {
-        let frame = CpuColorFrame::working(RgbaF32Frame {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 8,
             height: 8,
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.0, 0.0, 0.0, 1.0]; 64],
         });
         let layer = GpuCompositeLayer {
@@ -1338,7 +1338,7 @@ mod tests {
         let request = GpuCompositeRequest {
             width: 16,
             height: 16,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             layers: &[layer],
         };
 
@@ -1354,10 +1354,10 @@ mod tests {
 
     #[test]
     fn gpu_composite_request_rejects_source_color_space_mismatch() {
-        let frame = CpuColorFrame::working(RgbaF32Frame {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 8,
             height: 8,
-            color_space: ColorSpace::DciP3,
+            color_space: WorkingColorSpace::LinearP3D65,
             data: vec![[0.0, 0.0, 0.0, 1.0]; 64],
         });
         let layer = GpuCompositeLayer {
@@ -1371,7 +1371,7 @@ mod tests {
         let request = GpuCompositeRequest {
             width: 8,
             height: 8,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             layers: &[layer],
         };
 
@@ -1383,13 +1383,13 @@ mod tests {
         ));
     }
 
-    fn gpu_working_handle(id: u64, color_space: ColorSpace) -> GpuColorFrameHandle {
+    fn gpu_working_handle(id: u64, color_space: WorkingColorSpace) -> GpuColorFrameHandle {
         GpuColorFrameHandle::new(
             crate::GpuColorFrameId::from_raw(id),
             ColorFrameDescriptor {
                 width: 8,
                 height: 8,
-                color_space,
+                color_space: color_space.into(),
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,

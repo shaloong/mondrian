@@ -406,6 +406,24 @@ pub enum OcioColorSpaceIdentity {
     Working(WorkingColorSpace),
 }
 
+impl OcioColorSpaceIdentity {
+    /// Return the encoded source/delivery space when this identity is encoded.
+    pub const fn encoded(self) -> Option<ColorSpace> {
+        match self {
+            Self::Encoded(space) => Some(space),
+            Self::Working(_) => None,
+        }
+    }
+
+    /// Return the linear rendering space when this identity is a working space.
+    pub const fn working(self) -> Option<WorkingColorSpace> {
+        match self {
+            Self::Encoded(_) => None,
+            Self::Working(space) => Some(space),
+        }
+    }
+}
+
 impl From<ColorSpace> for OcioColorSpaceIdentity {
     fn from(value: ColorSpace) -> Self {
         Self::Encoded(value)

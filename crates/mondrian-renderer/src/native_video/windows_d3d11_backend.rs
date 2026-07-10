@@ -300,7 +300,7 @@ struct D3D11BridgePoolKey {
     storage_extent: GpuNativeVideoExtent,
     source_texture_format: GpuNativeDecodedFrameTextureFormat,
     source_color_space: ColorSpace,
-    working_color_space: ColorSpace,
+    working_color_space: mondrian_core::WorkingColorSpace,
     video_sampling: GpuNativeDecodedFrameVideoSampling,
     working_texture_format: GpuColorFrameTextureFormat,
 }

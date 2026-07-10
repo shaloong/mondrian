@@ -1,5 +1,5 @@
 use super::*;
-use mondrian_core::ColorSpace;
+use mondrian_core::{ColorSpace, WorkingColorSpace};
 use mondrian_effects::EffectRenderOp;
 use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation, Transform2D};
 use mondrian_timeline::sequence::{
@@ -33,7 +33,7 @@ fn create_new_project_with_settings_preserves_sequence_color_management() {
     let settings = SequenceSettings {
         resolution: Resolution { width: 3840, height: 2160 },
         frame_rate: Rational::FPS_23976,
-        color_space: ColorSpace::Rec2020,
+        working_color_space: WorkingColorSpace::LinearRec2020,
         color_management: mondrian_timeline::sequence::SequenceColorManagement {
             workflow: ColorWorkflow::SceneReferred,
             output_color_space: ColorSpace::Rec2100Pq,
@@ -55,7 +55,10 @@ fn create_new_project_with_settings_preserves_sequence_color_management() {
     let sequence = state.sequence.as_ref().expect("sequence");
     assert_eq!(sequence.settings.resolution, settings.resolution);
     assert_eq!(sequence.settings.frame_rate, Rational::FPS_23976);
-    assert_eq!(sequence.settings.color_space, ColorSpace::Rec2020);
+    assert_eq!(
+        sequence.settings.working_color_space,
+        WorkingColorSpace::LinearRec2020
+    );
     assert_eq!(
         sequence.settings.color_management.workflow,
         ColorWorkflow::SceneReferred

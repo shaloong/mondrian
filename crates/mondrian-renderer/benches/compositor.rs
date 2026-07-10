@@ -5,6 +5,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
+use mondrian_core::WorkingColorSpace;
 use mondrian_renderer::{
     composite_timeline_elements_color_frame, execute_cpu_input_stage, execute_cpu_output_stage,
     CpuColorFrame, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
@@ -32,7 +33,11 @@ fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
     let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec709, rgba);
     execute_cpu_input_stage(
         &source,
-        &RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        ),
     )
     .expect("benchmark input transform")
     .result
@@ -74,7 +79,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 black_box(h),
                 black_box(&elements),
                 TimelineCompositeOptions { empty_canvas_transparent: true },
-                ColorSpace::Rec709,
+                WorkingColorSpace::LinearRec709,
                 &mut scratch,
             );
             execute_cpu_output_stage(

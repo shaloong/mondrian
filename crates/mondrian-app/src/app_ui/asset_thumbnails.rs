@@ -11,6 +11,7 @@ use crate::app_ui::preview_access_mode::{
 };
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
+use mondrian_core::WorkingColorSpace;
 use mondrian_media::{
     decode_preview_frame_cancellable, DecodedVideoRange, PreviewDecodeAccessMode,
     PreviewDecodeOutcome, PreviewDecodeRequest, PreviewFileFingerprint, PreviewSourceColorContract,
@@ -19,7 +20,7 @@ use mondrian_renderer::{
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuEncodedColorFrame,
     RenderInputTransform, RenderOutputColorBoundary,
 };
-use mondrian_timeline::sequence::ColorContext;
+use mondrian_timeline::sequence::{ColorContext, ResolvedInputColor};
 use mondrian_ui_core::RasterImageColorSpace;
 use mondrian_ui_widgets::RasterImage;
 use std::cell::RefCell;
@@ -38,7 +39,7 @@ const THUMBNAIL_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 struct ThumbnailColorContract {
     source_color_space: ColorSpace,
     source_range: DecodedVideoRange,
-    working_color_space: ColorSpace,
+    working_color_space: WorkingColorSpace,
     output_color_space: ColorSpace,
     tone_map: bool,
     engine: ColorEngine,
@@ -51,7 +52,7 @@ impl ThumbnailColorContract {
     fn resolve(asset: &AssetRecord, context: &ColorContext) -> Option<Self> {
         let primary_video = asset.media_info.primary_video();
         let detected = primary_video.and_then(|video| video.detected_color_space);
-        let source_color_space = context
+        let source_color_space = match context
             .missing_metadata_policy
             .resolve_asset_input_decision(
                 None,
@@ -59,14 +60,18 @@ impl ThumbnailColorContract {
                 detected,
                 context.working_color_space,
             )
-            .color_space?;
+            .resolved
+        {
+            ResolvedInputColor::Color(color_space) => color_space,
+            ResolvedInputColor::Data | ResolvedInputColor::Rejected => return None,
+        };
         Some(Self {
             source_color_space,
             source_range: primary_video
                 .map(|video| video.color_range)
                 .unwrap_or(DecodedVideoRange::Unknown),
             working_color_space: context.working_color_space,
-            output_color_space: context.output_color_space,
+            output_color_space: context.output_color_space.encoded()?,
             tone_map: context.tone_map,
             engine: context.engine.clone(),
             display: context.ocio_display.clone(),
@@ -515,7 +520,7 @@ mod tests {
         ThumbnailColorContract {
             source_color_space: ColorSpace::Rec709,
             source_range: DecodedVideoRange::Limited,
-            working_color_space: ColorSpace::Rec709,
+            working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Srgb,
             tone_map: true,
             engine: ColorEngine::MondrianSmart,
@@ -635,7 +640,7 @@ mod tests {
         assert!(key.starts_with(&format!(
             "asset-thumb:{asset_id}:320x180:len1234:mtime0-42000000"
         )));
-        assert!(key.contains("srcRec709:workRec709:outSrgb:ocio"));
+        assert!(key.contains("srcRec709:workLinearRec709:outSrgb:ocio"));
     }
 
     #[test]
@@ -665,7 +670,10 @@ mod tests {
         let color = ThumbnailColorContract::resolve(&asset, &context)
             .expect("synthetic video has an input color interpretation");
 
-        assert_eq!(color.output_color_space, context.output_color_space);
+        assert_eq!(
+            Some(color.output_color_space),
+            context.output_color_space.encoded()
+        );
         assert_eq!(color.tone_map, context.tone_map);
         assert_eq!(
             color.raster_color_space(),

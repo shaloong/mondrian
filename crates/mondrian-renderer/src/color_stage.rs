@@ -20,6 +20,7 @@ use crate::{
     RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
+use mondrian_core::WorkingColorSpace;
 use serde::{Deserialize, Serialize};
 
 /// Preferred execution mode for a renderer color transform stage.
@@ -3054,6 +3055,24 @@ pub fn execute_cpu_input_stage_float(
     CpuRenderColorStageExecutor::input_to_working_float(frame, &plan)
 }
 
+/// Convert a CPU working frame into another linear working identity through OCIO.
+pub fn execute_cpu_working_transform(
+    frame: &CpuColorFrame,
+    destination: WorkingColorSpace,
+    engine: ColorEngine,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let descriptor = frame.descriptor();
+    let source = descriptor.color_space.working().ok_or(
+        RenderColorTransformError::UnsupportedWorkingIdentity { identity: descriptor.color_space },
+    )?;
+    let data = frame.rgba_f32().data.iter().flat_map(|pixel| pixel.iter().copied()).collect();
+    let source = LinearFloatSource::new(descriptor.width, descriptor.height, source, data);
+    execute_cpu_input_stage_float(
+        &source,
+        &RenderInputTransform::to_working(destination, false, engine),
+    )
+}
+
 /// Plan and execute a CPU working-space -> display/export color stage.
 pub fn execute_cpu_output_stage(
     frame: &CpuColorFrame,
@@ -3240,7 +3259,7 @@ impl<'a> RenderColorStagePlanner<'a> {
         let output = ColorFrameDescriptor {
             width: input.width,
             height: input.height,
-            color_space: transform.working_color_space,
+            color_space: transform.working_color_space.into(),
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
@@ -3272,7 +3291,7 @@ impl<'a> RenderColorStagePlanner<'a> {
         let output = ColorFrameDescriptor {
             width: input.width,
             height: input.height,
-            color_space: transform.output_color_space,
+            color_space: transform.output_color_space.into(),
             domain: transform.output_domain,
             encoding,
             residency: ColorFrameResidency::Cpu,
@@ -3690,7 +3709,8 @@ mod tests {
         RenderColorTransformBackend,
     };
     use mondrian_core::types::{ColorEngine, ColorSpace};
-    use mondrian_core::RgbaF32Frame;
+    use mondrian_core::WorkingColorSpace;
+    use mondrian_core::WorkingRgbaF32Frame;
     use mondrian_core::{
         ensure_mondrian_default_ocio_loaded, ocio_default_display_view, GpuLanguage,
     };
@@ -3900,7 +3920,7 @@ mod tests {
         ColorFrameDescriptor {
             width: 1280,
             height: 720,
-            color_space: ColorSpace::SLog3,
+            color_space: ColorSpace::SLog3.into(),
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency,
@@ -3911,7 +3931,7 @@ mod tests {
         ColorFrameDescriptor {
             width: 1920,
             height: 1080,
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709.into(),
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency,
@@ -3920,8 +3940,11 @@ mod tests {
 
     #[test]
     fn cpu_input_plan_uses_single_cpu_stage() {
-        let transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let mut planner = RenderColorStagePlanner::cpu_only();
 
         let plan = planner
@@ -3943,8 +3966,11 @@ mod tests {
             ColorSpace::SLog3,
             vec![128; 1280 * 720 * 4],
         );
-        let transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let mut planner = RenderColorStagePlanner::cpu_only();
         let plan = planner
             .plan_input_to_working(source.descriptor(), &transform)
@@ -3968,8 +3994,11 @@ mod tests {
             ColorSpace::SLog3,
             vec![128; 1280 * 720 * 4],
         );
-        let transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let mut cache = OcioGpuShaderCache::default();
         let mut planner = RenderColorStagePlanner::prefer_gpu(
             &mut cache,
@@ -3990,11 +4019,11 @@ mod tests {
 
     #[test]
     fn cpu_stage_executor_runs_output_plan_and_validates_descriptors() {
-        let frame = CpuColorFrame::working(RgbaF32Frame {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 1920,
             height: 1080,
             data: vec![[0.25, 0.5, 0.75, 1.0]; 1920 * 1080],
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
         });
         let transform =
             RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
@@ -4016,8 +4045,11 @@ mod tests {
     fn cpu_stage_helpers_plan_and_execute_transforms() {
         let source =
             CpuEncodedColorFrame::source_rgba8(2, 2, ColorSpace::Rec709, vec![96; 2 * 2 * 4]);
-        let input_transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let input_transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let working = execute_cpu_input_stage(&source, &input_transform)
             .expect("helper should execute input stage");
         assert_eq!(
@@ -4252,8 +4284,11 @@ mod tests {
             return;
         };
         let source = cpu_source_frame();
-        let transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_300);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-gpu-input-stage"),
@@ -4308,8 +4343,11 @@ mod tests {
             return;
         };
         let source = cpu_source_frame();
-        let transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let compositor = GpuFrameCompositor::new(&context.device);
         let mut effect_graph = mondrian_effects::EffectGraphBuilderState::new();
         effect_graph.append_unary(mondrian_effects::EffectRenderOp::ColorAdjust {
@@ -4361,7 +4399,7 @@ mod tests {
                 GpuCompositeRequest {
                     width: source.descriptor().width,
                     height: source.descriptor().height,
-                    working_color_space: ColorSpace::Rec709,
+                    working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &layers,
                 },
             )
@@ -4610,7 +4648,11 @@ mod tests {
             width: frame.descriptor().width as usize,
             height: frame.descriptor().height as usize,
             pixel_count: frame.descriptor().pixel_count(),
-            input_color_space: frame.descriptor().color_space,
+            input_color_space: frame
+                .descriptor()
+                .color_space
+                .encoded()
+                .expect("GPU output boundary input must be encoded"),
             output_color_space: boundary.output_color_space,
         };
         let stage_report = RenderGpuOutputStageDiagnosticsReport::from(stage_diagnostics);
@@ -4842,7 +4884,7 @@ mod tests {
         );
         assert_eq!(
             output.result.frame.descriptor().color_space,
-            ColorSpace::Rec709
+            ColorSpace::Rec709.into()
         );
         assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
     }
@@ -4891,8 +4933,11 @@ mod tests {
     #[test]
     fn gpu_input_plan_adds_upload_for_cpu_source() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let mut cache = OcioGpuShaderCache::default();
         let mut planner = RenderColorStagePlanner::prefer_gpu(
             &mut cache,
@@ -4997,7 +5042,7 @@ mod tests {
         let transform = executable_gpu_output_plan();
         let input = gpu_handle(5, transform.diagnostics.input, "working-input");
         let mut wrong_output_descriptor = transform.diagnostics.output;
-        wrong_output_descriptor.color_space = ColorSpace::Rec2020;
+        wrong_output_descriptor.color_space = ColorSpace::Rec2020.into();
         let output = gpu_handle(6, wrong_output_descriptor, "wrong-display-output");
         let pass_node = pass_node_for_transform(&transform);
 
@@ -5338,7 +5383,7 @@ mod tests {
         let input_descriptor = ColorFrameDescriptor {
             width: 1920,
             height: 1080,
-            color_space: ColorSpace::Rec2100Pq,
+            color_space: ColorSpace::Rec2100Pq.into(),
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
@@ -5350,7 +5395,7 @@ mod tests {
             "native-yuv-encoded-source",
         );
         let transform = RenderInputTransform::to_working_gpu(
-            ColorSpace::Rec2020,
+            WorkingColorSpace::LinearRec2020,
             true,
             ColorEngine::MondrianSmart,
         );
@@ -5395,8 +5440,11 @@ mod tests {
     #[test]
     fn gpu_input_stage_resource_plan_rejects_cpu_only_plan() {
         let source = cpu_source_frame();
-        let transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let mut planner = RenderColorStagePlanner::cpu_only();
         let stage_plan = planner
             .plan_input_to_working(source.descriptor(), &transform)
@@ -5621,7 +5669,7 @@ mod tests {
     fn gpu_output_stage_resource_plan_surfaces_resource_table_conflicts() {
         let resources = executable_gpu_output_stage_resources(620);
         let mut stale_descriptor = resources.output.descriptor();
-        stale_descriptor.color_space = ColorSpace::Rec2020;
+        stale_descriptor.color_space = ColorSpace::Rec2020.into();
         let stale_output = gpu_handle_with_format(
             resources.output.id().raw(),
             stale_descriptor,
@@ -5803,11 +5851,11 @@ mod tests {
     }
 
     fn cpu_working_frame() -> CpuColorFrame {
-        CpuColorFrame::working(RgbaF32Frame {
+        CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 4,
             height: 2,
             data: vec![[0.25, 0.5, 0.75, 1.0]; 8],
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
         })
     }
 
@@ -5817,8 +5865,11 @@ mod tests {
 
     fn gpu_input_stage_plan_for_source(source: &CpuEncodedColorFrame) -> RenderColorStagePlan {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let transform =
-            RenderInputTransform::to_working(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
         let mut cache = OcioGpuShaderCache::default();
         let mut planner = RenderColorStagePlanner::prefer_gpu(
             &mut cache,

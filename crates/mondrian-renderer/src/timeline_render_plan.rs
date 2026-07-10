@@ -4,7 +4,7 @@ use mondrian_core::{
         RenderPlanSource,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, Rational, SequenceId, TimeCode},
-    ColorEncodingSpec,
+    ColorEncodingSpec, WorkingColorSpace,
 };
 use mondrian_effects::CompiledEffectGraph;
 use std::sync::Arc;
@@ -234,8 +234,7 @@ pub struct TimelineColorDiagnostic {
     pub asset_id: AssetId,
     pub input_color_space_override: Option<ColorSpace>,
     pub input_encoding_override: Option<ColorEncodingSpec>,
-    pub working_color_space: ColorSpace,
-    pub working_encoding: ColorEncodingSpec,
+    pub working_color_space: WorkingColorSpace,
     pub output_color_space: ColorSpace,
     pub output_encoding: ColorEncodingSpec,
     /// OCIO display used for presentation, when the caller is collecting display diagnostics.
@@ -253,7 +252,7 @@ pub struct TimelineColorDiagnostic {
 pub fn collect_timeline_color_diagnostics(
     source: &dyn RenderPlanSource,
     timeline_frame: i64,
-    working_color_space: ColorSpace,
+    working_color_space: WorkingColorSpace,
     output_color_space: ColorSpace,
 ) -> Vec<TimelineColorDiagnostic> {
     collect_timeline_color_diagnostics_with_display_view(
@@ -270,7 +269,7 @@ pub fn collect_timeline_color_diagnostics(
 pub fn collect_timeline_color_diagnostics_with_display_view(
     source: &dyn RenderPlanSource,
     timeline_frame: i64,
-    working_color_space: ColorSpace,
+    working_color_space: WorkingColorSpace,
     output_color_space: ColorSpace,
     ocio_display: Option<&str>,
     ocio_view: Option<&str>,
@@ -284,7 +283,6 @@ pub fn collect_timeline_color_diagnostics_with_display_view(
                 input_color_space_override: media.color_space_override,
                 input_encoding_override: media.color_space_override.map(ColorSpace::encoding),
                 working_color_space,
-                working_encoding: working_color_space.encoding(),
                 output_color_space,
                 output_encoding: output_color_space.encoding(),
                 ocio_display: ocio_display.map(str::to_owned),
@@ -602,7 +600,7 @@ mod tests {
     fn color_diagnostics_expose_media_interpretation_and_sequence_output() {
         let mut seq = Sequence::new("color-diagnostics");
         let tb = seq.time_base();
-        seq.settings.color_space = ColorSpace::Rec2020;
+        seq.settings.working_color_space = mondrian_core::WorkingColorSpace::LinearRec2020;
         seq.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
         let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
         let asset_id = clip.asset_id;
@@ -615,7 +613,7 @@ mod tests {
         let diagnostics = collect_timeline_color_diagnostics(
             &seq,
             4,
-            seq.settings.color_space,
+            seq.settings.working_color_space,
             seq.settings.color_management.output_color_space,
         );
         assert_eq!(diagnostics.len(), 1);
@@ -625,10 +623,9 @@ mod tests {
             diagnostic.input_color_space_override,
             Some(ColorSpace::AppleLog)
         );
-        assert_eq!(diagnostic.working_color_space, ColorSpace::Rec2020);
         assert_eq!(
-            diagnostic.working_encoding.kind,
-            mondrian_core::ColorEncodingKind::DisplaySdr
+            diagnostic.working_color_space,
+            WorkingColorSpace::LinearRec2020
         );
         assert_eq!(diagnostic.output_color_space, ColorSpace::Rec2100Pq);
         assert_eq!(
@@ -663,7 +660,7 @@ mod tests {
         let diagnostics = collect_timeline_color_diagnostics_with_display_view(
             &seq,
             4,
-            ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             ColorSpace::Srgb,
             Some("sRGB - Display"),
             Some("ACES 2.0 - SDR 100 nits (Rec.709)"),

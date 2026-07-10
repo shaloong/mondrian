@@ -60,6 +60,13 @@ Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
+Nested sequences return typed linear `CpuColorFrame` values to their parent.
+Child working identities may be converted to the parent working identity by an
+explicit OCIO working-to-working processor, but they are never sent through a
+display/export transform or RGBA8 quantization during recursion. Preview and
+export apply their display/deliverable transform exactly once at the root
+boundary.
+
 The CPU timeline compositor keeps identity-transform media, solid-color layers,
 and float-capable adjustment layers in the typed float/linear working frame.
 Timeline blend modes, including seeded Dissolve, are implemented by
@@ -102,7 +109,7 @@ Preview and export must use `RenderInputTransform` plus
 produce a result carrying both `CpuColorFrame` and stage diagnostics before
 building `TimelineMediaLayer`. Timeline media layers therefore carry typed
 working frames, not naked RGBA slices. `CpuColorFrame` stores its linear
-`RgbaF32Frame` payload in shared immutable storage so preview caches, lazy CPU
+`WorkingRgbaF32Frame` payload in shared immutable storage so preview caches, lazy CPU
 fallbacks, and export scheduling can clone the typed frame contract without
 deep-copying a full 16-byte-per-pixel working frame. Copies that need owned
 mutable float data must happen explicitly at execution boundaries.

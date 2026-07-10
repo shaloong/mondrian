@@ -1,6 +1,7 @@
 use crate::color_transform::{RenderColorTransformBackend, RenderInputTransform};
 use mondrian_core::{
-    types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, RgbaF32Frame,
+    types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, WorkingColorSpace,
+    WorkingRgbaF32Frame,
 };
 use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
@@ -47,6 +48,45 @@ pub enum ColorFrameResidency {
     Gpu,
 }
 
+/// Color identity carried by a renderer frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ColorFrameSpace {
+    /// Transfer-encoded source, display, or delivery samples.
+    Encoded(ColorSpace),
+    /// Linear-light effects/compositing samples.
+    Working(WorkingColorSpace),
+}
+
+impl ColorFrameSpace {
+    /// Return the encoded identity, if this is a boundary frame.
+    pub const fn encoded(self) -> Option<ColorSpace> {
+        match self {
+            Self::Encoded(space) => Some(space),
+            Self::Working(_) => None,
+        }
+    }
+
+    /// Return the linear identity, if this is a working frame.
+    pub const fn working(self) -> Option<WorkingColorSpace> {
+        match self {
+            Self::Encoded(_) => None,
+            Self::Working(space) => Some(space),
+        }
+    }
+}
+
+impl From<ColorSpace> for ColorFrameSpace {
+    fn from(value: ColorSpace) -> Self {
+        Self::Encoded(value)
+    }
+}
+
+impl From<WorkingColorSpace> for ColorFrameSpace {
+    fn from(value: WorkingColorSpace) -> Self {
+        Self::Working(value)
+    }
+}
+
 /// Metadata that makes a frame's color contract explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColorFrameDescriptor {
@@ -55,7 +95,7 @@ pub struct ColorFrameDescriptor {
     /// Frame height in pixels.
     pub height: u32,
     /// Color space currently represented by the pixels.
-    pub color_space: ColorSpace,
+    pub color_space: ColorFrameSpace,
     /// Frame role in the render graph.
     pub domain: ColorFrameDomain,
     /// Pixel encoding.
@@ -1003,7 +1043,7 @@ impl GpuNativeDecodedFrameImportPlan {
         let encoded_source_descriptor = ColorFrameDescriptor {
             width: contract.width,
             height: contract.height,
-            color_space: contract.source_color_space,
+            color_space: contract.source_color_space.into(),
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
@@ -1018,7 +1058,7 @@ impl GpuNativeDecodedFrameImportPlan {
         let working_descriptor = ColorFrameDescriptor {
             width: contract.width,
             height: contract.height,
-            color_space: contract.input_transform.working_color_space,
+            color_space: contract.input_transform.working_color_space.into(),
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
@@ -1351,10 +1391,15 @@ impl GpuColorFrameReadbackPlan {
             let dst_end = dst_start + self.unpadded_bytes_per_row as usize;
             rgba[dst_start..dst_end].copy_from_slice(&mapped[src_start..src_end]);
         }
+        let color_space = self.output_descriptor.color_space.encoded().ok_or(
+            GpuColorFrameReadbackError::UnsupportedColorIdentity {
+                color_space: self.output_descriptor.color_space,
+            },
+        )?;
         Ok(CpuEncodedColorFrame::rgba8(
             self.output_descriptor.width,
             self.output_descriptor.height,
-            self.output_descriptor.color_space,
+            color_space,
             self.output_descriptor.domain,
             rgba,
         ))
@@ -1454,6 +1499,11 @@ pub enum GpuColorFrameReadbackError {
         /// Actual GPU frame encoding.
         encoding: ColorFrameEncoding,
     },
+    /// Encoded readback was requested for a linear working identity.
+    UnsupportedColorIdentity {
+        /// Actual frame color identity.
+        color_space: ColorFrameSpace,
+    },
     /// Row layout calculation overflowed.
     ReadbackLayoutOverflow,
     /// The mapped readback buffer is smaller than the plan requires.
@@ -1488,21 +1538,21 @@ pub enum GpuColorFrameResourceTableError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpuColorFrame {
     descriptor: ColorFrameDescriptor,
-    frame: Arc<RgbaF32Frame>,
+    frame: Arc<WorkingRgbaF32Frame>,
 }
 
 impl CpuColorFrame {
     /// Wrap a linear-light frame as a working-space render-graph frame.
-    pub fn working(frame: RgbaF32Frame) -> Self {
+    pub fn working(frame: WorkingRgbaF32Frame) -> Self {
         Self::linear(frame, ColorFrameDomain::Working)
     }
 
     /// Wrap a linear-light frame with an explicit render-graph domain.
-    pub fn linear(frame: RgbaF32Frame, domain: ColorFrameDomain) -> Self {
+    pub fn linear(frame: WorkingRgbaF32Frame, domain: ColorFrameDomain) -> Self {
         let descriptor = ColorFrameDescriptor {
             width: frame.width,
             height: frame.height,
-            color_space: frame.color_space,
+            color_space: ColorFrameSpace::Working(frame.color_space),
             domain,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
@@ -1516,18 +1566,13 @@ impl CpuColorFrame {
     }
 
     /// Borrow the underlying linear-light frame.
-    pub fn rgba_f32(&self) -> &RgbaF32Frame {
+    pub fn rgba_f32(&self) -> &WorkingRgbaF32Frame {
         self.frame.as_ref()
     }
 
     /// Consume this wrapper and return the underlying linear-light frame.
-    pub fn into_rgba_f32(self) -> RgbaF32Frame {
+    pub fn into_rgba_f32(self) -> WorkingRgbaF32Frame {
         Arc::try_unwrap(self.frame).unwrap_or_else(|frame| frame.as_ref().clone())
-    }
-
-    /// Encode this frame to RGBA8 for a specific output color space.
-    pub(crate) fn to_output_rgba8(&self, output: ColorSpace, tone_map: bool) -> Vec<u8> {
-        self.frame.to_rgba8(output, tone_map)
     }
 }
 
@@ -1544,7 +1589,7 @@ pub struct CpuEncodedFloatColorFrame {
 
 /// Encoded RGBA f32 samples at a source, display, or export boundary.
 ///
-/// Unlike [`RgbaF32Frame`], these RGB values are not linear light and cannot be
+/// Unlike [`WorkingRgbaF32Frame`], these RGB values are not linear light and cannot be
 /// consumed by effects or compositing APIs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodedRgbaF32Frame {
@@ -1564,7 +1609,7 @@ impl CpuEncodedFloatColorFrame {
         let descriptor = ColorFrameDescriptor {
             width: frame.width,
             height: frame.height,
-            color_space: frame.color_space,
+            color_space: ColorFrameSpace::Encoded(frame.color_space),
             domain,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Cpu,
@@ -1618,7 +1663,7 @@ impl CpuEncodedColorFrame {
         let descriptor = ColorFrameDescriptor {
             width,
             height,
-            color_space,
+            color_space: color_space.into(),
             domain,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Cpu,
@@ -1690,7 +1735,7 @@ pub struct LinearFloatSource {
 
 impl LinearFloatSource {
     /// Create a linear float source frame.
-    pub fn new(width: u32, height: u32, color_space: ColorSpace, data: Vec<f32>) -> Self {
+    pub fn new(width: u32, height: u32, color_space: WorkingColorSpace, data: Vec<f32>) -> Self {
         assert_eq!(
             data.len(),
             width as usize * height as usize * 4,
@@ -1699,7 +1744,7 @@ impl LinearFloatSource {
         let descriptor = ColorFrameDescriptor {
             width,
             height,
-            color_space,
+            color_space: color_space.into(),
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
@@ -1735,10 +1780,10 @@ impl LinearFloatSource {
     /// Convert to a working-space [`CpuColorFrame`] without any u8
     /// quantization. The caller must ensure the data is already in the target
     /// working color space.
-    pub fn to_working_frame(self, working_color_space: ColorSpace) -> CpuColorFrame {
+    pub fn to_working_frame(self, working_color_space: WorkingColorSpace) -> CpuColorFrame {
         let pixels: Vec<[f32; 4]> =
             self.data.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
-        let frame = RgbaF32Frame {
+        let frame = WorkingRgbaF32Frame {
             width: self.descriptor.width,
             height: self.descriptor.height,
             data: pixels,
@@ -1872,7 +1917,7 @@ mod tests {
         let descriptor = ColorFrameDescriptor {
             width: 1920,
             height: 1080,
-            color_space: ColorSpace::Rec709,
+            color_space: ColorSpace::Rec709.into(),
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
@@ -1894,7 +1939,7 @@ mod tests {
         let descriptor = ColorFrameDescriptor {
             width: 3840,
             height: 2160,
-            color_space: ColorSpace::Rec2020,
+            color_space: ColorSpace::Rec2020.into(),
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
@@ -2076,7 +2121,7 @@ mod tests {
         );
         let mut contract = native_import_contract();
         contract.input_transform = RenderInputTransform::to_working(
-            ColorSpace::Rec2020,
+            WorkingColorSpace::LinearRec2020,
             true,
             mondrian_core::types::ColorEngine::MondrianSmart,
         );
@@ -2117,7 +2162,7 @@ mod tests {
         assert_eq!(
             plan.input_transform,
             RenderInputTransform::to_working_gpu(
-                ColorSpace::Rec2020,
+                WorkingColorSpace::LinearRec2020,
                 true,
                 mondrian_core::types::ColorEngine::MondrianSmart,
             )
@@ -2138,7 +2183,7 @@ mod tests {
             ColorFrameDescriptor {
                 width: 3840,
                 height: 2160,
-                color_space: ColorSpace::Rec2100Pq,
+                color_space: ColorSpace::Rec2100Pq.into(),
                 domain: ColorFrameDomain::Source,
                 encoding: ColorFrameEncoding::EncodedFloat,
                 residency: ColorFrameResidency::Gpu,
@@ -2154,7 +2199,7 @@ mod tests {
             ColorFrameDescriptor {
                 width: 3840,
                 height: 2160,
-                color_space: ColorSpace::Rec2020,
+                color_space: WorkingColorSpace::LinearRec2020.into(),
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
@@ -2523,7 +2568,7 @@ mod tests {
             GpuColorFrameTextureFormat::Rgba16Float,
         );
         let mut stale_descriptor = working_descriptor();
-        stale_descriptor.color_space = ColorSpace::Rec2020;
+        stale_descriptor.color_space = ColorSpace::Rec2020.into();
         let stale_handle = gpu_handle(
             102,
             stale_descriptor,
@@ -2617,10 +2662,10 @@ mod tests {
 
     #[test]
     fn gpu_color_frame_upload_plan_packs_cpu_linear_float_as_rgba32float() {
-        let frame = CpuColorFrame::working(RgbaF32Frame {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 2,
             height: 1,
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.25, 0.5, 0.75, 1.0], [1.25, 1.5, 1.75, 0.5]],
         });
 
@@ -2697,10 +2742,10 @@ mod tests {
 
     #[test]
     fn cpu_color_frame_clone_shares_linear_payload() {
-        let frame = CpuColorFrame::working(RgbaF32Frame {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 2,
             height: 1,
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.25, 0.5, 0.75, 1.0], [1.25, 1.5, 1.75, 0.5]],
         });
 
@@ -2759,10 +2804,10 @@ mod tests {
 
     #[test]
     fn gpu_color_frame_upload_plan_rejects_unsupported_cpu_formats() {
-        let frame = CpuColorFrame::working(RgbaF32Frame {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 1,
             height: 1,
-            color_space: ColorSpace::Rec709,
+            color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.0, 0.0, 0.0, 1.0]],
         });
         let encoded =
@@ -2802,7 +2847,7 @@ mod tests {
         let descriptor = ColorFrameDescriptor {
             width: 3,
             height: 2,
-            color_space: ColorSpace::Srgb,
+            color_space: ColorSpace::Srgb.into(),
             domain: ColorFrameDomain::Display,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Gpu,
@@ -2873,7 +2918,7 @@ mod tests {
         let descriptor = ColorFrameDescriptor {
             width: 2,
             height: 1,
-            color_space: ColorSpace::Rec709,
+            color_space: ColorSpace::Rec709.into(),
             domain: ColorFrameDomain::Export,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Gpu,
@@ -2896,7 +2941,7 @@ mod tests {
         ColorFrameDescriptor {
             width: 1920,
             height: 1080,
-            color_space: ColorSpace::Rec709,
+            color_space: ColorSpace::Rec709.into(),
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
@@ -2909,7 +2954,7 @@ mod tests {
             height: 2160,
             source_color_space: ColorSpace::Rec2100Pq,
             input_transform: RenderInputTransform::to_working_gpu(
-                ColorSpace::Rec2020,
+                WorkingColorSpace::LinearRec2020,
                 true,
                 mondrian_core::types::ColorEngine::MondrianSmart,
             ),

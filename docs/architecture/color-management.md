@@ -125,11 +125,16 @@ compositing. It is deliberately separate from `ColorSpace`, which identifies
 encoded acquisition and delivery spaces. `OcioColorSpaceIdentity` carries that
 role distinction into CPU/GPU processor requests and cache keys, so encoded
 `Camera Rec.709` cannot alias linear `Linear Rec.709 (sRGB)`. Camera log spaces
-are rejected when converted to a working identity. `SequenceSettings.color_space`
-is the remaining persisted legacy representation; renderer boundaries validate
-and convert it to `WorkingColorSpace` before requesting a processor. Migrating
-sequence persistence to store `WorkingColorSpace` directly is required before
-the legacy field can be removed.
+are rejected when converted to a working identity.
+`SequenceSettings.working_color_space` persists `WorkingColorSpace` directly.
+Project files and sequence-setting actions do not accept encoded acquisition or
+delivery identities in this field.
+
+`InputColorResolution` returns a `ResolvedInputColor` value: `Color` requires an
+encoded source-to-working processor, `Data` requires an explicit non-color
+bypass, and `Rejected` fails the media path. Missing metadata can assume
+Rec.709 with a diagnosed policy branch or reject the source; it can never
+silently reinterpret encoded samples as the sequence's linear working space.
 
 `ColorPipeline` execution is source -> working -> output. The management engine
 dispatch must preserve that full chain; it must not collapse a timeline pipeline
@@ -165,7 +170,12 @@ linear-light working-space pixels and may participate in compositing.
 `CpuEncodedFloatColorFrame` and `CpuColorFrame` are separate types so an encoded
 output cannot accidentally re-enter linear effects or blending. Their payloads
 are also distinct: `EncodedRgbaF32Frame` carries nonlinear boundary samples,
-while `RgbaF32Frame` is reserved for linear-light pixels.
+while `WorkingRgbaF32Frame` is reserved for linear-light pixels and carries a
+`WorkingColorSpace` identity.
+
+`ColorFrameDescriptor` stores `ColorFrameSpace::{Encoded, Working}`. Frame
+domain validation and OCIO processor planning therefore share the same role
+distinction instead of inferring it from transfer characteristics.
 
 Renderer stages must carry typed color-frame metadata. `CpuColorFrame` is the
 CPU-resident linear working-frame contract; future GPU frames must expose the

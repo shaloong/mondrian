@@ -1,6 +1,6 @@
 //! UI-facing color models and parsing helpers.
 
-use crate::types::{Color, ColorSpace};
+use crate::types::{Color, ColorSpace, WorkingColorSpace};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -101,15 +101,11 @@ impl DisplayToneMapPolicy {
         self,
         auto_tone_map_media: bool,
         scene_referred_workflow: bool,
-        working_color_space: ColorSpace,
-        output_color_space: ColorSpace,
+        _working_color_space: WorkingColorSpace,
+        _output_color_space: ColorSpace,
     ) -> bool {
         match self {
-            Self::Automatic => {
-                auto_tone_map_media
-                    || scene_referred_workflow
-                    || (working_color_space.is_hdr() && !output_color_space.is_hdr())
-            }
+            Self::Automatic => auto_tone_map_media || scene_referred_workflow,
             Self::Always => true,
             Self::Never => false,
         }
@@ -646,28 +642,28 @@ mod tests {
 
     #[test]
     fn display_tone_map_policy_resolves_boundary_flag() {
-        assert!(DisplayToneMapPolicy::Automatic.resolve(
+        assert!(!DisplayToneMapPolicy::Automatic.resolve(
             false,
             false,
-            ColorSpace::Rec2100Pq,
+            WorkingColorSpace::LinearRec2020,
             ColorSpace::Rec709
         ));
         assert!(DisplayToneMapPolicy::Automatic.resolve(
             false,
             true,
-            ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             ColorSpace::Rec2100Pq
         ));
         assert!(DisplayToneMapPolicy::Always.resolve(
             false,
             false,
-            ColorSpace::Rec709,
+            WorkingColorSpace::LinearRec709,
             ColorSpace::Rec709
         ));
         assert!(!DisplayToneMapPolicy::Never.resolve(
             true,
             true,
-            ColorSpace::Rec2100Pq,
+            WorkingColorSpace::LinearRec2020,
             ColorSpace::Rec709
         ));
     }

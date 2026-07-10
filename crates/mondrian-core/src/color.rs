@@ -530,6 +530,22 @@ pub struct RgbaF32Frame {
     pub color_space: ColorSpace,
 }
 
+/// Linear-light RGBA frame in an explicit rendering working space.
+///
+/// This is a pure frame contract. Color conversion belongs to the configured
+/// OCIO processor and is never inferred from the working-space primaries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkingRgbaF32Frame {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Linear-light RGBA values. RGB may be negative or exceed 1.0.
+    pub data: Vec<[f32; 4]>,
+    /// Linear rendering identity for the RGB samples.
+    pub color_space: crate::WorkingColorSpace,
+}
+
 impl RgbaF32Frame {
     pub fn from_rgba8(
         width: u32,
