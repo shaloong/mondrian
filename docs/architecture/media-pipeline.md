@@ -531,16 +531,18 @@ playback cursor's decoder/session locality, ring buffers, hardware decode, and
 GPU-resident frame delivery, not from silently reusing adjacent timestamp
 requests as if they were the requested frame.
 
-Current decode residency is intentionally explicit and fail-closed. The active
-preview/media decode path produces CPU RGBA frames. Legacy YUV preview
-surfaces were removed before release so access-mode decode has one media
-payload contract until a real hardware-resident adapter replaces it.
+Current decode residency is intentionally explicit and fail-closed. CPU paths
+produce `RgbaFrame`; admitted in-process FFmpeg D3D11 playback may instead
+produce `PreviewNativeDecodedFrame`. Legacy unowned YUV preview surfaces remain
+removed: native output is an owned decoder-resource lease, not a raw plane
+container or a handle-kind diagnostic.
 `PreviewHardwareDecodeDecision` records the media-layer selection for each
 request. A GPU preference must resolve to a structured CPU RGBA reason such as
 `CpuRgbaHardwareUnavailable`, `CpuRgbaAccessModeUnsupported`,
 `CpuRgbaBackendUnavailable`, `CpuRgbaRendererImportUnavailable`,
 `CpuRgbaBackendBoundary`, or `HardwareDecodeCpuTransfer` until the selected
-decoder actually produces a renderer-importable native surface.
+decoder actually produces a native surface admitted by the caller's combined
+renderer/platform capability check.
 `HardwareDecodeCpuTransfer` means in-process FFmpeg hardware decode was
 configured and hardware frames are transferred back to CPU before RGBA preview;
 it is active hardware decode, but it is not zero-copy, GPU texture residency, or
@@ -567,7 +569,11 @@ exported/imported through the renderer native decoded-frame import contract,
 `decoder_adapter_available=false`, `hardware_decode_active=false`,
 `zero_copy_active=false`, `DecodedFrameResidency::CpuRgba`, no active GPU
 handle kind, and `renderer_import_ready=false`. Platform preference alone is
-not a valid hardware decode signal.
+not a valid hardware decode signal. The first concrete media adapter supports
+FFmpeg's preferred `AV_PIX_FMT_D3D11` frame ABI. It does not make D3D12VA,
+legacy `AV_PIX_FMT_D3D11VA_VLD`, DXVA2, VideoToolbox, VA-API, VDPAU, or CUDA
+native automatically; GPU-resident planning skips backend candidates without
+a matching concrete media adapter.
 For a concrete video stream, media may also run a read-only FFmpeg hardware
 codec config probe with `avcodec_get_hw_config`. That probe records whether the
 linked FFmpeg build lists the candidate hardware device type, whether the
@@ -586,9 +592,12 @@ FFmpeg error code. It must be cached per backend for the process lifetime so
 session planning does not repeatedly initialize GPU drivers. Playback sessions
 may attach a fresh retained `AVHWDeviceContext` to an unopened FFmpeg decoder
 and install a get-format callback that accepts only the advertised hardware
-pixel format. Until renderer native import exists, that path must materialize
-hardware frames through `av_hwframe_transfer_data` into CPU frames before RGBA
-scaling. A failed device-context probe is `CpuRgbaHardwareUnavailable`; a
+pixel format. `PreferHardwareDecode` always permits materializing hardware
+frames through `av_hwframe_transfer_data` into CPU frames before RGBA scaling.
+`PreferGpuResident` permits the same diagnosed fallback if native
+materialization fails. `RequireGpuResident` configures the hardware decoder but
+does not permit CPU transfer or software-frame fallback. A failed device-context
+probe is `CpuRgbaHardwareUnavailable`; a
 successful hardware decode session that still transfers frames to CPU is
 `HardwareDecodeCpuTransfer`; a future zero-copy adapter that cannot import into
 the renderer should use renderer/platform import diagnostics instead of this
@@ -687,6 +696,8 @@ copy stages.
 Every frame returned by the preview decode boundary is a
 `PreviewDecodeOutcome`: `Frame(RgbaFrame)` for CPU RGBA payloads or
 `NativeGpuFrame(PreviewNativeDecodedFrame)` for GPU-resident decoder payloads.
+Native FFmpeg results use `PreviewDecodePath::InProcessFfmpegNative`; they are
+never labeled as the in-process CPU RGBA path.
 `PreviewNativeDecodedFrame` must carry a
 `PreviewNativeDecodedFrameHandle` minted by the media backend that owns the
 native decoder resource. The handle is a shared lease over an
@@ -723,6 +734,20 @@ subsampled NV12/P010 payloads must have explicit chroma location. This remains
 media payload evidence, not color interpretation; unsupported-but-explicit
 chroma siting can be rejected later by the app/renderer admission boundary, but
 missing sampling facts must not escape the media native-frame constructor.
+For D3D11 frames, media reads `AVFrame::hw_frames_ctx` and accepts only explicit
+`AV_PIX_FMT_NV12` or `AV_PIX_FMT_P010LE` software layouts. Planar
+`AV_PIX_FMT_YUV420P` / `AV_PIX_FMT_YUV420P10LE` descriptions are not silently
+reinterpreted as two-plane GPU textures. A GPU-preferred CPU fallback records
+`PreviewNativeDecodeFallback` as `SoftwareFrame`,
+`ResourceAdapterUnavailable`, `SurfaceFormatUnavailable`,
+`SamplingMetadataIncomplete`, or `ResourceRetentionFailed`. A required-GPU
+request returns a decode error for the same condition instead.
+GPU-resident requests bypass the process-global CPU RGBA cache and the
+session-local RGBA playback ring. Native decoder surfaces are not inserted into
+either cache because retaining them there can exhaust the decoder surface pool;
+their bounded lifetime belongs to the returned current/prefetch payloads and
+the app scheduler. CPU fallback payloads remain eligible for the existing CPU
+cache policy.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
 reinterpret a native decoder surface as RGBA or silently force a CPU transfer.
@@ -747,7 +772,8 @@ D3D12/D3D11, VideoToolbox/IOSurface, and VA-API/DMABUF must import handles
 only; they must not silently decide Rec.709 vs Rec.2020, SDR vs PQ/HLG, or
 left vs center chroma siting.
 Both payload kinds carry `PreviewDecodeDiagnostics`: concrete path
-(`InProcessFfmpegCpuRgba`, `ExternalFfmpegCpuRgba`, or `PreviewCacheHit`),
+(`InProcessFfmpegCpuRgba`, `InProcessFfmpegNative`,
+`ExternalFfmpegCpuRgba`, `PlaybackSessionRingHit`, or `PreviewCacheHit`),
 elapsed microseconds, cache-hit status, requested access mode, external-process
 status, CPU-residency evidence, seek status, requested seek strategy,
 session-local seek-index availability and source (`None`, `SessionObserved`, or

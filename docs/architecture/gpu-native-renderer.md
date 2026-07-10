@@ -168,6 +168,14 @@ to its concrete resource type while the frame is borrowed; app/platform
 schedulers may inspect kind/id diagnostics but must not reinterpret them as OS
 handles. This keeps native resource release tied to the last frame/handle clone
 instead of cache or window timing.
+The first concrete media lease is `FfmpegNativeDecodedFrameResource` for the
+preferred FFmpeg D3D11 ABI. It retains the source `AVFrame`/`AVBufferRef` and
+exposes a borrowed `ID3D11Texture2D` pointer plus array slice only to the
+matching renderer import backend. Media can now return this payload as
+`InProcessFfmpegNative` after app admission; this does not make renderer support
+ready. `AppUiFrameRenderer` must continue reporting native import unavailable
+until its D3D11 bridge can import and sample that exact lease into the planned
+float working-space resource.
 The shared
 `execute_native_decoded_frame_import(...)` helper owns support validation,
 working-frame plan creation, backend invocation, and returned-resource contract

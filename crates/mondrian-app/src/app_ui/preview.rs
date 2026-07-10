@@ -1388,6 +1388,7 @@ impl AppUiPreviewService {
             PreviewDecodePath::InProcessFfmpegCpuRgba => {
                 bump(&self.metrics.decode_in_process_cpu_rgba_frames);
             }
+            PreviewDecodePath::InProcessFfmpegNative => {}
             PreviewDecodePath::ExternalFfmpegCpuRgba => {
                 bump(&self.metrics.decode_external_ffmpeg_cpu_rgba_frames);
             }
@@ -2913,6 +2914,7 @@ impl AppUiPreviewDecodeAccessModeProfile {
             PreviewDecodePath::InProcessFfmpegCpuRgba => {
                 self.in_process_cpu_rgba_frames = self.in_process_cpu_rgba_frames.saturating_add(1);
             }
+            PreviewDecodePath::InProcessFfmpegNative => {}
             PreviewDecodePath::ExternalFfmpegCpuRgba => {
                 self.external_ffmpeg_cpu_rgba_frames =
                     self.external_ffmpeg_cpu_rgba_frames.saturating_add(1);
@@ -10008,6 +10010,7 @@ mod tests {
             gpu_frame_handle_kind: None,
             renderer_import_ready: false,
             hardware_decode_blocker,
+            native_decode_fallback: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::P010,
             decoded_video_sampling: DecodedVideoSampling::default(),
         }
@@ -10074,6 +10077,7 @@ mod tests {
                 gpu_frame_handle_kind: None,
                 renderer_import_ready: false,
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+                native_decode_fallback: None,
                 decoded_surface_format: DecodedVideoSurfaceFormat::P010,
                 decoded_video_sampling: DecodedVideoSampling::default(),
             },
@@ -10138,6 +10142,7 @@ mod tests {
                 gpu_frame_handle_kind: None,
                 renderer_import_ready: false,
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+                native_decode_fallback: None,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
                 decoded_video_sampling: DecodedVideoSampling::default(),
             },
@@ -10202,6 +10207,7 @@ mod tests {
                 gpu_frame_handle_kind: None,
                 renderer_import_ready: false,
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+                native_decode_fallback: None,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Nv12,
                 decoded_video_sampling: DecodedVideoSampling::default(),
             },
@@ -10268,6 +10274,7 @@ mod tests {
                 gpu_frame_handle_kind: None,
                 renderer_import_ready: false,
                 hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+                native_decode_fallback: None,
                 decoded_surface_format: DecodedVideoSurfaceFormat::Nv12,
                 decoded_video_sampling: DecodedVideoSampling::default(),
             },
@@ -15902,6 +15909,7 @@ mod tests {
             gpu_frame_handle_kind: None,
             renderer_import_ready: false,
             hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+            native_decode_fallback: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
             decoded_video_sampling: DecodedVideoSampling::default(),
         };

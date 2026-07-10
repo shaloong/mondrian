@@ -44,8 +44,8 @@ pub use preview::{
     PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
     PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
     PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
-    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
-    PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
+    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
+    PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
     PreviewNativeDecodedFrameResource, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
     RgbaFrame,
 };

@@ -72,6 +72,8 @@ pub enum PreviewDecodeBackend {
 pub enum PreviewDecodePath {
     /// In-process FFmpeg decoder and software scaler returned CPU RGBA bytes.
     InProcessFfmpegCpuRgba,
+    /// In-process FFmpeg decoder returned a retained native hardware surface.
+    InProcessFfmpegNative,
     /// Experimental external `ffmpeg` process returned CPU RGBA bytes.
     ExternalFfmpegCpuRgba,
     /// Playback cursor reused a frame from its session-local forward ring.
@@ -156,6 +158,16 @@ pub enum PreviewHardwareDecodeRequest {
     RequireGpuResident,
 }
 
+impl PreviewHardwareDecodeRequest {
+    fn prefers_gpu_residency(self) -> bool {
+        matches!(self, Self::PreferGpuResident | Self::RequireGpuResident)
+    }
+
+    fn requires_gpu_residency(self) -> bool {
+        self == Self::RequireGpuResident
+    }
+}
+
 /// Media-layer hardware decode selection outcome for one preview request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewHardwareDecodeDecision {
@@ -208,6 +220,21 @@ pub enum PreviewHardwareDecodeBlocker {
     GpuHandleMissing,
     /// Decoder GPU residency exists, but renderer import is not ready.
     RendererImportNotReady,
+}
+
+/// Structured reason a GPU-preferred decode returned a CPU payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreviewNativeDecodeFallback {
+    /// FFmpeg returned a software frame after hardware decode was requested.
+    SoftwareFrame,
+    /// The decoded hardware pixel format has no native media resource adapter.
+    ResourceAdapterUnavailable,
+    /// The hardware frame did not expose an unambiguous native surface format.
+    SurfaceFormatUnavailable,
+    /// Required range, chroma-location, or bit-depth metadata was incomplete.
+    SamplingMetadataIncomplete,
+    /// FFmpeg could not retain or expose the native decoder resource.
+    ResourceRetentionFailed,
 }
 
 impl PreviewHardwareDecodeBlocker {
@@ -628,6 +655,7 @@ impl PreviewDecodePath {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
+            Self::InProcessFfmpegNative => "InProcessFfmpegNative",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
             Self::PlaybackSessionRingHit => "PlaybackSessionRingHit",
             Self::PreviewCacheHit => "PreviewCacheHit",
@@ -815,6 +843,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Structured reason hardware decode / zero-copy is not active.
     #[serde(default)]
     pub hardware_decode_blocker: PreviewHardwareDecodeBlocker,
+    /// Why a GPU-preferred request fell back to CPU materialization.
+    #[serde(default)]
+    pub native_decode_fallback: Option<PreviewNativeDecodeFallback>,
     /// Decoder output surface format before preview conversion to CPU RGBA.
     #[serde(default)]
     pub decoded_surface_format: DecodedVideoSurfaceFormat,
@@ -834,7 +865,7 @@ impl PreviewDecodeDiagnostics {
             ),
             access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
-            cpu_resident: true,
+            cpu_resident: path != PreviewDecodePath::InProcessFfmpegNative,
             seek_performed: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 0,
@@ -875,6 +906,7 @@ impl PreviewDecodeDiagnostics {
             gpu_frame_handle_kind: None,
             renderer_import_ready: false,
             hardware_decode_blocker: PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+            native_decode_fallback: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
             decoded_video_sampling: DecodedVideoSampling::default(),
         }
@@ -911,6 +943,41 @@ impl PreviewDecodeDiagnostics {
         self.any_seek_window_ms = policy.any_seek_window_ms;
         self.scrub_adaptive_class = policy.scrub_adaptive_class;
         self
+    }
+
+    fn with_hw_accel_probe(mut self, probe: &HwAccelProbe) -> Self {
+        self.hw_accel_backend = probe.selected_backend;
+        self.hardware_decode_candidate_backend = probe.candidate_backend;
+        self.hardware_decode_candidate_handle_kind = probe.candidate_handle_kind;
+        self.hardware_decode_adapter_available = probe.decoder_adapter_available;
+        self.hardware_decode_active = probe.hardware_decode_active;
+        self.zero_copy_active = probe.zero_copy_active;
+        self.decoded_frame_residency = probe.frame_residency;
+        self.gpu_frame_handle_kind = probe.gpu_frame_handle_kind;
+        self.renderer_import_ready = probe.renderer_import_ready;
+        self.hardware_decode_blocker = PreviewHardwareDecodeBlocker::from_probe(probe);
+        self
+    }
+
+    fn with_hardware_decode_plan(mut self, plan: &PreviewHardwareDecodePlan) -> Self {
+        self.hardware_decode_request = plan.request;
+        self.hardware_decode_decision = plan.decision;
+        self.hardware_decode_ffmpeg_device_type_available =
+            plan.ffmpeg_codec_config.ffmpeg_device_type_available;
+        self.hardware_decode_ffmpeg_codec_config_available =
+            plan.ffmpeg_codec_config.ffmpeg_codec_config_available;
+        self.hardware_decode_ffmpeg_hw_pixel_format = plan.ffmpeg_codec_config.hw_pixel_format;
+        self.hardware_decode_ffmpeg_device_context_attempted =
+            plan.ffmpeg_device_context.device_create_attempted;
+        self.hardware_decode_ffmpeg_device_context_created =
+            plan.ffmpeg_device_context.device_context_created;
+        self.hardware_decode_ffmpeg_device_context_error_code =
+            plan.ffmpeg_device_context.device_create_error_code;
+        self.hardware_decode_cpu_transfer_configured = plan.hardware_cpu_transfer_configured;
+        self.hardware_decode_cpu_transfer_observed = plan.hardware_cpu_transfer_observed;
+        self.hardware_decode_cpu_transfer_status = plan.hardware_cpu_transfer_status;
+        self.native_decode_fallback = plan.native_decode_fallback;
+        self.with_hw_accel_probe(&plan.probe)
     }
 }
 
@@ -1407,41 +1474,9 @@ impl RgbaFrame {
         self
     }
 
-    fn with_hw_accel_probe(mut self, probe: &HwAccelProbe) -> Self {
-        self.diagnostics.hw_accel_backend = probe.selected_backend;
-        self.diagnostics.hardware_decode_candidate_backend = probe.candidate_backend;
-        self.diagnostics.hardware_decode_candidate_handle_kind = probe.candidate_handle_kind;
-        self.diagnostics.hardware_decode_adapter_available = probe.decoder_adapter_available;
-        self.diagnostics.hardware_decode_active = probe.hardware_decode_active;
-        self.diagnostics.zero_copy_active = probe.zero_copy_active;
-        self.diagnostics.decoded_frame_residency = probe.frame_residency;
-        self.diagnostics.gpu_frame_handle_kind = probe.gpu_frame_handle_kind;
-        self.diagnostics.renderer_import_ready = probe.renderer_import_ready;
-        self.diagnostics.hardware_decode_blocker = PreviewHardwareDecodeBlocker::from_probe(probe);
-        self
-    }
-
     fn with_hardware_decode_plan(mut self, plan: &PreviewHardwareDecodePlan) -> Self {
-        self.diagnostics.hardware_decode_request = plan.request;
-        self.diagnostics.hardware_decode_decision = plan.decision;
-        self.diagnostics.hardware_decode_ffmpeg_device_type_available =
-            plan.ffmpeg_codec_config.ffmpeg_device_type_available;
-        self.diagnostics.hardware_decode_ffmpeg_codec_config_available =
-            plan.ffmpeg_codec_config.ffmpeg_codec_config_available;
-        self.diagnostics.hardware_decode_ffmpeg_hw_pixel_format =
-            plan.ffmpeg_codec_config.hw_pixel_format;
-        self.diagnostics.hardware_decode_ffmpeg_device_context_attempted =
-            plan.ffmpeg_device_context.device_create_attempted;
-        self.diagnostics.hardware_decode_ffmpeg_device_context_created =
-            plan.ffmpeg_device_context.device_context_created;
-        self.diagnostics.hardware_decode_ffmpeg_device_context_error_code =
-            plan.ffmpeg_device_context.device_create_error_code;
-        self.diagnostics.hardware_decode_cpu_transfer_configured =
-            plan.hardware_cpu_transfer_configured;
-        self.diagnostics.hardware_decode_cpu_transfer_observed =
-            plan.hardware_cpu_transfer_observed;
-        self.diagnostics.hardware_decode_cpu_transfer_status = plan.hardware_cpu_transfer_status;
-        self.with_hw_accel_probe(&plan.probe)
+        self.diagnostics = self.diagnostics.with_hardware_decode_plan(plan);
+        self
     }
 
     fn with_decoded_surface_format(mut self, format: DecodedVideoSurfaceFormat) -> Self {
@@ -1582,6 +1617,7 @@ struct PreviewHardwareDecodePlan {
     hardware_cpu_transfer_configured: bool,
     hardware_cpu_transfer_observed: bool,
     hardware_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus,
+    native_decode_fallback: Option<PreviewNativeDecodeFallback>,
 }
 
 impl PreviewHardwareDecodePlan {
@@ -1611,6 +1647,7 @@ impl PreviewHardwareDecodePlan {
             hardware_cpu_transfer_configured: false,
             hardware_cpu_transfer_observed: false,
             hardware_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
+            native_decode_fallback: None,
         }
     }
 
@@ -1644,6 +1681,11 @@ impl PreviewHardwareDecodePlan {
             if !codec_ready {
                 continue;
             }
+            if request.prefers_gpu_residency()
+                && !ffmpeg_native_resource_adapter_available(&codec_config)
+            {
+                continue;
+            }
             if Self::plan_requires_device_context(request, access_mode, backend)
                 && !device_context.device_context_created
             {
@@ -1652,6 +1694,9 @@ impl PreviewHardwareDecodePlan {
             probe.candidate_backend = Some(candidate);
             probe.candidate_handle_kind = candidate.native_handle_kind();
             probe.candidate_surface_formats = candidate.preferred_surface_formats();
+            probe.decoder_adapter_available =
+                ffmpeg_native_resource_adapter_available(&codec_config);
+            probe.renderer_import_ready = request.prefers_gpu_residency();
             return (probe, codec_config, device_context);
         }
 
@@ -1685,18 +1730,24 @@ impl PreviewHardwareDecodePlan {
             request,
             PreviewHardwareDecodeRequest::PreferHardwareDecode
                 | PreviewHardwareDecodeRequest::PreferGpuResident
+                | PreviewHardwareDecodeRequest::RequireGpuResident
         ) && access_mode == PreviewDecodeAccessMode::PlaybackCursor
             && backend != PreviewDecodeBackend::ExternalFfmpegCpuRgba
     }
 
-    fn should_attempt_hardware_cpu_transfer(&self, access_mode: PreviewDecodeAccessMode) -> bool {
+    fn should_configure_hardware_decoder(&self, access_mode: PreviewDecodeAccessMode) -> bool {
+        self.request != PreviewHardwareDecodeRequest::Auto
+            && access_mode == PreviewDecodeAccessMode::PlaybackCursor
+            && self.ffmpeg_codec_config.ffmpeg_codec_config_available
+            && self.ffmpeg_device_context.device_context_created
+    }
+
+    fn allows_cpu_transfer_fallback(&self) -> bool {
         matches!(
             self.request,
             PreviewHardwareDecodeRequest::PreferHardwareDecode
                 | PreviewHardwareDecodeRequest::PreferGpuResident
-        ) && access_mode == PreviewDecodeAccessMode::PlaybackCursor
-            && self.ffmpeg_codec_config.ffmpeg_codec_config_available
-            && self.ffmpeg_device_context.device_context_created
+        )
     }
 
     fn mark_hardware_cpu_transfer_configured(&mut self, backend: HwAccelBackend) {
@@ -1735,6 +1786,30 @@ impl PreviewHardwareDecodePlan {
                 backend.as_str()
             );
         }
+    }
+
+    fn mark_native_decode_fallback(&mut self, reason: PreviewNativeDecodeFallback) {
+        self.native_decode_fallback = Some(reason);
+    }
+
+    fn mark_gpu_resident_native_observed(&mut self, kind: DecodedGpuFrameHandleKind) {
+        self.hardware_cpu_transfer_configured = false;
+        self.hardware_cpu_transfer_observed = false;
+        self.hardware_cpu_transfer_status = PreviewHardwareDecodeCpuTransferStatus::NotAttempted;
+        self.native_decode_fallback = None;
+        self.decision = PreviewHardwareDecodeDecision::GpuResidentNative;
+        let backend = self.probe.candidate_backend.unwrap_or(HwAccelBackend::None);
+        self.probe.selected_backend = backend;
+        self.probe.decoder_adapter_available = true;
+        self.probe.hardware_decode_active = true;
+        self.probe.zero_copy_active = true;
+        self.probe.frame_residency = DecodedFrameResidency::GpuTexture;
+        self.probe.gpu_frame_handle_kind = Some(kind);
+        self.probe.renderer_import_ready = true;
+        self.probe.reason = format!(
+            "{} FFmpeg hardware decode produced a retained native decoder surface",
+            backend.as_str()
+        );
     }
 
     fn device_context_probe_for_plan(
@@ -1853,6 +1928,10 @@ fn preview_hardware_frame_format(format: ffmpeg::util::format::pixel::Pixel) -> 
     )
 }
 
+fn ffmpeg_native_resource_adapter_available(config: &HwAccelCodecConfigProbe) -> bool {
+    config.hw_pixel_format == Some(HwAccelPixelFormat::D3D11)
+}
+
 struct PreviewDecodeSession {
     path: PathBuf,
     fingerprint: PreviewFileFingerprint,
@@ -1883,10 +1962,38 @@ struct PreviewDecodeSession {
 }
 
 struct PreviewDecodeForwardResult {
-    frame: Option<RgbaFrame>,
+    frame: Option<PreviewDecodedFramePayload>,
     selected_pts: Option<i64>,
     decoded_frame_count: usize,
     canceled: bool,
+}
+
+#[derive(Debug)]
+enum PreviewDecodedFramePayload {
+    CpuRgba(RgbaFrame),
+    NativeGpu(PreviewNativeDecodedFrame),
+}
+
+impl PreviewDecodedFramePayload {
+    fn cache_cpu_rgba(
+        &self,
+        path: &Path,
+        fingerprint: PreviewFileFingerprint,
+        width: u32,
+        height: u32,
+        pts: i64,
+    ) {
+        if let Self::CpuRgba(frame) = self {
+            preview_cache_put_with_fingerprint(
+                path,
+                fingerprint,
+                width,
+                height,
+                pts,
+                frame.clone(),
+            );
+        }
+    }
 }
 
 struct RetainedDecodedFrame(ffmpeg::util::frame::video::Video);
@@ -1916,7 +2023,11 @@ impl RetainedDecodedFrame {
 }
 
 impl PreviewDecodeForwardResult {
-    fn frame(frame: RgbaFrame, selected_pts: i64, decoded_frame_count: usize) -> Self {
+    fn frame(
+        frame: PreviewDecodedFramePayload,
+        selected_pts: i64,
+        decoded_frame_count: usize,
+    ) -> Self {
         Self {
             frame: Some(frame),
             selected_pts: Some(selected_pts),
@@ -2348,17 +2459,27 @@ impl PreviewDecodeSession {
         let mut hardware_decode_context_state = None;
         let mut context =
             preview_decode_context_from_parameters(parameters.clone(), ffmpeg_threading, path)?;
-        if hardware_decode_plan.should_attempt_hardware_cpu_transfer(access_mode)
+        if hardware_decode_plan.should_configure_hardware_decoder(access_mode)
             && backend != PreviewDecodeBackend::Software
         {
             match configure_preview_hardware_decode_context(&mut context, &hardware_decode_plan) {
                 Ok((state, device_context)) => {
-                    hardware_decode_plan
-                        .mark_hardware_cpu_transfer_configured(device_context.backend());
+                    if hardware_decode_plan.allows_cpu_transfer_fallback() {
+                        hardware_decode_plan
+                            .mark_hardware_cpu_transfer_configured(device_context.backend());
+                    }
                     hardware_decode_context_state = Some(state);
                 }
                 Err(reason) => {
                     hardware_decode_plan.mark_hardware_cpu_transfer_setup_failed();
+                    if hardware_decode_request.requires_gpu_residency() {
+                        return Err(MondrianError::DecodeFailed {
+                            asset_id: path.display().to_string(),
+                            reason: format!(
+                                "required GPU-resident FFmpeg decoder setup failed: {reason}"
+                            ),
+                        });
+                    }
                     preview_trace(format!(
                         "[preview] hardware decode CPU-transfer setup failed, fallback software: {reason}"
                     ));
@@ -2369,6 +2490,14 @@ impl PreviewDecodeSession {
         let decoder = match context.decoder().video() {
             Ok(decoder) => decoder,
             Err(err) if hardware_decode_context_state.is_some() => {
+                if hardware_decode_request.requires_gpu_residency() {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason: format!(
+                            "required GPU-resident FFmpeg decoder failed to open: {err}"
+                        ),
+                    });
+                }
                 preview_trace(format!(
                     "[preview] hardware decode open failed, fallback software: {err}"
                 ));
@@ -2485,7 +2614,8 @@ impl PreviewDecodeSession {
         );
 
         let cache_lookup_started_at = Instant::now();
-        if policy.use_playback_ring {
+        let allow_cpu_cache = !self.hardware_decode_request.prefers_gpu_residency();
+        if allow_cpu_cache && policy.use_playback_ring {
             if let Some(hit) = self.playback_ring.get(target_pts, self.hit_tolerance_pts) {
                 if should_cancel() {
                     return Ok(PreviewDecodeOutcome::Canceled);
@@ -2506,35 +2636,37 @@ impl PreviewDecodeSession {
                 ));
             }
         }
-        if let Some(hit) = preview_cache_get(
-            &self.path,
-            self.fingerprint,
-            self.target_width,
-            self.target_height,
-            target_pts,
-            self.hit_tolerance_pts,
-        ) {
-            if should_cancel() {
-                return Ok(PreviewDecodeOutcome::Canceled);
+        if allow_cpu_cache {
+            if let Some(hit) = preview_cache_get(
+                &self.path,
+                self.fingerprint,
+                self.target_width,
+                self.target_height,
+                target_pts,
+                self.hit_tolerance_pts,
+            ) {
+                if should_cancel() {
+                    return Ok(PreviewDecodeOutcome::Canceled);
+                }
+                if policy.use_playback_ring {
+                    self.playback_ring.put(hit.pts, hit.frame.clone());
+                }
+                return Ok(PreviewDecodeOutcome::Frame(
+                    hit.frame
+                        .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
+                        .with_access_policy(policy)
+                        .with_seek_index_diagnostics(
+                            self.seek_index.diagnostics(),
+                            PreviewSeekResolution::default(),
+                        )
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_hardware_decode_plan(&self.hardware_decode_plan)
+                        .with_decoded_surface_format(self.decoded_surface_format),
+                ));
             }
-            if policy.use_playback_ring {
-                self.playback_ring.put(hit.pts, hit.frame.clone());
-            }
-            return Ok(PreviewDecodeOutcome::Frame(
-                hit.frame
-                    .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
-                    .with_access_policy(policy)
-                    .with_seek_index_diagnostics(
-                        self.seek_index.diagnostics(),
-                        PreviewSeekResolution::default(),
-                    )
-                    .with_stage_durations(PreviewDecodeStageDurations {
-                        cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
-                        ..PreviewDecodeStageDurations::default()
-                    })
-                    .with_hardware_decode_plan(&self.hardware_decode_plan)
-                    .with_decoded_surface_format(self.decoded_surface_format),
-            ));
         }
         let cache_lookup_us = duration_us(cache_lookup_started_at.elapsed());
 
@@ -2571,36 +2703,70 @@ impl PreviewDecodeSession {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
         if let Some(frame) = result.frame {
-            if policy.use_playback_ring {
-                if let Some(selected_pts) = result.selected_pts {
-                    self.playback_ring.put(selected_pts, frame.clone());
+            match frame {
+                PreviewDecodedFramePayload::CpuRgba(frame) => {
+                    if policy.use_playback_ring {
+                        if let Some(selected_pts) = result.selected_pts {
+                            self.playback_ring.put(selected_pts, frame.clone());
+                        }
+                    }
+                    let conversion_us = frame
+                        .diagnostics
+                        .stage_durations
+                        .hardware_transfer_us
+                        .saturating_add(frame.diagnostics.stage_durations.swscale_us)
+                        .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
+                    let packet_decode_us =
+                        duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
+                    return Ok(PreviewDecodeOutcome::Frame(
+                        frame
+                            .with_access_mode(access_mode)
+                            .with_stage_durations(PreviewDecodeStageDurations {
+                                cache_lookup_us,
+                                seek_us,
+                                packet_decode_us,
+                                ..PreviewDecodeStageDurations::default()
+                            })
+                            .with_decode_work(seek_performed, result.decoded_frame_count)
+                            .with_access_policy(policy)
+                            .with_forward_reused(should_continue_forward)
+                            .with_seek_index_diagnostics(
+                                self.seek_index.diagnostics(),
+                                seek_resolution,
+                            )
+                            .with_threading(self.threading_kind, self.threading_count)
+                            .with_hardware_decode_plan(&self.hardware_decode_plan)
+                            .with_decoded_surface_format(self.decoded_surface_format),
+                    ));
                 }
-            }
-            let conversion_us = frame
-                .diagnostics
-                .stage_durations
-                .hardware_transfer_us
-                .saturating_add(frame.diagnostics.stage_durations.swscale_us)
-                .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
-            let packet_decode_us =
-                duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
-            return Ok(PreviewDecodeOutcome::Frame(
-                frame
-                    .with_access_mode(access_mode)
-                    .with_stage_durations(PreviewDecodeStageDurations {
+                PreviewDecodedFramePayload::NativeGpu(mut frame) => {
+                    let mut diagnostics = frame.diagnostics.with_access_mode(access_mode);
+                    diagnostics.stage_durations.accumulate(PreviewDecodeStageDurations {
                         cache_lookup_us,
                         seek_us,
-                        packet_decode_us,
+                        packet_decode_us: duration_us(decode_started_at.elapsed()),
                         ..PreviewDecodeStageDurations::default()
-                    })
-                    .with_decode_work(seek_performed, result.decoded_frame_count)
-                    .with_access_policy(policy)
-                    .with_forward_reused(should_continue_forward)
-                    .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
-                    .with_threading(self.threading_kind, self.threading_count)
-                    .with_hardware_decode_plan(&self.hardware_decode_plan)
-                    .with_decoded_surface_format(self.decoded_surface_format),
-            ));
+                    });
+                    diagnostics.seek_performed = seek_performed;
+                    diagnostics.decoded_frame_count =
+                        result.decoded_frame_count.min(u32::MAX as usize) as u32;
+                    diagnostics = diagnostics.with_access_policy(policy);
+                    diagnostics.forward_reused = should_continue_forward;
+                    let seek_index = self.seek_index.diagnostics();
+                    diagnostics.seek_index_available = seek_index.available;
+                    diagnostics.seek_index_keyframes = seek_index.keyframes;
+                    diagnostics.seek_index_observed_packets = seek_index.observed_packets;
+                    diagnostics.seek_index_source = seek_index.source;
+                    diagnostics.seek_index_used = seek_resolution.used_index;
+                    diagnostics.seek_index_anchor_pts = seek_resolution.anchor_pts;
+                    diagnostics.threading_kind = self.threading_kind;
+                    diagnostics.threading_count =
+                        self.threading_count.min(u32::MAX as usize) as u32;
+                    frame.diagnostics =
+                        diagnostics.with_hardware_decode_plan(&self.hardware_decode_plan);
+                    return Ok(PreviewDecodeOutcome::NativeGpuFrame(frame));
+                }
+            }
         }
 
         Err(MondrianError::DecodeFailed {
@@ -2712,7 +2878,7 @@ impl PreviewDecodeSession {
              path: &Path,
              before: Option<&(i64, RetainedDecodedFrame)>,
              after: Option<&(i64, RetainedDecodedFrame)>|
-             -> Result<Option<(i64, RgbaFrame)>> {
+             -> Result<Option<(i64, PreviewDecodedFramePayload)>> {
                 if should_cancel() {
                     return Ok(None);
                 }
@@ -2743,7 +2909,7 @@ impl PreviewDecodeSession {
                 if should_cancel() {
                     return Ok(None);
                 }
-                let rgba = materialize_decoded_to_rgba(
+                let frame = materialize_decoded_frame(
                     selected_frame,
                     hardware_decode_plan,
                     scaler,
@@ -2752,7 +2918,7 @@ impl PreviewDecodeSession {
                     target_height,
                     path,
                 )?;
-                Ok(Some((selected_pts, rgba)))
+                Ok(Some((selected_pts, frame)))
             };
 
         for (s, packet) in self.input.packets() {
@@ -2789,7 +2955,7 @@ impl PreviewDecodeSession {
                             if should_cancel() {
                                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
                             }
-                            let rgba = materialize_decoded_to_rgba(
+                            let frame = materialize_decoded_frame(
                                 &decoded.frame,
                                 &mut self.hardware_decode_plan,
                                 &mut self.scaler,
@@ -2798,16 +2964,15 @@ impl PreviewDecodeSession {
                                 self.target_height,
                                 self.path.as_path(),
                             )?;
-                            preview_cache_put_with_fingerprint(
+                            frame.cache_cpu_rgba(
                                 &self.path,
                                 self.fingerprint,
                                 self.target_width,
                                 self.target_height,
                                 frame_pts,
-                                rgba.clone(),
                             );
                             return Ok(PreviewDecodeForwardResult::frame(
-                                rgba,
+                                frame,
                                 frame_pts,
                                 frames_decoded,
                             ));
@@ -2817,7 +2982,7 @@ impl PreviewDecodeSession {
                             frame_pts,
                             RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
                         ));
-                        if let Some((selected_pts, rgba)) = choose_and_convert(
+                        if let Some((selected_pts, frame)) = choose_and_convert(
                             &mut self.hardware_decode_plan,
                             &mut self.scaler,
                             &mut self.scaler_source_format,
@@ -2827,16 +2992,15 @@ impl PreviewDecodeSession {
                             best_before.as_ref(),
                             best_after.as_ref(),
                         )? {
-                            preview_cache_put_with_fingerprint(
+                            frame.cache_cpu_rgba(
                                 &self.path,
                                 self.fingerprint,
                                 self.target_width,
                                 self.target_height,
                                 selected_pts,
-                                rgba.clone(),
                             );
                             return Ok(PreviewDecodeForwardResult::frame(
-                                rgba,
+                                frame,
                                 selected_pts,
                                 frames_decoded,
                             ));
@@ -2881,7 +3045,7 @@ impl PreviewDecodeSession {
                             frame_pts,
                             RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
                         ));
-                        if let Some((selected_pts, rgba)) = choose_and_convert(
+                        if let Some((selected_pts, frame)) = choose_and_convert(
                             &mut self.hardware_decode_plan,
                             &mut self.scaler,
                             &mut self.scaler_source_format,
@@ -2891,17 +3055,16 @@ impl PreviewDecodeSession {
                             best_before.as_ref(),
                             best_after.as_ref(),
                         )? {
-                            preview_cache_put_with_fingerprint(
+                            frame.cache_cpu_rgba(
                                 &self.path,
                                 self.fingerprint,
                                 self.target_width,
                                 self.target_height,
                                 selected_pts,
-                                rgba.clone(),
                             );
                             self.reached_eof = true;
                             return Ok(PreviewDecodeForwardResult::frame(
-                                rgba,
+                                frame,
                                 selected_pts,
                                 frames_decoded,
                             ));
@@ -2917,7 +3080,7 @@ impl PreviewDecodeSession {
             self.reached_eof = true;
         }
 
-        if let Some((selected_pts, rgba)) = choose_and_convert(
+        if let Some((selected_pts, frame)) = choose_and_convert(
             &mut self.hardware_decode_plan,
             &mut self.scaler,
             &mut self.scaler_source_format,
@@ -2927,16 +3090,15 @@ impl PreviewDecodeSession {
             best_before.as_ref(),
             best_after.as_ref(),
         )? {
-            preview_cache_put_with_fingerprint(
+            frame.cache_cpu_rgba(
                 &self.path,
                 self.fingerprint,
                 self.target_width,
                 self.target_height,
                 selected_pts,
-                rgba.clone(),
             );
             return Ok(PreviewDecodeForwardResult::frame(
-                rgba,
+                frame,
                 selected_pts,
                 frames_decoded,
             ));
@@ -3011,17 +3173,6 @@ fn decode_preview_frame_outcome(
         }
 
         let session = slot.as_mut().expect("preview decode session must exist");
-        if hardware_decode_request == PreviewHardwareDecodeRequest::RequireGpuResident
-            && session.hardware_decode_plan.decision != PreviewHardwareDecodeDecision::GpuResidentNative
-        {
-            return Err(MondrianError::DecodeFailed {
-                asset_id: path.display().to_string(),
-                reason: format!(
-                    "required GPU-resident preview decode is unavailable: {:?}",
-                    session.hardware_decode_plan.decision
-                ),
-            });
-        }
         let mut external_process_us = 0;
         let external_hardware_decode_plan = PreviewHardwareDecodePlan::resolve(
             hardware_decode_request,
@@ -3552,7 +3703,166 @@ fn convert_decoded_to_rgba(
     }))
 }
 
-fn materialize_decoded_to_rgba(
+#[derive(Debug, thiserror::Error)]
+enum PreviewNativeFrameMaterializationError {
+    #[error("FFmpeg hardware pixel format {pixel_format:?} has no native media adapter")]
+    UnsupportedHardwarePixelFormat {
+        pixel_format: ffmpeg::util::format::pixel::Pixel,
+    },
+    #[error("FFmpeg hardware frame is missing AVFrame::hw_frames_ctx")]
+    MissingHardwareFramesContext,
+    #[error("FFmpeg hardware frame has an empty AVHWFramesContext payload")]
+    MissingHardwareFramesContextData,
+    #[error(
+        "FFmpeg hardware frame software layout {software_format:?} is not explicitly NV12/P010"
+    )]
+    UnsupportedHardwareSurfaceFormat {
+        software_format: ffmpeg::ffi::AVPixelFormat,
+    },
+    #[error(transparent)]
+    Resource(#[from] FfmpegNativeDecodedFrameResourceError),
+    #[error(transparent)]
+    Payload(#[from] PreviewNativeDecodedFrameError),
+}
+
+impl PreviewNativeFrameMaterializationError {
+    fn fallback_reason(&self) -> PreviewNativeDecodeFallback {
+        match self {
+            Self::UnsupportedHardwarePixelFormat { .. } => {
+                PreviewNativeDecodeFallback::ResourceAdapterUnavailable
+            }
+            Self::MissingHardwareFramesContext
+            | Self::MissingHardwareFramesContextData
+            | Self::UnsupportedHardwareSurfaceFormat { .. } => {
+                PreviewNativeDecodeFallback::SurfaceFormatUnavailable
+            }
+            Self::Payload(_) => PreviewNativeDecodeFallback::SamplingMetadataIncomplete,
+            Self::Resource(_) => PreviewNativeDecodeFallback::ResourceRetentionFailed,
+        }
+    }
+}
+
+fn materialize_decoded_frame(
+    decoded: &ffmpeg::util::frame::video::Video,
+    hardware_decode_plan: &mut PreviewHardwareDecodePlan,
+    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    target_width: u32,
+    target_height: u32,
+    path: &Path,
+) -> Result<PreviewDecodedFramePayload> {
+    if hardware_decode_plan.request.prefers_gpu_residency() {
+        if preview_hardware_frame_format(decoded.format()) {
+            match materialize_native_decoded_frame(decoded) {
+                Ok(frame) => {
+                    hardware_decode_plan.mark_gpu_resident_native_observed(frame.handle_kind());
+                    return Ok(PreviewDecodedFramePayload::NativeGpu(frame));
+                }
+                Err(error) if hardware_decode_plan.request.requires_gpu_residency() => {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason: format!(
+                            "required GPU-resident decoded frame could not be materialized: {error}"
+                        ),
+                    });
+                }
+                Err(error) => {
+                    hardware_decode_plan.mark_native_decode_fallback(error.fallback_reason());
+                    preview_trace(format!(
+                        "[preview] native FFmpeg frame materialization failed, fallback CPU transfer: {error}"
+                    ));
+                }
+            }
+        } else if hardware_decode_plan.request.requires_gpu_residency() {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "required GPU-resident decode returned software frame {:?}",
+                    decoded.format()
+                ),
+            });
+        } else {
+            hardware_decode_plan
+                .mark_native_decode_fallback(PreviewNativeDecodeFallback::SoftwareFrame);
+        }
+    }
+
+    Ok(PreviewDecodedFramePayload::CpuRgba(
+        materialize_decoded_to_cpu_rgba(
+            decoded,
+            hardware_decode_plan,
+            scaler,
+            scaler_source_format,
+            target_width,
+            target_height,
+            path,
+        )?,
+    ))
+}
+
+fn materialize_native_decoded_frame(
+    decoded: &ffmpeg::util::frame::video::Video,
+) -> std::result::Result<PreviewNativeDecodedFrame, PreviewNativeFrameMaterializationError> {
+    if decoded.format() != ffmpeg::util::format::pixel::Pixel::D3D11 {
+        return Err(
+            PreviewNativeFrameMaterializationError::UnsupportedHardwarePixelFormat {
+                pixel_format: decoded.format(),
+            },
+        );
+    }
+    let surface_format = decoded_native_surface_format(decoded)?;
+    let sampling = DecodedVideoSampling {
+        range: decoded_video_range_from_ffmpeg(decoded.color_range()),
+        chroma_location: decoded_chroma_location_from_ffmpeg(decoded.chroma_location()),
+        bit_depth: surface_format.fixed_bit_depth().unwrap_or(0),
+    };
+    let resource = FfmpegNativeDecodedFrameResource::retain(decoded)?;
+    resource.d3d11_texture()?;
+    let handle = PreviewNativeDecodedFrameHandle::new(resource);
+    Ok(PreviewNativeDecodedFrame::new(
+        decoded.width(),
+        decoded.height(),
+        handle,
+        surface_format,
+        sampling,
+        PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegNative),
+    )?)
+}
+
+fn decoded_native_surface_format(
+    decoded: &ffmpeg::util::frame::video::Video,
+) -> std::result::Result<DecodedVideoSurfaceFormat, PreviewNativeFrameMaterializationError> {
+    // SAFETY: decoded owns the AVFrame for this borrow. hw_frames_ctx, when
+    // present, is an AVBufferRef whose data points to an AVHWFramesContext.
+    let hardware_frames_context = unsafe { (*decoded.as_ptr()).hw_frames_ctx };
+    if hardware_frames_context.is_null() {
+        return Err(PreviewNativeFrameMaterializationError::MissingHardwareFramesContext);
+    }
+    // SAFETY: hardware_frames_context is non-null and owned by decoded.
+    let context_data = unsafe { (*hardware_frames_context).data };
+    let context = NonNull::new(context_data.cast::<ffmpeg::ffi::AVHWFramesContext>())
+        .ok_or(PreviewNativeFrameMaterializationError::MissingHardwareFramesContextData)?;
+    // SAFETY: FFmpeg defines AVBufferRef::data as AVHWFramesContext for
+    // AVFrame::hw_frames_ctx and the frame retains that buffer for this borrow.
+    let software_format = unsafe { context.as_ref().sw_format };
+    decoded_native_surface_format_from_software_format(software_format)
+}
+
+fn decoded_native_surface_format_from_software_format(
+    software_format: ffmpeg::ffi::AVPixelFormat,
+) -> std::result::Result<DecodedVideoSurfaceFormat, PreviewNativeFrameMaterializationError> {
+    match software_format {
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12 => Ok(DecodedVideoSurfaceFormat::Nv12),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE => Ok(DecodedVideoSurfaceFormat::P010),
+        _ => Err(
+            PreviewNativeFrameMaterializationError::UnsupportedHardwareSurfaceFormat {
+                software_format,
+            },
+        ),
+    }
+}
+
+fn materialize_decoded_to_cpu_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
@@ -3645,17 +3955,18 @@ fn ensure_preview_rgba_scaler<'a>(
 mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        decode_preview_frame_cancellable, decoded_surface_format_from_pixel,
-        decoded_video_sampling_from_frame, duration_us, preview_cache_get,
-        preview_cache_put_with_fingerprint,
+        decode_preview_frame_cancellable, decoded_native_surface_format_from_software_format,
+        decoded_surface_format_from_pixel, decoded_video_sampling_from_frame, duration_us,
+        materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
         preview_seek_index_cache_put, FfmpegNativeDecodedFrameResource,
         FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
         PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-        PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
-        PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
+        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewDecodedFramePayload,
+        PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+        PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
+        PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
         PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
         PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
         PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
@@ -3720,6 +4031,48 @@ mod tests {
         })
     }
 
+    fn synthetic_d3d11_frame(
+        software_format: ffmpeg::ffi::AVPixelFormat,
+    ) -> ffmpeg::util::frame::video::Video {
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        frame.set_format(ffmpeg::util::format::pixel::Pixel::D3D11);
+        frame.set_width(1920);
+        frame.set_height(1080);
+        frame.set_color_range(ffmpeg::util::color::Range::MPEG);
+        // SAFETY: Every AVBufferRef assigned to the synthetic frame is owned by
+        // the frame and released by its normal drop. The hardware-context bytes
+        // are initialized before being read, and native pointers are never
+        // dereferenced by these media contract tests.
+        unsafe {
+            let raw = frame.as_mut_ptr();
+            let surface = ffmpeg::ffi::av_buffer_alloc(1);
+            assert!(
+                !surface.is_null(),
+                "test surface buffer allocation must succeed"
+            );
+            (*raw).buf[0] = surface;
+            (*raw).data[0] = std::ptr::NonNull::<u8>::dangling().as_ptr();
+            (*raw).data[1] = 2usize as *mut u8;
+
+            let context =
+                ffmpeg::ffi::av_buffer_alloc(std::mem::size_of::<ffmpeg::ffi::AVHWFramesContext>());
+            assert!(
+                !context.is_null(),
+                "test hardware context allocation must succeed"
+            );
+            std::ptr::write_bytes(
+                (*context).data,
+                0,
+                std::mem::size_of::<ffmpeg::ffi::AVHWFramesContext>(),
+            );
+            (*((*context).data.cast::<ffmpeg::ffi::AVHWFramesContext>())).sw_format =
+                software_format;
+            (*raw).hw_frames_ctx = context;
+            (*raw).chroma_location = ffmpeg::util::chroma::Location::Left.into();
+        }
+        frame
+    }
+
     #[test]
     fn preview_decode_backend_codes_are_explicit_and_cpu_resident() {
         assert_eq!(PreviewDecodeBackend::from_u8(0), PreviewDecodeBackend::Auto);
@@ -3780,7 +4133,7 @@ mod tests {
     }
 
     #[test]
-    fn hardware_decode_plan_fails_closed_for_playback_prefer_gpu_until_adapter_exists() {
+    fn hardware_decode_plan_does_not_report_native_before_frame_is_observed() {
         let plan = PreviewHardwareDecodePlan::resolve(
             PreviewHardwareDecodeRequest::PreferGpuResident,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -3792,20 +4145,18 @@ mod tests {
             plan.request,
             PreviewHardwareDecodeRequest::PreferGpuResident
         );
-        let expected_decision = if plan.probe.candidate_backend.is_none()
-            || !plan.ffmpeg_codec_config.ffmpeg_device_type_available
-            || (plan.ffmpeg_codec_config.ffmpeg_codec_config_available
-                && !plan.ffmpeg_device_context.device_context_created)
-        {
-            PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable
-        } else if plan.ffmpeg_codec_config.ffmpeg_codec_config_available {
-            PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable
-        } else {
-            PreviewHardwareDecodeDecision::CpuRgbaCodecUnsupported
-        };
-        assert_eq!(plan.decision, expected_decision);
+        assert_ne!(
+            plan.decision,
+            PreviewHardwareDecodeDecision::GpuResidentNative
+        );
         assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
-        assert!(!plan.probe.decoder_adapter_available);
+        assert!(!plan.probe.hardware_decode_active);
+        assert!(!plan.probe.zero_copy_active);
+        assert_eq!(
+            plan.probe.decoder_adapter_available,
+            plan.ffmpeg_codec_config.hw_pixel_format
+                == Some(crate::decoder::HwAccelPixelFormat::D3D11)
+        );
     }
 
     #[test]
@@ -3830,7 +4181,7 @@ mod tests {
     }
 
     #[test]
-    fn hardware_decode_plan_does_not_attempt_cpu_transfer_for_required_gpu_residency() {
+    fn hardware_decode_plan_configures_required_gpu_without_cpu_transfer_fallback() {
         let plan = PreviewHardwareDecodePlan::resolve(
             PreviewHardwareDecodeRequest::RequireGpuResident,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -3842,12 +4193,13 @@ mod tests {
             plan.request,
             PreviewHardwareDecodeRequest::RequireGpuResident
         );
-        assert!(!plan.should_attempt_hardware_cpu_transfer(PreviewDecodeAccessMode::PlaybackCursor));
-        assert!(!plan.ffmpeg_device_context.device_create_attempted);
-        assert_eq!(
-            plan.ffmpeg_device_context.reason,
-            "hardware device context creation was not required for this preview plan"
-        );
+        assert!(!plan.allows_cpu_transfer_fallback());
+        if plan.ffmpeg_codec_config.ffmpeg_codec_config_available {
+            assert_eq!(
+                plan.ffmpeg_device_context.device_create_attempted,
+                plan.ffmpeg_device_context.ffmpeg_device_type_available
+            );
+        }
     }
 
     #[test]
@@ -4395,8 +4747,8 @@ mod tests {
     #[test]
     fn rgba_frame_diagnostics_record_hw_accel_probe_fail_closed() {
         let probe = HwAccelBackend::probe();
-        let frame = RgbaFrame::new(1, 1, vec![0; 4], PreviewDecodePath::InProcessFfmpegCpuRgba)
-            .with_hw_accel_probe(&probe);
+        let mut frame = RgbaFrame::new(1, 1, vec![0; 4], PreviewDecodePath::InProcessFfmpegCpuRgba);
+        frame.diagnostics = frame.diagnostics.with_hw_accel_probe(&probe);
 
         assert_eq!(frame.diagnostics.hw_accel_backend, HwAccelBackend::None);
         assert!(!frame.diagnostics.hardware_decode_active);
@@ -4801,6 +5153,141 @@ mod tests {
                 pixel_format: ffmpeg::util::format::pixel::Pixel::D3D11VA_VLD,
             }
         );
+    }
+
+    #[test]
+    fn native_surface_format_requires_explicit_nv12_or_p010_layout() {
+        assert_eq!(
+            decoded_native_surface_format_from_software_format(
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12,
+            )
+            .expect("NV12 hardware layout must be supported"),
+            DecodedVideoSurfaceFormat::Nv12
+        );
+        assert_eq!(
+            decoded_native_surface_format_from_software_format(
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE,
+            )
+            .expect("P010 hardware layout must be supported"),
+            DecodedVideoSurfaceFormat::P010
+        );
+        assert!(matches!(
+            decoded_native_surface_format_from_software_format(
+                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P,
+            ),
+            Err(
+                super::PreviewNativeFrameMaterializationError::UnsupportedHardwareSurfaceFormat {
+                    software_format: ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P,
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
+        let decoded =
+            ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 2, 2);
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+        );
+        plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
+        let mut scaler = None;
+        let mut scaler_source_format = None;
+        let payload = materialize_decoded_frame(
+            &decoded,
+            &mut plan,
+            &mut scaler,
+            &mut scaler_source_format,
+            2,
+            2,
+            Path::new("synthetic-rgba"),
+        )
+        .expect("GPU preference may fall back to CPU RGBA with diagnostics");
+
+        assert!(matches!(payload, PreviewDecodedFramePayload::CpuRgba(_)));
+        assert_eq!(
+            plan.native_decode_fallback,
+            Some(PreviewNativeDecodeFallback::SoftwareFrame)
+        );
+    }
+
+    #[test]
+    fn gpu_required_software_frame_fails_closed() {
+        let decoded =
+            ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 2, 2);
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+        );
+        plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
+        let error = materialize_decoded_frame(
+            &decoded,
+            &mut plan,
+            &mut None,
+            &mut None,
+            2,
+            2,
+            Path::new("synthetic-rgba"),
+        )
+        .expect_err("required GPU residency must not return a software frame");
+
+        assert!(error.to_string().contains("required GPU-resident decode returned software"));
+    }
+
+    #[test]
+    fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_cache() {
+        clear_global_preview_frame_cache();
+        let decoded = synthetic_d3d11_frame(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12);
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+        );
+        plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
+        let payload = materialize_decoded_frame(
+            &decoded,
+            &mut plan,
+            &mut None,
+            &mut None,
+            960,
+            540,
+            Path::new("synthetic-d3d11"),
+        )
+        .expect("explicit D3D11 NV12 frame must materialize as a native payload");
+
+        let frame = match &payload {
+            PreviewDecodedFramePayload::NativeGpu(frame) => frame,
+            PreviewDecodedFramePayload::CpuRgba(_) => {
+                panic!("explicit D3D11 NV12 frame must not transfer to CPU")
+            }
+        };
+        assert_eq!(frame.width, 1920);
+        assert_eq!(frame.height, 1080);
+        assert_eq!(frame.surface_format, DecodedVideoSurfaceFormat::Nv12);
+        assert_eq!(
+            frame.diagnostics.path,
+            PreviewDecodePath::InProcessFfmpegNative
+        );
+        assert_eq!(
+            plan.decision,
+            PreviewHardwareDecodeDecision::GpuResidentNative
+        );
+        assert_eq!(plan.native_decode_fallback, None);
+
+        let path = PathBuf::from("synthetic-d3d11");
+        let fingerprint = PreviewFileFingerprint {
+            len: None,
+            modified_secs: None,
+            modified_nanos: None,
+        };
+        payload.cache_cpu_rgba(&path, fingerprint, 960, 540, 42);
+        assert!(preview_cache_get(&path, fingerprint, 960, 540, 42, 1).is_none());
     }
 
     #[test]
