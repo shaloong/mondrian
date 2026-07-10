@@ -1723,6 +1723,7 @@ fn preview_external_access_mode_media_info(
             height: 0,
             frame_rate: Rational::FPS_30,
             pixel_format,
+            color_range: mondrian_media::DecodedVideoRange::Unknown,
             detected_color_space: None,
             color_interpretation: DetectedColorInterpretation {
                 color_space: None,

@@ -3163,6 +3163,7 @@ mod tests {
         let warnings = warning.into_iter().collect::<Vec<_>>();
         mondrian_media::VideoColorDiagnostic {
             detected_color_space: None,
+            color_range: mondrian_media::DecodedVideoRange::Unknown,
             interpretation: mondrian_media::DetectedColorInterpretation {
                 color_space: None,
                 confidence: mondrian_media::VideoColorInterpretationConfidence::None,
@@ -4416,6 +4417,7 @@ mod tests {
             asset_id,
             mondrian_media::VideoColorDiagnostic {
                 detected_color_space: None,
+                color_range: mondrian_media::DecodedVideoRange::Unknown,
                 interpretation: mondrian_media::DetectedColorInterpretation {
                     color_space: None,
                     confidence: mondrian_media::VideoColorInterpretationConfidence::None,

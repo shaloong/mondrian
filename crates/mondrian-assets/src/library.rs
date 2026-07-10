@@ -840,6 +840,7 @@ mod tests {
                 height: 1080,
                 frame_rate: mondrian_core::types::Rational::FPS_30,
                 pixel_format: PixelFormat::Yuv420p,
+                color_range: mondrian_media::DecodedVideoRange::Unknown,
                 detected_color_space: None,
                 color_interpretation: DetectedColorInterpretation {
                     color_space: None,

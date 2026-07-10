@@ -4,10 +4,10 @@
 //! flush 解码器后向前解码到目标 PTS，保证返回精确帧。
 
 use crate::decoder::{
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
-    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
-    HwAccelCodecConfigProbe, HwAccelDeviceContext, HwAccelDeviceContextProbe, HwAccelPixelFormat,
-    HwAccelProbe,
+    decoded_video_range_from_ffmpeg, DecodedFrameResidency, DecodedGpuFrameHandleKind,
+    DecodedVideoChromaLocation, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    HwAccelBackend, HwAccelCodecConfigProbe, HwAccelDeviceContext, HwAccelDeviceContextProbe,
+    HwAccelPixelFormat, HwAccelProbe,
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
@@ -3566,14 +3566,6 @@ fn decoded_video_sampling_from_frame(
         range: decoded_video_range_from_ffmpeg(frame.color_range()),
         chroma_location: decoded_chroma_location_from_ffmpeg(frame.chroma_location()),
         bit_depth: surface_format.fixed_bit_depth().unwrap_or(0),
-    }
-}
-
-fn decoded_video_range_from_ffmpeg(range: ffmpeg::util::color::Range) -> DecodedVideoRange {
-    match range {
-        ffmpeg::util::color::Range::MPEG => DecodedVideoRange::Limited,
-        ffmpeg::util::color::Range::JPEG => DecodedVideoRange::Full,
-        ffmpeg::util::color::Range::Unspecified => DecodedVideoRange::Unknown,
     }
 }
 

@@ -3,6 +3,7 @@
 //! 使用 FFmpeg `avformat_open_input` 读取媒体文件的流信息，
 //! 不进行解码，仅提取元数据。
 
+use crate::decoder::{decoded_video_range_from_ffmpeg, DecodedVideoRange};
 use ffmpeg_next as ffmpeg;
 use mondrian_core::icc::parse_icc_display_profile;
 use mondrian_core::types::*;
@@ -320,6 +321,9 @@ pub struct VideoHdrMetadataSummary {
 pub struct VideoColorDiagnostic {
     /// Explicitly detected Mondrian color space, if one was identified.
     pub detected_color_space: Option<ColorSpace>,
+    /// Encoded quantization range reported by FFmpeg.
+    #[serde(default)]
+    pub color_range: DecodedVideoRange,
     /// Structured interpretation of automatic color metadata.
     pub interpretation: DetectedColorInterpretation,
     /// Source state for the color metadata decision.
@@ -480,6 +484,7 @@ impl VideoColorDiagnostic {
     pub fn from_stream(stream: &VideoStreamInfo) -> Self {
         Self {
             detected_color_space: stream.detected_color_space,
+            color_range: stream.color_range,
             interpretation: stream.color_interpretation.clone(),
             source: stream.color_space_source,
             method: stream.color_detection_method,
@@ -529,10 +534,11 @@ impl VideoColorDiagnostic {
                 .join("|")
         };
         format!(
-            "source={:?},method={:?},detected={},confidence={:?},overridable={},warnings={},metadata={},hints={},hdr={}",
+            "source={:?},method={:?},detected={},range={:?},confidence={:?},overridable={},warnings={},metadata={},hints={},hdr={}",
             self.source,
             self.method,
             detected,
+            self.color_range,
             self.interpretation.confidence,
             self.interpretation.user_overridable,
             warnings,
@@ -816,6 +822,9 @@ pub struct VideoStreamInfo {
     pub height: u32,
     pub frame_rate: Rational,
     pub pixel_format: PixelFormat,
+    /// Encoded quantization range reported by FFmpeg for the primary decoder.
+    #[serde(default)]
+    pub color_range: DecodedVideoRange,
     /// Color space explicitly detected from container/codec metadata, if present.
     pub detected_color_space: Option<ColorSpace>,
     /// Structured automatic color interpretation with evidence and warnings.
@@ -954,6 +963,8 @@ impl MediaInfo {
                             width = decoder.width();
                             height = decoder.height();
                             pixel_format = map_pixel_format(decoder.format());
+                            let color_range =
+                                decoded_video_range_from_ffmpeg(decoder.color_range());
                             bit_depth = pixel_format.bit_depth();
                             has_alpha = pixel_format.has_alpha();
                             let raw_color_metadata = capture_color_metadata(
@@ -976,6 +987,7 @@ impl MediaInfo {
                                 height,
                                 frame_rate: map_rational(stream.avg_frame_rate()),
                                 pixel_format,
+                                color_range,
                                 detected_color_space,
                                 color_interpretation,
                                 color_space_source,
@@ -1010,6 +1022,7 @@ impl MediaInfo {
                         height,
                         frame_rate,
                         pixel_format,
+                        color_range: DecodedVideoRange::Unknown,
                         detected_color_space: None,
                         color_interpretation: DetectedColorInterpretation::decoder_unavailable(),
                         color_space_source: VideoColorSpaceSource::DecoderUnavailable,
@@ -1879,6 +1892,7 @@ mod tests {
             detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint), None);
         let diagnostic = VideoColorDiagnostic {
             detected_color_space: interpretation.color_space,
+            color_range: DecodedVideoRange::Limited,
             interpretation,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::MetadataHint,
@@ -1919,6 +1933,7 @@ mod tests {
         let interpretation = detect_color_space_from_metadata(&metadata, &hints, None);
         let diagnostic = VideoColorDiagnostic {
             detected_color_space: interpretation.color_space,
+            color_range: DecodedVideoRange::Limited,
             interpretation,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::MetadataHint,
@@ -1981,6 +1996,7 @@ mod tests {
         );
         let missing_diagnostic = VideoColorDiagnostic {
             detected_color_space: missing_interpretation.color_space,
+            color_range: DecodedVideoRange::Unknown,
             interpretation: missing_interpretation,
             source: VideoColorSpaceSource::MissingMetadata,
             method: VideoColorDetectionMethod::MissingMetadata,
@@ -2003,6 +2019,7 @@ mod tests {
         let unavailable_interpretation = DetectedColorInterpretation::decoder_unavailable();
         let unavailable_diagnostic = VideoColorDiagnostic {
             detected_color_space: unavailable_interpretation.color_space,
+            color_range: DecodedVideoRange::Unknown,
             interpretation: unavailable_interpretation,
             source: VideoColorSpaceSource::DecoderUnavailable,
             method: VideoColorDetectionMethod::DecoderUnavailable,
@@ -2045,6 +2062,7 @@ mod tests {
         let metadata_interpretation = detect_color_space_from_metadata(&metadata, &hints, None);
         let metadata_diagnostic = VideoColorDiagnostic {
             detected_color_space: metadata_interpretation.color_space,
+            color_range: DecodedVideoRange::Limited,
             interpretation: metadata_interpretation,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::MetadataHint,
@@ -2066,6 +2084,7 @@ mod tests {
         let unavailable_interpretation = DetectedColorInterpretation::decoder_unavailable();
         let unavailable_diagnostic = VideoColorDiagnostic {
             detected_color_space: unavailable_interpretation.color_space,
+            color_range: DecodedVideoRange::Unknown,
             interpretation: unavailable_interpretation,
             source: VideoColorSpaceSource::DecoderUnavailable,
             method: VideoColorDetectionMethod::DecoderUnavailable,
@@ -2248,6 +2267,7 @@ mod tests {
         );
         let diagnostic = VideoColorDiagnostic {
             detected_color_space: Some(ColorSpace::Rec2100Pq),
+            color_range: DecodedVideoRange::Limited,
             interpretation: detect_color_space_from_metadata(&metadata, &[], None),
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::CicpTags,
@@ -2272,6 +2292,7 @@ mod tests {
         assert!(summary.contains("source=Metadata"));
         assert!(summary.contains("method=CicpTags"));
         assert!(summary.contains("detected=Rec2100Pq"));
+        assert!(summary.contains("range=Limited"));
         assert!(summary.contains("confidence=High"));
         assert!(summary.contains("overridable=true"));
         assert!(summary.contains("primaries=bt2020"));

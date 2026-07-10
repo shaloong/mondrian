@@ -377,6 +377,12 @@ specified/unspecified state. Diagnostics, future UI warnings, and camera-log
 identification should consume this raw metadata instead of parsing free-form
 FFmpeg strings or inferring whether metadata existed from a resolved
 `ColorSpace`.
+`VideoStreamInfo.color_range` separately stores the decoder's encoded
+quantization range as `Limited`, `Full`, or explicit `Unknown` and propagates
+into `VideoColorDiagnostic`. Range is a sampled signal fact, not a color-space
+fallback. Proxy generation consumes the persisted stream fact, while native
+YUV decode consumes the equivalent per-frame sampling fact; neither derives
+range from primaries, transfer, matrix, codec, or pixel format.
 `VideoStreamInfo.color_interpretation` is the structured explanation layer for
 automatic detection. It carries the interpreted color space, confidence,
 source/method, evidence, warnings, and whether the result is user-overridable.

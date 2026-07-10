@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use mondrian_assets::AssetRecord;
 use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_media::{DecodedVideoRange, ProxyColorContract};
+use mondrian_media::ProxyColorContract;
 use mondrian_timeline::sequence::ColorContext;
 
 use super::AppState;
@@ -35,7 +35,7 @@ pub(crate) fn resolve_asset_proxy_color_contract(
     Ok(ProxyColorContract::new(
         source_color_space,
         video.bit_depth,
-        DecodedVideoRange::Unknown,
+        video.color_range,
     ))
 }
 

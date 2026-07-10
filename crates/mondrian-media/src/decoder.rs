@@ -80,6 +80,16 @@ pub enum DecodedVideoRange {
     Full,
 }
 
+pub(crate) fn decoded_video_range_from_ffmpeg(
+    range: ffmpeg_next::util::color::Range,
+) -> DecodedVideoRange {
+    match range {
+        ffmpeg_next::util::color::Range::MPEG => DecodedVideoRange::Limited,
+        ffmpeg_next::util::color::Range::JPEG => DecodedVideoRange::Full,
+        ffmpeg_next::util::color::Range::Unspecified => DecodedVideoRange::Unknown,
+    }
+}
+
 /// Chroma sample location reported by the decoder for a video frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum DecodedVideoChromaLocation {

@@ -7584,6 +7584,7 @@ impl AppUiPreviewService {
                     .map(VideoColorDiagnostic::from_stream)
                     .unwrap_or_else(|| VideoColorDiagnostic {
                         detected_color_space: None,
+                        color_range: mondrian_media::DecodedVideoRange::Unknown,
                         interpretation: mondrian_media::DetectedColorInterpretation {
                             color_space: None,
                             confidence: mondrian_media::VideoColorInterpretationConfidence::None,
@@ -9340,6 +9341,7 @@ mod tests {
                 height: 2160,
                 frame_rate: Rational::new(25, 1),
                 pixel_format: PixelFormat::Yuv420p10le,
+                color_range: DecodedVideoRange::Limited,
                 detected_color_space: Some(ColorSpace::Rec709),
                 color_interpretation: DetectedColorInterpretation {
                     color_space: Some(ColorSpace::Rec709),
@@ -14103,6 +14105,7 @@ mod tests {
             direct_id,
             mondrian_media::VideoColorDiagnostic {
                 detected_color_space: None,
+                color_range: DecodedVideoRange::Unknown,
                 interpretation: mondrian_media::DetectedColorInterpretation {
                     color_space: None,
                     confidence: mondrian_media::VideoColorInterpretationConfidence::None,
@@ -14125,6 +14128,7 @@ mod tests {
             nested_asset_id,
             mondrian_media::VideoColorDiagnostic {
                 detected_color_space: None,
+                color_range: DecodedVideoRange::Unknown,
                 interpretation: mondrian_media::DetectedColorInterpretation {
                     color_space: None,
                     confidence: mondrian_media::VideoColorInterpretationConfidence::None,
@@ -14149,6 +14153,7 @@ mod tests {
             unused_id,
             mondrian_media::VideoColorDiagnostic {
                 detected_color_space: Some(ColorSpace::Rec709),
+                color_range: DecodedVideoRange::Limited,
                 interpretation: mondrian_media::DetectedColorInterpretation {
                     color_space: Some(ColorSpace::Rec709),
                     confidence: mondrian_media::VideoColorInterpretationConfidence::Low,

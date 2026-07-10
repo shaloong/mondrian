@@ -667,6 +667,10 @@ spaces emit canonical FFmpeg primaries/transfer/matrix tags. Camera-log spaces
 do not receive guessed delivery tags: their sidecar contract remains
 authoritative. Unknown source range remains an explicit `Unknown` contract
 with a diagnostic; FFmpeg auto behavior is not reported as a known range.
+Ingest persists decoder `color_range()` on `VideoStreamInfo`, so ordinary
+probed assets propagate `Limited` or `Full` into the proxy contract. `Unknown`
+is reserved for genuinely unspecified metadata, decoder-unavailable records,
+and older serialized asset records loaded through the explicit serde default.
 Generation must also use `ProxyStatus`: a `Fresh` proxy is reused, while a
 `Stale` proxy is regenerated in the background. Failed regeneration must not
 delete the previous proxy file, because preview can keep falling back to source
