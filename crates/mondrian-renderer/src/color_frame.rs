@@ -26,11 +26,13 @@ pub enum ColorFrameDomain {
 pub enum ColorFrameEncoding {
     /// Linear-light floating-point RGBA.
     LinearFloat,
-    /// Non-linear source-encoded RGBA stored in a floating-point texture.
+    /// Non-linear color-space-encoded RGBA stored as floating-point samples.
     ///
     /// Native YCbCr decoding produces this representation before the OCIO
-    /// input transform. It preserves source precision without falsely
-    /// labeling encoded signal values as linear light.
+    /// input transform. Display and export transforms also produce it when
+    /// their destination transfer function is retained at float precision.
+    /// It preserves signal precision without falsely labeling encoded values
+    /// as linear light.
     EncodedFloat,
     /// Non-linear, destination-encoded RGBA bytes.
     EncodedRgba8,
@@ -1359,7 +1361,7 @@ impl GpuColorFrameReadbackPlan {
     }
 
     /// Unpack a padded mapped readback buffer from an `Rgba16Float` texture
-    /// into linear f32 RGBA pixels.
+    /// into f32 RGBA samples while preserving the descriptor's encoding.
     ///
     /// Returns the pixel data as `Vec<f32>` (4 floats per pixel, little-endian
     /// half-float unpacked to f32). The caller can use this for higher-bit-depth
@@ -1526,6 +1528,47 @@ impl CpuColorFrame {
     /// Encode this frame to RGBA8 for a specific output color space.
     pub(crate) fn to_output_rgba8(&self, output: ColorSpace, tone_map: bool) -> Vec<u8> {
         self.frame.to_rgba8(output, tone_map)
+    }
+}
+
+/// CPU-resident color-space-encoded floating-point frame at a graph boundary.
+///
+/// This type is intentionally distinct from [`CpuColorFrame`]: its RGB samples
+/// have already crossed an input, display, or export transfer function and
+/// therefore must not participate in linear-light compositing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CpuEncodedFloatColorFrame {
+    descriptor: ColorFrameDescriptor,
+    frame: Arc<RgbaF32Frame>,
+}
+
+impl CpuEncodedFloatColorFrame {
+    /// Wrap encoded float pixels at an explicit source/display/export boundary.
+    pub fn new(frame: RgbaF32Frame, domain: ColorFrameDomain) -> Self {
+        let descriptor = ColorFrameDescriptor {
+            width: frame.width,
+            height: frame.height,
+            color_space: frame.color_space,
+            domain,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Cpu,
+        };
+        Self { descriptor, frame: Arc::new(frame) }
+    }
+
+    /// Return the frame metadata contract.
+    pub fn descriptor(&self) -> ColorFrameDescriptor {
+        self.descriptor
+    }
+
+    /// Borrow the underlying encoded floating-point samples.
+    pub fn rgba_f32(&self) -> &RgbaF32Frame {
+        self.frame.as_ref()
+    }
+
+    /// Consume this wrapper and return the encoded floating-point samples.
+    pub fn into_rgba_f32(self) -> RgbaF32Frame {
+        Arc::try_unwrap(self.frame).unwrap_or_else(|frame| frame.as_ref().clone())
     }
 }
 

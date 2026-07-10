@@ -46,9 +46,15 @@ Sharma/Wu/Dalal 2005 reference pairs stored in the versioned
 corpus records its source and citation, and intentional formula changes must
 continue to satisfy its `1e-4` published-value tolerance.
 
-The D50 CIELAB API is restricted to SDR display validation. It is not a valid
-quality metric for scene-linear working values or absolute-luminance PQ/HLG
-output; those domains require their own explicitly typed accuracy contracts.
+The D50 CIELAB API is restricted to SDR display validation. Scene-linear
+working values use numeric channel/RMS/distribution budgets instead. HDR
+display validation follows ITU-R BT.2124: normalized full-range BT.2100 PQ is
+decoded to absolute-luminance BT.2100 RGB in cd/m2, converted through ICtCp to
+ITP, and compared with Delta E ITP. `Bt2100DisplayLinearRgb`, `CieXyzD65Nits`,
+and `ItpDisplay` keep luminance and white-point semantics explicit. The Annex 4
+reference calculation and PQ absolute-luminance endpoints are regression tests.
+Out-of-gamut negative display-linear values are retained through ITP conversion
+rather than silently clamped.
 
 ## Engines
 
@@ -142,12 +148,13 @@ must provide the same input color/range contract, and media must fail closed
 rather than accept an implicit swscale Rec.601/limited-range assumption.
 
 The typed frame graph distinguishes `EncodedFloat` from `LinearFloat`.
-`EncodedFloat` is the precision-preserving source-domain result of native
-NV12/P010 sampling and may contain values outside 0..1; it must still pass
-through the resolved OCIO input processor. `LinearFloat` is reserved for the
-working-space result after that processor. This distinction prevents a native
-shader or platform bridge from implicitly declaring nonlinear PQ/HLG/BT.709
-signal values to be scene-linear pixels.
+`EncodedFloat` is used for precision-preserving nonlinear samples at source,
+display, and export boundaries. Native NV12/P010 sampling produces it before
+the resolved OCIO input processor; float PQ/HLG/display/export processors
+produce it after the final output boundary. `LinearFloat` is reserved for
+linear-light working-space pixels and may participate in compositing.
+`CpuEncodedFloatColorFrame` and `CpuColorFrame` are separate types so an encoded
+output cannot accidentally re-enter linear effects or blending.
 
 Renderer stages must carry typed color-frame metadata. `CpuColorFrame` is the
 CPU-resident linear working-frame contract; future GPU frames must expose the
@@ -219,6 +226,11 @@ working passes decode OCIO output into `LinearFloat`; working -> output passes
 encode sampled linear values before invoking the OCIO program. The wrapper color
 contract participates in the wrapper link/source/render-pipeline hashes, so
 pipelines with different color-domain semantics cannot share the same shader.
+Output texture format and descriptor encoding are one contract: `Rgba8Unorm`
+requires `EncodedRgba8`, while `Rgba16Float`/`Rgba32Float` output targets require
+`EncodedFloat`. Resource planning rejects contradictory pairs. CPU float output
+encodes linear working samples into the OCIO processor's declared source space,
+matching the GPU wrapper before the same processor is executed.
 Display/view output boundaries carry an explicit `RenderOcioDisplayView` when
 the caller wants OCIO presentation semantics instead of a color-space delivery
 transform. CPU display/view boundaries execute through the OCIO display
@@ -238,6 +250,10 @@ working -> output conversion logic locally. CPU reference execution uses
 color/stage diagnostics in the same boundary result. App/export crates must not
 instantiate `RenderOutputColorBoundaryExecutor::cpu_only()` directly. Native
 GPU execution uses `RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`.
+Real-wgpu conformance tests read back `Rgba16Float` PQ display/view output and
+compare it to the CPU OCIO path with distribution-aware Delta E ITP and separate
+alpha budgets. This guards processor, wrapper, texture-format, readback, and
+half-float precision as one output contract.
 `RenderOutputColorBoundaryPlanner` owns CPU-only versus PreferGpu stage
 selection for that boundary, and PreferGpu planning reports native blockers
 instead of falling back to CPU stages. The resulting

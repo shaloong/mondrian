@@ -822,7 +822,7 @@ impl RenderGpuOutputBoundaryRuntime {
         } = self;
         let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
         let plan = planner
-            .plan(frame, boundary)
+            .plan_descriptor_for_texture(frame.descriptor(), boundary, output_texture_format)
             .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
         let resources = plan
             .gpu_resource_plan(frame_ids, frame, output_texture_format)
@@ -876,7 +876,7 @@ impl RenderGpuOutputBoundaryRuntime {
         } = self;
         let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
         let plan = planner
-            .plan_descriptor(input.descriptor(), boundary)
+            .plan_descriptor_for_texture(input.descriptor(), boundary, output_texture_format)
             .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
         let resources = RenderGpuOutputStageResourcePlan::from_gpu_working_frame(
             frame_ids,
@@ -1587,6 +1587,18 @@ impl<'a> RenderOutputColorBoundaryPlanner<'a> {
         self.plan_descriptor(frame.descriptor(), boundary)
     }
 
+    /// Plan a final output boundary that retains encoded float samples.
+    pub fn plan_float(
+        &mut self,
+        frame: &CpuColorFrame,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
+        let stage_plan = self
+            .stage_planner
+            .plan_output_transform_float(frame.descriptor(), &boundary.transform())?;
+        Ok(RenderOutputColorBoundaryStagePlan { boundary: boundary.clone(), stage_plan })
+    }
+
     /// Plan the final output boundary for an already-described working frame.
     ///
     /// This is used by GPU-resident upstream stages that have a
@@ -1598,6 +1610,25 @@ impl<'a> RenderOutputColorBoundaryPlanner<'a> {
     ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
         let stage_plan =
             self.stage_planner.plan_output_transform(descriptor, &boundary.transform())?;
+        Ok(RenderOutputColorBoundaryStagePlan { boundary: boundary.clone(), stage_plan })
+    }
+
+    /// Plan a boundary whose descriptor encoding matches its concrete GPU target.
+    pub fn plan_descriptor_for_texture(
+        &mut self,
+        descriptor: ColorFrameDescriptor,
+        boundary: &RenderOutputColorBoundary,
+        output_texture_format: GpuColorFrameTextureFormat,
+    ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
+        let transform = boundary.transform();
+        let stage_plan = match output_texture_format {
+            GpuColorFrameTextureFormat::Rgba8Unorm => {
+                self.stage_planner.plan_output_transform(descriptor, &transform)?
+            }
+            GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
+                self.stage_planner.plan_output_transform_float(descriptor, &transform)?
+            }
+        };
         Ok(RenderOutputColorBoundaryStagePlan { boundary: boundary.clone(), stage_plan })
     }
 }
@@ -1875,6 +1906,7 @@ impl RenderGpuOutputStageResourcePlan {
                 },
             );
         }
+        validate_output_texture_encoding(planned.gpu_output.encoding, output_texture_format)?;
         let input_upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
             ids.allocate(),
             frame,
@@ -1898,10 +1930,7 @@ impl RenderGpuOutputStageResourcePlan {
         )
         .map_err(RenderGpuOutputStageResourcePlanError::OutputHandle)?;
         let readback = if planned.readback_output.is_some() {
-            Some(
-                GpuColorFrameReadbackPlan::encoded_rgba8(output.clone())
-                    .map_err(RenderGpuOutputStageResourcePlanError::OutputReadback)?,
-            )
+            Some(output_readback_plan(output.clone())?)
         } else {
             None
         };
@@ -1950,6 +1979,7 @@ impl RenderGpuOutputStageResourcePlan {
                 },
             );
         }
+        validate_output_texture_encoding(planned.gpu_output.encoding, output_texture_format)?;
         let output = GpuColorFrameHandle::new(
             ids.allocate(),
             planned.gpu_output,
@@ -1958,10 +1988,7 @@ impl RenderGpuOutputStageResourcePlan {
         )
         .map_err(RenderGpuOutputStageResourcePlanError::OutputHandle)?;
         let readback = if planned.readback_output.is_some() {
-            Some(
-                GpuColorFrameReadbackPlan::encoded_rgba8(output.clone())
-                    .map_err(RenderGpuOutputStageResourcePlanError::OutputReadback)?,
-            )
+            Some(output_readback_plan(output.clone())?)
         } else {
             None
         };
@@ -2126,6 +2153,47 @@ impl RenderGpuOutputStageResourcePlan {
             None => Ok(None),
         }
     }
+}
+
+fn validate_output_texture_encoding(
+    encoding: ColorFrameEncoding,
+    texture_format: GpuColorFrameTextureFormat,
+) -> Result<(), RenderGpuOutputStageResourcePlanError> {
+    let matches = match texture_format {
+        GpuColorFrameTextureFormat::Rgba8Unorm => encoding == ColorFrameEncoding::EncodedRgba8,
+        GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
+            encoding == ColorFrameEncoding::EncodedFloat
+        }
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(
+            RenderGpuOutputStageResourcePlanError::OutputTextureEncodingMismatch {
+                encoding,
+                texture_format,
+            },
+        )
+    }
+}
+
+fn output_readback_plan(
+    output: GpuColorFrameHandle,
+) -> Result<GpuColorFrameReadbackPlan, RenderGpuOutputStageResourcePlanError> {
+    match output.texture_format() {
+        GpuColorFrameTextureFormat::Rgba8Unorm => GpuColorFrameReadbackPlan::encoded_rgba8(output),
+        GpuColorFrameTextureFormat::Rgba16Float => {
+            GpuColorFrameReadbackPlan::encoded_rgba16float(output)
+        }
+        GpuColorFrameTextureFormat::Rgba32Float => {
+            return Err(RenderGpuOutputStageResourcePlanError::OutputReadback(
+                GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                    texture_format: GpuColorFrameTextureFormat::Rgba32Float,
+                },
+            ));
+        }
+    }
+    .map_err(RenderGpuOutputStageResourcePlanError::OutputReadback)
 }
 
 impl RenderGpuInputStageResourcePlan {
@@ -2432,6 +2500,13 @@ pub enum RenderGpuOutputStageResourcePlanError {
     OutputHandle(crate::GpuColorFrameHandleError),
     /// The output GPU frame cannot be read back into the requested CPU boundary.
     OutputReadback(GpuColorFrameReadbackError),
+    /// The planned encoded sample representation does not match the target texture.
+    OutputTextureEncodingMismatch {
+        /// Encoding declared by the stage plan.
+        encoding: ColorFrameEncoding,
+        /// Concrete target texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
 }
 
 /// Error returned when GPU input stage resources cannot be planned.
@@ -2910,11 +2985,9 @@ impl CpuRenderColorStageExecutor {
     /// Execute a CPU working-space -> display/export stage plan, returning
     /// float output without u8 quantization.
     ///
-    /// The stage plan may declare an `EncodedRgba8` output descriptor (from the
-    /// CPU-only planner), but this executor intentionally produces a
-    /// `LinearFloat` result. Output descriptor validation is relaxed to the
-    /// color space and domain contract because the final pipe/presentation
-    /// encoding happens after this renderer-owned color transform.
+    /// The stage plan must explicitly declare an `EncodedFloat` output. This
+    /// keeps display/export transfer semantics visible to downstream cache,
+    /// readback, and delivery code.
     pub fn output_transform_float(
         frame: &CpuColorFrame,
         plan: &RenderColorStagePlan,
@@ -2934,13 +3007,8 @@ impl CpuRenderColorStageExecutor {
         };
         validate_descriptor(*input, frame.descriptor())?;
         let result = CpuColorTransformExecutor::transform_float(frame, transform)?;
-        let actual = result.frame.descriptor();
-        if actual.color_space != output.color_space || actual.domain != output.domain {
-            return Err(RenderColorTransformError::StageDescriptorMismatch {
-                expected: *output,
-                actual,
-            });
-        }
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
         Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
     }
 
@@ -3032,7 +3100,7 @@ pub fn execute_cpu_output_boundary_rgba8(
 #[derive(Debug)]
 pub struct RenderOutputColorBoundaryFloat {
     /// Float display/export frame with output transform applied.
-    pub frame: CpuColorFrame,
+    pub frame: crate::CpuEncodedFloatColorFrame,
     /// Color transform diagnostics emitted by the boundary executor.
     pub color_diagnostics: crate::RenderColorTransformDiagnostics,
     /// Stage diagnostics for the executed boundary plan.
@@ -3059,7 +3127,7 @@ pub fn execute_cpu_output_boundary_float(
     boundary: &RenderOutputColorBoundary,
 ) -> Result<RenderOutputColorBoundaryFloat, RenderColorTransformError> {
     let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
-    let plan = planner.plan(frame, boundary)?;
+    let plan = planner.plan_float(frame, boundary)?;
     let output = CpuRenderColorStageExecutor::output_transform_float(frame, &plan.stage_plan)?;
     let output_descriptor = output.result.frame.descriptor();
     Ok(RenderOutputColorBoundaryFloat {
@@ -3130,6 +3198,34 @@ impl<'a> RenderColorStagePlanner<'a> {
         }
     }
 
+    /// Plan timeline working-space -> display/export processing while
+    /// preserving the destination encoding in floating-point samples.
+    pub fn plan_output_transform_float(
+        &mut self,
+        input: ColorFrameDescriptor,
+        transform: &RenderColorTransform,
+    ) -> Result<RenderColorStagePlan, RenderColorTransformError> {
+        if input.domain != ColorFrameDomain::Working {
+            return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
+        }
+
+        match self.mode {
+            RenderColorStageMode::CpuOnly => Ok(self.cpu_output_stage_with_encoding(
+                input,
+                transform,
+                ColorFrameEncoding::EncodedFloat,
+            )),
+            RenderColorStageMode::PreferGpu => {
+                let plan = self.gpu_planner()?.plan_output_transform_with_encoding(
+                    input,
+                    transform,
+                    ColorFrameEncoding::EncodedFloat,
+                )?;
+                Ok(Self::gpu_stage_plan(plan))
+            }
+        }
+    }
+
     fn gpu_planner(
         &mut self,
     ) -> Result<RenderColorTransformGpuPlanner<'_>, RenderColorTransformError> {
@@ -3168,12 +3264,21 @@ impl<'a> RenderColorStagePlanner<'a> {
         input: ColorFrameDescriptor,
         transform: &RenderColorTransform,
     ) -> RenderColorStagePlan {
+        self.cpu_output_stage_with_encoding(input, transform, ColorFrameEncoding::EncodedRgba8)
+    }
+
+    fn cpu_output_stage_with_encoding(
+        &self,
+        input: ColorFrameDescriptor,
+        transform: &RenderColorTransform,
+        encoding: ColorFrameEncoding,
+    ) -> RenderColorStagePlan {
         let output = ColorFrameDescriptor {
             width: input.width,
             height: input.height,
             color_space: transform.output_color_space,
             domain: transform.output_domain,
-            encoding: ColorFrameEncoding::EncodedRgba8,
+            encoding,
             residency: ColorFrameResidency::Cpu,
         };
         RenderColorStagePlan {
@@ -4333,6 +4438,80 @@ mod tests {
         readback_buffer.unmap();
 
         assert_srgb_display_accurate(&expected.rgba, actual.rgba());
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_pq_display_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu PQ display/view accuracy test: no GPU adapter available");
+            return;
+        };
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display_view(
+            ColorSpace::Rec2100Pq,
+            "Rec.2100-PQ - Display",
+            "ACES 2.0 - HDR 1000 nits (Rec.2020)",
+            false,
+            ColorEngine::MondrianSmart,
+        );
+        let expected = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("CPU PQ display/view boundary");
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_250);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-pq-display-view-accuracy"),
+        });
+
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba16Float,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("runtime-owned GPU PQ display/view boundary should record");
+        let readback_buffer = record.readback_buffer.expect("PQ float readback buffer");
+        assert_eq!(
+            record.materialized.output.descriptor().encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let readback_plan =
+            GpuColorFrameReadbackPlan::encoded_rgba16float(record.materialized.output)
+                .expect("PQ output should be readable as RGBA16F");
+        let mapped = map_readback_buffer(&context.device, &readback_buffer);
+        let actual_flat = readback_plan
+            .unpack_mapped_rgba16float(&mapped)
+            .expect("PQ readback should unpack");
+        readback_buffer.unmap();
+        let actual: Vec<[f32; 4]> = actual_flat
+            .chunks_exact(4)
+            .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+            .collect();
+        let report = crate::compare_pq_hdr_display_rgba(
+            &expected.frame.rgba_f32().data,
+            &actual,
+            crate::PqHdrDisplayAccuracyBudget::new(0.5, 0.2, 0.5, 0.001),
+        )
+        .expect("valid PQ display accuracy report");
+
+        assert!(
+            report.within_budget,
+            "{report:#?}\nexpected={:?}\nactual={actual:?}",
+            expected.frame.rgba_f32().data
+        );
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
     }
@@ -5529,11 +5708,10 @@ mod tests {
 
         assert!(matches!(
             err,
-            RenderGpuOutputStageResourcePlanError::OutputReadback(
-                GpuColorFrameReadbackError::UnsupportedTextureFormat {
-                    texture_format: GpuColorFrameTextureFormat::Rgba16Float
-                }
-            )
+            RenderGpuOutputStageResourcePlanError::OutputTextureEncodingMismatch {
+                encoding: ColorFrameEncoding::EncodedRgba8,
+                texture_format: GpuColorFrameTextureFormat::Rgba16Float
+            }
         ));
     }
 
@@ -5663,7 +5841,7 @@ mod tests {
             RenderColorTransformGpuOptions::default(),
         );
         planner
-            .plan_output_transform(frame.descriptor(), &transform)
+            .plan_output_transform_float(frame.descriptor(), &transform)
             .expect("GPU output stage plan")
     }
 
@@ -5749,7 +5927,7 @@ mod tests {
 
         assert_eq!(
             result.frame.descriptor().encoding,
-            crate::ColorFrameEncoding::LinearFloat
+            crate::ColorFrameEncoding::EncodedFloat
         );
         assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Export);
         assert_eq!(result.output_descriptor.domain, ColorFrameDomain::Export);
@@ -5796,7 +5974,7 @@ mod tests {
 
         assert_eq!(
             result.frame.descriptor().encoding,
-            crate::ColorFrameEncoding::LinearFloat
+            crate::ColorFrameEncoding::EncodedFloat
         );
         assert_eq!(result.color_diagnostics.pixel_count, 8);
         assert!(!result.color_diagnostics.used_rgba8_boundary);
@@ -5857,7 +6035,7 @@ mod tests {
 
         assert_eq!(
             result.frame.descriptor().encoding,
-            crate::ColorFrameEncoding::LinearFloat
+            crate::ColorFrameEncoding::EncodedFloat
         );
         assert_eq!(result.color_diagnostics.pixel_count, 8);
         assert_eq!(
@@ -5882,7 +6060,7 @@ mod tests {
 
         assert_eq!(
             result.frame.descriptor().encoding,
-            crate::ColorFrameEncoding::LinearFloat
+            crate::ColorFrameEncoding::EncodedFloat
         );
         assert!(!result.color_diagnostics.used_rgba8_boundary);
     }

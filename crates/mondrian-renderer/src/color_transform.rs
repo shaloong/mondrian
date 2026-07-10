@@ -1,10 +1,11 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    CpuEncodedColorFrame, LinearFloatSource, OcioGpuShaderCache, OcioGpuShaderError,
-    OcioGpuShaderRequest, OcioGpuWgpuExecutionPlan, OcioGpuWgpuWrapperColorContract,
+    CpuEncodedColorFrame, CpuEncodedFloatColorFrame, LinearFloatSource, OcioGpuShaderCache,
+    OcioGpuShaderError, OcioGpuShaderRequest, OcioGpuWgpuExecutionPlan,
+    OcioGpuWgpuWrapperColorContract,
 };
 use mondrian_core::{
-    convert_rgba8_in_place,
+    convert_rgba8_in_place, encode_linear_rgba_f32_in_place,
     types::{ColorEngine, ColorSpace},
     ColorPipeline, GpuLanguage, RgbaF32Frame,
 };
@@ -66,8 +67,8 @@ pub struct RenderOutputTransformResult {
 
 /// Result of a float output transform that bypasses RGBA8 quantization.
 pub struct RenderOutputTransformFloatResult {
-    /// Linear float display/export frame with output transform applied.
-    pub frame: CpuColorFrame,
+    /// Encoded float display/export frame with output transform applied.
+    pub frame: CpuEncodedFloatColorFrame,
     /// Execution diagnostics.
     pub diagnostics: RenderColorTransformDiagnostics,
 }
@@ -472,8 +473,8 @@ impl CpuColorTransformExecutor {
     }
 
     /// Apply a working -> output transform on f32 data without u8
-    /// quantization. Returns a working-space `CpuColorFrame` with the output
-    /// transform applied in float.
+    /// quantization. Returns an encoded float boundary frame with the output
+    /// transform applied.
     ///
     /// This is the precision-preserving alternative to [`Self::transform`].
     /// The caller can then use the frame for GPU upload or further processing
@@ -494,12 +495,20 @@ impl CpuColorTransformExecutor {
             height: descriptor.height,
             color_space: transform.output_color_space,
             domain: transform.output_domain,
-            encoding: ColorFrameEncoding::LinearFloat,
+            encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Cpu,
         };
 
         // Flatten borrowed typed pixels into the contiguous f32 buffer OCIO expects.
         let mut flat = flatten_rgba_f32_pixels(&frame.rgba_f32().data);
+        encode_linear_rgba_f32_in_place(&mut flat, descriptor.color_space).map_err(|reason| {
+            RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::WorkingToOutput,
+                input: descriptor,
+                output: output_descriptor,
+                reason,
+            }
+        })?;
         if let Some(display_view) = &transform.display_view {
             transform
                 .engine
@@ -536,7 +545,7 @@ impl CpuColorTransformExecutor {
         // Re-pack flat f32 into Vec<[f32; 4]>.
         let pixels: Vec<[f32; 4]> =
             flat.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
-        let out_frame = CpuColorFrame::linear(
+        let out_frame = CpuEncodedFloatColorFrame::new(
             RgbaF32Frame {
                 width: descriptor.width,
                 height: descriptor.height,
@@ -621,6 +630,16 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         input: ColorFrameDescriptor,
         transform: &RenderColorTransform,
     ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
+        self.plan_output_transform_with_encoding(input, transform, ColorFrameEncoding::EncodedRgba8)
+    }
+
+    /// Plan GPU output while explicitly retaining the destination sample encoding.
+    pub fn plan_output_transform_with_encoding(
+        &mut self,
+        input: ColorFrameDescriptor,
+        transform: &RenderColorTransform,
+        output_encoding: ColorFrameEncoding,
+    ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
         if input.domain != ColorFrameDomain::Working {
             return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
         }
@@ -630,7 +649,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             height: input.height,
             color_space: transform.output_color_space,
             domain: transform.output_domain,
-            encoding: ColorFrameEncoding::EncodedRgba8,
+            encoding: output_encoding,
             residency: self.options.output_residency,
         };
         let request = if let Some(display_view) = &transform.display_view {
@@ -1093,11 +1112,11 @@ mod tests {
         let result = CpuColorTransformExecutor::transform_float(&source, &transform)
             .expect("float output transform");
 
-        // Float output keeps the output graph domain while avoiding u8 quantization.
+        // Float output keeps the encoded output graph domain while avoiding u8 quantization.
         assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Export);
         assert_eq!(
             result.frame.descriptor().encoding,
-            ColorFrameEncoding::LinearFloat
+            ColorFrameEncoding::EncodedFloat
         );
         assert_eq!(result.diagnostics.output.domain, ColorFrameDomain::Export);
         assert_eq!(result.diagnostics.pixel_count, 4);
@@ -1191,7 +1210,7 @@ mod tests {
         assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Export);
         assert_eq!(
             result.frame.descriptor().encoding,
-            ColorFrameEncoding::LinearFloat
+            ColorFrameEncoding::EncodedFloat
         );
         assert!(!result.diagnostics.used_rgba8_boundary);
         assert_eq!(

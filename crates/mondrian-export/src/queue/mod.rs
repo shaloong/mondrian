@@ -165,6 +165,8 @@ thread_local! {
     /// Test-only flag that forces `cpu_output_boundary_float` to return
     /// `Err`, exercising the RGBA8 precision-fallback branch in real render code.
     static FORCE_FLOAT_BOUNDARY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only flag that forces export GPU output scheduling to fail before runtime access.
+    static FORCE_GPU_BOUNDARY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Guard that sets and clears `FORCE_FLOAT_BOUNDARY_FAILURE` for the duration
@@ -184,6 +186,24 @@ impl FloatBoundaryFailureGuard {
 impl Drop for FloatBoundaryFailureGuard {
     fn drop(&mut self) {
         FORCE_FLOAT_BOUNDARY_FAILURE.with(|cell| cell.set(false));
+    }
+}
+
+#[cfg(test)]
+struct GpuBoundaryFailureGuard;
+
+#[cfg(test)]
+impl GpuBoundaryFailureGuard {
+    fn activate() -> Self {
+        FORCE_GPU_BOUNDARY_FAILURE.with(|cell| cell.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for GpuBoundaryFailureGuard {
+    fn drop(&mut self) {
+        FORCE_GPU_BOUNDARY_FAILURE.with(|cell| cell.set(false));
     }
 }
 
@@ -306,6 +326,10 @@ fn execute_export_gpu_output_boundary(
     boundary: &RenderOutputColorBoundary,
     frame_contract: ExportFrameContract,
 ) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputFallbackReason> {
+    #[cfg(test)]
+    if FORCE_GPU_BOUNDARY_FAILURE.with(|cell| cell.get()) {
+        return Err(ExportGpuOutputFallbackReason::ContextUnavailable);
+    }
     let backend = export_gpu_output_runtime()
         .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)?;
     let mut runtime = backend
@@ -3547,6 +3571,7 @@ mod tests {
         let mut export_diagnostics = ExportJobColorDiagnostics::default();
         let mut canvas = vec![0u8; 2 * 2 * 8];
 
+        let _gpu_guard = GpuBoundaryFailureGuard::activate();
         let _guard = FloatBoundaryFailureGuard::activate();
         render_timeline_frame_into(
             &timeline,
@@ -4382,6 +4407,7 @@ mod tests {
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
+        let _gpu_guard = GpuBoundaryFailureGuard::activate();
         let diagnostics = export_color_stage_diagnostics_for_frame(&timeline, 0, 2, 2)
             .expect("export stage diagnostics");
 

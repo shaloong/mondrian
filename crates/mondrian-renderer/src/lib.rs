@@ -27,21 +27,22 @@ pub mod timeline_composite;
 pub mod timeline_render_plan;
 
 pub use color_accuracy::{
-    compare_linear_rgba, compare_srgb_display_rgba8, LinearAccuracyBudget,
-    LinearAccuracyChannelGroup, LinearAccuracyError, LinearAccuracyGroupReport,
-    LinearAccuracyStatistics, LinearRgbaAccuracyBudget, LinearRgbaAccuracyReport,
-    SrgbDisplayAccuracyBudget, SrgbDisplayAccuracyError, SrgbDisplayAccuracyReport,
-    SrgbDisplayAccuracyStatistics,
+    compare_linear_rgba, compare_pq_hdr_display_rgba, compare_srgb_display_rgba8,
+    LinearAccuracyBudget, LinearAccuracyChannelGroup, LinearAccuracyError,
+    LinearAccuracyGroupReport, LinearAccuracyStatistics, LinearRgbaAccuracyBudget,
+    LinearRgbaAccuracyReport, PqHdrDisplayAccuracyBudget, PqHdrDisplayAccuracyError,
+    PqHdrDisplayAccuracyReport, PqHdrDisplayAccuracyStatistics, SrgbDisplayAccuracyBudget,
+    SrgbDisplayAccuracyError, SrgbDisplayAccuracyReport, SrgbDisplayAccuracyStatistics,
 };
 pub use color_frame::{
     execute_native_decoded_frame_import, ColorFrameDescriptor, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
-    GpuColorFrameAllocationPlan, GpuColorFrameContract, GpuColorFrameHandle,
-    GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadback,
-    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
-    GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportBackend,
+    CpuEncodedFloatColorFrame, GpuColorFrameAllocationPlan, GpuColorFrameContract,
+    GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocator,
+    GpuColorFrameReadback, GpuColorFrameReadbackError, GpuColorFrameReadbackPlan,
+    GpuColorFrameResource, GpuColorFrameResourceTable, GpuColorFrameResourceTableError,
+    GpuColorFrameTextureFormat, GpuColorFrameUploadError, GpuColorFrameUploadPlan,
+    GpuColorFrameUploader, GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportBackend,
     GpuNativeDecodedFrameImportContract, GpuNativeDecodedFrameImportError,
     GpuNativeDecodedFrameImportExecution, GpuNativeDecodedFrameImportPlan,
     GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSource,
