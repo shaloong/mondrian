@@ -111,6 +111,15 @@ policy, working space, and GPU backend) into OCIO execution. Sampling
 matrix/transfer facts that conflict with the resolved source color space, or a
 CPU transform backend on the native path, fail closed before frame allocation.
 
+CPU-decoded video follows the identical boundary ordering. Media first expands
+YUV range and applies the resolved matrix into source-encoded RGBA; it does not
+apply transfer, primaries, working-space, or display transforms. The resulting
+typed `DecodedRgbaFrameContract` records the source interpretation and the
+matrix/range actually applied. Renderer input processing then performs the
+single source -> working OCIO transform. Preview, thumbnail, and export callers
+must provide the same input color/range contract, and media must fail closed
+rather than accept an implicit swscale Rec.601/limited-range assumption.
+
 The typed frame graph distinguishes `EncodedFloat` from `LinearFloat`.
 `EncodedFloat` is the precision-preserving source-domain result of native
 NV12/P010 sampling and may contain values outside 0..1; it must still pass
@@ -331,7 +340,7 @@ instead of quantizing silently. Camera-log proxies carry no invented FFmpeg
 delivery tags and rely on their explicit sidecar interpretation.
 Asset thumbnails are presentation artifacts, not source frames. The app-owned
 thumbnail worker resolves `AssetMediaInterpretation`, detected input color,
-working space, engine, display/view, tone-map intent, fixed sRGB output, and
+encoded source range, working space, engine, display/view, tone-map intent, fixed sRGB output, and
 current OCIO config generation into one contract. It executes the same renderer
 CPU input and output boundary APIs used by preview, then uploads only the
 resulting sRGB RGBA8 bytes into the UI's `Rgba8UnormSrgb` atlas. Cache, failure,

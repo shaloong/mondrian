@@ -22,8 +22,8 @@ pub use audio::{
 };
 pub use decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
-    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
-    HwAccelCodecConfigMethods, HwAccelCodecConfigProbe, HwAccelDeviceContextProbe,
+    DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    HwAccelBackend, HwAccelCodecConfigMethods, HwAccelCodecConfigProbe, HwAccelDeviceContextProbe,
     HwAccelPixelFormat, HwAccelProbe,
 };
 pub use info::{
@@ -38,7 +38,8 @@ pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
     clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
     decode_preview_frame_cancellable, preview_decode_backend, preview_decode_cpu_budget,
-    set_preview_decode_backend, FfmpegD3D11TextureView, FfmpegNativeDecodedFrameResource,
+    set_preview_decode_backend, DecodedRgbaAlphaMode, DecodedRgbaEncoding,
+    DecodedRgbaFrameContract, FfmpegD3D11TextureView, FfmpegNativeDecodedFrameResource,
     FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
     PreviewDecodeBackend, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
     PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
@@ -47,7 +48,7 @@ pub use preview::{
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
     PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
     PreviewNativeDecodedFrameResource, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
-    RgbaFrame,
+    PreviewSourceColorContract, RgbaFrame,
 };
 pub use proxy::{
     ProxyArtifactManifest, ProxyArtifactSettings, ProxyCodec, ProxyColorContract, ProxyConfig,

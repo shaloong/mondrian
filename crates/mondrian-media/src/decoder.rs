@@ -125,6 +125,25 @@ pub struct DecodedVideoSampling {
     pub bit_depth: u8,
 }
 
+/// YUV matrix applied while converting a decoded CPU frame to source-encoded RGB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum DecodedVideoMatrix {
+    /// BT.709 non-constant luminance coefficients.
+    Bt709,
+    /// BT.2020 non-constant luminance coefficients.
+    Bt2020NonConstant,
+    /// FCC coefficients.
+    Fcc,
+    /// BT.470BG / BT.601 coefficients.
+    Bt470Bg,
+    /// SMPTE 170M / BT.601 coefficients.
+    Smpte170M,
+    /// SMPTE 240M coefficients.
+    Smpte240M,
+    /// Source pixels were already RGB, so no YUV matrix was applied.
+    Rgb,
+}
+
 /// Native hardware-frame handle family produced by a decoder.
 ///
 /// This enum names the cross-crate contract only. It does not claim that

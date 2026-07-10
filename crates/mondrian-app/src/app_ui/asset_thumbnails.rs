@@ -12,8 +12,8 @@ use crate::app_ui::preview_access_mode::{
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_media::{
-    decode_preview_frame_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
-    PreviewDecodeRequest, PreviewFileFingerprint,
+    decode_preview_frame_cancellable, DecodedVideoRange, PreviewDecodeAccessMode,
+    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewFileFingerprint, PreviewSourceColorContract,
 };
 use mondrian_renderer::{
     execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuEncodedColorFrame,
@@ -36,6 +36,7 @@ const THUMBNAIL_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ThumbnailColorContract {
     source_color_space: ColorSpace,
+    source_range: DecodedVideoRange,
     working_color_space: ColorSpace,
     output_color_space: ColorSpace,
     tone_map: bool,
@@ -47,8 +48,8 @@ struct ThumbnailColorContract {
 
 impl ThumbnailColorContract {
     fn resolve(asset: &AssetRecord, context: &ColorContext) -> Option<Self> {
-        let detected =
-            asset.media_info.primary_video().and_then(|video| video.detected_color_space);
+        let primary_video = asset.media_info.primary_video();
+        let detected = primary_video.and_then(|video| video.detected_color_space);
         let source_color_space = context
             .missing_metadata_policy
             .resolve_asset_input_decision(
@@ -60,6 +61,9 @@ impl ThumbnailColorContract {
             .color_space?;
         Some(Self {
             source_color_space,
+            source_range: primary_video
+                .map(|video| video.color_range)
+                .unwrap_or(DecodedVideoRange::Unknown),
             working_color_space: context.working_color_space,
             output_color_space: ColorSpace::Srgb,
             tone_map: true,
@@ -342,6 +346,7 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
         job.path.as_path(),
         0.0,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewSourceColorContract::new(job.color.source_color_space, job.color.source_range),
     )
     .with_max_size(Some(THUMBNAIL_MAX_WIDTH), Some(THUMBNAIL_MAX_HEIGHT))
     .with_fingerprint(job.fingerprint);
@@ -471,6 +476,7 @@ mod tests {
     fn thumbnail_color_contract() -> ThumbnailColorContract {
         ThumbnailColorContract {
             source_color_space: ColorSpace::Rec709,
+            source_range: DecodedVideoRange::Limited,
             working_color_space: ColorSpace::Rec709,
             output_color_space: ColorSpace::Srgb,
             tone_map: true,

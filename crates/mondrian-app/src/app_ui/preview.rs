@@ -23,19 +23,17 @@ use mondrian_core::MondrianError;
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
-    DecodedGpuFrameHandleKind, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
-    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget,
+    DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    HwAccelBackend, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget,
     PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
     PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
     PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
-    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueSummary,
+    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, PreviewSourceColorContract,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
-use mondrian_media::{
-    DecodedVideoChromaLocation, DecodedVideoRange, PreviewNativeDecodedFrameHandle,
-};
+use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle};
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_rgba8,
@@ -351,6 +349,7 @@ impl AppUiPreviewService {
             target_width: 1920,
             target_height: 1080,
             input_color_space: ColorSpace::Srgb,
+            input_video_range: DecodedVideoRange::Full,
             working_color_space: ColorSpace::Srgb,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
@@ -7636,6 +7635,11 @@ impl AppUiPreviewService {
                 target_width,
                 target_height,
                 input_color_space,
+                input_video_range: asset
+                    .media_info
+                    .primary_video()
+                    .map(|video| video.color_range)
+                    .unwrap_or(DecodedVideoRange::Unknown),
                 working_color_space: color_context.working_color_space,
                 tone_map: color_context.tone_map,
                 engine: color_context.engine.clone(),
@@ -9115,6 +9119,7 @@ fn decode_media_preview(
         job.key.fingerprint,
         job.adaptive_hints,
         job.hardware_decode_request,
+        PreviewSourceColorContract::new(job.key.input_color_space, job.key.input_video_range),
         should_cancel,
     );
     let decode_elapsed_us = app_duration_us(decode_started_at.elapsed());
@@ -9266,9 +9271,10 @@ fn decode_media_preview_for_access_mode(
     fingerprint: Option<PreviewFileFingerprint>,
     adaptive_hints: PreviewDecodeAdaptiveHints,
     hardware_decode_request: PreviewHardwareDecodeRequest,
+    source_color: PreviewSourceColorContract,
     should_cancel: impl Fn() -> bool,
 ) -> mondrian_core::Result<PreviewDecodeOutcome> {
-    let mut request = PreviewDecodeRequest::new(path, source_secs, access_mode)
+    let mut request = PreviewDecodeRequest::new(path, source_secs, access_mode, source_color)
         .with_max_size(max_width, max_height)
         .with_adaptive_hints(adaptive_hints)
         .with_hardware_decode_request(hardware_decode_request);
@@ -15089,6 +15095,7 @@ mod tests {
             target_width: 320,
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
+            input_video_range: DecodedVideoRange::Limited,
             working_color_space: ColorSpace::Rec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
@@ -15133,6 +15140,7 @@ mod tests {
             target_width: 320,
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
+            input_video_range: DecodedVideoRange::Limited,
             working_color_space: ColorSpace::Rec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
@@ -15483,6 +15491,7 @@ mod tests {
             target_width: 320,
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
+            input_video_range: DecodedVideoRange::Limited,
             working_color_space: ColorSpace::Rec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,

@@ -57,6 +57,15 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   the renderer source-to-working CPU reference stage, and cross an explicit
   working-to-sRGB display boundary before constructing a UI raster.
 
+Every request also carries a required `PreviewSourceColorContract`: the
+app-resolved input/source color space plus the ingest quantization range. CPU
+decode resolves each YUV frame's matrix and range from decoder metadata, using
+the request contract only for explicitly missing facts, and rejects conflicts,
+unknown facts, and unsupported matrices such as BT.2020 constant luminance.
+Before `sws_scale`, media configures `sws_setColorspaceDetails` with the exact
+matrix, input range, and full-range RGBA output. FFmpeg/swscale defaults are not
+part of Mondrian's color contract.
+
 These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app
 scheduling distinguish the requested access mode. Future hardware-resident
@@ -76,6 +85,12 @@ source media path, file fingerprint, output dimensions, and source time in
 microseconds. A bare timeline frame number is not a media identity: the same
 frame index can represent different source times under different time bases,
 and relink/proxy/source path changes must not reuse stale RGBA frames.
+CPU `RgbaFrame` payloads are explicitly source-encoded RGB with straight alpha,
+not implicit sRGB or working-linear pixels. Their applied YUV matrix/range and
+source contract travel with the payload. Decode sessions, the playback ring,
+and the process-global RGBA cache are isolated by that source contract because
+they sit downstream of YUV-to-RGB conversion; interpretation changes may reuse
+raw/native YUV resources, but must not reuse differently converted CPU RGBA.
 App preview scheduling preserves playback cursor locality without letting idle
 workers sit beside visible current-frame work. When more than one preview decode
 worker exists, worker 0 has playback affinity and the remaining workers have

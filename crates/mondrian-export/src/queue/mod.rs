@@ -14,8 +14,9 @@ use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
 use mondrian_media::{
-    decode_preview_frame_cancellable, PreviewDecodeAccessMode, PreviewDecodeOutcome,
-    PreviewDecodeRequest, VideoColorDiagnosticIssueAggregate,
+    decode_preview_frame_cancellable, DecodedVideoRange, PreviewDecodeAccessMode,
+    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewSourceColorContract,
+    VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
@@ -2405,9 +2406,7 @@ fn render_sequence_frame_into(
     }
 
     let mut decode_cache = (render_plan.len() > 1).then(|| {
-        HashMap::<(AssetId, i64, Rational, ColorSpace), Arc<DecodedVideoLayer>>::with_capacity(
-            render_plan.len(),
-        )
+        HashMap::<(AssetId, i64, Rational, ColorSpace, DecodedVideoRange), Arc<DecodedVideoLayer>>::with_capacity(render_plan.len())
     });
     let mut decoded_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
@@ -2453,11 +2452,17 @@ fn render_sequence_frame_into(
                     diagnostic
                 )
             })?;
+        let input_video_range = timeline
+            .asset_color_diagnostics
+            .get(&media.asset_id)
+            .map(|diagnostic| diagnostic.color_range)
+            .unwrap_or(DecodedVideoRange::Unknown);
         let cache_key = (
             media.asset_id,
             media.source_frame,
             media.source_time_base,
             input_color_space,
+            input_video_range,
         );
         let decoded = if let Some(cache) = decode_cache.as_mut() {
             if let Some(hit) = cache.get(&cache_key) {
@@ -2467,6 +2472,7 @@ fn render_sequence_frame_into(
                     media.asset_id,
                     path.as_path(),
                     input_color_space,
+                    input_video_range,
                     color_context.working_color_space,
                     &color_context.engine,
                     color_context.tone_map,
@@ -2485,6 +2491,7 @@ fn render_sequence_frame_into(
                 media.asset_id,
                 path.as_path(),
                 input_color_space,
+                input_video_range,
                 color_context.working_color_space,
                 &color_context.engine,
                 color_context.tone_map,
@@ -2713,6 +2720,7 @@ fn decode_video_layer_scaled(
     asset_id: AssetId,
     path: &Path,
     input_color_space: ColorSpace,
+    input_video_range: DecodedVideoRange,
     working_color_space: ColorSpace,
     engine: &ColorEngine,
     tone_map: bool,
@@ -2724,6 +2732,7 @@ fn decode_video_layer_scaled(
         path,
         source_secs,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewSourceColorContract::new(input_color_space, input_video_range),
     )
     .with_max_size(Some(width), Some(height));
     let decoded = match decode_preview_frame_cancellable(request, || false) {

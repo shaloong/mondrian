@@ -5,12 +5,13 @@
 
 use crate::decoder::{
     decoded_video_range_from_ffmpeg, DecodedFrameResidency, DecodedGpuFrameHandleKind,
-    DecodedVideoChromaLocation, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
-    HwAccelBackend, HwAccelCodecConfigProbe, HwAccelDeviceContext, HwAccelDeviceContextProbe,
-    HwAccelPixelFormat, HwAccelProbe,
+    DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling,
+    DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigProbe, HwAccelDeviceContext,
+    HwAccelDeviceContextProbe, HwAccelPixelFormat, HwAccelProbe,
 };
 use ffmpeg_next as ffmpeg;
-use mondrian_core::{MondrianError, Result};
+use mondrian_core::types::ColorSpace;
+use mondrian_core::{ColorMatrixCoefficients, MondrianError, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::cell::RefCell;
@@ -300,11 +301,34 @@ pub struct PreviewDecodeRequest<'a> {
     pub adaptive_hints: PreviewDecodeAdaptiveHints,
     /// Hardware decode/native-residency preference selected by the caller.
     pub hardware_decode_request: PreviewHardwareDecodeRequest,
+    /// Resolved source color and range contract required by CPU YUV conversion.
+    pub source_color: PreviewSourceColorContract,
+}
+
+/// App-resolved source color facts required before media can convert YUV to RGB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewSourceColorContract {
+    /// Effective input/source color space after interpretation policy.
+    pub color_space: ColorSpace,
+    /// Encoded quantization range from ingest, or explicit `Unknown`.
+    pub range: DecodedVideoRange,
+}
+
+impl PreviewSourceColorContract {
+    /// Build a source color contract from resolved input color and ingest range.
+    pub fn new(color_space: ColorSpace, range: DecodedVideoRange) -> Self {
+        Self { color_space, range }
+    }
 }
 
 impl<'a> PreviewDecodeRequest<'a> {
     /// Create a request for one scaled preview decode outcome.
-    pub fn new(path: &'a Path, timestamp_secs: f64, access_mode: PreviewDecodeAccessMode) -> Self {
+    pub fn new(
+        path: &'a Path,
+        timestamp_secs: f64,
+        access_mode: PreviewDecodeAccessMode,
+        source_color: PreviewSourceColorContract,
+    ) -> Self {
         Self {
             path,
             timestamp_secs,
@@ -314,6 +338,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             fingerprint: None,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+            source_color,
         }
     }
 
@@ -1004,8 +1029,55 @@ pub struct RgbaFrame {
     pub height: u32,
     /// Shared CPU-resident RGBA8 pixels.
     pub data: Arc<Vec<u8>>,
+    /// Color and alpha semantics of the decoded pixels.
+    pub color_contract: DecodedRgbaFrameContract,
     /// Decode/cache diagnostics for this frame.
     pub diagnostics: PreviewDecodeDiagnostics,
+}
+
+/// Encoding represented by a decoded CPU RGBA payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DecodedRgbaEncoding {
+    /// RGB channels retain the source transfer function and primaries.
+    SourceEncodedRgb,
+}
+
+/// Alpha representation of a decoded CPU RGBA payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DecodedRgbaAlphaMode {
+    /// Alpha is independent of the RGB channels.
+    Straight,
+}
+
+/// Applied conversion contract for a decoded CPU RGBA payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DecodedRgbaFrameContract {
+    /// Effective source color interpretation retained by RGB channels.
+    pub source: PreviewSourceColorContract,
+    /// Encoding of the RGB channels after decode.
+    pub encoding: DecodedRgbaEncoding,
+    /// Alpha representation after decode.
+    pub alpha_mode: DecodedRgbaAlphaMode,
+    /// Matrix actually applied while converting decoder pixels to RGB.
+    pub applied_matrix: DecodedVideoMatrix,
+    /// Quantization range actually applied while converting decoder pixels to RGB.
+    pub applied_range: DecodedVideoRange,
+}
+
+impl DecodedRgbaFrameContract {
+    fn source_encoded(
+        source: PreviewSourceColorContract,
+        applied_matrix: DecodedVideoMatrix,
+        applied_range: DecodedVideoRange,
+    ) -> Self {
+        Self {
+            source,
+            encoding: DecodedRgbaEncoding::SourceEncodedRgb,
+            alpha_mode: DecodedRgbaAlphaMode::Straight,
+            applied_matrix,
+            applied_range,
+        }
+    }
 }
 
 /// GPU-resident native decoded preview frame.
@@ -1391,11 +1463,18 @@ pub enum PreviewNativeDecodedFrameError {
 }
 
 impl RgbaFrame {
-    pub(crate) fn new(width: u32, height: u32, data: Vec<u8>, path: PreviewDecodePath) -> Self {
+    pub(crate) fn new(
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+        color_contract: DecodedRgbaFrameContract,
+        path: PreviewDecodePath,
+    ) -> Self {
         Self {
             width,
             height,
             data: Arc::new(data),
+            color_contract,
             diagnostics: PreviewDecodeDiagnostics::new(path),
         }
     }
@@ -1531,6 +1610,7 @@ pub fn decode_preview_frame_cancellable(
         request.fingerprint,
         request.adaptive_hints,
         request.hardware_decode_request,
+        request.source_color,
         should_cancel,
     )
 }
@@ -1920,6 +2000,7 @@ struct PreviewDecodeSession {
     max_height: Option<u32>,
     backend: PreviewDecodeBackend,
     hardware_decode_request: PreviewHardwareDecodeRequest,
+    source_color: PreviewSourceColorContract,
     codec_id: ffmpeg::codec::Id,
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
@@ -2370,6 +2451,7 @@ impl PreviewDecodeSession {
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
         hardware_decode_request: PreviewHardwareDecodeRequest,
+        source_color: PreviewSourceColorContract,
     ) -> Result<Self> {
         let input = ffmpeg::format::input(path).map_err(|e| MondrianError::MediaOpen {
             path: path.display().to_string(),
@@ -2384,6 +2466,7 @@ impl PreviewDecodeSession {
             access_mode,
             backend,
             hardware_decode_request,
+            source_color,
         )
     }
 
@@ -2396,6 +2479,7 @@ impl PreviewDecodeSession {
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
         hardware_decode_request: PreviewHardwareDecodeRequest,
+        source_color: PreviewSourceColorContract,
     ) -> Result<Self> {
         let (stream_index, parameters, stream_tb, stream_rate, seek_index) = {
             let stream = input.streams().best(ffmpeg::media::Type::Video).ok_or_else(|| {
@@ -2536,6 +2620,7 @@ impl PreviewDecodeSession {
             max_height,
             backend,
             hardware_decode_request,
+            source_color,
             codec_id,
             input,
             decoder,
@@ -2567,6 +2652,7 @@ impl PreviewDecodeSession {
         max_height: Option<u32>,
         backend: PreviewDecodeBackend,
         hardware_decode_request: PreviewHardwareDecodeRequest,
+        source_color: PreviewSourceColorContract,
     ) -> bool {
         self.path == path
             && self.fingerprint == fingerprint
@@ -2574,6 +2660,7 @@ impl PreviewDecodeSession {
             && self.max_height == max_height
             && self.backend == backend
             && self.hardware_decode_request == hardware_decode_request
+            && self.source_color == source_color
     }
 
     fn decode_at(
@@ -2621,6 +2708,7 @@ impl PreviewDecodeSession {
             if let Some(hit) = preview_cache_get(
                 &self.path,
                 self.fingerprint,
+                self.source_color,
                 self.target_width,
                 self.target_height,
                 target_pts,
@@ -2898,6 +2986,7 @@ impl PreviewDecodeSession {
                     target_width,
                     target_height,
                     path,
+                    self.source_color,
                 )?;
                 Ok(Some((selected_pts, frame)))
             };
@@ -2944,6 +3033,7 @@ impl PreviewDecodeSession {
                                 self.target_width,
                                 self.target_height,
                                 self.path.as_path(),
+                                self.source_color,
                             )?;
                             frame.cache_cpu_rgba(
                                 &self.path,
@@ -3108,6 +3198,7 @@ fn decode_preview_frame_outcome(
     fingerprint: Option<PreviewFileFingerprint>,
     adaptive_hints: PreviewDecodeAdaptiveHints,
     hardware_decode_request: PreviewHardwareDecodeRequest,
+    source_color: PreviewSourceColorContract,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
@@ -3135,6 +3226,7 @@ fn decode_preview_frame_outcome(
                     max_height,
                     backend,
                     hardware_decode_request,
+                    source_color,
                 )
             })
             .unwrap_or(false);
@@ -3149,6 +3241,7 @@ fn decode_preview_frame_outcome(
                 access_mode,
                 backend,
                 hardware_decode_request,
+                source_color,
             )?);
             session_open_us = duration_us(open_started_at.elapsed());
         }
@@ -3172,6 +3265,10 @@ fn decode_preview_frame_outcome(
                 timestamp_secs,
                 session.target_width,
                 session.target_height,
+                source_color,
+                session.decoder.format(),
+                session.decoder.color_space(),
+                session.decoder.color_range(),
             ) {
                 external_process_us = duration_us(external_started_at.elapsed());
                 match result {
@@ -3320,6 +3417,7 @@ struct PreviewCacheHit {
 struct PreviewFrameCacheEntry {
     path: PathBuf,
     fingerprint: PreviewFileFingerprint,
+    source_color: PreviewSourceColorContract,
     width: u32,
     height: u32,
     pts: i64,
@@ -3329,6 +3427,7 @@ struct PreviewFrameCacheEntry {
 fn preview_cache_get(
     path: &Path,
     fingerprint: PreviewFileFingerprint,
+    source_color: PreviewSourceColorContract,
     width: u32,
     height: u32,
     target_pts: i64,
@@ -3343,6 +3442,7 @@ fn preview_cache_get(
     for (index, entry) in guard.iter().enumerate() {
         if entry.path != path
             || entry.fingerprint != fingerprint
+            || entry.source_color != source_color
             || entry.width != width
             || entry.height != height
         {
@@ -3383,6 +3483,7 @@ fn preview_cache_put_with_fingerprint(
     if let Some(index) = guard.iter().position(|entry| {
         entry.path == path
             && entry.fingerprint == fingerprint
+            && entry.source_color == frame.color_contract.source
             && entry.width == width
             && entry.height == height
             && entry.pts == pts
@@ -3393,6 +3494,7 @@ fn preview_cache_put_with_fingerprint(
     guard.push_front(PreviewFrameCacheEntry {
         path: path.to_path_buf(),
         fingerprint,
+        source_color: frame.color_contract.source,
         width,
         height,
         pts,
@@ -3450,6 +3552,10 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
     timestamp_secs: f64,
     width: u32,
     height: u32,
+    source_color: PreviewSourceColorContract,
+    source_format: ffmpeg::util::format::pixel::Pixel,
+    decoded_color_space: ffmpeg::util::color::Space,
+    decoded_color_range: ffmpeg::util::color::Range,
 ) -> Option<Result<RgbaFrame>> {
     if width == 0 || height == 0 {
         return None;
@@ -3463,6 +3569,34 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         "auto"
     };
 
+    let color_contract = match resolve_cpu_rgba_contract_from_metadata(
+        source_format,
+        decoded_color_space,
+        decoded_color_range,
+        source_color,
+        path,
+    ) {
+        Ok(contract) => contract,
+        Err(error) => return Some(Err(error)),
+    };
+    let matrix_name = match color_contract.applied_matrix {
+        DecodedVideoMatrix::Bt709 => "bt709",
+        DecodedVideoMatrix::Bt2020NonConstant => "bt2020",
+        DecodedVideoMatrix::Fcc => "fcc",
+        DecodedVideoMatrix::Bt470Bg => "bt470bg",
+        DecodedVideoMatrix::Smpte170M => "smpte170m",
+        DecodedVideoMatrix::Smpte240M => "smpte240m",
+        DecodedVideoMatrix::Rgb => return None,
+    };
+    let range_name = match color_contract.applied_range {
+        DecodedVideoRange::Limited => "tv",
+        DecodedVideoRange::Full => "pc",
+        DecodedVideoRange::Unknown => return None,
+    };
+    let scale_filter = format!(
+        "scale={width}:{height}:flags=fast_bilinear:in_color_matrix={matrix_name}:out_color_matrix={matrix_name}:in_range={range_name}:out_range=pc"
+    );
+
     let output = Command::new("ffmpeg")
         .arg("-v")
         .arg("error")
@@ -3475,7 +3609,7 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         .arg("-frames:v")
         .arg("1")
         .arg("-vf")
-        .arg(format!("scale={}:{}:flags=fast_bilinear", width, height))
+        .arg(scale_filter)
         .arg("-pix_fmt")
         .arg("rgba")
         .arg("-f")
@@ -3510,6 +3644,7 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         width,
         height,
         output.stdout.into_iter().take(expected).collect(),
+        color_contract,
         PreviewDecodePath::ExternalFfmpegCpuRgba,
     )))
 }
@@ -3583,6 +3718,172 @@ fn decoded_chroma_location_from_ffmpeg(
     }
 }
 
+fn pixel_format_is_rgb(pixel: ffmpeg::util::format::pixel::Pixel) -> bool {
+    pixel.descriptor().is_some_and(|descriptor| unsafe {
+        ((*descriptor.as_ptr()).flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_RGB as u64) != 0
+    })
+}
+
+fn decoded_video_matrix_from_ffmpeg(
+    space: ffmpeg::util::color::Space,
+) -> std::result::Result<Option<DecodedVideoMatrix>, String> {
+    let matrix = match space {
+        ffmpeg::util::color::Space::RGB => Some(DecodedVideoMatrix::Rgb),
+        ffmpeg::util::color::Space::BT709 => Some(DecodedVideoMatrix::Bt709),
+        ffmpeg::util::color::Space::FCC => Some(DecodedVideoMatrix::Fcc),
+        ffmpeg::util::color::Space::BT470BG => Some(DecodedVideoMatrix::Bt470Bg),
+        ffmpeg::util::color::Space::SMPTE170M => Some(DecodedVideoMatrix::Smpte170M),
+        ffmpeg::util::color::Space::SMPTE240M => Some(DecodedVideoMatrix::Smpte240M),
+        ffmpeg::util::color::Space::BT2020NCL => Some(DecodedVideoMatrix::Bt2020NonConstant),
+        ffmpeg::util::color::Space::Unspecified => None,
+        unsupported => {
+            return Err(format!(
+                "unsupported FFmpeg YUV matrix {unsupported:?}; constant-luminance and derived matrices require a dedicated conversion"
+            ));
+        }
+    };
+    Ok(matrix)
+}
+
+fn source_video_matrix(source: PreviewSourceColorContract) -> Option<DecodedVideoMatrix> {
+    match source.color_space.encoding().matrix {
+        ColorMatrixCoefficients::Bt709 => Some(DecodedVideoMatrix::Bt709),
+        ColorMatrixCoefficients::Bt2020NonConstant => Some(DecodedVideoMatrix::Bt2020NonConstant),
+        ColorMatrixCoefficients::Rgb => Some(DecodedVideoMatrix::Rgb),
+        ColorMatrixCoefficients::Unspecified => None,
+    }
+}
+
+fn resolve_cpu_rgba_contract(
+    decoded: &ffmpeg::util::frame::video::Video,
+    source: PreviewSourceColorContract,
+    path: &Path,
+) -> Result<DecodedRgbaFrameContract> {
+    resolve_cpu_rgba_contract_from_metadata(
+        decoded.format(),
+        decoded.color_space(),
+        decoded.color_range(),
+        source,
+        path,
+    )
+}
+
+fn resolve_cpu_rgba_contract_from_metadata(
+    pixel_format: ffmpeg::util::format::pixel::Pixel,
+    decoded_color_space: ffmpeg::util::color::Space,
+    decoded_color_range: ffmpeg::util::color::Range,
+    source: PreviewSourceColorContract,
+    path: &Path,
+) -> Result<DecodedRgbaFrameContract> {
+    if pixel_format_is_rgb(pixel_format) {
+        return Ok(DecodedRgbaFrameContract::source_encoded(
+            source,
+            DecodedVideoMatrix::Rgb,
+            DecodedVideoRange::Full,
+        ));
+    }
+
+    let decoded_matrix =
+        decoded_video_matrix_from_ffmpeg(decoded_color_space).map_err(|reason| {
+            MondrianError::DecodeFailed { asset_id: path.display().to_string(), reason }
+        })?;
+    let expected_matrix =
+        source_video_matrix(source).filter(|matrix| *matrix != DecodedVideoMatrix::Rgb);
+    if let (Some(decoded_matrix), Some(expected_matrix)) = (decoded_matrix, expected_matrix) {
+        if decoded_matrix != expected_matrix {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "decoded YUV matrix {decoded_matrix:?} conflicts with resolved source color space {:?} ({expected_matrix:?})",
+                    source.color_space
+                ),
+            });
+        }
+    }
+    let matrix = decoded_matrix.or(expected_matrix).ok_or_else(|| MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: format!(
+            "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
+            source.color_space
+        ),
+    })?;
+    let decoded_range = decoded_video_range_from_ffmpeg(decoded_color_range);
+    let range = if decoded_range == DecodedVideoRange::Unknown {
+        source.range
+    } else {
+        decoded_range
+    };
+    if range == DecodedVideoRange::Unknown {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "YUV quantization range is unspecified; refusing implicit swscale defaults"
+                .to_owned(),
+        });
+    }
+    if decoded_range != DecodedVideoRange::Unknown
+        && source.range != DecodedVideoRange::Unknown
+        && decoded_range != source.range
+    {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "decoded YUV range {decoded_range:?} conflicts with ingest range {:?}",
+                source.range
+            ),
+        });
+    }
+
+    Ok(DecodedRgbaFrameContract::source_encoded(
+        source, matrix, range,
+    ))
+}
+
+fn configure_preview_rgba_scaler(
+    scaler: &mut ffmpeg::software::scaling::Context,
+    contract: DecodedRgbaFrameContract,
+    path: &Path,
+) -> Result<()> {
+    let coefficient_id = match contract.applied_matrix {
+        DecodedVideoMatrix::Bt709 => Some(ffmpeg::ffi::SWS_CS_ITU709),
+        DecodedVideoMatrix::Bt2020NonConstant => Some(ffmpeg::ffi::SWS_CS_BT2020),
+        DecodedVideoMatrix::Fcc => Some(ffmpeg::ffi::SWS_CS_FCC),
+        DecodedVideoMatrix::Bt470Bg | DecodedVideoMatrix::Smpte170M => {
+            Some(ffmpeg::ffi::SWS_CS_ITU601)
+        }
+        DecodedVideoMatrix::Smpte240M => Some(ffmpeg::ffi::SWS_CS_SMPTE240M),
+        DecodedVideoMatrix::Rgb => None,
+    };
+    let Some(coefficient_id) = coefficient_id else {
+        return Ok(());
+    };
+    let source_full_range = i32::from(contract.applied_range == DecodedVideoRange::Full);
+    let result = unsafe {
+        let coefficients = ffmpeg::ffi::sws_getCoefficients(coefficient_id);
+        ffmpeg::ffi::sws_setColorspaceDetails(
+            scaler.as_mut_ptr(),
+            coefficients,
+            source_full_range,
+            coefficients,
+            1,
+            0,
+            1 << 16,
+            1 << 16,
+        )
+    };
+    if result < 0 {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "failed to configure swscale matrix {:?} and range {:?}: {}",
+                contract.applied_matrix,
+                contract.applied_range,
+                ffmpeg::Error::from(result)
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn timestamp_to_stream_pts(timestamp_secs: f64, stream_tb: ffmpeg::Rational) -> i64 {
     if stream_tb.denominator() == 0 {
         return 0;
@@ -3629,9 +3930,12 @@ fn convert_decoded_to_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
     scaler: &mut ffmpeg::software::scaling::Context,
     path: &Path,
+    source_color: PreviewSourceColorContract,
 ) -> Result<RgbaFrame> {
     let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
     let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
+    let color_contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
+    configure_preview_rgba_scaler(scaler, color_contract, path)?;
     let mut rgba = ffmpeg::util::frame::video::Video::empty();
     let swscale_started_at = Instant::now();
     scaler.run(decoded, &mut rgba).map_err(|e| MondrianError::DecodeFailed {
@@ -3665,6 +3969,7 @@ fn convert_decoded_to_rgba(
         width,
         height,
         out,
+        color_contract,
         PreviewDecodePath::InProcessFfmpegCpuRgba,
     )
     .with_decoded_surface_format(decoded_surface_format)
@@ -3723,6 +4028,7 @@ fn materialize_decoded_frame(
     target_width: u32,
     target_height: u32,
     path: &Path,
+    source_color: PreviewSourceColorContract,
 ) -> Result<PreviewDecodedFramePayload> {
     if hardware_decode_plan.request.prefers_gpu_residency() {
         if preview_hardware_frame_format(decoded.format()) {
@@ -3769,6 +4075,7 @@ fn materialize_decoded_frame(
             target_width,
             target_height,
             path,
+            source_color,
         )?,
     ))
 }
@@ -3843,6 +4150,7 @@ fn materialize_decoded_to_cpu_rgba(
     target_width: u32,
     target_height: u32,
     path: &Path,
+    source_color: PreviewSourceColorContract,
 ) -> Result<RgbaFrame> {
     if !preview_hardware_frame_format(decoded.format()) {
         let scaler = ensure_preview_rgba_scaler(
@@ -3855,7 +4163,7 @@ fn materialize_decoded_to_cpu_rgba(
             target_height,
             path,
         )?;
-        return convert_decoded_to_rgba(decoded, scaler, path);
+        return convert_decoded_to_rgba(decoded, scaler, path, source_color);
     }
 
     let mut transferred = ffmpeg::util::frame::video::Video::empty();
@@ -3888,7 +4196,7 @@ fn materialize_decoded_to_cpu_rgba(
         path,
     )?;
     Ok(
-        convert_decoded_to_rgba(&transferred, scaler, path)?.with_stage_durations(
+        convert_decoded_to_rgba(&transferred, scaler, path, source_color)?.with_stage_durations(
             PreviewDecodeStageDurations {
                 hardware_transfer_us,
                 ..PreviewDecodeStageDurations::default()
@@ -3928,34 +4236,38 @@ fn ensure_preview_rgba_scaler<'a>(
 mod tests {
     use super::{
         clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        decode_preview_frame_cancellable, decoded_native_surface_format_from_software_format,
-        decoded_surface_format_from_pixel, decoded_video_sampling_from_frame, duration_us,
-        materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
+        convert_decoded_to_rgba, decode_preview_frame_cancellable,
+        decoded_native_surface_format_from_software_format, decoded_surface_format_from_pixel,
+        decoded_video_sampling_from_frame, duration_us, materialize_decoded_frame,
+        preview_cache_get, preview_cache_put_with_fingerprint, preview_create_rgba_scaler,
         preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
-        preview_seek_index_cache_put, FfmpegNativeDecodedFrameResource,
-        FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
-        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
-        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewDecodedFramePayload,
-        PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
-        PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
-        PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
-        PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-        PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
-        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
-        PreviewSeekResolution, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
-        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+        preview_seek_index_cache_put, resolve_cpu_rgba_contract, DecodedRgbaFrameContract,
+        FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError,
+        PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
+        PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
+        PreviewDecodeRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+        PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewFileFingerprint,
+        PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+        PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
+        PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
+        PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewPlaybackRing,
+        PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexDiagnostics,
+        PreviewSeekIndexSource, PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
+        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS,
         PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
     };
     use crate::decoder::{
         DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
-        DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
+        DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+        HwAccelBackend,
     };
     use ffmpeg_next as ffmpeg;
+    use mondrian_core::types::ColorSpace;
     use serde::Serialize;
     use std::any::Any;
     use std::num::NonZeroU64;
@@ -3963,6 +4275,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    fn test_source_color() -> PreviewSourceColorContract {
+        PreviewSourceColorContract::new(ColorSpace::Rec709, DecodedVideoRange::Limited)
+    }
+
+    fn test_rgba_contract() -> DecodedRgbaFrameContract {
+        DecodedRgbaFrameContract::source_encoded(
+            test_source_color(),
+            DecodedVideoMatrix::Bt709,
+            DecodedVideoRange::Limited,
+        )
+    }
 
     #[derive(Debug)]
     struct TestNativeDecodedFrameResource {
@@ -4085,6 +4409,7 @@ mod tests {
             Path::new("clip.mov"),
             0.0,
             PreviewDecodeAccessMode::PlaybackCursor,
+            test_source_color(),
         );
 
         assert_eq!(
@@ -4353,13 +4678,17 @@ mod tests {
             modified_secs: Some(20),
             modified_nanos: Some(30),
         };
-        let request =
-            PreviewDecodeRequest::new(path.as_path(), 1.25, PreviewDecodeAccessMode::ScrubCursor)
-                .with_max_size(Some(640), Some(360))
-                .with_fingerprint(fingerprint)
-                .with_adaptive_hints(PreviewDecodeAdaptiveHints {
-                    scrub_class: PreviewScrubAdaptiveClass::HotRegion,
-                });
+        let request = PreviewDecodeRequest::new(
+            path.as_path(),
+            1.25,
+            PreviewDecodeAccessMode::ScrubCursor,
+            test_source_color(),
+        )
+        .with_max_size(Some(640), Some(360))
+        .with_fingerprint(fingerprint)
+        .with_adaptive_hints(PreviewDecodeAdaptiveHints {
+            scrub_class: PreviewScrubAdaptiveClass::HotRegion,
+        });
 
         assert_eq!(request.path, path.as_path());
         assert_eq!(request.timestamp_secs, 1.25);
@@ -4674,17 +5003,23 @@ mod tests {
 
     #[test]
     fn rgba_frame_diagnostics_record_seek_index_evidence() {
-        let frame = RgbaFrame::new(1, 1, vec![0; 4], PreviewDecodePath::InProcessFfmpegCpuRgba)
-            .with_access_mode(PreviewDecodeAccessMode::ScrubCursor)
-            .with_seek_index_diagnostics(
-                PreviewSeekIndexDiagnostics {
-                    available: true,
-                    keyframes: 4,
-                    observed_packets: 12,
-                    source: PreviewSeekIndexSource::ProbeBacked,
-                },
-                PreviewSeekResolution { used_index: true, anchor_pts: Some(240) },
-            );
+        let frame = RgbaFrame::new(
+            1,
+            1,
+            vec![0; 4],
+            test_rgba_contract(),
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        )
+        .with_access_mode(PreviewDecodeAccessMode::ScrubCursor)
+        .with_seek_index_diagnostics(
+            PreviewSeekIndexDiagnostics {
+                available: true,
+                keyframes: 4,
+                observed_packets: 12,
+                source: PreviewSeekIndexSource::ProbeBacked,
+            },
+            PreviewSeekResolution { used_index: true, anchor_pts: Some(240) },
+        );
 
         assert!(frame.diagnostics.seek_index_available);
         assert_eq!(
@@ -4720,7 +5055,13 @@ mod tests {
     #[test]
     fn rgba_frame_diagnostics_record_hw_accel_probe_fail_closed() {
         let probe = HwAccelBackend::probe();
-        let mut frame = RgbaFrame::new(1, 1, vec![0; 4], PreviewDecodePath::InProcessFfmpegCpuRgba);
+        let mut frame = RgbaFrame::new(
+            1,
+            1,
+            vec![0; 4],
+            test_rgba_contract(),
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
         frame.diagnostics = frame.diagnostics.with_hw_accel_probe(&probe);
 
         assert_eq!(frame.diagnostics.hw_accel_backend, HwAccelBackend::None);
@@ -4780,6 +5121,126 @@ mod tests {
     }
 
     #[test]
+    fn cpu_rgba_contract_uses_explicit_bt2020_matrix_and_limited_range() {
+        let mut frame = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::util::format::pixel::Pixel::YUV420P10LE,
+            16,
+            16,
+        );
+        frame.set_color_space(ffmpeg::util::color::Space::BT2020NCL);
+        frame.set_color_range(ffmpeg::util::color::Range::MPEG);
+
+        let contract = resolve_cpu_rgba_contract(
+            &frame,
+            PreviewSourceColorContract::new(ColorSpace::Rec2100Pq, DecodedVideoRange::Limited),
+            Path::new("bt2020-pq.mov"),
+        )
+        .expect("BT.2020 NCL must resolve exactly");
+
+        assert_eq!(
+            contract.applied_matrix,
+            DecodedVideoMatrix::Bt2020NonConstant
+        );
+        assert_eq!(contract.applied_range, DecodedVideoRange::Limited);
+        assert_eq!(contract.source.color_space, ColorSpace::Rec2100Pq);
+    }
+
+    #[test]
+    fn cpu_rgba_contract_falls_back_only_to_explicit_source_facts() {
+        let frame = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::util::format::pixel::Pixel::YUV420P,
+            16,
+            16,
+        );
+
+        let contract = resolve_cpu_rgba_contract(
+            &frame,
+            PreviewSourceColorContract::new(ColorSpace::Rec709, DecodedVideoRange::Limited),
+            Path::new("untagged-rec709.mov"),
+        )
+        .expect("explicit app contract must resolve missing frame tags");
+
+        assert_eq!(contract.applied_matrix, DecodedVideoMatrix::Bt709);
+        assert_eq!(contract.applied_range, DecodedVideoRange::Limited);
+
+        let mut tagged_yuv = frame;
+        tagged_yuv.set_color_space(ffmpeg::util::color::Space::BT709);
+        let srgb_contract = resolve_cpu_rgba_contract(
+            &tagged_yuv,
+            PreviewSourceColorContract::new(ColorSpace::Srgb, DecodedVideoRange::Limited),
+            Path::new("srgb-transfer-yuv.mov"),
+        )
+        .expect("decoded YUV matrix remains authoritative for an RGB-defined source space");
+        assert_eq!(srgb_contract.applied_matrix, DecodedVideoMatrix::Bt709);
+    }
+
+    #[test]
+    fn cpu_rgba_contract_rejects_matrix_conflicts_and_constant_luminance() {
+        let mut conflict = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::util::format::pixel::Pixel::YUV420P,
+            16,
+            16,
+        );
+        conflict.set_color_space(ffmpeg::util::color::Space::BT709);
+        conflict.set_color_range(ffmpeg::util::color::Range::MPEG);
+        let error = resolve_cpu_rgba_contract(
+            &conflict,
+            PreviewSourceColorContract::new(ColorSpace::Rec2020, DecodedVideoRange::Limited),
+            Path::new("conflict.mov"),
+        )
+        .expect_err("conflicting standardized matrix facts must fail closed");
+        assert!(error.to_string().contains("conflicts"));
+
+        conflict.set_color_space(ffmpeg::util::color::Space::BT2020CL);
+        let error = resolve_cpu_rgba_contract(
+            &conflict,
+            PreviewSourceColorContract::new(ColorSpace::Rec2020, DecodedVideoRange::Limited),
+            Path::new("bt2020-cl.mov"),
+        )
+        .expect_err("constant-luminance BT.2020 needs a dedicated conversion");
+        assert!(error.to_string().contains("unsupported FFmpeg YUV matrix"));
+    }
+
+    #[test]
+    fn swscale_expands_bt709_limited_range_to_full_rgba() {
+        fn decoded_yuv420(y: u8) -> ffmpeg::util::frame::video::Video {
+            let mut frame = ffmpeg::util::frame::video::Video::new(
+                ffmpeg::util::format::pixel::Pixel::YUV420P,
+                4,
+                4,
+            );
+            frame.set_color_space(ffmpeg::util::color::Space::BT709);
+            frame.set_color_range(ffmpeg::util::color::Range::MPEG);
+            frame.data_mut(0).fill(y);
+            frame.data_mut(1).fill(128);
+            frame.data_mut(2).fill(128);
+            frame
+        }
+
+        let path = Path::new("limited-rec709.mov");
+        let mut scaler = preview_create_rgba_scaler(
+            ffmpeg::util::format::pixel::Pixel::YUV420P,
+            4,
+            4,
+            4,
+            4,
+            path,
+        )
+        .expect("create scaler");
+        let black =
+            convert_decoded_to_rgba(&decoded_yuv420(16), &mut scaler, path, test_source_color())
+                .expect("convert limited black");
+        let white =
+            convert_decoded_to_rgba(&decoded_yuv420(235), &mut scaler, path, test_source_color())
+                .expect("convert limited white");
+
+        assert!(black.rgba()[..3].iter().all(|channel| *channel <= 2));
+        assert!(white.rgba()[..3].iter().all(|channel| *channel >= 253));
+        assert_eq!(black.rgba()[3], 255);
+        assert_eq!(white.rgba()[3], 255);
+    }
+
+    #[test]
     fn percentile_upper_bound_uses_sorted_nearest_rank() {
         assert_eq!(percentile_upper_bound_us([30, 10, 20].into_iter(), 95), 30);
         assert_eq!(percentile_upper_bound_us([30, 10, 20].into_iter(), 50), 20);
@@ -4822,8 +5283,14 @@ mod tests {
 
     #[test]
     fn rgba_frame_diagnostics_record_cpu_residency_and_cache_hits() {
-        let frame = RgbaFrame::new(2, 1, vec![0; 8], PreviewDecodePath::InProcessFfmpegCpuRgba)
-            .with_elapsed(std::time::Duration::from_micros(42));
+        let frame = RgbaFrame::new(
+            2,
+            1,
+            vec![0; 8],
+            test_rgba_contract(),
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        )
+        .with_elapsed(std::time::Duration::from_micros(42));
 
         assert_eq!(
             frame.diagnostics.path,
@@ -4916,18 +5383,21 @@ mod tests {
             1,
             1,
             vec![1, 2, 3, 4],
+            test_rgba_contract(),
             PreviewDecodePath::InProcessFfmpegCpuRgba,
         );
         let frame_b = RgbaFrame::new(
             1,
             1,
             vec![5, 6, 7, 8],
+            test_rgba_contract(),
             PreviewDecodePath::InProcessFfmpegCpuRgba,
         );
         let frame_c = RgbaFrame::new(
             1,
             1,
             vec![9, 10, 11, 12],
+            test_rgba_contract(),
             PreviewDecodePath::InProcessFfmpegCpuRgba,
         );
 
@@ -4956,6 +5426,7 @@ mod tests {
             2,
             1,
             vec![0, 64, 128, 255, 255, 128, 64, 32],
+            test_rgba_contract(),
             PreviewDecodePath::InProcessFfmpegCpuRgba,
         );
         let cloned = frame.clone();
@@ -5176,6 +5647,7 @@ mod tests {
             2,
             2,
             Path::new("synthetic-rgba"),
+            test_source_color(),
         )
         .expect("GPU preference may fall back to CPU RGBA with diagnostics");
 
@@ -5205,6 +5677,7 @@ mod tests {
             2,
             2,
             Path::new("synthetic-rgba"),
+            test_source_color(),
         )
         .expect_err("required GPU residency must not return a software frame");
 
@@ -5230,6 +5703,7 @@ mod tests {
             960,
             540,
             Path::new("synthetic-d3d11"),
+            test_source_color(),
         )
         .expect("explicit D3D11 NV12 frame must materialize as a native payload");
 
@@ -5259,7 +5733,9 @@ mod tests {
             modified_nanos: None,
         };
         payload.cache_cpu_rgba(&path, fingerprint, 960, 540, 42);
-        assert!(preview_cache_get(&path, fingerprint, 960, 540, 42, 1).is_none());
+        assert!(
+            preview_cache_get(&path, fingerprint, test_source_color(), 960, 540, 42, 1).is_none()
+        );
     }
 
     #[test]
@@ -5382,6 +5858,7 @@ mod tests {
             path.as_path(),
             0.0,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
         )
         .with_max_size(Some(320), Some(180));
         let outcome = decode_preview_frame_cancellable(request, || true)
@@ -5421,13 +5898,18 @@ mod tests {
             2,
             1,
             vec![1, 2, 3, 4, 5, 6, 7, 8],
+            test_rgba_contract(),
             PreviewDecodePath::InProcessFfmpegCpuRgba,
         );
 
         preview_cache_put_with_fingerprint(&path, old_fingerprint, 2, 1, 100, frame);
 
-        assert!(preview_cache_get(&path, new_fingerprint, 2, 1, 100, 1).is_none());
-        assert!(preview_cache_get(&path, old_fingerprint, 2, 1, 100, 1).is_some());
+        assert!(
+            preview_cache_get(&path, new_fingerprint, test_source_color(), 2, 1, 100, 1).is_none()
+        );
+        assert!(
+            preview_cache_get(&path, old_fingerprint, test_source_color(), 2, 1, 100, 1).is_some()
+        );
         clear_global_preview_frame_cache();
     }
 
@@ -5444,13 +5926,40 @@ mod tests {
             2,
             1,
             vec![1, 2, 3, 4, 5, 6, 7, 8],
+            test_rgba_contract(),
             PreviewDecodePath::InProcessFfmpegCpuRgba,
         );
 
         preview_cache_put_with_fingerprint(&path, fingerprint, 2, 1, 100, frame);
 
-        assert!(preview_cache_get(&path, fingerprint, 2, 1, 105, 5).is_some());
-        assert!(preview_cache_get(&path, fingerprint, 2, 1, 106, 5).is_none());
+        assert!(preview_cache_get(&path, fingerprint, test_source_color(), 2, 1, 105, 5).is_some());
+        assert!(preview_cache_get(&path, fingerprint, test_source_color(), 2, 1, 106, 5).is_none());
+        clear_global_preview_frame_cache();
+    }
+
+    #[test]
+    fn preview_frame_cache_isolated_by_applied_source_color_contract() {
+        clear_global_preview_frame_cache();
+        let path = PathBuf::from("same-frame-different-color.mov");
+        let fingerprint = PreviewFileFingerprint {
+            len: Some(8),
+            modified_secs: Some(3),
+            modified_nanos: Some(0),
+        };
+        let rec709 = test_source_color();
+        let frame = RgbaFrame::new(
+            2,
+            1,
+            vec![16, 16, 16, 255, 235, 235, 235, 255],
+            test_rgba_contract(),
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
+        preview_cache_put_with_fingerprint(&path, fingerprint, 2, 1, 100, frame);
+
+        let rec2020 =
+            PreviewSourceColorContract::new(ColorSpace::Rec2020, DecodedVideoRange::Limited);
+        assert!(preview_cache_get(&path, fingerprint, rec709, 2, 1, 100, 1).is_some());
+        assert!(preview_cache_get(&path, fingerprint, rec2020, 2, 1, 100, 1).is_none());
         clear_global_preview_frame_cache();
     }
 
@@ -5490,6 +5999,7 @@ mod tests {
             path.as_path(),
             timestamp_secs,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
         )
         .with_max_size(max_width, max_height);
         let frame = match decode_preview_frame_cancellable(request, || false)
@@ -5581,6 +6091,7 @@ mod tests {
                 path.as_path(),
                 timestamp_secs,
                 PreviewDecodeAccessMode::PlaybackCursor,
+                test_source_color(),
             )
             .with_max_size(max_width, max_height)
             .with_fingerprint(fingerprint);
