@@ -121,6 +121,13 @@ shared, synchronized, adopted by the active wgpu device, sampled, or transformed
 Readiness therefore remains fail-closed until the backend has connected and
 validated the complete platform import bridge. Diagnostics distinguish missing
 device format features from a missing D3D11 shared-texture/fence bridge.
+The Windows renderer backend owns D3D11 source admission. Before any resource
+sharing, it verifies the retained FFmpeg texture ABI, actual DXGI NV12/P010
+format, visible-versus-storage extent, array-slice bounds, single mip/sample
+layout, and exact adapter LUID equality with the active wgpu DX12 adapter.
+Codec-aligned storage dimensions may exceed the visible frame; smaller storage
+is invalid. App, core, and generic platform probes must not duplicate or weaken
+these renderer resource invariants.
 The media layer's FFmpeg hardware codec config probe is also only planning
 evidence. It can prove that the linked FFmpeg decoder advertises a backend
 config for H.264/HEVC/etc., but it does not create an OS device, expose a

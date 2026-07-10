@@ -17,6 +17,7 @@ pub mod compositor;
 pub mod context;
 pub mod gpu_backend;
 pub mod gpu_compositor;
+pub mod native_video;
 pub mod ocio_gpu;
 pub mod pipeline;
 pub mod profile;
@@ -85,6 +86,11 @@ pub use gpu_compositor::{
     evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,
     GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositingBlockerReason,
     GpuCompositingCapability, GpuCompositingDiagnostics, GpuFrameCompositor,
+};
+#[cfg(target_os = "windows")]
+pub use native_video::{
+    inspect_d3d11_native_decoded_frame, D3D11NativeDecodedFrameInspection,
+    D3D11NativeDecodedFrameInspectionError, NativeVideoAdapterLuid,
 };
 pub use ocio_gpu::{
     OcioGpuBindingContract, OcioGpuBindingContractValidationError,

@@ -23,6 +23,9 @@ serde      = { workspace = true }
 lru        = "0.16"
 parking_lot = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
 [dev-dependencies]
 mondrian-timeline = { workspace = true }
 mondrian-effects = { workspace = true }
