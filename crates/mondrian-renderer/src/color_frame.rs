@@ -957,8 +957,6 @@ pub struct GpuNativeDecodedFrameImportContract {
     /// Shader-visible sampling contract for converting the decoded source
     /// surface into encoded RGB before OCIO input conversion.
     pub video_sampling: GpuNativeDecodedFrameVideoSampling,
-    /// Renderer-owned working texture format to produce.
-    pub working_texture_format: GpuColorFrameTextureFormat,
     /// Human-readable label for diagnostics/profiling.
     pub label: String,
 }
@@ -1029,17 +1027,6 @@ impl GpuNativeDecodedFrameImportPlan {
                 },
             );
         }
-        if !matches!(
-            contract.working_texture_format,
-            GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
-        ) {
-            return Err(
-                GpuNativeDecodedFrameImportPlanError::UnsupportedWorkingTextureFormat {
-                    working_texture_format: contract.working_texture_format,
-                },
-            );
-        }
-
         let encoded_source_descriptor = ColorFrameDescriptor {
             width: contract.width,
             height: contract.height,
@@ -1066,7 +1053,7 @@ impl GpuNativeDecodedFrameImportPlan {
         let working_frame = GpuColorFrameHandle::new(
             ids.allocate(),
             working_descriptor,
-            contract.working_texture_format,
+            GpuColorFrameTextureFormat::Rgba32Float,
             contract.label,
         )
         .map_err(GpuNativeDecodedFrameImportPlanError::WorkingFrameHandle)?;
@@ -1108,12 +1095,6 @@ pub enum GpuNativeDecodedFrameImportPlanError {
     UnsupportedSourceTextureFormat {
         /// Unsupported decoder source texture format.
         source_texture_format: GpuNativeDecodedFrameTextureFormat,
-    },
-    /// The requested working texture format cannot carry linear working pixels.
-    #[error("unsupported native decoded frame working texture format {working_texture_format:?}")]
-    UnsupportedWorkingTextureFormat {
-        /// Unsupported working texture format.
-        working_texture_format: GpuColorFrameTextureFormat,
     },
     /// Native decoded frames must use the renderer OCIO GPU input path.
     #[error("unsupported native decoded frame input transform backend {backend:?}")]
@@ -1371,6 +1352,39 @@ impl GpuColorFrameReadbackPlan {
         })
     }
 
+    /// Create a readback plan for a `Rgba32Float` GPU texture.
+    pub fn encoded_rgba32float(
+        handle: GpuColorFrameHandle,
+    ) -> Result<Self, GpuColorFrameReadbackError> {
+        if handle.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
+            return Err(GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                texture_format: handle.texture_format(),
+            });
+        }
+        let descriptor = handle.descriptor();
+        let unpadded_bytes_per_row = descriptor
+            .width
+            .checked_mul(handle.texture_format().bytes_per_pixel())
+            .ok_or(GpuColorFrameReadbackError::ReadbackLayoutOverflow)?;
+        let padded_bytes_per_row = align_copy_bytes_per_row(unpadded_bytes_per_row)?;
+        let buffer_size = u64::from(padded_bytes_per_row)
+            .checked_mul(u64::from(descriptor.height))
+            .ok_or(GpuColorFrameReadbackError::ReadbackLayoutOverflow)?;
+        Ok(Self {
+            handle,
+            output_descriptor: descriptor.with_residency(ColorFrameResidency::Cpu),
+            texture_format: GpuColorFrameTextureFormat::Rgba32Float,
+            extent: wgpu::Extent3d {
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: 1,
+            },
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+            buffer_size,
+        })
+    }
+
     /// Unpack a padded mapped readback buffer into a typed CPU encoded frame.
     pub fn unpack_mapped_rgba8(
         &self,
@@ -1442,6 +1456,41 @@ impl GpuColorFrameReadbackPlan {
                         u16::from_le_bytes([mapped[offset + c * 2], mapped[offset + c * 2 + 1]]);
                     data.push(f16_to_f32(half_bits));
                 }
+            }
+        }
+        Ok(data)
+    }
+
+    /// Unpack a padded `Rgba32Float` mapped buffer into native f32 RGBA samples.
+    pub fn unpack_mapped_rgba32float(
+        &self,
+        mapped: &[u8],
+    ) -> Result<Vec<f32>, GpuColorFrameReadbackError> {
+        if self.texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+            return Err(GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                texture_format: self.texture_format,
+            });
+        }
+        let expected = self.buffer_size as usize;
+        if mapped.len() < expected {
+            return Err(GpuColorFrameReadbackError::MappedBufferTooSmall {
+                expected,
+                actual: mapped.len(),
+            });
+        }
+        let pixel_count = self.extent.width as usize * self.extent.height as usize;
+        let mut data = Vec::with_capacity(pixel_count * 4);
+        for row in 0..self.extent.height as usize {
+            let src_start = row * self.padded_bytes_per_row as usize;
+            for component in 0..self.extent.width as usize * 4 {
+                let offset = src_start + component * size_of::<f32>();
+                let bytes = [
+                    mapped[offset],
+                    mapped[offset + 1],
+                    mapped[offset + 2],
+                    mapped[offset + 3],
+                ];
+                data.push(f32::from_le_bytes(bytes));
             }
         }
         Ok(data)
@@ -2092,27 +2141,6 @@ mod tests {
     }
 
     #[test]
-    fn native_decoded_frame_import_requires_float_working_texture() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
-        let support = GpuNativeDecodedFrameImportSupport::ready(
-            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
-            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
-        );
-        let mut contract = native_import_contract();
-        contract.working_texture_format = GpuColorFrameTextureFormat::Rgba8Unorm;
-
-        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
-            .expect_err("native input must not produce RGBA8 working frames");
-
-        assert_eq!(
-            err,
-            GpuNativeDecodedFrameImportPlanError::UnsupportedWorkingTextureFormat {
-                working_texture_format: GpuColorFrameTextureFormat::Rgba8Unorm
-            }
-        );
-    }
-
-    #[test]
     fn native_decoded_frame_import_requires_gpu_ocio_input_transform() {
         let mut ids = GpuColorFrameIdAllocator::new(500);
         let support = GpuNativeDecodedFrameImportSupport::ready(
@@ -2207,7 +2235,7 @@ mod tests {
         );
         assert_eq!(
             plan.working_frame.texture_format(),
-            GpuColorFrameTextureFormat::Rgba16Float
+            GpuColorFrameTextureFormat::Rgba32Float
         );
         assert_eq!(ids.next_raw(), 502);
     }
@@ -2485,11 +2513,11 @@ mod tests {
                 assert_eq!(actual.descriptor.width, 1280);
                 assert_eq!(
                     expected.texture_format,
-                    GpuColorFrameTextureFormat::Rgba16Float
+                    GpuColorFrameTextureFormat::Rgba32Float
                 );
                 assert_eq!(
                     actual.texture_format,
-                    GpuColorFrameTextureFormat::Rgba16Float
+                    GpuColorFrameTextureFormat::Rgba32Float
                 );
             }
             other => panic!("expected resource contract mismatch, got {other:?}"),
@@ -2966,7 +2994,6 @@ mod tests {
                 8,
                 GpuVideoChromaLocation::Left,
             ),
-            working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             label: "native-decoded-working".to_owned(),
         }
     }

@@ -3540,7 +3540,6 @@ fn preview_gpu_composite_native_video_import_readiness(
             decoder_handle_kind: facts.decoder_handle_kind,
             source_texture_format: facts.source_texture_format,
             source_video_sampling: facts.source_video_sampling,
-            working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             platform_probe: SystemPlatformService.native_video_texture_import(),
             renderer_support,
         })
@@ -3793,7 +3792,6 @@ fn record_preview_native_video_layer(
         source.source_color_space,
         &source.input_transform,
         &source.native_frame,
-        GpuColorFrameTextureFormat::Rgba16Float,
     )?;
     let handle = resource.handle().clone();
     if color_runtime
@@ -3820,7 +3818,6 @@ fn record_preview_gpu_input_layer(
     runtime.record_wgpu_input_stage_owned_backend(
         &source.input_transform,
         &source.source,
-        GpuColorFrameTextureFormat::Rgba16Float,
         RenderColorTransformGpuOptions::default(),
         RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
             device,

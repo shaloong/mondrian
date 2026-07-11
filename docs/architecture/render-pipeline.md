@@ -265,9 +265,9 @@ GPU input transforms have their own renderer contract instead of piggybacking
 on final-output plans. `RenderGpuInputStageResourcePlan` accepts a decoded CPU
 `CpuEncodedColorFrame` in the `Source` domain, uploads it as `Rgba8Unorm`,
 records the OCIO GPU input transform, and produces a GPU-resident linear
-working frame in a float texture (`Rgba16Float` or `Rgba32Float`). It rejects
-CPU-only plans, plans with native GPU blockers, non-source uploads, non-working
-outputs, and `Rgba8Unorm` working outputs. This is the guarded bridge for
+working frame in a renderer-selected `Rgba32Float` texture. The working format
+is not a caller option. It rejects CPU-only plans, plans with native GPU
+blockers, non-source uploads, and non-working outputs. This is the guarded bridge for
 preview playback to move input OCIO off the CPU. The runtime-owned entry point
 is `RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend(...)`,
 which reuses the same renderer-owned shader cache, backend-prep cache,
@@ -691,12 +691,12 @@ Resolved preview layers
        AppUiNativeVideoImportRuntime
        -> bounded D3D11/DX12 shared-texture bridge entry
        -> native YUV shader into encoded-float Rgba16Float source texture
-       -> OCIO GPU input transform into Rgba16Float working texture
+       -> OCIO GPU input transform into Rgba32Float working texture
        -> insert returned working resource into the composite frame table
   -> for each media layer with a source/input contract:
        RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend()
        -> upload CPU decoded source RGBA8 once as Rgba8Unorm
-       -> run OCIO GPU input transform into Rgba16Float working texture
+       -> run OCIO GPU input transform into Rgba32Float working texture
   -> GpuFrameCompositor::record()
      -> sample GPU-resident media layers directly
      -> upload only media layers that already have a materialized CPU working fallback

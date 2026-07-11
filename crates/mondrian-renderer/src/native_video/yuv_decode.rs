@@ -828,7 +828,6 @@ mod tests {
                     8,
                     GpuVideoChromaLocation::Left,
                 ),
-                working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
                 label: "native-ocio-working".to_owned(),
             },
             &GpuNativeDecodedFrameImportSupport::ready(
@@ -876,7 +875,7 @@ mod tests {
         assert_eq!(record.materialized.output, import.working_frame);
         assert_eq!(record.stage_diagnostics.upload_stages, 0);
         let readback_plan =
-            crate::GpuColorFrameReadbackPlan::encoded_rgba16float(import.working_frame.clone())
+            crate::GpuColorFrameReadbackPlan::encoded_rgba32float(import.working_frame.clone())
                 .expect("working readback plan");
         let working = runtime
             .frame_table()
@@ -891,7 +890,7 @@ mod tests {
         context.queue.submit(std::iter::once(encoder.finish()));
         let mapped = map_readback_buffer(&context.device, &readback);
         let actual =
-            readback_plan.unpack_mapped_rgba16float(&mapped).expect("unpack working output");
+            readback_plan.unpack_mapped_rgba32float(&mapped).expect("unpack working output");
         readback.unmap();
 
         for channel in &actual[0..3] {
@@ -983,7 +982,6 @@ mod tests {
                 10,
                 GpuVideoChromaLocation::Left,
             ),
-            working_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
             label: "native-working".to_owned(),
         }
     }

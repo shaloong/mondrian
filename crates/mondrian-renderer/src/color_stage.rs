@@ -692,7 +692,6 @@ impl RenderGpuOutputBoundaryRuntime {
         &mut self,
         transform: &RenderInputTransform,
         frame: &CpuEncodedColorFrame,
-        output_texture_format: GpuColorFrameTextureFormat,
         gpu_options: RenderColorTransformGpuOptions,
         backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
     ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
@@ -711,7 +710,6 @@ impl RenderGpuOutputBoundaryRuntime {
             frame_ids,
             frame,
             &stage_plan,
-            output_texture_format,
         )
         .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
         let output_format = color_target_format_for_gpu_frame(&resources.output);
@@ -2183,11 +2181,7 @@ fn output_readback_plan(
             GpuColorFrameReadbackPlan::encoded_rgba16float(output)
         }
         GpuColorFrameTextureFormat::Rgba32Float => {
-            return Err(RenderGpuOutputStageResourcePlanError::OutputReadback(
-                GpuColorFrameReadbackError::UnsupportedTextureFormat {
-                    texture_format: GpuColorFrameTextureFormat::Rgba32Float,
-                },
-            ));
+            GpuColorFrameReadbackPlan::encoded_rgba32float(output)
         }
     }
     .map_err(RenderGpuOutputStageResourcePlanError::OutputReadback)
@@ -2213,7 +2207,6 @@ impl RenderGpuInputStageResourcePlan {
         ids: &mut GpuColorFrameIdAllocator,
         frame: &CpuEncodedColorFrame,
         stage_plan: &RenderColorStagePlan,
-        output_texture_format: GpuColorFrameTextureFormat,
     ) -> Result<Self, RenderGpuInputStageResourcePlanError> {
         let planned = planned_gpu_source_upload_transform(stage_plan)?;
         if !planned.transform.wgpu.can_execute() {
@@ -2236,16 +2229,6 @@ impl RenderGpuInputStageResourcePlan {
                 },
             );
         }
-        if matches!(
-            output_texture_format,
-            GpuColorFrameTextureFormat::Rgba8Unorm
-        ) {
-            return Err(
-                RenderGpuInputStageResourcePlanError::UnsupportedOutputTextureFormat {
-                    texture_format: output_texture_format,
-                },
-            );
-        }
         let input_upload = GpuColorFrameUploadPlan::from_cpu_encoded_frame(
             ids.allocate(),
             frame,
@@ -2264,7 +2247,7 @@ impl RenderGpuInputStageResourcePlan {
         let output = GpuColorFrameHandle::new(
             ids.allocate(),
             planned.gpu_output,
-            output_texture_format,
+            GpuColorFrameTextureFormat::Rgba32Float,
             "color-stage-working-output",
         )
         .map_err(RenderGpuInputStageResourcePlanError::OutputHandle)?;
@@ -2329,10 +2312,7 @@ impl RenderGpuInputStageResourcePlan {
                 },
             );
         }
-        if !matches!(
-            output.texture_format(),
-            GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
-        ) {
+        if output.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
             return Err(
                 RenderGpuInputStageResourcePlanError::UnsupportedOutputTextureFormat {
                     texture_format: output.texture_format(),
@@ -4298,7 +4278,6 @@ mod tests {
             .record_wgpu_input_stage_owned_backend(
                 &transform,
                 &source,
-                GpuColorFrameTextureFormat::Rgba16Float,
                 RenderColorTransformGpuOptions::default(),
                 RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
                     device: &context.device,
@@ -4370,7 +4349,6 @@ mod tests {
             .record_wgpu_input_stage_owned_backend(
                 &transform,
                 &source,
-                GpuColorFrameTextureFormat::Rgba16Float,
                 RenderColorTransformGpuOptions::default(),
                 RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
                     device: &context.device,
@@ -5333,7 +5311,6 @@ mod tests {
             &mut ids,
             &source,
             &stage_plan,
-            GpuColorFrameTextureFormat::Rgba16Float,
         )
         .expect("GPU input stage resources");
 
@@ -5349,7 +5326,7 @@ mod tests {
         assert_eq!(resources.output_allocation.handle, resources.output);
         assert_eq!(
             resources.output_allocation.texture_format,
-            GpuColorFrameTextureFormat::Rgba16Float
+            GpuColorFrameTextureFormat::Rgba32Float
         );
         assert_eq!(
             resources.output.descriptor().domain,
@@ -5367,7 +5344,8 @@ mod tests {
         assert!(!resources.transform.requires_output_readback);
         assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
 
-        let pass_node = pass_node_for_transform(&resources.transform);
+        let mut pass_node = pass_node_for_transform(&resources.transform);
+        pass_node.output_format = OcioGpuWgpuColorTargetFormat::Rgba32Float;
         RenderGpuColorPassSchedule::new(
             resources.input,
             resources.output,
@@ -5411,7 +5389,7 @@ mod tests {
         let output = gpu_handle_with_format(
             711,
             stage_plan.final_descriptor,
-            GpuColorFrameTextureFormat::Rgba16Float,
+            GpuColorFrameTextureFormat::Rgba32Float,
             "native-yuv-working-output",
         );
 
@@ -5455,7 +5433,6 @@ mod tests {
             &mut ids,
             &source,
             &stage_plan,
-            GpuColorFrameTextureFormat::Rgba16Float,
         )
         .expect_err("CPU-only input plan cannot materialize GPU resources");
 
@@ -5476,7 +5453,6 @@ mod tests {
             &mut ids,
             &source,
             &stage_plan,
-            GpuColorFrameTextureFormat::Rgba16Float,
         )
         .expect_err("blocked GPU input stage cannot materialize executable resources");
 
@@ -5484,28 +5460,6 @@ mod tests {
             err,
             RenderGpuInputStageResourcePlanError::NativeBlockersRemaining { blockers, .. } if blockers > 0
         ));
-    }
-
-    #[test]
-    fn gpu_input_stage_resource_plan_rejects_rgba8_working_output_texture() {
-        let source = cpu_source_frame();
-        let stage_plan = gpu_input_stage_plan_for_source(&source);
-        let mut ids = GpuColorFrameIdAllocator::new(725);
-
-        let err = RenderGpuInputStageResourcePlan::from_cpu_encoded_source_frame(
-            &mut ids,
-            &source,
-            &stage_plan,
-            GpuColorFrameTextureFormat::Rgba8Unorm,
-        )
-        .expect_err("linear GPU working output must not use Rgba8Unorm");
-
-        assert_eq!(
-            err,
-            RenderGpuInputStageResourcePlanError::UnsupportedOutputTextureFormat {
-                texture_format: GpuColorFrameTextureFormat::Rgba8Unorm,
-            }
-        );
     }
 
     #[test]
@@ -6184,7 +6138,6 @@ mod tests {
             &mut ids,
             &source,
             &stage_plan,
-            GpuColorFrameTextureFormat::Rgba16Float,
         )
         .expect("GPU input stage resources")
     }

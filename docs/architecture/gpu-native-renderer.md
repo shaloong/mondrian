@@ -54,7 +54,7 @@ into renderer resources.
 Native decoded surfaces are not modeled as `GpuColorFrameHandle` values because
 they may be multi-plane YCbCr surfaces such as NV12 or P010. The renderer import
 contract records the decoder handle family, source texture format, source color
-space, target working color space, required float working texture format, and a
+space, target working color space, and a
 `GpuNativeDecodedFrameVideoSampling` contract. That sampling contract is the
 single place where the renderer learns limited/full range, YCbCr matrix,
 transfer characteristic, effective bit depth, and chroma siting. When a
@@ -68,8 +68,10 @@ and chroma plane views into a renderer-owned `Rgba16Float` source frame whose
 descriptor is `Source + EncodedFloat`; this frame is encoded RGB in the resolved
 source color space, not linear working data. `RenderGpuInputStageResourcePlan`
 then consumes that already GPU-resident frame without an upload and executes the
-same OCIO source-to-working processor used by CPU-uploaded source frames. The
-native import plan owns distinct encoded-source and linear-working handles so a
+same OCIO source-to-working processor used by CPU-uploaded source frames into a
+renderer-owned `Rgba32Float` working texture. Callers cannot lower working
+precision. The native import plan owns distinct encoded-source and
+linear-working handles so a
 backend cannot skip, reorder, or mislabel either pass.
 
 The YUV shader uses unfiltered `textureLoad` operations because NV12/P010 plane
@@ -107,7 +109,7 @@ a potentially importable OS family, is not enough by itself to claim hardware
 decode playback, zero-copy, or low-copy frame residency.
 Diagnostics should report the specific missing layer: decoder GPU handle absent,
 platform import unsupported/missing, renderer backend not ready, unsupported
-handle kind, unsupported source format, or unsupported working texture format.
+handle kind, or unsupported source format.
 Legacy DXVA2 and VDPAU can be FFmpeg CPU-transfer fallbacks, but they must not
 be presented as the modern GPU-native renderer import path.
 
