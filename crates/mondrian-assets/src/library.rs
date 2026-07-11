@@ -1,6 +1,6 @@
 //! 素材库主入口
 
-use crate::schema::{INIT_SQL, MIGRATE_FOLDERS_SQL, MIGRATE_INTERPRETATION_SQL};
+use crate::migration::migrate_asset_library;
 use mondrian_core::{
     timeline_data::AssetMediaInterpretation,
     types::{AssetId, AssetSource},
@@ -82,16 +82,12 @@ impl AssetLibrary {
     pub fn open(root: PathBuf) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&root)?;
         let db_path = root.join("index.db");
-        let conn = Connection::open(&db_path)
+        let mut conn = Connection::open(&db_path)
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
-        conn.execute_batch(INIT_SQL)
+        migrate_asset_library(&mut conn)
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
-
-        // Migrate existing databases that lack folder support.
-        let _ = conn.execute_batch(MIGRATE_FOLDERS_SQL);
-        let _ = conn.execute_batch(MIGRATE_INTERPRETATION_SQL);
 
         info!("Asset library opened at {:?}", root);
         Ok(Arc::new(Self { root, db: Arc::new(Mutex::new(conn)) }))

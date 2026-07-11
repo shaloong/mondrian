@@ -273,7 +273,16 @@ impl AppState {
         }
 
         let library_root = runtime_root.join("library");
-        let saved = load_project_archive(archive_file, library_root.as_path())?;
+        let loaded = load_project_archive(archive_file, library_root.as_path())?;
+        if loaded.library_schema_version > mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION {
+            anyhow::bail!(
+                "项目素材库 schema v{} 高于当前支持的 v{}",
+                loaded.library_schema_version,
+                mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION
+            );
+        }
+        let asset_library = AssetLibrary::open(library_root)?;
+        let saved = loaded.document;
 
         let project_sequences = saved.sequences;
         project_sequences.validate_nested_sequences()?;
@@ -300,7 +309,7 @@ impl AppState {
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         self.ensure_minimum_tracks();
 
-        self.asset_library = Some(AssetLibrary::open(library_root)?);
+        self.asset_library = Some(asset_library);
         Ok(())
     }
 

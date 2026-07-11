@@ -13,11 +13,18 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+mod migration;
+
+use migration::JsonMigrationRegistry;
 
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
 pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 1;
+/// Current embedded asset-library SQLite schema version.
+pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
 /// Entry name for the archive manifest.
 pub const MANIFEST_ENTRY: &str = "manifest.json";
@@ -28,6 +35,22 @@ pub const LIBRARY_ENTRY: &str = "library/index.db";
 
 const PROJECT_FORMAT_NAME: &str = "mondrian-project";
 const DOCUMENT_LAYOUT_SINGLE_JSON: &str = "single-project-json";
+const ARCHIVE_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
+    "project archive",
+    "format_version",
+    PROJECT_FORMAT_VERSION,
+    &[],
+);
+const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
+    "project document",
+    "schema_version",
+    PROJECT_DOCUMENT_SCHEMA_VERSION,
+    &[],
+);
+
+const fn initial_library_schema_version() -> u32 {
+    PROJECT_LIBRARY_SCHEMA_VERSION
+}
 
 /// `.mdp` archive manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,6 +65,9 @@ pub struct ProjectManifest {
     pub project_entry: String,
     /// Archive entry containing the project asset-library SQLite database.
     pub library_entry: String,
+    /// Expected SQLite schema version after runtime-copy migration.
+    #[serde(default = "initial_library_schema_version")]
+    pub library_schema_version: u32,
 }
 
 impl Default for ProjectManifest {
@@ -52,6 +78,7 @@ impl Default for ProjectManifest {
             document_layout: DOCUMENT_LAYOUT_SINGLE_JSON.to_string(),
             project_entry: PROJECT_ENTRY.to_string(),
             library_entry: LIBRARY_ENTRY.to_string(),
+            library_schema_version: PROJECT_LIBRARY_SCHEMA_VERSION,
         }
     }
 }
@@ -79,6 +106,12 @@ impl ProjectManifest {
         }
         if self.library_entry != LIBRARY_ENTRY {
             anyhow::bail!("unsupported library entry: {}", self.library_entry);
+        }
+        if self.library_schema_version > PROJECT_LIBRARY_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported project library schema version: {}",
+                self.library_schema_version
+            );
         }
         Ok(())
     }
@@ -164,26 +197,40 @@ pub fn read_project_document_from_archive(project_file: &Path) -> anyhow::Result
     read_project_document_from_zip(&mut archive)
 }
 
+/// Fully loaded archive payload with independently versioned SQLite evidence.
+pub struct LoadedProjectArchive {
+    /// Migrated and validated canonical project document.
+    pub document: ProjectDocument,
+    /// SQLite schema version declared by the archive manifest.
+    pub library_schema_version: u32,
+}
+
 /// Open an `.mdp` archive, validate the document, and extract the library DB.
 pub fn load_project_archive(
     archive_file: &Path,
     runtime_library_root: &Path,
-) -> anyhow::Result<ProjectDocument> {
+) -> anyhow::Result<LoadedProjectArchive> {
     fs::create_dir_all(runtime_library_root)?;
 
     let file = fs::File::open(archive_file)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let document = read_project_document_from_zip(&mut archive)?;
+    let (manifest, document) = read_project_archive_metadata_from_zip(&mut archive)?;
 
     let mut db_entry = archive
         .by_name(LIBRARY_ENTRY)
         .with_context(|| format!("missing project archive entry: {LIBRARY_ENTRY}"))?;
     let db_path = runtime_library_root.join("index.db");
-    let mut db_file = fs::File::create(db_path)?;
+    let db_tmp_path = temporary_sibling_path(&db_path, "extract");
+    let mut db_file = fs::File::create(&db_tmp_path)?;
     std::io::copy(&mut db_entry, &mut db_file)?;
     db_file.flush()?;
+    db_file.sync_all()?;
+    replace_file_preserving_original(&db_tmp_path, &db_path)?;
 
-    Ok(document)
+    Ok(LoadedProjectArchive {
+        document,
+        library_schema_version: manifest.library_schema_version,
+    })
 }
 
 /// Save an `.mdp` archive atomically next to the target file.
@@ -212,24 +259,29 @@ pub fn save_project_archive(
         let _ = fs::remove_file(&tmp_path);
         return Err(err);
     }
-
-    if target_file.exists() {
-        fs::remove_file(target_file)?;
-    }
-    fs::rename(&tmp_path, target_file)?;
+    read_project_document_from_archive(&tmp_path)
+        .context("new project archive failed reopen validation")?;
+    replace_file_preserving_original(&tmp_path, target_file)?;
     Ok(())
 }
 
 fn read_project_document_from_zip<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> anyhow::Result<ProjectDocument> {
+    Ok(read_project_archive_metadata_from_zip(archive)?.1)
+}
+
+fn read_project_archive_metadata_from_zip<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> anyhow::Result<(ProjectManifest, ProjectDocument)> {
     let manifest = {
         let mut manifest_json = String::new();
         archive
             .by_name(MANIFEST_ENTRY)
             .with_context(|| format!("missing project archive entry: {MANIFEST_ENTRY}"))?
             .read_to_string(&mut manifest_json)?;
-        serde_json::from_str::<ProjectManifest>(&manifest_json)?
+        let value = serde_json::from_str(&manifest_json)?;
+        serde_json::from_value::<ProjectManifest>(ARCHIVE_MIGRATIONS.migrate(value)?)?
     };
     manifest.validate()?;
 
@@ -238,9 +290,10 @@ fn read_project_document_from_zip<R: Read + std::io::Seek>(
         .by_name(PROJECT_ENTRY)
         .with_context(|| format!("missing project archive entry: {PROJECT_ENTRY}"))?
         .read_to_string(&mut project_json)?;
-    let document = serde_json::from_str::<ProjectDocument>(&project_json)?;
+    let value = serde_json::from_str(&project_json)?;
+    let document = serde_json::from_value::<ProjectDocument>(DOCUMENT_MIGRATIONS.migrate(value)?)?;
     document.validate()?;
-    Ok(document.normalized())
+    Ok((manifest, document.normalized()))
 }
 
 fn write_project_archive(
@@ -269,11 +322,61 @@ fn write_project_archive(
 }
 
 fn temporary_archive_path(target_file: &Path) -> PathBuf {
+    temporary_sibling_path(target_file, "archive")
+}
+
+fn temporary_sibling_path(target_file: &Path, purpose: &str) -> PathBuf {
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     target_file.to_string_lossy().hash(&mut hasher);
     let pid = std::process::id();
-    let suffix = format!("{}.tmp", hasher.finish());
+    let nonce = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let suffix = format!("{purpose}.{}.{nonce}.tmp", hasher.finish());
     target_file.with_extension(format!("mdp.{pid}.{suffix}"))
+}
+
+fn replace_file_preserving_original(temp_file: &Path, target_file: &Path) -> anyhow::Result<()> {
+    replace_file_preserving_original_with(temp_file, target_file, |source, target| {
+        fs::rename(source, target)
+    })
+}
+
+fn replace_file_preserving_original_with(
+    temp_file: &Path,
+    target_file: &Path,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    if !temp_file.is_file() {
+        anyhow::bail!("replacement source is not a file: {}", temp_file.display());
+    }
+    if !target_file.exists() {
+        replace(temp_file, target_file)?;
+        return Ok(());
+    }
+    let backup = temporary_sibling_path(target_file, "backup");
+    if backup.exists() {
+        fs::remove_file(&backup)?;
+    }
+    fs::rename(target_file, &backup)
+        .with_context(|| format!("failed to stage original file: {}", target_file.display()))?;
+    match replace(temp_file, target_file) {
+        Ok(()) => {
+            fs::remove_file(&backup)?;
+            Ok(())
+        }
+        Err(replace_error) => {
+            let restore_result = fs::rename(&backup, target_file);
+            let _ = fs::remove_file(temp_file);
+            match restore_result {
+                Ok(()) => Err(replace_error).context("failed to replace file; original restored"),
+                Err(restore_error) => Err(anyhow::anyhow!(
+                    "failed to replace {} ({replace_error}) and restore backup {} ({restore_error})",
+                    target_file.display(),
+                    backup.display()
+                )),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +412,10 @@ mod tests {
         assert_eq!(manifest.document_layout, "single-project-json");
         assert_eq!(manifest.project_entry, PROJECT_ENTRY);
         assert_eq!(manifest.library_entry, LIBRARY_ENTRY);
+        assert_eq!(
+            manifest.library_schema_version,
+            PROJECT_LIBRARY_SCHEMA_VERSION
+        );
         manifest.validate().expect("default manifest should validate");
     }
 
@@ -330,7 +437,11 @@ mod tests {
         let runtime_library = root.join("runtime-library");
         let loaded =
             load_project_archive(&project_path, &runtime_library).expect("load project archive");
-        assert_eq!(loaded.project_id, document.project_id);
+        assert_eq!(loaded.document.project_id, document.project_id);
+        assert_eq!(
+            loaded.library_schema_version,
+            PROJECT_LIBRARY_SCHEMA_VERSION
+        );
         assert_eq!(
             fs::read(runtime_library.join("index.db")).expect("read extracted db"),
             b"sqlite placeholder"
@@ -365,6 +476,100 @@ mod tests {
         assert_eq!(
             project_document_fingerprint(first).expect("first fingerprint"),
             project_document_fingerprint(second).expect("second fingerprint")
+        );
+    }
+
+    fn write_v1_fixture_archive(path: &Path, library: &[u8]) {
+        let file = fs::File::create(path).expect("create fixture archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+        writer.start_file(MANIFEST_ENTRY, options).expect("manifest entry");
+        writer
+            .write_all(include_bytes!("../tests/fixtures/v1/manifest.json"))
+            .expect("manifest fixture");
+        writer.start_file(PROJECT_ENTRY, options).expect("project entry");
+        writer
+            .write_all(include_bytes!("../tests/fixtures/v1/project.json"))
+            .expect("project fixture");
+        writer.start_file(LIBRARY_ENTRY, options).expect("library entry");
+        writer.write_all(library).expect("library fixture");
+        writer.finish().expect("finish fixture archive");
+    }
+
+    #[test]
+    fn v1_fixture_open_is_idempotent_and_save_reopen_preserves_semantics() {
+        let root = unique_temp_dir("v1-fixture");
+        let source = root.join("v1.mdp");
+        write_v1_fixture_archive(&source, b"sqlite-v1-fixture");
+
+        let first = read_project_document_from_archive(&source).expect("first open");
+        let second = read_project_document_from_archive(&source).expect("second open");
+        assert_eq!(
+            project_document_fingerprint(first.clone()).expect("first fingerprint"),
+            project_document_fingerprint(second).expect("second fingerprint")
+        );
+
+        let runtime = root.join("runtime");
+        let loaded = load_project_archive(&source, &runtime).expect("load fixture");
+        assert_eq!(loaded.library_schema_version, 1);
+        let resaved = root.join("resaved.mdp");
+        save_project_archive(&loaded.document, &runtime.join("index.db"), &resaved)
+            .expect("resave fixture");
+        let reopened = read_project_document_from_archive(&resaved).expect("reopen saved fixture");
+        assert_eq!(
+            project_document_fingerprint(loaded.document).expect("loaded fingerprint"),
+            project_document_fingerprint(reopened).expect("reopened fingerprint")
+        );
+    }
+
+    #[test]
+    fn failed_file_replacement_restores_original() {
+        let root = unique_temp_dir("replace-restore");
+        let target = root.join("project.mdp");
+        fs::write(&target, b"original").expect("original");
+        let temp = root.join("replacement.tmp");
+        fs::write(&temp, b"replacement").expect("replacement");
+
+        assert!(
+            replace_file_preserving_original_with(&temp, &target, |_source, _target| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected replacement failure",
+                ))
+            })
+            .is_err()
+        );
+
+        assert_eq!(fs::read(&target).expect("restored original"), b"original");
+    }
+
+    #[test]
+    fn failed_archive_open_does_not_modify_source_or_existing_runtime_library() {
+        let root = unique_temp_dir("failed-open-preserves-source");
+        let source = root.join("invalid.mdp");
+        let file = fs::File::create(&source).expect("archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+        writer.start_file(MANIFEST_ENTRY, options).expect("manifest");
+        writer
+            .write_all(include_bytes!("../tests/fixtures/v1/manifest.json"))
+            .expect("manifest fixture");
+        writer.start_file(PROJECT_ENTRY, options).expect("project");
+        writer
+            .write_all(include_bytes!("../tests/fixtures/v1/project.json"))
+            .expect("project fixture");
+        writer.finish().expect("finish invalid archive");
+        let source_before = fs::read(&source).expect("source before");
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&runtime).expect("runtime");
+        fs::write(runtime.join("index.db"), b"existing-runtime").expect("runtime db");
+
+        assert!(load_project_archive(&source, &runtime).is_err());
+
+        assert_eq!(fs::read(&source).expect("source after"), source_before);
+        assert_eq!(
+            fs::read(runtime.join("index.db")).expect("runtime after"),
+            b"existing-runtime"
         );
     }
 }

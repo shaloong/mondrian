@@ -17,7 +17,18 @@ during open.
 
 ## Atomic Save
 
-Save writes a temporary archive next to the target and renames it into place. This prevents partially written target files when serialization or archive writing fails.
+Save writes a temporary archive next to the target, reopens and validates the
+new document, stages the prior target as a sibling backup, and then renames the
+validated archive into place. If replacement fails after staging, the original
+is restored before the error returns. Serialization, ZIP writing, validation,
+and replacement failures therefore do not intentionally delete or truncate the
+source project.
+
+Archive open migrates JSON in memory and extracts SQLite through a temporary
+sibling file. A failed or missing library entry leaves an existing runtime DB
+and the source archive unchanged. SQLite migrations subsequently run
+transactionally against this runtime copy; migration never edits the archive in
+place. Saving and reopening is the only path that persists the current versions.
 
 ## Runtime Directory
 

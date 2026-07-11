@@ -7,3 +7,5 @@ pub mod library;
 pub mod schema;
 
 pub use library::{AssetKind, AssetLibrary, AssetRecord};
+mod migration;
+pub use migration::ASSET_LIBRARY_SCHEMA_VERSION;

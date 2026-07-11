@@ -1,0 +1,7 @@
+{
+  "format": "mondrian-project",
+  "format_version": 1,
+  "document_layout": "single-project-json",
+  "project_entry": "project.json",
+  "library_entry": "library/index.db"
+}

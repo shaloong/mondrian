@@ -32,6 +32,10 @@ _Avoid_: Quality flag
 Structured events and aggregates proving clock, scheduling, delivery, degradation, synchronization, and recovery behavior.
 _Avoid_: Debug log
 
+**Project Migration**:
+An ordered, transactional transformation of one persisted archive, document, or SQLite schema version into the next supported version.
+_Avoid_: Best-effort deserialization, ignored ALTER error
+
 ## Relationships
 
 - A **Playback Session** has exactly one active **Clock Master**.
@@ -40,6 +44,8 @@ _Avoid_: Debug log
 - Each **Frame Demand** produces at most one terminal **Frame Delivery**.
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.
 - **Playback Evidence** records state and clock transitions without owning them.
+- Each persisted archive, document, and SQLite library has an independent version and **Project Migration** chain.
+- A **Project Migration** operates on an in-memory value or runtime copy; opening never rewrites the source archive.
 
 ## Example dialogue
 

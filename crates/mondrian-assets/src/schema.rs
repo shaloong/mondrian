@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS ai_generation_log (
 );
 "#;
 
-/// Migration SQL for existing databases that don't have the folder columns.
-pub const MIGRATE_FOLDERS_SQL: &str = r#"
+/// Folder schema created before legacy asset columns are added.
+pub const CREATE_FOLDERS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS folders (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -64,12 +64,4 @@ CREATE TABLE IF NOT EXISTS folders (
     FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
-
-ALTER TABLE assets ADD COLUMN folder_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_assets_folder ON assets(folder_id);
-"#;
-
-/// Migration SQL for existing databases that don't have asset interpretation.
-pub const MIGRATE_INTERPRETATION_SQL: &str = r#"
-ALTER TABLE assets ADD COLUMN interpretation TEXT DEFAULT '{"color":{"mode":"auto"}}';
 "#;
