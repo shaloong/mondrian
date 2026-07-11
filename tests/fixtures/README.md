@@ -1,6 +1,7 @@
 # Test Fixtures
 
-Place downloaded sample media and golden references under this directory.
+Fixture identity and expected metadata are governed by
+`tests/validation/corpus-manifest.json`. A filename alone is not a test contract.
 
 Recommended layout:
 - `tests/fixtures/color/` for color golden samples and reference frames
@@ -15,4 +16,16 @@ Suggested naming:
 - `*_legal.*` / `*_full.*` for range variants
 - `*_rec709.*`, `*_rec2020.*`, `*_hlg.*`, `*_pq.*`, `*_log.*` for color-space variants
 
-Keep large files out of the repo history unless they are required for deterministic tests. If a sample is too large, prefer a short manifest entry plus a download script or external reference note.
+Keep large or redistribution-restricted files out of repository history. Store them
+at the manifest path locally and validate their byte length and SHA-256 before use.
+Never replace an asset in place while retaining its fixture ID.
+
+Run the public/PR gate with:
+
+```powershell
+pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Pr
+```
+
+`Nightly` and `Release` tiers require every restricted asset to be present. A
+missing required asset is reported as `blocked`, while a schema, size, or hash
+mismatch is `failed`; neither state is a pass.

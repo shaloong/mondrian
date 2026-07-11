@@ -353,7 +353,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **验证基础**
 
-- [ ] 建立 Reference Corpus manifest、Golden Project、Stress Project 和 Windows 参考机说明。
+- [x] 建立版本化 Reference Corpus manifest、Golden/Stress Project 机器可读契约、Windows 参考机 profile、机器证据采集脚本和分层校验门禁；完整素材角色与真实执行仍按 M1/M2 退出门槛验收。
 - [ ] 将 capability probe、实际执行 evidence、fallback/blocker 写入同一结构化报告，但保持 owner crate 的诊断所有权。
 - [ ] 清理路线图与规格中的错误声明：类型存在、效果可选择、shader 可创建都不得自动写成产品支持。
 

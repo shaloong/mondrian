@@ -40,3 +40,16 @@ cargo test -p mondrian-app app_ui
 ```
 
 Ignored performance smoke tests write JSONL output when their env vars are set.
+
+## Reference media and projects
+
+Reference media, Golden/Stress Project contracts, validation tiers, and Windows
+machine evidence are specified in [Reference Validation](reference-validation.md).
+The PR manifest gate is:
+
+```powershell
+pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Pr
+```
+
+Unit or simulated performance tests cannot substitute for a required real-media
+nightly or release result.

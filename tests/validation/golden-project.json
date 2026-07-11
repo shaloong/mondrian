@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "windows-alpha-golden-v1",
+  "kind": "golden",
+  "timeline": { "duration_frames": 7500, "frame_rate": "25/1", "width": 3840, "height": 2160, "working_color_space": "scene-linear" },
+  "required_fixture_roles": [
+    { "role": "hlg-main10-picture", "fixture_id": null, "required": true },
+    { "role": "rec709-h264-picture", "fixture_id": null, "required": true },
+    { "role": "srgb-alpha-still", "fixture_id": null, "required": true },
+    { "role": "pcm-audio", "fixture_id": null, "required": true },
+    { "role": "aac-audio", "fixture_id": null, "required": true }
+  ],
+  "required_operations": ["open", "play", "accurate-seek", "scrub", "insert", "overwrite", "trim", "ripple", "split", "undo-redo", "proxy-original-switch", "offline-relink", "save-reopen", "export", "reimport"],
+  "required_content": ["transform", "opacity", "primary-color", "lut", "cross-dissolve", "basic-title", "hold-keyframe", "linear-keyframe", "bezier-keyframe"],
+  "exports": [
+    { "id": "h264-aac-sdr", "container": "mp4", "video_codec": "h264", "audio_codec": "aac", "required_probe_fields": ["duration", "frame_rate", "primaries", "transfer", "matrix", "range", "audio_sample_rate", "audio_channels"] },
+    { "id": "hevc-main10", "container": "mp4", "video_codec": "hevc-main10", "audio_codec": "aac", "required_probe_fields": ["duration", "frame_rate", "bit_depth", "primaries", "transfer", "matrix", "range", "hdr_static_metadata"] }
+  ],
+  "acceptance": { "consecutive_passes": 3, "duration_error_max_frames": 1, "av_boundary_error_max_ms": 20, "silent_fallback_allowed": false }
+}

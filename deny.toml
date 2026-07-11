@@ -27,5 +27,14 @@ highlight = "all"
 [advisories]
 version = 2
 ignore = [
-    "RUSTSEC-2024-0436",
+    # Both quick-xml advisories are currently reachable only through build-time
+    # XML parsers in xcb and wayland-scanner. Mondrian does not pass project or
+    # media input to these parsers. Remove these exceptions as soon as those
+    # upstream crates accept quick-xml >= 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # ttf-parser 0.25 is unmaintained rather than known vulnerable. It remains
+    # the newest version selected by the current fontdb/cosmic-text/resvg and
+    # winit stacks. Remove this exception when those upstream stacks migrate.
+    "RUSTSEC-2026-0192",
 ]

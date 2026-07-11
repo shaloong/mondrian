@@ -15,6 +15,16 @@ env:
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
+  reference-contracts:
+    name: Reference Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验 Reference Corpus 与项目契约
+        shell: pwsh
+        run: ./scripts/validation/validate-reference-assets.ps1 -Tier Pr
+
   # ───────────────────────────────────────────────────────────────────────────
   # 代码格式 & 风格检查（最快，优先失败）
   # ───────────────────────────────────────────────────────────────────────────
