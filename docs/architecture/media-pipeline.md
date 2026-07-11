@@ -2,6 +2,11 @@
 
 `mondrian-media` owns FFmpeg-based media inspection, decode support, waveform/proxy/cache primitives, and audio buffers.
 
+Realtime transport, Clock Master selection, Frame Demand deadlines, and the
+interpretation of Frame Deliveries belong to the app Playback Engine described
+in [Playback Engine](playback-engine.md). `mondrian-media` executes bounded
+decode requests and reports facts; it does not pause or advance transport.
+
 ## Probe
 
 `MediaInfo::probe(path)` uses FFmpeg format/codec metadata without decoding full media. It extracts:

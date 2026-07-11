@@ -60,3 +60,6 @@ Lower layers cannot depend on higher layers:
 - UI visual values must come from theme tokens, not hardcoded colors/spacing/radii.
 - Command/menu/shortcut/plugin entry points should flow through a command registry, not private per-menu business logic.
 - Preview and export should share render semantics. Different scheduling or caching is allowed; different interpretation is not.
+- Realtime transport has exactly one Clock Master and is owned by the
+  [Playback Engine](playback-engine.md); Viewer, decode, render, and audio
+  adapters report observations rather than mutating transport.
