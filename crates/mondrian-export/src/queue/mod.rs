@@ -1553,13 +1553,13 @@ fn execute_timeline_export(
         }
 
         apply_video_codec_args(&mut cmd, &job.config.preset.video);
-        apply_sequence_video_format_args(&mut cmd, &timeline.sequence.settings);
-        apply_color_tag_args(
+        apply_export_video_signal_args(
             &mut cmd,
-            timeline.sequence.settings.color_management.output_color_space,
+            &timeline.sequence.settings,
+            &job.config.preset.video,
         );
         if timeline.sequence.settings.color_management.preserve_hdr_metadata {
-            if let Err(err) = apply_hdr_metadata_args(&mut cmd, &timeline.sequence.settings) {
+            if let Err(err) = apply_h265_hdr_metadata_args(&mut cmd, &timeline.sequence.settings) {
                 return JobExecutionResult::Failed(err);
             }
         }
@@ -4174,6 +4174,45 @@ mod tests {
     }
 
     #[test]
+    fn export_color_validation_rejects_unimplemented_hdr_metadata_backends() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
+        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        timeline.sequence.settings.color_management.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+        timeline.sequence.settings.color_management.hdr_content_light =
+            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+
+        for codec in [
+            VideoCodecConfig::Av1 { crf: 24 },
+            VideoCodecConfig::ProRes { variant: "hq".to_owned() },
+        ] {
+            let mut config = dummy_config("hdr-unsupported-metadata.mov");
+            config.preset.container = Container::Mov;
+            config.preset.video = codec;
+
+            let err = validate_timeline_export_color_compatibility(&config, &timeline)
+                .expect_err("metadata preservation needs a verified encoder backend");
+            assert!(err.contains("H.265/libx265"));
+            assert!(err.contains("metadata backend"));
+        }
+    }
+
+    #[test]
+    fn export_color_validation_requires_explicit_srgb_for_untagged_gif() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Eight;
+        let mut config = dummy_config("untagged.gif");
+        config.preset.container = Container::Gif;
+        config.preset.video = VideoCodecConfig::Gif { colors: 256, dither: true };
+
+        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect_err("untagged GIF must not imply sRGB");
+
+        assert!(err.contains("显式 sRGB"));
+    }
+
+    #[test]
     fn timeline_render_range_respects_marked_in_out() {
         let mut seq = Sequence::new("range-test");
         let tb = seq.time_base();
@@ -4339,23 +4378,32 @@ mod tests {
     }
 
     #[test]
-    fn sequence_video_format_args_follow_bit_depth_and_range() {
+    fn export_video_signal_args_bind_bit_depth_range_and_matrix_conversion() {
         let mut settings = mondrian_timeline::sequence::SequenceSettings::default();
         settings.color_management.export_bit_depth = ExportBitDepth::Ten;
         settings.color_management.video_range = VideoRange::Legal;
+        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
 
         let mut cmd = Command::new("ffmpeg");
-        apply_sequence_video_format_args(&mut cmd, &settings);
+        apply_export_video_signal_args(&mut cmd, &settings, &codec);
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
 
         assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "yuv420p10le"]));
         assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "-vf"
+                && pair[1] == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020"
+        }));
     }
 
     #[test]
     fn color_tag_args_use_export_output_color_space() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
         let mut cmd = Command::new("ffmpeg");
-        apply_color_tag_args(&mut cmd, ColorSpace::Rec2100Pq);
+        apply_export_video_signal_args(&mut cmd, &settings, &codec);
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
 
         assert!(args.windows(2).any(|pair| pair == ["-color_primaries", "bt2020"]));
@@ -4365,13 +4413,45 @@ mod tests {
 
     #[test]
     fn color_tag_args_skip_camera_log_spaces_without_standard_delivery_tags() {
-        let mut cmd = Command::new("ffmpeg");
-        apply_color_tag_args(&mut cmd, ColorSpace::AppleLog);
-        apply_color_tag_args(&mut cmd, ColorSpace::SLog3);
-        apply_color_tag_args(&mut cmd, ColorSpace::ArriLogC4);
+        let codec = VideoCodecConfig::ProRes { variant: "hq".to_owned() };
+        for color_space in [
+            ColorSpace::AppleLog,
+            ColorSpace::SLog3,
+            ColorSpace::ArriLogC4,
+        ] {
+            let mut settings = SequenceSettings::default();
+            settings.color_management.output_color_space = color_space;
+            settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+            let mut cmd = Command::new("ffmpeg");
+            apply_export_video_signal_args(&mut cmd, &settings, &codec);
 
-        let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
-        assert!(args.is_empty());
+            let args =
+                cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+            assert!(!args.iter().any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "-color_primaries" | "-color_trc" | "-colorspace"
+                )
+            }));
+            assert!(args.iter().any(|arg| arg == "-vf"));
+        }
+    }
+
+    #[test]
+    fn srgb_yuv_delivery_uses_bt709_matrix_without_relabeling_transfer() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.output_color_space = ColorSpace::Srgb;
+        let codec = VideoCodecConfig::H264 { crf: 20, bitrate_kbps: None };
+        let mut cmd = Command::new("ffmpeg");
+
+        apply_export_video_signal_args(&mut cmd, &settings, &codec);
+
+        let args = cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["-color_trc", "iec61966-2-1"]));
+        assert!(args.windows(2).any(|pair| pair == ["-colorspace", "bt709"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "-vf" && pair[1].contains("out_color_matrix=bt709") }));
     }
 
     #[test]

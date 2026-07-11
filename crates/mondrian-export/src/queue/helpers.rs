@@ -164,24 +164,120 @@ pub(crate) fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig
     }
 }
 
-pub(crate) fn apply_color_tag_args(cmd: &mut Command, color_space: ColorSpace) {
-    if let Some(tags) = color_space.ffmpeg_tags() {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportYuvMatrix {
+    Bt709,
+    Bt2020NonConstant,
+}
+
+impl ExportYuvMatrix {
+    const fn scale_name(self) -> &'static str {
+        match self {
+            Self::Bt709 => "bt709",
+            Self::Bt2020NonConstant => "bt2020",
+        }
+    }
+
+    const fn tag_name(self) -> &'static str {
+        match self {
+            Self::Bt709 => "bt709",
+            Self::Bt2020NonConstant => "bt2020nc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExportVideoSignalContract {
+    pixel_format: &'static str,
+    codec_range: Option<&'static str>,
+    scale_range: Option<&'static str>,
+    yuv_matrix: Option<ExportYuvMatrix>,
+    color_space: ColorSpace,
+}
+
+impl ExportVideoSignalContract {
+    fn resolve(settings: &SequenceSettings, codec: &VideoCodecConfig) -> Self {
+        let color_space = settings.color_management.output_color_space;
+        if matches!(codec, VideoCodecConfig::Gif { .. }) {
+            return Self {
+                pixel_format: "rgb8",
+                codec_range: None,
+                scale_range: None,
+                yuv_matrix: None,
+                color_space,
+            };
+        }
+        let pixel_format = match settings.color_management.export_bit_depth {
+            ExportBitDepth::Eight => "yuv420p",
+            ExportBitDepth::Ten => "yuv420p10le",
+            ExportBitDepth::SixteenFloat => "yuv444p10le",
+        };
+        let (codec_range, scale_range) = match settings.color_management.video_range {
+            VideoRange::Full => ("pc", "full"),
+            VideoRange::Legal => ("tv", "limited"),
+        };
+        let encoding = color_space.encoding();
+        let yuv_matrix = match encoding.matrix {
+            mondrian_core::ColorMatrixCoefficients::Bt2020NonConstant => {
+                ExportYuvMatrix::Bt2020NonConstant
+            }
+            mondrian_core::ColorMatrixCoefficients::Unspecified
+                if encoding.primaries == mondrian_core::ColorPrimaries::Bt2020 =>
+            {
+                ExportYuvMatrix::Bt2020NonConstant
+            }
+            mondrian_core::ColorMatrixCoefficients::Bt709
+            | mondrian_core::ColorMatrixCoefficients::Rgb
+            | mondrian_core::ColorMatrixCoefficients::Unspecified => ExportYuvMatrix::Bt709,
+        };
+        Self {
+            pixel_format,
+            codec_range: Some(codec_range),
+            scale_range: Some(scale_range),
+            yuv_matrix: Some(yuv_matrix),
+            color_space,
+        }
+    }
+}
+
+pub(crate) fn apply_export_video_signal_args(
+    cmd: &mut Command,
+    settings: &SequenceSettings,
+    codec: &VideoCodecConfig,
+) {
+    let contract = ExportVideoSignalContract::resolve(settings, codec);
+    if let (Some(range), Some(matrix)) = (contract.scale_range, contract.yuv_matrix) {
+        cmd.arg("-vf").arg(format!(
+            "scale=iw:ih:in_range=full:out_range={range}:out_color_matrix={}",
+            matrix.scale_name()
+        ));
+    }
+    cmd.arg("-pix_fmt").arg(contract.pixel_format);
+    if let Some(range) = contract.codec_range {
+        cmd.arg("-color_range").arg(range);
+    }
+    if let (Some(tags), Some(matrix)) = (contract.color_space.ffmpeg_tags(), contract.yuv_matrix) {
         cmd.arg("-color_primaries")
             .arg(tags.color_primaries)
             .arg("-color_trc")
             .arg(tags.color_trc)
             .arg("-colorspace")
-            .arg(tags.colorspace);
+            .arg(matrix.tag_name());
     }
 }
 
-/// 写入 HDR10 元数据（母版显示色彩体积 + 内容光级别）。
+/// Write HDR10 static metadata through the libx265 encoder contract.
 ///
-/// 当序列设置中 `preserve_hdr_metadata` 为 true 且输出为 HDR 色彩空间时调用。
-pub(crate) fn apply_hdr_metadata_args(
+/// Validation must reject other encoders before this boundary is reached.
+pub(crate) fn apply_h265_hdr_metadata_args(
     cmd: &mut Command,
     settings: &SequenceSettings,
 ) -> Result<(), String> {
+    cmd.arg("-x265-params").arg(h265_hdr_metadata_params(settings)?);
+    Ok(())
+}
+
+fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, String> {
     let cm = &settings.color_management;
     let mastering = cm
         .hdr_mastering_display
@@ -193,22 +289,7 @@ pub(crate) fn apply_hdr_metadata_args(
         .hdr_content_light
         .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?
         .to_x265_max_cll();
-    cmd.arg("-x265-params").arg(format!("master-display={mastering}"));
-    cmd.arg("-x265-params").arg(format!("max-cll={cll}"));
-    Ok(())
-}
-
-pub(crate) fn apply_sequence_video_format_args(cmd: &mut Command, settings: &SequenceSettings) {
-    let pix_fmt = match settings.color_management.export_bit_depth {
-        ExportBitDepth::Eight => "yuv420p",
-        ExportBitDepth::Ten => "yuv420p10le",
-        ExportBitDepth::SixteenFloat => "yuv444p10le",
-    };
-    let range = match settings.color_management.video_range {
-        VideoRange::Full => "pc",
-        VideoRange::Legal => "tv",
-    };
-    cmd.arg("-pix_fmt").arg(pix_fmt).arg("-color_range").arg(range);
+    Ok(format!("master-display={mastering}:max-cll={cll}"))
 }
 
 pub(crate) fn apply_audio_codec_args(cmd: &mut Command, codec: &AudioCodecConfig) {
@@ -267,11 +348,20 @@ pub(crate) fn validate_timeline_export_color_compatibility(
     if preserve_hdr && settings.color_management.hdr_content_light.is_none() {
         return Err("保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string());
     }
+    if preserve_hdr && !matches!(&config.preset.video, VideoCodecConfig::H265 { .. }) {
+        return Err(
+            "HDR metadata 写入当前仅由 H.265/libx265 编码后端支持；AV1/ProRes 尚无已验证的 metadata backend"
+                .to_string(),
+        );
+    }
 
     match (&config.preset.container, &config.preset.video) {
         (Container::Gif, _) | (_, VideoCodecConfig::Gif { .. }) => {
             if output.is_hdr() || preserve_hdr || bit_depth != ExportBitDepth::Eight {
                 return Err("GIF 导出仅支持 8-bit SDR 输出".to_string());
+            }
+            if output != ColorSpace::Srgb {
+                return Err("GIF 不携带可靠色彩标签，仅允许显式 sRGB 输出".to_string());
             }
         }
         (Container::Webm, VideoCodecConfig::H264 { .. } | VideoCodecConfig::H265 { .. }) => {
@@ -405,5 +495,32 @@ pub(crate) fn parse_time_spec_millis(raw: &str) -> Option<u64> {
             )
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod hdr_metadata_tests {
+    use super::*;
+    use mondrian_core::{VideoContentLightMetadata, VideoMasteringDisplayMetadata};
+
+    #[test]
+    fn h265_hdr_metadata_is_one_atomic_encoder_parameter() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+        settings.color_management.hdr_content_light =
+            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+        let mut command = Command::new("ffmpeg");
+
+        apply_h265_hdr_metadata_args(&mut command, &settings).expect("valid HDR10 metadata");
+
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-x265-params");
+        assert!(args[1].starts_with("master-display="));
+        assert!(args[1].contains(":max-cll="));
     }
 }

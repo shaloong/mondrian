@@ -396,6 +396,25 @@ Reverse media identification also lives on the same contract:
 interpretation rules used by media probing. `mondrian-media` must capture raw
 FFmpeg/CICP tags and call those core helpers rather than maintaining a separate
 color-space mapping table.
+
+Export encoding adds an explicit signal-representation contract after the
+renderer output boundary. The pipe always carries full-range encoded RGB;
+`ExportVideoSignalContract` binds the codec pixel format, requested YUV range,
+RGB-to-YUV matrix conversion, and emitted CICP matrix tag as one operation.
+BT.2020-family outputs use the BT.2020 non-constant-luminance matrix, while
+BT.709/P3-family and sRGB YUV deliveries use BT.709. An sRGB YUV delivery keeps
+the sRGB transfer tag but uses a BT.709 matrix tag matching its actual YUV
+samples; the RGB identity-matrix tag from `ColorSpace::encoding()` must not be
+copied onto YUV media. Camera-log outputs still omit unverified delivery tags,
+but their RGB-to-YUV matrix and range are explicit. GIF has no reliable color
+tag contract and is therefore accepted only with an explicit sRGB output.
+
+Static HDR10 metadata is currently supported only by the H.265/libx265
+backend. SMPTE ST 2086 mastering-display and MaxCLL/MaxFALL values are emitted
+through one atomic `x265-params` value so neither field can override the other.
+AV1 and ProRes requests with metadata preservation fail validation until they
+have independently implemented and verified bitstream/container backends.
+
 Derived proxy media follows the same encoding contract. The app resolves one
 `ProxyColorContract` from asset interpretation plus ingest metadata before
 proxy lookup or generation. Media code persists that source color space,
