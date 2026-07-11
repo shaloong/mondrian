@@ -185,7 +185,7 @@ impl Default for AppUiPreferencesModel {
             workspace: WorkspacePreset::Editing.display_name().to_owned(),
             sequence_summary: "没有活动序列".to_owned(),
             proxy_mode: enabled_label(false),
-            audio_clock: "AudioMaster".to_owned(),
+            audio_clock: "Inactive".to_owned(),
             audio_sample_rate: "48000 Hz".to_owned(),
             export_range: export_range_label(TimelineExportRange::SequenceInOut).to_owned(),
             export_output: "未选择".to_owned(),

@@ -471,7 +471,8 @@ version it, and delete superseded state rather than maintaining two authorities.
 
 ## Current integration status
 
-Phase 1 is complete and Phase 2 has begun with the `mondrian-playback` crate. The pure Engine now owns
+Phase 1 is complete, Phase 2 is active, and the first Phase 3 Clock Master slice
+is integrated through the `mondrian-playback` crate. The pure Engine now owns
 the app's transport position/state, Synthetic Clock Master, epoch invalidation,
 exact rational clock advancement, stale-delivery rejection, and bounded
 temporary-resolution recovery policy. `AppState` projects current frame and
@@ -509,6 +510,25 @@ Delivery.
 Play and running seek now remain in bounded Priming. Ready or allowed Degraded
 delivery starts Synthetic Master immediately; after the 500 ms policy deadline,
 Synthetic Master starts at the deadline anchor and catches up to the current
-monotonic time without adding another priming interval of drift. Audio Device
-Master remains unavailable until Phase 3 can provide qualified consumed-sample
-observations; the existing `AudioClock` cannot be relabeled as that evidence.
+monotonic time without adding another priming interval of drift.
+
+The CPAL Audio Playback Adapter now publishes a typed
+`CallbackConsumptionEstimate`: stream generation, active-interval callback
+frames, sample rate, callback age/quantum, estimated latency, uncertainty,
+underrun frames, and stream failure. The callback counters are atomic and PCM
+uses a fixed-capacity lock-free queue, so the realtime callback no longer takes
+the former contended `Mutex<VecDeque<_>>`. The app requires 120 ms PCM preroll,
+a callback no older than 100 ms, and at least one active-interval callback
+before offering Audio Device Master. The Engine accepts callback estimates only
+within its versioned 20 ms uncertainty budget, anchors the first qualified
+observation without a position jump, advances exact timeline frames from integer
+sample deltas, and ignores monotonic UI ticks while Audio Device Master is
+active. Stream failure, stale evidence, excessive uncertainty, or decreasing
+sample position hands off continuously to Synthetic Master; repeated unavailable
+observations while already Synthetic do not reanchor or freeze transport.
+
+The grade remains explicitly `CallbackConsumptionEstimate`, not exact hardware
+`DevicePosition`. The former misleading `AudioClock` is now explicitly named
+`AudioRenderCursor` and cannot be exposed as Clock Master evidence. Device reopen,
+phase-controlled Synthetic-to-Audio reacquisition, and backend-native hardware
+position grades remain Phase 3 work.

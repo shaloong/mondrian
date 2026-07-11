@@ -2,6 +2,8 @@ use super::*;
 
 const MIN_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(1);
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
+const AUDIO_DEVICE_PREROLL: Duration = Duration::from_millis(120);
+const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
 
 /// Result category for one playback clock advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,10 +59,11 @@ impl AppState {
             tracing::error!(%error, "failed to start Playback Session");
             return;
         }
-        self.sync_audio_clock_to_frame(frames);
-        self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
+        self.sync_audio_render_cursor_to_frame(frames);
+        self.reset_audio_render_pipeline(self.audio_render_cursor.now_seconds().max(0.0));
         if let Some(output) = &self.audio_output {
             output.set_muted(false);
+            output.set_active(true);
         }
     }
 
@@ -70,10 +73,11 @@ impl AppState {
         if let Err(error) = self.playback_engine.pause(self.playback_now) {
             tracing::error!(%error, "failed to pause Playback Session");
         }
-        self.sync_audio_clock_to_frame(frames);
-        self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
+        self.sync_audio_render_cursor_to_frame(frames);
+        self.reset_audio_render_pipeline(self.audio_render_cursor.now_seconds().max(0.0));
         if let Some(output) = &self.audio_output {
             output.set_muted(false);
+            output.set_active(false);
             output.clear();
         }
     }
@@ -86,6 +90,7 @@ impl AppState {
         self.reset_audio_render_pipeline(0.0);
         if let Some(output) = &self.audio_output {
             output.set_muted(false);
+            output.set_active(false);
             output.clear();
         }
     }
@@ -119,10 +124,11 @@ impl AppState {
                 return;
             }
         }
-        self.sync_audio_clock_to_frame(frame);
-        self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
+        self.sync_audio_render_cursor_to_frame(frame);
+        self.reset_audio_render_pipeline(self.audio_render_cursor.now_seconds().max(0.0));
         if let Some(output) = &self.audio_output {
             output.set_muted(false);
+            output.set_active(was_running);
             output.clear();
         }
     }
@@ -150,6 +156,7 @@ impl AppState {
 
         if !self.is_playing() {
             output.set_muted(false);
+            output.set_active(false);
             output.clear();
             if audio_idle_warmup_enabled() {
                 self.warm_audio_cache_when_idle();
@@ -193,6 +200,27 @@ impl AppState {
 
             self.audio_render_in_flight += 1;
             self.audio_render_next_start_secs += self.audio_chunk_secs;
+        }
+        self.observe_audio_output_clock();
+    }
+
+    fn observe_audio_output_clock(&mut self) {
+        let Some(snapshot) = self.audio_output.as_ref().map(RealtimeAudioOutput::snapshot) else {
+            return;
+        };
+        if !self.is_playing() {
+            return;
+        }
+        let already_audio_master =
+            self.playback_engine.snapshot().clock_master == Some(ClockMaster::AudioDevice);
+        let observation = audio_device_clock_observation(
+            snapshot,
+            self.playback_engine.snapshot().epoch,
+            self.playback_now,
+            already_audio_master,
+        );
+        if let Err(error) = self.playback_engine.observe_audio_device_clock(observation) {
+            tracing::warn!(%error, "rejected audio-device Clock Master observation");
         }
     }
 
@@ -286,10 +314,11 @@ impl AppState {
         let target_frame = snapshot.position.frame;
         if snapshot.state == TransportState::Ended {
             self.settle_preview_access_source();
-            self.sync_audio_clock_to_frame(target_frame);
-            self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
+            self.sync_audio_render_cursor_to_frame(target_frame);
+            self.reset_audio_render_pipeline(self.audio_render_cursor.now_seconds().max(0.0));
             if let Some(output) = &self.audio_output {
                 output.set_muted(false);
+                output.set_active(false);
                 output.clear();
             }
             return PlaybackAdvance {
@@ -419,6 +448,54 @@ fn clamp_playback_wake_delay(delay: Duration) -> Duration {
     delay.clamp(MIN_PLAYBACK_WAKE_DELAY, MAX_PLAYBACK_WAKE_DELAY)
 }
 
+fn duration_sample_frames(duration: Duration, sample_rate: u32) -> u64 {
+    duration
+        .as_nanos()
+        .saturating_mul(sample_rate as u128)
+        .checked_div(1_000_000_000)
+        .unwrap_or(u128::MAX)
+        .min(u64::MAX as u128) as u64
+}
+
+fn audio_device_clock_observation(
+    snapshot: RealtimeAudioOutputSnapshot,
+    epoch: mondrian_playback::PlaybackEpoch,
+    observed_at: MonotonicTimestamp,
+    already_audio_master: bool,
+) -> AudioDeviceClockObservation {
+    let callback_fresh =
+        snapshot.last_callback_age.is_some_and(|age| age <= AUDIO_CALLBACK_STALE_AFTER);
+    let preroll_frames = duration_sample_frames(AUDIO_DEVICE_PREROLL, snapshot.sample_rate);
+    let usable = snapshot.active
+        && !snapshot.stream_failed
+        && snapshot.active_callback_consumed_frames > 0
+        && callback_fresh
+        && (already_audio_master || snapshot.buffered_frames >= preroll_frames as usize);
+    let callback_age_frames = snapshot
+        .last_callback_age
+        .map(|age| duration_sample_frames(age, snapshot.sample_rate))
+        .unwrap_or(u64::MAX);
+    let uncertainty_frames = callback_age_frames
+        .saturating_add(snapshot.last_callback_frames as u64)
+        .min(u32::MAX as u64) as u32;
+    AudioDeviceClockObservation {
+        epoch,
+        stream_generation: snapshot.stream_generation,
+        sample_rate: snapshot.sample_rate,
+        consumed_frames: snapshot.active_callback_consumed_frames,
+        observed_at,
+        grade: AudioClockObservationGrade::CallbackConsumptionEstimate,
+        estimated_latency_frames: snapshot.last_callback_frames,
+        uncertainty_frames,
+        underrun_frames: snapshot.underrun_frames,
+        state: if usable {
+            AudioDeviceClockState::Running
+        } else {
+            AudioDeviceClockState::Unavailable
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +521,55 @@ mod tests {
     fn play_ready(state: &mut AppState) {
         state.play();
         assert!(state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+    }
+
+    fn audio_snapshot() -> RealtimeAudioOutputSnapshot {
+        RealtimeAudioOutputSnapshot {
+            stream_generation: 3,
+            sample_rate: 48_000,
+            channels: 2,
+            callback_consumed_frames: 960,
+            active_callback_consumed_frames: 480,
+            callback_count: 2,
+            underrun_frames: 0,
+            last_callback_frames: 480,
+            last_callback_age: Some(Duration::from_millis(1)),
+            buffered_frames: 5_760,
+            stream_failed: false,
+            active: true,
+        }
+    }
+
+    #[test]
+    fn audio_adapter_requires_fresh_callback_and_preroll_before_handoff() {
+        let state = state_with_sequence(20);
+        let epoch = state.playback_engine.snapshot().epoch;
+
+        let ready = audio_device_clock_observation(
+            audio_snapshot(),
+            epoch,
+            MonotonicTimestamp::ZERO,
+            false,
+        );
+        assert_eq!(ready.state, AudioDeviceClockState::Running);
+        assert_eq!(
+            ready.grade,
+            AudioClockObservationGrade::CallbackConsumptionEstimate
+        );
+
+        let mut stale = audio_snapshot();
+        stale.last_callback_age = Some(Duration::from_millis(101));
+        assert_eq!(
+            audio_device_clock_observation(stale, epoch, MonotonicTimestamp::ZERO, false,).state,
+            AudioDeviceClockState::Unavailable
+        );
+
+        let mut unprimed = audio_snapshot();
+        unprimed.buffered_frames = 5_759;
+        assert_eq!(
+            audio_device_clock_observation(unprimed, epoch, MonotonicTimestamp::ZERO, false,).state,
+            AudioDeviceClockState::Unavailable
+        );
     }
 
     #[test]

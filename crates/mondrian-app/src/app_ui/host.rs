@@ -391,13 +391,16 @@ impl AppUiHost {
                 .fold(false, |changed, delivery| {
                     self.app_state.borrow_mut().observe_frame_delivery(delivery) || changed
                 });
+        let transport_model_changed = preview_outcome.transport_change || playback_delivery_changed;
+        if transport_model_changed {
+            self.refresh_transport_state_without_preview();
+        }
         let visible_model_changed = media_imports_changed
             || thumbnails_changed
             || preview_outcome.visible_change
-            || waveform_changed
-            || playback_delivery_changed;
+            || waveform_changed;
         if !visible_model_changed {
-            return preview_outcome.needs_follow_up_poll;
+            return transport_model_changed || preview_outcome.needs_follow_up_poll;
         }
         self.mark_dirty();
         self.refresh_if_dirty(bounds);
@@ -409,6 +412,7 @@ impl AppUiHost {
     pub fn advance_playback_clock(&mut self, elapsed: Duration, bounds: Rect) -> bool {
         let playback_changed = {
             let mut state = self.app_state.borrow_mut();
+            state.pump_audio_output();
             state.advance_playback_clock(elapsed).requires_refresh()
         };
         if !playback_changed {

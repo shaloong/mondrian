@@ -17,8 +17,8 @@ pub mod proxy;
 pub mod waveform;
 
 pub use audio::{
-    AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData, ClockRole,
-    RealtimeAudioOutput,
+    AudioBuffer, AudioMixer, AudioRenderCursor, AudioSourceCache, AudioTrackConfig, AudioTrackData,
+    RealtimeAudioOutput, RealtimeAudioOutputSnapshot,
 };
 pub use decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,

@@ -93,6 +93,7 @@ usvg             = { version = "0.45", default-features = false }
 
 # ---- 并发 / 消息 ----
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 parking_lot       = "0.12"
 rayon             = "1"
 dashmap           = "6"

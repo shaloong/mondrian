@@ -24,6 +24,7 @@ futures = { workspace = true }
 rayon          = { workspace = true }
 parking_lot    = { workspace = true }
 crossbeam-channel = { workspace = true }
+crossbeam-queue = { workspace = true }
 dashmap        = { workspace = true }
 
 # 错误处理

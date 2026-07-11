@@ -98,6 +98,8 @@ const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 pub(crate) struct AppUiPreviewPollOutcome {
     /// A decoded frame or terminal decode failure changed visible viewer state.
     pub visible_change: bool,
+    /// Transport/pending feedback changed without requiring Viewer reconstruction.
+    pub transport_change: bool,
     /// More completed decode results should be drained on a follow-up event-loop tick.
     pub needs_follow_up_poll: bool,
     /// Exact terminal deliveries returned by playback-current worker jobs.
@@ -107,6 +109,7 @@ pub(crate) struct AppUiPreviewPollOutcome {
 impl AppUiPreviewPollOutcome {
     pub(crate) fn merge(&mut self, mut other: Self) {
         self.visible_change |= other.visible_change;
+        self.transport_change |= other.transport_change;
         self.needs_follow_up_poll |= other.needs_follow_up_poll;
         self.frame_deliveries.append(&mut other.frame_deliveries);
     }
@@ -810,7 +813,8 @@ impl AppUiPreviewService {
         add_cell(&self.metrics.queue_canceled_jobs, canceled_queued_jobs);
         self.current_frame_pending.set(false);
         AppUiPreviewPollOutcome {
-            visible_change: true,
+            visible_change: false,
+            transport_change: true,
             needs_follow_up_poll: false,
             frame_deliveries,
         }
@@ -15011,7 +15015,8 @@ mod tests {
         assert!(service.current_frame_pending.get());
 
         let outcome = service.expire_stalled_realtime_current_with_timeout(Duration::ZERO);
-        assert!(outcome.visible_change);
+        assert!(!outcome.visible_change);
+        assert!(outcome.transport_change);
         assert_eq!(outcome.frame_deliveries.len(), 1);
 
         let diagnostics = service.diagnostics();
@@ -15040,7 +15045,8 @@ mod tests {
 
         let outcome = service.expire_stalled_realtime_current_with_timeout(Duration::ZERO);
 
-        assert!(outcome.visible_change);
+        assert!(!outcome.visible_change);
+        assert!(outcome.transport_change);
         assert!(outcome.frame_deliveries.is_empty());
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.scheduler.pending_requests, 0);
@@ -15057,13 +15063,13 @@ mod tests {
         assert!(
             service
                 .expire_stalled_realtime_current_with_timeout(Duration::ZERO)
-                .visible_change
+                .transport_change
         );
         service.seed_pending_playback_current_preview_work_for_test();
         assert!(
             service
                 .expire_stalled_realtime_current_with_timeout(Duration::ZERO)
-                .visible_change
+                .transport_change
         );
 
         let diagnostics = service.diagnostics();

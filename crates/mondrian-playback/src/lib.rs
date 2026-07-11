@@ -113,6 +113,47 @@ pub enum ClockMaster {
     Synthetic,
 }
 
+/// Quality grade of one audio-device clock observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioClockObservationGrade {
+    /// Cumulative frames requested by the device callback with bounded uncertainty.
+    CallbackConsumptionEstimate,
+}
+
+/// Runtime state reported by an audio output Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioDeviceClockState {
+    /// The stream callback is active and its cumulative frame counter is usable.
+    Running,
+    /// The stream failed or no longer provides a usable monotonic observation.
+    Unavailable,
+}
+
+/// Versioned audio-device sample observation consumed by the Playback Engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioDeviceClockObservation {
+    /// Playback Session identity at the Adapter observation seam.
+    pub epoch: PlaybackEpoch,
+    /// Concrete output-stream generation.
+    pub stream_generation: u64,
+    /// Device callback sample rate.
+    pub sample_rate: u32,
+    /// Cumulative output frames consumed by callbacks in this stream generation.
+    pub consumed_frames: u64,
+    /// Engine-relative monotonic observation time.
+    pub observed_at: MonotonicTimestamp,
+    /// Observation quality; never infer exact hardware position from this value.
+    pub grade: AudioClockObservationGrade,
+    /// Estimated output latency in device frames.
+    pub estimated_latency_frames: u32,
+    /// Upper-bound uncertainty in device frames.
+    pub uncertainty_frames: u32,
+    /// Cumulative callback frames rendered as silence because PCM was unavailable.
+    pub underrun_frames: u64,
+    /// Current output stream state.
+    pub state: AudioDeviceClockState,
+}
+
 /// User-visible transport condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransportState {
@@ -211,6 +252,8 @@ pub struct PlaybackPolicy {
     pub pressure_threshold: usize,
     /// Number of consecutive healthy deliveries required to raise one scale.
     pub healthy_deliveries_to_recover: usize,
+    /// Maximum uncertainty accepted for callback-estimated Audio Device Master.
+    pub max_audio_clock_uncertainty: Duration,
 }
 
 impl Default for PlaybackPolicy {
@@ -220,6 +263,7 @@ impl Default for PlaybackPolicy {
             pressure_window: 12,
             pressure_threshold: 8,
             healthy_deliveries_to_recover: 60,
+            max_audio_clock_uncertainty: Duration::from_millis(20),
         }
     }
 }
@@ -239,6 +283,8 @@ pub struct PlaybackSnapshot {
     pub preview_scale: PreviewResolutionScale,
     /// Revision required on Frame Demands and Deliveries.
     pub quality_revision: u64,
+    /// Latest current-epoch audio observation, including quality and underrun evidence.
+    pub audio_clock_observation: Option<AudioDeviceClockObservation>,
 }
 
 /// Playback state-machine error. Invalid observations never mutate the Engine.
@@ -256,12 +302,22 @@ pub enum PlaybackError {
     /// Recovery policy cannot form a bounded pressure/health window.
     #[error("playback policy is invalid")]
     InvalidPolicy,
+    /// Audio observation did not carry a usable sample rate.
+    #[error("audio clock observation sample rate must be positive")]
+    InvalidAudioSampleRate,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ClockAnchor {
     timeline: TimeCode,
     monotonic: MonotonicTimestamp,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AudioDeviceClockAnchor {
+    stream_generation: u64,
+    consumed_frames: u64,
+    timeline: TimeCode,
 }
 
 /// Deep, headless Module owning a Playback Session and its realtime invariants.
@@ -284,6 +340,8 @@ pub struct PlaybackEngine {
     next_demand_sequence: u64,
     active_demand: Option<FrameDemand>,
     terminal_delivery: Option<(PlaybackEpoch, u64, FrameDemandSequence)>,
+    audio_device_anchor: Option<AudioDeviceClockAnchor>,
+    last_audio_observation: Option<AudioDeviceClockObservation>,
 }
 
 impl PlaybackEngine {
@@ -295,6 +353,7 @@ impl PlaybackEngine {
             || policy.pressure_threshold == 0
             || policy.pressure_threshold > policy.pressure_window
             || policy.healthy_deliveries_to_recover == 0
+            || policy.max_audio_clock_uncertainty.is_zero()
         {
             return Err(PlaybackError::InvalidPolicy);
         }
@@ -325,6 +384,8 @@ impl PlaybackEngine {
             next_demand_sequence: 1,
             active_demand: None,
             terminal_delivery: None,
+            audio_device_anchor: None,
+            last_audio_observation: None,
         }
     }
 
@@ -474,6 +535,9 @@ impl PlaybackEngine {
         ) {
             return Ok(None);
         }
+        if self.clock_master == Some(ClockMaster::AudioDevice) {
+            return Ok(Some(Duration::from_millis(2)));
+        }
         let elapsed = now.checked_elapsed_since(self.clock_anchor.monotonic)?;
         let completed = elapsed_frames(elapsed, self.position.time_base)?.max(0) as u128;
         let next_frame = completed.saturating_add(1);
@@ -499,7 +563,89 @@ impl PlaybackEngine {
             TransportState::Playing | TransportState::Recovering
         ) {
             self.clock_master = Some(ClockMaster::Synthetic);
+            self.audio_device_anchor = None;
             self.reanchor(now);
+        }
+        Ok(self.snapshot())
+    }
+
+    /// Apply a qualified audio callback-consumption observation.
+    ///
+    /// Old epochs are ignored. Unavailable, non-monotonic, or excessively
+    /// uncertain observations hand off continuously to Synthetic Clock Master.
+    pub fn observe_audio_device_clock(
+        &mut self,
+        observation: AudioDeviceClockObservation,
+    ) -> Result<PlaybackSnapshot, PlaybackError> {
+        if observation.epoch != self.epoch {
+            return Ok(self.snapshot());
+        }
+        if observation.state == AudioDeviceClockState::Running && observation.sample_rate == 0 {
+            return Err(PlaybackError::InvalidAudioSampleRate);
+        }
+        self.accept_timestamp(observation.observed_at)?;
+        self.last_audio_observation = Some(observation);
+        if observation.state == AudioDeviceClockState::Unavailable {
+            self.handoff_to_synthetic(observation.observed_at);
+            return Ok(self.snapshot());
+        }
+        let uncertainty = sample_frames_duration(
+            observation.uncertainty_frames as u64,
+            observation.sample_rate,
+        );
+        if uncertainty > self.policy.max_audio_clock_uncertainty {
+            self.handoff_to_synthetic(observation.observed_at);
+            return Ok(self.snapshot());
+        }
+        if !matches!(
+            self.state,
+            TransportState::Playing | TransportState::Recovering
+        ) {
+            return Ok(self.snapshot());
+        }
+
+        let effective_consumed = observation
+            .consumed_frames
+            .saturating_sub(observation.estimated_latency_frames as u64);
+        if self.audio_device_anchor.is_some_and(|anchor| {
+            anchor.stream_generation == observation.stream_generation
+                && effective_consumed < anchor.consumed_frames
+        }) {
+            self.handoff_to_synthetic(observation.observed_at);
+            return Ok(self.snapshot());
+        }
+        let Some(anchor) = self
+            .audio_device_anchor
+            .filter(|anchor| anchor.stream_generation == observation.stream_generation)
+        else {
+            self.audio_device_anchor = Some(AudioDeviceClockAnchor {
+                stream_generation: observation.stream_generation,
+                consumed_frames: effective_consumed,
+                timeline: self.position,
+            });
+            self.clock_master = Some(ClockMaster::AudioDevice);
+            self.reanchor(observation.observed_at);
+            return Ok(self.snapshot());
+        };
+
+        let sample_delta = effective_consumed.saturating_sub(anchor.consumed_frames);
+        let advanced = sample_frames_to_timeline_frames(
+            sample_delta,
+            observation.sample_rate,
+            self.position.time_base,
+        )?;
+        let target = anchor.timeline.frame.saturating_add(advanced);
+        self.position.frame = self.position.frame.max(target).min(self.end_frame).max(0);
+        self.clock_master = Some(ClockMaster::AudioDevice);
+        if self.active_target_frame != Some(self.position.frame) {
+            self.active_target_frame = Some(self.position.frame);
+            self.terminal_delivery = None;
+            self.refresh_frame_demand(observation.observed_at)?;
+        }
+        if self.position.frame >= self.end_frame {
+            self.state = TransportState::Ended;
+            self.clock_master = None;
+            self.audio_device_anchor = None;
         }
         Ok(self.snapshot())
     }
@@ -604,6 +750,7 @@ impl PlaybackEngine {
             clock_master: self.clock_master,
             preview_scale: self.preview_scale,
             quality_revision: self.quality_revision,
+            audio_clock_observation: self.last_audio_observation,
         }
     }
 
@@ -628,6 +775,9 @@ impl PlaybackEngine {
             self.state,
             TransportState::Playing | TransportState::Recovering
         ) {
+            return Ok(());
+        }
+        if self.clock_master == Some(ClockMaster::AudioDevice) {
             return Ok(());
         }
         let elapsed = now.checked_elapsed_since(self.clock_anchor.monotonic)?;
@@ -659,6 +809,18 @@ impl PlaybackEngine {
         self.clock_anchor = ClockAnchor { timeline: self.position, monotonic: now };
     }
 
+    fn handoff_to_synthetic(&mut self, now: MonotonicTimestamp) {
+        self.audio_device_anchor = None;
+        if matches!(
+            self.state,
+            TransportState::Playing | TransportState::Recovering
+        ) && self.clock_master != Some(ClockMaster::Synthetic)
+        {
+            self.clock_master = Some(ClockMaster::Synthetic);
+            self.reanchor(now);
+        }
+    }
+
     fn reset_runtime_policy(&mut self) {
         self.preview_scale = PreviewResolutionScale::Full;
         self.quality_revision = self.quality_revision.saturating_add(1);
@@ -667,6 +829,8 @@ impl PlaybackEngine {
         self.active_target_frame = Some(self.position.frame);
         self.active_demand = None;
         self.terminal_delivery = None;
+        self.audio_device_anchor = None;
+        self.last_audio_observation = None;
     }
 
     fn refresh_frame_demand_if_target_changed(
@@ -753,6 +917,31 @@ fn elapsed_frames(elapsed: Duration, time_base: Rational) -> Result<i64, Playbac
     Ok((numerator / denominator).min(i64::MAX as u128) as i64)
 }
 
+fn sample_frames_duration(frames: u64, sample_rate: u32) -> Duration {
+    if sample_rate == 0 {
+        return Duration::MAX;
+    }
+    let nanos = (frames as u128)
+        .saturating_mul(1_000_000_000)
+        .checked_div(sample_rate as u128)
+        .unwrap_or(u128::MAX);
+    Duration::from_nanos(nanos.min(u64::MAX as u128) as u64)
+}
+
+fn sample_frames_to_timeline_frames(
+    sample_frames: u64,
+    sample_rate: u32,
+    time_base: Rational,
+) -> Result<i64, PlaybackError> {
+    validate_time_base(time_base)?;
+    if sample_rate == 0 {
+        return Err(PlaybackError::InvalidAudioSampleRate);
+    }
+    let numerator = (sample_frames as u128).saturating_mul(time_base.den as u128);
+    let denominator = (sample_rate as u128).saturating_mul(time_base.num as u128);
+    Ok((numerator / denominator).min(i64::MAX as u128) as i64)
+}
+
 fn frame_duration(time_base: Rational) -> Result<Duration, PlaybackError> {
     validate_time_base(time_base)?;
     let numerator = 1_000_000_000_u128.saturating_mul(time_base.num as u128);
@@ -767,6 +956,100 @@ mod tests {
 
     fn ts(ms: u64) -> MonotonicTimestamp {
         MonotonicTimestamp::from_duration(Duration::from_millis(ms))
+    }
+
+    fn audio_observation(
+        engine: &PlaybackEngine,
+        consumed_frames: u64,
+        observed_at: MonotonicTimestamp,
+    ) -> AudioDeviceClockObservation {
+        AudioDeviceClockObservation {
+            epoch: engine.snapshot().epoch,
+            stream_generation: 7,
+            sample_rate: 48_000,
+            consumed_frames,
+            observed_at,
+            grade: AudioClockObservationGrade::CallbackConsumptionEstimate,
+            estimated_latency_frames: 0,
+            uncertainty_frames: 240,
+            underrun_frames: 0,
+            state: AudioDeviceClockState::Running,
+        }
+    }
+
+    #[test]
+    fn callback_consumption_drives_audio_device_master_without_monotonic_tick_drift() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+
+        let anchored = engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+        assert_eq!(anchored.clock_master, Some(ClockMaster::AudioDevice));
+        engine.tick(ts(40)).unwrap();
+        assert_eq!(engine.snapshot().position.frame, 0);
+
+        let advanced = engine
+            .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(40)))
+            .unwrap();
+        assert_eq!(advanced.position.frame, 1);
+        assert_eq!(advanced.clock_master, Some(ClockMaster::AudioDevice));
+    }
+
+    #[test]
+    fn audio_device_loss_hands_off_without_position_jump() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(40)))
+            .unwrap();
+
+        let handoff = engine.audio_device_lost(ts(50)).unwrap();
+        assert_eq!(handoff.position.frame, 1);
+        assert_eq!(handoff.clock_master, Some(ClockMaster::Synthetic));
+
+        let continued = engine.tick(ts(90)).unwrap();
+        assert_eq!(continued.position.frame, 2);
+    }
+
+    #[test]
+    fn decreasing_callback_position_falls_back_to_synthetic() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 2_000, ts(0)))
+            .unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 3_920, ts(40)))
+            .unwrap();
+
+        let fallback = engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(50)))
+            .unwrap();
+
+        assert_eq!(fallback.position.frame, 1);
+        assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
+        assert_eq!(engine.tick(ts(90)).unwrap().position.frame, 2);
+    }
+
+    #[test]
+    fn uncertain_audio_observation_cannot_claim_audio_device_master() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        let mut observation = audio_observation(&engine, 1_000, ts(0));
+        observation.uncertainty_frames = 2_000;
+
+        let snapshot = engine.observe_audio_device_clock(observation).unwrap();
+
+        assert_eq!(snapshot.clock_master, Some(ClockMaster::Synthetic));
+        assert_eq!(engine.tick(ts(40)).unwrap().position.frame, 1);
     }
 
     fn engine() -> PlaybackEngine {
@@ -836,6 +1119,7 @@ mod tests {
             pressure_window: 4,
             pressure_threshold: 3,
             healthy_deliveries_to_recover: 2,
+            ..PlaybackPolicy::default()
         };
         let mut engine = PlaybackEngine::new(Rational::new(1, 25), policy).unwrap();
         engine.play(100, ts(0)).unwrap();
@@ -927,6 +1211,7 @@ mod tests {
                 pressure_window: 4,
                 pressure_threshold: 5,
                 healthy_deliveries_to_recover: 1,
+                ..PlaybackPolicy::default()
             },
         );
         assert!(matches!(result, Err(PlaybackError::InvalidPolicy)));

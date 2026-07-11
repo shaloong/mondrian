@@ -24,10 +24,11 @@ use mondrian_effects::{
 };
 use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{
-    AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
-    RealtimeAudioOutput,
+    AudioBuffer, AudioMixer, AudioRenderCursor, AudioSourceCache, AudioTrackConfig, AudioTrackData,
+    RealtimeAudioOutput, RealtimeAudioOutputSnapshot,
 };
 use mondrian_playback::{
+    AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
     FrameDelivery, FrameDeliveryKind, MonotonicTimestamp, PlaybackEngine, TransportState,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
@@ -262,7 +263,7 @@ pub struct AppState {
 
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
-    pub audio_clock: AudioClock,
+    pub audio_render_cursor: AudioRenderCursor,
     pub audio_output: Option<RealtimeAudioOutput>,
     pub audio_mixer: AudioMixer,
     pub audio_source_cache: Arc<AudioSourceCache>,
@@ -351,7 +352,7 @@ impl AppState {
             auto_proxy_enabled: false,
             proxy_mode_assets: HashSet::new(),
             audio_sample_rate,
-            audio_clock: AudioClock::new(audio_sample_rate),
+            audio_render_cursor: AudioRenderCursor::new(audio_sample_rate),
             audio_output: RealtimeAudioOutput::try_new(audio_sample_rate, audio_channels).ok(),
             audio_mixer: AudioMixer::new(audio_sample_rate, audio_channels),
             audio_source_cache,
@@ -377,10 +378,10 @@ impl AppState {
             .max(1.0)
     }
 
-    fn sync_audio_clock_to_frame(&mut self, frame: i64) {
+    fn sync_audio_render_cursor_to_frame(&mut self, frame: i64) {
         let video_secs = frame.max(0) as f64 / self.fps();
         let sample_pos = (video_secs * self.audio_sample_rate as f64).round() as i64;
-        self.audio_clock.seek_to_samples(sample_pos.max(0));
+        self.audio_render_cursor.seek_to_samples(sample_pos.max(0));
     }
 
     pub fn set_status_hint(&mut self, message: impl Into<String>, is_error: bool) {

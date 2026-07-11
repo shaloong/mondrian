@@ -2,6 +2,23 @@
 
 `mondrian-media` owns FFmpeg-based media inspection, decode support, waveform/proxy/cache primitives, and audio buffers.
 
+## Realtime audio output evidence
+
+`RealtimeAudioOutput` owns the concrete CPAL stream and a fixed-capacity
+`ArrayQueue<f32>` PCM queue. The device callback may pop samples, fill silence,
+and update atomics only; it does not acquire the former queue mutex. Main-thread
+enqueue is bounded to two seconds and evicts the oldest queued sample under
+backpressure rather than growing memory.
+
+`RealtimeAudioOutputSnapshot` is the media-to-app Adapter evidence seam. It
+reports stream generation, configured sample format, cumulative and
+active-interval callback frames, callback count/age/quantum, queued frames,
+underrun frames, active state, and asynchronous stream failure. These are media
+facts. `mondrian-media` does not select a Clock Master or label this estimate as
+an exact hardware playback head; the app lowers the snapshot to a typed playback
+observation and `mondrian-playback` applies preroll, uncertainty, epoch,
+monotonicity, and handoff policy.
+
 Realtime transport, Clock Master selection, Frame Demand deadlines, and the
 interpretation of Frame Deliveries belong to the app Playback Engine described
 in [Playback Engine](playback-engine.md). `mondrian-media` executes bounded
@@ -272,6 +289,8 @@ is not a renderer fallback and must not clear ready/stale frames,
 still-frame work, media caches, or external GPU viewer textures. It exists so a
 lost, wedged, or pathologically slow current decode cannot retain scheduler
 capacity indefinitely.
+Expiration is transport-only feedback: the host refreshes transport/pending
+models without synchronously rebuilding Viewer preview content.
 The same counter must appear in the preview decode performance summary/report
 even before a worker returns a canceled decode result, because the product
 symptom is already user-visible at the moment the demand expires.

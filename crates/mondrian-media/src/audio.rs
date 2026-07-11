@@ -1,13 +1,14 @@
 //! 音频缓冲区与混合器
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crossbeam_queue::ArrayQueue;
 use mondrian_core::{MondrianError, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -82,9 +83,77 @@ pub struct AudioMixer {
 pub struct RealtimeAudioOutput {
     sample_rate: u32,
     channels: u8,
-    queue: Arc<Mutex<VecDeque<f32>>>,
+    queue: Arc<ArrayQueue<f32>>,
     muted: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
+    activation_consumed_frames: AtomicU64,
+    telemetry: Arc<RealtimeAudioOutputTelemetry>,
     _stream: cpal::Stream,
+}
+
+/// Callback-derived audio output evidence. This is not an exact hardware playhead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RealtimeAudioOutputSnapshot {
+    /// Concrete CPAL stream generation.
+    pub stream_generation: u64,
+    /// Configured device sample rate.
+    pub sample_rate: u32,
+    /// Configured interleaved channel count.
+    pub channels: u8,
+    /// Frames requested by callbacks since stream creation.
+    pub callback_consumed_frames: u64,
+    /// Callback-consumed frames since the output was most recently activated.
+    pub active_callback_consumed_frames: u64,
+    /// Number of output callbacks observed.
+    pub callback_count: u64,
+    /// Active callback frames filled with silence because PCM was unavailable.
+    pub underrun_frames: u64,
+    /// Frame count requested by the latest callback.
+    pub last_callback_frames: u32,
+    /// Runtime age of the latest callback, or `None` before the first callback.
+    pub last_callback_age: Option<Duration>,
+    /// PCM frames currently waiting in the output queue.
+    pub buffered_frames: usize,
+    /// Whether CPAL reported an asynchronous stream error.
+    pub stream_failed: bool,
+    /// Whether playback consumption is currently enabled.
+    pub active: bool,
+}
+
+struct RealtimeAudioOutputTelemetry {
+    stream_generation: u64,
+    origin: Instant,
+    callback_consumed_frames: AtomicU64,
+    callback_count: AtomicU64,
+    underrun_frames: AtomicU64,
+    last_callback_frames: AtomicU64,
+    last_callback_elapsed_ns: AtomicU64,
+    stream_failed: AtomicBool,
+}
+
+impl RealtimeAudioOutputTelemetry {
+    fn new() -> Self {
+        static NEXT_STREAM_GENERATION: AtomicU64 = AtomicU64::new(1);
+        Self {
+            stream_generation: NEXT_STREAM_GENERATION.fetch_add(1, Ordering::Relaxed),
+            origin: Instant::now(),
+            callback_consumed_frames: AtomicU64::new(0),
+            callback_count: AtomicU64::new(0),
+            underrun_frames: AtomicU64::new(0),
+            last_callback_frames: AtomicU64::new(0),
+            last_callback_elapsed_ns: AtomicU64::new(0),
+            stream_failed: AtomicBool::new(false),
+        }
+    }
+
+    fn record_callback(&self, frames: usize, underrun_frames: usize) {
+        self.callback_consumed_frames.fetch_add(frames as u64, Ordering::Relaxed);
+        self.callback_count.fetch_add(1, Ordering::Relaxed);
+        self.underrun_frames.fetch_add(underrun_frames as u64, Ordering::Relaxed);
+        self.last_callback_frames.store(frames as u64, Ordering::Relaxed);
+        let elapsed_ns = self.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.last_callback_elapsed_ns.store(elapsed_ns, Ordering::Release);
+    }
 }
 
 pub struct AudioSourceCache {
@@ -93,20 +162,15 @@ pub struct AudioSourceCache {
     decoded: Mutex<HashMap<PathBuf, Arc<AudioBuffer>>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClockRole {
-    VideoMaster,
-    AudioMaster,
-}
-
+/// Monotonic cursor used to choose audio render windows; never a Clock Master.
 #[derive(Debug, Clone)]
-pub struct AudioClock {
+pub struct AudioRenderCursor {
     pub sample_rate: u32,
     started_at: Instant,
     offset_samples: i64,
 }
 
-impl AudioClock {
+impl AudioRenderCursor {
     pub fn new(sample_rate: u32) -> Self {
         Self {
             sample_rate,
@@ -127,101 +191,6 @@ impl AudioClock {
     pub fn seek_to_samples(&mut self, samples: i64) {
         self.started_at = Instant::now();
         self.offset_samples = samples;
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SyncCorrection {
-    pub drift_seconds: f64,
-    pub playback_rate: f64,
-    pub padding_frames: usize,
-    pub drop_frames: usize,
-}
-
-/// 音视频主从时钟同步器。
-///
-/// 默认以视频为主时钟，对音频进行轻微速率修正；当漂移过大时退化为补零/丢帧。
-pub struct AudioSyncController {
-    pub role: ClockRole,
-    pub max_soft_drift: Duration,
-    pub max_hard_drift: Duration,
-    pub no_sync_threshold: Duration,
-    pub max_rate_adjust_percent: f64,
-}
-
-impl Default for AudioSyncController {
-    fn default() -> Self {
-        Self {
-            role: ClockRole::AudioMaster,
-            max_soft_drift: Duration::from_millis(40),
-            max_hard_drift: Duration::from_millis(100),
-            no_sync_threshold: Duration::from_secs(10),
-            max_rate_adjust_percent: 3.0,
-        }
-    }
-}
-
-impl AudioSyncController {
-    pub fn compute_correction(
-        &self,
-        master_seconds: f64,
-        slave_seconds: f64,
-        sample_rate: u32,
-    ) -> SyncCorrection {
-        let drift = master_seconds - slave_seconds;
-        let abs = drift.abs();
-        let soft = self.max_soft_drift.as_secs_f64();
-        let hard = self.max_hard_drift.as_secs_f64();
-        let no_sync = self.no_sync_threshold.as_secs_f64();
-        let sr = sample_rate as f64;
-
-        if abs >= no_sync {
-            return SyncCorrection {
-                drift_seconds: drift,
-                playback_rate: 1.0,
-                padding_frames: 0,
-                drop_frames: 0,
-            };
-        }
-
-        if abs <= soft {
-            return SyncCorrection {
-                drift_seconds: drift,
-                playback_rate: 1.0,
-                padding_frames: 0,
-                drop_frames: 0,
-            };
-        }
-
-        if abs >= hard {
-            let frames = (abs * sr).round().max(0.0) as usize;
-            return if drift > 0.0 {
-                SyncCorrection {
-                    drift_seconds: drift,
-                    playback_rate: 1.0,
-                    padding_frames: frames,
-                    drop_frames: 0,
-                }
-            } else {
-                SyncCorrection {
-                    drift_seconds: drift,
-                    playback_rate: 1.0,
-                    padding_frames: 0,
-                    drop_frames: frames,
-                }
-            };
-        }
-
-        let adjust_ratio = (drift / hard) * (self.max_rate_adjust_percent / 100.0);
-        SyncCorrection {
-            drift_seconds: drift,
-            playback_rate: (1.0 + adjust_ratio).clamp(
-                1.0 - self.max_rate_adjust_percent / 100.0,
-                1.0 + self.max_rate_adjust_percent / 100.0,
-            ),
-            padding_frames: 0,
-            drop_frames: 0,
-        }
     }
 }
 
@@ -258,30 +227,6 @@ impl AudioMixer {
 
         self.soft_clip(&mut output);
         output
-    }
-
-    pub fn apply_clock_correction(
-        &self,
-        mut buffer: AudioBuffer,
-        correction: &SyncCorrection,
-    ) -> AudioBuffer {
-        if correction.drop_frames > 0 {
-            let samples_to_drop = correction.drop_frames.saturating_mul(buffer.channels as usize);
-            if samples_to_drop < buffer.samples.len() {
-                buffer.samples.drain(0..samples_to_drop);
-            } else {
-                buffer.samples.clear();
-            }
-        }
-
-        if correction.padding_frames > 0 {
-            let extra = correction.padding_frames.saturating_mul(buffer.channels as usize);
-            let mut padded = vec![0.0f32; extra];
-            padded.extend_from_slice(&buffer.samples);
-            buffer.samples = padded;
-        }
-
-        buffer
     }
 
     fn mix_track_with_pan(
@@ -337,10 +282,16 @@ impl RealtimeAudioOutput {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        let queue = Arc::new(Mutex::new(VecDeque::with_capacity(sample_rate as usize)));
+        let queue_capacity = sample_rate as usize * channels.max(1) as usize * 2;
+        let queue = Arc::new(ArrayQueue::new(queue_capacity.max(1)));
         let queue_for_cb = Arc::clone(&queue);
         let muted = Arc::new(AtomicBool::new(false));
-        let err_fn = |err| tracing::error!("音频输出流错误: {}", err);
+        let active = Arc::new(AtomicBool::new(false));
+        let telemetry = Arc::new(RealtimeAudioOutputTelemetry::new());
+        let telemetry_for_error = Arc::clone(&telemetry);
+        let err_fn = move |_error| {
+            telemetry_for_error.stream_failed.store(true, Ordering::Release);
+        };
 
         let default_config = device
             .default_output_config()
@@ -349,26 +300,49 @@ impl RealtimeAudioOutput {
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::F32 => {
                 let muted_for_cb = Arc::clone(&muted);
-                build_f32_stream(&device, &config, queue_for_cb, muted_for_cb, err_fn).map_err(
-                    |e| MondrianError::Other(anyhow::anyhow!("创建 F32 输出流失败: {e}")),
-                )?
+                build_f32_stream(
+                    &device,
+                    &config,
+                    queue_for_cb,
+                    muted_for_cb,
+                    Arc::clone(&active),
+                    Arc::clone(&telemetry),
+                    err_fn,
+                )
+                .map_err(|e| MondrianError::Other(anyhow::anyhow!("创建 F32 输出流失败: {e}")))?
             }
             cpal::SampleFormat::I16 => {
                 let queue_for_cb = Arc::clone(&queue);
                 let muted_for_cb = Arc::clone(&muted);
+                let active_for_cb = Arc::clone(&active);
+                let telemetry_for_cb = Arc::clone(&telemetry);
                 device
                     .build_output_stream(
                         &config,
                         move |data: &mut [i16], _| {
-                            if muted_for_cb.load(Ordering::Relaxed) {
+                            let frames = data.len() / channels.max(1) as usize;
+                            if muted_for_cb.load(Ordering::Relaxed)
+                                || !active_for_cb.load(Ordering::Relaxed)
+                            {
                                 data.fill(0);
+                                telemetry_for_cb.record_callback(frames, 0);
                                 return;
                             }
-                            let mut guard = queue_for_cb.lock();
+                            let mut missing_samples = 0usize;
                             for s in data {
-                                let v = guard.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0);
+                                let v = queue_for_cb
+                                    .pop()
+                                    .unwrap_or_else(|| {
+                                        missing_samples = missing_samples.saturating_add(1);
+                                        0.0
+                                    })
+                                    .clamp(-1.0, 1.0);
                                 *s = (v * i16::MAX as f32) as i16;
                             }
+                            telemetry_for_cb.record_callback(
+                                frames,
+                                missing_samples / channels.max(1) as usize,
+                            );
                         },
                         err_fn,
                         None,
@@ -380,19 +354,35 @@ impl RealtimeAudioOutput {
             cpal::SampleFormat::U16 => {
                 let queue_for_cb = Arc::clone(&queue);
                 let muted_for_cb = Arc::clone(&muted);
+                let active_for_cb = Arc::clone(&active);
+                let telemetry_for_cb = Arc::clone(&telemetry);
                 device
                     .build_output_stream(
                         &config,
                         move |data: &mut [u16], _| {
-                            if muted_for_cb.load(Ordering::Relaxed) {
+                            let frames = data.len() / channels.max(1) as usize;
+                            if muted_for_cb.load(Ordering::Relaxed)
+                                || !active_for_cb.load(Ordering::Relaxed)
+                            {
                                 data.fill(u16::MAX / 2);
+                                telemetry_for_cb.record_callback(frames, 0);
                                 return;
                             }
-                            let mut guard = queue_for_cb.lock();
+                            let mut missing_samples = 0usize;
                             for s in data {
-                                let v = guard.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0);
+                                let v = queue_for_cb
+                                    .pop()
+                                    .unwrap_or_else(|| {
+                                        missing_samples = missing_samples.saturating_add(1);
+                                        0.0
+                                    })
+                                    .clamp(-1.0, 1.0);
                                 *s = ((v * 0.5 + 0.5) * u16::MAX as f32) as u16;
                             }
+                            telemetry_for_cb.record_callback(
+                                frames,
+                                missing_samples / channels.max(1) as usize,
+                            );
                         },
                         err_fn,
                         None,
@@ -417,6 +407,9 @@ impl RealtimeAudioOutput {
             channels,
             queue,
             muted,
+            active,
+            activation_consumed_frames: AtomicU64::new(0),
+            telemetry,
             _stream: stream,
         })
     }
@@ -425,25 +418,69 @@ impl RealtimeAudioOutput {
         if buffer.samples.is_empty() {
             return;
         }
-        let mut guard = self.queue.lock();
-        guard.extend(buffer.samples.iter().copied());
-
-        let max_samples = self.sample_rate as usize * self.channels as usize * 2;
-        while guard.len() > max_samples {
-            let _ = guard.pop_front();
+        for sample in &buffer.samples {
+            let mut pending = *sample;
+            loop {
+                match self.queue.push(pending) {
+                    Ok(()) => break,
+                    Err(returned) => {
+                        pending = returned;
+                        let _ = self.queue.pop();
+                    }
+                }
+            }
         }
     }
 
     pub fn clear(&self) {
-        self.queue.lock().clear();
+        while self.queue.pop().is_some() {}
     }
 
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
     }
 
+    /// Begin or end one playback-consumption interval.
+    pub fn set_active(&self, active: bool) {
+        let was_active = self.active.swap(active, Ordering::AcqRel);
+        if active && !was_active {
+            self.activation_consumed_frames.store(
+                self.telemetry.callback_consumed_frames.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+        }
+    }
+
     pub fn buffered_frames(&self) -> usize {
-        self.queue.lock().len() / self.channels.max(1) as usize
+        self.queue.len() / self.channels.max(1) as usize
+    }
+
+    /// Capture callback-consumption and health evidence without touching CPAL.
+    pub fn snapshot(&self) -> RealtimeAudioOutputSnapshot {
+        let last_elapsed_ns = self.telemetry.last_callback_elapsed_ns.load(Ordering::Acquire);
+        let now_ns = self.telemetry.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let callback_consumed_frames =
+            self.telemetry.callback_consumed_frames.load(Ordering::Acquire);
+        RealtimeAudioOutputSnapshot {
+            stream_generation: self.telemetry.stream_generation,
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            callback_consumed_frames,
+            active_callback_consumed_frames: callback_consumed_frames
+                .saturating_sub(self.activation_consumed_frames.load(Ordering::Acquire)),
+            callback_count: self.telemetry.callback_count.load(Ordering::Relaxed),
+            underrun_frames: self.telemetry.underrun_frames.load(Ordering::Relaxed),
+            last_callback_frames: self
+                .telemetry
+                .last_callback_frames
+                .load(Ordering::Relaxed)
+                .min(u32::MAX as u64) as u32,
+            last_callback_age: (last_elapsed_ns > 0)
+                .then(|| Duration::from_nanos(now_ns.saturating_sub(last_elapsed_ns))),
+            buffered_frames: self.buffered_frames(),
+            stream_failed: self.telemetry.stream_failed.load(Ordering::Acquire),
+            active: self.active.load(Ordering::Acquire),
+        }
     }
 }
 
@@ -483,21 +520,30 @@ impl AudioSourceCache {
 fn build_f32_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    queue: Arc<Mutex<VecDeque<f32>>>,
+    queue: Arc<ArrayQueue<f32>>,
     muted: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
+    telemetry: Arc<RealtimeAudioOutputTelemetry>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
+    let channels = config.channels.max(1) as usize;
     device.build_output_stream(
         config,
         move |data: &mut [f32], _| {
-            if muted.load(Ordering::Relaxed) {
+            let frames = data.len() / channels;
+            if muted.load(Ordering::Relaxed) || !active.load(Ordering::Relaxed) {
                 data.fill(0.0);
+                telemetry.record_callback(frames, 0);
                 return;
             }
-            let mut guard = queue.lock();
+            let mut missing_samples = 0usize;
             for s in data {
-                *s = guard.pop_front().unwrap_or(0.0);
+                *s = queue.pop().unwrap_or_else(|| {
+                    missing_samples = missing_samples.saturating_add(1);
+                    0.0
+                });
             }
+            telemetry.record_callback(frames, missing_samples / channels);
         },
         err_fn,
         None,
@@ -575,6 +621,27 @@ impl Default for AudioTrackConfig {
             is_muted: false,
             is_solo: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callback_telemetry_accumulates_consumption_and_underrun_without_locking() {
+        let telemetry = RealtimeAudioOutputTelemetry::new();
+
+        telemetry.record_callback(480, 0);
+        telemetry.record_callback(480, 32);
+
+        assert_eq!(
+            telemetry.callback_consumed_frames.load(Ordering::Relaxed),
+            960
+        );
+        assert_eq!(telemetry.callback_count.load(Ordering::Relaxed), 2);
+        assert_eq!(telemetry.underrun_frames.load(Ordering::Relaxed), 32);
+        assert_eq!(telemetry.last_callback_frames.load(Ordering::Relaxed), 480);
     }
 }
 
