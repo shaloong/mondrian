@@ -57,15 +57,6 @@ impl AppState {
             tracing::error!(%error, "failed to start Playback Session");
             return;
         }
-        // Compatibility adapter until typed Frame Delivery replaces preview_waiting.
-        // The sole Clock Master is already Synthetic; Viewer never owns time.
-        if let Err(error) = self
-            .playback_engine
-            .complete_priming(PlaybackClockMaster::Synthetic, self.playback_now)
-        {
-            tracing::error!(%error, "failed to complete legacy playback priming");
-            return;
-        }
         self.sync_audio_clock_to_frame(frames);
         self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
         if let Some(output) = &self.audio_output {
@@ -123,12 +114,7 @@ impl AppState {
             return;
         }
         if was_running {
-            if let Err(error) =
-                self.playback_engine.play(end_frame, self.playback_now).and_then(|_| {
-                    self.playback_engine
-                        .complete_priming(PlaybackClockMaster::Synthetic, self.playback_now)
-                })
-            {
+            if let Err(error) = self.playback_engine.play(end_frame, self.playback_now) {
                 tracing::error!(%error, "failed to resume Playback Session after seek");
                 return;
             }
@@ -363,13 +349,26 @@ impl AppState {
         self.playback_engine.snapshot().clock_master
     }
 
+    /// Remaining useful lifetime of the authoritative current Frame Demand.
+    pub fn playback_frame_deadline_budget_us(&self) -> Option<u64> {
+        let demand = self.playback_engine.frame_demand()?;
+        let deadline = demand.deadline.duration_since_origin();
+        let now = self.playback_now.duration_since_origin();
+        let remaining = deadline.saturating_sub(now);
+        Some(remaining.as_micros().min(u64::MAX as u128) as u64)
+    }
+
     /// Feed one terminal Viewer observation into the authoritative Playback Session.
     pub fn observe_viewer_frame_delivery(&mut self, kind: FrameDeliveryKind) -> bool {
         let before = self.playback_engine.snapshot();
+        let Some(demand) = self.playback_engine.frame_demand() else {
+            return false;
+        };
         let delivery = FrameDelivery {
-            epoch: before.epoch,
-            quality_revision: before.quality_revision,
-            target_frame: before.position.frame,
+            epoch: demand.epoch,
+            quality_revision: demand.quality_revision,
+            demand_sequence: demand.sequence,
+            target_frame: demand.target.frame,
             kind,
         };
         match self.playback_engine.observe_frame_delivery(delivery) {
@@ -436,10 +435,15 @@ mod tests {
         state
     }
 
+    fn play_ready(state: &mut AppState) {
+        state.play();
+        assert!(state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+    }
+
     #[test]
     fn advance_playback_clock_accumulates_subframe_ticks() {
         let mut state = state_with_sequence(20);
-        state.play();
+        play_ready(&mut state);
 
         let waiting = state.advance_playback_clock(Duration::from_millis(10));
         assert_eq!(waiting.status, PlaybackAdvanceStatus::WaitingForFrame);
@@ -456,20 +460,21 @@ mod tests {
     #[test]
     fn late_viewer_delivery_does_not_hold_synthetic_clock() {
         let mut state = state_with_sequence(20);
-        state.play();
+        play_ready(&mut state);
+        state.advance_playback_clock(Duration::from_millis(40));
         state.observe_viewer_frame_delivery(FrameDeliveryKind::Late);
 
         let advanced = state.advance_playback_clock(Duration::from_millis(40));
 
         assert_eq!(advanced.status, PlaybackAdvanceStatus::Advanced);
-        assert_eq!(advanced.current_frame, 1);
+        assert_eq!(advanced.current_frame, 2);
         assert!(state.is_playing());
     }
 
     #[test]
     fn advance_playback_clock_reaches_end_and_pauses() {
         let mut state = state_with_sequence(5);
-        state.play();
+        play_ready(&mut state);
 
         let outcome = state.advance_playback_clock(Duration::from_secs(1));
 
@@ -486,10 +491,10 @@ mod tests {
     #[test]
     fn play_after_reaching_end_restarts_from_zero() {
         let mut state = state_with_sequence(5);
-        state.play();
+        play_ready(&mut state);
         state.advance_playback_clock(Duration::from_secs(1));
 
-        state.play();
+        play_ready(&mut state);
 
         assert_eq!(state.current_frame(), 0);
         assert!(state.is_playing());
@@ -498,7 +503,7 @@ mod tests {
     #[test]
     fn seek_starts_a_new_epoch_and_reanchors_subframe_time() {
         let mut state = state_with_sequence(30);
-        state.play();
+        play_ready(&mut state);
         state.advance_playback_clock(Duration::from_millis(20));
         let old_epoch = state.playback_engine.snapshot().epoch;
 
@@ -549,7 +554,7 @@ mod tests {
     #[test]
     fn playback_next_frame_delay_is_bounded_while_playing() {
         let mut state = state_with_sequence(30);
-        state.play();
+        play_ready(&mut state);
 
         let delay = state.playback_next_frame_delay().expect("next frame delay");
 

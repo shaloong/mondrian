@@ -79,16 +79,16 @@ use crate::app_ui::preview_access_mode::{
     MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
+use crate::app_ui::preview_scheduler_policy::{
+    media_preview_forward_prefetch_window_frames, media_preview_job_deadline_at,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+};
 
 const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
 const MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY: usize = MEDIA_PREVIEW_CACHE_CAPACITY * 2;
 const VIEWER_PREVIEW_FRAME_CACHE_CAPACITY: usize = 48;
-const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 80_000;
-const MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES: usize = 1;
-const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 6;
 const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
-const MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US: u64 = 8_000;
-const MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
@@ -7491,7 +7491,7 @@ impl AppUiPreviewService {
         target_width: u32,
         target_height: u32,
         color_context: &ColorContext,
-        sequence_frame_rate: Rational,
+        _sequence_frame_rate: Rational,
     ) -> Option<MediaPreviewFrame> {
         let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
             state.is_playing(),
@@ -7522,7 +7522,9 @@ impl AppUiPreviewService {
             source_secs,
             MediaPreviewRequestPriority::Current,
             access_mode,
-            media_preview_playback_current_deadline_budget_us(sequence_frame_rate),
+            (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
+                .then(|| state.playback_frame_deadline_budget_us())
+                .flatten(),
             adaptive_hints,
         );
         None
@@ -8975,51 +8977,6 @@ impl PreviewScrubAdaptationState {
 
 fn source_micros(source_secs: f64) -> i64 {
     (source_secs.max(0.0) * 1_000_000.0).round() as i64
-}
-
-fn media_preview_job_deadline_at(
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-    enqueued_at: Instant,
-    playback_current_deadline_budget_us: Option<u64>,
-) -> Option<Instant> {
-    if priority == MediaPreviewRequestPriority::Current
-        && access_mode == PreviewDecodeAccessMode::PlaybackCursor
-    {
-        let budget_us = playback_current_deadline_budget_us?;
-        return Some(enqueued_at + Duration::from_micros(budget_us));
-    }
-    None
-}
-
-fn media_preview_playback_current_deadline_budget_us(frame_rate: Rational) -> Option<u64> {
-    let fps = frame_rate.to_f64();
-    if !fps.is_finite() || fps <= 0.0 {
-        return None;
-    }
-    let frame_duration_us = (1_000_000.0 / fps).round();
-    if !frame_duration_us.is_finite() || frame_duration_us <= 0.0 {
-        return None;
-    }
-    Some((frame_duration_us as u64).clamp(
-        MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US,
-        MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US,
-    ))
-}
-
-fn media_preview_forward_prefetch_window_frames(frame_rate: Rational) -> Option<usize> {
-    let fps = frame_rate.to_f64();
-    if !fps.is_finite() || fps <= 0.0 {
-        return None;
-    }
-    let frames = ((MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US as f64 / 1_000_000.0) * fps).round();
-    if !frames.is_finite() || frames <= 0.0 {
-        return None;
-    }
-    Some((frames as usize).clamp(
-        MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
-        MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
-    ))
 }
 
 fn media_preview_deadline_expired(deadline_at: Option<Instant>) -> bool {
@@ -16763,38 +16720,6 @@ mod tests {
                 now,
                 None,
             ),
-            None
-        );
-    }
-
-    #[test]
-    fn media_preview_playback_deadline_budget_uses_sequence_frame_duration() {
-        assert_eq!(
-            media_preview_playback_current_deadline_budget_us(Rational::FPS_25),
-            Some(40_000)
-        );
-        assert_eq!(
-            media_preview_playback_current_deadline_budget_us(Rational::FPS_30),
-            Some(33_333)
-        );
-        assert_eq!(
-            media_preview_playback_current_deadline_budget_us(Rational::FPS_60),
-            Some(16_667)
-        );
-        assert_eq!(
-            media_preview_playback_current_deadline_budget_us(Rational::new(240, 1)),
-            Some(MEDIA_PREVIEW_PLAYBACK_CURRENT_MIN_DEADLINE_US)
-        );
-        assert_eq!(
-            media_preview_playback_current_deadline_budget_us(Rational::FPS_10),
-            Some(MEDIA_PREVIEW_PLAYBACK_CURRENT_MAX_DEADLINE_US)
-        );
-        assert_eq!(
-            media_preview_playback_current_deadline_budget_us(Rational::new(0, 1)),
-            None
-        );
-        assert_eq!(
-            media_preview_playback_current_deadline_budget_us(Rational::new(24, 0)),
             None
         );
     }

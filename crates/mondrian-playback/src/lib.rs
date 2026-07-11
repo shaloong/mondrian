@@ -26,6 +26,11 @@ impl MonotonicTimestamp {
         self.0
     }
 
+    /// Add a bounded runtime duration.
+    pub fn saturating_add(self, duration: Duration) -> Self {
+        Self(self.0.saturating_add(duration))
+    }
+
     fn checked_elapsed_since(self, earlier: Self) -> Result<Duration, PlaybackError> {
         self.0.checked_sub(earlier.0).ok_or(PlaybackError::NonMonotonicTimestamp)
     }
@@ -40,6 +45,38 @@ impl PlaybackEpoch {
     pub const fn get(self) -> u64 {
         self.0
     }
+}
+
+/// Identity of one current-frame demand inside a Playback Session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FrameDemandSequence(u64);
+
+impl FrameDemandSequence {
+    /// Return the stable numeric value used by reports and adapters.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Authoritative current-frame request emitted by the Playback Engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameDemand {
+    /// Playback Session identity.
+    pub epoch: PlaybackEpoch,
+    /// Runtime quality-policy revision.
+    pub quality_revision: u64,
+    /// Monotonic sequence unique within the Engine lifetime.
+    pub sequence: FrameDemandSequence,
+    /// Active sequence, when a project timeline is configured.
+    pub sequence_id: Option<SequenceId>,
+    /// Timeline semantic revision.
+    pub timeline_revision: u64,
+    /// Exact target timeline position.
+    pub target: TimeCode,
+    /// Latest useful presentation time for this demand.
+    pub deadline: MonotonicTimestamp,
+    /// Runtime-only spatial quality selected by recovery policy.
+    pub preview_scale: PreviewResolutionScale,
 }
 
 /// Authoritative elapsed-media-time source.
@@ -117,6 +154,8 @@ pub struct FrameDelivery {
     pub epoch: PlaybackEpoch,
     /// Quality-policy revision carried by the original demand.
     pub quality_revision: u64,
+    /// Demand sequence carried by the original request.
+    pub demand_sequence: FrameDemandSequence,
     /// Timeline frame requested by the demand.
     pub target_frame: i64,
     /// Terminal outcome.
@@ -126,6 +165,8 @@ pub struct FrameDelivery {
 /// Versioned policy values that determine transport and recovery behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaybackPolicy {
+    /// Maximum startup/seek wait before Synthetic Clock Master continues.
+    pub priming_limit: Duration,
     /// Maximum number of recent current deliveries considered for pressure.
     pub pressure_window: usize,
     /// Late/failed deliveries in the window required to enter recovery.
@@ -137,6 +178,7 @@ pub struct PlaybackPolicy {
 impl Default for PlaybackPolicy {
     fn default() -> Self {
         Self {
+            priming_limit: Duration::from_millis(500),
             pressure_window: 12,
             pressure_threshold: 8,
             healthy_deliveries_to_recover: 60,
@@ -201,14 +243,17 @@ pub struct PlaybackEngine {
     recent_pressure: Vec<bool>,
     consecutive_healthy: usize,
     active_target_frame: Option<i64>,
-    terminal_delivery: Option<(PlaybackEpoch, u64, i64)>,
+    next_demand_sequence: u64,
+    active_demand: Option<FrameDemand>,
+    terminal_delivery: Option<(PlaybackEpoch, u64, FrameDemandSequence)>,
 }
 
 impl PlaybackEngine {
     /// Create a stopped engine at frame zero with a validated timeline time base.
     pub fn new(time_base: Rational, policy: PlaybackPolicy) -> Result<Self, PlaybackError> {
         validate_time_base(time_base)?;
-        if policy.pressure_window == 0
+        if policy.priming_limit.is_zero()
+            || policy.pressure_window == 0
             || policy.pressure_threshold == 0
             || policy.pressure_threshold > policy.pressure_window
             || policy.healthy_deliveries_to_recover == 0
@@ -239,6 +284,8 @@ impl PlaybackEngine {
             recent_pressure: Vec::with_capacity(policy.pressure_window),
             consecutive_healthy: 0,
             active_target_frame: None,
+            next_demand_sequence: 1,
+            active_demand: None,
             terminal_delivery: None,
         }
     }
@@ -282,6 +329,7 @@ impl PlaybackEngine {
         self.clock_master = Some(ClockMaster::Synthetic);
         self.active_target_frame = Some(self.position.frame);
         self.reset_runtime_policy();
+        self.refresh_frame_demand_with_duration(now, self.policy.priming_limit)?;
         self.reanchor(now);
         Ok(self.snapshot())
     }
@@ -297,6 +345,7 @@ impl PlaybackEngine {
             self.clock_master = Some(master);
             self.state = TransportState::Playing;
             self.reanchor(now);
+            self.refresh_frame_demand(now)?;
         }
         Ok(self.snapshot())
     }
@@ -351,7 +400,25 @@ impl PlaybackEngine {
 
     /// Advance the active Clock Master to `now` and publish the newest frame.
     pub fn tick(&mut self, now: MonotonicTimestamp) -> Result<PlaybackSnapshot, PlaybackError> {
+        self.accept_timestamp(now)?;
+        if self.state == TransportState::Priming {
+            if let Some(deadline) = self
+                .active_demand
+                .map(|demand| demand.deadline)
+                .filter(|deadline| now >= *deadline)
+            {
+                self.state = TransportState::Playing;
+                self.clock_master = Some(ClockMaster::Synthetic);
+                self.reanchor(deadline);
+            }
+        }
         self.advance_position(now)?;
+        if matches!(
+            self.state,
+            TransportState::Playing | TransportState::Recovering
+        ) {
+            self.refresh_frame_demand_if_target_changed(now)?;
+        }
         Ok(self.snapshot())
     }
 
@@ -413,9 +480,15 @@ impl PlaybackEngine {
         let identity = (
             delivery.epoch,
             delivery.quality_revision,
-            delivery.target_frame,
+            delivery.demand_sequence,
         );
         if self.terminal_delivery == Some(identity) {
+            return Ok(false);
+        }
+        if self
+            .active_demand
+            .is_none_or(|demand| demand.sequence != delivery.demand_sequence)
+        {
             return Ok(false);
         }
         if self.active_target_frame.is_some_and(|target| target != delivery.target_frame) {
@@ -437,6 +510,11 @@ impl PlaybackEngine {
             delivery.kind,
             FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded
         );
+        if self.state == TransportState::Priming && healthy {
+            self.state = TransportState::Playing;
+            self.clock_master = Some(ClockMaster::Synthetic);
+            self.reanchor(self.last_timestamp);
+        }
         self.push_pressure(pressured);
         if healthy {
             self.consecutive_healthy = self.consecutive_healthy.saturating_add(1);
@@ -457,6 +535,7 @@ impl PlaybackEngine {
                 self.preview_scale = lowered;
                 self.quality_revision = self.quality_revision.saturating_add(1);
                 self.active_target_frame = Some(self.position.frame);
+                self.refresh_frame_demand(self.last_timestamp)?;
             }
             self.recent_pressure.clear();
         } else if self.state == TransportState::Recovering
@@ -469,6 +548,7 @@ impl PlaybackEngine {
                 }
             };
             self.quality_revision = self.quality_revision.saturating_add(1);
+            self.refresh_frame_demand(self.last_timestamp)?;
             self.consecutive_healthy = 0;
             if self.preview_scale == PreviewResolutionScale::Full {
                 self.state = TransportState::Playing;
@@ -487,6 +567,11 @@ impl PlaybackEngine {
             preview_scale: self.preview_scale,
             quality_revision: self.quality_revision,
         }
+    }
+
+    /// Return the current demand that preview adapters must carry end-to-end.
+    pub const fn frame_demand(&self) -> Option<FrameDemand> {
+        self.active_demand
     }
 
     /// Timeline revision currently associated with the session.
@@ -542,7 +627,50 @@ impl PlaybackEngine {
         self.recent_pressure.clear();
         self.consecutive_healthy = 0;
         self.active_target_frame = Some(self.position.frame);
+        self.active_demand = None;
         self.terminal_delivery = None;
+    }
+
+    fn refresh_frame_demand_if_target_changed(
+        &mut self,
+        now: MonotonicTimestamp,
+    ) -> Result<(), PlaybackError> {
+        let current_matches = self.active_demand.is_some_and(|demand| {
+            demand.epoch == self.epoch
+                && demand.quality_revision == self.quality_revision
+                && demand.target == self.position
+        });
+        if !current_matches {
+            self.refresh_frame_demand(now)?;
+        }
+        Ok(())
+    }
+
+    fn refresh_frame_demand(&mut self, now: MonotonicTimestamp) -> Result<(), PlaybackError> {
+        let frame_duration = frame_duration(self.position.time_base)?;
+        self.refresh_frame_demand_with_duration(now, frame_duration)
+    }
+
+    fn refresh_frame_demand_with_duration(
+        &mut self,
+        now: MonotonicTimestamp,
+        useful_duration: Duration,
+    ) -> Result<(), PlaybackError> {
+        validate_time_base(self.position.time_base)?;
+        let sequence = FrameDemandSequence(self.next_demand_sequence);
+        self.next_demand_sequence = self.next_demand_sequence.saturating_add(1);
+        self.active_demand = Some(FrameDemand {
+            epoch: self.epoch,
+            quality_revision: self.quality_revision,
+            sequence,
+            sequence_id: self.sequence_id,
+            timeline_revision: self.timeline_revision,
+            target: self.position,
+            deadline: now.saturating_add(useful_duration),
+            preview_scale: self.preview_scale,
+        });
+        self.terminal_delivery = None;
+        Ok(())
     }
 
     fn push_pressure(&mut self, pressured: bool) {
@@ -587,6 +715,14 @@ fn elapsed_frames(elapsed: Duration, time_base: Rational) -> Result<i64, Playbac
     Ok((numerator / denominator).min(i64::MAX as u128) as i64)
 }
 
+fn frame_duration(time_base: Rational) -> Result<Duration, PlaybackError> {
+    validate_time_base(time_base)?;
+    let numerator = 1_000_000_000_u128.saturating_mul(time_base.num as u128);
+    let denominator = time_base.den as u128;
+    let nanos = numerator.saturating_add(denominator - 1) / denominator;
+    Ok(Duration::from_nanos(nanos.min(u64::MAX as u128) as u64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,6 +733,17 @@ mod tests {
 
     fn engine() -> PlaybackEngine {
         PlaybackEngine::new(Rational::new(1, 25), PlaybackPolicy::default()).unwrap()
+    }
+
+    fn current_delivery(engine: &PlaybackEngine, kind: FrameDeliveryKind) -> FrameDelivery {
+        let demand = engine.frame_demand().expect("active frame demand");
+        FrameDelivery {
+            epoch: demand.epoch,
+            quality_revision: demand.quality_revision,
+            demand_sequence: demand.sequence,
+            target_frame: demand.target.frame,
+            kind,
+        }
     }
 
     #[test]
@@ -635,6 +782,7 @@ mod tests {
             .observe_frame_delivery(FrameDelivery {
                 epoch: first.epoch,
                 quality_revision: first.quality_revision,
+                demand_sequence: FrameDemandSequence(0),
                 target_frame: 0,
                 kind: FrameDeliveryKind::Ready,
             })
@@ -646,6 +794,7 @@ mod tests {
     #[test]
     fn sustained_pressure_recovers_by_resolution_without_proxy_semantics() {
         let policy = PlaybackPolicy {
+            priming_limit: Duration::from_millis(500),
             pressure_window: 4,
             pressure_threshold: 3,
             healthy_deliveries_to_recover: 2,
@@ -663,15 +812,9 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let snapshot = engine.tick(ts((index as u64 + 1) * 40)).unwrap();
-            engine
-                .observe_frame_delivery(FrameDelivery {
-                    epoch: snapshot.epoch,
-                    quality_revision: snapshot.quality_revision,
-                    target_frame: snapshot.position.frame,
-                    kind,
-                })
-                .unwrap();
+            engine.tick(ts((index as u64 + 1) * 40)).unwrap();
+            let delivery = current_delivery(&engine, kind);
+            engine.observe_frame_delivery(delivery).unwrap();
         }
         let recovering = engine.snapshot();
         assert_eq!(recovering.state, TransportState::Recovering);
@@ -679,15 +822,9 @@ mod tests {
         assert!(recovering.quality_revision > playing.quality_revision);
 
         for index in 0..2 {
-            let snapshot = engine.tick(ts(200 + index * 40)).unwrap();
-            engine
-                .observe_frame_delivery(FrameDelivery {
-                    epoch: snapshot.epoch,
-                    quality_revision: snapshot.quality_revision,
-                    target_frame: snapshot.position.frame,
-                    kind: FrameDeliveryKind::Ready,
-                })
-                .unwrap();
+            engine.tick(ts(200 + index * 40)).unwrap();
+            let delivery = current_delivery(&engine, FrameDeliveryKind::Ready);
+            engine.observe_frame_delivery(delivery).unwrap();
         }
         assert_eq!(engine.snapshot().state, TransportState::Playing);
         assert_eq!(
@@ -699,15 +836,10 @@ mod tests {
     #[test]
     fn blocked_delivery_is_not_reclassified_as_buffering_or_pressure() {
         let mut engine = engine();
-        let snapshot = engine.play(100, ts(0)).unwrap();
-        engine
-            .observe_frame_delivery(FrameDelivery {
-                epoch: snapshot.epoch,
-                quality_revision: snapshot.quality_revision,
-                target_frame: 0,
-                kind: FrameDeliveryKind::Blocked,
-            })
-            .unwrap();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        let delivery = current_delivery(&engine, FrameDeliveryKind::Blocked);
+        engine.observe_frame_delivery(delivery).unwrap();
         assert_eq!(engine.snapshot().state, TransportState::Blocked);
         assert_eq!(engine.snapshot().clock_master, None);
     }
@@ -753,6 +885,7 @@ mod tests {
         let result = PlaybackEngine::new(
             Rational::new(1, 25),
             PlaybackPolicy {
+                priming_limit: Duration::from_millis(500),
                 pressure_window: 4,
                 pressure_threshold: 5,
                 healthy_deliveries_to_recover: 1,
@@ -776,14 +909,52 @@ mod tests {
     fn duplicate_terminal_delivery_cannot_mutate_pressure_twice() {
         let mut engine = engine();
         engine.play(100, ts(0)).unwrap();
-        let snapshot = engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
-        let delivery = FrameDelivery {
-            epoch: snapshot.epoch,
-            quality_revision: snapshot.quality_revision,
-            target_frame: 0,
-            kind: FrameDeliveryKind::Late,
-        };
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        let delivery = current_delivery(&engine, FrameDeliveryKind::Late);
         assert!(engine.observe_frame_delivery(delivery).unwrap());
         assert!(!engine.observe_frame_delivery(delivery).unwrap());
+    }
+
+    #[test]
+    fn frame_demand_identity_and_deadline_advance_once_per_target() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        let first = engine.frame_demand().expect("initial demand");
+        assert_eq!(first.target.frame, 0);
+        assert_eq!(first.deadline, ts(40));
+
+        engine.tick(ts(10)).unwrap();
+        assert_eq!(engine.frame_demand(), Some(first));
+
+        engine.tick(ts(40)).unwrap();
+        let second = engine.frame_demand().expect("next demand");
+        assert_eq!(second.target.frame, 1);
+        assert!(second.sequence.get() > first.sequence.get());
+        assert_eq!(second.deadline, ts(80));
+    }
+
+    #[test]
+    fn delivery_for_superseded_demand_is_rejected_even_on_same_epoch() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        let old = current_delivery(&engine, FrameDeliveryKind::Ready);
+        engine.tick(ts(40)).unwrap();
+
+        assert!(!engine.observe_frame_delivery(old).unwrap());
+        assert_eq!(engine.snapshot().state, TransportState::Playing);
+    }
+
+    #[test]
+    fn priming_timeout_starts_at_deadline_and_catches_up_without_extra_drift() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+
+        let snapshot = engine.tick(ts(750)).unwrap();
+
+        assert_eq!(snapshot.state, TransportState::Playing);
+        assert_eq!(snapshot.clock_master, Some(ClockMaster::Synthetic));
+        assert_eq!(snapshot.position.frame, 6);
     }
 }

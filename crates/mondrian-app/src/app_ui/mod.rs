@@ -26,6 +26,7 @@ pub mod preview;
 pub(crate) mod preview_access_mode;
 pub(crate) mod preview_gpu_output_blocker;
 pub(crate) mod preview_scale;
+pub(crate) mod preview_scheduler_policy;
 pub mod rendering;
 pub mod runtime;
 pub mod sequence_settings_dialog;

@@ -237,6 +237,13 @@ Deliveries. `Ready`, `StaleAvailable`, and `Blocked` are terminal observations;
 hold the Synthetic/Audio Clock Master and does not mute or clear realtime audio.
 Late video is dropped while authoritative media time continues.
 
+Current playback worker deadlines originate in the Playback Engine Frame Demand.
+The app Adapter converts its remaining monotonic lifetime to an `Instant` budget
+at enqueue/promotion time. `app_ui::preview_scheduler_policy` owns the pure
+worker-deadline eligibility and bounded frame-rate-to-prefetch-window policy;
+`app_ui::preview` owns execution and evidence aggregation, not duplicated clock
+math.
+
 The app/window layer retains a separate interaction escape hatch: `Loading`
 feedback may defer synchronous reconstruction of the same GPU preview candidate
 during redraw. This is a presentation-work guard, not transport buffering, and

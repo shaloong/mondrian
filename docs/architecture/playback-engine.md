@@ -486,8 +486,15 @@ Viewer-owned `playback_buffering` state and its audio mute/clock hold have been
 removed. Window redraw may still defer duplicate GPU candidate preparation while
 Loading, but that presentation guard has no transport authority.
 
-Play/seek currently complete Priming immediately with Synthetic Master. Full
-deadline-derived demand identity and bounded startup Priming remain Phase 2
-work. Audio Device Master remains unavailable until Phase 3 can provide
-qualified consumed-sample observations; the existing `AudioClock` cannot be
-relabeled as that evidence.
+The Engine now emits a Frame Demand identity containing epoch, quality revision,
+demand sequence, sequence/timeline revision, exact target, preview scale, and
+monotonic deadline. Preview worker deadline budgets consume that demand instead
+of independently reconstructing frame duration. Same-epoch completions for a
+superseded demand are rejected before target validation.
+
+Play and running seek now remain in bounded Priming. Ready or allowed Degraded
+delivery starts Synthetic Master immediately; after the 500 ms policy deadline,
+Synthetic Master starts at the deadline anchor and catches up to the current
+monotonic time without adding another priming interval of drift. Audio Device
+Master remains unavailable until Phase 3 can provide qualified consumed-sample
+observations; the existing `AudioClock` cannot be relabeled as that evidence.
