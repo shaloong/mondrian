@@ -26,6 +26,7 @@ pub mod shaders;
 pub mod texture_pool;
 pub mod timeline_composite;
 pub mod timeline_render_plan;
+pub mod viewer_spatial;
 
 pub use color_accuracy::{
     compare_linear_rgba, compare_pq_hdr_display_rgba, compare_srgb_display_rgba8,
@@ -184,4 +185,8 @@ pub use timeline_render_plan::{
     TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
     TimelineRenderPlan, TimelineRenderPlanElement, TimelineRenderQuality, TimelineRenderSettings,
     TimelineSolidColorPlan,
+};
+pub use viewer_spatial::{
+    GpuViewerSpatialPlan, GpuViewerSpatialPlanError, GpuViewerSpatialRuntime,
+    GpuViewerSpatialRuntimeDiagnostics, GpuViewerSpatialRuntimeError, ViewerSourceRect,
 };

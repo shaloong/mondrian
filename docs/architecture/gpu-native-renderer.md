@@ -270,6 +270,25 @@ against `apply_compiled_effect_graph_rgba_f32(...)` and
 numerical contract for extending the GPU subset; shader parsing or successful
 command recording alone is not sufficient evidence of effect correctness.
 
+## Viewer Working-Linear Spatial Processing
+
+`viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
+accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
+frames, so it cannot be scheduled after an OCIO display/output transform or an
+ICC device transform. Strong downscales first build full-frame 2x box-prefilter
+levels in working-linear light until the final reconstruction footprint is
+bounded, then use two separable Lanczos3 passes over the requested visible
+source region. Filtering is performed on premultiplied RGB and alpha and the
+public output is restored to the compositor's straight-alpha contract.
+
+`GpuViewerSpatialRuntime` owns its pipelines, private prefilter/intermediate
+textures, typed output resource, frame IDs, and cumulative pass/pixel
+diagnostics. Private pyramid levels never enter app or UI caches. Real-wgpu
+readback tests prove 1:1 sample preservation, linear-light checkerboard
+downscaling, normalized crop coordinates, and mandatory RGBA32F working input.
+The app/UI integration must provide presentation geometry; it must not
+reinterpret this spatial filter or resample display/device code values.
+
 ## OCIO GPU Integration
 
 `mondrian-renderer::OcioGpuShaderCache` is the renderer-side cache for OCIO GPU

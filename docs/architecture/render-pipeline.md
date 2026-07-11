@@ -702,6 +702,9 @@ Resolved preview layers
      -> upload only media layers that already have a materialized CPU working fallback
      -> composite media/solid layers into an Rgba32Float working texture
      -> insert the working texture into RenderGpuOutputBoundaryRuntime frame table
+  -> GpuViewerSpatialRuntime::record()
+     -> prefilter strong downscales in working-linear light
+     -> crop the visible source region and reconstruct it into Rgba32Float presentation pixels
   -> RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
      -> OCIO GPU display/output transform
   -> frame_renderer.register_external_texture_view()
