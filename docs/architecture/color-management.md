@@ -425,6 +425,18 @@ color contract. A color-context change clears visible thumbnail state and
 invalidates in-flight request ownership, so an older OCIO generation or
 tone-map result cannot overwrite a newer completion.
 
+Thumbnail rejection and execution failures are structured rather than reduced
+to an absent image or a free-form log string. `AssetThumbnailFailureReason`
+separates missing ingest facts, unsupported non-color data, rejected input
+policy, unresolved source range, invalid output identity, unsupported raster
+output, worker availability, decode cancellation/failure, unexpected GPU
+frames, input/output transform failures, and invalid raster payloads. The cache
+deduplicates repeated observations of the same failed request and exposes
+reason counters through `AssetThumbnailDiagnostics`. A disconnected worker is
+committed to the failure cache synchronously, so the UI cannot remain in a
+false `Loading` state. Human-readable detail is evidence only; stable reason
+codes are the reporting and aggregation contract.
+
 `RasterImage` and `DrawCommand::RasterImage` always carry an explicit
 `RasterImageColorSpace`; bare RGBA8 has no UI presentation meaning. The current
 atlas is `Rgba8UnormSrgb` and accepts only `Srgb`. Any other declared space is

@@ -186,9 +186,80 @@ pub enum AssetThumbnailState {
     /// A thumbnail request has been queued or is currently decoding.
     Loading,
     /// A thumbnail was expected but could not be loaded.
-    Failed,
+    Failed(AssetThumbnailFailure),
     /// A render-ready thumbnail is available.
     Ready(RasterImage),
+}
+
+/// Stable machine-readable reason for a thumbnail failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AssetThumbnailFailureReason {
+    /// Source path is missing or inaccessible.
+    MissingSourceFile,
+    /// Asset ingest has no primary video stream contract.
+    MissingVideoStreamContract,
+    /// Non-color YUV data cannot be interpreted as a presentation thumbnail.
+    NonColorDataUnsupported,
+    /// Missing-metadata policy rejected the input identity.
+    InputColorRejected,
+    /// Ingest did not resolve full versus limited encoded range.
+    UnresolvedSourceRange,
+    /// An internal working identity reached a presentation-only boundary.
+    InternalOutputIdentity,
+    /// UI raster atlas cannot represent the requested encoded output.
+    UnsupportedRasterOutput,
+    /// Background thumbnail worker is unavailable.
+    WorkerUnavailable,
+    /// Media decode failed.
+    DecodeFailed,
+    /// Deterministic still decode was unexpectedly canceled.
+    DecodeCanceled,
+    /// Still decode unexpectedly returned a GPU-resident frame.
+    UnexpectedGpuFrame,
+    /// Source-to-working transform failed.
+    InputTransformFailed,
+    /// Working-to-display transform failed.
+    OutputTransformFailed,
+    /// Final raster payload shape was invalid.
+    InvalidRasterPayload,
+}
+
+impl AssetThumbnailFailureReason {
+    /// Stable diagnostic code for logs, tests, and telemetry.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::MissingSourceFile => "missing_source_file",
+            Self::MissingVideoStreamContract => "missing_video_stream_contract",
+            Self::NonColorDataUnsupported => "non_color_data_unsupported",
+            Self::InputColorRejected => "input_color_rejected",
+            Self::UnresolvedSourceRange => "unresolved_source_range",
+            Self::InternalOutputIdentity => "internal_output_identity",
+            Self::UnsupportedRasterOutput => "unsupported_raster_output",
+            Self::WorkerUnavailable => "worker_unavailable",
+            Self::DecodeFailed => "decode_failed",
+            Self::DecodeCanceled => "decode_canceled",
+            Self::UnexpectedGpuFrame => "unexpected_gpu_frame",
+            Self::InputTransformFailed => "input_transform_failed",
+            Self::OutputTransformFailed => "output_transform_failed",
+            Self::InvalidRasterPayload => "invalid_raster_payload",
+        }
+    }
+}
+
+/// Structured thumbnail failure retained by the cache and panel model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetThumbnailFailure {
+    /// Stable failure category.
+    pub reason: AssetThumbnailFailureReason,
+    /// Diagnostic detail for logs and support tooling.
+    pub detail: String,
+}
+
+impl AssetThumbnailFailure {
+    /// Build a structured thumbnail failure.
+    pub fn new(reason: AssetThumbnailFailureReason, detail: impl Into<String>) -> Self {
+        Self { reason, detail: detail.into() }
+    }
 }
 
 /// Complete set of view models needed by the app UI panel shell.
@@ -2125,7 +2196,7 @@ fn asset_grid_item_from_asset(
         item = match state {
             AssetThumbnailState::Unavailable => item,
             AssetThumbnailState::Loading => item.with_thumbnail_loading(),
-            AssetThumbnailState::Failed => item.with_thumbnail_failed(),
+            AssetThumbnailState::Failed(_) => item.with_thumbnail_failed(),
             AssetThumbnailState::Ready(thumbnail) => item.with_thumbnail(thumbnail),
         };
     }
@@ -7296,7 +7367,12 @@ mod tests {
         let failed = AppUiPanelModels::from_app_state_with_asset_folder_and_thumbnails(
             &state,
             None,
-            Some(&TestThumbnails(AssetThumbnailState::Failed)),
+            Some(&TestThumbnails(AssetThumbnailState::Failed(
+                AssetThumbnailFailure::new(
+                    AssetThumbnailFailureReason::DecodeFailed,
+                    "test failure",
+                ),
+            ))),
         );
         assert_eq!(
             failed.assets.items[0].thumbnail_status,
