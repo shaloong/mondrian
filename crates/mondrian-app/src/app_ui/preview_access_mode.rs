@@ -36,6 +36,7 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) working_color_space: WorkingColorSpace,
     pub(crate) tone_map: bool,
     pub(crate) engine: ColorEngine,
+    pub(crate) ocio_generation: u64,
 }
 
 /// Latest-wins scheduler for access-mode-aware preview decode work.
@@ -1126,6 +1127,7 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
+            ocio_generation: mondrian_core::ocio_config_generation(),
         }
     }
 

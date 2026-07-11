@@ -357,6 +357,7 @@ impl AppUiPreviewService {
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
+            ocio_generation: mondrian_core::ocio_config_generation(),
         };
         let generation = self.scheduler.begin_generation();
         let _ = self.scheduler.request(
@@ -7674,6 +7675,7 @@ impl AppUiPreviewService {
                 working_color_space: color_context.working_color_space,
                 tone_map: color_context.tone_map,
                 engine: color_context.engine.clone(),
+                ocio_generation: mondrian_core::ocio_config_generation(),
             },
             source_secs.max(0.0),
         ))
@@ -15406,6 +15408,7 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
+            ocio_generation: mondrian_core::ocio_config_generation(),
         };
 
         let result = decode_media_preview(
@@ -15451,6 +15454,7 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
+            ocio_generation: mondrian_core::ocio_config_generation(),
         };
 
         let result = decode_media_preview(
@@ -15802,6 +15806,7 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::MondrianSmart,
+            ocio_generation: mondrian_core::ocio_config_generation(),
         }
     }
 
@@ -16406,6 +16411,24 @@ mod tests {
 
         assert!(cache.get(&new_key).is_none());
         assert!(cache.get(&old_key).is_some());
+    }
+
+    #[test]
+    fn media_preview_caches_isolate_ocio_config_generations() {
+        let mut old_key = test_media_key(1);
+        old_key.ocio_generation = 41;
+        let mut new_key = old_key.clone();
+        new_key.ocio_generation = 42;
+        let mut frames = MediaPreviewCache::new(2);
+        let mut failures = MediaPreviewFailureCache::new(2);
+
+        frames.insert(old_key.clone(), test_media_frame(1));
+        failures.insert(old_key.clone());
+
+        assert!(frames.get(&new_key).is_none());
+        assert!(!failures.contains(&new_key));
+        assert!(frames.get(&old_key).is_some());
+        assert!(failures.contains(&old_key));
     }
 
     #[test]

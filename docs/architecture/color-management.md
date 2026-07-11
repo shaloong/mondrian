@@ -437,6 +437,15 @@ committed to the failure cache synchronously, so the UI cannot remain in a
 false `Loading` state. Human-readable detail is evidence only; stable reason
 codes are the reporting and aggregation contract.
 
+Viewer media caches store source-decoded or input-transformed working frames,
+never display-transformed frames. Their request identity includes the resolved
+source space and range, target dimensions, working space, color engine,
+tone-map intent, file fingerprint, and OCIO config generation. Both successful
+frames and negative-cache entries are isolated by that identity. An OCIO hot
+reload therefore cannot reuse working pixels or a transform failure produced
+by an older processor generation; display/output cache invalidation alone is
+not sufficient because the input processor may also have changed.
+
 `RasterImage` and `DrawCommand::RasterImage` always carry an explicit
 `RasterImageColorSpace`; bare RGBA8 has no UI presentation meaning. The current
 atlas is `Rgba8UnormSrgb` and accepts only `Srgb`. Any other declared space is
