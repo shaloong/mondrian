@@ -50,6 +50,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Playback Session** has exactly one **Transport State** at a time.
 - A **Playback Session** produces zero or more **Frame Demands**.
 - Each **Frame Demand** produces at most one terminal **Frame Delivery**.
+- A Viewer stale lifecycle state does not terminate a **Frame Demand**; only a deadline/policy decision may emit `StaleAvailable`, while an in-flight worker retains the chance to deliver `Ready`.
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.
 - **Playback Evidence** records state and clock transitions without owning them.
 - **Playback Evidence** uses bounded versioned events and aggregates from real Frame Demand, Frame Delivery, Clock Master, seek, and Audio Playback observations; capability probes alone cannot satisfy execution gates.

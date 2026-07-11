@@ -250,7 +250,8 @@ Terminal outcomes are:
 
 - `Ready`: correct demand result available before its deadline.
 - `Late`: correct result completed after its deadline.
-- `StaleAvailable`: a previously presented frame may remain visible.
+- `StaleAvailable`: at the demand deadline, policy closed the demand while a
+  previously presented frame could remain visible.
 - `Degraded`: an explicitly allowed temporary resolution or HDR-to-SDR path was
   executed and reported.
 - `Blocked`: correctness/capability policy forbids presentation.
@@ -270,6 +271,15 @@ Only the Playback Engine interprets a delivery:
 - Blocked enters Blocked when no allowed path exists.
 - Repeated Late/Failed outcomes enter Recovering according to a sliding window,
   not a single-frame boolean.
+
+The Viewer's immediate `Stale` lifecycle state is not itself a Frame Delivery.
+It describes the currently visible fallback while current work is still
+eligible to complete. Converting that first stale refresh into a terminal
+`StaleAvailable` would consume the one-terminal invariant and force a Ready
+completion arriving before the deadline to be rejected. `ViewerPlaybackFeedback`
+therefore emits terminal feedback only for current Ready and correctness
+Blocked states; worker/deadline scheduling owns Late, Canceled, Failed, and any
+future deadline-classified StaleAvailable outcome.
 
 ## Quality and recovery policy
 
@@ -598,10 +608,16 @@ lateness and Viewer state remain unrelated to this decision.
 The app now feeds the collector after transport, clock, demand, delivery, seek,
 and underrun observations and exposes one serializable report. The real-media
 continuous playback harness uses one Play plus monotonic Engine ticks and sends
-actual Viewer Ready/Stale outcomes back as Frame Deliveries; it no longer fakes
-continuous playback by seeking and restarting every frame. External-media gates
-consume the same report and fail on delivery-clock drift above 20 ms, any
-sustained-underrun recovery, or evidence retention overflow. Hardware-residency,
+exact worker completion deliveries through the same Adapter ordering as the
+production Host. Viewer Ready/Blocked feedback can close cache-hit or
+correctness outcomes, while Viewer Stale remains nonterminal. The harness no
+longer fakes continuous playback by seeking and restarting every frame.
+External-media gates consume the same report and fail on delivery-clock drift
+above 20 ms, any sustained-underrun recovery, evidence retention overflow, or
+fewer than 90% current Ready samples even when stale frames keep 95% of samples
+visible. The headless harness still lacks the production Window's real GPU
+output/presentation Adapter, so this Ready gate intentionally remains red for
+media that requires the deferred GPU composite path. Hardware-residency,
 30-minute duration, and Golden Project identity gates remain to be added before
 the professional playback acceptance claim is complete.
 

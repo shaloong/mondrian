@@ -1,6 +1,7 @@
 use super::*;
 use crate::app::ui_actions::TimelineSeekSource;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
+use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preview::{
     build_preview_color_health_report, build_preview_decode_performance_report,
     build_preview_decode_performance_report_with_required_access_modes,
@@ -123,6 +124,8 @@ struct PreviewExternalPlaybackGateReport {
     playback_queue_wait_p95_observed_us: u64,
     min_visible_frames: usize,
     visible_frames: usize,
+    min_ready_frames: usize,
+    ready_frames: usize,
     delivery_clock_drift_limit_us: u64,
     delivery_clock_drift_observed_us: u64,
     audio_underrun_recoveries: u64,
@@ -1295,6 +1298,12 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         1,
         100,
     );
+    let min_ready_percent = env_usize_clamped(
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_PERCENT",
+        90,
+        1,
+        100,
+    );
 
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_preview_external_playback_{uniq}"));
@@ -1330,6 +1339,7 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         playback_p95_limit_us,
         playback_queue_wait_p95_limit_us,
         min_visible_percent,
+        min_ready_percent,
     );
     report.real_media_gates = Some(real_media_gates);
     let report_json = serde_json::to_string(&report)?;
@@ -1384,6 +1394,7 @@ fn evaluate_external_playback_gates(
     playback_decode_p95_limit_us: u64,
     playback_queue_wait_p95_limit_us: u64,
     min_visible_percent: usize,
+    min_ready_percent: usize,
 ) -> PreviewExternalPlaybackGateReport {
     let playback_decode_p95_observed_us =
         decode_check_observed(decode_report, "preview_decode_playback_cursor_p95_frame_us");
@@ -1393,6 +1404,7 @@ fn evaluate_external_playback_gates(
     );
     let visible_frames = readiness.ready.saturating_add(readiness.stale);
     let min_visible_frames = frames.saturating_mul(min_visible_percent).saturating_add(99) / 100;
+    let min_ready_frames = frames.saturating_mul(min_ready_percent).saturating_add(99) / 100;
     let mut failures = Vec::new();
     if playback_decode_p95_observed_us == 0
         || playback_decode_p95_observed_us > playback_decode_p95_limit_us
@@ -1404,6 +1416,9 @@ fn evaluate_external_playback_gates(
     }
     if visible_frames < min_visible_frames {
         failures.push("visible_frame_ratio");
+    }
+    if readiness.ready < min_ready_frames {
+        failures.push("current_ready_ratio");
     }
     let delivery_clock_drift_limit_us = 20_000;
     let delivery_clock_drift_observed_us = playback_evidence.delivery_clock_drift.max_us;
@@ -1442,6 +1457,8 @@ fn evaluate_external_playback_gates(
         playback_queue_wait_p95_observed_us,
         min_visible_frames,
         visible_frames,
+        min_ready_frames,
+        ready_frames: readiness.ready,
         delivery_clock_drift_limit_us,
         delivery_clock_drift_observed_us,
         audio_underrun_recoveries: playback_evidence.audio_underrun_recoveries,
@@ -1485,7 +1502,8 @@ fn run_preview_media_continuous_playback_probe(
     state.seek(0);
     wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
     state.play();
-    state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready);
+    let initial_preview = preview_service.viewer_preview_for_state(&state);
+    observe_headless_viewer_feedback(&mut state, &initial_preview);
     let playback_case = run_case(
         "preview_media.continuous_playback_readiness",
         1,
@@ -1493,21 +1511,14 @@ fn run_preview_media_continuous_playback_probe(
         || {
             for _ in 0..frame_count {
                 state.advance_playback_clock(Duration::from_millis(frame_interval_ms));
-                let _ = preview_service.poll_finished();
-                let preview = preview_service.viewer_preview_for_state(&state);
-                let delivery = match &preview {
-                    ViewerPreviewState::Ready(_) => Some(FrameDeliveryKind::Ready),
-                    ViewerPreviewState::Stale(_) => Some(FrameDeliveryKind::StaleAvailable),
-                    ViewerPreviewState::Unavailable | ViewerPreviewState::Loading => None,
-                };
+                let preview = run_headless_preview_interval(
+                    &preview_service,
+                    &mut state,
+                    Duration::from_millis(frame_interval_ms),
+                );
                 record_preview_readiness(&mut readiness, preview);
-                if let Some(kind) = delivery {
-                    state.observe_viewer_frame_delivery(kind);
-                }
-                let _ = preview_service.poll_finished();
-                thread::sleep(Duration::from_millis(frame_interval_ms));
             }
-            let _ = preview_service.poll_finished();
+            apply_headless_preview_outcome(&preview_service, &mut state);
             Ok(())
         },
     )?;
@@ -1572,6 +1583,50 @@ fn run_preview_media_continuous_playback_probe(
         playback_evidence,
         cases: vec![playback_case, gpu_candidate_case],
     })
+}
+
+fn run_headless_preview_interval(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+    interval: Duration,
+) -> ViewerPreviewState {
+    let deadline = Instant::now() + interval;
+    let mut preview = preview_service.viewer_preview_for_state(state);
+    observe_headless_viewer_feedback(state, &preview);
+
+    loop {
+        let visible_change = apply_headless_preview_outcome(preview_service, state);
+        if visible_change {
+            preview = preview_service.viewer_preview_for_state(state);
+            observe_headless_viewer_feedback(state, &preview);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        thread::sleep((deadline - now).min(Duration::from_millis(1)));
+    }
+
+    preview
+}
+
+fn apply_headless_preview_outcome(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+) -> bool {
+    let mut outcome = preview_service.poll_finished_outcome();
+    outcome.merge(preview_service.expire_stalled_realtime_current());
+    for delivery in outcome.frame_deliveries.iter().copied() {
+        state.observe_frame_delivery(delivery);
+    }
+    outcome.visible_change
+}
+
+fn observe_headless_viewer_feedback(state: &mut AppState, preview: &ViewerPreviewState) {
+    if let Some(delivery) = ViewerPlaybackFeedback::from_preview_state(preview).terminal_delivery()
+    {
+        state.observe_viewer_frame_delivery(delivery);
+    }
 }
 
 fn build_app_ui_perf_state(
@@ -2892,6 +2947,7 @@ fn external_playback_gates_fail_on_decode_queue_or_visibility_regression() {
         40_000,
         10_000,
         95,
+        90,
     );
 
     assert!(!gates.passed);
@@ -2902,7 +2958,8 @@ fn external_playback_gates_fail_on_decode_queue_or_visibility_regression() {
         vec![
             "playback_decode_p95",
             "playback_queue_wait_p95",
-            "visible_frame_ratio"
+            "visible_frame_ratio",
+            "current_ready_ratio"
         ]
     );
 }
@@ -2923,10 +2980,37 @@ fn external_playback_gates_pass_when_real_media_thresholds_hold() {
         40_000,
         10_000,
         95,
+        90,
     );
 
     assert!(gates.passed);
     assert!(gates.failures.is_empty());
+}
+
+#[test]
+fn external_playback_gates_do_not_treat_repeated_stale_frames_as_current_ready() {
+    let readiness = PreviewReadinessCounts { ready: 2, stale: 18, loading: 0, unavailable: 0 };
+    let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
+    let diagnostics = AppUiPreviewDiagnostics::default();
+    let evidence = PlaybackEvidenceCollector::default().report();
+
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        20,
+        &decode,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+        90,
+    );
+
+    assert_eq!(gates.visible_frames, 20);
+    assert_eq!(gates.ready_frames, 2);
+    assert_eq!(gates.min_ready_frames, 18);
+    assert_eq!(gates.failures, vec!["current_ready_ratio"]);
+    assert!(!gates.passed);
 }
 
 #[test]
@@ -2948,6 +3032,7 @@ fn external_playback_gates_fail_on_clock_audio_or_evidence_integrity() {
         40_000,
         10_000,
         95,
+        90,
     );
 
     assert_eq!(
@@ -2986,6 +3071,7 @@ fn external_playback_gates_fail_on_cpu_frame_store_budget_or_admission() {
         40_000,
         10_000,
         95,
+        90,
     );
 
     assert_eq!(

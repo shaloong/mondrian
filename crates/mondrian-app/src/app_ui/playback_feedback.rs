@@ -3,7 +3,7 @@
 //! This module deliberately owns no transport or preview work. It prevents UI
 //! lifecycle details from leaking into the Playback Engine Interface.
 
-use super::panels::ViewerPanelModel;
+use super::panels::{ViewerPanelModel, ViewerPreviewState};
 use mondrian_playback::FrameDeliveryKind;
 
 /// Playback-relevant meaning of the current Viewer lifecycle state.
@@ -36,13 +36,26 @@ impl ViewerPlaybackFeedback {
         }
     }
 
-    /// Convert terminal feedback into the Playback Engine vocabulary.
+    /// Adapt the raw preview lifecycle for headless/perf Adapters.
+    pub fn from_preview_state(state: &ViewerPreviewState) -> Self {
+        match state {
+            ViewerPreviewState::Unavailable => Self::Unavailable,
+            ViewerPreviewState::Loading => Self::Loading,
+            ViewerPreviewState::Stale(_) => Self::Stale,
+            ViewerPreviewState::Ready(_) => Self::Ready,
+        }
+    }
+
+    /// Convert only terminal current-frame feedback into Playback Engine vocabulary.
+    ///
+    /// A stale raster describes what remains visible while current work is
+    /// pending. It must not consume the current Frame Demand before its worker
+    /// can return Ready/Late/Canceled.
     pub const fn terminal_delivery(self) -> Option<FrameDeliveryKind> {
         match self {
             Self::Ready => Some(FrameDeliveryKind::Ready),
-            Self::Stale => Some(FrameDeliveryKind::StaleAvailable),
             Self::Blocked => Some(FrameDeliveryKind::Blocked),
-            Self::Unavailable | Self::Loading => None,
+            Self::Unavailable | Self::Loading | Self::Stale => None,
         }
     }
 
@@ -68,6 +81,15 @@ pub enum ViewerPreviewStateKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_ui_core::RasterImageColorSpace;
+    use mondrian_ui_widgets::{ViewerFrameContent, ViewerFrameImage};
+
+    fn raster_content(key: &str) -> ViewerFrameContent {
+        ViewerFrameContent::Raster(
+            ViewerFrameImage::new(key, 1, 1, RasterImageColorSpace::Srgb, vec![0, 0, 0, 255])
+                .expect("valid test raster"),
+        )
+    }
 
     #[test]
     fn loading_is_not_falsely_reported_as_terminal_delivery() {
@@ -76,14 +98,35 @@ mod tests {
     }
 
     #[test]
-    fn stale_and_blocked_remain_distinct_terminal_meanings() {
-        assert_eq!(
-            ViewerPlaybackFeedback::Stale.terminal_delivery(),
-            Some(FrameDeliveryKind::StaleAvailable)
-        );
+    fn stale_visibility_does_not_consume_current_demand_but_blocked_is_terminal() {
+        assert_eq!(ViewerPlaybackFeedback::Stale.terminal_delivery(), None);
         assert_eq!(
             ViewerPlaybackFeedback::Blocked.terminal_delivery(),
             Some(FrameDeliveryKind::Blocked)
+        );
+    }
+
+    #[test]
+    fn raw_preview_adapter_preserves_ready_loading_and_stale_meanings() {
+        assert_eq!(
+            ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Unavailable),
+            ViewerPlaybackFeedback::Unavailable
+        );
+        assert_eq!(
+            ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Loading),
+            ViewerPlaybackFeedback::Loading
+        );
+        assert_eq!(
+            ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Stale(raster_content(
+                "stale"
+            ))),
+            ViewerPlaybackFeedback::Stale
+        );
+        assert_eq!(
+            ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Ready(raster_content(
+                "ready"
+            ))),
+            ViewerPlaybackFeedback::Ready
         );
     }
 }
