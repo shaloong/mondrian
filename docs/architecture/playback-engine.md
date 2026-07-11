@@ -415,8 +415,22 @@ reported separately from their evictable caches. Project/sequence cancellation
 clears media, Viewer, failure, and pinned state through one Interface. External
 real-media gates fail when either cache exceeds its byte budget, either pin
 exceeds its corresponding budget, or an oversize payload was rejected.
-Renderer/window-owned GPU texture
-tables remain a separate Module and are not falsely counted as CPU storage.
+Renderer-owned GPU texture tables remain a separate Module and are not falsely
+counted as CPU storage.
+
+`ViewerGpuPreviewRuntime` is the device-scoped resource-owner Module for the
+GPU side of Viewer execution. It owns native decoded-video import, the
+working-linear compositor, spatial processing, the display output runtime,
+display calibration resources, and the active external-texture presentation
+identity. `AppUiWindowSession` retains surface/event-loop state and adapts this
+runtime to `AppUiFrameRenderer`; it no longer independently owns each GPU stage.
+Frame-scoped resources clear through one Interface, while pipelines and device
+capability state remain resident. A device/display invalidation must first
+unregister the runtime's external texture key, then reset the runtime as one
+unit. This ownership seam is intentionally established before moving the
+remaining execution procedure out of `window.rs`; the future headless GPU
+Adapter must instantiate this same runtime rather than implement a second
+composite/color path.
 
 ## Required invariants
 

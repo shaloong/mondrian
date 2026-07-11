@@ -38,6 +38,7 @@ pub mod startup;
 pub(crate) mod test_utils;
 pub mod title_bar;
 pub mod viewer_gpu_output_budget;
+pub(crate) mod viewer_gpu_preview_runtime;
 pub mod waveform_cache;
 pub mod window;
 pub mod window_controls;
