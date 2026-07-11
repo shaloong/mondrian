@@ -1,7 +1,7 @@
 use crate::color_transform::{RenderColorTransformBackend, RenderInputTransform};
 use mondrian_core::{
-    types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, WorkingColorSpace,
-    WorkingRgbaF32Frame,
+    display_calibration::DisplayCalibrationKey, types::ColorSpace, ColorMatrixCoefficients,
+    ColorTransferCharacteristic, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
@@ -37,6 +37,8 @@ pub enum ColorFrameEncoding {
     EncodedFloat,
     /// Non-linear, destination-encoded RGBA bytes.
     EncodedRgba8,
+    /// Monitor-device RGB values produced by an explicit calibration processor.
+    DeviceFloat,
 }
 
 /// Memory residency for a render-graph frame.
@@ -55,6 +57,8 @@ pub enum ColorFrameSpace {
     Encoded(ColorSpace),
     /// Linear-light effects/compositing samples.
     Working(WorkingColorSpace),
+    /// Monitor-device RGB identity after ICC calibration.
+    Device(DisplayCalibrationKey),
 }
 
 impl ColorFrameSpace {
@@ -62,14 +66,14 @@ impl ColorFrameSpace {
     pub const fn encoded(self) -> Option<ColorSpace> {
         match self {
             Self::Encoded(space) => Some(space),
-            Self::Working(_) => None,
+            Self::Working(_) | Self::Device(_) => None,
         }
     }
 
     /// Return the linear identity, if this is a working frame.
     pub const fn working(self) -> Option<WorkingColorSpace> {
         match self {
-            Self::Encoded(_) => None,
+            Self::Encoded(_) | Self::Device(_) => None,
             Self::Working(space) => Some(space),
         }
     }
@@ -1960,6 +1964,11 @@ fn create_color_frame_view_and_sampler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_frame_space_stays_compact_for_hot_frame_handles() {
+        assert!(std::mem::size_of::<ColorFrameSpace>() <= 8);
+    }
 
     #[test]
     fn gpu_color_frame_handle_requires_gpu_residency() {

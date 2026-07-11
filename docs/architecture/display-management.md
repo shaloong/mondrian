@@ -81,6 +81,17 @@ app must not report an OS ICC profile as managed. Preview admission also rejects
 an `OsIccProfile` status that claims `ManagedColorSpace` without processor proof,
 so a stale or manually constructed snapshot cannot bypass the blocker.
 
+Core now provides a renderer-neutral `DisplayCalibrationLut3d` contract for
+the missing calibration processor. It parses the complete destination ICC
+payload, fingerprints the payload for cache identity, samples a supported
+standard encoded source into an RGBA32F 3D LUT, and exposes a CPU trilinear
+reference. The default cube is 33^3; supported quality sizes are odd values
+from 17 through 65. Camera-log spaces are rejected because they are acquisition
+spaces, not monitor boundary encodings. This processor foundation does not yet
+change `MonitorProfileStatus`: viewer admission remains fail-closed until the
+app can prove that the matching LUT is resident and that its device RGB codes
+survive the UI/surface presentation boundary without another transfer encode.
+
 ### HdrStatus
 
 Full-chain HDR diagnosis:

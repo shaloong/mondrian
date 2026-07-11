@@ -2,10 +2,7 @@
 
 use crate::icc::parse_icc_display_profile;
 use crate::types::{ColorEngine, ColorSpace, OcioColorSpaceIdentity};
-use moxcms::{
-    CicpColorPrimaries, CicpProfile, ColorProfile as CmsColorProfile, Layout as CmsLayout,
-    MatrixCoefficients, TransferCharacteristics, TransformOptions,
-};
+use moxcms::{ColorProfile as CmsColorProfile, Layout as CmsLayout, TransformOptions};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -482,7 +479,8 @@ fn apply_icc_transform_rgba8(
     source_color_space: ColorSpace,
     display_icc: &[u8],
 ) -> Result<(), String> {
-    let src_profile = cms_profile_for_color_space(source_color_space).ok_or_else(|| {
+    let src_profile = crate::display_calibration::cms_profile_for_color_space(source_color_space)
+        .ok_or_else(|| {
         format!("unsupported source color space for ICC transform: {source_color_space:?}")
     })?;
     let dst_profile = CmsColorProfile::new_from_slice(display_icc)
@@ -515,23 +513,6 @@ fn apply_icc_transform_rgba8(
         px[2] = rgb[2];
     }
     Ok(())
-}
-
-fn cms_profile_for_color_space(color_space: ColorSpace) -> Option<CmsColorProfile> {
-    match color_space {
-        ColorSpace::Srgb => Some(CmsColorProfile::new_srgb()),
-        ColorSpace::Rec709 => Some(CmsColorProfile::new_from_cicp(CicpProfile {
-            color_primaries: CicpColorPrimaries::Bt709,
-            transfer_characteristics: TransferCharacteristics::Bt709,
-            matrix_coefficients: MatrixCoefficients::Bt709,
-            full_range: false,
-        })),
-        ColorSpace::Rec2020 => Some(CmsColorProfile::new_bt2020()),
-        ColorSpace::Rec2100Pq => Some(CmsColorProfile::new_bt2020_pq()),
-        ColorSpace::Rec2100Hlg => Some(CmsColorProfile::new_bt2020_hlg()),
-        ColorSpace::DciP3 => Some(CmsColorProfile::new_dci_p3()),
-        ColorSpace::AppleLog | ColorSpace::SLog3 | ColorSpace::ArriLogC4 => None,
-    }
 }
 
 pub fn compute_color_scopes(

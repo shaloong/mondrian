@@ -7,6 +7,7 @@ pub mod automation;
 pub mod color;
 pub mod color_models;
 pub mod color_science;
+pub mod display_calibration;
 pub mod display_contract;
 pub mod display_labels;
 pub mod display_probe;

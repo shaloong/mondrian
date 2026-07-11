@@ -372,6 +372,20 @@ portable non-filtering `wgpu::Sampler` objects from that packed plan while
 preserving OCIO interpolation metadata in the resource plans. Upload success
 alone still does not make the color pass executable.
 
+Monitor ICC calibration uses a separate typed processor after OCIO display/view
+output. `GpuDisplayCalibrationPlan` accepts only an encoded float frame in the
+same standard source space used to build `DisplayCalibrationLut3d`, and produces
+a `Device(calibration_key)` / `DeviceFloat` frame. The full ICC fingerprint is
+retained by the LUT and pass binding while the non-authoritative compact key
+avoids inflating every hot `GpuColorFrameHandle`; it cannot authorize a cache
+hit or pass. The backend uploads the cube as RGBA32F and
+performs explicit trilinear interpolation with
+`textureLoad`; this avoids requiring `FLOAT32_FILTERABLE` and keeps CPU/GPU
+sampling rules identical. Real-wgpu tests read back the pass and compare it
+against the core CPU reference. The pass is not sufficient presentation proof:
+the app must preserve the resulting device codes through its sRGB UI attachment
+before it may unblock an OS ICC profile.
+
 `OcioGpuWgpuUniformUploadPlan` is the uniform-buffer handoff. It carries OCIO
 uniform names, types, offsets, value counts, and copied values. The packed
 uniform buffer uses OCIO's reported `buffer_offset` and `uniform_buffer_size`

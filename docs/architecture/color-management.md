@@ -236,6 +236,19 @@ monitor ICC correction, true HDR swapchains, and dynamic per-monitor profile
 switching require additional platform-specific contracts before they can be
 enabled.
 
+Monitor calibration is a distinct boundary after the OCIO display/view output.
+`DisplayCalibrationLut3d` represents standard encoded display RGB to ICC device
+RGB; it is not a working-space effect and cannot be inserted before compositing.
+The LUT stores RGBA32F samples and a full-payload ICC fingerprint. Hot frame
+contracts carry its non-authoritative compact calibration key while LUT caches
+and pass preparation validate the complete fingerprint. The compact key must
+never authorize cache reuse or processor execution. A matching GPU pass
+must produce `ColorFrameSpace::Device` plus `DeviceFloat`, preventing
+device values from being mistaken for a reusable standard color space. The
+current app still blocks ICC-backed preview until that typed device frame can
+be presented with exact code-value preservation through the UI renderer and
+swapchain.
+
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are
 scheduled explicitly by `RenderColorStagePlan` nodes rather than hidden inside
