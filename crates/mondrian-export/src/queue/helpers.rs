@@ -207,9 +207,16 @@ impl ExportVideoSignalContract {
                 color_space,
             };
         }
-        let pixel_format = match settings.color_management.delivery_bit_depth {
-            DeliveryBitDepth::Eight => "yuv420p",
-            DeliveryBitDepth::Ten => "yuv420p10le",
+        let pixel_format = match codec {
+            VideoCodecConfig::ProRes { variant } if prores_variant_is_4444(variant) => {
+                "yuva444p12le"
+            }
+            VideoCodecConfig::ProRes { .. } => "yuv422p10le",
+            _ => match settings.color_management.delivery_bit_depth {
+                DeliveryBitDepth::Eight => "yuv420p",
+                DeliveryBitDepth::Ten => "yuv420p10le",
+                DeliveryBitDepth::Twelve => "yuv420p12le",
+            },
         };
         let (codec_range, scale_range) = match settings.color_management.video_range {
             VideoRange::Full => ("pc", "full"),
@@ -237,6 +244,25 @@ impl ExportVideoSignalContract {
             color_space,
         }
     }
+
+    fn validation_constraints(self) -> crate::validator::ExpectedVideoSignalConstraints {
+        let tags = self.color_space.ffmpeg_tags();
+        crate::validator::ExpectedVideoSignalConstraints {
+            pixel_format: Some(self.pixel_format.to_owned()),
+            color_range: self.codec_range.map(str::to_owned),
+            color_primaries: tags.map(|tags| tags.color_primaries.to_owned()),
+            color_transfer: tags.map(|tags| tags.color_trc.to_owned()),
+            color_matrix: self.yuv_matrix.map(|matrix| matrix.tag_name().to_owned()),
+            require_color_tags_absent: tags.is_none(),
+        }
+    }
+}
+
+pub(crate) fn expected_export_video_signal(
+    settings: &SequenceSettings,
+    codec: &VideoCodecConfig,
+) -> crate::validator::ExpectedVideoSignalConstraints {
+    ExportVideoSignalContract::resolve(settings, codec).validation_constraints()
 }
 
 pub(crate) fn apply_export_video_signal_args(
@@ -354,6 +380,28 @@ pub(crate) fn validate_timeline_export_color_compatibility(
         );
     }
 
+    match &config.preset.video {
+        VideoCodecConfig::ProRes { variant }
+            if prores_variant_is_4444(variant) && bit_depth != DeliveryBitDepth::Twelve =>
+        {
+            return Err("ProRes 4444/4444 XQ 交付必须声明 12-bit 位深".to_string());
+        }
+        VideoCodecConfig::ProRes { variant }
+            if !prores_variant_is_4444(variant) && bit_depth != DeliveryBitDepth::Ten =>
+        {
+            return Err("ProRes Proxy/LT/Standard/HQ 交付必须声明 10-bit 位深".to_string());
+        }
+        VideoCodecConfig::H264 { .. }
+        | VideoCodecConfig::H265 { .. }
+        | VideoCodecConfig::Av1 { .. }
+            if bit_depth == DeliveryBitDepth::Twelve =>
+        {
+            return Err("H.264/H.265/AV1 当前仅支持 8-bit 或 10-bit 交付".to_string());
+        }
+        VideoCodecConfig::Gif { .. } => {}
+        _ => {}
+    }
+
     match (&config.preset.container, &config.preset.video) {
         (Container::Gif, _) | (_, VideoCodecConfig::Gif { .. }) => {
             if output.is_hdr() || preserve_hdr || bit_depth != DeliveryBitDepth::Eight {
@@ -388,6 +436,10 @@ pub(crate) fn prores_profile_variant(variant: &str) -> &'static str {
         "4444xq" => "5",
         _ => "3",
     }
+}
+
+fn prores_variant_is_4444(variant: &str) -> bool {
+    matches!(variant.to_ascii_lowercase().as_str(), "4444" | "4444xq")
 }
 
 pub(crate) fn container_format(container: &Container) -> &'static str {

@@ -65,7 +65,7 @@ impl ExportFrameContract {
     pub fn from_bit_depth(bit_depth: DeliveryBitDepth) -> Self {
         match bit_depth {
             DeliveryBitDepth::Eight => Self::Rgba8,
-            DeliveryBitDepth::Ten => Self::Rgba16Float,
+            DeliveryBitDepth::Ten | DeliveryBitDepth::Twelve => Self::Rgba16Float,
         }
     }
 
@@ -579,38 +579,38 @@ impl ExportGpuOutputFallbackBreakdown {
 /// Structured reason for final export output precision fallback.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExportOutputPrecisionFallbackReason {
-    /// 10-bit delivery fell back to an RGBA8 CPU output boundary before pipe packing.
-    CpuRgba8BoundaryPackedToTenBitPipe,
+    /// Integer delivery fell back to an RGBA8 CPU output boundary before float-pipe packing.
+    CpuRgba8BoundaryPackedToFloatPipe,
 }
 
 /// Structured final export output precision fallback counts.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExportOutputPrecisionFallbackBreakdown {
-    /// 10-bit delivery used an RGBA8 CPU output boundary before `rgba64le` pipe packing.
-    pub cpu_rgba8_boundary_packed_to_ten_bit_pipe: u64,
+    /// Integer delivery used an RGBA8 CPU output boundary before `rgba64le` pipe packing.
+    pub cpu_rgba8_boundary_packed_to_float_pipe: u64,
 }
 
 impl ExportOutputPrecisionFallbackBreakdown {
     /// Return total fallback count across all recorded reasons.
     pub fn total(&self) -> u64 {
-        self.cpu_rgba8_boundary_packed_to_ten_bit_pipe
+        self.cpu_rgba8_boundary_packed_to_float_pipe
     }
 
     /// Merge another breakdown in place.
     pub fn accumulate(self, other: Self) -> Self {
         Self {
-            cpu_rgba8_boundary_packed_to_ten_bit_pipe: self
-                .cpu_rgba8_boundary_packed_to_ten_bit_pipe
-                .saturating_add(other.cpu_rgba8_boundary_packed_to_ten_bit_pipe),
+            cpu_rgba8_boundary_packed_to_float_pipe: self
+                .cpu_rgba8_boundary_packed_to_float_pipe
+                .saturating_add(other.cpu_rgba8_boundary_packed_to_float_pipe),
         }
     }
 
     /// Map one reason into a mut accumulator entry.
     pub fn add_reason(mut self, reason: ExportOutputPrecisionFallbackReason) -> Self {
         match reason {
-            ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToTenBitPipe => {
-                self.cpu_rgba8_boundary_packed_to_ten_bit_pipe =
-                    self.cpu_rgba8_boundary_packed_to_ten_bit_pipe.saturating_add(1)
+            ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToFloatPipe => {
+                self.cpu_rgba8_boundary_packed_to_float_pipe =
+                    self.cpu_rgba8_boundary_packed_to_float_pipe.saturating_add(1)
             }
         }
         self
@@ -1096,14 +1096,14 @@ fn push_export_root_causes_and_actions(
             "export_output_precision_fallback",
             ExportColorHealthSeverity::Fail,
             format!(
-                "output_precision_fallbacks={} cpu_rgba8_boundary_packed_to_ten_bit_pipe={}",
+                "output_precision_fallbacks={} cpu_rgba8_boundary_packed_to_float_pipe={}",
                 summary.output_precision_fallbacks,
                 summary
                     .output_precision_fallback_reasons
-                    .cpu_rgba8_boundary_packed_to_ten_bit_pipe
+                    .cpu_rgba8_boundary_packed_to_float_pipe
             ),
             "replace_export_cpu_rgba8_output_boundary",
-            "Replace the 10-bit delivery CPU fallback with a renderer-owned float output boundary.",
+            "Replace the integer-delivery RGBA8 fallback with a renderer-owned float output boundary.",
         );
     }
     if summary.output_transform_issues > 0 || summary.output_transform_issue_reasons.total() > 0 {
@@ -1429,6 +1429,7 @@ fn execute_file_export(
                         height: Some(normalize_output_dimension(resolution.height)),
                         fps_num: None,
                         fps_den: None,
+                        signal: None,
                     }
                 }),
                 expected_duration_secs: if duration_ms > 0 {
@@ -1495,6 +1496,10 @@ fn execute_timeline_export(
                 height: Some(height),
                 fps_num: Some(range.fps_num),
                 fps_den: Some(range.fps_den),
+                signal: Some(expected_export_video_signal(
+                    &timeline.sequence.settings,
+                    &job.config.preset.video,
+                )),
             }),
             expected_duration_secs: Some(
                 range.total_frames as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64,
@@ -2748,7 +2753,7 @@ fn render_sequence_frame_into(
                         }
                         if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
                             diagnostics.record_output_precision_fallback(
-                                ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToTenBitPipe,
+                                ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToFloatPipe,
                             );
                         }
                         frame_contract.pack_rgba8(&encoded.rgba)
@@ -3659,7 +3664,7 @@ mod tests {
         assert_eq!(
             export_diagnostics
                 .output_precision_fallback_reasons
-                .cpu_rgba8_boundary_packed_to_ten_bit_pipe,
+                .cpu_rgba8_boundary_packed_to_float_pipe,
             1
         );
 
@@ -4134,7 +4139,7 @@ mod tests {
     #[test]
     fn export_color_validation_allows_camera_log_prores_intermediate() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLog);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
 
         let mut config = dummy_config("camera-log.mov");
         config.preset.container = Container::Mov;
@@ -4142,6 +4147,25 @@ mod tests {
 
         validate_timeline_export_color_compatibility(&config, &timeline)
             .expect("camera log ProRes intermediate should pass");
+    }
+
+    #[test]
+    fn export_color_validation_binds_prores_profile_to_real_sample_depth() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        let mut config = dummy_config("prores.mov");
+        config.preset.container = Container::Mov;
+
+        config.preset.video = VideoCodecConfig::ProRes { variant: "hq".to_owned() };
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
+        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect_err("ProRes HQ is a 10-bit profile");
+        assert!(err.contains("必须声明 10-bit"));
+
+        config.preset.video = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect_err("ProRes 4444 XQ is a 12-bit profile");
+        assert!(err.contains("必须声明 12-bit"));
     }
 
     #[test]
@@ -4452,6 +4476,31 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| { pair[0] == "-vf" && pair[1].contains("out_color_matrix=bt709") }));
+    }
+
+    #[test]
+    fn post_encode_expectations_come_from_the_same_signal_contract() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        settings.color_management.video_range = VideoRange::Legal;
+        let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+
+        let expected = expected_export_video_signal(&settings, &codec);
+
+        assert_eq!(expected.pixel_format.as_deref(), Some("yuv420p10le"));
+        assert_eq!(expected.color_range.as_deref(), Some("tv"));
+        assert_eq!(expected.color_primaries.as_deref(), Some("bt2020"));
+        assert_eq!(expected.color_transfer.as_deref(), Some("smpte2084"));
+        assert_eq!(expected.color_matrix.as_deref(), Some("bt2020nc"));
+        assert!(!expected.require_color_tags_absent);
+
+        settings.color_management.output_color_space = ColorSpace::AppleLog;
+        settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
+        let prores = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
+        let expected = expected_export_video_signal(&settings, &prores);
+        assert_eq!(expected.pixel_format.as_deref(), Some("yuva444p12le"));
+        assert!(expected.require_color_tags_absent);
     }
 
     #[test]
@@ -4778,6 +4827,10 @@ mod tests {
         );
         assert_eq!(
             ExportFrameContract::from_bit_depth(DeliveryBitDepth::Ten),
+            ExportFrameContract::Rgba16Float
+        );
+        assert_eq!(
+            ExportFrameContract::from_bit_depth(DeliveryBitDepth::Twelve),
             ExportFrameContract::Rgba16Float
         );
     }

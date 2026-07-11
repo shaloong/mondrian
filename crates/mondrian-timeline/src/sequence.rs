@@ -400,6 +400,8 @@ pub enum DeliveryBitDepth {
     /// 10-bit encoded delivery samples.
     #[default]
     Ten,
+    /// 12-bit encoded delivery samples for codecs such as ProRes 4444.
+    Twelve,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

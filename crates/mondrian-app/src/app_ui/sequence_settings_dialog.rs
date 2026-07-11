@@ -281,8 +281,11 @@ const NESTED_COLOR_PROCESSING_OPTIONS: [NestedColorProcessing; 3] = [
 
 const VIDEO_RANGE_OPTIONS: [VideoRange; 2] = [VideoRange::Full, VideoRange::Legal];
 
-const DELIVERY_BIT_DEPTH_OPTIONS: [DeliveryBitDepth; 2] =
-    [DeliveryBitDepth::Eight, DeliveryBitDepth::Ten];
+const DELIVERY_BIT_DEPTH_OPTIONS: [DeliveryBitDepth; 3] = [
+    DeliveryBitDepth::Eight,
+    DeliveryBitDepth::Ten,
+    DeliveryBitDepth::Twelve,
+];
 
 impl SequenceSettingsTabPayload {
     const ALL: [Self; 3] = [Self::Format, Self::Color, Self::Preview];
@@ -441,6 +444,7 @@ fn delivery_bit_depth_label(value: DeliveryBitDepth) -> &'static str {
     match value {
         DeliveryBitDepth::Eight => "8-bit",
         DeliveryBitDepth::Ten => "10-bit",
+        DeliveryBitDepth::Twelve => "12-bit",
     }
 }
 

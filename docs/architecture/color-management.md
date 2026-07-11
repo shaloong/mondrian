@@ -415,9 +415,19 @@ through one atomic `x265-params` value so neither field can override the other.
 AV1 and ProRes requests with metadata preservation fail validation until they
 have independently implemented and verified bitstream/container backends.
 
+Successful encoder exit is not proof of a correct deliverable. Timeline export
+derives `ExpectedVideoSignalConstraints` from the same
+`ExportVideoSignalContract` used to build FFmpeg arguments, then probes the
+finished file. Validation fails on mismatched pixel format, range, primaries,
+transfer, or matrix. Camera-log and GIF contracts additionally require color
+tags to be absent, so an encoder cannot silently replace an intentionally
+untagged signal with guessed metadata. ProRes 422 profiles are verified as
+10-bit 4:2:2, while ProRes 4444/4444 XQ are verified as 12-bit 4:4:4:4.
+
 Delivery sample depth and renderer transport precision are separate contracts.
-`DeliveryBitDepth` exposes only the 8-bit and 10-bit formats implemented by the
-current codecs. A 10-bit delivery uses the internal `Rgba16Float` export frame
+`DeliveryBitDepth` exposes only the 8-bit, 10-bit, and 12-bit formats implemented
+by current codecs. ProRes 422 profiles require 10-bit; ProRes 4444 profiles
+require 12-bit. A 10/12-bit delivery uses the internal `Rgba16Float` export frame
 contract and `rgba64le` FFmpeg pipe so the renderer output transform is not
 quantized to 8-bit before encoding. That internal transport does not represent
 a 16-bit-float deliverable; no such user-facing option exists until a real

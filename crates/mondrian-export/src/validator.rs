@@ -17,12 +17,31 @@ pub struct MediaStreamSummary {
     pub duration_secs: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExpectedVideoConstraints {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps_num: Option<i64>,
     pub fps_den: Option<i64>,
+    /// Encoded signal fields that must match the finished video stream.
+    pub signal: Option<ExpectedVideoSignalConstraints>,
+}
+
+/// Expected ffprobe-visible signal identity for a finished video stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExpectedVideoSignalConstraints {
+    /// Exact encoded pixel format, such as `yuv420p10le`.
+    pub pixel_format: Option<String>,
+    /// Exact encoded range tag, such as `tv` or `pc`.
+    pub color_range: Option<String>,
+    /// Exact color-primaries tag.
+    pub color_primaries: Option<String>,
+    /// Exact transfer-characteristic tag.
+    pub color_transfer: Option<String>,
+    /// Exact matrix-coefficients tag.
+    pub color_matrix: Option<String>,
+    /// Require primaries, transfer, and matrix tags to be absent.
+    pub require_color_tags_absent: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,6 +59,11 @@ struct FfprobeStream {
     r_frame_rate: Option<String>,
     avg_frame_rate: Option<String>,
     duration: Option<String>,
+    pix_fmt: Option<String>,
+    color_range: Option<String>,
+    color_space: Option<String>,
+    color_transfer: Option<String>,
+    color_primaries: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,7 +135,7 @@ fn validate_report(
         return Err("导出结果缺少音频流".to_string());
     }
 
-    if let (Some(stream), Some(expected)) = (video_stream, expectations.expected_video) {
+    if let (Some(stream), Some(expected)) = (video_stream, expectations.expected_video.as_ref()) {
         if let Some(expected_width) = expected.width {
             let actual_width = stream.width.unwrap_or(0);
             if actual_width != expected_width {
@@ -147,6 +171,9 @@ fn validate_report(
                 ));
             }
         }
+        if let Some(signal) = expected.signal.as_ref() {
+            validate_video_signal(stream, signal)?;
+        }
     }
 
     if let Some(expected_duration_secs) = expectations.expected_duration_secs {
@@ -180,6 +207,66 @@ fn validate_report(
     }
 
     Ok(())
+}
+
+fn validate_video_signal(
+    stream: &FfprobeStream,
+    expected: &ExpectedVideoSignalConstraints,
+) -> Result<(), String> {
+    validate_exact_video_field(
+        "像素格式",
+        expected.pixel_format.as_deref(),
+        stream.pix_fmt.as_deref(),
+    )?;
+    validate_exact_video_field(
+        "视频范围",
+        expected.color_range.as_deref(),
+        stream.color_range.as_deref(),
+    )?;
+    if expected.require_color_tags_absent {
+        for (name, actual) in [
+            ("色彩原色", stream.color_primaries.as_deref()),
+            ("传递函数", stream.color_transfer.as_deref()),
+            ("矩阵系数", stream.color_space.as_deref()),
+        ] {
+            if let Some(actual) = actual {
+                return Err(format!("导出{name}标签应缺失，实际 {actual}"));
+            }
+        }
+        return Ok(());
+    }
+    validate_exact_video_field(
+        "色彩原色",
+        expected.color_primaries.as_deref(),
+        stream.color_primaries.as_deref(),
+    )?;
+    validate_exact_video_field(
+        "传递函数",
+        expected.color_transfer.as_deref(),
+        stream.color_transfer.as_deref(),
+    )?;
+    validate_exact_video_field(
+        "矩阵系数",
+        expected.color_matrix.as_deref(),
+        stream.color_space.as_deref(),
+    )
+}
+
+fn validate_exact_video_field(
+    name: &str,
+    expected: Option<&str>,
+    actual: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if actual == Some(expected) {
+        return Ok(());
+    }
+    Err(format!(
+        "导出{name}不匹配：期望 {expected}，实际 {}",
+        actual.unwrap_or("<missing>")
+    ))
 }
 
 fn summarize_report(report: &FfprobeReport) -> MediaStreamSummary {
@@ -255,6 +342,11 @@ mod tests {
                     r_frame_rate: Some("25/1".to_string()),
                     avg_frame_rate: Some("25/1".to_string()),
                     duration: Some("10.0".to_string()),
+                    pix_fmt: Some("yuv420p10le".to_string()),
+                    color_range: Some("tv".to_string()),
+                    color_space: Some("bt2020nc".to_string()),
+                    color_transfer: Some("smpte2084".to_string()),
+                    color_primaries: Some("bt2020".to_string()),
                 },
                 FfprobeStream {
                     codec_type: Some("audio".to_string()),
@@ -263,6 +355,11 @@ mod tests {
                     r_frame_rate: None,
                     avg_frame_rate: None,
                     duration: Some("10.0".to_string()),
+                    pix_fmt: None,
+                    color_range: None,
+                    color_space: None,
+                    color_transfer: None,
+                    color_primaries: None,
                 },
             ],
             format: Some(FfprobeFormat { duration: Some("10.0".to_string()) }),
@@ -280,6 +377,7 @@ mod tests {
                 height: Some(1080),
                 fps_num: Some(25),
                 fps_den: Some(1),
+                signal: None,
             }),
             expected_duration_secs: Some(10.0),
         };
@@ -321,11 +419,94 @@ mod tests {
                 height: Some(1080),
                 fps_num: Some(25),
                 fps_den: Some(1),
+                signal: None,
             }),
             expected_duration_secs: None,
         };
         let err = validate_report(&report, &expected).expect_err("should fail");
         assert!(err.contains("帧率不匹配"));
+    }
+
+    #[test]
+    fn validate_report_checks_encoded_video_signal_fields() {
+        let report = base_report();
+        let expected = ExportValidationExpectations {
+            require_video_stream: true,
+            require_audio_stream: false,
+            expected_video: Some(ExpectedVideoConstraints {
+                signal: Some(ExpectedVideoSignalConstraints {
+                    pixel_format: Some("yuv420p10le".to_owned()),
+                    color_range: Some("tv".to_owned()),
+                    color_primaries: Some("bt2020".to_owned()),
+                    color_transfer: Some("smpte2084".to_owned()),
+                    color_matrix: Some("bt2020nc".to_owned()),
+                    require_color_tags_absent: false,
+                }),
+                ..ExpectedVideoConstraints::default()
+            }),
+            expected_duration_secs: None,
+        };
+
+        assert!(validate_report(&report, &expected).is_ok());
+    }
+
+    #[test]
+    fn validate_report_fails_on_encoded_matrix_mismatch() {
+        let report = base_report();
+        let expected = ExportValidationExpectations {
+            require_video_stream: true,
+            require_audio_stream: false,
+            expected_video: Some(ExpectedVideoConstraints {
+                signal: Some(ExpectedVideoSignalConstraints {
+                    color_matrix: Some("bt709".to_owned()),
+                    ..ExpectedVideoSignalConstraints::default()
+                }),
+                ..ExpectedVideoConstraints::default()
+            }),
+            expected_duration_secs: None,
+        };
+
+        let err = validate_report(&report, &expected).expect_err("matrix mismatch must fail");
+        assert!(err.contains("矩阵系数"));
+        assert!(err.contains("bt709"));
+        assert!(err.contains("bt2020nc"));
+    }
+
+    #[test]
+    fn validate_report_can_require_color_tags_absent() {
+        let mut report = base_report();
+        {
+            let video = report
+                .streams
+                .iter_mut()
+                .find(|stream| stream.codec_type.as_deref() == Some("video"))
+                .expect("video stream");
+            video.color_primaries = None;
+            video.color_transfer = None;
+            video.color_space = None;
+        }
+        let expected = ExportValidationExpectations {
+            require_video_stream: true,
+            require_audio_stream: false,
+            expected_video: Some(ExpectedVideoConstraints {
+                signal: Some(ExpectedVideoSignalConstraints {
+                    require_color_tags_absent: true,
+                    ..ExpectedVideoSignalConstraints::default()
+                }),
+                ..ExpectedVideoConstraints::default()
+            }),
+            expected_duration_secs: None,
+        };
+
+        assert!(validate_report(&report, &expected).is_ok());
+        report
+            .streams
+            .iter_mut()
+            .find(|stream| stream.codec_type.as_deref() == Some("video"))
+            .expect("video stream")
+            .color_transfer = Some("bt709".to_owned());
+        let err = validate_report(&report, &expected).expect_err("invented tag must fail");
+        assert!(err.contains("传递函数标签应缺失"));
     }
 
     #[test]
@@ -351,5 +532,64 @@ mod tests {
                 duration_secs: Some(10.0),
             }
         );
+    }
+
+    #[test]
+    fn validate_export_output_reads_real_signal_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "mondrian-export-signal-validation-{}.mp4",
+            std::process::id()
+        ));
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=16x16:d=0.1",
+                "-vf",
+                "format=rgba,scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt709",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_range",
+                "tv",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "iec61966-2-1",
+                "-colorspace",
+                "bt709",
+            ])
+            .arg(&path)
+            .status()
+            .expect("launch ffmpeg signal fixture");
+        assert!(status.success());
+        let expectations = ExportValidationExpectations {
+            require_video_stream: true,
+            require_audio_stream: false,
+            expected_video: Some(ExpectedVideoConstraints {
+                width: Some(16),
+                height: Some(16),
+                signal: Some(ExpectedVideoSignalConstraints {
+                    pixel_format: Some("yuv420p".to_owned()),
+                    color_range: Some("tv".to_owned()),
+                    color_primaries: Some("bt709".to_owned()),
+                    color_transfer: Some("iec61966-2-1".to_owned()),
+                    color_matrix: Some("bt709".to_owned()),
+                    require_color_tags_absent: false,
+                }),
+                ..ExpectedVideoConstraints::default()
+            }),
+            expected_duration_secs: None,
+        };
+
+        let result = validate_export_output(&path, &expectations);
+        let _ = std::fs::remove_file(path);
+        result.expect("real encoded signal should satisfy its contract");
     }
 }
