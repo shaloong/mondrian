@@ -427,9 +427,15 @@ runtime to `AppUiFrameRenderer`; it no longer independently owns each GPU stage.
 Frame-scoped resources clear through one Interface, while pipelines and device
 capability state remain resident. A device/display invalidation must first
 unregister the runtime's external texture key, then reset the runtime as one
-unit. This ownership seam is intentionally established before moving the
-remaining execution procedure out of `window.rs`; the future headless GPU
-Adapter must instantiate this same runtime rather than implement a second
+unit. Its `record_frame` Interface now hides native import with explicit CPU
+fallback evidence, GPU input transforms, working-linear compositing, spatial
+processing, display-output recording, and optional proven display calibration.
+It returns the retained presentation output handle plus stage, compositing,
+spatial, residency, and fallback evidence.
+`window.rs` performs only Window Adapter policy around that Interface: display
+contract admission, renderer external-texture registration, Viewer publication,
+and telemetry projection. The headless GPU Adapter must call `record_frame`
+and provide its own presentation registration; it must not implement a second
 composite/color path.
 
 ## Required invariants
