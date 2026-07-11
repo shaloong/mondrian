@@ -242,20 +242,32 @@ fn resolve_monitor_profile_status(
                 }
             };
 
-            match parsed.mapping {
-                mondrian_core::icc::IccColorSpaceMapping::Mapped { color_space, .. } => {
-                    MonitorProfileStatus::ManagedColorSpace {
-                        color_space,
-                        source: MonitorProfileSource::OsIccProfile,
-                    }
-                }
-                mondrian_core::icc::IccColorSpaceMapping::Unmapped { reason, .. } => {
-                    MonitorProfileStatus::IccProfileUnmapped {
-                        profile_path: Some(profile_path.display().to_string()),
-                        parsed_color_space: None,
-                        reason,
-                    }
-                }
+            monitor_status_from_parsed_icc(&profile_path, parsed)
+        }
+    }
+}
+
+fn monitor_status_from_parsed_icc(
+    profile_path: &Path,
+    parsed: mondrian_core::icc::ParsedIccDisplayProfile,
+) -> MonitorProfileStatus {
+    match parsed.mapping {
+        mondrian_core::icc::IccColorSpaceMapping::Mapped {
+            color_space,
+            method,
+        } => MonitorProfileStatus::IccProfileUnmapped {
+            profile_path: Some(profile_path.display().to_string()),
+            parsed_color_space: Some(color_space),
+            reason: format!(
+                "ICC profile '{}' maps to {color_space:?} via {method:?}, but no renderer ICC calibration processor is available",
+                parsed.name
+            ),
+        },
+        mondrian_core::icc::IccColorSpaceMapping::Unmapped { reason, .. } => {
+            MonitorProfileStatus::IccProfileUnmapped {
+                profile_path: Some(profile_path.display().to_string()),
+                parsed_color_space: None,
+                reason,
             }
         }
     }
@@ -448,6 +460,31 @@ mod tests {
 
     fn default_policy() -> DisplayManagementPolicy {
         DisplayManagementPolicy::default()
+    }
+
+    #[test]
+    fn named_icc_mapping_stays_blocked_without_renderer_calibration() {
+        let status = monitor_status_from_parsed_icc(
+            Path::new("display.icc"),
+            mondrian_core::icc::ParsedIccDisplayProfile {
+                name: "Display P3".to_owned(),
+                mapping: mondrian_core::icc::IccColorSpaceMapping::Mapped {
+                    color_space: ColorSpace::DciP3,
+                    method: mondrian_core::icc::IccColorSpaceMappingMethod::ProfileName,
+                },
+                linear_matrix: Some([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                gamma_compensation: Some(1.0),
+            },
+        );
+
+        assert!(matches!(
+            status,
+            MonitorProfileStatus::IccProfileUnmapped {
+                parsed_color_space: Some(ColorSpace::DciP3),
+                reason,
+                ..
+            } if reason.contains("no renderer ICC calibration processor")
+        ));
     }
 
     fn no_hdr_info() -> wgpu::DisplayHdrInfo {

@@ -8424,7 +8424,15 @@ fn preview_icc_display_color_space(
     }
 
     match snapshot.monitor_profile_status {
-        MonitorProfileStatus::ManagedColorSpace { color_space, .. } => Ok(color_space),
+        MonitorProfileStatus::ManagedColorSpace {
+            source: mondrian_core::display_contract::MonitorProfileSource::OsIccProfile,
+            ..
+        } => Err(
+            crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "icc_monitor_calibration_processor".to_owned(),
+                reason: "OS ICC profile was marked managed without a renderer calibration processor; preview refuses the uncalibrated output".to_owned(),
+            },
+        ),
         ref status => Err(
             crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "icc_preview_color_space_resolution".to_owned(),
@@ -9668,7 +9676,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_display_color_space_resolves_icc_from_display_contract() {
+    fn preview_display_color_space_rejects_uncalibrated_managed_icc_status() {
         let mut sequence = Sequence::new("icc-preview");
         sequence.settings.color_management.inherit = false;
         sequence.settings.color_management.display_management =
@@ -9682,35 +9690,32 @@ mod tests {
             };
         let snapshot = managed_icc_display_snapshot(ColorSpace::DciP3);
 
-        assert_eq!(
-            preview_display_color_space(
-                &sequence,
-                &ProjectColorManagement::default(),
-                Some(&snapshot)
-            )
-            .expect("ICC display color space should resolve from display contract"),
-            ColorSpace::DciP3
-        );
+        let err = preview_display_color_space(
+            &sequence,
+            &ProjectColorManagement::default(),
+            Some(&snapshot),
+        )
+        .expect_err("ICC status without a renderer calibration processor must fail closed");
+        assert!(matches!(
+            err,
+            crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                ref feature,
+                ..
+            } if feature == "icc_monitor_calibration_processor"
+        ));
     }
 
     #[test]
-    fn gpu_preview_frame_for_icc_policy_uses_display_contract_color_space() {
+    fn gpu_preview_frame_for_icc_policy_rejects_uncalibrated_monitor_profile() {
         let service = AppUiPreviewService::new();
         let state = state_with_icc_display_policy(Color::from_rgba8(24, 80, 160, 255));
         let snapshot = managed_icc_display_snapshot(ColorSpace::DciP3);
         service.set_display_output_snapshot(Some(&snapshot));
 
-        let frame = match service.gpu_preview_frame_for_state(&state) {
-            AppUiGpuPreviewFrameState::Ready(frame) => frame,
-            AppUiGpuPreviewFrameState::Current => panic!("expected new GPU preview candidate"),
-            AppUiGpuPreviewFrameState::Loading => panic!("expected ready GPU preview candidate"),
-            AppUiGpuPreviewFrameState::Unavailable => {
-                panic!("ICC policy should resolve through display contract")
-            }
-        };
-
-        assert_eq!(frame.boundary.output_color_space, ColorSpace::DciP3);
-        assert_eq!(frame.working_color_space, WorkingColorSpace::LinearRec709);
+        assert!(matches!(
+            service.gpu_preview_frame_for_state(&state),
+            AppUiGpuPreviewFrameState::Unavailable
+        ));
     }
 
     fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {

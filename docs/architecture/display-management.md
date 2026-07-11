@@ -65,14 +65,21 @@ Status of the OS monitor ICC profile. The fail-closed chain:
 | ColorSpace(x) | * | `ManagedColorSpace` |
 | IccProfile | OS discovery unsupported | `IccProfileUnsupported` |
 | IccProfile | OS discovery works, parse fails | `IccProfileReadError` |
-| IccProfile | OS discovery works, parse OK, no OCIO match | `IccProfileUnmapped` + fail-closed blocker |
-| IccProfile | OS discovery works, parse OK, OCIO match | `ManagedColorSpace` |
+| IccProfile | OS discovery works, parse OK, no managed identity | `IccProfileUnmapped` + fail-closed blocker |
+| IccProfile | Managed identity found, calibration processor unavailable | `IccProfileUnmapped` + fail-closed blocker |
+| IccProfile | Managed identity and renderer calibration processor both ready | `ManagedColorSpace` (future) |
 
 Parsing and mapping are separate. A valid generic RGB monitor profile is not
 implicitly Rec.709: the shared core ICC parser returns `Unmapped`, and the app
 turns that result into the fail-closed blocker above. The monitor path and media
 ingest path consume the same mapping result rather than maintaining separate
 name heuristics.
+
+Mapping a profile name to sRGB/P3/Rec.709 is not monitor calibration. Until the
+renderer executes the ICC device transform at the presentation boundary, the
+app must not report an OS ICC profile as managed. Preview admission also rejects
+an `OsIccProfile` status that claims `ManagedColorSpace` without processor proof,
+so a stale or manually constructed snapshot cannot bypass the blocker.
 
 ### HdrStatus
 
