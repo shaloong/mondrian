@@ -104,7 +104,8 @@ pub(crate) struct AppUiPreviewPollOutcome {
     pub transport_change: bool,
     /// More completed decode results should be drained on a follow-up event-loop tick.
     pub needs_follow_up_poll: bool,
-    /// Exact terminal deliveries returned by playback-current worker jobs.
+    /// Exact late/canceled/failed terminal deliveries returned by workers.
+    /// Successful readiness terminates only through a Presentation Adapter.
     pub frame_deliveries: Vec<mondrian_playback::FrameDelivery>,
 }
 
@@ -131,6 +132,7 @@ pub struct AppUiPreviewService {
     requested_proxy_generations: RefCell<HashSet<PreviewProxyGenerationRequestKey>>,
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
+    degraded_playback_demands: RefCell<HashSet<mondrian_playback::FrameDemandIdentity>>,
     next_gpu_preview_candidate_id: Cell<u64>,
     scheduler: MediaPreviewScheduler,
     worker_activity: Arc<PreviewWorkerActivity>,
@@ -219,6 +221,7 @@ impl AppUiPreviewService {
             requested_proxy_generations: RefCell::new(HashSet::new()),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
             external_viewer_frame: RefCell::new(None),
+            degraded_playback_demands: RefCell::new(HashSet::new()),
             next_gpu_preview_candidate_id: Cell::new(0),
             scheduler,
             worker_activity,
@@ -881,9 +884,20 @@ impl AppUiPreviewService {
                     result.priority,
                     result.decode_diagnostics.as_ref().map(PlaybackDecodeExecution::from),
                 );
-                outcome
-                    .frame_deliveries
-                    .push(mondrian_playback::FrameDelivery::for_demand(identity, kind));
+                match kind {
+                    mondrian_playback::FrameDeliveryKind::Ready => {
+                        // Successful decode is non-terminal: the Presentation Adapter
+                        // finishes the demand after its output is actually usable.
+                    }
+                    mondrian_playback::FrameDeliveryKind::Degraded => {
+                        if completion.is_current() {
+                            self.degraded_playback_demands.borrow_mut().insert(identity);
+                        }
+                    }
+                    _ => outcome
+                        .frame_deliveries
+                        .push(mondrian_playback::FrameDelivery::for_demand(identity, kind)),
+                }
             }
             if let Some(diagnostics) = result.decode_diagnostics {
                 self.scrub_adaptation.borrow_mut().observe_decode(diagnostics);
@@ -1268,7 +1282,37 @@ impl AppUiPreviewService {
             working_input,
             boundary,
             preview_candidate_id: candidate_id,
+            presentation_delivery: self.playback_presentation_delivery(state),
         }))
+    }
+
+    /// Build the exact terminal delivery that a Presentation Adapter may emit
+    /// only after it makes the current output usable.
+    pub(crate) fn playback_presentation_delivery(
+        &self,
+        state: &AppState,
+    ) -> Option<mondrian_playback::FrameDelivery> {
+        if !state.is_playing() {
+            return None;
+        }
+        let identity = state.playback_frame_demand_identity()?;
+        let mut degraded = self.degraded_playback_demands.borrow_mut();
+        degraded.retain(|candidate| *candidate == identity);
+        let kind = if degraded.contains(&identity) {
+            mondrian_playback::FrameDeliveryKind::Degraded
+        } else {
+            mondrian_playback::FrameDeliveryKind::Ready
+        };
+        Some(mondrian_playback::FrameDelivery::for_demand(identity, kind))
+    }
+
+    /// Release per-demand decode classification after a Presentation Adapter
+    /// has attempted the exact terminal delivery.
+    pub(crate) fn acknowledge_playback_presentation(
+        &self,
+        delivery: mondrian_playback::FrameDelivery,
+    ) {
+        self.degraded_playback_demands.borrow_mut().remove(&delivery.identity());
     }
 
     /// Mark a GPU preview output texture as the current viewer frame for its resolved plan.
@@ -1326,6 +1370,7 @@ impl AppUiPreviewService {
             return self.current_generation.get();
         }
         *last_key = Some(key);
+        self.degraded_playback_demands.borrow_mut().clear();
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
         generation
@@ -1333,6 +1378,7 @@ impl AppUiPreviewService {
 
     fn invalidate_preview_generation(&self) {
         self.last_generation_key.replace(None);
+        self.degraded_playback_demands.borrow_mut().clear();
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
     }
@@ -6713,6 +6759,8 @@ pub(crate) struct AppUiGpuPreviewFrame {
     pub boundary: RenderOutputColorBoundary,
     /// Monotonic identifier for this working-frame candidate.
     preview_candidate_id: u64,
+    /// Exact terminal delivery to emit only after presentation succeeds.
+    presentation_delivery: Option<mondrian_playback::FrameDelivery>,
 }
 
 /// Working-space input for the app-window GPU output path.
@@ -6804,6 +6852,11 @@ impl AppUiGpuPreviewFrame {
     /// Candidate identifier for viewer output attempt correlation.
     pub(crate) fn preview_candidate_id(&self) -> u64 {
         self.preview_candidate_id
+    }
+
+    /// Exact playback delivery authorized for successful presentation.
+    pub(crate) const fn presentation_delivery(&self) -> Option<mondrian_playback::FrameDelivery> {
+        self.presentation_delivery
     }
 }
 
@@ -9754,6 +9807,11 @@ mod tests {
         }
         assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
         assert_eq!(frame.preview_candidate_id(), 1);
+        assert_eq!(
+            frame.presentation_delivery(),
+            None,
+            "paused still-frame candidates must not carry playback authority"
+        );
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.gpu_preview_candidate_requests, 1);
@@ -9762,6 +9820,32 @@ mod tests {
         assert_eq!(diagnostics.gpu_preview_candidate_loading, 0);
         assert_eq!(diagnostics.gpu_preview_candidate_unavailable, 0);
         assert_eq!(diagnostics.gpu_preview_candidate_pixels, 960_u64 * 540);
+    }
+
+    #[test]
+    fn playing_gpu_candidate_carries_exact_presentation_delivery() {
+        let service = AppUiPreviewService::new();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let identity = state.playback_frame_demand_identity().expect("frame demand identity");
+
+        let frame = match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Ready(frame) => frame,
+            _ => panic!("expected ready GPU preview candidate"),
+        };
+
+        let delivery = frame.presentation_delivery().expect("presentation delivery");
+        assert_eq!(
+            delivery,
+            mondrian_playback::FrameDelivery::for_demand(
+                identity,
+                mondrian_playback::FrameDeliveryKind::Ready,
+            )
+        );
+        assert!(
+            state.observe_frame_delivery(delivery),
+            "candidate construction alone must not terminate the demand"
+        );
     }
 
     #[test]
@@ -15736,7 +15820,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_service_poll_reports_presentable_hardware_fallback_as_degraded() {
+    fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
         state.play();
@@ -15771,13 +15855,21 @@ mod tests {
             outcome.visible_change,
             "correct CPU fallback remains presentable"
         );
+        assert!(
+            outcome.frame_deliveries.is_empty(),
+            "decode readiness must not terminate the demand before presentation"
+        );
+        let delivery =
+            service.playback_presentation_delivery(&state).expect("presentation delivery");
         assert_eq!(
-            outcome.frame_deliveries,
-            vec![mondrian_playback::FrameDelivery::for_demand(
+            delivery,
+            mondrian_playback::FrameDelivery::for_demand(
                 demand_identity,
                 mondrian_playback::FrameDeliveryKind::Degraded,
-            )]
+            )
         );
+        assert!(state.observe_frame_delivery(delivery));
+        service.acknowledge_playback_presentation(delivery);
         service.shutdown();
     }
 

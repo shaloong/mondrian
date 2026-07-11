@@ -54,6 +54,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Playback Session** has exactly one **Transport State** at a time.
 - A **Playback Session** produces zero or more **Frame Demands**.
 - Each **Frame Demand** produces at most one terminal **Frame Delivery**.
+- Successful decode/cache completion is nonterminal readiness. A CPU or GPU **Presentation Adapter** must carry the exact demand identity and emit `Ready`/`Degraded` only after it has produced a usable Viewer output; deadline/cancellation/failure paths may terminate earlier without presentation.
 - A Viewer stale lifecycle state does not terminate a **Frame Demand**; only a deadline/policy decision may emit `StaleAvailable`, while an in-flight worker retains the chance to deliver `Ready`.
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.
 - An active Playback Quality Policy's temporary `Full`/`Half`/`Quarter` scale multiplies the user-authored preview scale at every Preview Adapter boundary; paused/stopped still-frame work returns to the authored scale. It changes output extent only and never changes proxy/original selection or color interpretation.

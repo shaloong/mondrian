@@ -248,7 +248,8 @@ current-frame work.
 
 Terminal outcomes are:
 
-- `Ready`: correct demand result available before its deadline.
+- `Ready`: a correct current output became usable through a Presentation Adapter
+  before its deadline. Decode/cache readiness alone is not sufficient.
 - `Late`: correct result completed after its deadline.
 - `StaleAvailable`: at the demand deadline, policy closed the demand while a
   previously presented frame could remain visible.
@@ -277,11 +278,13 @@ Only the Playback Engine interprets a delivery:
 The Viewer's immediate `Stale` lifecycle state is not itself a Frame Delivery.
 It describes the currently visible fallback while current work is still
 eligible to complete. Converting that first stale refresh into a terminal
-`StaleAvailable` would consume the one-terminal invariant and force a Ready
-completion arriving before the deadline to be rejected. `ViewerPlaybackFeedback`
-therefore emits terminal feedback only for current Ready and correctness
-Blocked states; worker/deadline scheduling owns Late, Canceled, Failed, and any
-future deadline-classified StaleAvailable outcome.
+`StaleAvailable` would consume the one-terminal invariant and force a later
+presentation arriving before the deadline to be rejected. Payload-free
+`ViewerPlaybackFeedback` therefore emits only correctness `Blocked` as a
+terminal outcome. A Ready lifecycle must be paired with an exact presentation
+delivery carrying the original demand identity. Worker/deadline scheduling owns
+Late, Canceled, Failed, and any future deadline-classified StaleAvailable
+outcome.
 
 ## Quality and recovery policy
 
@@ -580,11 +583,14 @@ superseded demand are rejected before target validation.
 Playback-current preview jobs carry the opaque identity projection (`epoch`,
 quality revision, demand sequence, target frame) through queue, worker, result,
 and app polling. Media workers do not interpret playback policy. Polling returns
-an exact terminal Frame Delivery for Ready, Late, Failed, or Canceled work, and
-the Playback Engine performs the final identity check. Media generation remains
-a decode/cache cancellation mechanism and is not a substitute for Playback
-Session identity. Viewer lifecycle feedback remains the Adapter for cache hits
-and presentation-only outcomes that do not originate from worker completion.
+exact terminal deliveries only for Late, Failed, or Canceled work. A successful
+Ready/Degraded decode is staged as nonterminal readiness; its classification is
+attached to the exact GPU candidate or CPU presentation and terminates the
+demand only after that Adapter produces a usable output. The Playback Engine
+performs the final identity check, so an old candidate cannot terminate a newer
+demand. Media generation remains a decode/cache cancellation mechanism and is
+not a substitute for Playback Session identity. Payload-free Viewer lifecycle
+feedback cannot synthesize Ready without this exact presentation identity.
 Scheduler pending state retains the same identity until completion or
 expiration. A stall expiration returns that stored identity and never asks the
 host to synthesize a delivery from whichever demand is current at poll time.
@@ -653,9 +659,10 @@ lateness and Viewer state remain unrelated to this decision.
 The app now feeds the collector after transport, clock, demand, delivery, seek,
 and underrun observations and exposes one serializable report. The real-media
 continuous playback harness uses one Play plus monotonic Engine ticks and sends
-exact worker completion deliveries through the same Adapter ordering as the
-production Host. Viewer Ready/Blocked feedback can close cache-hit or
-correctness outcomes, while Viewer Stale remains nonterminal. The harness no
+exact deadline/failure worker deliveries and presentation deliveries through
+the same Adapter ordering as the production Host. CPU/GPU Ready presentation
+can close cache-hit outcomes, Viewer Blocked closes correctness outcomes, and
+Viewer Stale remains nonterminal. The harness no
 longer fakes continuous playback by seeking and restarting every frame.
 External-media gates consume the same report and fail on delivery-clock drift
 above 20 ms, any sustained-underrun recovery, evidence retention overflow, or

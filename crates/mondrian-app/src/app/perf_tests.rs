@@ -1843,11 +1843,17 @@ fn execute_headless_gpu_candidate(
                 .execute(&frame)
                 .context("execute current Viewer frame on the real headless GPU Adapter")?;
             gpu_summary.record(execution);
-            state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready);
+            if let Some(delivery) = frame.presentation_delivery() {
+                state.observe_frame_delivery(delivery);
+                preview_service.acknowledge_playback_presentation(delivery);
+            }
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
         crate::app_ui::preview::AppUiGpuPreviewFrameState::Current => {
-            state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready);
+            if let Some(delivery) = preview_service.playback_presentation_delivery(state) {
+                state.observe_frame_delivery(delivery);
+                preview_service.acknowledge_playback_presentation(delivery);
+            }
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
         crate::app_ui::preview::AppUiGpuPreviewFrameState::Loading => {

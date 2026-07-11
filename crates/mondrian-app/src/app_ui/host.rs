@@ -269,6 +269,10 @@ impl AppUiHost {
         let updated =
             self.preview_service.set_external_viewer_frame(frame, texture_key, presentation);
         if updated {
+            if let Some(delivery) = frame.presentation_delivery() {
+                let _ = self.app_state.borrow_mut().observe_frame_delivery(delivery);
+                self.preview_service.acknowledge_playback_presentation(delivery);
+            }
             self.mark_dirty();
         }
         updated
@@ -447,9 +451,21 @@ impl AppUiHost {
         let feedback = self.root.viewer_playback_feedback();
         let feedback_changed = feedback != self.playback_feedback;
         self.playback_feedback = feedback;
-        let transport_changed = feedback
-            .terminal_delivery()
-            .is_some_and(|kind| self.app_state.borrow_mut().observe_viewer_frame_delivery(kind));
+        let presentation_delivery = if feedback == ViewerPlaybackFeedback::Ready {
+            let state = self.app_state.borrow();
+            self.preview_service.playback_presentation_delivery(&state)
+        } else {
+            None
+        };
+        let transport_changed = if let Some(delivery) = presentation_delivery {
+            let changed = self.app_state.borrow_mut().observe_frame_delivery(delivery);
+            self.preview_service.acknowledge_playback_presentation(delivery);
+            changed
+        } else {
+            feedback
+                .terminal_delivery()
+                .is_some_and(|kind| self.app_state.borrow_mut().observe_viewer_frame_delivery(kind))
+        };
         if transport_changed {
             self.refresh_transport_state_without_preview();
         }

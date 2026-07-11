@@ -46,16 +46,15 @@ impl ViewerPlaybackFeedback {
         }
     }
 
-    /// Convert only terminal current-frame feedback into Playback Engine vocabulary.
+    /// Convert only payload-free correctness feedback into Playback Engine vocabulary.
     ///
     /// A stale raster describes what remains visible while current work is
     /// pending. It must not consume the current Frame Demand before its worker
     /// can return Ready/Late/Canceled.
     pub const fn terminal_delivery(self) -> Option<FrameDeliveryKind> {
         match self {
-            Self::Ready => Some(FrameDeliveryKind::Ready),
             Self::Blocked => Some(FrameDeliveryKind::Blocked),
-            Self::Unavailable | Self::Loading | Self::Stale => None,
+            Self::Unavailable | Self::Loading | Self::Stale | Self::Ready => None,
         }
     }
 
@@ -95,6 +94,11 @@ mod tests {
     fn loading_is_not_falsely_reported_as_terminal_delivery() {
         assert_eq!(ViewerPlaybackFeedback::Loading.terminal_delivery(), None);
         assert!(ViewerPlaybackFeedback::Loading.should_defer_gpu_prepare());
+    }
+
+    #[test]
+    fn ready_lifecycle_requires_an_exact_presentation_delivery() {
+        assert_eq!(ViewerPlaybackFeedback::Ready.terminal_delivery(), None);
     }
 
     #[test]

@@ -256,6 +256,16 @@ impl FrameDelivery {
             kind,
         }
     }
+
+    /// Recover the opaque demand identity carried through an Adapter.
+    pub const fn identity(self) -> FrameDemandIdentity {
+        FrameDemandIdentity {
+            epoch: self.epoch,
+            quality_revision: self.quality_revision,
+            sequence: self.demand_sequence,
+            target_frame: self.target_frame,
+        }
+    }
 }
 
 /// Versioned policy values that determine transport and recovery behavior.
@@ -1036,6 +1046,19 @@ mod tests {
         assert_eq!(PreviewResolutionScale::Full.dimension_divisor(), 1);
         assert_eq!(PreviewResolutionScale::Half.dimension_divisor(), 2);
         assert_eq!(PreviewResolutionScale::Quarter.dimension_divisor(), 4);
+    }
+
+    #[test]
+    fn frame_delivery_round_trips_opaque_demand_identity() {
+        let identity = FrameDemandIdentity {
+            epoch: PlaybackEpoch(7),
+            quality_revision: 3,
+            sequence: FrameDemandSequence(11),
+            target_frame: 42,
+        };
+        let delivery = FrameDelivery::for_demand(identity, FrameDeliveryKind::Ready);
+
+        assert_eq!(delivery.identity(), identity);
     }
 
     fn ts(ms: u64) -> MonotonicTimestamp {
