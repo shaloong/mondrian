@@ -24,8 +24,11 @@ use mondrian_effects::{
 };
 use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{
-    AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioSyncController, AudioTrackConfig,
-    AudioTrackData, ClockRole, RealtimeAudioOutput,
+    AudioBuffer, AudioClock, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
+    RealtimeAudioOutput,
+};
+use mondrian_playback::{
+    ClockMaster as PlaybackClockMaster, MonotonicTimestamp, PlaybackEngine, TransportState,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;
@@ -56,22 +59,6 @@ use exporting::TimelineExportDraft;
 use media_import::*;
 pub use selection::{SelectedClipRef, SelectedEffectRef, SelectedTrackRef};
 use timeline_editing::*;
-
-// ─────────────────────────────────────────────
-//  PlaybackState
-// ─────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum PlaybackState {
-    #[default]
-    Stopped,
-    Playing {
-        timecode_frames: i64,
-    },
-    Paused {
-        timecode_frames: i64,
-    },
-}
 
 #[derive(Debug, Clone)]
 pub struct DraggingAsset {
@@ -238,14 +225,12 @@ pub struct AppState {
     pub cmd_history: mondrian_timeline::command::CommandHistory,
 
     // 播放状态
-    pub playback: PlaybackState,
-    /// 播放器自然播放到终点后暂停的标志（区别于用户手动跳帧）。
-    /// 当 advance_playback_clock 到达 playback_end 时置 true，
-    /// seek() / stop() 时清除，play() 据此决定是否回到 in_point。
-    pub playback_reached_end: bool,
+    /// Sole authority for transport position, epoch, and Clock Master.
+    playback_engine: PlaybackEngine,
+    /// App-adapter monotonic origin advanced only by event-loop elapsed time.
+    playback_now: MonotonicTimestamp,
     /// 播放时由 Viewer 面板上报：当前是否处于短暂停留缓冲状态。
     pub playback_buffering: bool,
-    playback_frame_accumulator: f64,
     /// Most recent timeline seek interaction source used by preview access-mode selection.
     pub last_timeline_seek_source: TimelineSeekSource,
 
@@ -280,8 +265,6 @@ pub struct AppState {
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
     pub audio_clock: AudioClock,
-    pub audio_sync: AudioSyncController,
-    pub av_drift_ms: f64,
     pub audio_output: Option<RealtimeAudioOutput>,
     pub audio_mixer: AudioMixer,
     pub audio_source_cache: Arc<AudioSourceCache>,
@@ -353,10 +336,9 @@ impl AppState {
             project_runtime_dir: None,
             project_settings: ProjectSettings::default(),
             cmd_history: mondrian_timeline::command::CommandHistory::new(200),
-            playback: PlaybackState::default(),
-            playback_reached_end: false,
+            playback_engine: PlaybackEngine::default(),
+            playback_now: MonotonicTimestamp::ZERO,
             playback_buffering: false,
-            playback_frame_accumulator: 0.0,
             last_timeline_seek_source: TimelineSeekSource::Settled,
             asset_library: None,
             dragging_asset: None,
@@ -373,8 +355,6 @@ impl AppState {
             proxy_mode_assets: HashSet::new(),
             audio_sample_rate,
             audio_clock: AudioClock::new(audio_sample_rate),
-            audio_sync: AudioSyncController { role: ClockRole::AudioMaster, ..Default::default() },
-            av_drift_ms: 0.0,
             audio_output: RealtimeAudioOutput::try_new(audio_sample_rate, audio_channels).ok(),
             audio_mixer: AudioMixer::new(audio_sample_rate, audio_channels),
             audio_source_cache,

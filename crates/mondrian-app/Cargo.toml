@@ -35,6 +35,7 @@ path = "src/bin/viewer_gpu_output_budget.rs"
 
 [dependencies]
 mondrian-core     = { workspace = true }
+mondrian-playback = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
 mondrian-renderer = { workspace = true }

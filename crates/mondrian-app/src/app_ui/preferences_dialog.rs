@@ -154,7 +154,10 @@ impl AppUiPreferencesModel {
             workspace: workspace.display_name().to_owned(),
             sequence_summary,
             proxy_mode: enabled_label(state.should_auto_generate_proxy_for_import()),
-            audio_clock: format!("{:?}", state.audio_sync.role),
+            audio_clock: state
+                .playback_clock_master()
+                .map(|master| format!("{master:?}"))
+                .unwrap_or_else(|| "Inactive".to_owned()),
             audio_sample_rate: format!("{} Hz", state.audio_sample_rate),
             export_range: export_range_label(state.export_draft.range).to_owned(),
             export_output: if state.export_draft.output_path.trim().is_empty() {

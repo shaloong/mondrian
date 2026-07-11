@@ -468,3 +468,22 @@ loop playback, variable-rate audio, and corresponding cache/decode policies.
 
 Each phase must leave the product runnable, preserve report compatibility or
 version it, and delete superseded state rather than maintaining two authorities.
+
+## Current integration status
+
+Phase 1 has begun with the `mondrian-playback` crate. The pure Engine now owns
+the app's transport position/state, Synthetic Clock Master, epoch invalidation,
+exact rational clock advancement, stale-delivery rejection, and bounded
+temporary-resolution recovery policy. `AppState` projects current frame and
+running state from the Engine; the former app-local `PlaybackState`, frame
+accumulator, reached-end flag, and misleading audio/video-master diagnostic have
+been removed.
+
+The current `preview_waiting` compatibility adapter may still hold calls to
+`advance_playback_clock` and mute/clear the provisional audio output. It is not
+a second Clock Master: app elapsed time is not added while held, and play/seek
+currently complete Priming immediately with Synthetic Master. Phase 2 must
+replace this adapter with typed Frame Deliveries before enabling the final
+deadline-drop policy. Audio Device Master remains unavailable until Phase 3 can
+provide qualified consumed-sample observations; the existing `AudioClock`
+cannot be relabeled as that evidence.
