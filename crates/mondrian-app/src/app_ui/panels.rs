@@ -658,6 +658,23 @@ pub struct ViewerPanelModel {
 }
 
 impl ViewerPanelModel {
+    /// Payload-free lifecycle classification for the playback feedback Adapter.
+    pub(crate) fn preview_state_kind(
+        &self,
+    ) -> crate::app_ui::playback_feedback::ViewerPreviewStateKind {
+        if self.frame_content.is_some() {
+            if self.preview_waiting {
+                crate::app_ui::playback_feedback::ViewerPreviewStateKind::Stale
+            } else {
+                crate::app_ui::playback_feedback::ViewerPreviewStateKind::Ready
+            }
+        } else if self.preview_waiting {
+            crate::app_ui::playback_feedback::ViewerPreviewStateKind::Loading
+        } else {
+            crate::app_ui::playback_feedback::ViewerPreviewStateKind::Unavailable
+        }
+    }
+
     /// Snapshot viewer chrome data from app state.
     pub fn from_app_state(state: &AppState) -> Self {
         Self::from_app_state_with_preview(state, None)

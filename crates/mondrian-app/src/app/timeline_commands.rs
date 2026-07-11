@@ -350,7 +350,6 @@ impl AppState {
         self.asset_library = None;
         self.stop();
         self.settle_preview_access_source();
-        self.playback_buffering = false;
         self.dragging_asset = None;
         self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
         self.proxy_mode_assets.clear();

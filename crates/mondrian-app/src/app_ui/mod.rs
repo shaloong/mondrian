@@ -19,6 +19,7 @@ pub(crate) mod native_video_import;
 pub mod new_project_dialog;
 pub mod panels;
 pub mod pending_close_dialog;
+pub mod playback_feedback;
 pub mod preferences_dialog;
 pub mod preferences_store;
 pub mod preview;

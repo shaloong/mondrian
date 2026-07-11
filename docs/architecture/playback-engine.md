@@ -471,7 +471,7 @@ version it, and delete superseded state rather than maintaining two authorities.
 
 ## Current integration status
 
-Phase 1 has begun with the `mondrian-playback` crate. The pure Engine now owns
+Phase 1 is complete and Phase 2 has begun with the `mondrian-playback` crate. The pure Engine now owns
 the app's transport position/state, Synthetic Clock Master, epoch invalidation,
 exact rational clock advancement, stale-delivery rejection, and bounded
 temporary-resolution recovery policy. `AppState` projects current frame and
@@ -479,11 +479,15 @@ running state from the Engine; the former app-local `PlaybackState`, frame
 accumulator, reached-end flag, and misleading audio/video-master diagnostic have
 been removed.
 
-The current `preview_waiting` compatibility adapter may still hold calls to
-`advance_playback_clock` and mute/clear the provisional audio output. It is not
-a second Clock Master: app elapsed time is not added while held, and play/seek
-currently complete Priming immediately with Synthetic Master. Phase 2 must
-replace this adapter with typed Frame Deliveries before enabling the final
-deadline-drop policy. Audio Device Master remains unavailable until Phase 3 can
-provide qualified consumed-sample observations; the existing `AudioClock`
-cannot be relabeled as that evidence.
+`app_ui::playback_feedback` now adapts Viewer lifecycle into typed terminal Frame
+Deliveries. Loading remains non-terminal, Stale and Blocked remain distinct, and
+duplicate terminal delivery identities cannot mutate recovery twice. The former
+Viewer-owned `playback_buffering` state and its audio mute/clock hold have been
+removed. Window redraw may still defer duplicate GPU candidate preparation while
+Loading, but that presentation guard has no transport authority.
+
+Play/seek currently complete Priming immediately with Synthetic Master. Full
+deadline-derived demand identity and bounded startup Priming remain Phase 2
+work. Audio Device Master remains unavailable until Phase 3 can provide
+qualified consumed-sample observations; the existing `AudioClock` cannot be
+relabeled as that evidence.

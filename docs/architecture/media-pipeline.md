@@ -231,45 +231,32 @@ prefetch workers pass a cooperative cancellation predicate into
 `PreviewDecodeRequest`, and the media loop checks that predicate before
 open, seek, packet decode, frame receive, EOF drain, and RGBA conversion. Do
 not depend on thread abort to preempt synchronous packet decode.
-Viewer preview readiness feeds back into the app playback clock. While the
-current playback frame is still `Loading` or only a stale frame can be shown,
-the app enters a short buffering state, holds the video clock, and mutes/clears
-realtime audio output until the preview becomes current again. This prevents a
-slow CPU fallback decode from chasing ever-newer playback frames and dragging
-the UI through unbounded obsolete work. Future hardware playback may replace
-this with stricter clock-driven frame dropping, but it must preserve the same
-readiness feedback contract.
-Buffering must not make the UI event loop behave like normal frame playback.
-While the clock is held, playback wakeups are throttled to a low-frequency
-health tick instead of the sequence frame cadence. Transport actions such as
-play, pause, toggle-play, stepping, and seek must refresh controls and timeline
-state without synchronously requesting viewer preview/composite work; preview
-catch-up is driven by worker completion, cache state, and later render ticks.
-This keeps pause, close, and other shell input responsive even when a 4K
-Long-GOP decode or GPU-preview blocker is still unresolved.
-The app/window layer owns the interactive escape hatch. If the host playback
-state is buffering, redraw handling must not synchronously re-enter GPU preview
-candidate construction just to repaint controls; it records a loading skip and
-lets worker completion or a later state change drive the next preview prepare.
-This gate must use the app playback state, not the viewer model, because
-lightweight transport refreshes intentionally avoid preview and may not preserve
-`viewer_preview_waiting`. The event loop also caps buffering wake delay to an
-interactive budget so status ticks and shell input stay responsive while media
-workers continue in the background.
+Viewer lifecycle is adapted through `app_ui::playback_feedback` into typed Frame
+Deliveries. `Ready`, `StaleAvailable`, and `Blocked` are terminal observations;
+`Loading` is non-terminal pending work. Loading or stale presentation does not
+hold the Synthetic/Audio Clock Master and does not mute or clear realtime audio.
+Late video is dropped while authoritative media time continues.
+
+The app/window layer retains a separate interaction escape hatch: `Loading`
+feedback may defer synchronous reconstruction of the same GPU preview candidate
+during redraw. This is a presentation-work guard, not transport buffering, and
+cannot advance, pause, or select the Clock Master. Transport actions still
+cancel obsolete preview generations and refresh controls without synchronously
+requesting new preview/composite work.
 Background polling must also enforce a hard escape hatch for the current
 realtime playback request. If a scheduler-accepted `Current` request for
-`PlaybackCursor` or `ScrubCursor` remains pending past the buffering stall
+`PlaybackCursor` or `ScrubCursor` remains pending past the realtime stall
 budget, the app preview service expires only that realtime-current pending work,
 removes matching queued worker jobs, records
 `playback_current_stalled_expirations`, clears the current-frame pending flag,
-and lets the host release playback buffering through the preview-free transport
-path. This is not a renderer fallback and must not clear ready/stale frames,
+and emits a Late Frame Delivery through the preview-free transport path. This
+is not a renderer fallback and must not clear ready/stale frames,
 still-frame work, media caches, or external GPU viewer textures. It exists so a
-lost, wedged, or pathologically slow current decode cannot hold pause/close UI
-behind "preview buffering" indefinitely.
+lost, wedged, or pathologically slow current decode cannot retain scheduler
+capacity indefinitely.
 The same counter must appear in the preview decode performance summary/report
 even before a worker returns a canceled decode result, because the product
-symptom is already user-visible at the moment buffering is released.
+symptom is already user-visible at the moment the demand expires.
 Each expired realtime-current request released this way must also count as a
 playback late-drop decision and a proxy/hardware recommendation decision so
 clock-driven playback diagnostics do not under-report frames that were skipped
@@ -295,22 +282,17 @@ The external real-media variant also emits `real_media_gates` and fails on
 `PlaybackCursor` decode p95, queue-wait p95, or visible-frame-ratio regression;
 those gates must remain separate from broad timeout windows so slow-but-eventual
 4K playback is not mistaken for production readiness.
-When background preview completion changes the viewer waiting state, the app
-host may perform one preview-aware model refresh for the completed work, but
-the derived playback-buffering flag must be propagated with a transport/status
-refresh that does not request preview again. A buffering-state transition must
-not trigger a second full root refresh or layout pass that re-enters preview
-interpretation. The same rule applies when playback-clock advancement discovers
-that the new visible frame is still waiting on preview decode: the current-frame
-refresh may consult preview once, but buffering controls/status must then update
-through the lightweight transport path.
+When background preview completion changes Viewer lifecycle, the app host may
+perform one preview-aware model refresh, then adapt its payload-free feedback
+without requesting preview again. A feedback transition must not trigger a
+second full root refresh or layout pass that re-enters preview interpretation.
 The native app event loop also records stage-level responsiveness telemetry for
 action draining, redraw, GPU preview preparation, UI refresh, paint/render,
 background-task polling, and playback-clock advancement. Any stage that exceeds
 the UI responsiveness budget is logged with the stable stage name and elapsed
 time. This diagnostic boundary is intentionally in the app layer because it
 measures host scheduling and UI-thread residency, not media decode semantics;
-media/render changes must preserve it so a future buffering report can identify
+media/render changes must preserve it so a future playback report can identify
 whether the stall is decode backlog, GPU preview preparation, redraw/render, or
 control dispatch.
 Completed preview decode results are also consumed under an explicit UI-thread
@@ -980,7 +962,7 @@ decision. When no realtime decode work is pending, the scheduler must admit one
 current playback request so the viewer has a chance to recover instead of
 staying permanently stale.
 User transport and close/quit actions are interactive escape paths. When they
-arrive while playback or buffering is active, the app host must cancel obsolete
+arrive while playback or current-frame work is active, the app host must cancel obsolete
 preview generations and queued jobs before dispatching the state mutation, and
 it must refresh transport controls without synchronously requesting a new
 preview frame. A visible pending-close confirmation must be repainted

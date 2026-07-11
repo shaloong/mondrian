@@ -3970,7 +3970,7 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         push_decode_warn_max_check(
             &mut checks,
             AppUiPreviewDecodePerformanceArea::Scheduling,
-            "preview_decode_playback_buffering_stall_expirations",
+            "preview_decode_playback_current_stall_expirations",
             summary.playback_current_stalled_expirations,
             0,
         );
@@ -4875,7 +4875,7 @@ fn push_preview_decode_root_causes_and_actions(
             root_causes,
             actions,
             AppUiPreviewDecodePerformanceArea::Scheduling,
-            "preview_decode_playback_buffering_stall_expirations",
+            "preview_decode_playback_current_stall_expirations",
             format!(
                 "playback_current_stalled_expirations={} queue_canceled_jobs={} scheduler_canceled_requests={} queued_jobs={} queued_current_jobs={} in_flight_jobs={} in_flight_current_jobs={} canceled_jobs={} canceled_obsolete_jobs={} canceled_playback_deadline_jobs={}",
                 summary.playback_current_stalled_expirations,
@@ -12161,7 +12161,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_decode_performance_report_flags_playback_buffering_stall_expiration() {
+    fn preview_decode_performance_report_flags_playback_current_stall_expiration() {
         let diagnostics = AppUiPreviewDiagnostics {
             playback_current_stalled_expirations: 1,
             queue_canceled_jobs: 1,
@@ -12191,13 +12191,13 @@ mod tests {
                 && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
         }));
         assert!(report.checks.iter().any(|check| {
-            check.code == "preview_decode_playback_buffering_stall_expirations"
+            check.code == "preview_decode_playback_current_stall_expirations"
                 && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
                 && check.observed == 1
                 && check.limit == Some(0)
         }));
         assert!(report.root_causes.iter().any(|root| {
-            root.code == "preview_decode_playback_buffering_stall_expirations"
+            root.code == "preview_decode_playback_current_stall_expirations"
                 && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
                 && root.evidence.contains("playback_current_stalled_expirations=1")
                 && root.evidence.contains("queue_canceled_jobs=1")

@@ -3007,7 +3007,7 @@ fn viewer_gpu_output_diagnostics_output_path() -> Option<PathBuf> {
 }
 
 fn app_ui_interactive_playback_wake_delay(host: &AppUiHost, delay: Duration) -> Duration {
-    if host.is_playback_buffering() {
+    if host.is_playback_frame_pending() {
         delay.min(APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY)
     } else {
         delay

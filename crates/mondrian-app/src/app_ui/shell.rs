@@ -262,8 +262,6 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
             _ => "导出处理中".to_owned(),
         };
         (message, false, true)
-    } else if state.is_playing() && state.is_playback_buffering() {
-        ("预览缓冲中...".to_owned(), false, true)
     } else if let Some((message, is_error)) = &state.status_hint {
         (message.clone(), *is_error, false)
     } else {
@@ -869,9 +867,13 @@ impl AppUiAppRoot {
         preview_waiting
     }
 
-    /// Return whether the current viewer model is waiting for a current preview frame.
-    pub(crate) fn viewer_preview_waiting(&self) -> bool {
-        self.models.viewer.preview_waiting
+    /// Return the payload-free Viewer lifecycle meaning used by playback.
+    pub(crate) fn viewer_playback_feedback(
+        &self,
+    ) -> crate::app_ui::playback_feedback::ViewerPlaybackFeedback {
+        crate::app_ui::playback_feedback::ViewerPlaybackFeedback::from_viewer_model(
+            &self.models.viewer,
+        )
     }
 
     /// Refresh panel contents and preferences from a full app UI state
@@ -3269,20 +3271,6 @@ mod tests {
         assert!(!model.is_error);
         assert!(!model.is_busy);
         assert_eq!(model.context, "Cut 01");
-    }
-
-    #[test]
-    fn status_bar_model_prioritizes_preview_buffering_over_hint() {
-        let mut state = AppState::new();
-        state.set_status_hint("Project saved", false);
-        state.set_playback_frame_running(42);
-        state.set_playback_buffering(true);
-
-        let model = status_bar_model(&state);
-
-        assert_eq!(model.message, "预览缓冲中...");
-        assert!(!model.is_error);
-        assert!(model.is_busy);
     }
 
     #[test]

@@ -2,7 +2,6 @@ use super::*;
 
 const MIN_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(1);
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
-const BUFFERING_PLAYBACK_WAKE_DELAY: Duration = MAX_PLAYBACK_WAKE_DELAY;
 
 /// Result category for one playback clock advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +50,6 @@ impl AppState {
         if prior_state == TransportState::Ended || (end_frame >= 0 && frames > end_frame) {
             frames = 0;
         }
-        self.playback_buffering = false;
         if !self.reset_playback_timeline(frames, end_frame) {
             return;
         }
@@ -78,7 +76,6 @@ impl AppState {
     pub fn pause(&mut self) {
         let frames = self.current_frame();
         self.settle_preview_access_source();
-        self.playback_buffering = false;
         if let Err(error) = self.playback_engine.pause(self.playback_now) {
             tracing::error!(%error, "failed to pause Playback Session");
         }
@@ -92,7 +89,6 @@ impl AppState {
 
     pub fn stop(&mut self) {
         self.settle_preview_access_source();
-        self.playback_buffering = false;
         if let Err(error) = self.playback_engine.stop(self.playback_now) {
             tracing::error!(%error, "failed to stop Playback Session");
         }
@@ -114,7 +110,6 @@ impl AppState {
     pub fn seek_with_source(&mut self, frame: i64, source: TimelineSeekSource) {
         let was_running = self.is_playing();
         self.last_timeline_seek_source = source;
-        self.playback_buffering = false;
         let end_frame = self.last_content_frame();
         if !self.reset_playback_timeline(frame, end_frame) {
             return;
@@ -149,30 +144,6 @@ impl AppState {
     pub fn set_playback_frame_running(&mut self, frame: i64) {
         self.seek(frame.max(0));
         self.play();
-    }
-
-    pub fn set_playback_buffering(&mut self, buffering: bool) {
-        if self.playback_buffering == buffering {
-            return;
-        }
-        self.playback_buffering = buffering;
-        if buffering {
-            if let Some(output) = &self.audio_output {
-                output.set_muted(true);
-                output.clear();
-            }
-        } else {
-            let frame = self.current_frame();
-            self.sync_audio_clock_to_frame(frame);
-            self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
-            if let Some(output) = &self.audio_output {
-                output.set_muted(false);
-            }
-        }
-    }
-
-    pub fn is_playback_buffering(&self) -> bool {
-        self.playback_buffering
     }
 
     pub fn pump_audio_output(&mut self) {
@@ -211,17 +182,8 @@ impl AppState {
 
         let sample_rate_f64 = self.audio_sample_rate as f64;
         let chunk_frames = ((self.audio_chunk_secs * sample_rate_f64).round() as usize).max(1);
-        let (target_high_secs, max_in_flight) = if self.playback_buffering {
-            (
-                audio_buffer_target_high_secs_buffering(),
-                audio_render_max_in_flight_buffering(),
-            )
-        } else {
-            (
-                audio_buffer_target_high_secs_playing(),
-                audio_render_max_in_flight_playing(),
-            )
-        };
+        let target_high_secs = audio_buffer_target_high_secs_playing();
+        let max_in_flight = audio_render_max_in_flight_playing();
         let target_high_frames = (sample_rate_f64 * target_high_secs).round() as usize;
 
         while output.buffered_frames() + self.audio_render_in_flight * chunk_frames
@@ -320,14 +282,6 @@ impl AppState {
                 status: PlaybackAdvanceStatus::Idle,
             };
         }
-        if self.playback_buffering {
-            return PlaybackAdvance {
-                previous_frame,
-                current_frame: previous_frame,
-                frames_advanced: 0,
-                status: PlaybackAdvanceStatus::WaitingForFrame,
-            };
-        }
         self.playback_now = MonotonicTimestamp::from_duration(
             self.playback_now.duration_since_origin().saturating_add(elapsed),
         );
@@ -344,18 +298,8 @@ impl AppState {
             }
         };
         let target_frame = snapshot.position.frame;
-        if target_frame <= previous_frame {
-            return PlaybackAdvance {
-                previous_frame,
-                current_frame: previous_frame,
-                frames_advanced: 0,
-                status: PlaybackAdvanceStatus::WaitingForFrame,
-            };
-        }
-
         if snapshot.state == TransportState::Ended {
             self.settle_preview_access_source();
-            self.playback_buffering = false;
             self.sync_audio_clock_to_frame(target_frame);
             self.reset_audio_render_pipeline(self.audio_clock.now_seconds().max(0.0));
             if let Some(output) = &self.audio_output {
@@ -369,6 +313,15 @@ impl AppState {
                 status: PlaybackAdvanceStatus::ReachedEnd,
             };
         }
+        if target_frame <= previous_frame {
+            return PlaybackAdvance {
+                previous_frame,
+                current_frame: previous_frame,
+                frames_advanced: 0,
+                status: PlaybackAdvanceStatus::WaitingForFrame,
+            };
+        }
+
         PlaybackAdvance {
             previous_frame,
             current_frame: target_frame,
@@ -382,10 +335,6 @@ impl AppState {
         if !self.is_playing() {
             return None;
         }
-        if self.playback_buffering {
-            return Some(BUFFERING_PLAYBACK_WAKE_DELAY);
-        }
-
         self.playback_engine
             .time_until_next_frame(self.playback_now)
             .ok()
@@ -412,6 +361,25 @@ impl AppState {
     /// Current authoritative Clock Master exposed to diagnostics/UI adapters.
     pub fn playback_clock_master(&self) -> Option<mondrian_playback::ClockMaster> {
         self.playback_engine.snapshot().clock_master
+    }
+
+    /// Feed one terminal Viewer observation into the authoritative Playback Session.
+    pub fn observe_viewer_frame_delivery(&mut self, kind: FrameDeliveryKind) -> bool {
+        let before = self.playback_engine.snapshot();
+        let delivery = FrameDelivery {
+            epoch: before.epoch,
+            quality_revision: before.quality_revision,
+            target_frame: before.position.frame,
+            kind,
+        };
+        match self.playback_engine.observe_frame_delivery(delivery) {
+            Ok(true) => self.playback_engine.snapshot() != before,
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(%error, ?kind, "rejected Viewer Frame Delivery");
+                false
+            }
+        }
     }
 
     fn reset_playback_timeline(&mut self, frame: i64, end_frame: i64) -> bool {
@@ -486,38 +454,16 @@ mod tests {
     }
 
     #[test]
-    fn advance_playback_clock_waits_while_preview_is_buffering() {
+    fn late_viewer_delivery_does_not_hold_synthetic_clock() {
         let mut state = state_with_sequence(20);
         state.play();
-        state.set_playback_buffering(true);
+        state.observe_viewer_frame_delivery(FrameDeliveryKind::Late);
 
-        let waiting = state.advance_playback_clock(Duration::from_secs(1));
-
-        assert_eq!(waiting.status, PlaybackAdvanceStatus::WaitingForFrame);
-        assert_eq!(waiting.current_frame, 0);
-        assert_eq!(waiting.frames_advanced, 0);
-        assert_eq!(state.current_frame(), 0);
-        assert!(state.is_playing());
-        assert!(state.is_playback_buffering());
-
-        state.set_playback_buffering(false);
         let advanced = state.advance_playback_clock(Duration::from_millis(40));
 
         assert_eq!(advanced.status, PlaybackAdvanceStatus::Advanced);
         assert_eq!(advanced.current_frame, 1);
-        assert!(!state.is_playback_buffering());
-    }
-
-    #[test]
-    fn playback_next_frame_delay_is_throttled_while_buffering() {
-        let mut state = state_with_sequence(20);
-        state.play();
-        state.set_playback_buffering(true);
-
-        assert_eq!(
-            state.playback_next_frame_delay(),
-            Some(BUFFERING_PLAYBACK_WAKE_DELAY)
-        );
+        assert!(state.is_playing());
     }
 
     #[test]

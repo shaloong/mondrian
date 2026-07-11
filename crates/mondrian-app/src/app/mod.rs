@@ -28,7 +28,8 @@ use mondrian_media::audio::{
     RealtimeAudioOutput,
 };
 use mondrian_playback::{
-    ClockMaster as PlaybackClockMaster, MonotonicTimestamp, PlaybackEngine, TransportState,
+    ClockMaster as PlaybackClockMaster, FrameDelivery, FrameDeliveryKind, MonotonicTimestamp,
+    PlaybackEngine, TransportState,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;
@@ -229,8 +230,6 @@ pub struct AppState {
     playback_engine: PlaybackEngine,
     /// App-adapter monotonic origin advanced only by event-loop elapsed time.
     playback_now: MonotonicTimestamp,
-    /// 播放时由 Viewer 面板上报：当前是否处于短暂停留缓冲状态。
-    pub playback_buffering: bool,
     /// Most recent timeline seek interaction source used by preview access-mode selection.
     pub last_timeline_seek_source: TimelineSeekSource,
 
@@ -338,7 +337,6 @@ impl AppState {
             cmd_history: mondrian_timeline::command::CommandHistory::new(200),
             playback_engine: PlaybackEngine::default(),
             playback_now: MonotonicTimestamp::ZERO,
-            playback_buffering: false,
             last_timeline_seek_source: TimelineSeekSource::Settled,
             asset_library: None,
             dragging_asset: None,
@@ -557,17 +555,6 @@ fn audio_buffer_target_high_secs_playing() -> f64 {
     })
 }
 
-fn audio_buffer_target_high_secs_buffering() -> f64 {
-    static TARGET: OnceLock<f64> = OnceLock::new();
-    *TARGET.get_or_init(|| {
-        std::env::var("MONDRIAN_AUDIO_BUFFER_HIGH_SECS_BUFFERING")
-            .ok()
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|v| *v >= 0.30 && *v <= 3.0)
-            .unwrap_or(0.90)
-    })
-}
-
 fn audio_render_max_in_flight_playing() -> usize {
     static MAX: OnceLock<usize> = OnceLock::new();
     *MAX.get_or_init(|| {
@@ -577,18 +564,6 @@ fn audio_render_max_in_flight_playing() -> usize {
             .filter(|v| *v > 0)
             .map(|v| v.clamp(1, 24))
             .unwrap_or(8)
-    })
-}
-
-fn audio_render_max_in_flight_buffering() -> usize {
-    static MAX: OnceLock<usize> = OnceLock::new();
-    *MAX.get_or_init(|| {
-        std::env::var("MONDRIAN_AUDIO_RENDER_MAX_IN_FLIGHT_BUFFERING")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|v| *v > 0)
-            .map(|v| v.clamp(1, 32))
-            .unwrap_or(12)
     })
 }
 

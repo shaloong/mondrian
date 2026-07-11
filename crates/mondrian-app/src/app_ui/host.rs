@@ -39,6 +39,7 @@ use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::asset_thumbnails::AssetThumbnailCache;
 use crate::app_ui::native_video_import::platform_handle_kind_for_decoder;
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
+use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preferences_store::{
     app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
     AppUiPreferences,
@@ -95,6 +96,7 @@ pub struct AppUiHost {
     asset_thumbnails: AssetThumbnailCache,
     waveform_cache: AudioWaveformCache,
     preview_service: AppUiPreviewService,
+    playback_feedback: ViewerPlaybackFeedback,
     mode: AppUiMode,
     system_theme_preset: ThemePreset,
     ui_dirty: Cell<bool>,
@@ -132,6 +134,7 @@ impl AppUiHost {
             Some(&asset_thumbnails),
             Some(&preview_service),
         );
+        let playback_feedback = root.viewer_playback_feedback();
         let mode = if app_state.has_open_project() {
             AppUiMode::Workspace
         } else {
@@ -153,6 +156,7 @@ impl AppUiHost {
             asset_thumbnails,
             waveform_cache,
             preview_service,
+            playback_feedback,
             mode,
             system_theme_preset,
             ui_dirty: Cell::new(false),
@@ -378,30 +382,24 @@ impl AppUiHost {
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_outcome = self.preview_service.poll_finished_outcome();
         let waveform_changed = self.waveform_cache.poll_finished();
-        let playback_stall_released =
-            self.is_playback_buffering() && self.preview_service.expire_stalled_playback_current();
-        if playback_stall_released {
-            self.app_state.borrow_mut().set_playback_buffering(false);
-            self.refresh_transport_state_without_preview();
+        let playback_stall_expired = self.app_state.borrow().is_playing()
+            && self.preview_service.expire_stalled_playback_current();
+        if playback_stall_expired {
+            self.app_state
+                .borrow_mut()
+                .observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Late);
         }
         let visible_model_changed = media_imports_changed
             || thumbnails_changed
             || preview_outcome.visible_change
             || waveform_changed
-            || playback_stall_released;
+            || playback_stall_expired;
         if !visible_model_changed {
             return preview_outcome.needs_follow_up_poll;
         }
-        if playback_stall_released && !preview_outcome.visible_change {
-            return true;
-        }
-        if self.is_playback_buffering() && !preview_outcome.visible_change {
-            return self.refresh_playback_buffering_controls_without_preview()
-                || preview_outcome.needs_follow_up_poll;
-        }
         self.mark_dirty();
         self.refresh_if_dirty(bounds);
-        self.refresh_playback_buffering_controls_without_preview();
+        self.sync_playback_feedback_from_viewer();
         true
     }
 
@@ -416,12 +414,10 @@ impl AppUiHost {
         }
         {
             let state = self.app_state.borrow();
-            let preview_waiting = self
-                .root
+            self.root
                 .refresh_playback_frame_from_app_state(&state, Some(&self.preview_service));
-            drop(state);
-            self.refresh_playback_buffering_controls_for_preview_waiting(preview_waiting);
         }
+        self.sync_playback_feedback_from_viewer();
         TreeWalker::layout(self.active_root_mut(), bounds);
         true
     }
@@ -431,46 +427,32 @@ impl AppUiHost {
         self.app_state.borrow().playback_next_frame_delay()
     }
 
-    /// Whether playback is currently held waiting for a current preview frame.
-    pub(crate) fn is_playback_buffering(&self) -> bool {
-        self.app_state.borrow().is_playback_buffering()
+    /// Whether current-frame work is pending in the Viewer Adapter.
+    pub(crate) fn is_playback_frame_pending(&self) -> bool {
+        self.app_state.borrow().is_playing()
+            && self.playback_feedback == ViewerPlaybackFeedback::Loading
     }
 
     /// Whether GPU preview preparation should yield to interactive shell input.
     ///
-    /// When playback is held waiting for preview, another redraw must not
-    /// synchronously re-enter preview resolution/GPU candidate construction.
-    /// Lightweight transport refreshes intentionally avoid preview and may not
-    /// preserve `viewer_preview_waiting`, so the app playback state is the
-    /// authoritative gate here.
+    /// Pending Viewer work does not hold the Clock Master, but another redraw
+    /// must not synchronously reconstruct the same GPU candidate. This gate is
+    /// presentation feedback only and has no transport authority.
     pub(crate) fn should_defer_gpu_preview_prepare_for_interaction(&self) -> bool {
-        self.is_playback_buffering()
+        self.app_state.borrow().is_playing() && self.playback_feedback.should_defer_gpu_prepare()
     }
 
-    fn refresh_playback_buffering_controls_without_preview(&mut self) -> bool {
-        let preview_waiting = self.root.viewer_preview_waiting();
-        self.refresh_playback_buffering_controls_for_preview_waiting(preview_waiting)
-    }
-
-    fn refresh_playback_buffering_controls_for_preview_waiting(
-        &mut self,
-        preview_waiting: bool,
-    ) -> bool {
-        if !self.set_playback_buffering_from_preview(preview_waiting) {
-            return false;
+    fn sync_playback_feedback_from_viewer(&mut self) -> bool {
+        let feedback = self.root.viewer_playback_feedback();
+        let feedback_changed = feedback != self.playback_feedback;
+        self.playback_feedback = feedback;
+        let transport_changed = feedback
+            .terminal_delivery()
+            .is_some_and(|kind| self.app_state.borrow_mut().observe_viewer_frame_delivery(kind));
+        if transport_changed {
+            self.refresh_transport_state_without_preview();
         }
-        self.refresh_transport_state_without_preview();
-        true
-    }
-
-    fn set_playback_buffering_from_preview(&mut self, preview_waiting: bool) -> bool {
-        let mut state = self.app_state.borrow_mut();
-        if state.is_playing() || state.is_playback_buffering() {
-            let changed = state.is_playback_buffering() != preview_waiting;
-            state.set_playback_buffering(preview_waiting);
-            return changed;
-        }
-        false
+        feedback_changed || transport_changed
     }
 
     /// Drain queued widget actions through shell-local handling and `AppState`.
@@ -1015,7 +997,7 @@ fn action_preempts_preview_work(action: &Action, state: &AppState) -> bool {
     if !action_prefers_transport_refresh_without_preview(action) {
         return false;
     }
-    state.is_playing() || state.is_playback_buffering()
+    state.is_playing()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2013,11 +1995,10 @@ mod tests {
     }
 
     #[test]
-    fn transport_action_while_buffering_cancels_obsolete_preview_work() {
+    fn transport_action_while_preview_pending_cancels_obsolete_work() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = workspace_host_without_preview_workers("transport-cancel-preview-work");
         host.app_state.borrow_mut().play();
-        host.app_state.borrow_mut().set_playback_buffering(true);
         host.preview_service.seed_pending_preview_work_for_test();
         let before_render_requests = host.preview_service.diagnostics().render_requests;
         assert_eq!(
@@ -2039,7 +2020,6 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(!host.app_state().is_playing());
-        assert!(!host.app_state().is_playback_buffering());
         let diagnostics = host.preview_service.diagnostics();
         assert_eq!(diagnostics.interactive_cancel_requests, 1);
         assert_eq!(diagnostics.interactive_cancel_scheduler_requests, 1);
@@ -2054,7 +2034,7 @@ mod tests {
     }
 
     #[test]
-    fn buffering_control_refresh_does_not_request_preview_refresh() {
+    fn loading_feedback_does_not_stop_transport_or_request_preview_refresh() {
         struct LoadingPreview;
 
         impl crate::app_ui::panels::ViewerPreviewSource for LoadingPreview {
@@ -2079,9 +2059,10 @@ mod tests {
         }
         let before_render_requests = host.preview_service.diagnostics().render_requests;
 
-        assert!(host.refresh_playback_buffering_controls_without_preview());
+        assert!(host.sync_playback_feedback_from_viewer());
 
-        assert!(host.app_state.borrow().is_playback_buffering());
+        assert!(host.app_state.borrow().is_playing());
+        assert_eq!(host.playback_feedback, ViewerPlaybackFeedback::Loading);
         assert_eq!(
             host.preview_service.diagnostics().render_requests,
             before_render_requests,
@@ -2094,7 +2075,7 @@ mod tests {
     }
 
     #[test]
-    fn buffering_defers_gpu_preview_prepare_until_preview_state_changes() {
+    fn loading_feedback_defers_duplicate_gpu_prepare_without_holding_clock() {
         struct LoadingPreview;
 
         impl crate::app_ui::panels::ViewerPreviewSource for LoadingPreview {
@@ -2117,9 +2098,9 @@ mod tests {
             let state = host.app_state.borrow();
             assert!(host.root.refresh_playback_frame_from_app_state(&state, Some(&LoadingPreview)));
         }
-        assert!(host.refresh_playback_buffering_controls_without_preview());
+        assert!(host.sync_playback_feedback_from_viewer());
 
-        assert!(host.app_state.borrow().is_playback_buffering());
+        assert!(host.app_state.borrow().is_playing());
         assert!(
             host.should_defer_gpu_preview_prepare_for_interaction(),
             "a redraw while already waiting must not synchronously re-enter GPU preview preparation"
@@ -2134,23 +2115,21 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
-        assert!(!host.app_state.borrow().is_playback_buffering());
         assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
     }
 
     #[test]
-    fn poll_background_tasks_releases_stalled_playback_buffering_without_preview_refresh() {
+    fn poll_background_tasks_expires_stalled_delivery_without_holding_transport() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = workspace_host_without_preview_workers("buffering-stall-release");
         host.app_state.borrow_mut().play();
-        host.app_state.borrow_mut().set_playback_buffering(true);
         host.preview_service.seed_pending_playback_current_preview_work_for_test();
         let before_render_requests = host.preview_service.diagnostics().render_requests;
 
         std::thread::sleep(Duration::from_millis(275));
 
         assert!(host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0)));
-        assert!(!host.app_state.borrow().is_playback_buffering());
+        assert!(host.app_state.borrow().is_playing());
         assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
         let diagnostics = host.preview_service.diagnostics();
         assert_eq!(diagnostics.playback_current_stalled_expirations, 1);

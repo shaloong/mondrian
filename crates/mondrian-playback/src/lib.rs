@@ -201,6 +201,7 @@ pub struct PlaybackEngine {
     recent_pressure: Vec<bool>,
     consecutive_healthy: usize,
     active_target_frame: Option<i64>,
+    terminal_delivery: Option<(PlaybackEpoch, u64, i64)>,
 }
 
 impl PlaybackEngine {
@@ -238,6 +239,7 @@ impl PlaybackEngine {
             recent_pressure: Vec::with_capacity(policy.pressure_window),
             consecutive_healthy: 0,
             active_target_frame: None,
+            terminal_delivery: None,
         }
     }
 
@@ -408,10 +410,19 @@ impl PlaybackEngine {
         if delivery.epoch != self.epoch || delivery.quality_revision != self.quality_revision {
             return Ok(false);
         }
+        let identity = (
+            delivery.epoch,
+            delivery.quality_revision,
+            delivery.target_frame,
+        );
+        if self.terminal_delivery == Some(identity) {
+            return Ok(false);
+        }
         if self.active_target_frame.is_some_and(|target| target != delivery.target_frame) {
             return Err(PlaybackError::MismatchedFrameDelivery);
         }
         if delivery.kind == FrameDeliveryKind::Blocked {
+            self.terminal_delivery = Some(identity);
             self.state = TransportState::Blocked;
             self.clock_master = None;
             return Ok(true);
@@ -421,6 +432,7 @@ impl PlaybackEngine {
             delivery.kind,
             FrameDeliveryKind::Late | FrameDeliveryKind::Failed
         );
+        self.terminal_delivery = Some(identity);
         let healthy = matches!(
             delivery.kind,
             FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded
@@ -499,7 +511,10 @@ impl PlaybackEngine {
         let advanced = elapsed_frames(elapsed, self.position.time_base)?;
         let target = self.clock_anchor.timeline.frame.saturating_add(advanced);
         self.position.frame = target.min(self.end_frame).max(0);
-        self.active_target_frame = Some(self.position.frame);
+        if self.active_target_frame != Some(self.position.frame) {
+            self.active_target_frame = Some(self.position.frame);
+            self.terminal_delivery = None;
+        }
         if self.position.frame >= self.end_frame {
             self.state = TransportState::Ended;
             self.clock_master = None;
@@ -527,6 +542,7 @@ impl PlaybackEngine {
         self.recent_pressure.clear();
         self.consecutive_healthy = 0;
         self.active_target_frame = Some(self.position.frame);
+        self.terminal_delivery = None;
     }
 
     fn push_pressure(&mut self, pressured: bool) {
@@ -638,13 +654,16 @@ mod tests {
         engine.play(100, ts(0)).unwrap();
         let playing = engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
 
-        for kind in [
+        for (index, kind) in [
             FrameDeliveryKind::Late,
             FrameDeliveryKind::Late,
             FrameDeliveryKind::Ready,
             FrameDeliveryKind::Failed,
-        ] {
-            let snapshot = engine.snapshot();
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let snapshot = engine.tick(ts((index as u64 + 1) * 40)).unwrap();
             engine
                 .observe_frame_delivery(FrameDelivery {
                     epoch: snapshot.epoch,
@@ -659,8 +678,8 @@ mod tests {
         assert_eq!(recovering.preview_scale, PreviewResolutionScale::Half);
         assert!(recovering.quality_revision > playing.quality_revision);
 
-        for _ in 0..2 {
-            let snapshot = engine.snapshot();
+        for index in 0..2 {
+            let snapshot = engine.tick(ts(200 + index * 40)).unwrap();
             engine
                 .observe_frame_delivery(FrameDelivery {
                     epoch: snapshot.epoch,
@@ -751,5 +770,20 @@ mod tests {
         let snapshot = engine.seek(TimeCode::new(200, Rational::new(1, 25)), ts(0)).unwrap();
         assert_eq!(snapshot.state, TransportState::Paused);
         assert_eq!(snapshot.position.frame, 200);
+    }
+
+    #[test]
+    fn duplicate_terminal_delivery_cannot_mutate_pressure_twice() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        let snapshot = engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        let delivery = FrameDelivery {
+            epoch: snapshot.epoch,
+            quality_revision: snapshot.quality_revision,
+            target_frame: 0,
+            kind: FrameDeliveryKind::Late,
+        };
+        assert!(engine.observe_frame_delivery(delivery).unwrap());
+        assert!(!engine.observe_frame_delivery(delivery).unwrap());
     }
 }

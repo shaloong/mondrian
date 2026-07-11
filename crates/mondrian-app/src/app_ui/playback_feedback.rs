@@ -1,0 +1,89 @@
+//! Typed adaptation from Viewer lifecycle state to playback observations.
+//!
+//! This module deliberately owns no transport or preview work. It prevents UI
+//! lifecycle details from leaking into the Playback Engine Interface.
+
+use super::panels::ViewerPanelModel;
+use mondrian_playback::FrameDeliveryKind;
+
+/// Playback-relevant meaning of the current Viewer lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewerPlaybackFeedback {
+    /// No media frame is expected, such as an empty sequence.
+    #[default]
+    Unavailable,
+    /// Current-frame work is pending; this is not a terminal Frame Delivery.
+    Loading,
+    /// A prior frame remains visible but cannot satisfy current readiness.
+    Stale,
+    /// The current target frame is ready.
+    Ready,
+    /// Correctness policy rejected the current frame.
+    Blocked,
+}
+
+impl ViewerPlaybackFeedback {
+    /// Adapt the Viewer model without exposing its frame payload to transport.
+    pub fn from_viewer_model(model: &ViewerPanelModel) -> Self {
+        if model.color_rejection.is_some() && model.frame_content.is_none() {
+            return Self::Blocked;
+        }
+        match model.preview_state_kind() {
+            ViewerPreviewStateKind::Unavailable => Self::Unavailable,
+            ViewerPreviewStateKind::Loading => Self::Loading,
+            ViewerPreviewStateKind::Stale => Self::Stale,
+            ViewerPreviewStateKind::Ready => Self::Ready,
+        }
+    }
+
+    /// Convert terminal feedback into the Playback Engine vocabulary.
+    pub const fn terminal_delivery(self) -> Option<FrameDeliveryKind> {
+        match self {
+            Self::Ready => Some(FrameDeliveryKind::Ready),
+            Self::Stale => Some(FrameDeliveryKind::StaleAvailable),
+            Self::Blocked => Some(FrameDeliveryKind::Blocked),
+            Self::Unavailable | Self::Loading => None,
+        }
+    }
+
+    /// Whether redraw should avoid synchronously rebuilding the same pending GPU candidate.
+    pub const fn should_defer_gpu_prepare(self) -> bool {
+        matches!(self, Self::Loading)
+    }
+}
+
+/// Payload-free classification used by the feedback Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerPreviewStateKind {
+    /// No preview expected.
+    Unavailable,
+    /// Current work pending.
+    Loading,
+    /// Previous frame retained.
+    Stale,
+    /// Current frame ready.
+    Ready,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loading_is_not_falsely_reported_as_terminal_delivery() {
+        assert_eq!(ViewerPlaybackFeedback::Loading.terminal_delivery(), None);
+        assert!(ViewerPlaybackFeedback::Loading.should_defer_gpu_prepare());
+    }
+
+    #[test]
+    fn stale_and_blocked_remain_distinct_terminal_meanings() {
+        assert_eq!(
+            ViewerPlaybackFeedback::Stale.terminal_delivery(),
+            Some(FrameDeliveryKind::StaleAvailable)
+        );
+        assert_eq!(
+            ViewerPlaybackFeedback::Blocked.terminal_delivery(),
+            Some(FrameDeliveryKind::Blocked)
+        );
+    }
+}
