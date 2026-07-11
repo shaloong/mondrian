@@ -94,12 +94,14 @@ const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct AppUiPreviewPollOutcome {
     /// A decoded frame or terminal decode failure changed visible viewer state.
     pub visible_change: bool,
     /// More completed decode results should be drained on a follow-up event-loop tick.
     pub needs_follow_up_poll: bool,
+    /// Exact terminal deliveries returned by playback-current worker jobs.
+    pub frame_deliveries: Vec<mondrian_playback::FrameDelivery>,
 }
 
 /// Host-owned preview renderer used by the app UI viewer panel.
@@ -379,6 +381,7 @@ impl AppUiPreviewService {
             hardware_decode_request: self.hardware_decode_request_for_access_mode(access_mode),
             enqueued_at: Instant::now(),
             deadline_at: None,
+            demand_identity: None,
         });
         self.current_generation.set(generation);
         self.current_frame_pending.set(true);
@@ -814,10 +817,28 @@ impl AppUiPreviewService {
                     result.decode_elapsed_us,
                     result.cancel_observed_elapsed_us,
                 );
+                if let Some(identity) = result.demand_identity {
+                    outcome.frame_deliveries.push(mondrian_playback::FrameDelivery::for_demand(
+                        identity,
+                        mondrian_playback::FrameDeliveryKind::Canceled,
+                    ));
+                }
                 continue;
             }
             let completed_after_playback_deadline =
                 media_preview_completed_after_playback_deadline(&result);
+            if let Some(identity) = result.demand_identity {
+                let kind = if completed_after_playback_deadline {
+                    mondrian_playback::FrameDeliveryKind::Late
+                } else if result.frame.is_some() {
+                    mondrian_playback::FrameDeliveryKind::Ready
+                } else {
+                    mondrian_playback::FrameDeliveryKind::Failed
+                };
+                outcome
+                    .frame_deliveries
+                    .push(mondrian_playback::FrameDelivery::for_demand(identity, kind));
+            }
             if let Some(diagnostics) = result.decode_diagnostics {
                 self.scrub_adaptation.borrow_mut().observe_decode(diagnostics);
                 self.record_preview_decode(
@@ -7177,6 +7198,7 @@ struct MediaPreviewResult {
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
+    demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
 }
 
 #[derive(Default)]
@@ -7449,6 +7471,7 @@ impl AppUiPreviewService {
                             MediaPreviewRequestPriority::Prefetch,
                             PreviewDecodeAccessMode::PlaybackCursor,
                             None,
+                            None,
                             PreviewDecodeAdaptiveHints::default(),
                         );
                         if enqueued {
@@ -7524,6 +7547,9 @@ impl AppUiPreviewService {
             access_mode,
             (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
                 .then(|| state.playback_frame_deadline_budget_us())
+                .flatten(),
+            (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
+                .then(|| state.playback_frame_demand_identity())
                 .flatten(),
             adaptive_hints,
         );
@@ -7762,6 +7788,7 @@ impl AppUiPreviewService {
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
         playback_current_deadline_budget_us: Option<u64>,
+        demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
         adaptive_hints: PreviewDecodeAdaptiveHints,
     ) -> bool {
         let generation = self.current_generation.get();
@@ -7819,6 +7846,7 @@ impl AppUiPreviewService {
                         enqueued_at,
                         playback_current_deadline_budget_us,
                     ),
+                    demand_identity,
                     adaptive_hints,
                     hardware_decode_request,
                 );
@@ -7872,6 +7900,7 @@ impl AppUiPreviewService {
                 enqueued_at,
                 playback_current_deadline_budget_us,
             ),
+            demand_identity,
         };
         if priority == MediaPreviewRequestPriority::Current {
             let pruned = self.jobs.prune_obsolete_jobs(generation) as u64;
@@ -9139,6 +9168,7 @@ fn media_preview_canceled_result(
     decode_elapsed_us: u64,
     cancel_observed_elapsed_us: Option<u64>,
 ) -> MediaPreviewResult {
+    let demand_identity = job.demand_identity;
     MediaPreviewResult {
         key: job.key,
         frame: None,
@@ -9156,6 +9186,7 @@ fn media_preview_canceled_result(
         decode_diagnostics: None,
         color_diagnostics: None,
         color_stage_diagnostics: None,
+        demand_identity,
     }
 }
 
@@ -9169,6 +9200,7 @@ fn decode_media_preview(
     let priority = job.priority;
     let access_mode = job.access_mode;
     let deadline_at = job.deadline_at;
+    let demand_identity = job.demand_identity;
     let decode_outcome = decode_media_preview_for_access_mode(
         job.key.path.as_path(),
         job.source_secs,
@@ -9227,6 +9259,7 @@ fn decode_media_preview(
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
+                demand_identity,
             }
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
@@ -9267,6 +9300,7 @@ fn decode_media_preview(
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
+                demand_identity,
             }
         }
         Ok(PreviewDecodeOutcome::Canceled) => MediaPreviewResult {
@@ -9286,6 +9320,7 @@ fn decode_media_preview(
             decode_diagnostics: None,
             color_diagnostics: None,
             color_stage_diagnostics: None,
+            demand_identity,
         },
         Err(err) => {
             let failure_reason = media_preview_failure_reason(&err);
@@ -9306,6 +9341,7 @@ fn decode_media_preview(
                 decode_diagnostics: None,
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
+                demand_identity,
             }
         }
     }
@@ -14986,6 +15022,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
+                demand_identity: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -14999,6 +15036,7 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::PlaybackCursor,
             Some(33_333),
+            None,
             PreviewDecodeAdaptiveHints::default(),
         ));
 
@@ -15028,6 +15066,7 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::PlaybackCursor,
             Some(33_333),
+            None,
             PreviewDecodeAdaptiveHints::default(),
         ));
 
@@ -15052,6 +15091,7 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
             None,
+            None,
             PreviewDecodeAdaptiveHints::default(),
         ));
         assert!(service.request_media_preview(
@@ -15060,6 +15100,7 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
             Some(33_333),
+            None,
             PreviewDecodeAdaptiveHints::default(),
         ));
 
@@ -15096,6 +15137,7 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
             Some(33_333),
+            None,
             PreviewDecodeAdaptiveHints::default(),
         ));
 
@@ -15182,6 +15224,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
+                demand_identity: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15243,6 +15286,7 @@ mod tests {
                     hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                     enqueued_at: Instant::now(),
                     deadline_at: None,
+                    demand_identity: None,
                 }),
                 MediaPreviewJobEnqueueStatus::Enqueued {
                     evicted_prefetch: None,
@@ -15320,6 +15364,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
+                demand_identity: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15392,6 +15437,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
+                demand_identity: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15441,6 +15487,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
+                demand_identity: None,
             },
             123,
             || false,
@@ -15487,6 +15534,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
+                demand_identity: None,
             },
             456,
             || true,
@@ -15532,6 +15580,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
+                demand_identity: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15600,6 +15649,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
+                demand_identity: None,
             },
             12_000,
             MediaPreviewCancelReason::PlaybackDeadline,
@@ -15631,6 +15681,10 @@ mod tests {
     #[test]
     fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
         let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let demand_identity =
+            state.playback_frame_demand_identity().expect("playback demand identity");
         let result_tx = install_preview_result_channel_for_test(&service);
         let key = test_media_key(78);
         let generation = service.scheduler.begin_generation();
@@ -15647,6 +15701,7 @@ mod tests {
         result.priority = MediaPreviewRequestPriority::Current;
         result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
         result.deadline_at = Some(Instant::now() - Duration::from_millis(1));
+        result.demand_identity = Some(demand_identity);
         result_tx.send(result).expect("send late successful result");
 
         let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
@@ -15656,6 +15711,13 @@ mod tests {
             "a successfully decoded but late playback frame must not refresh the viewer"
         );
         assert!(!outcome.needs_follow_up_poll);
+        assert_eq!(
+            outcome.frame_deliveries,
+            vec![mondrian_playback::FrameDelivery::for_demand(
+                demand_identity,
+                mondrian_playback::FrameDeliveryKind::Late,
+            )]
+        );
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.scheduler.pending_requests, 0);
         assert_eq!(diagnostics.decode_successes, 1);
@@ -15704,6 +15766,7 @@ mod tests {
                         hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                         enqueued_at: Instant::now(),
                         deadline_at: Some(Instant::now() - Duration::from_millis(1)),
+                        demand_identity: None,
                     },
                     1_000,
                     MediaPreviewCancelReason::PlaybackDeadline,
@@ -15859,6 +15922,7 @@ mod tests {
             decode_diagnostics: None,
             color_diagnostics: None,
             color_stage_diagnostics: None,
+            demand_identity: None,
         }
     }
 
@@ -16506,6 +16570,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
+                demand_identity: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );

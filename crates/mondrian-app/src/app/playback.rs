@@ -358,27 +358,33 @@ impl AppState {
         Some(remaining.as_micros().min(u64::MAX as u128) as u64)
     }
 
+    /// Identity preview adapters must return with terminal current-frame work.
+    pub fn playback_frame_demand_identity(&self) -> Option<mondrian_playback::FrameDemandIdentity> {
+        self.playback_engine.frame_demand().map(|demand| demand.identity())
+    }
+
+    /// Feed an exact terminal preview observation into the Playback Session.
+    pub fn observe_frame_delivery(&mut self, delivery: FrameDelivery) -> bool {
+        let before = self.playback_engine.snapshot();
+        match self.playback_engine.observe_frame_delivery(delivery) {
+            Ok(true) => self.playback_engine.snapshot() != before,
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(%error, ?delivery, "rejected Viewer Frame Delivery");
+                false
+            }
+        }
+    }
+
     /// Feed one terminal Viewer observation into the authoritative Playback Session.
     pub fn observe_viewer_frame_delivery(&mut self, kind: FrameDeliveryKind) -> bool {
         let before = self.playback_engine.snapshot();
         let Some(demand) = self.playback_engine.frame_demand() else {
             return false;
         };
-        let delivery = FrameDelivery {
-            epoch: demand.epoch,
-            quality_revision: demand.quality_revision,
-            demand_sequence: demand.sequence,
-            target_frame: demand.target.frame,
-            kind,
-        };
-        match self.playback_engine.observe_frame_delivery(delivery) {
-            Ok(true) => self.playback_engine.snapshot() != before,
-            Ok(false) => false,
-            Err(error) => {
-                tracing::warn!(%error, ?kind, "rejected Viewer Frame Delivery");
-                false
-            }
-        }
+        let delivery = FrameDelivery::for_demand(demand.identity(), kind);
+        let changed = self.observe_frame_delivery(delivery);
+        changed || self.playback_engine.snapshot() != before
     }
 
     fn reset_playback_timeline(&mut self, frame: i64, end_frame: i64) -> bool {
@@ -513,6 +519,24 @@ mod tests {
         assert_eq!(outcome.status, PlaybackAdvanceStatus::WaitingForFrame);
         assert_eq!(state.current_frame(), 10);
         assert_ne!(state.playback_engine.snapshot().epoch, old_epoch);
+    }
+
+    #[test]
+    fn completion_for_pre_seek_demand_cannot_mutate_new_session() {
+        let mut state = state_with_sequence(30);
+        state.play();
+        let old_identity = state.playback_frame_demand_identity().expect("priming demand identity");
+
+        state.seek(10);
+        let before = state.playback_engine.snapshot();
+        let accepted = state.observe_frame_delivery(FrameDelivery::for_demand(
+            old_identity,
+            FrameDeliveryKind::Ready,
+        ));
+
+        assert!(!accepted);
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(before.state, TransportState::Priming);
     }
 
     #[test]

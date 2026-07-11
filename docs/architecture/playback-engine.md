@@ -47,9 +47,9 @@ the new seams.
 `AppState` owns the Playback Engine as project runtime state. It exposes a
 snapshot to UI models but does not mirror individual playback booleans.
 
-### Target crate placement
+### Crate placement
 
-The pure state machine belongs in a future `mondrian-playback` engine crate. It
+The pure state machine lives in the `mondrian-playback` engine crate. It
 may depend on `mondrian-core` time/ID/value types, but not on winit, widgets,
 wgpu, FFmpeg, CPAL, platform code, `AssetLibrary`, or concrete `Sequence`
 internals. App code lowers the active sequence into an immutable playback
@@ -58,8 +58,8 @@ timeline descriptor and supplies observations through the Interface.
 Media/audio/render implementations remain in their owner crates and enter as
 app-level adapters. This direction prevents `mondrian-media` from becoming a
 second editor-state owner and prevents the pure Engine from accumulating codec
-or UI conditionals. The crate should be added only with Phase 1 behavior and
-tests, not as an empty pass-through package.
+or UI conditionals. Its public Interface remains limited to transport commands,
+observations, snapshots, Frame Demands, and Frame Deliveries.
 
 ## Runtime flow
 
@@ -491,6 +491,15 @@ demand sequence, sequence/timeline revision, exact target, preview scale, and
 monotonic deadline. Preview worker deadline budgets consume that demand instead
 of independently reconstructing frame duration. Same-epoch completions for a
 superseded demand are rejected before target validation.
+
+Playback-current preview jobs carry the opaque identity projection (`epoch`,
+quality revision, demand sequence, target frame) through queue, worker, result,
+and app polling. Media workers do not interpret playback policy. Polling returns
+an exact terminal Frame Delivery for Ready, Late, Failed, or Canceled work, and
+the Playback Engine performs the final identity check. Media generation remains
+a decode/cache cancellation mechanism and is not a substitute for Playback
+Session identity. Viewer lifecycle feedback remains the Adapter for cache hits
+and presentation-only outcomes that do not originate from worker completion.
 
 Play and running seek now remain in bounded Priming. Ready or allowed Degraded
 delivery starts Synthetic Master immediately; after the 500 ms policy deadline,

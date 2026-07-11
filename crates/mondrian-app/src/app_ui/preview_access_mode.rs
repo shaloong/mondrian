@@ -226,6 +226,8 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) hardware_decode_request: PreviewHardwareDecodeRequest,
     pub(crate) enqueued_at: Instant,
     pub(crate) deadline_at: Option<Instant>,
+    /// Opaque Playback Session identity; media workers only carry it.
+    pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
 }
 
 pub(crate) struct MediaPreviewJobQueueSender {
@@ -432,6 +434,7 @@ impl MediaPreviewJobQueueSender {
         source_secs: f64,
         enqueued_at: Instant,
         deadline_at: Option<Instant>,
+        demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
         adaptive_hints: PreviewDecodeAdaptiveHints,
         hardware_decode_request: PreviewHardwareDecodeRequest,
     ) -> MediaPreviewJobPromoteStatus {
@@ -455,6 +458,7 @@ impl MediaPreviewJobQueueSender {
         queued.job.hardware_decode_request = hardware_decode_request;
         queued.job.enqueued_at = enqueued_at;
         queued.job.deadline_at = deadline_at;
+        queued.job.demand_identity = demand_identity;
         let priority_promoted = previous != queued.priority;
         let access_mode_changed = previous_access_mode != queued.job.access_mode;
         let generation_changed = previous_generation != queued.job.generation;
@@ -1155,6 +1159,7 @@ mod tests {
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             enqueued_at: Instant::now(),
             deadline_at: None,
+            demand_identity: None,
         }
     }
 
@@ -2378,6 +2383,15 @@ mod tests {
         );
 
         let promoted_at = Instant::now();
+        let mut playback_engine = mondrian_playback::PlaybackEngine::new(
+            mondrian_core::Rational::new(1, 25),
+            mondrian_playback::PlaybackPolicy::default(),
+        )
+        .expect("playback engine");
+        playback_engine
+            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .expect("playback demand");
+        let demand_identity = playback_engine.frame_demand().expect("frame demand").identity();
         let status = sender.promote(
             &promoted,
             MediaPreviewRequestPriority::Current,
@@ -2386,6 +2400,7 @@ mod tests {
             1.25,
             promoted_at,
             None,
+            Some(demand_identity),
             PreviewDecodeAdaptiveHints::default(),
             PreviewHardwareDecodeRequest::PreferGpuResident,
         );
@@ -2405,6 +2420,7 @@ mod tests {
         assert_eq!(promoted_job.source_secs, 1.25);
         assert_eq!(promoted_job.enqueued_at, promoted_at);
         assert_eq!(promoted_job.deadline_at, None);
+        assert_eq!(promoted_job.demand_identity, Some(demand_identity));
         assert_eq!(
             promoted_job.access_mode,
             PreviewDecodeAccessMode::ScrubCursor
@@ -2444,6 +2460,7 @@ mod tests {
             1.0,
             refreshed_at,
             refreshed_deadline,
+            None,
             PreviewDecodeAdaptiveHints::default(),
             PreviewHardwareDecodeRequest::Auto,
         );
@@ -2617,6 +2634,7 @@ mod tests {
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
+                demand_identity: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -2665,6 +2683,7 @@ mod tests {
                 1.0,
                 Instant::now(),
                 None,
+                None,
                 PreviewDecodeAdaptiveHints::default(),
                 PreviewHardwareDecodeRequest::Auto,
             ),
@@ -2678,6 +2697,7 @@ mod tests {
                 1,
                 1.0,
                 Instant::now(),
+                None,
                 None,
                 PreviewDecodeAdaptiveHints::default(),
                 PreviewHardwareDecodeRequest::Auto,

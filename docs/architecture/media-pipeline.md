@@ -244,6 +244,13 @@ worker-deadline eligibility and bounded frame-rate-to-prefetch-window policy;
 `app_ui::preview` owns execution and evidence aggregation, not duplicated clock
 math.
 
+The same current request carries an opaque Frame Demand identity end-to-end.
+The preview queue and worker may transport but must not interpret that identity;
+the poll Adapter converts the exact result into a terminal Frame Delivery and
+only `mondrian-playback` decides whether it still belongs to the active Playback
+Session. Decode generation continues to guard media task/cache relevance, but
+cannot authorize a transport transition or replace epoch/demand validation.
+
 The app/window layer retains a separate interaction escape hatch: `Loading`
 feedback may defer synchronous reconstruction of the same GPU preview candidate
 during redraw. This is a presentation-work guard, not transport buffering, and

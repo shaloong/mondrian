@@ -58,6 +58,19 @@ impl FrameDemandSequence {
     }
 }
 
+/// Stable identity that preview adapters carry without interpreting playback policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameDemandIdentity {
+    /// Playback Session identity.
+    pub epoch: PlaybackEpoch,
+    /// Runtime quality-policy revision.
+    pub quality_revision: u64,
+    /// Demand sequence within the Playback Engine lifetime.
+    pub sequence: FrameDemandSequence,
+    /// Exact timeline frame requested by the demand.
+    pub target_frame: i64,
+}
+
 /// Authoritative current-frame request emitted by the Playback Engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameDemand {
@@ -77,6 +90,18 @@ pub struct FrameDemand {
     pub deadline: MonotonicTimestamp,
     /// Runtime-only spatial quality selected by recovery policy.
     pub preview_scale: PreviewResolutionScale,
+}
+
+impl FrameDemand {
+    /// Project the request to the opaque identity carried through preview adapters.
+    pub const fn identity(self) -> FrameDemandIdentity {
+        FrameDemandIdentity {
+            epoch: self.epoch,
+            quality_revision: self.quality_revision,
+            sequence: self.sequence,
+            target_frame: self.target.frame,
+        }
+    }
 }
 
 /// Authoritative elapsed-media-time source.
@@ -160,6 +185,19 @@ pub struct FrameDelivery {
     pub target_frame: i64,
     /// Terminal outcome.
     pub kind: FrameDeliveryKind,
+}
+
+impl FrameDelivery {
+    /// Build a terminal observation for an exact demand identity.
+    pub const fn for_demand(identity: FrameDemandIdentity, kind: FrameDeliveryKind) -> Self {
+        Self {
+            epoch: identity.epoch,
+            quality_revision: identity.quality_revision,
+            demand_sequence: identity.sequence,
+            target_frame: identity.target_frame,
+            kind,
+        }
+    }
 }
 
 /// Versioned policy values that determine transport and recovery behavior.

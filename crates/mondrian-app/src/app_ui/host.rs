@@ -382,6 +382,14 @@ impl AppUiHost {
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_outcome = self.preview_service.poll_finished_outcome();
         let waveform_changed = self.waveform_cache.poll_finished();
+        let playback_delivery_changed =
+            preview_outcome
+                .frame_deliveries
+                .iter()
+                .copied()
+                .fold(false, |changed, delivery| {
+                    self.app_state.borrow_mut().observe_frame_delivery(delivery) || changed
+                });
         let playback_stall_expired = self.app_state.borrow().is_playing()
             && self.preview_service.expire_stalled_playback_current();
         if playback_stall_expired {
@@ -393,6 +401,7 @@ impl AppUiHost {
             || thumbnails_changed
             || preview_outcome.visible_change
             || waveform_changed
+            || playback_delivery_changed
             || playback_stall_expired;
         if !visible_model_changed {
             return preview_outcome.needs_follow_up_poll;
