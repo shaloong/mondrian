@@ -391,7 +391,9 @@ pub fn compute_display_blockers(
                 reason: reason.clone(),
             });
         }
-        MonitorProfileStatus::NotRequested | MonitorProfileStatus::ManagedColorSpace { .. } => {}
+        MonitorProfileStatus::NotRequested
+        | MonitorProfileStatus::ManagedColorSpace { .. }
+        | MonitorProfileStatus::ManagedIccCalibration { .. } => {}
     }
 
     // HDR fail-closed blockers

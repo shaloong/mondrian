@@ -5,6 +5,7 @@ use moxcms::{
     CicpColorPrimaries, CicpProfile, ColorProfile, Layout, MatrixCoefficients,
     TransferCharacteristics, TransformOptions,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -14,7 +15,7 @@ const MIN_LUT_EDGE: u16 = 17;
 const MAX_LUT_EDGE: u16 = 65;
 
 /// Content-derived identity for an ICC payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IccProfileFingerprint {
     /// ICC payload length.
     pub byte_len: u64,
@@ -48,7 +49,7 @@ impl IccProfileFingerprint {
 ///
 /// LUT caches and pass admission must validate [`IccProfileFingerprint`]; this
 /// key exists only to keep per-frame descriptors compact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DisplayCalibrationKey(u32);
 
 /// Renderer-ready monitor calibration sampled over normalized encoded RGB.

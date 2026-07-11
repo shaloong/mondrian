@@ -244,10 +244,11 @@ contracts carry its non-authoritative compact calibration key while LUT caches
 and pass preparation validate the complete fingerprint. The compact key must
 never authorize cache reuse or processor execution. A matching GPU pass
 must produce `ColorFrameSpace::Device` plus `DeviceFloat`, preventing
-device values from being mistaken for a reusable standard color space. The
-current app still blocks ICC-backed preview until that typed device frame can
-be presented with exact code-value preservation through the UI renderer and
-swapchain.
+device values from being mistaken for a reusable standard color space. The app
+records this pass only between the OCIO display/view output and the UI
+presentation carrier. ICC paths keep the OCIO encoded output and device output
+in `Rgba16Float`; LUT storage and interpolation math remain 32F. Uncalibrated,
+stale, or fingerprint-mismatched profiles remain fail-closed.
 
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are

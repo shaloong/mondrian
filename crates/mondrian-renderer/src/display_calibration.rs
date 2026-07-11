@@ -7,6 +7,7 @@ use crate::{
     GpuColorFrameUploader, GpuColorFrameWgpuResource,
 };
 use mondrian_core::display_calibration::{DisplayCalibrationLut3d, IccProfileFingerprint};
+use mondrian_core::ColorSpace;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -89,6 +90,147 @@ pub struct GpuDisplayCalibrationPreparedPass {
     profile_fingerprint: IccProfileFingerprint,
     edge_size: u16,
     bind_group: wgpu::BindGroup,
+}
+
+/// Renderer-owned cache and frame resources for monitor calibration.
+pub struct GpuDisplayCalibrationRuntime {
+    pipeline: Option<GpuDisplayCalibrationPipeline>,
+    pipeline_format: Option<GpuColorFrameTextureFormat>,
+    lut: Option<GpuDisplayCalibrationLut>,
+    lut_contract: Option<(ColorSpace, IccProfileFingerprint, u16)>,
+    output: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
+    ids: GpuColorFrameIdAllocator,
+    diagnostics: GpuDisplayCalibrationRuntimeDiagnostics,
+}
+
+/// Cumulative monitor-calibration runtime cache diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuDisplayCalibrationRuntimeDiagnostics {
+    /// Backend pipelines constructed after format changes.
+    pub pipeline_builds: u64,
+    /// Immutable 3D LUT uploads after full fingerprint changes.
+    pub lut_uploads: u64,
+    /// Calibration passes recorded.
+    pub records: u64,
+}
+
+impl Default for GpuDisplayCalibrationRuntime {
+    fn default() -> Self {
+        Self {
+            pipeline: None,
+            pipeline_format: None,
+            lut: None,
+            lut_contract: None,
+            output: None,
+            ids: GpuColorFrameIdAllocator::new(1),
+            diagnostics: GpuDisplayCalibrationRuntimeDiagnostics::default(),
+        }
+    }
+}
+
+impl GpuDisplayCalibrationRuntime {
+    /// Record calibration and retain the device-RGB output through presentation.
+    pub fn record(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        input: GpuColorFrameHandle,
+        input_view: &wgpu::TextureView,
+        calibration: Arc<DisplayCalibrationLut3d>,
+        output_format: GpuColorFrameTextureFormat,
+    ) -> Result<GpuColorFrameHandle, GpuDisplayCalibrationRuntimeError> {
+        let plan = GpuDisplayCalibrationPlan::new(
+            &mut self.ids,
+            input,
+            calibration.clone(),
+            output_format,
+        )?;
+        if self.pipeline_format != Some(output_format) {
+            self.pipeline = Some(GpuDisplayCalibrationPipeline::new(device, output_format)?);
+            self.pipeline_format = Some(output_format);
+            self.diagnostics.pipeline_builds = self.diagnostics.pipeline_builds.saturating_add(1);
+        }
+        let lut_contract = (
+            calibration.source_color_space,
+            calibration.profile_fingerprint,
+            calibration.edge_size,
+        );
+        if self.lut_contract != Some(lut_contract) {
+            self.lut = Some(GpuDisplayCalibrationPipeline::upload_lut(
+                device,
+                queue,
+                &calibration,
+            ));
+            self.lut_contract = Some(lut_contract);
+            self.diagnostics.lut_uploads = self.diagnostics.lut_uploads.saturating_add(1);
+        }
+        let pipeline = self.pipeline.as_ref().ok_or(
+            GpuDisplayCalibrationRuntimeError::InternalResourceMissing("pipeline"),
+        )?;
+        let lut =
+            self.lut
+                .as_ref()
+                .ok_or(GpuDisplayCalibrationRuntimeError::InternalResourceMissing(
+                    "LUT",
+                ))?;
+        let prepared = pipeline.prepare_pass(device, &plan, input_view, lut)?;
+        let output = GpuDisplayCalibrationPipeline::allocate_output(device, &plan);
+        pipeline.record(encoder, &plan, &prepared, &output)?;
+        let handle = output.handle().clone();
+        self.output = Some(output);
+        self.diagnostics.records = self.diagnostics.records.saturating_add(1);
+        Ok(handle)
+    }
+
+    /// Resolve the retained output resource for the exact returned handle.
+    pub fn output(
+        &self,
+        handle: &GpuColorFrameHandle,
+    ) -> Option<&GpuColorFrameResource<GpuColorFrameWgpuResource>> {
+        self.output
+            .as_ref()
+            .filter(|output| output.handle().contract() == handle.contract())
+    }
+
+    /// Drop per-frame output while retaining immutable pipeline and LUT caches.
+    pub fn clear_frame_resources(&mut self) {
+        self.output = None;
+    }
+
+    /// Return cumulative cache and execution diagnostics.
+    pub const fn diagnostics(&self) -> GpuDisplayCalibrationRuntimeDiagnostics {
+        self.diagnostics
+    }
+
+    /// Drop all device objects after a display/device contract change.
+    pub fn clear(&mut self) {
+        self.pipeline = None;
+        self.pipeline_format = None;
+        self.lut = None;
+        self.lut_contract = None;
+        self.output = None;
+    }
+}
+
+/// Runtime monitor-calibration failure.
+#[derive(Debug, Error)]
+pub enum GpuDisplayCalibrationRuntimeError {
+    /// Typed plan construction failed.
+    #[error(transparent)]
+    Plan(#[from] GpuDisplayCalibrationPlanError),
+    /// Backend pipeline construction failed.
+    #[error(transparent)]
+    Pipeline(#[from] GpuDisplayCalibrationPipelineError),
+    /// LUT/input binding failed.
+    #[error(transparent)]
+    Prepare(#[from] GpuDisplayCalibrationPrepareError),
+    /// Command recording failed.
+    #[error(transparent)]
+    Record(#[from] GpuDisplayCalibrationRecordError),
+    /// Runtime invariant was violated.
+    #[error("display calibration runtime missing internal {0}")]
+    InternalResourceMissing(&'static str),
 }
 
 /// Device-owned monitor calibration pipeline.
@@ -554,7 +696,107 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn runtime_reuses_pipeline_and_full_fingerprint_lut() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping display calibration runtime test: no adapter available");
+            return;
+        };
+        let calibration = Arc::new(identity_calibration());
+        let original_input_handle = input_handle(30, calibration.source_color_space);
+        let input = GpuColorFrameUploader::allocate(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(original_input_handle.clone()),
+        );
+        let mut runtime = GpuDisplayCalibrationRuntime::default();
+
+        for _ in 0..2 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-display-calibration-runtime"),
+                });
+            let output = runtime
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    original_input_handle.clone(),
+                    &input.resource().texture_view,
+                    calibration.clone(),
+                    GpuColorFrameTextureFormat::Rgba16Float,
+                )
+                .expect("runtime calibration record");
+            assert!(runtime.output(&output).is_some());
+            context.queue.submit(std::iter::once(encoder.finish()));
+            runtime.clear_frame_resources();
+        }
+
+        assert_eq!(
+            runtime.diagnostics(),
+            GpuDisplayCalibrationRuntimeDiagnostics {
+                pipeline_builds: 1,
+                lut_uploads: 1,
+                records: 2,
+            }
+        );
+
+        let alternate_calibration = Arc::new(identity_calibration_for(ColorSpace::DciP3));
+        let alternate_input_handle = input_handle(31, alternate_calibration.source_color_space);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-display-calibration-runtime-source-change"),
+        });
+        runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                alternate_input_handle,
+                &input.resource().texture_view,
+                alternate_calibration,
+                GpuColorFrameTextureFormat::Rgba16Float,
+            )
+            .expect("runtime calibration after source color-space change");
+        context.queue.submit(std::iter::once(encoder.finish()));
+        assert_eq!(
+            runtime.diagnostics(),
+            GpuDisplayCalibrationRuntimeDiagnostics {
+                pipeline_builds: 1,
+                lut_uploads: 2,
+                records: 3,
+            }
+        );
+
+        runtime.clear();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-display-calibration-runtime-after-clear"),
+        });
+        runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                original_input_handle,
+                &input.resource().texture_view,
+                calibration,
+                GpuColorFrameTextureFormat::Rgba16Float,
+            )
+            .expect("runtime calibration after display invalidation");
+        context.queue.submit(std::iter::once(encoder.finish()));
+        assert_eq!(
+            runtime.diagnostics(),
+            GpuDisplayCalibrationRuntimeDiagnostics {
+                pipeline_builds: 2,
+                lut_uploads: 3,
+                records: 4,
+            }
+        );
+    }
+
     fn identity_calibration() -> DisplayCalibrationLut3d {
+        identity_calibration_for(ColorSpace::Srgb)
+    }
+
+    fn identity_calibration_for(source_color_space: ColorSpace) -> DisplayCalibrationLut3d {
         let edge = DEFAULT_DISPLAY_CALIBRATION_LUT_EDGE;
         let mut samples = Vec::new();
         let denominator = f32::from(edge - 1);
@@ -571,7 +813,7 @@ mod tests {
             }
         }
         DisplayCalibrationLut3d::from_rgba32f_samples(
-            ColorSpace::Srgb,
+            source_color_space,
             IccProfileFingerprint::from_bytes(b"identity-calibration"),
             edge,
             samples,

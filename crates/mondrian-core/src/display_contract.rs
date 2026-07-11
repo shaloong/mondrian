@@ -109,6 +109,13 @@ pub enum MonitorProfileStatus {
         /// How this mapping was obtained.
         source: MonitorProfileSource,
     },
+    /// An ICC device transform was generated for an explicit encoded source.
+    ManagedIccCalibration {
+        /// Encoded display space entering the ICC device transform.
+        source_color_space: ColorSpace,
+        /// Full destination ICC payload identity verified by the runtime LUT.
+        profile_fingerprint: crate::display_calibration::IccProfileFingerprint,
+    },
     /// OS ICC profile discovery is not implemented on this platform.
     IccProfileUnsupported {
         /// Stable feature code (e.g. `os_icc_profile`).
@@ -148,6 +155,10 @@ impl std::fmt::Display for MonitorProfileStatus {
             Self::ManagedColorSpace { color_space, source } => {
                 write!(f, "Managed {color_space:?} via {source:?}")
             }
+            Self::ManagedIccCalibration { source_color_space, profile_fingerprint } => write!(
+                f,
+                "Managed ICC calibration from {source_color_space:?} ({profile_fingerprint:?})"
+            ),
             Self::IccProfileUnsupported { reason, .. } => {
                 write!(f, "ICC Unsupported: {reason}")
             }
@@ -676,6 +687,33 @@ mod tests {
             reason: "no OCIO display match".to_owned(),
         };
         assert!(snapshot.has_unknown_capabilities());
+    }
+
+    #[test]
+    fn managed_icc_calibration_is_known_and_fingerprint_invalidates_contract() {
+        let mut first = sdr_pass_snapshot();
+        first.monitor_profile_status = MonitorProfileStatus::ManagedIccCalibration {
+            source_color_space: ColorSpace::Srgb,
+            profile_fingerprint: crate::display_calibration::IccProfileFingerprint::from_bytes(
+                b"profile-a",
+            ),
+        };
+        let mut second = first.clone();
+        second.monitor_profile_status = MonitorProfileStatus::ManagedIccCalibration {
+            source_color_space: ColorSpace::Srgb,
+            profile_fingerprint: crate::display_calibration::IccProfileFingerprint::from_bytes(
+                b"profile-b",
+            ),
+        };
+
+        assert!(!first.has_unknown_capabilities());
+        assert_ne!(first.contract_generation(), second.contract_generation());
+        let json = serde_json::to_string(&first).expect("serialize calibrated snapshot");
+        assert_eq!(
+            serde_json::from_str::<DisplayOutputSnapshot>(&json)
+                .expect("deserialize calibrated snapshot"),
+            first
+        );
     }
 
     #[test]

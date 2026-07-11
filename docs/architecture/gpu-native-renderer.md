@@ -382,9 +382,11 @@ hit or pass. The backend uploads the cube as RGBA32F and
 performs explicit trilinear interpolation with
 `textureLoad`; this avoids requiring `FLOAT32_FILTERABLE` and keeps CPU/GPU
 sampling rules identical. Real-wgpu tests read back the pass and compare it
-against the core CPU reference. The pass is not sufficient presentation proof:
-the app must preserve the resulting device codes through its sRGB UI attachment
-before it may unblock an OS ICC profile.
+against the core CPU reference. `GpuDisplayCalibrationRuntime` caches pipelines
+by target format and LUTs by the complete fingerprint plus edge size, while
+retaining only the current device-RGB output frame. Runtime diagnostics count
+pipeline builds, LUT uploads, and records. The app combines this processor proof
+with the explicit opaque sRGB-surface code-value carrier before unblocking ICC.
 
 `OcioGpuWgpuUniformUploadPlan` is the uniform-buffer handoff. It carries OCIO
 uniform names, types, offsets, value counts, and copied values. The packed

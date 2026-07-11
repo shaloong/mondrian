@@ -8424,6 +8424,9 @@ fn preview_icc_display_color_space(
     }
 
     match snapshot.monitor_profile_status {
+        MonitorProfileStatus::ManagedIccCalibration { source_color_space, .. } => {
+            Ok(source_color_space)
+        }
         MonitorProfileStatus::ManagedColorSpace {
             source: mondrian_core::display_contract::MonitorProfileSource::OsIccProfile,
             ..
@@ -9563,6 +9566,19 @@ mod tests {
         snapshot
     }
 
+    fn calibrated_icc_display_snapshot(color_space: ColorSpace) -> DisplayOutputSnapshot {
+        let mut snapshot = mondrian_core::display_probe::FakeDisplayProbe::sdr_pass().snapshot;
+        snapshot.monitor_profile_status = MonitorProfileStatus::ManagedIccCalibration {
+            source_color_space: color_space,
+            profile_fingerprint:
+                mondrian_core::display_calibration::IccProfileFingerprint::from_bytes(
+                    b"test-monitor-profile",
+                ),
+        };
+        snapshot.resolved_output_color_space = format!("{color_space:?}");
+        snapshot
+    }
+
     fn test_color_context(output_color_space: ColorSpace) -> ColorContext {
         ensure_test_ocio_loaded();
         Sequence::new("color-context")
@@ -9703,6 +9719,32 @@ mod tests {
                 ..
             } if feature == "icc_monitor_calibration_processor"
         ));
+    }
+
+    #[test]
+    fn preview_display_color_space_accepts_calibrated_icc_status() {
+        let mut sequence = Sequence::new("icc-preview");
+        sequence.settings.color_management.inherit = false;
+        sequence.settings.color_management.display_management =
+            mondrian_core::DisplayManagementPolicy {
+                monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
+                    profile_id: "os-default".to_owned(),
+                },
+                viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+                tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
+                ..Default::default()
+            };
+        let snapshot = calibrated_icc_display_snapshot(ColorSpace::Srgb);
+
+        assert_eq!(
+            preview_display_color_space(
+                &sequence,
+                &ProjectColorManagement::default(),
+                Some(&snapshot),
+            )
+            .expect("calibrated ICC display source"),
+            ColorSpace::Srgb
+        );
     }
 
     #[test]

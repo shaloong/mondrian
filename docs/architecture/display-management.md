@@ -65,21 +65,22 @@ Status of the OS monitor ICC profile. The fail-closed chain:
 | ColorSpace(x) | * | `ManagedColorSpace` |
 | IccProfile | OS discovery unsupported | `IccProfileUnsupported` |
 | IccProfile | OS discovery works, parse fails | `IccProfileReadError` |
-| IccProfile | OS discovery works, parse OK, no managed identity | `IccProfileUnmapped` + fail-closed blocker |
-| IccProfile | Managed identity found, calibration processor unavailable | `IccProfileUnmapped` + fail-closed blocker |
-| IccProfile | Managed identity and renderer calibration processor both ready | `ManagedColorSpace` (future) |
+| IccProfile | ICC parses but device processor creation fails | `IccProfileUnmapped` + fail-closed blocker |
+| IccProfile | CPU LUT and full-fingerprint processor proof ready | `ManagedIccCalibration` |
 
-Parsing and mapping are separate. A valid generic RGB monitor profile is not
-implicitly Rec.709: the shared core ICC parser returns `Unmapped`, and the app
-turns that result into the fail-closed blocker above. The monitor path and media
-ingest path consume the same mapping result rather than maintaining separate
-name heuristics.
+Parsing, descriptive mapping, and device calibration are separate. A valid
+generic RGB monitor profile is not implicitly Rec.709: the shared parser may
+return an `Unmapped` descriptive identity while the ICC engine still builds a
+device transform from the explicit presentation source. Media ingest continues
+to require a mapped source identity; monitor calibration does not manufacture
+one from profile names.
 
-Mapping a profile name to sRGB/P3/Rec.709 is not monitor calibration. Until the
-renderer executes the ICC device transform at the presentation boundary, the
-app must not report an OS ICC profile as managed. Preview admission also rejects
-an `OsIccProfile` status that claims `ManagedColorSpace` without processor proof,
-so a stale or manually constructed snapshot cannot bypass the blocker.
+Mapping a profile name to sRGB/P3/Rec.709 is not monitor calibration and no
+longer controls admission. The encoded source is the explicit OCIO
+display/presentation boundary; any ICC payload that can produce a device
+processor may become `ManagedIccCalibration`. Preview admission still rejects
+an `OsIccProfile` status that merely claims `ManagedColorSpace`, so stale or
+manually constructed snapshots cannot bypass processor proof.
 
 Core now provides a renderer-neutral `DisplayCalibrationLut3d` contract for
 the missing calibration processor. It parses the complete destination ICC
@@ -87,10 +88,12 @@ payload, fingerprints the payload for cache identity, samples a supported
 standard encoded source into an RGBA32F 3D LUT, and exposes a CPU trilinear
 reference. The default cube is 33^3; supported quality sizes are odd values
 from 17 through 65. Camera-log spaces are rejected because they are acquisition
-spaces, not monitor boundary encodings. This processor foundation does not yet
-change `MonitorProfileStatus`: viewer admission remains fail-closed until the
-app can prove that the matching LUT is resident and that its device RGB codes
-survive the UI/surface presentation boundary without another transfer encode.
+spaces, not monitor boundary encodings. The live resolver returns a serializable
+snapshot plus a non-persistent CPU LUT. The snapshot carries the complete ICC
+fingerprint, while the window owns the matching `Arc<DisplayCalibrationLut3d>`
+and the renderer owns pipeline, GPU LUT, and per-frame output resources. Display
+changes clear the GPU cache and preview resources. A mismatch at any layer fails
+before command submission.
 
 ### HdrStatus
 

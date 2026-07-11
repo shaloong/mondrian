@@ -94,6 +94,8 @@ pub use display_calibration::{
     GpuDisplayCalibrationLut, GpuDisplayCalibrationPipeline, GpuDisplayCalibrationPipelineError,
     GpuDisplayCalibrationPlan, GpuDisplayCalibrationPlanError, GpuDisplayCalibrationPrepareError,
     GpuDisplayCalibrationPreparedPass, GpuDisplayCalibrationRecordError,
+    GpuDisplayCalibrationRuntime, GpuDisplayCalibrationRuntimeDiagnostics,
+    GpuDisplayCalibrationRuntimeError,
 };
 pub use gpu_compositor::{
     evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,

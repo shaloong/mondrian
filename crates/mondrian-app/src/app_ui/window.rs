@@ -43,9 +43,9 @@ use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::{
     native_video_texture_device_features, CpuColorFrame, GpuColorFrameHandle,
     GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
-    GpuFrameCompositor, GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, RenderColorStageDiagnostics,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    GpuDisplayCalibrationRuntime, GpuFrameCompositor, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling,
+    RenderColorStageDiagnostics, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
     RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
@@ -1283,11 +1283,13 @@ struct AppUiWindowSession {
     config: wgpu::SurfaceConfiguration,
     display_output_contract: AppUiDisplayOutputContract,
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
+    display_calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
     frame_renderer: AppUiFrameRenderer,
     native_video_import_runtime: AppUiNativeVideoImportRuntime,
     renderer_queue: wgpu::Queue,
     color_output_runtime: RenderGpuOutputBoundaryRuntime,
+    display_calibration_runtime: GpuDisplayCalibrationRuntime,
     working_compositor: GpuFrameCompositor,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
     viewer_gpu_preview_texture_key: Option<ExternalTextureKey>,
@@ -3169,6 +3171,7 @@ fn prepare_viewer_gpu_preview(
         session.frame_renderer.unregister_external_texture(&previous);
     }
     session.color_output_runtime.clear_frame_resources();
+    session.display_calibration_runtime.clear_frame_resources();
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("app_ui_viewer_gpu_preview_output_encoder"),
@@ -3243,7 +3246,11 @@ fn prepare_viewer_gpu_preview(
                         .record_wgpu_output_boundary_gpu_frame_owned_backend(
                             &frame.boundary,
                             &composite.output,
-                            GpuColorFrameTextureFormat::Rgba8Unorm,
+                            if session.display_calibration.is_some() {
+                                GpuColorFrameTextureFormat::Rgba16Float
+                            } else {
+                                GpuColorFrameTextureFormat::Rgba8Unorm
+                            },
                             RenderColorTransformGpuOptions::default(),
                             RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
                                 device,
@@ -3319,7 +3326,7 @@ fn prepare_viewer_gpu_preview(
         }
     };
     let output = record.materialized.output.clone();
-    let view = match session.color_output_runtime.frame_table().get(&output) {
+    let output_resource = match session.color_output_runtime.frame_table().get(&output) {
         Ok(resource) => &resource.resource().texture_view,
         Err(err) => {
             session.viewer_gpu_output_telemetry.record_missing_output_texture();
@@ -3333,12 +3340,50 @@ fn prepare_viewer_gpu_preview(
         }
     };
 
-    if let Err(err) = session.frame_renderer.register_external_texture_view(
-        device,
-        texture_key.clone(),
-        view,
-        ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
-    ) {
+    let registration = if let Some(calibration) = session.display_calibration.clone() {
+        validate_display_calibration_proof(session.display_snapshot.as_ref(), &calibration)
+            .and_then(|()| {
+                session
+                    .display_calibration_runtime
+                    .record(
+                        device,
+                        queue,
+                        &mut encoder,
+                        output.clone(),
+                        output_resource,
+                        calibration,
+                        GpuColorFrameTextureFormat::Rgba16Float,
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .and_then(|device_output| {
+                let device_resource =
+                    session.display_calibration_runtime.output(&device_output).ok_or_else(
+                        || "display calibration output disappeared before presentation".to_owned(),
+                    )?;
+                session
+                    .frame_renderer
+                    .register_external_texture_view(
+                        device,
+                        texture_key.clone(),
+                        &device_resource.resource().texture_view,
+                        ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
+                    )
+                    .map_err(|error| error.to_string())
+            })
+    } else {
+        session
+            .frame_renderer
+            .register_external_texture_view(
+                device,
+                texture_key.clone(),
+                output_resource,
+                ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
+            )
+            .map_err(|error| error.to_string())
+    };
+
+    if let Err(err) = registration {
         session
             .viewer_gpu_output_telemetry
             .record_rejected_external_frame(record.stage_diagnostics);
@@ -3369,6 +3414,28 @@ fn prepare_viewer_gpu_preview(
     session
         .viewer_gpu_output_telemetry
         .record_prepare_duration(prepare_started.elapsed());
+}
+
+fn validate_display_calibration_proof(
+    snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
+    calibration: &mondrian_core::display_calibration::DisplayCalibrationLut3d,
+) -> Result<(), String> {
+    let Some(snapshot) = snapshot else {
+        return Err("display calibration LUT has no matching display snapshot".to_owned());
+    };
+    match snapshot.monitor_profile_status {
+        mondrian_core::display_contract::MonitorProfileStatus::ManagedIccCalibration {
+            source_color_space,
+            profile_fingerprint,
+        } if source_color_space == calibration.source_color_space
+            && profile_fingerprint == calibration.profile_fingerprint =>
+        {
+            Ok(())
+        }
+        ref status => Err(format!(
+            "display calibration LUT does not match snapshot processor proof: {status}"
+        )),
+    }
 }
 
 struct PreparedPreviewGpuComposite<'a> {
@@ -4057,7 +4124,7 @@ fn refresh_display_output_contract(
     let previous_display_name = previous.display_target.name.clone();
     let new_display_name = next.display_target.name.clone();
 
-    let snapshot = super::display_probe_impl::generate_display_snapshot(
+    let display_resolution = super::display_probe_impl::resolve_display_snapshot(
         next.display_target.name.clone(),
         next.display_target.position,
         next.display_target.physical_size,
@@ -4071,6 +4138,7 @@ fn refresh_display_output_contract(
         surface_color_space_to_color_space(next.surface_color.color_space),
         &reason_str,
     );
+    let snapshot = display_resolution.snapshot;
 
     if let Some(ref prev_snapshot) = session.display_snapshot {
         if prev_snapshot.display_id != snapshot.display_id {
@@ -4091,6 +4159,7 @@ fn refresh_display_output_contract(
     let new_generation = snapshot.contract_generation();
 
     session.display_snapshot = Some(snapshot);
+    session.display_calibration = display_resolution.calibration;
     host.set_display_output_snapshot(session.display_snapshot.as_ref());
     session.display_management_policy = display_management_policy;
 
@@ -4134,6 +4203,7 @@ fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, ho
         session.frame_renderer.unregister_external_texture(&previous);
     }
     session.color_output_runtime.clear_frame_resources();
+    session.display_calibration_runtime.clear();
     host.clear_external_viewer_frame();
     host.mark_dirty();
 }
@@ -4179,7 +4249,7 @@ impl AppUiWindowSession {
         TreeWalker::layout(host.active_root_mut(), bounds);
 
         let display_management_policy = host.resolved_display_management_policy();
-        let initial_snapshot = super::display_probe_impl::generate_display_snapshot(
+        let initial_display_resolution = super::display_probe_impl::resolve_display_snapshot(
             display_output_contract.display_target.name.clone(),
             display_output_contract.display_target.position,
             display_output_contract.display_target.physical_size,
@@ -4193,6 +4263,7 @@ impl AppUiWindowSession {
             surface_color_space_to_color_space(display_output_contract.surface_color.color_space),
             "Startup",
         );
+        let initial_snapshot = initial_display_resolution.snapshot;
         host.set_display_output_snapshot(Some(&initial_snapshot));
 
         let frame_renderer = AppUiFrameRenderer::new(device, config.format);
@@ -4207,11 +4278,13 @@ impl AppUiWindowSession {
             config: config.clone(),
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
+            display_calibration: initial_display_resolution.calibration,
             display_management_policy,
             frame_renderer,
             native_video_import_runtime,
             renderer_queue: queue.clone(),
             color_output_runtime: RenderGpuOutputBoundaryRuntime::default(),
+            display_calibration_runtime: GpuDisplayCalibrationRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
             viewer_gpu_preview_texture_key: None,
@@ -4591,6 +4664,53 @@ mod tests {
     use mondrian_renderer::{GpuVideoChromaLocation, GpuVideoRange};
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
+
+    #[test]
+    fn display_calibration_proof_requires_exact_source_and_full_fingerprint() {
+        let edge = 17_u16;
+        let mut samples = Vec::new();
+        let denominator = f32::from(edge - 1);
+        for blue in 0..edge {
+            for green in 0..edge {
+                for red in 0..edge {
+                    samples.extend_from_slice(&[
+                        f32::from(red) / denominator,
+                        f32::from(green) / denominator,
+                        f32::from(blue) / denominator,
+                        1.0,
+                    ]);
+                }
+            }
+        }
+        let fingerprint =
+            mondrian_core::display_calibration::IccProfileFingerprint::from_bytes(b"profile-a");
+        let calibration =
+            mondrian_core::display_calibration::DisplayCalibrationLut3d::from_rgba32f_samples(
+                ColorSpace::Srgb,
+                fingerprint,
+                edge,
+                samples,
+            )
+            .expect("test calibration");
+        let mut snapshot = mondrian_core::display_probe::FakeDisplayProbe::sdr_pass().snapshot;
+        snapshot.monitor_profile_status =
+            mondrian_core::display_contract::MonitorProfileStatus::ManagedIccCalibration {
+                source_color_space: ColorSpace::Srgb,
+                profile_fingerprint: fingerprint,
+            };
+
+        assert!(validate_display_calibration_proof(Some(&snapshot), &calibration).is_ok());
+
+        snapshot.monitor_profile_status =
+            mondrian_core::display_contract::MonitorProfileStatus::ManagedIccCalibration {
+                source_color_space: ColorSpace::Srgb,
+                profile_fingerprint:
+                    mondrian_core::display_calibration::IccProfileFingerprint::from_bytes(
+                        b"profile-b",
+                    ),
+            };
+        assert!(validate_display_calibration_proof(Some(&snapshot), &calibration).is_err());
+    }
 
     #[test]
     fn srgb_surface_format_detection_matches_presentation_formats() {
